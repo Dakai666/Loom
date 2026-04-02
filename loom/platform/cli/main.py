@@ -547,6 +547,17 @@ class LoomSession:
             )
         )
 
+        # Skill evaluation loop: if this tool_name matches a SkillGenome,
+        # update its confidence via EMA and persist the updated genome.
+        if self._procedural is not None:
+            try:
+                skill = await self._procedural.get(call.tool_name)
+                if skill is not None:
+                    skill.record_outcome(result.success)
+                    await self._procedural.upsert(skill)
+            except Exception:
+                pass  # Never let skill accounting block the trace callback
+
     async def _confirm_tool(self, call: ToolCall) -> bool:
         # No Rich Live is active during _run_streaming_turn (we removed it),
         # so plain console output + prompt_toolkit prompt_async() work cleanly.

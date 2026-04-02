@@ -28,6 +28,47 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+
+async def _retry_async(
+    coro_fn,
+    *,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> Any:
+    """
+    Call ``coro_fn()`` up to ``max_retries`` times with exponential backoff.
+
+    Retryable conditions:
+    - HTTP status in {429, 500, 502, 503, 504}
+    - asyncio.TimeoutError
+    - Any exception whose class name contains "timeout" or "connection"
+    """
+    last_exc: BaseException = RuntimeError("no attempts made")
+    for attempt in range(max_retries):
+        try:
+            return await coro_fn()
+        except BaseException as exc:
+            last_exc = exc
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            exc_name = type(exc).__name__.lower()
+            retryable = (
+                isinstance(exc, asyncio.TimeoutError)
+                or (isinstance(status, int) and status in _RETRYABLE_STATUSES)
+                or "timeout" in exc_name
+                or "connection" in exc_name
+            )
+            if not retryable or attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(base_delay * (2 ** attempt))
+    raise last_exc  # unreachable, but satisfies type checkers
+
+
+# ---------------------------------------------------------------------------
 # Normalized data types
 # ---------------------------------------------------------------------------
 
@@ -160,12 +201,20 @@ class MiniMaxProvider(LLMProvider):
     name = "minimax"
     BASE_URL = "https://api.minimax.io/v1"
 
-    def __init__(self, api_key: str, model: str = "MiniMax-M2.7") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "MiniMax-M2.7",
+        timeout: float = 60.0,
+        max_retries: int = 3,
+    ) -> None:
         from openai import OpenAI, AsyncOpenAI
         self._api_key = api_key
-        self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
-        self._async_client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL)
+        self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL, timeout=timeout)
+        self._async_client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL, timeout=timeout)
         self.model = model
+        self._timeout = timeout
+        self._max_retries = max_retries
 
     async def chat(
         self,
@@ -174,9 +223,14 @@ class MiniMaxProvider(LLMProvider):
         max_tokens: int = 8096,
     ) -> LLMResponse:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._sync_chat, messages, tools, max_tokens
-        )
+
+        async def _call() -> LLMResponse:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self._sync_chat, messages, tools, max_tokens),
+                timeout=self._timeout,
+            )
+
+        return await _retry_async(_call, max_retries=self._max_retries)
 
     def _sync_chat(
         self,
@@ -380,12 +434,20 @@ class AnthropicProvider(LLMProvider):
 
     name = "anthropic"
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-sonnet-4-6",
+        timeout: float = 60.0,
+        max_retries: int = 3,
+    ) -> None:
         import anthropic as _anthropic
         self._api_key = api_key
-        self._client = _anthropic.Anthropic(api_key=api_key)
-        self._async_client = _anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = _anthropic.Anthropic(api_key=api_key, timeout=timeout)
+        self._async_client = _anthropic.AsyncAnthropic(api_key=api_key, timeout=timeout)
         self.model = model
+        self._timeout = timeout
+        self._max_retries = max_retries
 
     async def chat(
         self,
@@ -394,9 +456,14 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 8096,
     ) -> LLMResponse:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self._sync_chat, messages, tools, max_tokens
-        )
+
+        async def _call() -> LLMResponse:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self._sync_chat, messages, tools, max_tokens),
+                timeout=self._timeout,
+            )
+
+        return await _retry_async(_call, max_retries=self._max_retries)
 
     def _sync_chat(
         self,

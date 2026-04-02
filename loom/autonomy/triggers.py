@@ -47,14 +47,36 @@ class TriggerDefinition:
 # Minimal cron field validator (digit, *, ranges, lists)
 _CRON_FIELD = re.compile(r'^(\*|\d+(-\d+)?(,\d+(-\d+)?)*)(/\d+)?$')
 
+# (min, max) inclusive for each cron position: minute hour dom month dow
+_CRON_RANGES = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+
+
+def _validate_cron_field_range(field: str, lo: int, hi: int, field_name: str, expr: str) -> None:
+    """Validate that every literal number in a cron field is within [lo, hi]."""
+    # Strip step suffix before checking values
+    base = field.split("/")[0] if "/" in field else field
+    if base == "*":
+        return
+    for part in base.split(","):
+        bounds = part.split("-")
+        for token in bounds:
+            n = int(token)
+            if not (lo <= n <= hi):
+                raise ValueError(
+                    f"Cron field {field_name}={field!r} value {n} out of range "
+                    f"[{lo},{hi}] in {expr!r}"
+                )
+
 
 def _validate_cron(expr: str) -> None:
     parts = expr.strip().split()
     if len(parts) != 5:
         raise ValueError(f"Cron expression must have 5 fields, got: {expr!r}")
-    for part in parts:
+    field_names = ("minute", "hour", "dom", "month", "dow")
+    for part, name, (lo, hi) in zip(parts, field_names, _CRON_RANGES):
         if not _CRON_FIELD.match(part):
             raise ValueError(f"Invalid cron field {part!r} in {expr!r}")
+        _validate_cron_field_range(part, lo, hi, name, expr)
 
 
 @dataclass

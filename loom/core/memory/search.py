@@ -154,8 +154,9 @@ class MemorySearch:
     """
     Ranked retrieval across semantic facts and procedural skills using BM25.
 
-    Each call to ``recall()`` fetches the full corpus from SQLite and builds
-    a fresh BM25 index. Suitable for corpora up to ~10 000 entries.
+    BM25 indexes are cached in memory and revalidated on each call via a
+    lightweight fingerprint query ``(COUNT, MAX(updated_at))``.  The full
+    corpus fetch only runs when the fingerprint changes (new/updated entries).
     """
 
     def __init__(
@@ -165,6 +166,14 @@ class MemorySearch:
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
+        # BM25 cache for semantic entries
+        self._sem_bm25: BM25 | None = None
+        self._sem_entries: list = []
+        self._sem_fp: tuple | None = None
+        # BM25 cache for skill entries
+        self._skill_bm25: BM25 | None = None
+        self._skill_entries: list = []
+        self._skill_fp: tuple | None = None
 
     async def recall(
         self,
@@ -297,15 +306,38 @@ class MemorySearch:
 
     # ------------------------------------------------------------------
 
+    async def _sem_fingerprint(self) -> tuple:
+        """Cheap query to detect corpus changes: (row_count, max_updated_at)."""
+        async with self._semantic._db.execute(
+            "SELECT COUNT(*), MAX(updated_at) FROM semantic_entries"
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0] or 0, row[1] or "")
+
+    async def _skill_fingerprint(self) -> tuple:
+        """Cheap query to detect skill corpus changes: (row_count, max_updated_at)."""
+        async with self._procedural._db.execute(
+            "SELECT COUNT(*), MAX(updated_at) FROM skill_genomes "
+            "WHERE confidence > deprecation_threshold"
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0] or 0, row[1] or "")
+
     async def _search_semantic(self, query: str, limit: int) -> list[MemorySearchResult]:
-        entries = await self._semantic.list_recent(500)
+        fp = await self._sem_fingerprint()
+        if fp != self._sem_fp or self._sem_bm25 is None:
+            entries = await self._semantic.list_recent(500)
+            docs = [f"{e.key} {e.value}" for e in entries]
+            bm25 = BM25()
+            bm25.index(docs)
+            self._sem_entries = entries
+            self._sem_bm25 = bm25
+            self._sem_fp = fp
+        else:
+            entries = self._sem_entries
+
         if not entries:
             return []
-
-        # Index key + value so the query can match on either
-        docs = [f"{e.key} {e.value}" for e in entries]
-        bm25 = BM25()
-        bm25.index(docs)
 
         return [
             MemorySearchResult(
@@ -315,21 +347,24 @@ class MemorySearch:
                 score=score,
                 metadata={"confidence": entries[i].confidence},
             )
-            for i, score in bm25.top_k(query, k=limit)
+            for i, score in self._sem_bm25.top_k(query, k=limit)
         ]
 
     async def _search_skills(self, query: str, limit: int) -> list[MemorySearchResult]:
-        skills = await self._procedural.list_active()
+        fp = await self._skill_fingerprint()
+        if fp != self._skill_fp or self._skill_bm25 is None:
+            skills = await self._procedural.list_active()
+            docs = [f"{s.name} {' '.join(s.tags)} {s.body}" for s in skills]
+            bm25 = BM25()
+            bm25.index(docs)
+            self._skill_entries = skills
+            self._skill_bm25 = bm25
+            self._skill_fp = fp
+        else:
+            skills = self._skill_entries
+
         if not skills:
             return []
-
-        # Index name + tags + body
-        docs = [
-            f"{s.name} {' '.join(s.tags)} {s.body}"
-            for s in skills
-        ]
-        bm25 = BM25()
-        bm25.index(docs)
 
         return [
             MemorySearchResult(
@@ -339,5 +374,5 @@ class MemorySearch:
                 score=score,
                 metadata={"confidence": skills[i].confidence, "tags": skills[i].tags},
             )
-            for i, score in bm25.top_k(query, k=limit)
+            for i, score in self._skill_bm25.top_k(query, k=limit)
         ]

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from loom.autonomy.evaluator import TriggerEvaluator
+from loom.autonomy.history import TriggerHistory
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
 from loom.core.harness.permissions import TrustLevel
@@ -38,15 +39,17 @@ class AutonomyDaemon:
         notify_router: NotificationRouter,
         confirm_flow: ConfirmFlow,
         loom_session=None,   # LoomSession for executing prompts
+        db=None,             # open aiosqlite.Connection for trigger_history persistence
     ) -> None:
         self._notify = notify_router
         self._confirm = confirm_flow
         self._session = loom_session
 
+        history = TriggerHistory(db) if db is not None else None
         self._planner = ActionPlanner(
             semantic_memory=getattr(loom_session, "_semantic", None) if loom_session else None,
         )
-        self._evaluator = TriggerEvaluator(on_fire=self._planner.handle)
+        self._evaluator = TriggerEvaluator(on_fire=self._planner.handle, history=history)
         # Intercept planned actions
         self._planner_handle_orig = self._planner.handle
         self._evaluator._on_fire = self._on_trigger_fire

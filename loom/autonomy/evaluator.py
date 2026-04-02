@@ -16,6 +16,7 @@ import asyncio
 from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable
 
+from .history import TriggerHistory
 from .triggers import (
     TriggerDefinition, TriggerKind,
     CronTrigger, EventTrigger, ConditionTrigger,
@@ -34,9 +35,14 @@ class TriggerEvaluator:
         await evaluator.evaluate_cron(datetime.now(UTC))
     """
 
-    def __init__(self, on_fire: FireCallback | None = None) -> None:
+    def __init__(
+        self,
+        on_fire: FireCallback | None = None,
+        history: TriggerHistory | None = None,
+    ) -> None:
         self._triggers: dict[str, TriggerDefinition] = {}
         self._on_fire = on_fire
+        self._history = history
         self._fired_this_minute: set[str] = set()
         self._last_minute: int | None = None
 
@@ -62,15 +68,33 @@ class TriggerEvaluator:
         Check all CronTriggers against `dt`.
         Returns names of triggers that fired.
         Deduplicates: a cron trigger fires at most once per minute.
+        Restores dedup state from persistent history on minute boundary (survives restarts).
         """
         if dt is None:
             dt = datetime.now(UTC)
 
-        # Reset dedup set on new minute
         minute_key = dt.year * 100000 + dt.month * 10000 + dt.day * 100 + dt.hour * 60 + dt.minute
         if minute_key != self._last_minute:
             self._fired_this_minute = set()
             self._last_minute = minute_key
+            # Restore from DB: any trigger that last fired in this exact minute
+            # was already handled before the restart — skip it again.
+            if self._history is not None:
+                try:
+                    for entry in await self._history.get_all():
+                        last_iso = entry["last_fire_iso"]
+                        last_dt = datetime.fromisoformat(last_iso)
+                        lk = (
+                            last_dt.year * 100000
+                            + last_dt.month * 10000
+                            + last_dt.day * 100
+                            + last_dt.hour * 60
+                            + last_dt.minute
+                        )
+                        if lk == minute_key:
+                            self._fired_this_minute.add(entry["trigger_name"])
+                except Exception:
+                    pass  # History read failure must never block cron evaluation
 
         fired: list[str] = []
         for trigger in self.list():
@@ -82,6 +106,11 @@ class TriggerEvaluator:
             if trigger.should_fire(dt):
                 self._fired_this_minute.add(trigger.name)
                 fired.append(trigger.name)
+                if self._history is not None:
+                    try:
+                        await self._history.record_fire(trigger.name, dt)
+                    except Exception:
+                        pass
                 await self._fire(trigger, {"triggered_at": dt.isoformat(), "source": "cron"})
 
         return fired
@@ -96,12 +125,18 @@ class TriggerEvaluator:
         ctx = context or {}
         ctx["event_name"] = event_name
 
+        now = datetime.now(UTC)
         for trigger in self.list():
             if trigger.kind != TriggerKind.EVENT:
                 continue
             assert isinstance(trigger, EventTrigger)
             if trigger.event_name == event_name:
                 fired.append(trigger.name)
+                if self._history is not None:
+                    try:
+                        await self._history.record_fire(trigger.name, now)
+                    except Exception:
+                        pass
                 await self._fire(trigger, ctx)
 
         return fired
@@ -112,6 +147,7 @@ class TriggerEvaluator:
 
     async def poll_conditions(self) -> list[str]:
         """Evaluate all ConditionTriggers right now. Returns fired trigger names."""
+        now = datetime.now(UTC)
         fired: list[str] = []
         for trigger in self.list():
             if trigger.kind != TriggerKind.CONDITION:
@@ -119,6 +155,11 @@ class TriggerEvaluator:
             assert isinstance(trigger, ConditionTrigger)
             if trigger.evaluate():
                 fired.append(trigger.name)
+                if self._history is not None:
+                    try:
+                        await self._history.record_fire(trigger.name, now)
+                    except Exception:
+                        pass
                 await self._fire(trigger, {"source": "condition"})
         return fired
 

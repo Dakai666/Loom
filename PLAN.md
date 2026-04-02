@@ -635,11 +635,11 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 
 #### 5B. 待開發
 
-- [ ] AutonomyDaemon 狀態持久化（`trigger_history` 表，重啟保留 last_fire_time）
-- [ ] Request timeout + Retry / Circuit Breaker（provider 層，避免永久阻塞）
-- [ ] Cron 欄位數值範圍驗證（`60 * * * *` 目前通過但永遠不執行）
-- [ ] Skill 評估回路接通（`SkillGenome.record_outcome()` 接 tool result）
-- [ ] BM25 index cache（目前每次 `recall()` 重建，n 大時 O(n)）
+- [x] AutonomyDaemon 狀態持久化（`trigger_history` 表 + `TriggerHistory` class，重啟保留 last_fire_time）
+- [x] Request timeout + Retry（provider 層：`timeout` 注入 SDK client，`_retry_async` 指數退避，max_retries=3）
+- [x] Cron 欄位數值範圍驗證（`_validate_cron_field_range` 補充，`60 * * * *` 現在 raise ValueError）
+- [x] Skill 評估回路接通（`_on_trace` callback 查 ProceduralMemory → `record_outcome()` → `upsert()`）
+- [x] BM25 index cache（`(COUNT, MAX(updated_at))` fingerprint，corpus 不變時跳過重建）
 - [ ] Relational Memory 讀寫 API
 - [ ] REST API Platform（FastAPI，Webhook reply endpoint）
 - [ ] Discord / Slack / Email Notifier
