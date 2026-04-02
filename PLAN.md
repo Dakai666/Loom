@@ -642,7 +642,7 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 - [x] BM25 index cache（`(COUNT, MAX(updated_at))` fingerprint，corpus 不變時跳過重建）
 - [x] Relational Memory 讀寫 API（`RelationalMemory` class + `relate` / `query_relations` 工具 + MemoryIndex 整合）
 - [x] REST API Platform（`loom/platform/api/server.py` FastAPI app；`GET/POST /memory/semantic`, `GET/POST /memory/relational`, `POST /webhook/reply`, `POST /events/emit`；`loom api start` CLI 命令；optional dep `loom[api]`）
-- [ ] Discord / Slack / Email Notifier
+- [x] Discord Notifier（`DiscordNotifier`；embed 顏色分類；confirm 附帶 curl 回覆指令；`DISCORD_WEBHOOK_URL` env / loom.toml `[notify.discord]` 自動載入；push_reply 接 REST API）
 - [ ] IDE Extension 支援（VS Code）
 - [ ] 文檔網站
 
