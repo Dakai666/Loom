@@ -58,6 +58,7 @@ from loom.core.harness.middleware import (
 )
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolRegistry
+from loom.core.memory.embeddings import build_embedding_provider
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -82,6 +83,7 @@ Below are tool calls from an agent session.
 Extract 3-7 concise, reusable facts or learnings that would be valuable in future sessions.
 Format each on its own line starting with "FACT: ".
 Ignore trivial or highly session-specific details.
+IMPORTANT: Write every FACT in the same language as the session content below.
 
 Session log:
 {log}
@@ -285,7 +287,8 @@ class LoomSession:
         await self._store.initialize()
         self._db = await self._store.connect().__aenter__()
         self._episodic  = EpisodicMemory(self._db)
-        self._semantic  = SemanticMemory(self._db)
+        emb_provider = build_embedding_provider(_load_env())
+        self._semantic  = SemanticMemory(self._db, embedding_provider=emb_provider)
         self._procedural = ProceduralMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
 

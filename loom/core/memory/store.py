@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS semantic_entries (
     source      TEXT,
     metadata    TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    embedding   TEXT            -- JSON float array; NULL until first embed
 );
 
 CREATE TABLE IF NOT EXISTS skill_genomes (
@@ -101,6 +102,16 @@ class SQLiteStore:
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
             await db.commit()
+            # Runtime migration: add `embedding` column to existing databases.
+            # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so we
+            # attempt the ALTER and silently ignore the "duplicate column" error.
+            try:
+                await db.execute(
+                    "ALTER TABLE semantic_entries ADD COLUMN embedding TEXT"
+                )
+                await db.commit()
+            except Exception:
+                pass  # Column already exists — this is expected on all but the first run
 
     def connect(self) -> aiosqlite.Connection:
         """Return an async context-manager that yields an open connection."""

@@ -404,7 +404,7 @@ class TestRecallTool:
         result = await tool.executor(call)
 
         assert result.success is True
-        assert "No relevant" in result.output
+        assert "No memories stored yet." in result.output
 
     async def test_type_filter_forwarded(self, semantic, procedural):
         skill = SkillGenome(name="bash_skill", body="use bash for automation", tags=["bash"])
@@ -514,3 +514,142 @@ class TestMemorizeTool:
         tool = make_memorize_tool(mock_sem)
         assert tool.trust_level == TrustLevel.GUARDED
         assert "memorize" in tool.tags
+
+# ---------------------------------------------------------------------------
+# Embedding provider + multi-fallback recall (Phase 5)
+# ---------------------------------------------------------------------------
+
+from loom.core.memory.embeddings import (
+    cosine_similarity,
+    MiniMaxEmbeddingProvider,
+    build_embedding_provider,
+)
+
+
+class TestCosineSimilarity:
+    def test_identical_vectors(self):
+        v = [1.0, 0.0, 0.0]
+        assert cosine_similarity(v, v) == pytest.approx(1.0)
+
+    def test_orthogonal_vectors(self):
+        assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+
+    def test_opposite_vectors(self):
+        assert cosine_similarity([1.0, 0.0], [-1.0, 0.0]) == pytest.approx(-1.0)
+
+    def test_empty_vector_returns_zero(self):
+        assert cosine_similarity([], []) == 0.0
+
+    def test_zero_vector_returns_zero(self):
+        assert cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+    def test_dimension_mismatch_returns_zero(self):
+        assert cosine_similarity([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0
+
+    def test_general_similarity(self):
+        a = [1.0, 1.0, 0.0]
+        b = [1.0, 0.5, 0.0]
+        sim = cosine_similarity(a, b)
+        assert 0.9 < sim < 1.0
+
+
+class TestBuildEmbeddingProvider:
+    def test_returns_provider_when_key_present(self):
+        provider = build_embedding_provider({"minimax.io_key": "sk-test"})
+        assert isinstance(provider, MiniMaxEmbeddingProvider)
+
+    def test_returns_none_when_no_key(self):
+        assert build_embedding_provider({}) is None
+        assert build_embedding_provider({"OTHER_KEY": "x"}) is None
+
+    def test_uses_minimax_api_key_env(self):
+        provider = build_embedding_provider({"MINIMAX_API_KEY": "sk-test2"})
+        assert provider is not None
+
+
+class TestSemanticMemoryWithEmbeddings:
+    async def test_upsert_stores_embedding_when_provider_set(self, db_conn):
+        mock_provider = AsyncMock()
+        mock_provider.embed.return_value = [[0.1, 0.2, 0.3]]
+
+        sem = SemanticMemory(db_conn, embedding_provider=mock_provider)
+        await sem.upsert(SemanticEntry(key="test:1", value="Loom uses SQLite"))
+
+        mock_provider.embed.assert_called_once()
+        pairs = await sem.list_with_embeddings(10)
+        assert len(pairs) == 1
+        entry, vec = pairs[0]
+        assert vec == pytest.approx([0.1, 0.2, 0.3])
+
+    async def test_upsert_without_provider_leaves_embedding_null(self, semantic):
+        await semantic.upsert(SemanticEntry(key="no:emb", value="no embedding"))
+        pairs = await semantic.list_with_embeddings(10)
+        _, vec = pairs[0]
+        assert vec is None
+
+    async def test_embedding_failure_does_not_block_write(self, db_conn):
+        mock_provider = AsyncMock()
+        mock_provider.embed.side_effect = RuntimeError("API down")
+
+        sem = SemanticMemory(db_conn, embedding_provider=mock_provider)
+        # Should not raise
+        await sem.upsert(SemanticEntry(key="safe:write", value="still written"))
+
+        stored = await sem.get("safe:write")
+        assert stored is not None
+
+    def test_has_embeddings_property(self, semantic):
+        assert semantic.has_embeddings is False
+
+    async def test_has_embeddings_true_with_provider(self, db_conn):
+        mock_provider = AsyncMock()
+        sem = SemanticMemory(db_conn, embedding_provider=mock_provider)
+        assert sem.has_embeddings is True
+
+    async def test_list_with_embeddings_returns_none_for_missing(self, semantic):
+        await semantic.upsert(SemanticEntry(key="k1", value="fact one"))
+        await semantic.upsert(SemanticEntry(key="k2", value="fact two"))
+        pairs = await semantic.list_with_embeddings(10)
+        assert all(vec is None for _, vec in pairs)
+
+
+class TestMemorySearchEmbeddingTier:
+    async def test_embedding_tier_used_when_provider_configured(self, db_conn, procedural):
+        mock_provider = AsyncMock()
+        # upsert calls embed once (write-time), recall calls embed once (query)
+        mock_provider.embed.side_effect = [
+            [[1.0, 0.0]],   # write-time embedding (from upsert)
+            [[1.0, 0.0]],   # query embedding (from _search_semantic_embedding)
+        ]
+        sem = SemanticMemory(db_conn, embedding_provider=mock_provider)
+        await sem.upsert(SemanticEntry(key="loom:arch", value="middleware pipeline"))
+
+        search = MemorySearch(sem, procedural)
+        results = await search.recall("middleware", type="semantic", limit=5)
+
+        assert len(results) >= 1
+        assert results[0].metadata.get("method") == "embedding"
+
+    async def test_falls_through_to_bm25_on_embedding_error(self, db_conn, procedural):
+        mock_provider = AsyncMock()
+        mock_provider.embed.side_effect = RuntimeError("network error")
+
+        sem = SemanticMemory(db_conn, embedding_provider=mock_provider)
+        await sem.upsert(SemanticEntry(key="bm25:fact", value="loom harness pipeline"))
+
+        search = MemorySearch(sem, procedural)
+        # BM25 should find this even though embedding failed
+        results = await search.recall("harness", type="semantic", limit=5)
+        assert any(r.key == "bm25:fact" for r in results)
+
+    async def test_falls_through_to_recency_when_no_embedding_no_bm25(
+        self, db_conn, procedural
+    ):
+        sem = SemanticMemory(db_conn)
+        await sem.upsert(SemanticEntry(key="recent:1", value="some stored fact"))
+
+        search = MemorySearch(sem, procedural)
+        # Chinese query → no BM25 match → recency fallback
+        results = await search.recall("查詢完全不相關", type="semantic", limit=5)
+        assert len(results) == 1
+        assert results[0].metadata.get("fallback") is True

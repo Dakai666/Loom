@@ -24,6 +24,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
+from loom.core.memory.embeddings import cosine_similarity
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import SemanticMemory
 
@@ -174,6 +175,11 @@ class MemorySearch:
         """
         Return the top-*limit* memory entries most relevant to *query*.
 
+        BM25 is lexical (keyword-based).  When no terms overlap between the
+        query and stored facts — e.g. cross-language queries or very generic
+        phrases — the ranked search returns no results.  In that case we fall
+        back to recency ordering so the caller always gets something useful.
+
         Parameters
         ----------
         query:  Natural-language search query.
@@ -183,15 +189,110 @@ class MemorySearch:
         if not query.strip():
             return []
 
-        results: list[MemorySearchResult] = []
+        # ── Tier 1: embedding cosine similarity (language-agnostic) ──────────
+        # Only runs when the SemanticMemory instance has an EmbeddingProvider
+        # configured.  Any exception (network, API error) falls through to BM25.
+        if self._semantic.has_embeddings and type in ("semantic", "all"):
+            try:
+                emb_results = await self._search_semantic_embedding(query, limit)
+                if emb_results:
+                    # Skills are not embedding-indexed; mix in BM25 skill results
+                    if type == "all":
+                        skill_results = await self._search_skills(query, limit)
+                        combined = emb_results + skill_results
+                        combined.sort(key=lambda r: r.score, reverse=True)
+                        return combined[:limit]
+                    return emb_results
+            except Exception:
+                pass  # Fall through to BM25
 
+        # ── Tier 2: BM25 keyword search ───────────────────────────────────────
+        results: list[MemorySearchResult] = []
         if type in ("semantic", "all"):
             results.extend(await self._search_semantic(query, limit))
-
         if type in ("skill", "all"):
             results.extend(await self._search_skills(query, limit))
 
         results.sort(key=lambda r: r.score, reverse=True)
+        ranked = results[:limit]
+
+        # ── Tier 3: recency fallback ──────────────────────────────────────────
+        if not ranked:
+            ranked = await self._recent_fallback(type, limit)
+
+        return ranked
+
+    async def _search_semantic_embedding(
+        self, query: str, limit: int
+    ) -> list[MemorySearchResult]:
+        """Rank semantic entries by cosine similarity to the query embedding."""
+        provider = self._semantic._embeddings
+        if provider is None:
+            return []
+
+        query_vectors = await provider.embed([query])
+        if not query_vectors:
+            return []
+        query_vec = query_vectors[0]
+
+        entries_with_vecs = await self._semantic.list_with_embeddings(500)
+
+        scored: list[tuple[float, int]] = []
+        for i, (_, vec) in enumerate(entries_with_vecs):
+            if vec is None:
+                continue
+            score = cosine_similarity(query_vec, vec)
+            if score > 0.0:
+                scored.append((score, i))
+
+        scored.sort(reverse=True)
+
+        return [
+            MemorySearchResult(
+                type="semantic",
+                key=entries_with_vecs[i][0].key,
+                value=entries_with_vecs[i][0].value,
+                score=score,
+                metadata={
+                    "confidence": entries_with_vecs[i][0].confidence,
+                    "method": "embedding",
+                },
+            )
+            for score, i in scored[:limit]
+        ]
+
+    async def _recent_fallback(
+        self, type: MemoryType, limit: int
+    ) -> list[MemorySearchResult]:
+        """Return the most recently updated entries with score=0 (recency order)."""
+        results: list[MemorySearchResult] = []
+
+        if type in ("semantic", "all"):
+            entries = await self._semantic.list_recent(limit)
+            results.extend(
+                MemorySearchResult(
+                    type="semantic",
+                    key=e.key,
+                    value=e.value,
+                    score=0.0,
+                    metadata={"confidence": e.confidence, "fallback": True},
+                )
+                for e in entries
+            )
+
+        if type in ("skill", "all"):
+            skills = await self._procedural.list_active()
+            results.extend(
+                MemorySearchResult(
+                    type="skill",
+                    key=s.name,
+                    value=s.body,
+                    score=0.0,
+                    metadata={"confidence": s.confidence, "tags": s.tags, "fallback": True},
+                )
+                for s in skills[:limit]
+            )
+
         return results[:limit]
 
     # ------------------------------------------------------------------

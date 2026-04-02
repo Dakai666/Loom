@@ -5,13 +5,18 @@ Facts are written by the session compressor at the end of each session.
 Each fact has a confidence score and can be updated or queried by key.
 """
 
+from __future__ import annotations
+
 import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
+
+if TYPE_CHECKING:
+    from loom.core.memory.embeddings import EmbeddingProvider
 
 
 @dataclass
@@ -29,11 +34,27 @@ class SemanticEntry:
 class SemanticMemory:
     """Read/write access to the semantic_entries table."""
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        db: aiosqlite.Connection,
+        embedding_provider: "EmbeddingProvider | None" = None,
+    ) -> None:
         self._db = db
+        self._embeddings = embedding_provider
+
+    @property
+    def has_embeddings(self) -> bool:
+        """True if an embedding provider is configured."""
+        return self._embeddings is not None
 
     async def upsert(self, entry: SemanticEntry) -> None:
-        """Insert or update a fact by key."""
+        """
+        Insert or update a fact by key.
+
+        If an embedding provider is configured, computes and persists the
+        vector for this entry after the upsert.  Embedding failures are
+        silently swallowed so a network error never blocks a memory write.
+        """
         now = datetime.now(UTC).isoformat()
         await self._db.execute(
             """
@@ -59,6 +80,19 @@ class SemanticMemory:
             ),
         )
         await self._db.commit()
+
+        if self._embeddings is not None:
+            try:
+                text = f"{entry.key} {entry.value}"
+                vectors = await self._embeddings.embed([text])
+                if vectors:
+                    await self._db.execute(
+                        "UPDATE semantic_entries SET embedding = ? WHERE key = ?",
+                        (json.dumps(vectors[0]), entry.key),
+                    )
+                    await self._db.commit()
+            except Exception:
+                pass  # Embedding failure must never block the memory write
 
     async def get(self, key: str) -> SemanticEntry | None:
         cursor = await self._db.execute(
@@ -92,6 +126,33 @@ class SemanticMemory:
             )
             for r in rows
         ]
+
+    async def list_with_embeddings(
+        self, limit: int = 500
+    ) -> list[tuple[SemanticEntry, list[float] | None]]:
+        """
+        Return entries together with their stored embedding vectors.
+        Entries without a computed embedding return None for the vector.
+        Used by MemorySearch for cosine-similarity ranking.
+        """
+        cursor = await self._db.execute(
+            "SELECT id, key, value, confidence, source, metadata, "
+            "created_at, updated_at, embedding "
+            "FROM semantic_entries ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        result: list[tuple[SemanticEntry, list[float] | None]] = []
+        for r in rows:
+            entry = SemanticEntry(
+                id=r[0], key=r[1], value=r[2], confidence=r[3],
+                source=r[4], metadata=json.loads(r[5]),
+                created_at=datetime.fromisoformat(r[6]),
+                updated_at=datetime.fromisoformat(r[7]),
+            )
+            vector: list[float] | None = json.loads(r[8]) if r[8] else None
+            result.append((entry, vector))
+        return result
 
     async def search(self, query: str, limit: int = 10) -> list[SemanticEntry]:
         """Simple substring search — full-text search can be added later."""
