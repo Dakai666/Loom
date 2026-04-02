@@ -63,11 +63,18 @@ from loom.core.harness.registry import ToolRegistry
 from loom.core.memory.embeddings import build_embedding_provider
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
-from loom.platform.cli.tools import BUILTIN_TOOLS, make_recall_tool, make_memorize_tool
+from loom.platform.cli.tools import (
+    BUILTIN_TOOLS,
+    make_memorize_tool,
+    make_query_relations_tool,
+    make_recall_tool,
+    make_relate_tool,
+)
 from loom.platform.cli.ui import (
     TextChunk,
     ToolBegin,
@@ -264,6 +271,7 @@ class LoomSession:
         self._episodic: EpisodicMemory | None = None
         self._semantic: SemanticMemory | None = None
         self._procedural: ProceduralMemory | None = None
+        self._relational: RelationalMemory | None = None
         self._reflection: ReflectionAPI | None = None
         self._pipeline: MiddlewarePipeline | None = None
         self._memory_index: MemoryIndex = MemoryIndex()
@@ -305,10 +313,13 @@ class LoomSession:
         emb_provider = build_embedding_provider(_load_env())
         self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         self._procedural = ProceduralMemory(self._db)
+        self._relational = RelationalMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
 
         # Build MemoryIndex and inject into system prompt
-        indexer = MemoryIndexer(self._semantic, self._procedural, self._episodic)
+        indexer = MemoryIndexer(
+            self._semantic, self._procedural, self._episodic, self._relational
+        )
         self._memory_index = await indexer.build()
         if not self._memory_index.is_empty:
             index_text = self._memory_index.render()
@@ -321,6 +332,8 @@ class LoomSession:
         search = MemorySearch(self._semantic, self._procedural)
         self.registry.register(make_recall_tool(search))
         self.registry.register(make_memorize_tool(self._semantic))
+        self.registry.register(make_relate_tool(self._relational))
+        self.registry.register(make_query_relations_tool(self._relational))
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
@@ -913,8 +926,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     in place, giving genuine streaming.  A Rule separator frames the response
     without the Live complexity.
     """
-    import asyncio
-
     console.print()
     t0 = time.monotonic()
     text_buffer = ""

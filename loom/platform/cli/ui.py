@@ -311,8 +311,8 @@ def set_show_cursor(visible: bool) -> None:
 
 
 def streaming_cursor() -> str:
-    """Return the streaming cursor string."""
-    return "▌" if _SHOW_CURSOR else ""
+    """Return the streaming cursor string (ASCII-safe)."""
+    return ">" if _SHOW_CURSOR else ""
 
 
 def clear_line_escape() -> str:
@@ -341,7 +341,7 @@ def status_bar(
 
     bar_len = 10
     filled = int(bar_len * context_fraction)
-    bar = "▓" * filled + "░" * (bar_len - filled)
+    bar = "#" * filled + "." * (bar_len - filled)
 
     return Text.from_markup(
         f"[dim]-[/dim]"
@@ -350,7 +350,7 @@ def status_bar(
         f"{input_tokens}in / {output_tokens}out  |  "
         f"{elapsed_ms / 1000:.1f}s  |  "
         f"{tool_count} tool{'s' if tool_count != 1 else ''}"
-        f"[dim]-[/dim]"
+        f"[/dim][dim]-[/dim]"
     )
 
 
