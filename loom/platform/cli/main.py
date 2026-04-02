@@ -855,6 +855,14 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         console.print(f"[dim]  Compacting context ({pct:.1f}% used)…[/dim]")
         await session._smart_compact()
 
+    elif command == "/verbose":
+        from loom.platform.cli.ui import toggle_verbose_mode, is_verbose_mode
+
+        state = toggle_verbose_mode()
+        console.print(
+            f"[dim]Tool output: {'[green]verbose[/green]' if state else '[yellow]compact[/yellow]'}[/dim]"
+        )
+
     elif command == "/help":
         console.print(
             Panel(
@@ -863,8 +871,11 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [cyan]/personality off[/cyan]        Remove active persona\n"
                 "  [cyan]/personality[/cyan]             Show active + available personas\n"
                 "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
+                "  [cyan]/verbose[/cyan]                 Toggle tool output verbosity\n"
                 "  [cyan]/help[/cyan]                    Show this message\n\n"
-                "[bold]Input[/bold]\n\n"
+                "[bold]Keyboard shortcuts[/bold]\n\n"
+                "  [dim]Ctrl-L[/dim]  Clear screen\n"
+                "  [dim]Ctrl-O[/dim]  Toggle tool output verbosity\n"
                 "  [dim]up / down[/dim]  Browse input history\n"
                 "  [dim]Tab[/dim]    Autocomplete slash commands\n"
                 "  [dim]exit[/dim] / [dim]Ctrl-C[/dim]  End session",

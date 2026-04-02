@@ -33,6 +33,7 @@ from rich.text import Text
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
 
@@ -91,6 +92,7 @@ _SLASH_WORDS = [
     "/personality researcher",
     "/personality operator",
     "/compact",
+    "/verbose",
     "/help",
 ]
 
@@ -116,13 +118,40 @@ _PT_STYLE = Style.from_dict(
 )
 
 
+def _build_key_bindings() -> KeyBindings:
+    """Build key bindings for Ctrl+L (clear) and Ctrl+O (verbose toggle)."""
+    kb = KeyBindings()
+
+    @kb.add("c-l")
+    def clear_screen(_) -> None:
+        """Ctrl+L: clear terminal screen."""
+        from rich.console import Console
+
+        _console = Console()
+        _console.clear()
+
+    @kb.add("c-o")
+    def toggle_verbose(_) -> None:
+        """Ctrl+O: toggle tool output verbosity."""
+        new_state = toggle_verbose_mode()
+        from rich.console import Console
+
+        _console = Console()
+        _console.print(
+            f"[dim]Tool output verbosity: {'[green]verbose[/green]' if new_state else '[yellow]compact[/yellow]'}[/dim]"
+        )
+
+    return kb
+
+
 def make_prompt_session() -> PromptSession:
-    """Create a PromptSession with input history and slash autocomplete."""
+    """Create a PromptSession with input history, slash autocomplete, and key bindings."""
     return PromptSession(
         history=InMemoryHistory(),
         completer=SlashCompleter(),
         complete_while_typing=True,
         style=_PT_STYLE,
+        key_bindings=_build_key_bindings(),
     )
 
 
