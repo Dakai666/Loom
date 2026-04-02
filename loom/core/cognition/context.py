@@ -45,8 +45,16 @@ class ContextBudget:
     # --- Accounting ---
 
     def record_response(self, input_tokens: int, output_tokens: int) -> None:
-        """Update usage from provider-reported token counts."""
-        self.used_tokens += input_tokens + output_tokens
+        """
+        Update usage from provider-reported token counts.
+
+        ``input_tokens`` is the *total* context the model processed this
+        call — it already includes every prior message.  We therefore
+        REPLACE (not add) used_tokens so the budget always reflects the
+        real current window size, not a cumulative sum that would grow
+        exponentially across turns.
+        """
+        self.used_tokens = input_tokens + output_tokens
 
     def record_messages(self, messages: list[dict[str, Any]]) -> None:
         """Recount usage from the current message list (after compression)."""
@@ -78,5 +86,5 @@ class ContextBudget:
         pct = self.usage_fraction * 100
         return (
             f"ContextBudget({self.used_tokens:,}/{self.total_tokens:,} tokens, "
-            f"{pct:.1f}%{'  ⚠ compress' if self.should_compress() else ''})"
+            f"{pct:.1f}%{'  [compress]' if self.should_compress() else ''})"
         )

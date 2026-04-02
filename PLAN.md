@@ -174,8 +174,8 @@ plan = graph.compile()
 
 - 總 token 上限：MiniMax M2.7 = 204,800 tokens
 - 壓縮閾值：80%（可設定）
-- `record_response(input, output)` 追蹤實際用量
-- `should_compress()` 觸發後自動截取 messages[-20:]
+- `record_response(input, output)` 追蹤實際用量（replace，不 accumulate）
+- `should_compress()` 觸發後呼叫 `_smart_compact()`
 
 #### Reflection API
 
@@ -286,13 +286,16 @@ Project_Next/
 │   │   │   ├── store.py             # SQLiteStore（WAL 模式，統一初始化）
 │   │   │   ├── episodic.py          # EpisodicEntry + EpisodicMemory
 │   │   │   ├── semantic.py          # SemanticEntry + SemanticMemory
-│   │   │   └── procedural.py        # SkillGenome（EMA） + ProceduralMemory
+│   │   │   ├── procedural.py        # SkillGenome（EMA） + ProceduralMemory
+│   │   │   ├── index.py             # MemoryIndex + MemoryIndexer（輕量目錄）
+│   │   │   └── search.py            # MemorySearch（BM25 + TF-IDF 加權搜尋）
 │   │   ├── cognition/
 │   │   │   ├── __init__.py
-│   │   │   ├── providers.py         # LLMProvider / MiniMaxProvider / AnthropicProvider
-│   │   │   ├── router.py            # LLMRouter（prefix routing）
-│   │   │   ├── context.py           # ContextBudget
-│   │   │   └── reflection.py        # ReflectionAPI
+│   │   │   ├── providers.py         # LLMProvider / MiniMaxProvider / AnthropicProvider（async client reuse）
+│   │   │   ├── router.py            # LLMRouter（prefix routing）+ stream_chat
+│   │   │   ├── context.py           # ContextBudget（replace semantics on record_response）
+│   │   │   ├── reflection.py        # ReflectionAPI
+│   │   │   └── prompt_stack.py      # PromptStack（SOUL → Agent → Personality 三層棧）
 │   │   └── tasks/
 │   │       ├── __init__.py
 │   │       ├── graph.py             # TaskNode + TaskGraph（Kahn's sort）
@@ -312,11 +315,21 @@ Project_Next/
 │   │       ├── __init__.py
 │   │       ├── cli.py               # CLINotifier（Rich + stdin）
 │   │       └── webhook.py           # WebhookNotifier + TelegramNotifier
+│   ├── extensibility/
+│   │   ├── __init__.py
+│   │   ├── lens.py                  # BaseLens 抽象（extract_skills/middleware/adapters）
+│   │   ├── hermes.py                # HermesLens（procedural memory 格式轉換）
+│   │   ├── claw.py                  # ClawCodeLens（harness pattern 引入）
+│   │   ├── pipeline.py              # Skill Import Pipeline（沙盒評估 + confidence gate）
+│   │   └── adapter.py               # Adapter Registry（@loom.tool decorator）
 │   └── platform/
 │       └── cli/
 │           ├── __init__.py
 │           ├── main.py              # CLI entry（chat / memory / reflect / autonomy）
-│           └── tools.py             # 4 builtin tools（read_file/write_file/list_dir/run_bash）
+│           │                        # LoomSession + _smart_compact + stream_turn
+│           ├── ui.py                # UI components（TextChunk/ToolBegin/ToolEnd/TurnDone）
+│           │                        # PromptSession + SlashCompleter
+│           └── tools.py             # 6 builtin tools（read_file/write_file/list_dir/run_bash/recall/memorize）
 └── tests/
     ├── __init__.py
     ├── test_harness.py              # 29 tests — Harness Layer
@@ -324,10 +337,12 @@ Project_Next/
     ├── test_integration.py          # 18 tests — Pipeline×Memory + builtin tools + compression
     ├── test_cognition.py            # 39 tests — Cognition Layer + ReflectionAPI
     ├── test_tasks.py                # 32 tests — DAG + Scheduler
-    └── test_autonomy.py             # 59 tests — Autonomy + Notify
+    ├── test_autonomy.py             # 59 tests — Autonomy + Notify
+    ├── test_extensibility.py        # Lens system + Skill Import Pipeline
+    └── test_prompt_stack.py         # PromptStack 三層注入
 ```
 
-**測試總計：206 tests，全部通過，Python 3.14 / pytest 9.0**
+**測試總計：352 tests，全部通過，Python 3.14 / pytest 9.0**
 
 ---
 
@@ -442,7 +457,7 @@ loom autonomy emit <event_name>   # 手動觸發 EventTrigger
 - [x] TelegramNotifier（Bot API + reply hook）
 - [x] CLI 指令：`loom autonomy start / status / emit`
 
-### Phase 4：學習層（Extensibility + Memory-as-Attention + Prompt Stack） ⬜ 待開發
+### Phase 4：學習層（Extensibility + Memory-as-Attention + Prompt Stack） ✅ 完成
 
 #### 4A. 三層提示詞棧
 
@@ -560,16 +575,48 @@ recall(query="refactor python function", type="skill")
 - [ ] Relational Memory 讀寫 API（用戶偏好 / 協作風格）
 
 **Phase 4 完整 checklist：**
-- [ ] `Agent.md` 規格定義與 loader
-- [ ] `personalities/` 目錄結構 + 5 個內建人格文件
-- [ ] 三層提示詞棧注入機制（SOUL → Agent → Personality）
-- [ ] `loom.toml` `[identity]` 區塊支援
-- [ ] `MemoryIndex` 資料結構與生成邏輯
-- [ ] BM25 搜尋實作（`loom/core/memory/search.py`）
-- [ ] `recall` tool（接入 ToolRegistry，SAFE）
-- [ ] `memorize` tool（GUARDED，agent 寫入 semantic memory）
-- [ ] `/personality <name>` 斜線指令（session 中切換）
-- [ ] Skill 評估回路接通（tool result → `SkillGenome.record_outcome()`）
+- [x] `Agent.md` 規格定義與 loader
+- [x] `personalities/` 目錄結構 + 5 個內建人格文件（adversarial / minimalist / architect / researcher / operator）
+- [x] 三層提示詞棧注入機制（SOUL → Agent → Personality，`PromptStack`）
+- [x] `loom.toml` `[identity]` 區塊支援
+- [x] `MemoryIndex` 資料結構與生成邏輯（`loom/core/memory/index.py`）
+- [x] BM25 搜尋實作（`loom/core/memory/search.py`）
+- [x] `recall` tool（接入 ToolRegistry，SAFE）
+- [x] `memorize` tool（GUARDED，agent 寫入 semantic memory）
+- [x] `/personality <name>` 斜線指令（session 中切換）
+- [x] Extensibility：BaseLens + HermesLens + ClawCodeLens + Skill Import Pipeline + Adapter Registry
+- [ ] Skill 評估回路接通（tool result → `SkillGenome.record_outcome()`）← 結構完整，尚未接線
+
+### Phase 4.5：CLI Platform 成熟化 ✅ 完成
+
+CLI 從最小原型升級為接近生產品質的互動介面：
+
+**Streaming 架構（`ui.py` + `stream_turn()`）**
+- 事件模型：`TextChunk / ToolBegin / ToolEnd / TurnDone` 型別化事件流
+- `AsyncOpenAI` / `AsyncAnthropic` 真實 async streaming（client 在 `__init__` 建立，session 內複用）
+- 直接 `console.print(chunk, end="")` 逐 token 輸出，無 Rich Live 問題
+
+**Input 體驗（`prompt_toolkit`）**
+- `PromptSession` + `InMemoryHistory`（↑/↓ 瀏覽歷史）
+- `SlashCompleter`（Tab 自動補全斜線指令）
+- 斜線指令：`/personality <name>` · `/compact` · `/help`
+
+**Context 管理**
+- `ContextBudget.record_response()` 改為 replace 語義（修正累加 bug）
+- `_smart_compact()`：LLM 摘要最老的 1/2 輪次 → 2 條摘要訊息（節省 token 同時保留語義）
+  - 僅在 `≥3` 個 user turn 時啟用（避免摘要空對話）
+  - 失敗時 fallback 到 `_compress_context()`（安全的 turn-boundary 刪截）
+- 自動觸發：每輪開頭 + 工具迴圈中（閾值 80%）
+- 手動觸發：`/compact` 斜線指令
+
+**Bug 修正**
+- 雙重工具列：移除 `LogMiddleware`，改由 `ToolBegin/ToolEnd` 事件渲染
+- Rich Live 阻擋 stdin：完全移除 Live，改用 `console.print(end="")`
+- GUARDED 工具確認無響應：改用 `prompt_toolkit.prompt` via `run_in_executor`
+- Session compression 無 fallback：LLM 未輸出 `FACT:` 前綴時保存原始摘要
+- Dead code：移除未使用的 `run_turn()`
+
+---
 
 ### Phase 5：生態 ⬜ 待開發
 - [ ] REST API Platform（FastAPI）
@@ -577,6 +624,11 @@ recall(query="refactor python function", type="skill")
 - [ ] IDE Extension 支援（VS Code）
 - [ ] Lens Marketplace 概念驗證
 - [ ] 文檔網站
+- [ ] Skill 評估回路接通（`record_outcome()` 接 tool result）
+- [ ] TaskGraph 接入 LoomSession（自動並行多工具計畫）
+- [ ] AutonomyDaemon 狀態持久化（trigger_history 表）
+- [ ] Request timeout + Retry / Circuit Breaker（provider 層）
+- [ ] Relational Memory 讀寫 API
 
 ---
 
@@ -598,9 +650,33 @@ recall(query="refactor python function", type="skill")
 
 | 項目 | 現況 | 下一步 |
 |------|------|--------|
-| Relational Memory | 資料表已建立，尚未有讀寫 API | Phase 4 展開 |
-| Skill 自動評估回路 | Genome 結構完整，尚未接 tool result → `record_outcome()` | Phase 4 |
-| Autonomy 實際 LLM 執行 | daemon._run_agent 已接 LoomSession | 需端到端實測 |
-| Webhook reply endpoint | push_reply() 存在，需一個 HTTP server 接收外部回覆 | Phase 5 REST API |
-| Telegram bot reply | push_reply hook 預留，需 bot webhook handler | Phase 4/5 |
+| Skill 自動評估回路 | Genome 結構完整，尚未接 tool result → `record_outcome()` | Phase 5 |
+| TaskGraph 未接 LoomSession | DAG engine 完整但只在測試中使用 | Phase 5 |
+| Relational Memory | 資料表已建立，尚未有讀寫 API | Phase 5 |
+| AutonomyDaemon 狀態非持久化 | 重啟後 last_fire_time 丟失 | Phase 5（trigger_history 表）|
+| Request timeout | provider 無 timeout 參數，網路阻塞時永久等待 | Phase 5 |
+| Retry / Circuit Breaker | API 瞬斷直接失敗 | Phase 5 |
+| BM25 index 每次重建 | `recall()` 每次重建語料庫，n 增大時 O(n) | Phase 5（cache）|
+| Webhook reply endpoint | `push_reply()` 存在，需 HTTP server 接收外部回覆 | Phase 5 REST API |
 | Windows asyncio pipe warning | Python 3.14 + Proactor 的已知問題，不影響功能 | 等 CPython 修復 |
+
+### Code Review 問題處置（小晴 審查，2026-04-02）
+
+| 問題 | 評估 | 處置 |
+|------|------|------|
+| C-1 Context compression 破壞完整性 | 已在 Phase 4.5 修復（safe turn-boundary cut） | ✅ 已修 |
+| C-2 Session compression 無 fallback | 已修：LLM 未產生 `FACT:` 時儲存原始文字 | ✅ 已修 |
+| C-3 SQLite transaction 管理 | aiosqlite 關閉時自動 commit，可接受 | 不處理 |
+| C-4 每次 stream 創建新 HTTP client | 已修：client 移至 `__init__`，session 內複用 | ✅ 已修 |
+| C-5 BM25 index 每次重建 | 效能問題，需 cache 機制 | Phase 5 |
+| D-1 Relational Memory 空殼 | 已知缺口，資料表存在 | Phase 5 |
+| D-2 Middleware chain 每次重建 | 微優化，影響忽略不計 | 不處理 |
+| D-3 ConditionTrigger 不可序列化 | 設計限制，code-only 使用屬預期 | 不處理 |
+| D-4 PermissionContext 非持久化 | session-scoped by design | 不處理 |
+| D-5 AutonomyDaemon 狀態非持久化 | 真實問題 | Phase 5 |
+| R-1 無 Request timeout | 生產環境風險 | Phase 5 |
+| R-2 Cron 驗證不完整 | 隱藏 bug（如 `60 * * * *`） | Phase 5 |
+| R-3 無 Cancellation 處理 | Ctrl-C 不取消 HTTP 請求 | Phase 5 |
+| R-5 Blocking input with Live | 已在 Phase 4.5 修復（移除 Live） | ✅ 已修 |
+| A-1 TaskGraph 未使用 | 已知，等 Phase 5 接入 LoomSession | Phase 5 |
+| N-5 `run_turn()` dead code | 已移除 | ✅ 已修 |

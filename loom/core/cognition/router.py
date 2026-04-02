@@ -23,6 +23,8 @@ Usage
     )
 """
 
+from collections.abc import AsyncIterator
+
 from .providers import LLMProvider, LLMResponse
 
 
@@ -70,6 +72,20 @@ class LLMRouter:
     ) -> LLMResponse:
         provider = self.get_provider(model)
         return await provider.chat(messages=messages, tools=tools, max_tokens=max_tokens)
+
+    async def stream_chat(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        """Yield ``(chunk, None)`` text fragments then ``("", LLMResponse)``."""
+        provider = self.get_provider(model)
+        async for item in provider.stream_chat(
+            messages=messages, tools=tools, max_tokens=max_tokens
+        ):
+            yield item
 
     def format_tool_result(
         self,

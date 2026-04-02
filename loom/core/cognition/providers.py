@@ -22,6 +22,7 @@ import json
 import re
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,6 +82,22 @@ class LLMProvider(ABC):
     ) -> dict[str, Any]:
         """Build the provider-correct tool-result message to append to history."""
         ...
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 8096,
+    ) -> AsyncIterator[tuple[str, "LLMResponse | None"]]:
+        """
+        Stream a chat response.  Yields ``(chunk, None)`` for each text
+        fragment and ``("", LLMResponse)`` once as the final item.
+        Default implementation falls back to non-streaming ``chat()``.
+        """
+        response = await self.chat(messages=messages, tools=tools, max_tokens=max_tokens)
+        if response.text:
+            yield (response.text, None)
+        yield ("", response)
 
     def format_tools(
         self, tools: list[dict[str, Any]]
@@ -144,8 +161,10 @@ class MiniMaxProvider(LLMProvider):
     BASE_URL = "https://api.minimax.io/v1"
 
     def __init__(self, api_key: str, model: str = "MiniMax-M2.7") -> None:
-        from openai import OpenAI
+        from openai import OpenAI, AsyncOpenAI
+        self._api_key = api_key
         self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL)
+        self._async_client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL)
         self.model = model
 
     async def chat(
@@ -234,6 +253,109 @@ class MiniMaxProvider(LLMProvider):
             raw_message=raw_message,
         )
 
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = self.format_tools(tools)
+
+        full_content = ""
+        tc_accum: dict[int, dict] = {}   # index → {id, name, arguments}
+        finish_reason: str | None = None
+        input_tokens = 0
+        output_tokens = 0
+
+        stream = await self._async_client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            # Usage-only final chunk
+            if not chunk.choices:
+                if chunk.usage:
+                    input_tokens = chunk.usage.prompt_tokens or 0
+                    output_tokens = chunk.usage.completion_tokens or 0
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if delta.content:
+                full_content += delta.content
+                yield (delta.content, None)
+
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tc_accum:
+                        tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tc_accum[idx]["id"] = tc_delta.id
+                    if tc_delta.function and tc_delta.function.name:
+                        tc_accum[idx]["name"] = tc_delta.function.name
+                    if tc_delta.function and tc_delta.function.arguments:
+                        tc_accum[idx]["arguments"] += tc_delta.function.arguments
+
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+        # Build normalized response
+        tool_uses: list[ToolUse] = []
+        for idx in sorted(tc_accum):
+            tc = tc_accum[idx]
+            try:
+                args = json.loads(tc["arguments"])
+            except (json.JSONDecodeError, ValueError):
+                args = {"_raw": tc["arguments"]}
+            tool_uses.append(ToolUse(
+                id=tc["id"] or str(uuid.uuid4()),
+                name=tc["name"],
+                args=args,
+            ))
+
+        if not tool_uses and full_content and "<minimax:tool_call>" in full_content:
+            tool_uses = _parse_xml_tool_calls(full_content)
+
+        if finish_reason in ("tool_calls", "function_call"):
+            stop_reason = "tool_use"
+        elif finish_reason == "length":
+            stop_reason = "max_tokens"
+        else:
+            stop_reason = "end_turn"
+
+        if tool_uses and stop_reason != "tool_use":
+            stop_reason = "tool_use"
+
+        raw_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+        if tc_accum:
+            raw_message["tool_calls"] = [
+                {
+                    "id": tc_accum[i]["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc_accum[i]["name"],
+                        "arguments": tc_accum[i]["arguments"],
+                    },
+                }
+                for i in sorted(tc_accum)
+            ]
+
+        yield ("", LLMResponse(
+            text=full_content or None,
+            tool_uses=tool_uses,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            raw_message=raw_message,
+        ))
+
     def format_tool_result(
         self, tool_use_id: str, content: str, success: bool = True
     ) -> dict[str, Any]:
@@ -260,7 +382,9 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-6") -> None:
         import anthropic as _anthropic
+        self._api_key = api_key
         self._client = _anthropic.Anthropic(api_key=api_key)
+        self._async_client = _anthropic.AsyncAnthropic(api_key=api_key)
         self.model = model
 
     async def chat(
@@ -336,6 +460,82 @@ class AnthropicProvider(LLMProvider):
             output_tokens=response.usage.output_tokens if response.usage else 0,
             raw_message=raw_message,
         )
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        anthropic_msgs = _to_anthropic_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": anthropic_msgs,
+        }
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "input_schema": t.get("parameters", t.get("input_schema", {})),
+                }
+                for t in tools
+            ]
+
+        full_text = ""
+        tool_uses: list[ToolUse] = []
+        input_tokens = 0
+        output_tokens = 0
+        stop_reason = "end_turn"
+
+        async with self._async_client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                full_text += text
+                yield (text, None)
+
+            final = await stream.get_final_message()
+
+        for block in final.content:
+            if block.type == "tool_use":
+                tool_uses.append(ToolUse(
+                    id=block.id,
+                    name=block.name,
+                    args=dict(block.input),
+                ))
+
+        stop_reason = {
+            "end_turn": "end_turn",
+            "tool_use": "tool_use",
+            "max_tokens": "max_tokens",
+        }.get(final.stop_reason, "end_turn")
+
+        if final.usage:
+            input_tokens = final.usage.input_tokens
+            output_tokens = final.usage.output_tokens
+
+        raw_message: dict[str, Any] = {"role": "assistant", "content": full_text or ""}
+        if tool_uses:
+            raw_message["tool_calls"] = [
+                {
+                    "id": tu.id,
+                    "type": "function",
+                    "function": {
+                        "name": tu.name,
+                        "arguments": json.dumps(tu.args),
+                    },
+                }
+                for tu in tool_uses
+            ]
+
+        yield ("", LLMResponse(
+            text=full_text or None,
+            tool_uses=tool_uses,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            raw_message=raw_message,
+        ))
 
     def format_tool_result(
         self, tool_use_id: str, content: str, success: bool = True

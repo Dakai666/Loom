@@ -19,11 +19,11 @@ from loom.notify.types import (
 )
 
 _ICON = {
-    NotificationType.INFO:    "[cyan]ℹ[/cyan]",
-    NotificationType.CONFIRM: "[yellow]⚠[/yellow]",
-    NotificationType.INPUT:   "[blue]✎[/blue]",
-    NotificationType.ALERT:   "[red]🚨[/red]",
-    NotificationType.REPORT:  "[green]📋[/green]",
+    NotificationType.INFO:    "[cyan][i][/cyan]",
+    NotificationType.CONFIRM: "[yellow][?][/yellow]",
+    NotificationType.INPUT:   "[blue][>][/blue]",
+    NotificationType.ALERT:   "[red][!][/red]",
+    NotificationType.REPORT:  "[green][r][/green]",
 }
 
 _BORDER = {

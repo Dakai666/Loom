@@ -20,14 +20,24 @@ Usage
 
 import asyncio
 import os
+import time
 import tomllib
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import click
 from dotenv import dotenv_values
 from rich.console import Console
+# Force UTF-8 output on Windows so the Rich console can render full Unicode.
+import sys as _sys
+if _sys.platform == "win32":
+    try:
+        _sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        _sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except (AttributeError, Exception):
+        pass
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -55,8 +65,13 @@ from loom.core.memory.store import SQLiteStore
 from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
 from loom.platform.cli.tools import BUILTIN_TOOLS, make_recall_tool, make_memorize_tool
+from loom.platform.cli.ui import (
+    TextChunk, ToolBegin, ToolEnd, TurnDone,
+    make_prompt_session, render_header,
+    tool_begin_line, tool_end_line,
+)
 
-console = Console()
+console = Console(highlight=False)
 
 # ---------------------------------------------------------------------------
 # Session compression (episodic → semantic)
@@ -70,6 +85,19 @@ Ignore trivial or highly session-specific details.
 
 Session log:
 {log}
+"""
+
+COMPACT_PROMPT = """\
+You are summarizing an AI assistant conversation for context compression.
+Produce a concise but complete summary that preserves all context the assistant needs to continue seamlessly.
+
+Include:
+- Key facts, decisions, and outcomes discussed
+- Tool calls made and their results (brief)
+- Any ongoing tasks or user goals
+- Important context established
+
+Output as flowing prose. Be dense and accurate. Do not include any preamble.
 """
 
 
@@ -101,6 +129,9 @@ async def compress_session(
         for line in raw.splitlines()
         if line.strip().startswith("FACT:")
     ]
+    # Fallback: if the LLM didn't use FACT: prefixes, save the raw text as one fact.
+    if not facts and raw.strip():
+        facts = [raw.strip()[:800]]
 
     for i, fact in enumerate(facts):
         await semantic.upsert(SemanticEntry(
@@ -273,8 +304,9 @@ class LoomSession:
         self.registry.register(make_recall_tool(search))
         self.registry.register(make_memorize_tool(self._semantic))
 
+        # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
+        # events that the UI renders, providing richer display without duplication.
         self._pipeline = MiddlewarePipeline([
-            LogMiddleware(console),
             TraceMiddleware(on_trace=self._on_trace),
             BlastRadiusMiddleware(perm_ctx=self.perm, confirm_fn=self._confirm_tool),
         ])
@@ -292,12 +324,23 @@ class LoomSession:
         await self._db.close()
 
     # ------------------------------------------------------------------
-    # Agent loop
+    # Streaming agent loop
     # ------------------------------------------------------------------
 
-    async def run_turn(self, user_input: str) -> str:
+    async def stream_turn(
+        self, user_input: str
+    ) -> AsyncIterator[TextChunk | ToolBegin | ToolEnd | TurnDone]:
+        """
+        Run one complete agent turn and yield typed UI events.
+
+        Yields
+        ------
+        TextChunk   — each fragment of streaming LLM text
+        ToolBegin   — just before a tool call executes
+        ToolEnd     — just after a tool call finishes
+        TurnDone    — once all tool loops are resolved
+        """
         self.messages.append({"role": "user", "content": user_input})
-        self.budget.add(len(user_input) // 4)
 
         await self._episodic.write(EpisodicEntry(
             session_id=self.session_id,
@@ -305,29 +348,69 @@ class LoomSession:
             content=f"User: {user_input[:200]}",
         ))
 
+        # Compress before the first LLM call if already over threshold.
+        # (budget.used_tokens reflects the last response's actual token count,
+        # so this check is accurate from turn 2 onward.)
         if self.budget.should_compress():
-            console.print("[dim]  Context approaching limit — compressing…[/dim]")
-            await self._compress_context()
+            console.print(
+                f"[yellow]  Context at {self.budget.usage_fraction*100:.0f}% — "
+                f"compressing…[/yellow]"
+            )
+            await self._smart_compact()
 
         tools = self.registry.to_openai_schema()
+        tool_count = 0
+        input_tokens = 0
+        output_tokens = 0
+        t0 = time.monotonic()
 
         while True:
-            response = await self.router.chat(
+            response: Any = None
+
+            async for chunk, final in self.router.stream_chat(
                 model=self.model,
                 messages=self.messages,
                 tools=tools,
                 max_tokens=8096,
-            )
+            ):
+                if final is None:
+                    if chunk:
+                        yield TextChunk(text=chunk)
+                else:
+                    response = final
 
+            if response is None:
+                break
+
+            # Replace (not accumulate) — input_tokens is the total context this call.
             self.budget.record_response(response.input_tokens, response.output_tokens)
             self.messages.append(response.raw_message)
+            input_tokens = response.input_tokens    # report latest actual value
+            output_tokens += response.output_tokens
 
             if response.stop_reason == "end_turn":
-                return response.text or ""
+                yield TurnDone(
+                    tool_count=tool_count,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    elapsed_ms=(time.monotonic() - t0) * 1000,
+                )
+                return
 
             if response.stop_reason == "tool_use":
                 for tu in response.tool_uses:
+                    yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
+                    ts = time.monotonic()
                     result = await self._dispatch(tu.name, tu.args, tu.id)
+                    duration_ms = (time.monotonic() - ts) * 1000
+                    tool_count += 1
+                    yield ToolEnd(
+                        name=tu.name,
+                        success=result.success,
+                        output=(str(result.output)[:200] if result.output else ""),
+                        duration_ms=duration_ms,
+                        call_id=tu.id,
+                    )
                     self.messages.append(
                         self.router.format_tool_result(
                             self.model, tu.id,
@@ -335,10 +418,24 @@ class LoomSession:
                             result.success,
                         )
                     )
+
+                # Check budget after tool results are appended — the next LLM
+                # call in this loop will include them and may push over the limit.
+                if self.budget.should_compress():
+                    console.print(
+                        f"[yellow]  Context at {self.budget.usage_fraction*100:.0f}%"
+                        f" mid-turn — compressing…[/yellow]"
+                    )
+                    await self._smart_compact()
             else:
                 break
 
-        return ""
+        yield TurnDone(
+            tool_count=tool_count,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            elapsed_ms=(time.monotonic() - t0) * 1000,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -378,19 +475,152 @@ class LoomSession:
         ))
 
     async def _confirm_tool(self, call: ToolCall) -> bool:
+        # No Rich Live is active during _run_streaming_turn (we removed it),
+        # so plain console output + prompt_toolkit prompt_async() work cleanly.
+        console.print()
         console.print(Panel(
             f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
             f"[dim]args: {call.args}[/dim]",
-            title="[yellow]⚠ Tool requires confirmation[/yellow]",
+            title="[yellow]  Tool requires confirmation[/yellow]",
             border_style="yellow",
         ))
-        return Confirm.ask("Allow?", default=False)
+        # Use prompt_toolkit so the prompt renders correctly on all terminals.
+        from prompt_toolkit import prompt as pt_prompt
+        try:
+            answer = await asyncio.get_event_loop().run_in_executor(
+                None, pt_prompt, "Allow? [y/N]: "
+            )
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        return answer.strip().lower() in {"y", "yes"}
+
+    async def _smart_compact(self) -> None:
+        """
+        LLM-based context compaction.
+
+        Summarizes the oldest half of the conversation into a concise summary
+        pair (user summary + assistant ack), preserving semantic content while
+        reducing token count.  Falls back to turn-boundary dropping if the
+        summarization call fails.
+        """
+        system = [m for m in self.messages if m["role"] == "system"]
+        non_sys = [m for m in self.messages if m["role"] != "system"]
+        user_positions = [i for i, m in enumerate(non_sys) if m["role"] == "user"]
+
+        # Need at least 3 user turns to meaningfully compact the first one
+        if len(user_positions) < 3:
+            await self._compress_context()
+            return
+
+        # Summarize the first half of user turns
+        mid = len(user_positions) // 2
+        split_at = user_positions[mid]
+        to_compact = non_sys[:split_at]
+        to_keep = non_sys[split_at:]
+
+        # Render to compact to readable text for the LLM
+        conv_lines: list[str] = []
+        for m in to_compact:
+            role = m.get("role", "?")
+            content = m.get("content") or ""
+            if isinstance(content, list):
+                parts: list[str] = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        parts.append(
+                            f"[tool_call: {block.get('name')}({block.get('input', {})})]"
+                        )
+                    elif btype == "tool_result":
+                        parts.append(
+                            f"[tool_result: {str(block.get('content', ''))[:300]}]"
+                        )
+                content = " ".join(parts)
+            if role == "tool":
+                content = f"[tool_result]: {str(content)[:300]}"
+            if m.get("tool_calls"):
+                names = [tc["function"]["name"] for tc in m["tool_calls"]]
+                content += f" [calls: {', '.join(names)}]"
+            conv_lines.append(f"{role.upper()}: {str(content)[:600]}")
+
+        conv_text = "\n\n".join(conv_lines)
+        before_tokens = self.budget.used_tokens
+
+        try:
+            response = await self.router.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": COMPACT_PROMPT},
+                    {"role": "user", "content": f"Summarize:\n\n{conv_text}"},
+                ],
+                max_tokens=2048,
+            )
+            summary = (response.text or "").strip()
+        except Exception as exc:
+            console.print(
+                f"[dim]  Smart compact failed ({exc}), falling back to turn drop.[/dim]"
+            )
+            await self._compress_context()
+            return
+
+        if not summary:
+            await self._compress_context()
+            return
+
+        summary_pair = [
+            {
+                "role": "user",
+                "content": (
+                    "[Earlier conversation — compacted for context efficiency]\n\n"
+                    + summary
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": "Understood. I have the context from our earlier conversation.",
+            },
+        ]
+
+        self.messages = system + summary_pair + to_keep
+        self.budget.record_messages(self.messages)
+
+        saved = before_tokens - self.budget.used_tokens
+        console.print(
+            f"[dim]  Context compacted: {len(to_compact)} msgs summarized "
+            f"(-~{saved:,} tokens), {self.budget.usage_fraction*100:.1f}% used.[/dim]"
+        )
 
     async def _compress_context(self) -> None:
-        """Keep only the last 20 messages to free context budget."""
-        if len(self.messages) > 20:
-            self.messages = self.messages[-20:]
-        self.budget.record_messages(self.messages)
+        """
+        Fallback: drop the oldest complete turns until context is under 60%.
+
+        Only cuts at ``role == "user"`` boundaries so we never orphan a
+        ``role == "tool"`` result without its matching tool_call id.
+        The system message is always preserved.
+        """
+        system = [m for m in self.messages if m["role"] == "system"]
+        non_sys = [m for m in self.messages if m["role"] != "system"]
+        user_positions = [i for i, m in enumerate(non_sys) if m["role"] == "user"]
+
+        before = len(non_sys)
+        while len(user_positions) > 1 and self.budget.usage_fraction > 0.60:
+            next_user = user_positions[1]
+            non_sys = non_sys[next_user:]
+            self.messages = system + non_sys
+            self.budget.record_messages(self.messages)
+            user_positions = [i for i, m in enumerate(non_sys) if m["role"] == "user"]
+
+        dropped = before - len(non_sys)
+        if dropped:
+            console.print(
+                f"[dim]  Context trimmed: dropped {dropped} messages, "
+                f"{len(self.messages)} remaining "
+                f"({self.budget.usage_fraction*100:.1f}%).[/dim]"
+            )
 
     @property
     def reflection(self) -> ReflectionAPI:
@@ -415,15 +645,10 @@ def chat(model: str, db: str) -> None:
 
 
 async def _chat(model: str, db: str) -> None:
-    console.print(Panel(
-        f"[bold cyan]Loom[/bold cyan]  [dim]v0.2.0[/dim]\n"
-        f"model [green]{model}[/green]  |  memory [dim]{db}[/dim]\n"
-        f"[dim]Type 'exit' or Ctrl-C to quit.[/dim]",
-        border_style="cyan",
-    ))
-
     session = LoomSession(model=model, db_path=db)
     await session.start()
+
+    console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
         console.print(Panel(
@@ -432,66 +657,164 @@ async def _chat(model: str, db: str) -> None:
             border_style="dim",
         ))
 
+    prompt_session = make_prompt_session()
+
     try:
         while True:
+            # ── Read user input (prompt_toolkit — history + autocomplete) ──
             try:
-                user_input = Prompt.ask("\n[bold cyan]you[/bold cyan]")
+                user_input: str = await prompt_session.prompt_async(
+                    "\nyou> ",
+                    style=None,
+                )
             except (EOFError, KeyboardInterrupt):
                 break
 
-            if user_input.strip().lower() in {"exit", "quit", "q"}:
-                break
             if not user_input.strip():
                 continue
 
-            # ── Slash commands ──────────────────────────────────────────
-            if user_input.startswith("/personality"):
-                parts = user_input.split(maxsplit=1)
-                name = parts[1].strip() if len(parts) > 1 else ""
-                if not name:
-                    p = session.current_personality
-                    avail = session._stack.available_personalities()
-                    console.print(
-                        f"[dim]Active: [bold]{p or '(none)'}[/bold]  "
-                        f"Available: {', '.join(avail) or '(none)'}[/dim]"
-                    )
-                elif name == "off":
-                    session.switch_personality("off")
-                    console.print("[dim]Personality cleared.[/dim]")
-                else:
-                    ok = session.switch_personality(name)
-                    if ok:
-                        console.print(f"[dim]Personality → [bold]{name}[/bold][/dim]")
-                    else:
-                        avail = session._stack.available_personalities()
-                        console.print(
-                            f"[red]Unknown personality '{name}'.[/red] "
-                            f"[dim]Available: {', '.join(avail) or '(none)'}[/dim]"
-                        )
-                continue
-            # ────────────────────────────────────────────────────────────
+            if user_input.strip().lower() in {"exit", "quit", "q"}:
+                break
 
+            # ── Slash commands ────────────────────────────────────────────
+            if user_input.startswith("/"):
+                await _handle_slash(user_input.strip(), session)
+                continue
+
+            # ── Streaming turn with Rich Live display ─────────────────────
             console.print()
-            try:
-                response = await session.run_turn(user_input)
-            except Exception as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-                continue
+            await _run_streaming_turn(session, user_input)
 
-            if response:
-                console.print(Panel(
-                    Markdown(response),
-                    title="[bold green]loom[/bold green]",
-                    border_style="green",
-                ))
-
-            # Show budget status
-            console.print(
-                f"[dim]  context: {session.budget.usage_fraction*100:.1f}% used[/dim]"
-            )
     finally:
         await session.stop()
         console.print("\n[dim]Session ended. Goodbye.[/dim]")
+
+
+async def _handle_slash(cmd: str, session: "LoomSession") -> None:
+    """Dispatch a slash command and print feedback."""
+    parts = cmd.split(maxsplit=1)
+    command = parts[0]
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if command == "/personality":
+        if not arg:
+            p = session.current_personality
+            avail = session._stack.available_personalities()
+            console.print(
+                f"[dim]Active: [bold]{p or '(none)'}[/bold]  "
+                f"Available: {', '.join(avail) or '(none)'}[/dim]"
+            )
+        elif arg == "off":
+            session.switch_personality("off")
+            console.print("[dim]Personality cleared.[/dim]")
+        else:
+            ok = session.switch_personality(arg)
+            if ok:
+                console.print(f"[dim]Personality -> [bold]{arg}[/bold][/dim]")
+            else:
+                avail = session._stack.available_personalities()
+                console.print(
+                    f"[red]Unknown personality '{arg}'.[/red] "
+                    f"[dim]Available: {', '.join(avail) or '(none)'}[/dim]"
+                )
+
+    elif command == "/compact":
+        pct = session.budget.usage_fraction * 100
+        console.print(f"[dim]  Compacting context ({pct:.1f}% used)…[/dim]")
+        await session._smart_compact()
+
+    elif command == "/help":
+        console.print(Panel(
+            "[bold]Slash commands[/bold]\n\n"
+            "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
+            "  [cyan]/personality off[/cyan]        Remove active persona\n"
+            "  [cyan]/personality[/cyan]             Show active + available personas\n"
+            "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
+            "  [cyan]/help[/cyan]                    Show this message\n\n"
+            "[bold]Input[/bold]\n\n"
+            "  [dim]up / down[/dim]  Browse input history\n"
+            "  [dim]Tab[/dim]    Autocomplete slash commands\n"
+            "  [dim]exit[/dim] / [dim]Ctrl-C[/dim]  End session",
+            title="[cyan]Help[/cyan]",
+            border_style="cyan",
+        ))
+
+    else:
+        console.print(f"[dim]Unknown command '{command}'. Type /help for help.[/dim]")
+
+
+async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
+    """
+    Execute one streaming agent turn with real character-by-character output.
+
+    Design rationale
+    ----------------
+    Rich Live rewrites the entire panel on every update — visually it looks
+    like the response appears all at once, and its background render thread
+    conflicts with blocking stdin reads (breaking tool-confirmation input).
+
+    Instead we use plain console.print(chunk, end="") so each token appends
+    in place, giving genuine streaming.  A Rule separator frames the response
+    without the Live complexity.
+    """
+    console.print()
+    t0 = time.monotonic()
+    text_buffer = ""
+    at_line_start = True   # track whether we need a newline before next section
+
+    # ── Opening rule ──────────────────────────────────────────────────────────
+    pct = session.budget.usage_fraction * 100
+    ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
+    persona_tag = (
+        f"  [dim]|  persona: {session.current_personality}[/dim]"
+        if session.current_personality else ""
+    )
+    console.print(Rule(
+        f"[bold green]loom[/bold green]"
+        f"[dim]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/dim]"
+        f"{persona_tag}",
+        style="green",
+    ))
+
+    try:
+        async for event in session.stream_turn(user_input):
+
+            if isinstance(event, TextChunk):
+                # Append each chunk in-place — true streaming
+                console.print(event.text, end="", markup=False, highlight=False)
+                text_buffer += event.text
+                at_line_start = event.text.endswith("\n")
+
+            elif isinstance(event, ToolBegin):
+                # Ensure tool rows start on a fresh line
+                if not at_line_start:
+                    console.print()
+                    at_line_start = True
+                console.print(tool_begin_line(event.name, event.args))
+
+            elif isinstance(event, ToolEnd):
+                console.print(tool_end_line(event.name, event.success, event.duration_ms))
+                at_line_start = True
+                # Blank line to visually separate tool result from next text
+                console.print()
+
+            elif isinstance(event, TurnDone):
+                if not at_line_start:
+                    console.print()
+                elapsed = time.monotonic() - t0
+                pct = session.budget.usage_fraction * 100
+                ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
+                console.print(Rule(
+                    f"[dim][{ctx_color}]context {pct:.1f}%[/{ctx_color}]"
+                    f"  |  {event.input_tokens}in / {event.output_tokens}out"
+                    f"  |  {elapsed:.1f}s[/dim]",
+                    style="dim green",
+                ))
+
+    except Exception as exc:
+        if not at_line_start:
+            console.print()
+        console.print(f"[red]Error: {exc}[/red]")
 
 
 # ---------------------------------------------------------------------------

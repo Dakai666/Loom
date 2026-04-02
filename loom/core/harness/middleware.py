@@ -111,11 +111,11 @@ class LogMiddleware(Middleware):
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         self._console.print(
-            f"  [dim]→ tool[/dim] [bold]{call.tool_name}[/bold] "
+            f"  [dim]~> tool[/dim] [bold]{call.tool_name}[/bold] "
             f"{call.trust_level.label}"
         )
         result = await next(call)
-        status = "[green]✓[/green]" if result.success else "[red]✗[/red]"
+        status = "[green]ok[/green]" if result.success else "[red]!![/red]"
         self._console.print(
             f"  {status} [dim]{call.tool_name}[/dim] "
             f"[dim]{result.duration_ms:.0f}ms[/dim]"

@@ -49,3 +49,9 @@ coverage.xml
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# other
+CLAUDE.md
+diary/
+scripts/
+tests/
