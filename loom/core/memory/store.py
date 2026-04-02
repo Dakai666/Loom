@@ -78,6 +78,12 @@ CREATE INDEX IF NOT EXISTS idx_episodic_session   ON episodic_entries(session_id
 CREATE INDEX IF NOT EXISTS idx_episodic_created   ON episodic_entries(created_at);
 CREATE INDEX IF NOT EXISTS idx_semantic_key        ON semantic_entries(key);
 CREATE INDEX IF NOT EXISTS idx_audit_session       ON audit_log(session_id);
+CREATE TABLE IF NOT EXISTS trigger_history (
+    trigger_name  TEXT PRIMARY KEY,
+    last_fire_iso TEXT NOT NULL,
+    fire_count    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_relational_subject  ON relational_entries(subject);
 CREATE INDEX IF NOT EXISTS idx_relational_pred     ON relational_entries(predicate);
 """

@@ -127,11 +127,18 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
 
         if not results:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output="No relevant memories found.")
+                              success=True, output="No memories stored yet.")
+
+        # If all results are recency-fallback (BM25/embedding had no matches),
+        # prepend a header so the agent knows they are unranked.
+        if all(r.metadata.get("fallback") for r in results):
+            header = f"[No keyword match — showing {len(results)} most recent entries]\n\n"
+        else:
+            header = ""
 
         lines = [r.format() for r in results]
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output="\n\n".join(lines))
+                          success=True, output=header + "\n\n".join(lines))
 
     return ToolDefinition(
         name="recall",
