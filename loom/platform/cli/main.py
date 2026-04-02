@@ -401,26 +401,58 @@ class LoomSession:
                 return
 
             if response.stop_reason == "tool_use":
-                for tu in response.tool_uses:
-                    yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
-                    ts = time.monotonic()
-                    result = await self._dispatch(tu.name, tu.args, tu.id)
-                    duration_ms = (time.monotonic() - ts) * 1000
-                    tool_count += 1
-                    yield ToolEnd(
-                        name=tu.name,
-                        success=result.success,
-                        output=(str(result.output)[:200] if result.output else ""),
-                        duration_ms=duration_ms,
-                        call_id=tu.id,
-                    )
-                    self.messages.append(
-                        self.router.format_tool_result(
-                            self.model, tu.id,
-                            str(result.output) if result.success else (result.error or ""),
-                            result.success,
+                # Attempt parallel dispatch when multiple tools are requested.
+                # Falls back to sequential if any tool needs interactive confirmation
+                # (GUARDED/CRITICAL not yet authorized) — parallel confirmation prompts
+                # would interleave on the CLI.
+                parallel = (
+                    len(response.tool_uses) > 1
+                    and self._all_authorized(response.tool_uses)
+                )
+
+                if parallel:
+                    # Announce all tools, then run concurrently
+                    for tu in response.tool_uses:
+                        yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
+                    dispatched = await self._dispatch_parallel(response.tool_uses)
+                    for tu, result, duration_ms in dispatched:
+                        tool_count += 1
+                        yield ToolEnd(
+                            name=tu.name,
+                            success=result.success,
+                            output=(str(result.output)[:200] if result.output else ""),
+                            duration_ms=duration_ms,
+                            call_id=tu.id,
                         )
-                    )
+                        self.messages.append(
+                            self.router.format_tool_result(
+                                self.model, tu.id,
+                                str(result.output) if result.success else (result.error or ""),
+                                result.success,
+                            )
+                        )
+                else:
+                    # Sequential: single tool, or needs interactive confirmation
+                    for tu in response.tool_uses:
+                        yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
+                        ts = time.monotonic()
+                        result = await self._dispatch(tu.name, tu.args, tu.id)
+                        duration_ms = (time.monotonic() - ts) * 1000
+                        tool_count += 1
+                        yield ToolEnd(
+                            name=tu.name,
+                            success=result.success,
+                            output=(str(result.output)[:200] if result.output else ""),
+                            duration_ms=duration_ms,
+                            call_id=tu.id,
+                        )
+                        self.messages.append(
+                            self.router.format_tool_result(
+                                self.model, tu.id,
+                                str(result.output) if result.success else (result.error or ""),
+                                result.success,
+                            )
+                        )
 
                 # Check budget after tool results are appended — the next LLM
                 # call in this loop will include them and may push over the limit.
@@ -496,6 +528,64 @@ class LoomSession:
         except (EOFError, KeyboardInterrupt):
             answer = ""
         return answer.strip().lower() in {"y", "yes"}
+
+    def _all_authorized(self, tool_uses: list) -> bool:
+        """
+        Return True only if every tool in the list is pre-authorized for
+        immediate execution (no interactive confirmation required).
+
+        SAFE tools are always authorized.
+        GUARDED tools are authorized once the user has confirmed them this session.
+        CRITICAL tools always require a fresh confirmation — never parallelizable.
+        """
+        for tu in tool_uses:
+            tool_def = self.registry.get(tu.name)
+            if tool_def is None:
+                continue  # unknown tools fail at dispatch; don't block parallel
+            if not self.perm.is_authorized(tu.name, tool_def.trust_level):
+                return False
+        return True
+
+    async def _dispatch_parallel(
+        self, tool_uses: list
+    ) -> list[tuple]:
+        """
+        Dispatch multiple independent tool calls concurrently via TaskGraph.
+
+        All tool_uses are treated as independent nodes (one DAG level), so they
+        execute via asyncio.gather under the TaskScheduler.  Results are returned
+        in the original tool_uses order.
+
+        Returns
+        -------
+        list of (ToolUse, ToolResult, duration_ms) tuples.
+        """
+        from loom.core.tasks.graph import TaskGraph, TaskNode
+        from loom.core.tasks.scheduler import TaskScheduler
+
+        graph = TaskGraph()
+        pairs: list[tuple] = []   # (ToolUse, TaskNode)
+        timings: dict[str, tuple[float, ToolResult]] = {}
+
+        for tu in tool_uses:
+            node = graph.add(tu.name, metadata={"tu": tu})
+            pairs.append((tu, node))
+
+        async def _execute(node: TaskNode) -> ToolResult:
+            tu = node.metadata["tu"]
+            t0 = time.monotonic()
+            result = await self._dispatch(tu.name, tu.args, tu.id)
+            timings[node.id] = ((time.monotonic() - t0) * 1000, result)
+            return result
+
+        plan = graph.compile()
+        scheduler = TaskScheduler(executor=_execute, stop_on_failure=False)
+        await scheduler.run(plan)
+
+        return [
+            (tu, timings[node.id][1], timings[node.id][0])
+            for tu, node in pairs
+        ]
 
     async def _smart_compact(self) -> None:
         """

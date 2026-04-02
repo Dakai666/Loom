@@ -618,17 +618,33 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 
 ---
 
-### Phase 5：生態 ⬜ 待開發
-- [ ] REST API Platform（FastAPI）
+### Phase 5：生態 🔄 進行中
+
+#### 5A. 已完成
+
+- [x] **Multi-fallback 記憶搜尋**（embedding > BM25 > recency）
+  - `embeddings.py`：`MiniMaxEmbeddingProvider`（embo-01）、`cosine_similarity`
+  - `SemanticMemory.upsert()` 寫入時自動計算向量；失敗不阻擋寫入
+  - `MemorySearch.recall()` 三層瀑布：cosine → BM25 → recency fallback
+  - DB migration：ALTER TABLE 自動補 `embedding TEXT` 欄位
+- [x] **TaskGraph 接入 LoomSession**（自動並行多工具計畫）
+  - `LoomSession._dispatch_parallel()`：TaskGraph + TaskScheduler 包裝
+  - `_all_authorized()`：所有工具預授權 → asyncio.gather 並行；否則循序
+  - GUARDED/CRITICAL 需確認的工具永遠走循序路徑（避免 CLI 平行確認混亂）
+  - UI：先輸出所有 `ToolBegin`，並行執行，再依序輸出 `ToolEnd`
+
+#### 5B. 待開發
+
+- [ ] AutonomyDaemon 狀態持久化（`trigger_history` 表，重啟保留 last_fire_time）
+- [ ] Request timeout + Retry / Circuit Breaker（provider 層，避免永久阻塞）
+- [ ] Cron 欄位數值範圍驗證（`60 * * * *` 目前通過但永遠不執行）
+- [ ] Skill 評估回路接通（`SkillGenome.record_outcome()` 接 tool result）
+- [ ] BM25 index cache（目前每次 `recall()` 重建，n 大時 O(n)）
+- [ ] Relational Memory 讀寫 API
+- [ ] REST API Platform（FastAPI，Webhook reply endpoint）
 - [ ] Discord / Slack / Email Notifier
 - [ ] IDE Extension 支援（VS Code）
-- [ ] Lens Marketplace 概念驗證
 - [ ] 文檔網站
-- [ ] Skill 評估回路接通（`record_outcome()` 接 tool result）
-- [ ] TaskGraph 接入 LoomSession（自動並行多工具計畫）
-- [ ] AutonomyDaemon 狀態持久化（trigger_history 表）
-- [ ] Request timeout + Retry / Circuit Breaker（provider 層）
-- [ ] Relational Memory 讀寫 API
 
 ---
 
@@ -651,7 +667,7 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 | 項目 | 現況 | 下一步 |
 |------|------|--------|
 | Skill 自動評估回路 | Genome 結構完整，尚未接 tool result → `record_outcome()` | Phase 5 |
-| TaskGraph 未接 LoomSession | DAG engine 完整但只在測試中使用 | Phase 5 |
+| TaskGraph 接入 LoomSession | ✅ `_dispatch_parallel()` 已接通 | 完成 |
 | Relational Memory | 資料表已建立，尚未有讀寫 API | Phase 5 |
 | AutonomyDaemon 狀態非持久化 | 重啟後 last_fire_time 丟失 | Phase 5（trigger_history 表）|
 | Request timeout | provider 無 timeout 參數，網路阻塞時永久等待 | Phase 5 |
