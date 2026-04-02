@@ -643,8 +643,36 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 - [x] Relational Memory 讀寫 API（`RelationalMemory` class + `relate` / `query_relations` 工具 + MemoryIndex 整合）
 - [x] REST API Platform（`loom/platform/api/server.py` FastAPI app；`GET/POST /memory/semantic`, `GET/POST /memory/relational`, `POST /webhook/reply`, `POST /events/emit`；`loom api start` CLI 命令；optional dep `loom[api]`）
 - [x] Discord Notifier（`DiscordNotifier`；embed 顏色分類；confirm 附帶 curl 回覆指令；`DISCORD_WEBHOOK_URL` env / loom.toml `[notify.discord]` 自動載入；push_reply 接 REST API）
+- [ ] Session Log + Session 管理（`sessions` metadata 表 + `session_log` 完整 message history 表；audit_log 接入；`loom chat --resume` / `--session <id>`；`loom sessions list/show/rm`）
 - [ ] IDE Extension 支援（VS Code）
 - [ ] 文檔網站
+
+#### Session Log 設計備忘
+
+兩張新表：
+
+```sql
+-- Session metadata
+sessions (session_id PK, model, started_at, last_active, title, turn_count)
+
+-- Full lossless message history（永久保存，手動 prune）
+session_log (id PK, session_id, turn_index, role, content, metadata JSON, created_at)
+```
+
+關鍵行為：
+- `stream_turn()` 每個 user msg / assistant response / tool result 同步寫 `session_log`
+- `_on_trace()` 同步寫 `audit_log`（表已存在，目前從未寫入）
+- `LoomSession.start()` 接受 `session_id` 參數；傳入時從 `session_log` 重建 `self.messages`
+- `stop()` 更新 `sessions.last_active` + `turn_count`
+
+CLI 新增：
+```bash
+loom chat --resume               # 接最近 session
+loom chat --session <id>         # 接指定 session
+loom sessions list               # 列近期 sessions（title、時間、turns）
+loom sessions show <id>          # 回放對話
+loom sessions rm <id>            # 刪除
+```
 
 ---
 
