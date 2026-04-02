@@ -1258,5 +1258,38 @@ async def _autonomy_emit(event_name: str, config: str, model: str, db: str) -> N
     await session.stop()
 
 
+# ---------------------------------------------------------------------------
+# loom api commands
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def api() -> None:
+    """REST API server for memory and autonomy."""
+
+
+@api.command("start")
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--port", default=8000, show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--reload", is_flag=True, default=False, help="Auto-reload on code changes (dev)")
+def api_start(host: str, port: int, db: str, reload: bool) -> None:
+    """Start the Loom REST API server (requires: pip install loom[api])."""
+    try:
+        from loom.platform.api.server import run_server
+    except ImportError:
+        console.print(
+            "[red]FastAPI not installed.[/red] "
+            "Run:  [bold]pip install loom[api][/bold]"
+        )
+        raise SystemExit(1)
+    console.print(
+        f"[bold cyan]Loom API[/bold cyan]  "
+        f"http://{host}:{port}  |  db: {db}\n"
+        f"[dim]Docs: http://{host}:{port}/docs[/dim]"
+    )
+    run_server(host=host, port=port, db_path=db, reload=reload)
+
+
 if __name__ == "__main__":
     cli()

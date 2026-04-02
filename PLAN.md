@@ -640,8 +640,8 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 - [x] Cron 欄位數值範圍驗證（`_validate_cron_field_range` 補充，`60 * * * *` 現在 raise ValueError）
 - [x] Skill 評估回路接通（`_on_trace` callback 查 ProceduralMemory → `record_outcome()` → `upsert()`）
 - [x] BM25 index cache（`(COUNT, MAX(updated_at))` fingerprint，corpus 不變時跳過重建）
-- [ ] Relational Memory 讀寫 API
-- [ ] REST API Platform（FastAPI，Webhook reply endpoint）
+- [x] Relational Memory 讀寫 API（`RelationalMemory` class + `relate` / `query_relations` 工具 + MemoryIndex 整合）
+- [x] REST API Platform（`loom/platform/api/server.py` FastAPI app；`GET/POST /memory/semantic`, `GET/POST /memory/relational`, `POST /webhook/reply`, `POST /events/emit`；`loom api start` CLI 命令；optional dep `loom[api]`）
 - [ ] Discord / Slack / Email Notifier
 - [ ] IDE Extension 支援（VS Code）
 - [ ] 文檔網站

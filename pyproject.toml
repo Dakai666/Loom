@@ -28,3 +28,4 @@ asyncio_mode = "auto"
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-asyncio>=1.0"]
+api = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]

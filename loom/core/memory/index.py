@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 
 
@@ -67,6 +68,8 @@ class MemoryIndex:
     skill_count: int = 0
     skill_tags: list[str] = field(default_factory=list)
     episode_sessions: int = 0
+    relational_count: int = 0
+    relational_predicates: list[str] = field(default_factory=list)
 
     _WIDTH = 45
 
@@ -75,22 +78,32 @@ class MemoryIndex:
         topics = ", ".join(self.semantic_topics) if self.semantic_topics else "(none)"
         tags = ", ".join(self.skill_tags) if self.skill_tags else "(none)"
         bar = "─" * self._WIDTH
-        return (
-            f"Memory Index\n"
-            f"{bar}\n"
+        lines = [
+            "Memory Index",
+            bar,
             f"Semantic  : {self.semantic_count} {'fact' if self.semantic_count == 1 else 'facts'}"
-            f"   [topics: {topics}]\n"
-            f"Skills    : {self.skill_count} active"
-            f"  [tags: {tags}]\n"
-            f"Episodes  : {self.episode_sessions} sessions compressed\n"
-            f"{bar}\n"
-            f"Use recall(query) to retrieve relevant entries.\n"
-            f"Use memorize(key, value) to store a new fact."
-        )
+            f"   [topics: {topics}]",
+            f"Skills    : {self.skill_count} active  [tags: {tags}]",
+            f"Episodes  : {self.episode_sessions} sessions compressed",
+        ]
+        if self.relational_count > 0:
+            preds = ", ".join(self.relational_predicates) if self.relational_predicates else "(none)"
+            lines.append(
+                f"Relations : {self.relational_count} {'triple' if self.relational_count == 1 else 'triples'}"
+                f"  [predicates: {preds}]"
+            )
+        lines += [
+            bar,
+            "Use recall(query) to retrieve relevant entries.",
+            "Use memorize(key, value) to store a new fact.",
+        ]
+        if self.relational_count > 0:
+            lines.append("Use query_relations(subject) to look up relationships.")
+        return "\n".join(lines)
 
     @property
     def is_empty(self) -> bool:
-        return self.semantic_count == 0 and self.skill_count == 0
+        return self.semantic_count == 0 and self.skill_count == 0 and self.relational_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +122,12 @@ class MemoryIndexer:
         semantic: SemanticMemory,
         procedural: ProceduralMemory,
         episodic: EpisodicMemory | None = None,
+        relational: RelationalMemory | None = None,
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
         self._episodic = episodic
+        self._relational = relational
 
     async def build(self) -> MemoryIndex:
         """Fetch counts and metadata; return a MemoryIndex."""
@@ -137,10 +152,23 @@ class MemoryIndexer:
             all_tags.update(s.tags)
         skill_tags = sorted(all_tags)[:10]
 
+        # Relational triples
+        relational_count = 0
+        relational_predicates: list[str] = []
+        if self._relational is not None:
+            triples = await self._relational.query()
+            relational_count = len(triples)
+            seen: dict[str, int] = {}
+            for t in triples:
+                seen[t.predicate] = seen.get(t.predicate, 0) + 1
+            relational_predicates = sorted(seen, key=lambda p: seen[p], reverse=True)[:8]
+
         return MemoryIndex(
             semantic_count=semantic_count,
             semantic_topics=semantic_topics,
             skill_count=skill_count,
             skill_tags=skill_tags,
             episode_sessions=episode_sessions,
+            relational_count=relational_count,
+            relational_predicates=relational_predicates,
         )

@@ -22,6 +22,7 @@ from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
 
 if TYPE_CHECKING:
+    from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
 
@@ -224,6 +225,108 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
         },
         executor=_memorize,
         tags=["memory", "write", "memorize"],
+    )
+
+
+def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
+    """
+    Create a GUARDED ``relate`` tool bound to the given RelationalMemory instance.
+
+    Stores a (subject, predicate, object) triple — e.g.
+    relate(subject="user", predicate="prefers", object="concise responses").
+    """
+    from loom.core.memory.relational import RelationalEntry
+
+    async def _relate(call: ToolCall) -> ToolResult:
+        subject = call.args.get("subject", "").strip()
+        predicate = call.args.get("predicate", "").strip()
+        obj = call.args.get("object", "").strip()
+        confidence = float(call.args.get("confidence", 1.0))
+        confidence = max(0.0, min(1.0, confidence))
+
+        if not subject or not predicate or not obj:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'subject', 'predicate', and 'object' are required")
+
+        entry = RelationalEntry(
+            subject=subject,
+            predicate=predicate,
+            object=obj,
+            confidence=confidence,
+            source="agent",
+        )
+        await relational.upsert(entry)
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}")
+
+    return ToolDefinition(
+        name="relate",
+        description=(
+            "Store a relationship triple (subject, predicate, object) in relational memory. "
+            "Use this to record durable facts about preferences, constraints, or associations. "
+            "Example: relate(subject='user', predicate='prefers', object='concise answers'). "
+            "Upserting with the same subject+predicate replaces the previous object."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subject":   {"type": "string", "description": "The entity (e.g. 'user', 'project:loom')"},
+                "predicate": {"type": "string", "description": "The relationship (e.g. 'prefers', 'uses', 'avoids')"},
+                "object":    {"type": "string", "description": "The value of the relationship"},
+                "confidence": {"type": "number", "description": "Confidence 0–1 (default 1.0)"},
+            },
+            "required": ["subject", "predicate", "object"],
+        },
+        executor=_relate,
+        tags=["memory", "write", "relational"],
+    )
+
+
+def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
+    """
+    Create a SAFE ``query_relations`` tool bound to the given RelationalMemory instance.
+
+    Returns all triples matching the given subject and/or predicate filters.
+    """
+    async def _query_relations(call: ToolCall) -> ToolResult:
+        subject = call.args.get("subject", "").strip() or None
+        predicate = call.args.get("predicate", "").strip() or None
+
+        if not subject and not predicate:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="At least one of 'subject' or 'predicate' is required")
+
+        entries = await relational.query(subject=subject, predicate=predicate)
+        if not entries:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output="No matching relationships found.")
+
+        lines = [
+            f"[{e.subject}] {e.predicate} → {e.object}  (conf: {e.confidence:.2f})"
+            for e in entries
+        ]
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=True, output="\n".join(lines))
+
+    return ToolDefinition(
+        name="query_relations",
+        description=(
+            "Query the relational memory store for (subject, predicate, object) triples. "
+            "Filter by subject to get all known facts about an entity, or by predicate "
+            "to find all entities with that relationship. "
+            "Example: query_relations(subject='user') returns all user preferences."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subject":   {"type": "string", "description": "Filter by subject entity"},
+                "predicate": {"type": "string", "description": "Filter by predicate (relationship type)"},
+            },
+        },
+        executor=_query_relations,
+        tags=["memory", "search", "relational"],
     )
 
 
