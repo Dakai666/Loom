@@ -1,0 +1,30 @@
+[loom]
+name = "loom"
+version = "0.1.0"
+
+[identity]
+soul        = "SOUL.md"               # 核心身份，永駐 context
+agent       = "Agent.md"              # 專案/環境特定，agent 可自寫
+personality = ""                      # 臨時認知濾鏡，留空表示不啟用
+                                      # 例："personalities/adversarial.md"
+
+[cognition]
+default_model = "claude-sonnet-4-6"
+max_tokens = 8096
+
+[memory]
+backend = "sqlite"
+db_path = "~/.loom/memory.db"
+episodic_retention_days = 7
+skill_deprecation_threshold = 0.3
+
+[harness]
+default_trust_level = "guarded"
+require_audit_log = true
+
+[autonomy]
+enabled = false
+timezone = "Asia/Taipei"
+
+[notify]
+default_channel = "cli"
