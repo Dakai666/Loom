@@ -30,8 +30,10 @@ from typing import Any
 import click
 from dotenv import dotenv_values
 from rich.console import Console
+
 # Force UTF-8 output on Windows so the Rich console can render full Unicode.
 import sys as _sys
+
 if _sys.platform == "win32":
     try:
         _sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
@@ -67,9 +69,20 @@ from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
 from loom.platform.cli.tools import BUILTIN_TOOLS, make_recall_tool, make_memorize_tool
 from loom.platform.cli.ui import (
-    TextChunk, ToolBegin, ToolEnd, TurnDone,
-    make_prompt_session, render_header,
-    tool_begin_line, tool_end_line,
+    TextChunk,
+    ToolBegin,
+    ToolEnd,
+    TurnDone,
+    clear_line_escape,
+    is_verbose_mode,
+    make_prompt_session,
+    render_cursor,
+    render_header,
+    status_bar,
+    tool_begin_line,
+    tool_end_line,
+    tool_end_verbose_line,
+    tool_running_line,
 )
 
 console = Console(highlight=False)
@@ -114,10 +127,7 @@ async def compress_session(
     if not entries:
         return 0
 
-    log_text = "\n".join(
-        f"[{e.event_type}] {e.content}"
-        for e in entries[:60]
-    )
+    log_text = "\n".join(f"[{e.event_type}] {e.content}" for e in entries[:60])
 
     response = await router.chat(
         model=model,
@@ -127,7 +137,7 @@ async def compress_session(
 
     raw = response.text or ""
     facts = [
-        line[len("FACT:"):].strip()
+        line[len("FACT:") :].strip()
         for line in raw.splitlines()
         if line.strip().startswith("FACT:")
     ]
@@ -136,12 +146,14 @@ async def compress_session(
         facts = [raw.strip()[:800]]
 
     for i, fact in enumerate(facts):
-        await semantic.upsert(SemanticEntry(
-            key=f"session:{session_id}:fact:{i}",
-            value=fact,
-            confidence=0.8,
-            source=f"session:{session_id}",
-        ))
+        await semantic.upsert(
+            SemanticEntry(
+                key=f"session:{session_id}:fact:{i}",
+                value=fact,
+                confidence=0.8,
+                source=f"session:{session_id}",
+            )
+        )
 
     return len(facts)
 
@@ -149,6 +161,7 @@ async def compress_session(
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
+
 
 def _load_loom_config() -> dict:
     """Load loom.toml from cwd or the package root; return {} on miss."""
@@ -190,12 +203,13 @@ def build_router(model: str) -> LLMRouter:
     )
     if minimax_key:
         mm_model = model if model.startswith("MiniMax") else "MiniMax-M2.7"
-        router.register(MiniMaxProvider(api_key=minimax_key, model=mm_model), default=True)
+        router.register(
+            MiniMaxProvider(api_key=minimax_key, model=mm_model), default=True
+        )
 
     # Anthropic — fallback
-    anthropic_key = (
-        env.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY", "")
+    anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get(
+        "ANTHROPIC_API_KEY", ""
     )
     if anthropic_key:
         ant_model = model if model.startswith("claude") else "claude-sonnet-4-6"
@@ -212,6 +226,7 @@ def build_router(model: str) -> LLMRouter:
 # ---------------------------------------------------------------------------
 # LoomSession
 # ---------------------------------------------------------------------------
+
 
 class LoomSession:
     def __init__(self, model: str, db_path: str) -> None:
@@ -286,9 +301,9 @@ class LoomSession:
     async def start(self) -> None:
         await self._store.initialize()
         self._db = await self._store.connect().__aenter__()
-        self._episodic  = EpisodicMemory(self._db)
+        self._episodic = EpisodicMemory(self._db)
         emb_provider = build_embedding_provider(_load_env())
-        self._semantic  = SemanticMemory(self._db, embedding_provider=emb_provider)
+        self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         self._procedural = ProceduralMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
 
@@ -309,18 +324,25 @@ class LoomSession:
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
-        self._pipeline = MiddlewarePipeline([
-            TraceMiddleware(on_trace=self._on_trace),
-            BlastRadiusMiddleware(perm_ctx=self.perm, confirm_fn=self._confirm_tool),
-        ])
+        self._pipeline = MiddlewarePipeline(
+            [
+                TraceMiddleware(on_trace=self._on_trace),
+                BlastRadiusMiddleware(
+                    perm_ctx=self.perm, confirm_fn=self._confirm_tool
+                ),
+            ]
+        )
 
     async def stop(self) -> None:
         if self._db is None:
             return
         console.print(Rule("[dim]Compressing session to memory…[/dim]"))
         count = await compress_session(
-            self.session_id, self._episodic, self._semantic,
-            self.router, self.model,
+            self.session_id,
+            self._episodic,
+            self._semantic,
+            self.router,
+            self.model,
         )
         if count:
             console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
@@ -345,18 +367,20 @@ class LoomSession:
         """
         self.messages.append({"role": "user", "content": user_input})
 
-        await self._episodic.write(EpisodicEntry(
-            session_id=self.session_id,
-            event_type="message",
-            content=f"User: {user_input[:200]}",
-        ))
+        await self._episodic.write(
+            EpisodicEntry(
+                session_id=self.session_id,
+                event_type="message",
+                content=f"User: {user_input[:200]}",
+            )
+        )
 
         # Compress before the first LLM call if already over threshold.
         # (budget.used_tokens reflects the last response's actual token count,
         # so this check is accurate from turn 2 onward.)
         if self.budget.should_compress():
             console.print(
-                f"[yellow]  Context at {self.budget.usage_fraction*100:.0f}% — "
+                f"[yellow]  Context at {self.budget.usage_fraction * 100:.0f}% — "
                 f"compressing…[/yellow]"
             )
             await self._smart_compact()
@@ -388,7 +412,7 @@ class LoomSession:
             # Replace (not accumulate) — input_tokens is the total context this call.
             self.budget.record_response(response.input_tokens, response.output_tokens)
             self.messages.append(response.raw_message)
-            input_tokens = response.input_tokens    # report latest actual value
+            input_tokens = response.input_tokens  # report latest actual value
             output_tokens += response.output_tokens
 
             if response.stop_reason == "end_turn":
@@ -405,9 +429,8 @@ class LoomSession:
                 # Falls back to sequential if any tool needs interactive confirmation
                 # (GUARDED/CRITICAL not yet authorized) — parallel confirmation prompts
                 # would interleave on the CLI.
-                parallel = (
-                    len(response.tool_uses) > 1
-                    and self._all_authorized(response.tool_uses)
+                parallel = len(response.tool_uses) > 1 and self._all_authorized(
+                    response.tool_uses
                 )
 
                 if parallel:
@@ -426,8 +449,11 @@ class LoomSession:
                         )
                         self.messages.append(
                             self.router.format_tool_result(
-                                self.model, tu.id,
-                                str(result.output) if result.success else (result.error or ""),
+                                self.model,
+                                tu.id,
+                                str(result.output)
+                                if result.success
+                                else (result.error or ""),
                                 result.success,
                             )
                         )
@@ -448,8 +474,11 @@ class LoomSession:
                         )
                         self.messages.append(
                             self.router.format_tool_result(
-                                self.model, tu.id,
-                                str(result.output) if result.success else (result.error or ""),
+                                self.model,
+                                tu.id,
+                                str(result.output)
+                                if result.success
+                                else (result.error or ""),
                                 result.success,
                             )
                         )
@@ -458,7 +487,7 @@ class LoomSession:
                 # call in this loop will include them and may push over the limit.
                 if self.budget.should_compress():
                     console.print(
-                        f"[yellow]  Context at {self.budget.usage_fraction*100:.0f}%"
+                        f"[yellow]  Context at {self.budget.usage_fraction * 100:.0f}%"
                         f" mid-turn — compressing…[/yellow]"
                     )
                     await self._smart_compact()
@@ -479,11 +508,18 @@ class LoomSession:
     async def _dispatch(self, tool_name: str, args: dict, call_id: str) -> ToolResult:
         tool_def = self.registry.get(tool_name)
         if tool_def is None:
-            return ToolResult(call_id=call_id, tool_name=tool_name,
-                              success=False, error=f"Unknown tool: {tool_name}")
+            return ToolResult(
+                call_id=call_id,
+                tool_name=tool_name,
+                success=False,
+                error=f"Unknown tool: {tool_name}",
+            )
         call = ToolCall(
-            id=call_id, tool_name=tool_name, args=args,
-            trust_level=tool_def.trust_level, session_id=self.session_id,
+            id=call_id,
+            tool_name=tool_name,
+            args=args,
+            trust_level=tool_def.trust_level,
+            session_id=self.session_id,
         )
         return await self._pipeline.execute(call, tool_def.executor)
 
@@ -498,29 +534,34 @@ class LoomSession:
         elif result.output and isinstance(result.output, str):
             summary += f" → {result.output[:120].replace(chr(10), ' ')}"
 
-        await self._episodic.write(EpisodicEntry(
-            session_id=self.session_id,
-            event_type="tool_result",
-            content=summary,
-            metadata={
-                "tool_name": call.tool_name,
-                "success": result.success,
-                "duration_ms": result.duration_ms,
-            },
-        ))
+        await self._episodic.write(
+            EpisodicEntry(
+                session_id=self.session_id,
+                event_type="tool_result",
+                content=summary,
+                metadata={
+                    "tool_name": call.tool_name,
+                    "success": result.success,
+                    "duration_ms": result.duration_ms,
+                },
+            )
+        )
 
     async def _confirm_tool(self, call: ToolCall) -> bool:
         # No Rich Live is active during _run_streaming_turn (we removed it),
         # so plain console output + prompt_toolkit prompt_async() work cleanly.
         console.print()
-        console.print(Panel(
-            f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
-            f"[dim]args: {call.args}[/dim]",
-            title="[yellow]  Tool requires confirmation[/yellow]",
-            border_style="yellow",
-        ))
+        console.print(
+            Panel(
+                f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
+                f"[dim]args: {call.args}[/dim]",
+                title="[yellow]  Tool requires confirmation[/yellow]",
+                border_style="yellow",
+            )
+        )
         # Use prompt_toolkit so the prompt renders correctly on all terminals.
         from prompt_toolkit import prompt as pt_prompt
+
         try:
             answer = await asyncio.get_event_loop().run_in_executor(
                 None, pt_prompt, "Allow? [y/N]: "
@@ -546,9 +587,7 @@ class LoomSession:
                 return False
         return True
 
-    async def _dispatch_parallel(
-        self, tool_uses: list
-    ) -> list[tuple]:
+    async def _dispatch_parallel(self, tool_uses: list) -> list[tuple]:
         """
         Dispatch multiple independent tool calls concurrently via TaskGraph.
 
@@ -564,7 +603,7 @@ class LoomSession:
         from loom.core.tasks.scheduler import TaskScheduler
 
         graph = TaskGraph()
-        pairs: list[tuple] = []   # (ToolUse, TaskNode)
+        pairs: list[tuple] = []  # (ToolUse, TaskNode)
         timings: dict[str, tuple[float, ToolResult]] = {}
 
         for tu in tool_uses:
@@ -582,10 +621,7 @@ class LoomSession:
         scheduler = TaskScheduler(executor=_execute, stop_on_failure=False)
         await scheduler.run(plan)
 
-        return [
-            (tu, timings[node.id][1], timings[node.id][0])
-            for tu, node in pairs
-        ]
+        return [(tu, timings[node.id][1], timings[node.id][0]) for tu, node in pairs]
 
     async def _smart_compact(self) -> None:
         """
@@ -684,7 +720,7 @@ class LoomSession:
         saved = before_tokens - self.budget.used_tokens
         console.print(
             f"[dim]  Context compacted: {len(to_compact)} msgs summarized "
-            f"(-~{saved:,} tokens), {self.budget.usage_fraction*100:.1f}% used.[/dim]"
+            f"(-~{saved:,} tokens), {self.budget.usage_fraction * 100:.1f}% used.[/dim]"
         )
 
     async def _compress_context(self) -> None:
@@ -712,7 +748,7 @@ class LoomSession:
             console.print(
                 f"[dim]  Context trimmed: dropped {dropped} messages, "
                 f"{len(self.messages)} remaining "
-                f"({self.budget.usage_fraction*100:.1f}%).[/dim]"
+                f"({self.budget.usage_fraction * 100:.1f}%).[/dim]"
             )
 
     @property
@@ -724,14 +760,15 @@ class LoomSession:
 # CLI commands
 # ---------------------------------------------------------------------------
 
+
 @click.group()
 def cli() -> None:
     """Loom — harness-first agent framework."""
 
 
 @cli.command()
-@click.option("--model",  default="MiniMax-M2.7", show_default=True)
-@click.option("--db",     default="~/.loom/memory.db", show_default=True)
+@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
 def chat(model: str, db: str) -> None:
     """Start an interactive agent session."""
     asyncio.run(_chat(model, db))
@@ -744,11 +781,13 @@ async def _chat(model: str, db: str) -> None:
     console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
-        console.print(Panel(
-            session._memory_index.render(),
-            title="[cyan]Memory[/cyan]",
-            border_style="dim",
-        ))
+        console.print(
+            Panel(
+                session._memory_index.render(),
+                title="[cyan]Memory[/cyan]",
+                border_style="dim",
+            )
+        )
 
     prompt_session = make_prompt_session()
 
@@ -817,20 +856,22 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         await session._smart_compact()
 
     elif command == "/help":
-        console.print(Panel(
-            "[bold]Slash commands[/bold]\n\n"
-            "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
-            "  [cyan]/personality off[/cyan]        Remove active persona\n"
-            "  [cyan]/personality[/cyan]             Show active + available personas\n"
-            "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
-            "  [cyan]/help[/cyan]                    Show this message\n\n"
-            "[bold]Input[/bold]\n\n"
-            "  [dim]up / down[/dim]  Browse input history\n"
-            "  [dim]Tab[/dim]    Autocomplete slash commands\n"
-            "  [dim]exit[/dim] / [dim]Ctrl-C[/dim]  End session",
-            title="[cyan]Help[/cyan]",
-            border_style="cyan",
-        ))
+        console.print(
+            Panel(
+                "[bold]Slash commands[/bold]\n\n"
+                "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
+                "  [cyan]/personality off[/cyan]        Remove active persona\n"
+                "  [cyan]/personality[/cyan]             Show active + available personas\n"
+                "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
+                "  [cyan]/help[/cyan]                    Show this message\n\n"
+                "[bold]Input[/bold]\n\n"
+                "  [dim]up / down[/dim]  Browse input history\n"
+                "  [dim]Tab[/dim]    Autocomplete slash commands\n"
+                "  [dim]exit[/dim] / [dim]Ctrl-C[/dim]  End session",
+                title="[cyan]Help[/cyan]",
+                border_style="cyan",
+            )
+        )
 
     else:
         console.print(f"[dim]Unknown command '{command}'. Type /help for help.[/dim]")
@@ -850,67 +891,125 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     in place, giving genuine streaming.  A Rule separator frames the response
     without the Live complexity.
     """
+    import asyncio
+
     console.print()
     t0 = time.monotonic()
     text_buffer = ""
-    at_line_start = True   # track whether we need a newline before next section
+    at_line_start = True
+    active_tool: str | None = None
+    spinner_task: asyncio.Task | None = None
+    frame_index = 0
 
     # ── Opening rule ──────────────────────────────────────────────────────────
     pct = session.budget.usage_fraction * 100
     ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
     persona_tag = (
         f"  [dim]|  persona: {session.current_personality}[/dim]"
-        if session.current_personality else ""
+        if session.current_personality
+        else ""
     )
-    console.print(Rule(
-        f"[bold green]loom[/bold green]"
-        f"[dim]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/dim]"
-        f"{persona_tag}",
-        style="green",
-    ))
+    console.print(
+        Rule(
+            f"[bold green]loom[/bold green]"
+            f"[dim]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/dim]"
+            f"{persona_tag}",
+            style="green",
+        )
+    )
+
+    def _cancel_spinner() -> None:
+        nonlocal spinner_task
+        if spinner_task and not spinner_task.done():
+            spinner_task.cancel()
+            spinner_task = None
+
+    def _print_spinner() -> None:
+        nonlocal frame_index
+        console.print(clear_line_escape(), end="")
+        console.print(tool_running_line(active_tool or "", frame_index), end="")
+        frame_index = (frame_index + 1) % 4
+
+    async def _spin_loop() -> None:
+        """Background task: animate spinner while tool is running."""
+        nonlocal frame_index
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                _print_spinner()
+        except asyncio.CancelledError:
+            pass
 
     try:
         async for event in session.stream_turn(user_input):
-
             if isinstance(event, TextChunk):
-                # Append each chunk in-place — true streaming
+                # Clear cursor from previous position
+                console.print(clear_line_escape(), end="")
+                # Print text chunk
                 console.print(event.text, end="", markup=False, highlight=False)
                 text_buffer += event.text
                 at_line_start = event.text.endswith("\n")
+                # Print streaming cursor at end
+                console.print(render_cursor(), end="")
 
             elif isinstance(event, ToolBegin):
+                # Cancel any running spinner
+                _cancel_spinner()
                 # Ensure tool rows start on a fresh line
                 if not at_line_start:
                     console.print()
                     at_line_start = True
+                active_tool = event.name
+                frame_index = 0
                 console.print(tool_begin_line(event.name, event.args))
+                # Start spinner animation
+                spinner_task = asyncio.create_task(_spin_loop())
 
             elif isinstance(event, ToolEnd):
-                console.print(tool_end_line(event.name, event.success, event.duration_ms))
+                # Cancel spinner and clear its line
+                _cancel_spinner()
+                console.print(clear_line_escape(), end="")
+                # Print tool result (verbose if enabled)
+                if is_verbose_mode() and event.output:
+                    console.print(
+                        tool_end_verbose_line(
+                            event.name, event.success, event.duration_ms, event.output
+                        )
+                    )
+                else:
+                    console.print(
+                        tool_end_line(event.name, event.success, event.duration_ms)
+                    )
                 at_line_start = True
-                # Blank line to visually separate tool result from next text
+                active_tool = None
                 console.print()
 
             elif isinstance(event, TurnDone):
+                # Cancel any running spinner and clear cursor
+                _cancel_spinner()
+                console.print(clear_line_escape(), end="")
                 if not at_line_start:
                     console.print()
                 elapsed = time.monotonic() - t0
-                pct = session.budget.usage_fraction * 100
-                ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
-                console.print(Rule(
-                    f"[dim][{ctx_color}]context {pct:.1f}%[/{ctx_color}]"
-                    f"  |  {event.input_tokens}in / {event.output_tokens}out"
-                    f"  |  {elapsed:.1f}s[/dim]",
-                    style="dim green",
-                ))
+                console.print(
+                    status_bar(
+                        context_fraction=session.budget.usage_fraction,
+                        input_tokens=event.input_tokens,
+                        output_tokens=event.output_tokens,
+                        elapsed_ms=elapsed * 1000,
+                        tool_count=event.tool_count,
+                    )
+                )
 
     except Exception as exc:
-        if not at_line_start:
-            console.print()
+        _cancel_spinner()
+        console.print(clear_line_escape(), end="")
+        console.print()
         console.print(f"[red]Error: {exc}[/red]")
 
 
 # ---------------------------------------------------------------------------
+
 
 @cli.group()
 def memory() -> None:
@@ -918,7 +1017,7 @@ def memory() -> None:
 
 
 @memory.command("list")
-@click.option("--db",    default="~/.loom/memory.db", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--limit", default=20, show_default=True)
 def memory_list(db: str, limit: int) -> None:
     """Show recent semantic memories."""
@@ -940,16 +1039,16 @@ async def _memory_list(db: str, limit: int) -> None:
     for e in entries:
         c = "green" if e.confidence > 0.7 else "yellow" if e.confidence > 0.4 else "red"
         console.print(
-            f"  [{c}]{e.confidence:.2f}[/{c}]  [dim]{e.key}[/dim]\n"
-            f"       {e.value}\n"
+            f"  [{c}]{e.confidence:.2f}[/{c}]  [dim]{e.key}[/dim]\n       {e.value}\n"
         )
 
 
 # ---------------------------------------------------------------------------
 
+
 @cli.command()
 @click.option("--session", default=None, help="Session ID (latest if omitted)")
-@click.option("--db",      default="~/.loom/memory.db", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
 def reflect(session: str | None, db: str) -> None:
     """Show reflection report for a session."""
     asyncio.run(_reflect(session, db))
@@ -992,18 +1091,21 @@ async def _reflect(session_id: str | None, db: str) -> None:
 # loom autonomy commands
 # ---------------------------------------------------------------------------
 
+
 @cli.group()
 def autonomy() -> None:
     """Manage the autonomous action engine."""
 
 
 @autonomy.command("start")
-@click.option("--config", default="loom.toml", show_default=True,
-              help="Path to loom.toml")
-@click.option("--model",  default="MiniMax-M2.7", show_default=True)
-@click.option("--db",     default="~/.loom/memory.db", show_default=True)
-@click.option("--interval", default=60, show_default=True,
-              help="Poll interval in seconds")
+@click.option(
+    "--config", default="loom.toml", show_default=True, help="Path to loom.toml"
+)
+@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option(
+    "--interval", default=60, show_default=True, help="Poll interval in seconds"
+)
 def autonomy_start(config: str, model: str, db: str, interval: int) -> None:
     """Start the autonomy daemon (foreground)."""
     asyncio.run(_autonomy_start(config, model, db, interval))
@@ -1032,13 +1134,15 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
         loom_session=session,
     )
     n = daemon.load_config(config)
-    console.print(Panel(
-        f"[bold cyan]Loom Autonomy Daemon[/bold cyan]\n"
-        f"Loaded [green]{n}[/green] trigger(s) from [dim]{config}[/dim]\n"
-        f"Poll interval: {interval}s  |  model: {model}\n"
-        f"[dim]Press Ctrl-C to stop.[/dim]",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel(
+            f"[bold cyan]Loom Autonomy Daemon[/bold cyan]\n"
+            f"Loaded [green]{n}[/green] trigger(s) from [dim]{config}[/dim]\n"
+            f"Poll interval: {interval}s  |  model: {model}\n"
+            f"[dim]Press Ctrl-C to stop.[/dim]",
+            border_style="cyan",
+        )
+    )
 
     try:
         await daemon.start(poll_interval=float(interval))
@@ -1066,7 +1170,9 @@ def autonomy_status(config: str) -> None:
 
     console.print(Rule("[cyan]Registered Triggers[/cyan]"))
     if not triggers:
-        console.print("[dim]No triggers found (check autonomy.enabled in loom.toml)[/dim]")
+        console.print(
+            "[dim]No triggers found (check autonomy.enabled in loom.toml)[/dim]"
+        )
         return
 
     for t in triggers:
@@ -1082,8 +1188,8 @@ def autonomy_status(config: str) -> None:
 @autonomy.command("emit")
 @click.argument("event_name")
 @click.option("--config", default="loom.toml", show_default=True)
-@click.option("--model",  default="MiniMax-M2.7", show_default=True)
-@click.option("--db",     default="~/.loom/memory.db", show_default=True)
+@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
 def autonomy_emit(event_name: str, config: str, model: str, db: str) -> None:
     """Manually emit an event to trigger matching EventTriggers."""
     asyncio.run(_autonomy_emit(event_name, config, model, db))
@@ -1113,7 +1219,9 @@ async def _autonomy_emit(event_name: str, config: str, model: str, db: str) -> N
     )
     daemon.load_config(config)
     fired = await daemon.evaluator.emit(event_name)
-    console.print(f"[cyan]Emitted[/cyan] '{event_name}' → fired triggers: {fired or ['(none)']}")
+    console.print(
+        f"[cyan]Emitted[/cyan] '{event_name}' → fired triggers: {fired or ['(none)']}"
+    )
     await session.stop()
 
 
