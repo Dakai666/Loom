@@ -15,7 +15,10 @@ Elm-inspired: each component owns its state and responds to messages.
 
 Layout (dock):
     Header (top dock, height=3)
-    MessageList (center, flex)
+    ConversationPane (left, 60%)
+        MessageList + ToolBlock
+    WorkspacePanel (right, 40%)
+        Artifacts / Knowledge Graph tabs
     InputArea (bottom dock, height=3)
     StatusBar (bottom dock, height=1)
     ObservabilityPanel (bottom dock, height=3, collapsed by default)
@@ -38,6 +41,13 @@ from .components import (
     StatusBar,
     InputArea,
     ObservabilityPanel,
+    ArtifactState,
+    Artifact,
+    ArtifactsPanel,
+    KnowledgeGraph,
+    KnowledgeNode,
+    WorkspacePanel,
+    WorkspaceTab,
 )
 from .events import (
     StreamEvent,
@@ -60,6 +70,13 @@ __all__ = [
     "StatusBar",
     "InputArea",
     "ObservabilityPanel",
+    "ArtifactState",
+    "Artifact",
+    "ArtifactsPanel",
+    "KnowledgeGraph",
+    "KnowledgeNode",
+    "WorkspacePanel",
+    "WorkspaceTab",
     "StreamEvent",
     "TurnStart",
     "TextChunk",

@@ -21,6 +21,9 @@ from .components import (
     StatusBar,
     InputArea,
     ObservabilityPanel,
+    WorkspacePanel,
+    WorkspaceTab,
+    ArtifactState,
 )
 from .components.message_list import Role
 from .events import (
@@ -67,6 +70,17 @@ class LoomApp(App):
         border-bottom: solid $border;
     }
 
+    #conversation-pane {
+        dock: left;
+        width: 60%;
+        border-right: solid $border;
+    }
+
+    #workspace-pane {
+        dock: left;
+        width: 40%;
+    }
+
     #message-list {
         dock: top;
         height: 1fr;
@@ -104,11 +118,18 @@ class LoomApp(App):
     #obs-panel.visible {
         display: block;
     }
+
+    #workspace-panel {
+        dock: top;
+        height: 1fr;
+        overflow-y: auto;
+    }
     """
 
     BINDINGS = [
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
         Binding("ctrl+o", "toggle_verbose", "Verbose", show=True),
+        Binding("ctrl+w", "toggle_space", "Space", show=True),
     ]
 
     def __init__(
@@ -124,8 +145,10 @@ class LoomApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(model=self._model, db_path=self._db_path)
-        yield MessageList(id="message-list")
-        yield ToolBlock(id="tool-block")
+        with Static(id="conversation-pane"):
+            yield MessageList(id="message-list")
+            yield ToolBlock(id="tool-block")
+        yield WorkspacePanel(id="workspace-panel")
         yield ObservabilityPanel(id="obs-panel")
         yield StatusBar(id="status-bar")
         yield InputArea(id="input-area")
@@ -144,6 +167,14 @@ class LoomApp(App):
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.clear()
         self.notify("[dim]Screen cleared[/dim]")
+
+    def action_toggle_space(self) -> None:
+        """Toggle between Conversation and Workspace space."""
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.toggle_tab()
+        current = workspace.active_tab
+        label = "Knowledge" if current == WorkspaceTab.KNOWLEDGE else "Artifacts"
+        self.notify(f"[dim]Switched to [bold]{label}[/bold][/dim]")
 
     def action_toggle_verbose(self) -> None:
         """Toggle tool output verbosity."""
@@ -252,9 +283,34 @@ class LoomApp(App):
         status_bar.input_tokens = event.input_tokens
         status_bar.output_tokens = event.output_tokens
 
+    # ── Artifact and Knowledge Graph helpers ──────────────────────────────────
+
+    def add_artifact(
+        self,
+        path: str,
+        state: ArtifactState,
+        diff_lines: list[str] | None = None,
+        preview: str = "",
+    ) -> None:
+        """Add an artifact to the workspace (called by main.py)."""
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.add_artifact(path, state, diff_lines, preview)
+
+    def load_knowledge_graph(
+        self,
+        semantic_count: int = 0,
+        procedural_count: int = 0,
+        episodic_count: int = 0,
+    ) -> None:
+        """Load knowledge graph from session memory stats."""
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.load_knowledge_graph(semantic_count, procedural_count, episodic_count)
+
     # ── Input submission ───────────────────────────────────────────────────────
 
     def on_input_area_submit(self, event: InputArea.Submit) -> None:
+        """Handle message submission from InputArea."""
+        self.post_message(self.UserMessage(event.text))
         """Handle message submission from InputArea."""
         # This will be connected to LoomSession in main.py
         # The app emits a custom message that main.py listens to
