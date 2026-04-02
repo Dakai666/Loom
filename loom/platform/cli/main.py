@@ -1153,6 +1153,29 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
     notifier = CLINotifier(console)
     notify_router = NotificationRouter()
     notify_router.register(notifier)
+
+    # Auto-register Discord if DISCORD_WEBHOOK_URL is set in env or loom.toml
+    env = _load_env()
+    loom_cfg = _load_loom_config()
+    discord_url = (
+        env.get("DISCORD_WEBHOOK_URL")
+        or os.environ.get("DISCORD_WEBHOOK_URL", "")
+        or loom_cfg.get("notify", {}).get("discord", {}).get("webhook_url", "")
+    )
+    if discord_url:
+        from loom.notify.adapters.discord import DiscordNotifier
+        rest_api_url = (
+            loom_cfg.get("notify", {}).get("discord", {}).get("rest_api_url")
+            or env.get("LOOM_API_URL", "")
+        )
+        discord_notifier = DiscordNotifier(
+            webhook_url=discord_url,
+            username=loom_cfg.get("notify", {}).get("discord", {}).get("username", "Loom Agent"),
+            rest_api_url=rest_api_url or None,
+        )
+        notify_router.register(discord_notifier)
+        console.print(f"[dim]  Discord notifier registered.[/dim]")
+
     confirm_flow = ConfirmFlow(
         send_fn=notify_router.send,
         wait_fn=notifier.wait_reply,
