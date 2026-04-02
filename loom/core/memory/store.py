@@ -60,10 +60,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at   TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_episodic_session  ON episodic_entries(session_id);
-CREATE INDEX IF NOT EXISTS idx_episodic_created  ON episodic_entries(created_at);
-CREATE INDEX IF NOT EXISTS idx_semantic_key       ON semantic_entries(key);
-CREATE INDEX IF NOT EXISTS idx_audit_session      ON audit_log(session_id);
+CREATE TABLE IF NOT EXISTS relational_entries (
+    id          TEXT PRIMARY KEY,
+    subject     TEXT NOT NULL,
+    predicate   TEXT NOT NULL,
+    object      TEXT NOT NULL,
+    confidence  REAL NOT NULL DEFAULT 1.0,
+    source      TEXT NOT NULL DEFAULT 'agent',
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE(subject, predicate)
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodic_session   ON episodic_entries(session_id);
+CREATE INDEX IF NOT EXISTS idx_episodic_created   ON episodic_entries(created_at);
+CREATE INDEX IF NOT EXISTS idx_semantic_key        ON semantic_entries(key);
+CREATE INDEX IF NOT EXISTS idx_audit_session       ON audit_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_relational_subject  ON relational_entries(subject);
+CREATE INDEX IF NOT EXISTS idx_relational_pred     ON relational_entries(predicate);
 """
 
 

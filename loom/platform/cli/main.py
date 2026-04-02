@@ -20,6 +20,7 @@ Usage
 
 import asyncio
 import os
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 
 from loom.core.cognition.context import ContextBudget
+from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider, MiniMaxProvider
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
@@ -50,7 +52,9 @@ from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
-from loom.platform.cli.tools import BUILTIN_TOOLS
+from loom.core.memory.index import MemoryIndex, MemoryIndexer
+from loom.core.memory.search import MemorySearch
+from loom.platform.cli.tools import BUILTIN_TOOLS, make_recall_tool, make_memorize_tool
 
 console = Console()
 
@@ -113,19 +117,17 @@ async def compress_session(
 # Router factory
 # ---------------------------------------------------------------------------
 
-def _load_soul() -> str | None:
-    """
-    Load SOUL.md from the project root (cwd or two levels above this file).
-    Returns the content as a string, or None if not found.
-    """
+def _load_loom_config() -> dict:
+    """Load loom.toml from cwd or the package root; return {} on miss."""
     candidates = [
-        Path.cwd() / "SOUL.md",
-        Path(__file__).parents[3] / "SOUL.md",
+        Path.cwd() / "loom.toml",
+        Path(__file__).parents[3] / "loom.toml",
     ]
     for path in candidates:
         if path.exists():
-            return path.read_text(encoding="utf-8")
-    return None
+            with open(path, "rb") as fh:
+                return tomllib.load(fh)
+    return {}
 
 
 def _load_env(project_root: Path | None = None) -> dict[str, str]:
@@ -184,11 +186,14 @@ class LoomSession:
         self.session_id = str(uuid.uuid4())[:8]
         self.router = build_router(model)
 
-        # OpenAI-canonical message history
-        # Seed with SOUL.md as the system prompt if available
-        soul = _load_soul()
+        # Build prompt stack from loom.toml [identity] config
+        config = _load_loom_config()
+        self._stack = PromptStack.from_config(config)
+        system_prompt = self._stack.load()
+
+        # OpenAI-canonical message history, seeded with composed system prompt
         self.messages: list[dict[str, Any]] = (
-            [{"role": "system", "content": soul}] if soul else []
+            [{"role": "system", "content": system_prompt}] if system_prompt else []
         )
 
         # Registry
@@ -213,6 +218,37 @@ class LoomSession:
         self._procedural: ProceduralMemory | None = None
         self._reflection: ReflectionAPI | None = None
         self._pipeline: MiddlewarePipeline | None = None
+        self._memory_index: MemoryIndex = MemoryIndex()
+
+    # ------------------------------------------------------------------
+    # Personality management
+    # ------------------------------------------------------------------
+
+    def switch_personality(self, name: str) -> bool:
+        """
+        Switch to a named personality and update the system message.
+        Pass ``"off"`` to remove the personality layer.
+        Returns True on success.
+        """
+        if name == "off":
+            self._stack.clear_personality()
+        else:
+            if not self._stack.switch_personality(name):
+                return False
+
+        new_prompt = self._stack.composed_prompt
+        if self.messages and self.messages[0]["role"] == "system":
+            if new_prompt:
+                self.messages[0]["content"] = new_prompt
+            else:
+                self.messages.pop(0)
+        elif new_prompt:
+            self.messages.insert(0, {"role": "system", "content": new_prompt})
+        return True
+
+    @property
+    def current_personality(self) -> str | None:
+        return self._stack.current_personality
 
     async def start(self) -> None:
         await self._store.initialize()
@@ -221,6 +257,21 @@ class LoomSession:
         self._semantic  = SemanticMemory(self._db)
         self._procedural = ProceduralMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
+
+        # Build MemoryIndex and inject into system prompt
+        indexer = MemoryIndexer(self._semantic, self._procedural, self._episodic)
+        self._memory_index = await indexer.build()
+        if not self._memory_index.is_empty:
+            index_text = self._memory_index.render()
+            if self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] += f"\n\n{index_text}"
+            else:
+                self.messages.insert(0, {"role": "system", "content": index_text})
+
+        # Register memory tools with injected stores
+        search = MemorySearch(self._semantic, self._procedural)
+        self.registry.register(make_recall_tool(search))
+        self.registry.register(make_memorize_tool(self._semantic))
 
         self._pipeline = MiddlewarePipeline([
             LogMiddleware(console),
@@ -374,6 +425,13 @@ async def _chat(model: str, db: str) -> None:
     session = LoomSession(model=model, db_path=db)
     await session.start()
 
+    if not session._memory_index.is_empty:
+        console.print(Panel(
+            session._memory_index.render(),
+            title="[cyan]Memory[/cyan]",
+            border_style="dim",
+        ))
+
     try:
         while True:
             try:
@@ -385,6 +443,33 @@ async def _chat(model: str, db: str) -> None:
                 break
             if not user_input.strip():
                 continue
+
+            # ── Slash commands ──────────────────────────────────────────
+            if user_input.startswith("/personality"):
+                parts = user_input.split(maxsplit=1)
+                name = parts[1].strip() if len(parts) > 1 else ""
+                if not name:
+                    p = session.current_personality
+                    avail = session._stack.available_personalities()
+                    console.print(
+                        f"[dim]Active: [bold]{p or '(none)'}[/bold]  "
+                        f"Available: {', '.join(avail) or '(none)'}[/dim]"
+                    )
+                elif name == "off":
+                    session.switch_personality("off")
+                    console.print("[dim]Personality cleared.[/dim]")
+                else:
+                    ok = session.switch_personality(name)
+                    if ok:
+                        console.print(f"[dim]Personality → [bold]{name}[/bold][/dim]")
+                    else:
+                        avail = session._stack.available_personalities()
+                        console.print(
+                            f"[red]Unknown personality '{name}'.[/red] "
+                            f"[dim]Available: {', '.join(avail) or '(none)'}[/dim]"
+                        )
+                continue
+            # ────────────────────────────────────────────────────────────
 
             console.print()
             try:
