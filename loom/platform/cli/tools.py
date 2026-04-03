@@ -54,43 +54,129 @@ def _html_to_text(html: str) -> tuple[str, str]:
     return title, cleaned
 
 
-async def _read_file(call: ToolCall) -> ToolResult:
-    path = Path(call.args.get("path", ""))
+def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
+    """Resolve a raw path string relative to workspace.
+
+    - Relative paths → workspace / raw
+    - Absolute paths inside workspace → kept as-is
+    - Absolute paths OUTSIDE workspace → re-rooted under workspace
+      (strips leading / so the agent can't escape the sandbox)
+    """
+    p = Path(raw)
+    if not p.is_absolute():
+        return (workspace / p).resolve()
+    resolved = p.resolve()
     try:
-        content = path.read_text(encoding="utf-8")
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=content)
-    except Exception as exc:
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=False, error=str(exc))
+        resolved.relative_to(workspace)
+        return resolved  # already inside workspace
+    except ValueError:
+        # Reroute: strip root and place under workspace
+        # e.g. ~/tmp/foo.md → workspace/tmp/foo.md
+        parts = resolved.parts[1:]  # drop drive/root
+        return (workspace / Path(*parts)).resolve()
 
 
-async def _write_file(call: ToolCall) -> ToolResult:
-    path = Path(call.args.get("path", ""))
-    content = call.args.get("content", "")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=f"Written {len(content)} chars to {path}")
-    except Exception as exc:
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=False, error=str(exc))
+def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
+    """Return read_file, write_file, list_dir tools bound to *workspace*."""
 
+    async def _read_file(call: ToolCall) -> ToolResult:
+        raw = call.args.get("path", "")
+        path = _resolve_workspace_path(raw, workspace)
+        try:
+            content = path.read_text(encoding="utf-8")
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output=content)
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
 
-async def _list_dir(call: ToolCall) -> ToolResult:
-    path = Path(call.args.get("path", "."))
-    try:
-        entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
-        lines = [
-            f"{'[dir] ' if e.is_dir() else '      '}{e.name}"
-            for e in entries
-        ]
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output="\n".join(lines))
-    except Exception as exc:
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=False, error=str(exc))
+    async def _write_file(call: ToolCall) -> ToolResult:
+        raw = call.args.get("path", "")
+        content = call.args.get("content", "")
+        path = _resolve_workspace_path(raw, workspace)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True,
+                              output=f"Written {len(content)} chars to {path}")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+
+    async def _list_dir(call: ToolCall) -> ToolResult:
+        raw = call.args.get("path", "")
+        path = _resolve_workspace_path(raw or ".", workspace)
+        try:
+            entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+            lines = [
+                f"{'[dir] ' if e.is_dir() else '      '}{e.name}"
+                for e in entries
+            ]
+            header = f"[workspace: {workspace}]\n" if path == workspace else ""
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output=header + "\n".join(lines))
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+
+    return [
+        ToolDefinition(
+            name="read_file",
+            description=(
+                "Read the contents of a file. Relative paths resolve inside the workspace. "
+                "Use this to read code, configs, or documents."
+            ),
+            trust_level=TrustLevel.SAFE,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string",
+                             "description": "File path (relative to workspace or absolute)"},
+                },
+                "required": ["path"],
+            },
+            executor=_read_file,
+            tags=["filesystem", "read"],
+        ),
+        ToolDefinition(
+            name="write_file",
+            description=(
+                "Write content to a file inside the workspace. Creates directories as needed. "
+                "Relative paths resolve inside the workspace."
+            ),
+            trust_level=TrustLevel.GUARDED,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path":    {"type": "string",
+                                "description": "Destination path (relative to workspace or absolute)"},
+                    "content": {"type": "string", "description": "Text content to write"},
+                },
+                "required": ["path", "content"],
+            },
+            executor=_write_file,
+            tags=["filesystem", "write"],
+        ),
+        ToolDefinition(
+            name="list_dir",
+            description=(
+                "List files and directories. Defaults to workspace root. "
+                "Relative paths resolve inside the workspace."
+            ),
+            trust_level=TrustLevel.SAFE,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string",
+                             "description": "Directory path (default: workspace root)"},
+                },
+                "required": [],
+            },
+            executor=_list_dir,
+            tags=["filesystem", "read"],
+        ),
+    ]
 
 
 async def _run_bash(call: ToolCall) -> ToolResult:
@@ -472,50 +558,10 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     )
 
 
+# run_bash is workspace-independent (spawns a shell in CWD, which is fine)
+# read_file / write_file / list_dir are registered via make_filesystem_tools(workspace)
+# in LoomSession.start() so they close over the correct workspace path.
 BUILTIN_TOOLS: list[ToolDefinition] = [
-    ToolDefinition(
-        name="read_file",
-        description="Read the contents of a file at the given path.",
-        trust_level=TrustLevel.SAFE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Absolute or relative file path"},
-            },
-            "required": ["path"],
-        },
-        executor=_read_file,
-        tags=["filesystem", "read"],
-    ),
-    ToolDefinition(
-        name="write_file",
-        description="Write content to a file. Creates directories as needed.",
-        trust_level=TrustLevel.GUARDED,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "path":    {"type": "string", "description": "Destination file path"},
-                "content": {"type": "string", "description": "Text content to write"},
-            },
-            "required": ["path", "content"],
-        },
-        executor=_write_file,
-        tags=["filesystem", "write"],
-    ),
-    ToolDefinition(
-        name="list_dir",
-        description="List files and directories at the given path.",
-        trust_level=TrustLevel.SAFE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Directory path (default: current dir)"},
-            },
-            "required": [],
-        },
-        executor=_list_dir,
-        tags=["filesystem", "read"],
-    ),
     ToolDefinition(
         name="run_bash",
         description="Execute a shell command and return stdout/stderr.",

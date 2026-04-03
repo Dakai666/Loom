@@ -31,7 +31,11 @@ from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.cognition.providers import LLMResponse
-from loom.platform.cli.tools import BUILTIN_TOOLS, _read_file, _write_file, _list_dir, _run_bash
+from loom.platform.cli.tools import (
+    BUILTIN_TOOLS,
+    make_filesystem_tools,
+    _run_bash,
+)
 from loom.platform.cli.main import compress_session
 
 
@@ -152,19 +156,25 @@ class TestPipelineToMemory:
 # ---------------------------------------------------------------------------
 
 class TestBuiltinTools:
+    # Helper: extract executor from workspace-bound filesystem tools
+    @staticmethod
+    def _fs(tmp_workspace):
+        tools = make_filesystem_tools(tmp_workspace)
+        return {t.name: t.executor for t in tools}
+
     @pytest.mark.asyncio
     async def test_read_file_success(self, tmp_workspace):
         f = tmp_workspace / "hello.txt"
         f.write_text("hello loom", encoding="utf-8")
         call = make_call("read_file", args={"path": str(f)})
-        result = await _read_file(call)
+        result = await self._fs(tmp_workspace)["read_file"](call)
         assert result.success is True
         assert result.output == "hello loom"
 
     @pytest.mark.asyncio
     async def test_read_file_missing(self, tmp_workspace):
         call = make_call("read_file", args={"path": str(tmp_workspace / "nope.txt")})
-        result = await _read_file(call)
+        result = await self._fs(tmp_workspace)["read_file"](call)
         assert result.success is False
         assert result.error is not None
 
@@ -172,7 +182,7 @@ class TestBuiltinTools:
     async def test_write_file_creates_file(self, tmp_workspace):
         dest = tmp_workspace / "output.txt"
         call = make_call("write_file", args={"path": str(dest), "content": "written!"})
-        result = await _write_file(call)
+        result = await self._fs(tmp_workspace)["write_file"](call)
         assert result.success is True
         assert dest.read_text() == "written!"
 
@@ -180,7 +190,7 @@ class TestBuiltinTools:
     async def test_write_file_creates_parent_dirs(self, tmp_workspace):
         dest = tmp_workspace / "deep" / "nested" / "file.txt"
         call = make_call("write_file", args={"path": str(dest), "content": "deep"})
-        result = await _write_file(call)
+        result = await self._fs(tmp_workspace)["write_file"](call)
         assert result.success is True
         assert dest.exists()
 
@@ -190,7 +200,7 @@ class TestBuiltinTools:
         (tmp_workspace / "b.txt").write_text("b")
         (tmp_workspace / "subdir").mkdir()
         call = make_call("list_dir", args={"path": str(tmp_workspace)})
-        result = await _list_dir(call)
+        result = await self._fs(tmp_workspace)["list_dir"](call)
         assert result.success is True
         assert "a.txt" in result.output
         assert "b.txt" in result.output
@@ -199,7 +209,7 @@ class TestBuiltinTools:
     @pytest.mark.asyncio
     async def test_list_dir_missing_path(self, tmp_workspace):
         call = make_call("list_dir", args={"path": str(tmp_workspace / "ghost")})
-        result = await _list_dir(call)
+        result = await self._fs(tmp_workspace)["list_dir"](call)
         assert result.success is False
 
     @pytest.mark.asyncio
@@ -223,16 +233,20 @@ class TestBuiltinTools:
         assert result.success is False
         assert "timed out" in result.error.lower()
 
-    def test_builtin_tools_registered_in_list(self):
-        names = {t.name for t in BUILTIN_TOOLS}
-        assert names == {"read_file", "write_file", "list_dir", "run_bash"}
+    def test_builtin_tools_registered_in_list(self, tmp_workspace):
+        # BUILTIN_TOOLS now only contains run_bash; filesystem tools come from make_filesystem_tools
+        bash_names = {t.name for t in BUILTIN_TOOLS}
+        assert "run_bash" in bash_names
+        fs_names = {t.name for t in make_filesystem_tools(tmp_workspace)}
+        assert fs_names == {"read_file", "write_file", "list_dir"}
 
-    def test_trust_levels_correct(self):
-        trust_map = {t.name: t.trust_level for t in BUILTIN_TOOLS}
-        assert trust_map["read_file"] == TrustLevel.SAFE
-        assert trust_map["list_dir"] == TrustLevel.SAFE
-        assert trust_map["write_file"] == TrustLevel.GUARDED
-        assert trust_map["run_bash"] == TrustLevel.GUARDED
+    def test_trust_levels_correct(self, tmp_workspace):
+        fs_trust = {t.name: t.trust_level for t in make_filesystem_tools(tmp_workspace)}
+        assert fs_trust["read_file"] == TrustLevel.SAFE
+        assert fs_trust["list_dir"] == TrustLevel.SAFE
+        assert fs_trust["write_file"] == TrustLevel.GUARDED
+        bash_trust = {t.name: t.trust_level for t in BUILTIN_TOOLS}
+        assert bash_trust["run_bash"] == TrustLevel.GUARDED
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +321,7 @@ class TestFullPipeline:
         ])
 
         registry = ToolRegistry()
-        for tool in BUILTIN_TOOLS:
+        for tool in make_filesystem_tools(tmp_workspace):
             registry.register(tool)
 
         # Step 1: read

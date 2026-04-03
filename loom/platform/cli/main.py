@@ -73,6 +73,7 @@ from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
     BUILTIN_TOOLS,
     make_fetch_url_tool,
+    make_filesystem_tools,
     make_memorize_tool,
     make_query_relations_tool,
     make_recall_tool,
@@ -245,10 +246,13 @@ class LoomSession:
         model: str,
         db_path: str,
         resume_session_id: str | None = None,
+        workspace: Path | None = None,
     ) -> None:
         self.model = model
         self.session_id = resume_session_id or str(uuid.uuid4())[:8]
         self._resume = resume_session_id is not None
+        # Workspace root — all relative file paths resolve here; defaults to CWD
+        self.workspace: Path = (workspace or Path.cwd()).resolve()
         self.router = build_router(model)
 
         # Build prompt stack from loom.toml [identity] config
@@ -256,19 +260,38 @@ class LoomSession:
         self._stack = PromptStack.from_config(config)
         system_prompt = self._stack.load()
 
+        # Inject workspace context into system prompt
+        workspace_note = (
+            f"\n\n## Workspace\nYour working directory is: `{self.workspace}`\n"
+            "ALWAYS save files inside this directory. "
+            "Use relative paths (e.g. `report.md`) which resolve to the workspace. "
+            "NEVER write to `~`, `/tmp`, or paths outside the workspace unless "
+            "explicitly instructed by the user."
+        )
+        if system_prompt:
+            system_prompt = system_prompt + workspace_note
+        else:
+            system_prompt = workspace_note.strip()
+
         # OpenAI-canonical message history, seeded with composed system prompt
         self.messages: list[dict[str, Any]] = (
             [{"role": "system", "content": system_prompt}] if system_prompt else []
         )
 
-        # Registry
+        # Registry — run_bash (workspace-independent) + workspace-aware filesystem tools
         self.registry = ToolRegistry()
         for tool in BUILTIN_TOOLS:
+            self.registry.register(tool)
+        _fs_tools = make_filesystem_tools(self.workspace)
+        for tool in _fs_tools:
             self.registry.register(tool)
 
         # Permission context (SAFE tools pre-authorized)
         self.perm = PermissionContext(session_id=self.session_id)
         for tool in BUILTIN_TOOLS:
+            if tool.trust_level == TrustLevel.SAFE:
+                self.perm.authorize(tool.name)
+        for tool in _fs_tools:
             if tool.trust_level == TrustLevel.SAFE:
                 self.perm.authorize(tool.name)
 
@@ -1212,9 +1235,23 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
     elif command == "/verbose":
         app.action_toggle_verbose()
 
+    elif command == "/sessions":
+        # Show session picker; if a different session is chosen, exit so
+        # _chat_tui() loop can restart with the new session_id.
+        from loom.core.memory.session_log import SessionLog as _SL
+        from loom.platform.cli.tui.components.session_picker import SessionPickerModal
+
+        async with session._store.connect() as conn:
+            rows = await _SL(conn).list_sessions(limit=20)
+        selected = await app.push_screen_wait(SessionPickerModal(rows))
+        if selected and selected != session.session_id:
+            app.exit(selected)  # _chat_tui restart loop picks this up
+        elif selected == session.session_id:
+            app.notify("Already in this session.", severity="information")
+
     elif command == "/help":
         app.notify(
-            "Commands: /personality [name|off], /compact, /verbose, /help  |  "
+            "Commands: /personality [name|off], /compact, /verbose, /sessions, /help  |  "
             "Keys: Ctrl+L clear · Ctrl+O verbose · Ctrl+W workspace"
         )
 
@@ -1223,36 +1260,61 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
 
 async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -> None:
-    """Launch the Textual TUI chat session."""
+    """Launch the Textual TUI chat session.
+
+    If no resume_session_id is given, auto-resume the most recent saved session
+    so users continue where they left off without extra flags.
+    """
     db_path = str(Path(db).expanduser())
-    session = LoomSession(model=model, db_path=db_path, resume_session_id=resume_session_id)
-    await session.start()
 
-    app = LoomChatApp.create(session)
+    # Auto-resume last session when no explicit target is given
+    if resume_session_id is None:
+        store = SQLiteStore(db_path)
+        await store.initialize()
+        async with store.connect() as conn:
+            rows = await SessionLog(conn).list_sessions(limit=1)
+        if rows:
+            resume_session_id = rows[0]["session_id"]
 
-    # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
-    # shows a ModalScreen dialog — no terminal suspension needed.
-    from loom.core.harness.middleware import BlastRadiusMiddleware
-    from loom.platform.cli.tui.components.confirm_modal import ConfirmModal
+    # Session switch loop: /sessions command exits the app with the new session_id.
+    # We restart the whole setup with the requested session.
+    next_session_id: str | None = resume_session_id
+    while True:
+        session = LoomSession(model=model, db_path=db_path,
+                              resume_session_id=next_session_id)
+        await session.start()
 
-    async def _tui_confirm(call: ToolCall) -> bool:
-        args_preview = "  ".join(
-            f"{k}={str(v)[:40]}" for k, v in call.args.items()
-        )[:120]
-        return await app.push_screen_wait(
-            ConfirmModal(
-                tool_name=call.tool_name,
-                trust_label=call.trust_level.label,
-                args_preview=args_preview,
+        app = LoomChatApp.create(session)
+
+        # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
+        # shows a ModalScreen dialog — no terminal suspension needed.
+        from loom.core.harness.middleware import BlastRadiusMiddleware
+        from loom.platform.cli.tui.components.confirm_modal import ConfirmModal
+
+        async def _tui_confirm(call: ToolCall) -> bool:
+            args_preview = "  ".join(
+                f"{k}={str(v)[:40]}" for k, v in call.args.items()
+            )[:120]
+            return await app.push_screen_wait(
+                ConfirmModal(
+                    tool_name=call.tool_name,
+                    trust_label=call.trust_level.label,
+                    args_preview=args_preview,
+                )
             )
-        )
 
-    for mw in session._pipeline._middlewares:
-        if isinstance(mw, BlastRadiusMiddleware):
-            mw._confirm = _tui_confirm
+        for mw in session._pipeline._middlewares:
+            if isinstance(mw, BlastRadiusMiddleware):
+                mw._confirm = _tui_confirm
+                break
+
+        result = await app.run_async()
+        # If /sessions returned a session_id via app.exit(id), restart with it;
+        # otherwise we're done.
+        if isinstance(result, str):
+            next_session_id = result
+        else:
             break
-
-    await app.run_async()
 
 
 async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
