@@ -1,5 +1,5 @@
 """
-InputArea component — multiline input with slash command completion.
+InputArea component — single-line chat input with slash command completion.
 """
 
 from __future__ import annotations
@@ -7,18 +7,18 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.events import Key
 from textual.message import Message
-from textual.widgets import TextArea
+from textual.widget import Widget
+from textual.widgets import Input
 
 
-class InputArea(TextArea):
+class InputArea(Widget):
     """
-    Multiline text input with slash command completion.
+    Single-line chat input with slash command Tab-completion.
 
     Handles:
-    - Tab completion for slash commands (/personality, /compact, etc.)
-    - Enter to submit
-    - Multiline input (Shift+Enter for newline)
-    - History navigation (up/down) — delegated to parent app
+    - Enter to submit (posts Submit message)
+    - Tab to complete slash commands
+    - Inner Input widget receives focus on mount
     """
 
     SLASH_COMMANDS = [
@@ -42,39 +42,37 @@ class InputArea(TextArea):
             self.text = text
 
     def compose(self) -> ComposeResult:
-        yield TextArea(
+        yield Input(
             id="input-text",
             placeholder="Type a message... (/help for commands)",
-            multiline=False,
-            tab_behavior="indent",
         )
 
     def on_mount(self) -> None:
-        ta = self.query_one("#input-text", TextArea)
-        ta.focus()
+        self.query_one("#input-text", Input).focus()
 
-    def _on_key(self, event: Key) -> None:
-        """Handle key events for submission and completion."""
-        ta = self.query_one("#input-text", TextArea)
-        text = ta.text
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter key — submit and clear."""
+        text = event.value.strip()
+        if text:
+            self.post_message(self.Submit(text))
+            event.input.value = ""
 
-        if event.key == "enter":
-            if text.strip():
-                self.post_message(self.Submit(text.strip()))
-                ta.text = ""
+    def on_key(self, event: Key) -> None:
+        """Tab — complete slash commands."""
+        if event.key != "tab":
             return
-
-        if event.key == "tab":
-            # Simple slash command completion
-            cursor = ta.cursor_position
-            text_before = text[:cursor]
-            last_word = text_before.split()[-1] if text_before.split() else ""
-            if last_word.startswith("/"):
-                for cmd in self.SLASH_COMMANDS:
-                    if cmd.startswith(last_word) and cmd != last_word:
-                        # Replace the incomplete word
-                        before = text_before[: cursor - len(last_word)]
-                        after = text[cursor:]
-                        ta.text = before + cmd + after
-                        ta.cursor_position = len(before) + len(cmd)
-                        break
+        inp = self.query_one("#input-text", Input)
+        text = inp.value
+        cursor = inp.cursor_position
+        text_before = text[:cursor]
+        words = text_before.split()
+        last_word = words[-1] if words else ""
+        if last_word.startswith("/"):
+            for cmd in self.SLASH_COMMANDS:
+                if cmd.startswith(last_word) and cmd != last_word:
+                    before = text_before[: cursor - len(last_word)]
+                    after = text[cursor:]
+                    inp.value = before + cmd + after
+                    inp.cursor_position = len(before) + len(cmd)
+                    break
+            event.prevent_default()

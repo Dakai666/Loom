@@ -155,9 +155,7 @@ class LoomApp(App):
         yield InputArea(id="input-area")
 
     def on_mount(self) -> None:
-        """Set focus to input area on startup."""
-        input_area = self.query_one("#input-area", InputArea)
-        self.set_focus(input_area)
+        """InputArea.on_mount() focuses the inner Input widget directly."""
 
     # ── Actions (called by bindings) ─────────────────────────────────────────
 
