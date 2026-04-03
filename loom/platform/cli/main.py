@@ -136,6 +136,12 @@ async def compress_session(
     router: LLMRouter,
     model: str,
 ) -> int:
+    """Compress unprocessed episodic entries to semantic facts, then delete them.
+
+    Uses a timestamp in the semantic key so repeated compressions (mid-session
+    and on close) never overwrite each other.  Episodic entries are deleted
+    after a successful compression to prevent redundant re-processing.
+    """
     entries = await episodic.read_session(session_id)
     if not entries:
         return 0
@@ -158,15 +164,21 @@ async def compress_session(
     if not facts and raw.strip():
         facts = [raw.strip()[:800]]
 
+    # Use a timestamp suffix so repeated compressions don't overwrite each other
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     for i, fact in enumerate(facts):
         await semantic.upsert(
             SemanticEntry(
-                key=f"session:{session_id}:fact:{i}",
+                key=f"session:{session_id}:{ts}:fact:{i}",
                 value=fact,
                 confidence=0.8,
                 source=f"session:{session_id}",
             )
         )
+
+    # Delete processed episodic entries so they aren't re-compressed on next stop()
+    if facts:
+        await episodic.delete_session(session_id)
 
     return len(facts)
 
@@ -373,6 +385,9 @@ class LoomSession:
             loaded = await self._session_log.load_messages(self.session_id)
             system_msgs = [m for m in self.messages if m["role"] == "system"]
             self.messages = system_msgs + loaded
+            # Strip any incomplete tool_use sequences left by abrupt close or
+            # sessions saved before the raw_message fix.
+            self._sanitize_history()
             # Resume turn_index after the last saved turn
             meta = await self._session_log.get_session(self.session_id)
             self._turn_index = meta["turn_count"] if meta else 0
@@ -466,6 +481,9 @@ class LoomSession:
             )
             await self._smart_compact()
 
+        # Guard against corrupted history before sending to the API.
+        self._sanitize_history()
+
         tools = self.registry.to_openai_schema()
         tool_count = 0
         input_tokens = 0
@@ -506,6 +524,20 @@ class LoomSession:
 
             if response.stop_reason == "end_turn":
                 self._turn_index += 1
+
+                # Mid-session episodic compression: once every 30 entries so
+                # long-running sessions don't accumulate stale episodic noise.
+                _EPISODIC_COMPRESS_THRESHOLD = 30
+                try:
+                    ep_count = await self._episodic.count_session(self.session_id)
+                    if ep_count >= _EPISODIC_COMPRESS_THRESHOLD:
+                        await compress_session(
+                            self.session_id, self._episodic, self._semantic,
+                            self.router, self.model,
+                        )
+                except Exception:
+                    pass  # never block the turn on compression failure
+
                 yield TurnDone(
                     tool_count=tool_count,
                     input_tokens=input_tokens,
@@ -595,6 +627,34 @@ class LoomSession:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _sanitize_history(self) -> None:
+        """Remove incomplete tool_use sequences from message history.
+
+        An assistant message with ``tool_calls`` must be immediately followed
+        by one ``tool`` message per call-id.  Any incomplete sequence (caused
+        by abrupt close or sessions saved before the raw_message fix) is
+        trimmed back so the API never sees an unresolved tool call.
+        """
+        msgs = self.messages
+        i = len(msgs) - 1
+        while i >= 0:
+            msg = msgs[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                expected_ids = {tc["id"] for tc in msg["tool_calls"]}
+                # Collect tool messages immediately following this assistant msg
+                found_ids: set[str] = set()
+                j = i + 1
+                while j < len(msgs) and msgs[j].get("role") == "tool":
+                    tid = msgs[j].get("tool_call_id")
+                    if tid in expected_ids:
+                        found_ids.add(tid)
+                    j += 1
+                if found_ids != expected_ids:
+                    # Incomplete — trim from this assistant message onward
+                    self.messages = msgs[:i]
+                    return
+            i -= 1
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None

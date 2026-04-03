@@ -137,13 +137,16 @@ class MemorySearchResult:
     value: str              # fact value or skill body
     score: float            # BM25 relevance score
     metadata: dict = field(default_factory=dict)
+    updated_at: str = ""    # ISO timestamp of last update (empty if unknown)
 
     def format(self, max_value_len: int = 300) -> str:
-        """Human-readable one-entry summary."""
+        """Human-readable one-entry summary with timestamp."""
         truncated = self.value[:max_value_len]
         if len(self.value) > max_value_len:
             truncated += "…"
-        return f"[{self.type}] {self.key}\n  {truncated}"
+        # Show date portion only (YYYY-MM-DD) to keep output concise
+        date_hint = f" [{self.updated_at[:10]}]" if self.updated_at else ""
+        return f"[{self.type}]{date_hint} {self.key}\n  {truncated}"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +269,10 @@ class MemorySearch:
                     "confidence": entries_with_vecs[i][0].confidence,
                     "method": "embedding",
                 },
+                updated_at=(
+                    entries_with_vecs[i][0].updated_at.isoformat()
+                    if entries_with_vecs[i][0].updated_at else ""
+                ),
             )
             for score, i in scored[:limit]
         ]
@@ -285,6 +292,7 @@ class MemorySearch:
                     value=e.value,
                     score=0.0,
                     metadata={"confidence": e.confidence, "fallback": True},
+                    updated_at=e.updated_at.isoformat() if e.updated_at else "",
                 )
                 for e in entries
             )
@@ -298,6 +306,7 @@ class MemorySearch:
                     value=s.body,
                     score=0.0,
                     metadata={"confidence": s.confidence, "tags": s.tags, "fallback": True},
+                    updated_at=s.updated_at.isoformat() if s.updated_at else "",
                 )
                 for s in skills[:limit]
             )
@@ -346,6 +355,7 @@ class MemorySearch:
                 value=entries[i].value,
                 score=score,
                 metadata={"confidence": entries[i].confidence},
+                updated_at=entries[i].updated_at.isoformat() if entries[i].updated_at else "",
             )
             for i, score in self._sem_bm25.top_k(query, k=limit)
         ]
@@ -373,6 +383,7 @@ class MemorySearch:
                 value=skills[i].body,
                 score=score,
                 metadata={"confidence": skills[i].confidence, "tags": skills[i].tags},
+                updated_at=skills[i].updated_at.isoformat() if skills[i].updated_at else "",
             )
             for i, score in self._skill_bm25.top_k(query, k=limit)
         ]

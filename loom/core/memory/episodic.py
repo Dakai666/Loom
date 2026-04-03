@@ -74,3 +74,12 @@ class EpisodicMemory:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+    async def delete_session(self, session_id: str) -> int:
+        """Delete all episodic entries for *session_id*. Returns count deleted."""
+        cursor = await self._db.execute(
+            "DELETE FROM episodic_entries WHERE session_id = ?",
+            (session_id,),
+        )
+        await self._db.commit()
+        return cursor.rowcount or 0
