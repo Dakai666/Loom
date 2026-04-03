@@ -102,12 +102,11 @@ class LoomApp(App):
 
     #workspace-panel {
         width: 40%;
-        overflow-y: auto;
     }
 
     #obs-panel {
         dock: bottom;
-        height: 3;
+        height: 1;
         background: $surface;
         border-top: solid $border;
         display: none;
@@ -115,6 +114,7 @@ class LoomApp(App):
 
     #obs-panel.visible {
         display: block;
+        height: 2;
     }
 
     #status-bar {

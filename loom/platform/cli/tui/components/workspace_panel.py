@@ -36,6 +36,27 @@ class WorkspacePanel(Widget):
     └──────────────────────────────────────────────────────────────────┘
     """
 
+    DEFAULT_CSS = """
+    WorkspacePanel {
+        overflow-y: auto;
+        padding: 0 1;
+    }
+
+    #workspace-header {
+        height: 2;
+        border-bottom: solid $border;
+        margin-bottom: 1;
+    }
+
+    #artifacts-panel {
+        height: auto;
+    }
+
+    #knowledge-panel {
+        height: auto;
+    }
+    """
+
     active_tab: reactive[WorkspaceTab] = reactive(WorkspaceTab.ARTIFACTS)
 
     class TabChanged(Message, bubble=True):
@@ -117,14 +138,18 @@ class WorkspacePanel(Widget):
         knowledge_active = self.active_tab == WorkspaceTab.KNOWLEDGE
 
         artifacts_tag = (
-            "[bold green]Artifacts[/bold green]"
+            "[reverse cyan] Artifacts [/reverse cyan]"
             if artifacts_active
-            else "[dim]Artifacts[/dim]"
+            else "[dim][ Artifacts ][/dim]"
         )
         knowledge_tag = (
-            "[bold green]Knowledge[/bold green]"
+            "[reverse cyan] Knowledge [/reverse cyan]"
             if knowledge_active
-            else "[dim]Knowledge[/dim]"
+            else "[dim][ Knowledge ][/dim]"
         )
 
-        header.update(f"[bold]WORKSPACE[/bold]    {artifacts_tag}  |  {knowledge_tag}")
+        header.update(
+            f"[bold dim]WORKSPACE[/bold dim]  "
+            f"{artifacts_tag}  {knowledge_tag}  "
+            f"[dim]Ctrl+W[/dim]"
+        )

@@ -1,10 +1,8 @@
 """
-ObservabilityPanel component — bottom dock with tool summary + budget.
+ObservabilityPanel component — compact tool summary after each turn.
 
 Shows after TurnDone when tools were used:
-    ┌─ tools ──────────────────────────────────────────────────┐
-    │  Read (12ms ok)  |  glob (8ms ok)  |  Bash (234ms ok)  │
-    └─────────────────────────────────────────────────────────┘
+  ✓ read_file 12ms  ✓ list_dir 8ms  ✗ run_bash 234ms
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
@@ -29,10 +26,10 @@ class ToolSummary:
 
 class ObservabilityPanel(Widget):
     """
-    Bottom dock panel showing tool call summary.
+    Bottom dock panel showing tool call summary after each turn.
 
-    Appears after TurnDone when tool_count > 0.
-    Shows tool name + duration on one line.
+    Appears (display: block) after TurnDone when tool_count > 0.
+    Single-line compact format — no box drawing.
     """
 
     visible: reactive[bool] = reactive(False)
@@ -57,26 +54,29 @@ class ObservabilityPanel(Widget):
         self.set_class(visible, "visible")
 
     def _update_display(self) -> None:
-        """Render the observability panel."""
-        content = self.query_one("#obs-content", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            content = self.query_one("#obs-content", Static)
+        except NoMatches:
+            return
+
         if not self.visible or not self.tools:
             content.update("")
             return
 
-        tool_parts = []
+        parts: list[str] = []
         for tool in self.tools:
-            icon = "ok" if tool.success else "!!"
-            color = "green" if tool.success else "red"
-            tool_parts.append(
-                f"[dim]{tool.name}[/dim] "
-                f"[{color}]{tool.duration_ms:.0f}ms {icon}[/{color}]"
-            )
+            if tool.success:
+                parts.append(
+                    f"[green]✓[/green] [dim]{tool.name}[/dim] "
+                    f"[green]{tool.duration_ms:.0f}ms[/green]"
+                )
+            else:
+                parts.append(
+                    f"[red]✗[/red] [dim]{tool.name}[/dim] "
+                    f"[red]{tool.duration_ms:.0f}ms[/red]"
+                )
 
-        line = "  |  ".join(tool_parts)
-        content.update(
-            f"[dim]┌─ tools ──────────────────────────────────────────────"
-            f"─────────────┐\n"
-            f"│  {line}  │\n"
-            f"└────────────────────────────────────────────────────"
-            f"───────────────────┘[/dim]"
-        )
+        summary = "  [dim]|[/dim]  ".join(parts)
+        content.update(f"[dim]tools:[/dim]  {summary}")

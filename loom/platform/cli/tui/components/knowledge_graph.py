@@ -111,6 +111,9 @@ class KnowledgeGraph(Widget):
     def compose(self) -> ComposeResult:
         yield Static("", id="kg-content")
 
+    def on_mount(self) -> None:
+        self._update_display()
+
     def set_nodes(self, nodes: list[KnowledgeNode]) -> None:
         """Set the knowledge graph nodes."""
         self.root_nodes = nodes
@@ -119,70 +122,35 @@ class KnowledgeGraph(Widget):
     def load_from_session(
         self, semantic_count: int, procedural_count: int, episodic_count: int
     ) -> None:
-        """Load a default session summary into the graph."""
-        root = KnowledgeNode(id="root", label="Session", node_type="root")
-
-        project = KnowledgeNode(id="project", label="Project", node_type="root")
-        framework = KnowledgeNode(
-            id="framework",
-            label="Framework: FastAPI",
-            node_type="concept",
-            confidence=0.95,
-        )
-        language = KnowledgeNode(
-            id="language",
-            label="Language: Python 3.12",
-            node_type="concept",
-            confidence=0.9,
-        )
-
-        concepts = KnowledgeNode(
-            id="concepts", label="Key Concepts", node_type="category", expanded=False
-        )
-        concepts.children = [
-            KnowledgeNode(
-                id="middleware",
-                label="Middleware Pattern",
-                node_type="concept",
-                confidence=0.85,
-            ),
-            KnowledgeNode(
-                id="memory-types",
-                label="Memory Types (4)",
-                node_type="concept",
-                confidence=0.9,
-                expanded=False,
-            ),
-            KnowledgeNode(
-                id="dag", label="DAG Task Engine", node_type="concept", confidence=0.75
-            ),
-        ]
-
-        project.children = [framework, language, concepts]
-
-        memory = KnowledgeNode(id="memory", label="Memory", node_type="root")
+        """Load session memory stats into the graph."""
+        memory = KnowledgeNode(id="memory", label="Memory Layer", node_type="root", expanded=True)
         memory.children = [
             KnowledgeNode(
                 id="semantic",
-                label=f"Semantic: {semantic_count} entries",
+                label=f"Semantic  {semantic_count} entries",
                 node_type="memory",
                 confidence=0.95,
             ),
             KnowledgeNode(
                 id="procedural",
-                label=f"Procedural: {procedural_count} skills",
+                label=f"Procedural  {procedural_count} skills",
                 node_type="skill",
                 confidence=0.9,
             ),
             KnowledgeNode(
                 id="episodic",
-                label=f"Episodic: {episodic_count} entries",
+                label=f"Episodic  {episodic_count} turns",
                 node_type="memory",
                 confidence=0.8,
             ),
         ]
 
-        self.root_nodes = [root, project, memory]
+        session_node = KnowledgeNode(
+            id="session", label="Session", node_type="root", expanded=True
+        )
+        session_node.children = [memory]
+
+        self.root_nodes = [session_node]
         self._update_display()
 
     def toggle_node(self, node_id: str) -> None:
@@ -225,21 +193,29 @@ class KnowledgeGraph(Widget):
         self._update_display()
 
     def _update_display(self) -> None:
-        content = self.query_one("#kg-content", Static)
-        if not self.root_nodes:
-            content.update("[dim](no knowledge graph)[/dim]")
+        from textual.css.query import NoMatches
+
+        try:
+            content = self.query_one("#kg-content", Static)
+        except NoMatches:
             return
 
-        lines = ["[bold]KNOWLEDGE GRAPH[/bold]", ""]
+        if not self.root_nodes:
+            content.update(
+                "[dim]No memory data yet.[/dim]\n\n"
+                "[dim]Knowledge graph populates as the\n"
+                "agent stores memories.[/dim]"
+            )
+            return
 
+        lines: list[str] = []
         for node in self.root_nodes:
             lines.extend(node.to_lines(indent=0))
 
         lines.append("")
         lines.append(
-            "[bold cyan]expand[/bold cyan]  "
-            "[bold cyan]collapse[/bold cyan]  "
-            "[bold cyan]search[/bold cyan]"
+            "[dim]Ctrl+W[/dim] toggle  "
+            "[bold cyan]↑↓[/bold cyan] navigate"
         )
 
         content.update("\n".join(lines))

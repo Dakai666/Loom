@@ -1,11 +1,13 @@
 """
-StatusBar component — color-coded budget visualization.
+StatusBar component — bottom bar with session stats.
+
+Design:
+  [GUARDED]  ctx 45% [▓▓▓▓▓░░░░░]  1.2k in / 340 out  2.3s  3 tools
 """
 
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
@@ -15,8 +17,8 @@ class StatusBar(Widget):
     """
     Bottom status bar showing context budget and token usage.
 
-    Visual: [#....#....] 45% | 1.2k in / 340 out | 2.3s | 3 tools
-    Color-coded: green < 60%, yellow 60-85%, red > 85%
+    Color-coded context bar: green < 60%, yellow 60-85%, red > 85%.
+    Shows trust mode, token counts, elapsed time, tool count.
     """
 
     context_fraction: reactive[float] = reactive(0.0)
@@ -27,6 +29,9 @@ class StatusBar(Widget):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-content")
+
+    def on_mount(self) -> None:
+        self._update_display()
 
     def update(
         self,
@@ -48,26 +53,45 @@ class StatusBar(Widget):
         self._update_display()
 
     def _update_display(self) -> None:
-        """Render the status bar."""
         from textual.css.query import NoMatches
 
         try:
             content = self.query_one("#status-content", Static)
         except NoMatches:
             return
+
         pct = self.context_fraction * 100
         ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
 
         bar_len = 10
         filled = int(bar_len * self.context_fraction)
-        bar = "#" * filled + "." * (bar_len - filled)
+        bar = "▓" * filled + "░" * (bar_len - filled)
 
-        content.update(
-            f"[dim]-[/dim]"
-            f"[{ctx_color}]{bar}[/{ctx_color}]"
-            f"[dim] context {pct:.1f}%  |  "
-            f"{self.input_tokens}in / {self.output_tokens}out  |  "
-            f"{self.elapsed_ms / 1000:.1f}s  |  "
-            f"{self.tool_count} tool{'s' if self.tool_count != 1 else ''}"
-            f"[/dim]"
+        parts: list[str] = []
+
+        # Context bar
+        parts.append(
+            f"ctx [{ctx_color}]{bar}[/{ctx_color}] "
+            f"[{ctx_color}]{pct:.0f}%[/{ctx_color}]"
         )
+
+        # Tokens — only show after first turn
+        if self.input_tokens > 0:
+            def _fmt(n: int) -> str:
+                return f"{n/1000:.1f}k" if n >= 1000 else str(n)
+
+            parts.append(
+                f"[dim]{_fmt(self.input_tokens)} in"
+                f" / {_fmt(self.output_tokens)} out[/dim]"
+            )
+
+        # Elapsed time
+        if self.elapsed_ms > 0:
+            parts.append(f"[dim]{self.elapsed_ms / 1000:.1f}s[/dim]")
+
+        # Tool count
+        if self.tool_count > 0:
+            label = "tool" if self.tool_count == 1 else "tools"
+            parts.append(f"[dim]{self.tool_count} {label}[/dim]")
+
+        content.update("  [dim]|[/dim]  ".join(parts))

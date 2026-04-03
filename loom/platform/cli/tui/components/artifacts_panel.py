@@ -43,6 +43,9 @@ class ArtifactsPanel(Widget):
     def compose(self) -> ComposeResult:
         yield Static("", id="artifacts-content")
 
+    def on_mount(self) -> None:
+        self._update_display()
+
     def add_artifact(
         self,
         path: str,
@@ -68,13 +71,23 @@ class ArtifactsPanel(Widget):
         self._update_display()
 
     def _update_display(self) -> None:
-        content = self.query_one("#artifacts-content", Static)
-        if not self.artifacts:
-            content.update("[dim](no artifacts yet)[/dim]")
+        from textual.css.query import NoMatches
+        from rich.markup import escape as markup_escape
+
+        try:
+            content = self.query_one("#artifacts-content", Static)
+        except NoMatches:
             return
 
-        lines = ["[bold]ARTIFACTS[/bold]", ""]
+        if not self.artifacts:
+            content.update(
+                "[dim]No files modified yet.[/dim]\n\n"
+                "[dim]Artifacts appear here when the agent\n"
+                "writes or modifies files.[/dim]"
+            )
+            return
 
+        lines: list[str] = []
         for i, a in enumerate(self.artifacts):
             age = self._age_string(a.timestamp)
             state_color = {
@@ -82,14 +95,26 @@ class ArtifactsPanel(Widget):
                 ArtifactState.MODIFIED: "yellow",
                 ArtifactState.DELETED: "red",
             }[a.state]
-            filename = a.path.split("/")[-1].split("\\")[-1]
-            marker = ">" if i == self._selected_index else " "
-
+            state_icon = {
+                ArtifactState.CREATED: "✚",
+                ArtifactState.MODIFIED: "~",
+                ArtifactState.DELETED: "✗",
+            }[a.state]
+            # Show full relative path, not just filename
+            safe_path = markup_escape(a.path)
+            marker = "[bold cyan]>[/bold cyan]" if i == self._selected_index else " "
             lines.append(
-                f"{marker} [yellow]{filename}[/yellow]  "
-                f"[{state_color}]{a.state.value}[/{state_color}]  "
-                f"[dim]{age}[/dim]"
+                f"{marker} [{state_color}]{state_icon}[/{state_color}] "
+                f"[yellow]{safe_path}[/yellow]"
             )
+            lines.append(
+                f"   [{state_color}]{a.state.value}[/{state_color}]"
+                f"  [dim]{age}[/dim]"
+            )
+            if a.preview:
+                preview_line = markup_escape(a.preview.split("\n")[0][:50])
+                lines.append(f"   [dim]{preview_line}[/dim]")
+            lines.append("")
 
         content.update("\n".join(lines))
 
