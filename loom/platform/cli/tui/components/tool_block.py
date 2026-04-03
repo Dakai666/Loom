@@ -145,24 +145,25 @@ class ToolBlock(Widget):
             if tool.state == ToolState.PENDING:
                 args_preview = self._format_args(tool.args)
                 lines.append(
-                    f"  [dim][[/dim][yellow]-[/yellow][dim]][/dim] [yellow]{tool.name}[/yellow]({args_preview})"
+                    f"  [yellow]○[/yellow] [yellow]{tool.name}[/yellow]({args_preview})"
                 )
             elif tool.state == ToolState.RUNNING:
                 lines.append(
-                    f"  [dim][[/dim][yellow]{tool.spinner_frame}[/yellow][dim]][/dim] [dim]{tool.name} running...[/dim]"
+                    f"  [yellow]{tool.spinner_frame}[/yellow] [dim]{tool.name} running...[/dim]"
                 )
 
         # Completed tools (most recent last)
-        for tool in self.completed_tools[-5:]:  # show last 5
-            icon = (
-                "[green]ok[/green]" if tool.state == ToolState.DONE else "[red]!![/red]"
-            )
-            state = "done" if tool.state == ToolState.DONE else "failed"
-            lines.append(
-                f"  [dim][[/dim]{icon}[dim]][/dim] [dim]{tool.name}[/dim]  "
-                f"[{'green' if tool.state == ToolState.DONE else 'red'}]{tool.duration_ms:.0f}ms[/{'green' if tool.state == ToolState.DONE else 'red'}]  "
-                f"[dim]{state}[/dim]"
-            )
+        for tool in self.completed_tools[-5:]:
+            if tool.state == ToolState.DONE:
+                lines.append(
+                    f"  [green]✓[/green] [dim]{tool.name}[/dim]"
+                    f"  [green]{tool.duration_ms:.0f}ms[/green]"
+                )
+            else:
+                lines.append(
+                    f"  [red]✗[/red] [dim]{tool.name}[/dim]"
+                    f"  [red]{tool.duration_ms:.0f}ms[/red]"
+                )
 
         content.update("\n".join(lines) if lines else "")
 

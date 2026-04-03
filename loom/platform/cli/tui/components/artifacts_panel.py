@@ -12,7 +12,6 @@ from typing import Sequence
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
-from textual.scroll_view import ScrollView
 from textual.widget import Widget
 from textual.widgets import Static
 

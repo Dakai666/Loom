@@ -954,6 +954,22 @@ class LoomChatApp:
                 )
                 self._session = session
 
+            async def on_mount(self) -> None:
+                """Load knowledge graph counts from memory on startup."""
+                try:
+                    semantic_entries = await session._semantic.list_recent(limit=999)
+                    procedural_skills = await session._procedural.list_active()
+                    episodic_count = await session._episodic.count_session(
+                        session.session_id
+                    )
+                    self.load_knowledge_graph(
+                        semantic_count=len(semantic_entries),
+                        procedural_count=len(procedural_skills),
+                        episodic_count=episodic_count,
+                    )
+                except Exception:
+                    pass  # memory not ready yet — workspace stays empty
+
             async def on_unmount(self) -> None:
                 await self._session.stop()
 
@@ -983,6 +999,9 @@ class LoomChatApp:
                         )
                     )
 
+                    # call_id → (tool_name, path) for artifact tracking
+                    _pending_writes: dict[str, str] = {}
+
                     async for ev in self._session.stream_turn(text):
                         if isinstance(ev, TextChunk):
                             await self.dispatch_stream_event(TuiChunk(text=ev.text))
@@ -994,6 +1013,8 @@ class LoomChatApp:
                                     call_id=ev.call_id,
                                 )
                             )
+                            if ev.name == "write_file":
+                                _pending_writes[ev.call_id] = ev.args.get("path", "")
                         elif isinstance(ev, ToolEnd):
                             await self.dispatch_stream_event(
                                 TuiToolEnd(
@@ -1004,6 +1025,11 @@ class LoomChatApp:
                                     call_id=ev.call_id,
                                 )
                             )
+                            if ev.name == "write_file" and ev.success:
+                                from loom.platform.cli.tui.components import ArtifactState
+                                path = _pending_writes.pop(ev.call_id, "")
+                                if path:
+                                    self.add_artifact(path, ArtifactState.MODIFIED)
                         elif isinstance(ev, TurnDone):
                             await self.dispatch_stream_event(
                                 TuiTurnDone(
