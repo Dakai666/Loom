@@ -43,8 +43,8 @@ class WorkspacePanel(Widget):
             super().__init__()
             self.tab = tab
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._artifacts_panel: ArtifactsPanel | None = None
         self._kg_panel: KnowledgeGraph | None = None
 
