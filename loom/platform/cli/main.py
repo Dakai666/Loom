@@ -19,6 +19,7 @@ Usage
 """
 
 import asyncio
+import json
 import os
 import time
 import tomllib
@@ -495,20 +496,15 @@ class LoomSession:
             input_tokens = response.input_tokens  # report latest actual value
             output_tokens += response.output_tokens
 
+            # Log the full raw_message as JSON so tool_calls are preserved for resume.
+            # format="raw_message" signals load_messages() to parse it back directly.
+            asyncio.ensure_future(self._log_message(
+                "assistant",
+                json.dumps(response.raw_message, ensure_ascii=False),
+                {"format": "raw_message"},
+            ))
+
             if response.stop_reason == "end_turn":
-                # Log assistant text response
-                raw = response.raw_message
-                if isinstance(raw.get("content"), str):
-                    assistant_text = raw["content"]
-                elif isinstance(raw.get("content"), list):
-                    assistant_text = " ".join(
-                        b.get("text", "") for b in raw["content"]
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                else:
-                    assistant_text = ""
-                if assistant_text:
-                    asyncio.ensure_future(self._log_message("assistant", assistant_text))
                 self._turn_index += 1
                 yield TurnDone(
                     tool_count=tool_count,

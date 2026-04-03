@@ -164,6 +164,17 @@ class SessionLog:
         result: list[dict[str, Any]] = []
         for role, content, metadata_raw in rows:
             meta: dict[str, Any] = json.loads(metadata_raw)
+
+            if role == "assistant" and meta.get("format") == "raw_message":
+                # Full raw_message was stored as JSON — parse it back directly so
+                # tool_calls, content lists, etc. are all intact for the API.
+                try:
+                    msg = json.loads(content)
+                    result.append(msg)
+                    continue
+                except Exception:
+                    pass  # fall through to plain text reconstruction
+
             msg: dict[str, Any] = {"role": role, "content": content}
             # Re-attach tool_call_id for tool messages (required by OpenAI format)
             if role == "tool" and "tool_call_id" in meta:
