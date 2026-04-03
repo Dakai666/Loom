@@ -793,9 +793,13 @@ def cli() -> None:
 @cli.command()
 @click.option("--model", default="MiniMax-M2.7", show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
-def chat(model: str, db: str) -> None:
+@click.option("--tui", is_flag=True, default=False, help="Use Textual TUI interface.")
+def chat(model: str, db: str, tui: bool) -> None:
     """Start an interactive agent session."""
-    asyncio.run(_chat(model, db))
+    if tui:
+        asyncio.run(_chat_tui(model, db))
+    else:
+        asyncio.run(_chat(model, db))
 
 
 async def _chat(model: str, db: str) -> None:
@@ -910,6 +914,189 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     else:
         console.print(f"[dim]Unknown command '{command}'. Type /help for help.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Textual TUI integration
+# ---------------------------------------------------------------------------
+
+
+class LoomChatApp:
+    """
+    Subclass of LoomApp that wires a live LoomSession to the Textual component
+    tree.  Instantiated lazily to avoid importing Textual at module load time
+    (keeps `loom chat` startup fast for users without the TUI).
+    """
+
+    @staticmethod
+    def create(session: "LoomSession") -> "Any":
+        """Return a configured LoomApp instance bound to *session*."""
+        from loom.platform.cli.tui import LoomApp
+        from loom.platform.cli.tui.events import (
+            TurnStart,
+            TextChunk as TuiChunk,
+            ToolBegin as TuiToolBegin,
+            ToolEnd as TuiToolEnd,
+            TurnDone as TuiTurnDone,
+        )
+        from loom.platform.cli.ui import (
+            TextChunk,
+            ToolBegin,
+            ToolEnd,
+            TurnDone,
+        )
+
+        class _App(LoomApp):
+            def __init__(self) -> None:
+                super().__init__(
+                    model=session.model,
+                    db_path=str(session._store.path),
+                )
+                self._session = session
+
+            async def on_unmount(self) -> None:
+                await self._session.stop()
+
+            async def on_loom_app_user_message(
+                self, event: LoomApp.UserMessage
+            ) -> None:
+                text = event.text.strip()
+                if not text:
+                    return
+
+                if text.startswith("/"):
+                    await _handle_slash_tui(text, self._session, self)
+                    return
+
+                await self.dispatch_stream_event(
+                    TurnStart(
+                        user_input=text,
+                        context_pct=self._session.budget.usage_fraction,
+                    )
+                )
+
+                try:
+                    async for ev in self._session.stream_turn(text):
+                        if isinstance(ev, TextChunk):
+                            await self.dispatch_stream_event(TuiChunk(text=ev.text))
+                        elif isinstance(ev, ToolBegin):
+                            await self.dispatch_stream_event(
+                                TuiToolBegin(
+                                    name=ev.name,
+                                    args=ev.args,
+                                    call_id=ev.call_id,
+                                )
+                            )
+                        elif isinstance(ev, ToolEnd):
+                            await self.dispatch_stream_event(
+                                TuiToolEnd(
+                                    name=ev.name,
+                                    success=ev.success,
+                                    output=ev.output,
+                                    duration_ms=ev.duration_ms,
+                                    call_id=ev.call_id,
+                                )
+                            )
+                        elif isinstance(ev, TurnDone):
+                            await self.dispatch_stream_event(
+                                TuiTurnDone(
+                                    tool_count=ev.tool_count,
+                                    input_tokens=ev.input_tokens,
+                                    output_tokens=ev.output_tokens,
+                                    elapsed_ms=ev.elapsed_ms,
+                                    context_pct=self._session.budget.usage_fraction,
+                                )
+                            )
+                except Exception as exc:
+                    self.notify(str(exc), severity="error")
+
+        return _App()
+
+
+async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
+    """Slash command handler for TUI mode — sends feedback via app.notify()."""
+    parts = cmd.split(maxsplit=1)
+    command = parts[0]
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if command == "/personality":
+        if not arg:
+            p = session.current_personality
+            avail = session._stack.available_personalities()
+            app.notify(
+                f"Active: {p or '(none)'}  |  Available: {', '.join(avail) or '(none)'}"
+            )
+        elif arg == "off":
+            session.switch_personality("off")
+            app.notify("Personality cleared.")
+        else:
+            ok = session.switch_personality(arg)
+            if ok:
+                app.notify(f"Personality → {arg}")
+            else:
+                avail = session._stack.available_personalities()
+                app.notify(
+                    f"Unknown personality '{arg}'. Available: {', '.join(avail) or '(none)'}",
+                    severity="error",
+                )
+
+    elif command == "/compact":
+        pct = session.budget.usage_fraction * 100
+        app.notify(f"Compacting context ({pct:.1f}% used)…")
+        await session._smart_compact()
+        app.notify("Context compacted.")
+
+    elif command == "/verbose":
+        app.action_toggle_verbose()
+
+    elif command == "/help":
+        app.notify(
+            "Commands: /personality [name|off], /compact, /verbose, /help  |  "
+            "Keys: Ctrl+L clear · Ctrl+O verbose · Ctrl+W workspace"
+        )
+
+    else:
+        app.notify(f"Unknown command '{command}'. Type /help.", severity="warning")
+
+
+async def _chat_tui(model: str, db: str) -> None:
+    """Launch the Textual TUI chat session."""
+    db_path = str(Path(db).expanduser())
+    session = LoomSession(model=model, db_path=db_path)
+    await session.start()
+
+    app = LoomChatApp.create(session)
+
+    # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
+    # suspends the Textual app, prompts in the raw terminal, then resumes.
+    from loom.core.harness.middleware import BlastRadiusMiddleware
+    from prompt_toolkit import prompt as pt_prompt
+
+    async def _tui_confirm(call: ToolCall) -> bool:
+        async with app.suspend():
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
+                    f"[dim]args: {call.args}[/dim]",
+                    title="[yellow]  Tool requires confirmation[/yellow]",
+                    border_style="yellow",
+                )
+            )
+            try:
+                answer = await asyncio.get_event_loop().run_in_executor(
+                    None, pt_prompt, "Allow? [y/N]: "
+                )
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+        return answer.strip().lower() in {"y", "yes"}
+
+    for mw in session._pipeline._middlewares:
+        if isinstance(mw, BlastRadiusMiddleware):
+            mw._confirm = _tui_confirm
+            break
+
+    await app.run_async()
 
 
 async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
