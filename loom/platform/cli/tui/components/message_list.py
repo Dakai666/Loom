@@ -13,7 +13,6 @@ from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
-from textual.scroll_view import ScrollView
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -45,6 +44,12 @@ class MessageList(Widget):
     - Auto-scroll to bottom on new content
     """
 
+    DEFAULT_CSS = """
+    MessageList {
+        overflow-y: auto;
+    }
+    """
+
     messages: reactive[list[MessageItem]] = reactive([], layout=True)
     _current_assistant_buffer: str = ""
 
@@ -56,15 +61,10 @@ class MessageList(Widget):
             self.text = text
 
     def compose(self) -> ComposeResult:
-        yield ScrollView(
-            Static("", id="message-content"),
-            id="message-scroll",
-        )
+        yield Static("", id="message-content")
 
     def on_mount(self) -> None:
-        scroll = self.query_one("#message-scroll", ScrollView)
-        scroll.border_title = "conversation"
-        scroll.scroll_end(animate=False)
+        self.border_title = "conversation"
 
     def add_message(self, role: Role, content: str) -> None:
         """Add a complete message (user or assistant)."""
@@ -102,7 +102,12 @@ class MessageList(Widget):
 
     def _update_display(self) -> None:
         """Render all messages to the Static widget."""
-        content = self.query_one("#message-content", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            content = self.query_one("#message-content", Static)
+        except NoMatches:
+            return
         lines: list[str] = []
 
         for msg in self.messages:
@@ -127,5 +132,4 @@ class MessageList(Widget):
 
     def _scroll_to_bottom(self) -> None:
         """Auto-scroll to bottom."""
-        scroll = self.query_one("#message-scroll", ScrollView)
-        scroll.scroll_end(animate=False)
+        self.scroll_end(animate=False)

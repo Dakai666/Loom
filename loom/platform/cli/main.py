@@ -953,36 +953,36 @@ class LoomChatApp:
                     db_path=str(session._store.path),
                 )
                 self._session = session
-                self._turn_task: asyncio.Task | None = None
 
             async def on_unmount(self) -> None:
-                if self._turn_task and not self._turn_task.done():
-                    self._turn_task.cancel()
                 await self._session.stop()
 
             def on_input_area_submit(self, event: Any) -> None:
-                """Override LoomApp relay — drive session directly via task."""
+                """Override LoomApp relay — drive session via Textual worker."""
                 text = event.text.strip()
                 if not text:
                     return
-                # Cancel any still-running turn before starting a new one
-                if self._turn_task and not self._turn_task.done():
-                    self._turn_task.cancel()
-                self._turn_task = asyncio.create_task(self._run_turn(text))
-
-            async def _run_turn(self, text: str) -> None:
-                if text.startswith("/"):
-                    await _handle_slash_tui(text, self._session, self)
-                    return
-
-                await self.dispatch_stream_event(
-                    TurnStart(
-                        user_input=text,
-                        context_pct=self._session.budget.usage_fraction,
-                    )
+                # exclusive=True cancels any in-progress turn; exit_on_error=False
+                # keeps the app alive if _run_turn raises unexpectedly.
+                self.run_worker(
+                    self._run_turn(text),
+                    exclusive=True,
+                    exit_on_error=False,
                 )
 
+            async def _run_turn(self, text: str) -> None:
                 try:
+                    if text.startswith("/"):
+                        await _handle_slash_tui(text, self._session, self)
+                        return
+
+                    await self.dispatch_stream_event(
+                        TurnStart(
+                            user_input=text,
+                            context_pct=self._session.budget.usage_fraction,
+                        )
+                    )
+
                     async for ev in self._session.stream_turn(text):
                         if isinstance(ev, TextChunk):
                             await self.dispatch_stream_event(TuiChunk(text=ev.text))
