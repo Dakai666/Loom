@@ -1,6 +1,6 @@
 # Loom
 
-> *The loom is what the harness belongs to. Claude Code is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
+> *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
 **v0.2.2** — Sub-agent, Plugin system, `<think>` reasoning collapse, `loom import`, Skill eval loop, and architecture hardening.
 
