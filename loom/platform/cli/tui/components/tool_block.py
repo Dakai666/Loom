@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from textual.app import ComposeResult, RunCoroutine
+from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.worker import Worker
 
 
 class ToolState(Enum):
@@ -68,7 +69,7 @@ class ToolBlock(Widget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._spinner_task: asyncio.Task | None = None
+        self._spinner_task: Worker | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="tool-content")

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Container
 from textual.message import Message
 from textual.widget import Widget
 
@@ -145,7 +146,7 @@ class LoomApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(model=self._model, db_path=self._db_path)
-        with Static(id="conversation-pane"):
+        with Container(id="conversation-pane"):
             yield MessageList(id="message-list")
             yield ToolBlock(id="tool-block")
         yield WorkspacePanel(id="workspace-panel")
@@ -195,8 +196,6 @@ class LoomApp(App):
         This is the bridge between the async LoomSession.stream_turn() generator
         and the Textual message bus.
         """
-        from textual.message import Circle as Msg
-
         if isinstance(event, TurnStart):
             await self._on_turn_start(event)
 
@@ -308,18 +307,14 @@ class LoomApp(App):
 
     # ── Input submission ───────────────────────────────────────────────────────
 
+    class UserMessage(Message, bubble=True):
+        """User submitted a message — sent to main.py to drive LoomSession."""
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
     def on_input_area_submit(self, event: InputArea.Submit) -> None:
         """Handle message submission from InputArea."""
-        self.post_message(self.UserMessage(event.text))
-        """Handle message submission from InputArea."""
-        # This will be connected to LoomSession in main.py
         # The app emits a custom message that main.py listens to
         self.post_message(self.UserMessage(event.text))
-
-
-class UserMessage(Message, bubble=True):
-    """User submitted a message — sent to main.py to drive LoomSession."""
-
-    def __init__(self, text: str) -> None:
-        super().__init__()
-        self.text = text

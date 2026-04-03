@@ -39,7 +39,7 @@ class KnowledgeNode:
     def to_lines(self, indent: int = 0, show_children: bool = True) -> list[str]:
         """Render node as indented text lines."""
         prefix = "  " * indent
-        bullet = "o" if self.state == NodeState.ACTIVE else "o"
+        bullet = "o" if self.state == NodeState.ACTIVE else "-"
 
         if self.node_type == "root":
             line = f"[bold cyan]{self.label}[/bold cyan]"

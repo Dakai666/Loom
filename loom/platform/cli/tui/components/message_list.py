@@ -108,7 +108,7 @@ class MessageList(Widget):
         for msg in self.messages:
             role_tag = {
                 Role.USER: "[bold yellow]user[/bold yellow]",
-                Role.ASSISTANT: "[bold green]assistant[/bold yellow]",
+                Role.ASSISTANT: "[bold green]assistant[/bold green]",
                 Role.SYSTEM: "[dim]system[/dim]",
             }[msg.role]
 
