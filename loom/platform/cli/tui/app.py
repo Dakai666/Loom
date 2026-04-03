@@ -96,9 +96,8 @@ class LoomApp(App):
     }
 
     #input-area {
-        height: 3;
+        height: 4;
         background: $surface;
-        border-top: solid $border;
     }
 
     #workspace-panel {
@@ -127,6 +126,7 @@ class LoomApp(App):
     """
 
     BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
         Binding("ctrl+o", "toggle_verbose", "Verbose", show=True),
         Binding("ctrl+w", "toggle_space", "Space", show=True),

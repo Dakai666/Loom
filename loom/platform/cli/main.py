@@ -953,17 +953,24 @@ class LoomChatApp:
                     db_path=str(session._store.path),
                 )
                 self._session = session
+                self._turn_task: asyncio.Task | None = None
 
             async def on_unmount(self) -> None:
+                if self._turn_task and not self._turn_task.done():
+                    self._turn_task.cancel()
                 await self._session.stop()
 
-            async def on_loom_app_user_message(
-                self, event: LoomApp.UserMessage
-            ) -> None:
+            def on_input_area_submit(self, event: Any) -> None:
+                """Override LoomApp relay — drive session directly via task."""
                 text = event.text.strip()
                 if not text:
                     return
+                # Cancel any still-running turn before starting a new one
+                if self._turn_task and not self._turn_task.done():
+                    self._turn_task.cancel()
+                self._turn_task = asyncio.create_task(self._run_turn(text))
 
+            async def _run_turn(self, text: str) -> None:
                 if text.startswith("/"):
                     await _handle_slash_tui(text, self._session, self)
                     return
@@ -1007,6 +1014,8 @@ class LoomChatApp:
                                     context_pct=self._session.budget.usage_fraction,
                                 )
                             )
+                except asyncio.CancelledError:
+                    pass
                 except Exception as exc:
                     import traceback as _tb
 
@@ -1015,7 +1024,7 @@ class LoomChatApp:
                     with open(_log, "a") as _f:
                         _f.write(_tb.format_exc())
                     self.notify(
-                        f"Error: {exc}\n(details in ~/.loom/tui_error.log)",
+                        f"Error: {exc}  (details in ~/.loom/tui_error.log)",
                         severity="error",
                         timeout=20,
                     )
