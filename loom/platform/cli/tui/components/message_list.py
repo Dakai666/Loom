@@ -7,10 +7,9 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
 
+from rich.style import Style
 from rich.text import Text as RichText
-from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
@@ -38,11 +37,9 @@ class MessageList(Widget):
     """
     Scrollable list of messages (user + assistant).
 
-    Handles:
-    - Appending messages
-    - Streaming text accumulation (in-place update)
-    - Markdown rendering for assistant messages
-    - Auto-scroll to bottom on new content
+    Uses Rich Text objects (not markup strings) for content rendering so
+    that arbitrary user/LLM text containing [ ] brackets never triggers
+    Textual's markup parser.
     """
 
     DEFAULT_CSS = """
@@ -62,7 +59,7 @@ class MessageList(Widget):
             self.text = text
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="message-content")
+        yield Static("", id="message-content", markup=False)
 
     def on_mount(self) -> None:
         self.border_title = "conversation"
@@ -102,35 +99,53 @@ class MessageList(Widget):
         self._update_display()
 
     def _update_display(self) -> None:
-        """Render all messages to the Static widget."""
+        """Render all messages as a Rich Text object (no markup parsing)."""
         from textual.css.query import NoMatches
 
         try:
             content = self.query_one("#message-content", Static)
         except NoMatches:
             return
-        lines: list[str] = []
 
-        for msg in self.messages:
-            role_tag = {
-                Role.USER: "[bold yellow]user[/bold yellow]",
-                Role.ASSISTANT: "[bold green]assistant[/bold green]",
-                Role.SYSTEM: "[dim]system[/dim]",
-            }[msg.role]
+        if not self.messages:
+            # markup=False Static — pass a RichText with dim style
+            placeholder = RichText("(no messages yet)", style=Style(dim=True))
+            content.update(placeholder)
+            return
 
+        # Build one big RichText by concatenating per-message Text objects.
+        # Using Rich Text.append() means content is NEVER parsed as markup.
+        combined = RichText()
+
+        role_styles = {
+            Role.USER:      ("user",      Style(bold=True, color="yellow")),
+            Role.ASSISTANT: ("assistant", Style(bold=True, color="green")),
+            Role.SYSTEM:    ("system",    Style(dim=True)),
+        }
+
+        for i, msg in enumerate(self.messages):
+            role_label, role_style = role_styles[msg.role]
             timestamp = msg.timestamp.strftime("%H:%M")
-            cursor = " [bold yellow]>[/bold yellow]" if msg.streaming else ""
 
-            safe_content = markup_escape(msg.content)
-            if msg.role == Role.USER:
-                lines.append(f"[dim]{timestamp}[/dim] {role_tag}: {safe_content}")
-            else:
-                lines.append(
-                    f"[dim]{timestamp}[/dim] {role_tag}:{cursor}\n{safe_content}"
-                )
-            lines.append("")
+            # timestamp
+            combined.append(timestamp, style=Style(dim=True))
+            combined.append(" ")
+            # role
+            combined.append(role_label, style=role_style)
+            combined.append(":")
 
-        content.update("\n".join(lines) if lines else "[dim](no messages yet)[/dim]")
+            # streaming cursor
+            if msg.streaming:
+                combined.append(" ▌", style=Style(bold=True, color="yellow"))
+
+            combined.append("\n")
+
+            # content — plain append, no escaping, no markup parsing
+            combined.append(msg.content)
+
+            combined.append("\n\n")
+
+        content.update(combined)
 
     def _scroll_to_bottom(self) -> None:
         """Auto-scroll to bottom."""
