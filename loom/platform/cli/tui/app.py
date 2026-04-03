@@ -96,7 +96,6 @@ class LoomApp(App):
     }
 
     #input-area {
-        dock: bottom;
         height: 3;
         background: $surface;
         border-top: solid $border;

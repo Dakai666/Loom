@@ -14,7 +14,6 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
-from textual.worker import Worker
 
 
 class ToolState(Enum):
@@ -69,7 +68,7 @@ class ToolBlock(Widget):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._spinner_task: Worker | None = None
+        self._spinner_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="tool-content")
@@ -102,9 +101,7 @@ class ToolBlock(Widget):
 
     def _start_spinner(self, call_id: str) -> None:
         """Start the spinner animation for a running tool."""
-        self._spinner_task = self.run_worker(
-            self._spin_loop(call_id), ignore_errors=True
-        )
+        self._spinner_task = asyncio.create_task(self._spin_loop(call_id))
 
     async def _spin_loop(self, call_id: str) -> None:
         """Animate spinner for running tool."""
