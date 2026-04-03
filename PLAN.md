@@ -644,11 +644,11 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 - [x] REST API Platform（`loom/platform/api/server.py` FastAPI app；`GET/POST /memory/semantic`, `GET/POST /memory/relational`, `POST /webhook/reply`, `POST /events/emit`；`loom api start` CLI 命令；optional dep `loom[api]`）
 - [x] Discord Notifier（`DiscordNotifier`；embed 顏色分類；confirm 附帶 curl 回覆指令；`DISCORD_WEBHOOK_URL` env / loom.toml `[notify.discord]` 自動載入；push_reply 接 REST API）
 - [x] **Textual TUI**（`loom chat --tui`；dual-space layout；ModalScreen tool confirm；Artifacts + Knowledge Graph workspace；streaming cursor；status bar；Ctrl+C/L/O/W bindings）— **v0.2 發布**
-- [ ] **Session Log + Session 管理** ← **Phase 5C 當前重點**
+- [x] **Session Log + Session 管理** — **Phase 5C 完成**
   - `sessions` metadata 表 + `session_log` 完整 message history 表
-  - audit_log 接入；`loom chat --resume` / `--session <id>`
-  - `loom sessions list/show/rm`
-- [ ] **Web Tools** ← **Phase 5D**
+  - `loom chat --resume` / `--session <id>`；`loom sessions list/show/rm`
+  - TUI resume 時回放歷史訊息至 MessageList
+- [ ] **Web Tools** ← **Phase 5D 當前重點**
   - `fetch_url`（GUARDED）：HTTP GET → HTML 轉純文字（去 scripts/styles/nav），回傳 title + 清洗後正文，1000 字截斷
   - `web_search`（GUARDED）：Brave Search API（`brave_search_key` from `.env`），返回 top-N snippet + URL 列表，內建 result 清洗
   - 兩者都有 timeout（10s）+ 回傳字元數限制，避免把垃圾 log 塞進 context

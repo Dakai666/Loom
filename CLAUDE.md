@@ -113,6 +113,8 @@ Three trigger types fire the same callback chain:
 - **`tools.py`** — 6 built-in tools: `read_file` (SAFE), `list_dir` (SAFE), `write_file` (GUARDED), `run_bash` (GUARDED), `recall` (SAFE), `memorize` (GUARDED)
 - **`main.py`** — `LoomSession`, `stream_turn()` (streaming agent loop), `_dispatch_parallel()` (TaskGraph-backed parallel tool dispatch), `_smart_compact()` (LLM-based context compaction), slash command handling. Also contains `LoomChatApp` factory (TUI integration) and `_chat_tui()` entrypoint.
 
+**Session Management (v0.3):** `LoomSession` accepts `resume_session_id`; `start()` creates or replays history via `SessionLog`; `stop()` persists turn count + auto-title. CLI: `loom chat --resume` (latest session), `--session <id>` (specific); `loom sessions list/show/rm`. TUI replays persisted messages into `MessageList` on `on_mount`.
+
 Streaming uses direct `console.print(chunk, end="")` — no Rich Live — for genuine token-by-token output and clean stdin interaction.
 
 ### TUI Platform (`loom/platform/cli/tui/`) — v0.2
@@ -182,3 +184,4 @@ StatusBar (dock bottom, 1 row)     — context bar ▓░ + tokens + elapsed
 
 - **v0.1** — Core framework: Harness + Memory + Cognition + Tasks + Autonomy + Notify + Extensibility + CLI streaming
 - **v0.2** — Textual TUI (`loom chat --tui`): dual-space layout, ModalScreen tool confirm, workspace panel, streaming cursor, status bar
+- **v0.3** — Session Management: `sessions` + `session_log` tables; `loom chat --resume/--session`; `loom sessions list/show/rm`; TUI history replay on resume
