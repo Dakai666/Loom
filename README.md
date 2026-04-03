@@ -2,6 +2,8 @@
 
 > *The loom is what the harness belongs to. Claude Code is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
+**v0.2** — Textual TUI interface now available (`loom chat --tui`). Basic conversation, tool execution with modal confirmation, workspace panel (Artifacts + Knowledge Graph), and real-time status bar.
+
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
 ---
@@ -61,11 +63,15 @@ ANTHROPIC_API_KEY=your_anthropic_key_here   # optional
 ## Quick Start
 
 ```bash
-# Interactive agent session (MiniMax-M2.7 by default)
+# Classic CLI mode
 loom chat
 
-# Use a different model
+# Textual TUI mode (v0.2+)
+loom chat --tui
+
+# Use a specific model
 loom chat --model claude-sonnet-4-6
+loom chat --tui --model MiniMax-M2.7
 
 # Inspect memory
 loom memory list
@@ -86,7 +92,19 @@ loom autonomy emit <event_name>  # manually fire an EventTrigger
 | `/compact` | LLM-summarize oldest conversation turns to free context |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
 | `/personality off` | Remove active persona |
+| `/verbose` | Toggle tool output verbosity |
 | `/help` | Show all commands |
+
+### TUI keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+C` | Quit |
+| `Ctrl+L` | Clear conversation |
+| `Ctrl+O` | Toggle tool output verbosity |
+| `Ctrl+W` | Toggle Workspace tab (Artifacts ↔ Knowledge) |
+| `Tab` | Autocomplete slash commands |
+| `Y` / `N` | Approve / deny tool confirmation dialogs |
 
 ---
 
@@ -208,7 +226,9 @@ python -m pytest tests/test_integration.py -v
 | Phase 3 | Autonomy + Notify | ✅ Complete |
 | Phase 4 | Learning Layer (Prompt Stack, Memory-as-Attention, Lens System) | ✅ Complete |
 | Phase 4.5 | CLI Platform maturity (streaming, smart compact, parallel tools) | ✅ Complete |
-| Phase 5 | Ecosystem (REST API, Discord/Slack, IDE Extension, Skill eval loop) | 🔄 In progress |
+| Phase 5A | Ecosystem foundations (REST API, Discord, memory search, skill eval) | ✅ Complete |
+| Phase 5B | Textual TUI (`loom chat --tui`) — dual-space interface, modal confirm | ✅ Complete (v0.2) |
+| Phase 5C | Session management (`--resume`, `loom sessions list/show`) | 🔄 Next |
 
 ---
 

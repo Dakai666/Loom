@@ -20,6 +20,9 @@ python -m pytest tests/test_autonomy.py::TestCronTrigger::test_should_fire_weekd
 # Start interactive agent session (requires MINIMAX_API_KEY in .env)
 loom chat
 
+# TUI mode (Textual, requires pip install -e ".[dev]")
+loom chat --tui
+
 # Autonomy daemon
 loom autonomy start --config loom.toml
 loom autonomy status
@@ -108,9 +111,55 @@ Three trigger types fire the same callback chain:
 
 - **`ui.py`** — event model (`TextChunk / ToolBegin / ToolEnd / TurnDone`), `PromptSession` (prompt_toolkit, InMemoryHistory, SlashCompleter)
 - **`tools.py`** — 6 built-in tools: `read_file` (SAFE), `list_dir` (SAFE), `write_file` (GUARDED), `run_bash` (GUARDED), `recall` (SAFE), `memorize` (GUARDED)
-- **`main.py`** — `LoomSession`, `stream_turn()` (streaming agent loop), `_dispatch_parallel()` (TaskGraph-backed parallel tool dispatch), `_smart_compact()` (LLM-based context compaction), slash command handling
+- **`main.py`** — `LoomSession`, `stream_turn()` (streaming agent loop), `_dispatch_parallel()` (TaskGraph-backed parallel tool dispatch), `_smart_compact()` (LLM-based context compaction), slash command handling. Also contains `LoomChatApp` factory (TUI integration) and `_chat_tui()` entrypoint.
 
 Streaming uses direct `console.print(chunk, end="")` — no Rich Live — for genuine token-by-token output and clean stdin interaction.
+
+### TUI Platform (`loom/platform/cli/tui/`) — v0.2
+
+Textual-based dual-space interface. Activated via `loom chat --tui`.
+
+**Layout:**
+```
+Header (dock top, 3 rows)          — model name + memory db path
+Horizontal body
+  Vertical conversation-pane (60%)
+    MessageList (1fr)              — scrollable, streams text with ▌ cursor
+    ToolBlock (auto, max 5 rows)   — ○/spinner/✓/✗ per tool call
+    InputArea (4 rows)             — Input widget + Tab slash completion
+  WorkspacePanel (40%)             — Artifacts tab / Knowledge Graph tab
+ObservabilityPanel (dock bottom)   — single-line tool summary after turn
+StatusBar (dock bottom, 1 row)     — context bar ▓░ + tokens + elapsed
+```
+
+**Key files:**
+- **`tui/app.py`** — `LoomApp(App)`: CSS, bindings, `dispatch_stream_event()` bridge
+- **`tui/events.py`** — TUI-side event types (`TurnStart`, `TextChunk`, `ToolBegin`, `ToolEnd`, `TurnDone`, `BudgetUpdate`)
+- **`tui/components/message_list.py`** — `MessageList(Widget)`: message accumulation, `stream_text()`, auto-scroll
+- **`tui/components/tool_block.py`** — `ToolBlock(Widget)`: `asyncio.create_task` spinner, state machine
+- **`tui/components/input_area.py`** — `InputArea(Widget)`: wraps `Input`, posts `Submit` message
+- **`tui/components/workspace_panel.py`** — `WorkspacePanel`: tab host for ArtifactsPanel + KnowledgeGraph
+- **`tui/components/artifacts_panel.py`** — tracks `write_file` outputs as artifacts
+- **`tui/components/knowledge_graph.py`** — renders session memory counts as a tree
+- **`tui/components/confirm_modal.py`** — `ConfirmModal(ModalScreen[bool])`: Allow/Deny buttons for GUARDED/CRITICAL tools
+- **`tui/components/status_bar.py`** — context fraction + token counts + elapsed time
+- **`tui/components/observability_panel.py`** — post-turn tool summary
+
+**Integration pattern in `main.py`:**
+- `LoomChatApp.create(session)` returns a `_App(LoomApp)` subclass bound to a live `LoomSession`
+- `_App.on_input_area_submit()` → `self.run_worker(self._run_turn(text), exclusive=True, exit_on_error=False)`
+- `_run_turn()` maps `ui.py` events → `tui/events.py` types → `dispatch_stream_event()`
+- `write_file` ToolBegin/ToolEnd tracked via `_pending_writes` dict → `add_artifact()`
+- `BlastRadiusMiddleware._confirm` patched post-`session.start()` to use `push_screen_wait(ConfirmModal(...))`
+
+**Critical Textual 8.x gotchas learned:**
+- `ScrollView` is for Rich renderables only — use `Widget` with `DEFAULT_CSS: overflow-y: auto` for child widgets
+- `app.suspend()` is a sync `@contextmanager` — use `with`, not `async with`
+- `asyncio.create_task()` from sync handlers silently drops exceptions — use `run_worker(exclusive=True, exit_on_error=False)`
+- `reactive` watchers fire during `__init__` before `compose()` — always guard `query_one()` with `NoMatches` try/except
+- Never define `_render()` on Widget subclasses — it shadows Textual's internal rendering and returns None
+- Rich markup: always `markup_escape()` user-provided content before interpolating into f-strings with `[tag]` syntax
+- `[dim][[/dim]` is parsed as `[dim]` open + new tag start, not "dim-styled [" — use Unicode chars instead
 
 ## Key Conventions
 
@@ -128,3 +177,8 @@ Streaming uses direct `console.print(chunk, end="")` — no Rich Live — for ge
 ## Current Test Count
 
 371 tests, all passing, Python 3.14 / pytest 9.0.
+
+## Version History
+
+- **v0.1** — Core framework: Harness + Memory + Cognition + Tasks + Autonomy + Notify + Extensibility + CLI streaming
+- **v0.2** — Textual TUI (`loom chat --tui`): dual-space layout, ModalScreen tool confirm, workspace panel, streaming cursor, status bar
