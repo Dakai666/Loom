@@ -52,6 +52,15 @@ desktop.ini
 
 # other
 CLAUDE.md
+PLAN.md
+CODE_REVIEW.md
+UI_ISSUE_TEMPLATE.md
+CLI_UI_DESIGN.md
+IMPLEMENTATION_STATUS.md
+*.md.bak
 diary/
 scripts/
 tests/
+*.png
+*.jpg
+loom/_commit_msg.txt
