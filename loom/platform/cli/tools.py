@@ -17,7 +17,7 @@ import asyncio
 import re
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -560,6 +560,97 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
         },
         executor=_web_search,
         tags=["web", "search"],
+    )
+
+
+def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
+    """Return a GUARDED tool that spawns an ephemeral sub-agent for a bounded task."""
+    from loom.core.agent.subagent import SubAgentConfig, run_subagent
+
+    async def _spawn_agent(call: ToolCall) -> ToolResult:
+        task = call.args.get("task", "").strip()
+        if not task:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'task' argument is required",
+                              failure_type="validation_error")
+
+        raw_tools = call.args.get("tools", None)
+        allowed_tools: list[str] | None = None
+        if isinstance(raw_tools, list) and raw_tools:
+            allowed_tools = [str(t) for t in raw_tools]
+        elif isinstance(raw_tools, str) and raw_tools.strip():
+            allowed_tools = [t.strip() for t in raw_tools.split(",") if t.strip()]
+
+        max_turns = min(max(int(call.args.get("max_turns", 10)), 1), 20)
+
+        config = SubAgentConfig(
+            task=task,
+            model=parent_session.model,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+        )
+
+        try:
+            result = await run_subagent(
+                config,
+                router=parent_session.router,
+                episodic=parent_session._episodic,
+                semantic=parent_session._semantic,
+                procedural=parent_session._procedural,
+                tool_registry=parent_session.registry,
+                parent_session_id=parent_session.session_id,
+                workspace=parent_session.workspace,
+            )
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"Sub-agent error: {exc}",
+                              failure_type="execution_error")
+
+        if result.success:
+            header = (
+                f"[sub-agent {result.agent_id}] "
+                f"{result.turns_used} turn(s), {result.tool_calls} tool call(s)\n\n"
+            )
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output=header + result.output)
+        else:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=result.error or "Sub-agent failed",
+                              failure_type="execution_error")
+
+    return ToolDefinition(
+        name="spawn_agent",
+        description=(
+            "Spawn an ephemeral sub-agent to complete a bounded, self-contained task. "
+            "The sub-agent runs independently with its own context and returns a result. "
+            "Use this to delegate research, file analysis, or parallel investigation tasks. "
+            "The sub-agent cannot interact with the user — it works autonomously until done."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Clear description of the task for the sub-agent to complete",
+                },
+                "tools": {
+                    "type": ["array", "string", "null"],
+                    "description": (
+                        "Tool whitelist for the sub-agent. "
+                        "List of tool names (e.g. ['read_file', 'web_search']) or comma-separated string. "
+                        "Omit or null for SAFE-only tools. CRITICAL tools are always blocked."
+                    ),
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Maximum turns before the sub-agent is stopped (1–20, default 10)",
+                },
+            },
+            "required": ["task"],
+        },
+        executor=_spawn_agent,
+        tags=["agent", "spawn"],
     )
 
 

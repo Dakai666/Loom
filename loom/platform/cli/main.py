@@ -79,6 +79,7 @@ from loom.platform.cli.tools import (
     make_query_relations_tool,
     make_recall_tool,
     make_relate_tool,
+    make_spawn_agent_tool,
     make_web_search_tool,
 )
 from loom.platform.cli.ui import (
@@ -405,6 +406,9 @@ class LoomSession:
         brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
         if brave_key:
             self.registry.register(make_web_search_tool(brave_key))
+
+        # Register sub-agent tool (Phase 5E)
+        self.registry.register(make_spawn_agent_tool(self))
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
