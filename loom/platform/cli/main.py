@@ -27,7 +27,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import click
 from dotenv import dotenv_values
@@ -342,6 +342,7 @@ class LoomSession:
         self._session_log: SessionLog | None = None
         self._turn_index: int = 0  # increments once per completed stream_turn()
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
+        self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
 
     # ------------------------------------------------------------------
     # Personality management
@@ -673,7 +674,20 @@ class LoomSession:
                     for tu in response.tool_uses:
                         yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
                         ts = time.monotonic()
-                        result = await self._dispatch(tu.name, tu.args, tu.id)
+                        try:
+                            result = await self._dispatch(tu.name, tu.args, tu.id)
+                        except Exception as _dispatch_exc:
+                            # An unexpected exception in dispatch (e.g. TUI confirm crash)
+                            # must still produce a tool result message — otherwise the
+                            # assistant's tool_calls entry becomes orphaned and the next
+                            # API call gets a 2013 "tool id not found" error.
+                            result = ToolResult(
+                                call_id=tu.id,
+                                tool_name=tu.name,
+                                success=False,
+                                error=f"Internal dispatch error: {_dispatch_exc}",
+                                failure_type="execution_error",
+                            )
                         duration_ms = (time.monotonic() - ts) * 1000
                         tool_count += 1
                         tool_output = str(result.output) if result.success else (result.error or "")
@@ -824,20 +838,34 @@ class LoomSession:
     # ------------------------------------------------------------------
 
     def _sanitize_history(self) -> None:
-        """Remove incomplete tool_use sequences from message history.
+        """Remove incomplete tool_use sequences and fix malformed tool args.
 
-        An assistant message with ``tool_calls`` must be immediately followed
-        by one ``tool`` message per call-id.  Any incomplete sequence (caused
-        by abrupt close or sessions saved before the raw_message fix) is
-        trimmed back so the API never sees an unresolved tool call.
+        Two passes:
+        1. Fix any tool_calls whose ``arguments`` field is not valid JSON
+           (can happen when MiniMax truncates a streaming response mid-JSON).
+           Re-serialize from an empty dict so the API accepts the message.
+        2. Trim any assistant message whose tool_calls are not all followed by
+           matching tool result messages (orphaned tool_calls → 2013 error).
         """
         msgs = self.messages
+
+        # Pass 1: repair invalid arguments JSON in-place
+        for msg in msgs:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", "{}")
+                    try:
+                        json.loads(raw_args)
+                    except (json.JSONDecodeError, ValueError):
+                        fn["arguments"] = "{}"
+
+        # Pass 2: trim orphaned tool_call sequences
         i = len(msgs) - 1
         while i >= 0:
             msg = msgs[i]
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 expected_ids = {tc["id"] for tc in msg["tool_calls"]}
-                # Collect tool messages immediately following this assistant msg
                 found_ids: set[str] = set()
                 j = i + 1
                 while j < len(msgs) and msgs[j].get("role") == "tool":
@@ -846,7 +874,6 @@ class LoomSession:
                         found_ids.add(tid)
                     j += 1
                 if found_ids != expected_ids:
-                    # Incomplete — trim from this assistant message onward
                     self.messages = msgs[:i]
                     return
             i -= 1
@@ -919,8 +946,11 @@ class LoomSession:
                 pass  # Never let skill accounting block the trace callback
 
     async def _confirm_tool(self, call: ToolCall) -> bool:
-        # No Rich Live is active during _run_streaming_turn (we removed it),
-        # so plain console output + prompt_toolkit prompt_async() work cleanly.
+        # Stop any running spinner before printing the confirm panel so the
+        # spinner animation doesn't overwrite the prompt input line.
+        if self._cancel_spinner_fn is not None:
+            self._cancel_spinner_fn()
+            console.print(clear_line_escape(), end="")  # clear spinner line
         console.print()
         console.print(
             Panel(
@@ -1277,6 +1307,11 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
     elif command == "/help":
         console.print(
             Panel(
+                "[bold]Session[/bold]\n\n"
+                "  Start a new session:    [cyan]loom chat[/cyan]\n"
+                "  Resume last session:    [cyan]loom chat --resume[/cyan]\n"
+                "  Resume specific:        [cyan]loom chat --session <id>[/cyan]\n"
+                "  List sessions:          [cyan]loom sessions list[/cyan]\n\n"
                 "[bold]Slash commands[/bold]\n\n"
                 "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
                 "  [cyan]/personality off[/cyan]        Remove active persona\n"
@@ -1508,6 +1543,11 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
     elif command == "/verbose":
         app.action_toggle_verbose()
 
+    elif command == "/new":
+        # Exit with sentinel None so _chat_tui restart loop creates a fresh session.
+        await session.stop()
+        app.exit("__new__")
+
     elif command == "/sessions":
         # Show session picker; if a different session is chosen, exit so
         # _chat_tui() loop can restart with the new session_id.
@@ -1524,7 +1564,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/help":
         app.notify(
-            "Commands: /personality [name|off], /think, /compact, /verbose, /sessions, /help  |  "
+            "Commands: /new, /sessions, /personality [name|off], /think, /compact, /verbose, /help  |  "
             "Keys: Ctrl+L clear · Ctrl+O verbose · Ctrl+W workspace"
         )
 
@@ -1582,9 +1622,12 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
                 break
 
         result = await app.run_async()
-        # If /sessions returned a session_id via app.exit(id), restart with it;
-        # otherwise we're done.
-        if isinstance(result, str):
+        # /sessions exits with a session_id string → resume that session.
+        # /new exits with "__new__" sentinel → start a fresh session (no resume).
+        # Any other exit (Ctrl+C, quit) → done.
+        if result == "__new__":
+            next_session_id = None
+        elif isinstance(result, str):
             next_session_id = result
         else:
             break
@@ -1650,6 +1693,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 _print_spinner()
         except asyncio.CancelledError:
             pass
+
+    # Give the session a handle to cancel the spinner before confirm prompts.
+    session._cancel_spinner_fn = _cancel_spinner
 
     try:
         async for event in session.stream_turn(user_input):

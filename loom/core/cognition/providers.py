@@ -389,17 +389,39 @@ class MiniMaxProvider(LLMProvider):
 
         raw_message: dict[str, Any] = {"role": "assistant", "content": full_content}
         if tc_accum:
-            raw_message["tool_calls"] = [
-                {
+            tool_calls_out = []
+            for i in sorted(tc_accum):
+                raw_args = tc_accum[i]["arguments"]
+                # Validate the accumulated arguments JSON.  If MiniMax truncated
+                # the stream mid-JSON (e.g. server load, context overflow) the
+                # string is malformed.  Re-serialize from the already-parsed args
+                # dict so the stored raw_message is always valid JSON — otherwise
+                # a resumed session will send bad arguments and get a 2013 error.
+                try:
+                    json.loads(raw_args)   # just validate; keep original string if OK
+                    valid_args = raw_args
+                except (json.JSONDecodeError, ValueError):
+                    # Fall back to the parsed (possibly partial) dict, re-serialized
+                    parsed_args = {}
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except Exception:
+                        pass
+                    # tool_uses already parsed this above; find the matching entry
+                    for tu in tool_uses:
+                        if tu.id == tc_accum[i]["id"] or tu.name == tc_accum[i]["name"]:
+                            parsed_args = tu.args
+                            break
+                    valid_args = json.dumps(parsed_args, ensure_ascii=False)
+                tool_calls_out.append({
                     "id": tc_accum[i]["id"],
                     "type": "function",
                     "function": {
                         "name": tc_accum[i]["name"],
-                        "arguments": tc_accum[i]["arguments"],
+                        "arguments": valid_args,
                     },
-                }
-                for i in sorted(tc_accum)
-            ]
+                })
+            raw_message["tool_calls"] = tool_calls_out
 
         yield ("", LLMResponse(
             text=full_content or None,
