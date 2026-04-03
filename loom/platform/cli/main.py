@@ -678,6 +678,7 @@ class LoomSession:
                 tool_name=tool_name,
                 success=False,
                 error=f"Unknown tool: {tool_name}",
+                failure_type="tool_not_found",
             )
         call = ToolCall(
             id=call_id,
@@ -699,16 +700,19 @@ class LoomSession:
         elif result.output and isinstance(result.output, str):
             summary += f" → {result.output[:120].replace(chr(10), ' ')}"
 
+        meta: dict[str, Any] = {
+            "tool_name": call.tool_name,
+            "success": result.success,
+            "duration_ms": result.duration_ms,
+        }
+        if result.failure_type:
+            meta["failure_type"] = result.failure_type
         await self._episodic.write(
             EpisodicEntry(
                 session_id=self.session_id,
                 event_type="tool_result",
                 content=summary,
-                metadata={
-                    "tool_name": call.tool_name,
-                    "success": result.success,
-                    "duration_ms": result.duration_ms,
-                },
+                metadata=meta,
             )
         )
 

@@ -140,13 +140,14 @@ class MemorySearchResult:
     updated_at: str = ""    # ISO timestamp of last update (empty if unknown)
 
     def format(self, max_value_len: int = 300) -> str:
-        """Human-readable one-entry summary with timestamp."""
+        """Human-readable one-entry summary with timestamp and effective confidence."""
         truncated = self.value[:max_value_len]
         if len(self.value) > max_value_len:
             truncated += "…"
-        # Show date portion only (YYYY-MM-DD) to keep output concise
         date_hint = f" [{self.updated_at[:10]}]" if self.updated_at else ""
-        return f"[{self.type}]{date_hint} {self.key}\n  {truncated}"
+        conf = self.metadata.get("effective_confidence") or self.metadata.get("confidence")
+        conf_hint = f" conf={conf:.2f}" if conf is not None else ""
+        return f"[{self.type}]{date_hint}{conf_hint} {self.key}\n  {truncated}"
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +268,7 @@ class MemorySearch:
                 score=score,
                 metadata={
                     "confidence": entries_with_vecs[i][0].confidence,
+                    "effective_confidence": entries_with_vecs[i][0].effective_confidence(),
                     "method": "embedding",
                 },
                 updated_at=(
@@ -291,7 +293,11 @@ class MemorySearch:
                     key=e.key,
                     value=e.value,
                     score=0.0,
-                    metadata={"confidence": e.confidence, "fallback": True},
+                    metadata={
+                        "confidence": e.confidence,
+                        "effective_confidence": e.effective_confidence(),
+                        "fallback": True,
+                    },
                     updated_at=e.updated_at.isoformat() if e.updated_at else "",
                 )
                 for e in entries
@@ -354,7 +360,10 @@ class MemorySearch:
                 key=entries[i].key,
                 value=entries[i].value,
                 score=score,
-                metadata={"confidence": entries[i].confidence},
+                metadata={
+                    "confidence": entries[i].confidence,
+                    "effective_confidence": entries[i].effective_confidence(),
+                },
                 updated_at=entries[i].updated_at.isoformat() if entries[i].updated_at else "",
             )
             for i, score in self._sem_bm25.top_k(query, k=limit)

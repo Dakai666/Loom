@@ -101,6 +101,23 @@ class ReflectionAPI:
             for s in skills
         ]
 
+    async def failure_summary(self, session_id: str) -> dict[str, int]:
+        """
+        Return failure counts grouped by failure_type for the session.
+        Example: {"permission_denied": 2, "timeout": 1, "execution_error": 3}
+        Entries without a failure_type are grouped under "unclassified".
+        """
+        entries = await self._episodic.read_session(session_id)
+        counts: dict[str, int] = {}
+        for e in entries:
+            if e.event_type != "tool_result":
+                continue
+            if e.metadata.get("success"):
+                continue
+            ftype = e.metadata.get("failure_type") or "unclassified"
+            counts[ftype] = counts.get(ftype, 0) + 1
+        return counts
+
     async def tool_success_rate(self, session_id: str) -> dict[str, float]:
         """
         Per-tool success rates for the current session.

@@ -8,6 +8,7 @@ Each fact has a confidence score and can be updated or queried by key.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
@@ -17,6 +18,18 @@ import aiosqlite
 
 if TYPE_CHECKING:
     from loom.core.memory.embeddings import EmbeddingProvider
+
+
+_DEFAULT_HALF_LIFE_DAYS = 90.0  # confidence halves after this many days of no update
+
+
+def _effective_confidence(confidence: float, updated_at: datetime,
+                           half_life_days: float = _DEFAULT_HALF_LIFE_DAYS) -> float:
+    """Exponential decay: confidence * 2^(-days_since_update / half_life).
+    Returns at least 0.01 so a stale entry is never completely invisible."""
+    days = (datetime.now(UTC) - updated_at).total_seconds() / 86400.0
+    decayed = confidence * math.pow(2.0, -days / half_life_days)
+    return max(0.01, round(decayed, 4))
 
 
 @dataclass
@@ -29,6 +42,10 @@ class SemanticEntry:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def effective_confidence(self, half_life_days: float = _DEFAULT_HALF_LIFE_DAYS) -> float:
+        """Time-decayed confidence score."""
+        return _effective_confidence(self.confidence, self.updated_at, half_life_days)
 
 
 class SemanticMemory:
@@ -47,15 +64,36 @@ class SemanticMemory:
         """True if an embedding provider is configured."""
         return self._embeddings is not None
 
-    async def upsert(self, entry: SemanticEntry) -> None:
+    async def upsert(self, entry: SemanticEntry) -> bool:
         """
-        Insert or update a fact by key.
+        Insert or update a fact by key.  Returns True if an existing value
+        was overwritten (conflict), False for a clean insert.
+
+        On conflict the previous value is appended to metadata["history"]
+        (capped at 3 entries) so overwrites are traceable.
 
         If an embedding provider is configured, computes and persists the
         vector for this entry after the upsert.  Embedding failures are
         silently swallowed so a network error never blocks a memory write.
         """
         now = datetime.now(UTC).isoformat()
+
+        # Check for an existing entry to record conflict provenance
+        existing = await self.get(entry.key)
+        conflicted = False
+        merged_metadata = dict(entry.metadata)
+
+        if existing is not None and existing.value != entry.value:
+            conflicted = True
+            # Preserve history of overwritten values (last 3)
+            history: list = existing.metadata.get("history", [])
+            history.append({
+                "value": existing.value[:200],
+                "source": existing.source,
+                "updated_at": existing.updated_at.isoformat() if existing.updated_at else "",
+            })
+            merged_metadata["history"] = history[-3:]
+
         await self._db.execute(
             """
             INSERT INTO semantic_entries
@@ -74,7 +112,7 @@ class SemanticMemory:
                 entry.value,
                 entry.confidence,
                 entry.source,
-                json.dumps(entry.metadata, ensure_ascii=False),
+                json.dumps(merged_metadata, ensure_ascii=False),
                 entry.created_at.isoformat(),
                 now,
             ),
@@ -93,6 +131,8 @@ class SemanticMemory:
                     await self._db.commit()
             except Exception:
                 pass  # Embedding failure must never block the memory write
+
+        return conflicted
 
     async def get(self, key: str) -> SemanticEntry | None:
         cursor = await self._db.execute(

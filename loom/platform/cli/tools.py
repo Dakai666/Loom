@@ -193,7 +193,8 @@ async def _run_bash(call: ToolCall) -> ToolResult:
         except asyncio.TimeoutError:
             proc.kill()
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=f"Command timed out after {timeout}s")
+                              success=False, error=f"Command timed out after {timeout}s",
+                              failure_type="timeout")
 
         output = stdout.decode("utf-8", errors="replace")
         success = proc.returncode == 0
@@ -305,10 +306,14 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
                               success=False, error="Both 'key' and 'value' are required")
 
         entry = SemanticEntry(key=key, value=value, confidence=confidence, source="agent")
-        await semantic.upsert(entry)
+        conflicted = await semantic.upsert(entry)
 
+        if conflicted:
+            msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
+        else:
+            msg = f"Memorized: {key!r}"
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=f"Memorized: {key!r}")
+                          success=True, output=msg)
 
     return ToolDefinition(
         name="memorize",

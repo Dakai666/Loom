@@ -33,6 +33,18 @@ class ToolCall:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# Structured failure categories — used for reflexive learning and failure analysis.
+# Set on ToolResult.failure_type when success=False.
+FAILURE_TYPES = {
+    "tool_not_found",    # tool name not in registry
+    "permission_denied", # trust level insufficient / user denied
+    "timeout",           # execution exceeded time limit
+    "execution_error",   # tool raised an exception at runtime
+    "validation_error",  # bad/missing arguments
+    "model_error",       # LLM API error during tool-related call
+}
+
+
 @dataclass
 class ToolResult:
     """The outcome of a tool invocation, after execution."""
@@ -41,6 +53,7 @@ class ToolResult:
     success: bool
     output: Any = None
     error: str | None = None
+    failure_type: str | None = None   # one of FAILURE_TYPES when success=False
     duration_ms: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -178,6 +191,7 @@ class BlastRadiusMiddleware(Middleware):
                 tool_name=call.tool_name,
                 success=False,
                 error="User denied tool execution.",
+                failure_type="permission_denied",
             )
 
         # Authorize at GUARDED level for the rest of this session.
