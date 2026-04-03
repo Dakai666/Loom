@@ -1,5 +1,10 @@
 """
-ClawCodeLens — converts instructkr/claw-code tool definitions to Loom adapter dicts.
+OpenAIToolsLens — imports OpenAI-compatible tool definitions into Loom.
+
+This lens understands the standard OpenAI function-calling schema, which is
+also used by many third-party agent frameworks (LangChain, AutoGen, etc.).
+It converts tool definitions into Loom AdapterRegistry entries so they can be
+installed into a session without touching Loom's core harness.
 
 Expected source format (dict or JSON string)
 --------------------------------------------
@@ -19,7 +24,7 @@ Expected source format (dict or JSON string)
             "tags":  ["web", "search"]
         }
     ],
-    "middleware": [                        (optional)
+    "middleware": [                         (optional, informational only)
         {
             "name":        "RateLimitMiddleware",
             "description": "Throttles outbound API calls to 10 req/s."
@@ -27,9 +32,14 @@ Expected source format (dict or JSON string)
     ]
 }
 
-Extracted adapters are ready for AdapterRegistry.from_lens_result().
-Middleware patterns are informational only — they describe harness behaviors
-observed in claw-code but are not auto-imported.
+``parameters`` maps directly to Loom's ``input_schema`` field.
+``trust`` is Loom-specific; if absent, defaults to "safe".
+
+Middleware entries are recorded in ``LensResult.middleware_patterns`` for
+documentation purposes but are never auto-imported — adding middleware to
+Loom's harness is a deliberate, code-level act.
+
+Extracted adapters are ready for ``AdapterRegistry.from_lens_result()``.
 """
 
 from __future__ import annotations
@@ -37,14 +47,15 @@ from __future__ import annotations
 from loom.extensibility.lens import BaseLens, LensResult
 
 
-class ClawCodeLens(BaseLens):
+class OpenAIToolsLens(BaseLens):
     """
-    Lens for claw-code (instructkr) tool-definition format.
+    Lens for OpenAI-compatible tool definition format.
 
-    Extracts platform adapters (tool definitions) and middleware patterns.
+    Extracts platform adapters (tool definitions) and records any middleware
+    patterns as informational annotations.
     """
 
-    name = "claw"
+    name = "openai_tools"
     version = "1.0"
 
     _VALID_TRUST = frozenset({"safe", "guarded", "critical"})
@@ -59,12 +70,12 @@ class ClawCodeLens(BaseLens):
         return False
 
     def extract(self, source: str | dict) -> LensResult:
-        """Extract adapter dicts and middleware patterns from a claw-code source."""
+        """Extract adapter dicts and middleware patterns from the source."""
         parsed = self._parse(source)
 
         if not isinstance(parsed, dict):
             return LensResult(
-                source="claw",
+                source="openai_tools",
                 warnings=["Could not parse source as a dict"],
             )
 
@@ -95,7 +106,10 @@ class ClawCodeLens(BaseLens):
             adapters.append({
                 "name":         name,
                 "description":  (raw.get("description") or "").strip(),
-                "input_schema": raw.get("parameters", {"type": "object", "properties": {}}),
+                "input_schema": raw.get(
+                    "parameters",
+                    raw.get("input_schema", {"type": "object", "properties": {}}),
+                ),
                 "trust_level":  trust,
                 "tags":         list(raw.get("tags", [])),
             })
@@ -108,7 +122,7 @@ class ClawCodeLens(BaseLens):
                 })
 
         return LensResult(
-            source="claw",
+            source="openai_tools",
             platform_adapters=adapters,
             middleware_patterns=middleware_patterns,
             warnings=warnings,

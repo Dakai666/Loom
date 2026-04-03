@@ -91,6 +91,7 @@ _SLASH_WORDS = [
     "/personality architect",
     "/personality researcher",
     "/personality operator",
+    "/think",
     "/compact",
     "/verbose",
     "/help",

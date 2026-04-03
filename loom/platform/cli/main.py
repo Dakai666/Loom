@@ -185,6 +185,23 @@ async def compress_session(
 
 
 # ---------------------------------------------------------------------------
+# Think-block filter helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_partial_tag_suffix(text: str, tag: str) -> int:
+    """Return the length of the longest suffix of *text* that is a prefix of *tag*.
+
+    Used to detect `<think>` / `</think>` tags split across streaming chunks so
+    we can hold the partial tag in a lookahead buffer instead of emitting it.
+    """
+    for n in range(min(len(tag) - 1, len(text)), 0, -1):
+        if text[-n:] == tag[:n]:
+            return n
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
 
@@ -324,6 +341,7 @@ class LoomSession:
         self._memory_index: MemoryIndex = MemoryIndex()
         self._session_log: SessionLog | None = None
         self._turn_index: int = 0  # increments once per completed stream_turn()
+        self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
 
     # ------------------------------------------------------------------
     # Personality management
@@ -409,6 +427,11 @@ class LoomSession:
 
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
+
+        # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
+        # New plugin files require one-time GUARDED approval stored in
+        # RelationalMemory; previously approved files load silently.
+        await self._load_plugins()
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
@@ -498,8 +521,16 @@ class LoomSession:
         output_tokens = 0
         t0 = time.monotonic()
 
+        # Think-block filter state — persists across the whole turn so multi-step
+        # reasoning (think → tool use → think again) is handled correctly.
+        _think_in = False       # currently inside <think>…</think>?
+        _think_shown = False    # emitted the collapsed indicator for this streaming call?
+        _tbuf = ""              # partial-tag lookahead buffer
+        _think_parts: list[str] = []  # accumulates think content for /think command
+
         while True:
             response: Any = None
+            _think_shown = False  # reset per streaming call (each tool round can think again)
 
             async for chunk, final in self.router.stream_chat(
                 model=self.model,
@@ -509,9 +540,58 @@ class LoomSession:
             ):
                 if final is None:
                     if chunk:
-                        yield TextChunk(text=chunk)
+                        _tbuf += chunk
+                        out_parts: list[str] = []
+                        while _tbuf:
+                            if _think_in:
+                                close_idx = _tbuf.find("</think>")
+                                if close_idx >= 0:
+                                    _think_parts.append(_tbuf[:close_idx])
+                                    _think_in = False
+                                    _tbuf = _tbuf[close_idx + len("</think>"):]
+                                    if not _think_shown:
+                                        out_parts.append("▸ thinking…\n")
+                                        _think_shown = True
+                                else:
+                                    # Partial </think> at end? Accumulate up to lookahead.
+                                    partial = _find_partial_tag_suffix(_tbuf, "</think>")
+                                    if partial:
+                                        _think_parts.append(_tbuf[: len(_tbuf) - partial])
+                                        _tbuf = _tbuf[len(_tbuf) - partial :]
+                                    else:
+                                        _think_parts.append(_tbuf)
+                                        _tbuf = ""
+                                    break
+                            else:
+                                open_idx = _tbuf.find("<think>")
+                                if open_idx >= 0:
+                                    before = _tbuf[:open_idx]
+                                    if before:
+                                        out_parts.append(before)
+                                    _think_in = True
+                                    _tbuf = _tbuf[open_idx + len("<think>"):]
+                                else:
+                                    # Partial <think> at end? Keep lookahead.
+                                    partial = _find_partial_tag_suffix(_tbuf, "<think>")
+                                    if partial:
+                                        before = _tbuf[: len(_tbuf) - partial]
+                                        if before:
+                                            out_parts.append(before)
+                                        _tbuf = _tbuf[len(_tbuf) - partial :]
+                                    else:
+                                        out_parts.append(_tbuf)
+                                        _tbuf = ""
+                                    break
+                        text = "".join(out_parts)
+                        if text:
+                            yield TextChunk(text=text)
                 else:
                     response = final
+
+            # Flush any buffered non-think content after each streaming call ends.
+            if _tbuf and not _think_in:
+                yield TextChunk(text=_tbuf)
+                _tbuf = ""
 
             if response is None:
                 break
@@ -546,6 +626,7 @@ class LoomSession:
                 except Exception:
                     pass  # never block the turn on compression failure
 
+                self._last_think = "".join(_think_parts).strip()
                 yield TurnDone(
                     tool_count=tool_count,
                     input_tokens=input_tokens,
@@ -624,6 +705,7 @@ class LoomSession:
             else:
                 break
 
+        self._last_think = "".join(_think_parts).strip()
         self._turn_index += 1
         yield TurnDone(
             tool_count=tool_count,
@@ -631,6 +713,111 @@ class LoomSession:
             output_tokens=output_tokens,
             elapsed_ms=(time.monotonic() - t0) * 1000,
         )
+
+    # ------------------------------------------------------------------
+    # Plugin loader
+    # ------------------------------------------------------------------
+
+    async def _load_plugins(self) -> None:
+        """
+        Discover and load plugins from two locations (in order):
+
+        1. ``~/.loom/plugins/*.py``  — global plugin directory; Loom itself
+           can write new plugins here via write_file.
+        2. ``<workspace>/loom_tools.py`` — local convenience file (backward
+           compatible; treated as a plugin bundle).
+
+        Safety gate
+        -----------
+        The first time a plugin file is seen (not in RelationalMemory), the
+        user is prompted to approve it.  Approval is stored as:
+            (subject="plugin:<stem>", predicate="approved", object="true")
+        Subsequent sessions load approved plugins silently.
+        GUARDED trust — user must explicitly allow unknown code.
+        """
+        import importlib.util as _ilu
+        import loom as _loom_pkg
+
+        plugin_dir = Path("~/.loom/plugins").expanduser()
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect candidate files: global plugins first, then local loom_tools.py
+        candidates: list[tuple[Path, str]] = []
+        for p in sorted(plugin_dir.glob("*.py")):
+            candidates.append((p, f"plugin:{p.stem}"))
+        local = self.workspace / "loom_tools.py"
+        if local.exists():
+            candidates.append((local, f"plugin:loom_tools"))
+
+        if not candidates:
+            return
+
+        for plugin_path, rel_key in candidates:
+            approved = False
+            if self._relational is not None:
+                entry = await self._relational.get(rel_key, "approved")
+                approved = entry is not None and entry.object == "true"
+
+            if not approved:
+                # First-time: show file summary and ask for confirmation
+                console.print(
+                    f"\n[yellow]  New plugin:[/yellow] [bold]{plugin_path.name}[/bold]"
+                )
+                console.print(f"  [dim]{plugin_path}[/dim]")
+                try:
+                    lines = plugin_path.read_text(encoding="utf-8").splitlines()
+                    preview = "\n".join(f"    {l}" for l in lines[:12])
+                    if len(lines) > 12:
+                        preview += f"\n    … ({len(lines) - 12} more lines)"
+                    console.print(f"[dim]{preview}[/dim]")
+                except Exception:
+                    pass
+
+                allow = Confirm.ask(
+                    "  [yellow]Allow this plugin?[/yellow]", default=False
+                )
+                if not allow:
+                    console.print(f"  [dim]Skipped {plugin_path.name}[/dim]")
+                    continue
+
+                # Persist approval
+                if self._relational is not None:
+                    from loom.core.memory.relational import RelationalEntry
+                    await self._relational.upsert(RelationalEntry(
+                        subject=rel_key,
+                        predicate="approved",
+                        object="true",
+                        source="user",
+                    ))
+
+            # Load the file — this executes @loom.tool / loom.register_plugin() calls
+            _loom_pkg._get_default_registry().__init__()      # reset so re-runs don't double-register
+            _loom_pkg._get_default_plugin_registry().__init__()
+            try:
+                _spec = _ilu.spec_from_file_location(plugin_path.stem, plugin_path)
+                if _spec and _spec.loader:
+                    _mod = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+            except Exception as exc:
+                console.print(f"  [red]Error loading {plugin_path.name}: {exc}[/red]")
+                continue
+
+            # Install @loom.tool tools
+            tool_count = _loom_pkg._get_default_registry().install_into(self.registry)
+
+            # Install LoomPlugin instances
+            plugin_summary = _loom_pkg._get_default_plugin_registry().install_into(self)
+            plugin_count = sum(plugin_summary.values())
+            named_plugins = [n for n in plugin_summary if n != "(anonymous)"]
+
+            total = tool_count + plugin_count
+            if total:
+                detail = ""
+                if named_plugins:
+                    detail = f"  [dim]({', '.join(named_plugins)})[/dim]"
+                console.print(
+                    f"  [dim]✓ {plugin_path.name} — {total} tool(s) loaded{detail}[/dim]"
+                )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1065,6 +1252,15 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                     f"[dim]Available: {', '.join(avail) or '(none)'}[/dim]"
                 )
 
+    elif command == "/think":
+        think = session._last_think
+        if think:
+            console.print(
+                Panel(think, title="[dim]Reasoning chain[/dim]", border_style="dim")
+            )
+        else:
+            console.print("[dim]No reasoning chain captured for the last turn.[/dim]")
+
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
         console.print(f"[dim]  Compacting context ({pct:.1f}% used)…[/dim]")
@@ -1085,6 +1281,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
                 "  [cyan]/personality off[/cyan]        Remove active persona\n"
                 "  [cyan]/personality[/cyan]             Show active + available personas\n"
+                "  [cyan]/think[/cyan]                   Show reasoning chain from last turn\n"
                 "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
                 "  [cyan]/verbose[/cyan]                 Toggle tool output verbosity\n"
                 "  [cyan]/help[/cyan]                    Show this message\n\n"
@@ -1294,6 +1491,14 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                     severity="error",
                 )
 
+    elif command == "/think":
+        think = session._last_think
+        if think:
+            from loom.platform.cli.tui.components.think_modal import ThinkModal
+            await app.push_screen_wait(ThinkModal(think))
+        else:
+            app.notify("No reasoning chain captured for the last turn.", severity="information")
+
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
         app.notify(f"Compacting context ({pct:.1f}% used)…")
@@ -1319,7 +1524,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/help":
         app.notify(
-            "Commands: /personality [name|off], /compact, /verbose, /sessions, /help  |  "
+            "Commands: /personality [name|off], /think, /compact, /verbose, /sessions, /help  |  "
             "Keys: Ctrl+L clear · Ctrl+O verbose · Ctrl+W workspace"
         )
 
@@ -1701,6 +1906,147 @@ async def _reflect(session_id: str | None, db: str) -> None:
                     f"[dim]used {s['usage_count']}×  "
                     f"tags: {s['tags']}[/dim]"
                 )
+
+
+# ---------------------------------------------------------------------------
+# loom import command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--lens",
+    default=None,
+    metavar="NAME",
+    help="Force a specific lens (hermes, openai_tools). Auto-detected if omitted.",
+)
+@click.option(
+    "--min-confidence",
+    default=0.5,
+    show_default=True,
+    type=float,
+    help="Minimum confidence for skill import (0.0–1.0).",
+)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--dry-run", is_flag=True, default=False, help="Show decisions without writing.")
+def import_cmd(
+    file: str, lens: str | None, min_confidence: float, db: str, dry_run: bool
+) -> None:
+    """Import skills or tools from a JSON file using a Lens."""
+    asyncio.run(_import(file, lens, min_confidence, db, dry_run))
+
+
+async def _import(
+    file: str,
+    lens_name: str | None,
+    min_confidence: float,
+    db: str,
+    dry_run: bool,
+) -> None:
+    import json as _json
+    from loom.extensibility import (
+        LensRegistry, HermesLens, OpenAIToolsLens,
+        SkillImportPipeline,
+    )
+    from loom.extensibility.adapter import AdapterRegistry
+
+    # Build registry with all built-in lenses
+    lens_registry = LensRegistry()
+    lens_registry.register(HermesLens())
+    lens_registry.register(OpenAIToolsLens())
+
+    # Load file
+    raw_path = Path(file).expanduser().resolve()
+    try:
+        source = _json.loads(raw_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        console.print(f"[red]Could not read '{raw_path}': {exc}[/red]")
+        return
+
+    # Extract via lens
+    result = lens_registry.extract(source, lens_name=lens_name)
+    if result is None:
+        avail = ", ".join(lens_registry.registered_names) or "(none)"
+        console.print(
+            f"[red]No lens matched this file.[/red] "
+            f"[dim]Available: {avail}. Use --lens to specify one.[/dim]"
+        )
+        return
+
+    console.print(f"[dim]Lens:[/dim] [cyan]{result.source}[/cyan]  "
+                  f"[dim]File:[/dim] {raw_path.name}")
+
+    if result.warnings:
+        for w in result.warnings:
+            console.print(f"  [yellow]⚠[/yellow]  {w}")
+
+    if result.is_empty:
+        console.print("[dim]Nothing to import.[/dim]")
+        return
+
+    store = SQLiteStore(db)
+    async with store.connect() as conn:
+        from loom.core.memory.procedural import ProceduralMemory
+
+        # ── Skills ──────────────────────────────────────────────────────────
+        if result.skills:
+            procedural = ProceduralMemory(conn)
+            pipeline = SkillImportPipeline(procedural, min_confidence=min_confidence)
+            decisions = await pipeline.process(result.skills)
+
+            console.print(f"\n[bold]Skills[/bold] ({len(decisions)} evaluated)")
+            approved = [d for d in decisions if d.approved]
+            rejected = [d for d in decisions if not d.approved]
+
+            for d in approved:
+                marker = "[dim](dry-run)[/dim]" if dry_run else "[green]✓[/green]"
+                console.print(
+                    f"  {marker} [cyan]{d.skill_name}[/cyan]  "
+                    f"[dim]conf={d.adjusted_confidence:.2f}[/dim]"
+                )
+            for d in rejected:
+                console.print(
+                    f"  [dim]✗[/dim] [dim]{d.skill_name}[/dim]  "
+                    f"[red]{d.reason}[/red]"
+                )
+
+            if not dry_run and approved:
+                count = await pipeline.import_approved(decisions, result.skills)
+                console.print(
+                    f"\n  [green]{count} skill(s) written to ProceduralMemory.[/green]"
+                )
+
+        # ── Tool adapters ────────────────────────────────────────────────────
+        if result.platform_adapters:
+            console.print(f"\n[bold]Tool adapters[/bold] ({len(result.platform_adapters)} found)")
+            for a in result.platform_adapters:
+                trust_color = {"safe": "green", "guarded": "yellow", "critical": "red"}.get(
+                    a.get("trust_level", "safe"), "white"
+                )
+                console.print(
+                    f"  [dim]·[/dim] [cyan]{a['name']}[/cyan]  "
+                    f"[{trust_color}]{a.get('trust_level', 'safe').upper()}[/{trust_color}]  "
+                    f"[dim]{a.get('description', '')[:60]}[/dim]"
+                )
+            if dry_run:
+                console.print(
+                    "  [dim](dry-run) Adapters listed but not installed into any session.[/dim]"
+                )
+            else:
+                console.print(
+                    "  [dim]Adapters listed. Use AdapterRegistry.from_lens_result() "
+                    "in code, or place tools in loom_tools.py for auto-loading.[/dim]"
+                )
+
+        # ── Middleware patterns (informational) ──────────────────────────────
+        if result.middleware_patterns:
+            console.print(
+                f"\n[bold]Middleware patterns[/bold] "
+                f"[dim](informational — not imported)[/dim]"
+            )
+            for m in result.middleware_patterns:
+                console.print(f"  [dim]·[/dim] {m['name']}  {m.get('description', '')[:60]}")
 
 
 # ---------------------------------------------------------------------------

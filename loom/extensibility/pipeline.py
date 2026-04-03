@@ -1,17 +1,21 @@
 """
-SkillImportPipeline — validate and gate foreign skills before persisting.
+SkillImportPipeline — statically vet and gate foreign skills before persisting.
 
-Pipeline steps (in order)
---------------------------
-1. Schema validation  — required fields ('name', 'body') must be non-empty.
-2. Confidence gate    — skill confidence must meet the minimum threshold.
-3. Deduplication      — skip if a skill with the same name already exists.
+Vetting steps (in order)
+-------------------------
+1. Schema check    — required fields ('name', 'body') must be non-empty strings.
+2. Confidence gate — skill confidence must meet the minimum threshold.
+3. Deduplication   — skip if a skill with the same name already exists.
+
+No code is executed during vetting; this is purely structural inspection.
+Runtime safety is ensured by Loom's existing TrustLevel / BlastRadiusMiddleware
+stack once the skill is invoked as a tool.
 
 Usage
 -----
     pipeline = SkillImportPipeline(procedural_memory, min_confidence=0.5)
 
-    # Phase 1: evaluate
+    # Phase 1: evaluate (no writes)
     decisions = await pipeline.process(lens_result.skills)
 
     # Phase 2: persist approved

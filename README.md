@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude Code is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2.1** — Session management, web tools, workspace sandbox, and memory improvements. Stable foundation before P5E sub-agent architecture.
+**v0.2.2** — Sub-agent, Plugin system, `<think>` reasoning collapse, `loom import`, Skill eval loop, and architecture hardening.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -37,7 +37,7 @@ Platform (CLI)  →  Cognition  →  Harness  →  Memory
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
 | **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision |
 | **Notify** | `NotificationRouter` fan-out; `CLINotifier`, `WebhookNotifier`, `TelegramNotifier`; `ConfirmFlow` with timeout |
-| **Extensibility** | `BaseLens` + `HermesLens` / `ClawCodeLens`; Skill Import Pipeline; `@loom.tool` adapter registry |
+| **Extensibility** | `LoomPlugin` unified plugin interface; `HermesLens` / `OpenAIToolsLens`; Skill Import Pipeline; `@loom.tool` + `loom.register_plugin()` |
 
 ---
 
@@ -96,6 +96,7 @@ loom autonomy emit <event_name>  # manually fire an EventTrigger
 
 | Command | Effect |
 |---------|--------|
+| `/think` | Show the full reasoning chain (`<think>…</think>`) from the last turn |
 | `/compact` | LLM-summarize oldest conversation turns to free context |
 | `/sessions` | Browse and switch sessions (TUI picker) |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
@@ -216,6 +217,71 @@ default_channel = "cli"
 
 ---
 
+## Extensibility
+
+### Plugin System
+
+Loom can extend itself at runtime through a unified plugin interface.  Plugins live in `~/.loom/plugins/` — Loom (or you) can drop files there and they are loaded automatically on the next session start.
+
+**First run:** a new plugin file triggers a GUARDED confirmation prompt. Approval is stored in relational memory so future sessions load it silently.
+
+**Simple tool plugin** — just drop a `.py` file:
+
+```python
+# ~/.loom/plugins/my_tools.py
+import loom
+
+@loom.tool(trust_level="safe", description="Query our internal API")
+async def query_internal_api(call):
+    url = call.args["url"]
+    # ... your implementation
+```
+
+**Full plugin class** — for tools + middleware + lenses together:
+
+```python
+# ~/.loom/plugins/git_tools.py
+import loom
+from loom.extensibility import LoomPlugin
+from loom.core.harness.registry import ToolDefinition
+from loom.core.harness.permissions import TrustLevel
+
+class GitPlugin(LoomPlugin):
+    name = "git"
+    version = "1.0"
+
+    def tools(self):
+        return [git_status_tool, git_diff_tool]   # ToolDefinition instances
+
+    def middleware(self):
+        return [GitSafetyMiddleware()]             # Middleware subclass instances
+
+loom.register_plugin(GitPlugin())
+```
+
+| Extension point | Method |
+|----------------|--------|
+| Tools | `tools() -> list[ToolDefinition]` |
+| Middleware | `middleware() -> list[Middleware]` |
+| Lenses | `lenses() -> list[BaseLens]` |
+| Notifiers | `notifiers() -> list[BaseNotifier]` |
+| Lifecycle hooks | `on_session_start(session)` / `on_session_stop(session)` |
+
+### Importing external skills and tools
+
+```bash
+# Import skills from a Hermes-format JSON
+loom import skills.json
+
+# Import OpenAI-compatible tool definitions
+loom import tools.json --lens openai_tools
+
+# Preview without writing
+loom import skills.json --dry-run --min-confidence 0.7
+```
+
+---
+
 ## Running Tests
 
 ```bash
@@ -243,12 +309,16 @@ python -m pytest tests/test_integration.py -v
 | Phase 3 | Autonomy + Notify | ✅ Complete |
 | Phase 4 | Learning Layer (Prompt Stack, Memory-as-Attention, Lens System) | ✅ Complete |
 | Phase 4.5 | CLI Platform maturity (streaming, smart compact, parallel tools) | ✅ Complete |
+| Phase 4C | Extensibility: Lens system, Skill Import Pipeline, `@loom.tool` | ✅ Complete |
+| Phase 4D | Plugin system: `LoomPlugin`, `~/.loom/plugins/` auto-scan, approval gate | ✅ Complete |
 | Phase 5A | Ecosystem foundations (REST API, Discord, memory search, skill eval) | ✅ Complete |
 | Phase 5B | Textual TUI (`loom chat --tui`) — dual-space interface, modal confirm | ✅ Complete (v0.2) |
 | Phase 5C | Session management (`--resume`, `/sessions` picker, TUI auto-resume) | ✅ Complete (v0.2.1) |
 | Phase 5D | Web tools (`fetch_url`, `web_search`) + workspace sandbox | ✅ Complete (v0.2.1) |
 | Phase 5D+ | Memory: timestamps in recall, periodic compression, datetime context | ✅ Complete (v0.2.1) |
-| Phase 5E | Sub-agent (`spawn_agent`) — isolated child LoomSession with trust inheritance | 🔄 Next |
+| Phase 5E | Sub-agent (`spawn_agent`) — isolated child LoomSession with trust inheritance | ✅ Complete |
+| Phase 5F | Architecture hardening: failure taxonomy, confidence decay, memory provenance | ✅ Complete |
+| Phase UI | `<think>` reasoning collapse, `/think` command, streaming cursor improvements | ✅ Complete |
 
 ---
 

@@ -1,13 +1,15 @@
 from .lens import BaseLens, LensResult, LensRegistry
 from .hermes import HermesLens
-from .claw import ClawCodeLens
+from .openai_tools import OpenAIToolsLens
 from .pipeline import ImportDecision, SkillImportPipeline
 from .adapter import AdapterRegistry
+from .plugin import LoomPlugin, PluginRegistry
 
 __all__ = [
     "BaseLens", "LensResult", "LensRegistry",
     "HermesLens",
-    "ClawCodeLens",
+    "OpenAIToolsLens",
     "ImportDecision", "SkillImportPipeline",
     "AdapterRegistry",
+    "LoomPlugin", "PluginRegistry",
 ]
