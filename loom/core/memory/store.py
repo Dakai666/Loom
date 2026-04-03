@@ -86,6 +86,28 @@ CREATE TABLE IF NOT EXISTS trigger_history (
 
 CREATE INDEX IF NOT EXISTS idx_relational_subject  ON relational_entries(subject);
 CREATE INDEX IF NOT EXISTS idx_relational_pred     ON relational_entries(predicate);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id   TEXT PRIMARY KEY,
+    model        TEXT NOT NULL,
+    title        TEXT,
+    started_at   TEXT NOT NULL,
+    last_active  TEXT NOT NULL,
+    turn_count   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS session_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    turn_index  INTEGER NOT NULL,
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 """
 
 

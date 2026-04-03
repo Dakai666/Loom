@@ -5,6 +5,7 @@ from .procedural import SkillGenome, ProceduralMemory
 from .relational import RelationalEntry, RelationalMemory
 from .search import BM25, MemorySearchResult, MemorySearch
 from .index import MemoryIndex, MemoryIndexer
+from .session_log import SessionLog
 
 __all__ = [
     "SQLiteStore",
@@ -14,4 +15,5 @@ __all__ = [
     "RelationalEntry", "RelationalMemory",
     "BM25", "MemorySearchResult", "MemorySearch",
     "MemoryIndex", "MemoryIndexer",
+    "SessionLog",
 ]

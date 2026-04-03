@@ -643,9 +643,48 @@ CLI 從最小原型升級為接近生產品質的互動介面：
 - [x] Relational Memory 讀寫 API（`RelationalMemory` class + `relate` / `query_relations` 工具 + MemoryIndex 整合）
 - [x] REST API Platform（`loom/platform/api/server.py` FastAPI app；`GET/POST /memory/semantic`, `GET/POST /memory/relational`, `POST /webhook/reply`, `POST /events/emit`；`loom api start` CLI 命令；optional dep `loom[api]`）
 - [x] Discord Notifier（`DiscordNotifier`；embed 顏色分類；confirm 附帶 curl 回覆指令；`DISCORD_WEBHOOK_URL` env / loom.toml `[notify.discord]` 自動載入；push_reply 接 REST API）
-- [ ] Session Log + Session 管理（`sessions` metadata 表 + `session_log` 完整 message history 表；audit_log 接入；`loom chat --resume` / `--session <id>`；`loom sessions list/show/rm`）
+- [x] **Textual TUI**（`loom chat --tui`；dual-space layout；ModalScreen tool confirm；Artifacts + Knowledge Graph workspace；streaming cursor；status bar；Ctrl+C/L/O/W bindings）— **v0.2 發布**
+- [ ] **Session Log + Session 管理** ← **Phase 5C 當前重點**
+  - `sessions` metadata 表 + `session_log` 完整 message history 表
+  - audit_log 接入；`loom chat --resume` / `--session <id>`
+  - `loom sessions list/show/rm`
+- [ ] **Web Tools** ← **Phase 5D**
+  - `fetch_url`（GUARDED）：HTTP GET → HTML 轉純文字（去 scripts/styles/nav），回傳 title + 清洗後正文，1000 字截斷
+  - `web_search`（GUARDED）：Brave Search API（`brave_search_key` from `.env`），返回 top-N snippet + URL 列表，內建 result 清洗
+  - 兩者都有 timeout（10s）+ 回傳字元數限制，避免把垃圾 log 塞進 context
+- [ ] **Sub-agent** ← **Phase 5E（重要，獨立架構設計）**
+  - 父 session 透過 `spawn_agent` tool 建立子 `LoomSession`，帶獨立 context + memory scope
+  - 子 agent 完成後結果序列化回父 session 的 message history
+  - Trust 繼承：子 agent 預設 trust ≤ 父；父未授權的工具子也不能執行
+  - 用途：長任務拆分、平行調查、隔離危險操作
 - [ ] IDE Extension 支援（VS Code）
 - [ ] 文檔網站
+
+#### TUI 設計落差審視（CLI_UI_DESIGN.md vs 實際實作）
+
+| 功能 | 規劃 | 現狀 | 決策 |
+|------|------|------|------|
+| Dual-space 雙欄佈局 | ✅ | ✅ 已實作 | — |
+| Header（model / memory）| ✅ | ✅ 已實作 | — |
+| MessageList + streaming cursor `▌` | ✅ | ✅ 已實作 | — |
+| ToolBlock 三態（pending/running/done）| ✅ | ✅ 已實作 | — |
+| InputArea + slash Tab 補全 | ✅ | ✅ 已實作 | — |
+| StatusBar 色彩 context bar | ✅ | ✅ 已實作 | — |
+| Workspace Artifacts tab | ✅ | ✅ 已實作（write_file 自動追蹤）| — |
+| Workspace Knowledge Graph tab | ✅ | ✅ 已實作（session memory 數據）| — |
+| ObservabilityPanel 工具摘要 | ✅ | ✅ 精簡版（單行）| 設計過度複雜 |
+| ConfirmModal 工具確認 | ✅ | ✅ 已實作（Allow/Deny 按鈕）| — |
+| Ctrl+C/L/O/W 快捷鍵 | ✅ | ✅ 已實作 | — |
+| DAG 可視化（Observability）| 規劃 | ❌ 未實作 | **過度規劃**，TUI 無需圖形 DAG |
+| Context Budget 詳細儀表板 | 規劃 | ❌ 未實作 | **過度規劃**，StatusBar 已足夠 |
+| Memory 健康狀態面板 | 規劃 | ❌ 未實作 | **過度規劃**，Knowledge Graph 已覆蓋 |
+| User 訊息靠右對齊 | 規劃 | ❌ 未實作 | 低優先，終端機寬度限制意義不大 |
+| Artifact jump/diff 互動操作 | 規劃 | ❌ 顯示為靜態標籤 | Phase 5D 可選 |
+| Markdown 程式碼高亮（即時）| 規劃 | ❌ 純文字 | 需 rich.syntax，Phase 5D |
+| 多行 InputArea | 規劃 | ❌ 單行 Input | 現狀足夠，多行增加複雜度 |
+| 全屏 Workspace（Ctrl+Shift+W）| 規劃 | ❌ 未實作 | 低優先 |
+
+**結論：DAG 可視化、Context Budget 儀表板、Memory 健康面板為過度規劃，不列入後續開發。Artifact 互動與 Markdown 高亮列為 Phase 5D 可選。**
 
 #### Session Log 設計備忘
 

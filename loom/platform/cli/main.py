@@ -24,6 +24,7 @@ import time
 import tomllib
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,7 @@ from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
+from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
     BUILTIN_TOOLS,
     make_memorize_tool,
@@ -236,9 +238,15 @@ def build_router(model: str) -> LLMRouter:
 
 
 class LoomSession:
-    def __init__(self, model: str, db_path: str) -> None:
+    def __init__(
+        self,
+        model: str,
+        db_path: str,
+        resume_session_id: str | None = None,
+    ) -> None:
         self.model = model
-        self.session_id = str(uuid.uuid4())[:8]
+        self.session_id = resume_session_id or str(uuid.uuid4())[:8]
+        self._resume = resume_session_id is not None
         self.router = build_router(model)
 
         # Build prompt stack from loom.toml [identity] config
@@ -275,6 +283,8 @@ class LoomSession:
         self._reflection: ReflectionAPI | None = None
         self._pipeline: MiddlewarePipeline | None = None
         self._memory_index: MemoryIndex = MemoryIndex()
+        self._session_log: SessionLog | None = None
+        self._turn_index: int = 0  # increments once per completed stream_turn()
 
     # ------------------------------------------------------------------
     # Personality management
@@ -315,6 +325,7 @@ class LoomSession:
         self._procedural = ProceduralMemory(self._db)
         self._relational = RelationalMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
+        self._session_log = SessionLog(self._db)
 
         # Build MemoryIndex and inject into system prompt
         indexer = MemoryIndexer(
@@ -327,6 +338,18 @@ class LoomSession:
                 self.messages[0]["content"] += f"\n\n{index_text}"
             else:
                 self.messages.insert(0, {"role": "system", "content": index_text})
+
+        if not self._resume:
+            await self._session_log.create_session(self.session_id, self.model)
+        else:
+            # Load persisted history. System message is always rebuilt fresh
+            # (PromptStack + MemoryIndex) — never re-loaded from session_log.
+            loaded = await self._session_log.load_messages(self.session_id)
+            system_msgs = [m for m in self.messages if m["role"] == "system"]
+            self.messages = system_msgs + loaded
+            # Resume turn_index after the last saved turn
+            meta = await self._session_log.get_session(self.session_id)
+            self._turn_index = meta["turn_count"] if meta else 0
 
         # Register memory tools with injected stores
         search = MemorySearch(self._semantic, self._procedural)
@@ -359,6 +382,17 @@ class LoomSession:
         )
         if count:
             console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+        if self._session_log is not None:
+            first_user = next(
+                (m["content"] for m in self.messages if m["role"] == "user"), None
+            )
+            title = first_user[:60] if isinstance(first_user, str) else None
+            await self._session_log.update_session(
+                self.session_id,
+                turn_count=self._turn_index,
+                last_active=datetime.now(UTC).isoformat(),
+                title=title,
+            )
         await self._db.close()
 
     # ------------------------------------------------------------------
@@ -379,6 +413,7 @@ class LoomSession:
         TurnDone    — once all tool loops are resolved
         """
         self.messages.append({"role": "user", "content": user_input})
+        asyncio.ensure_future(self._log_message("user", user_input))
 
         await self._episodic.write(
             EpisodicEntry(
@@ -429,6 +464,20 @@ class LoomSession:
             output_tokens += response.output_tokens
 
             if response.stop_reason == "end_turn":
+                # Log assistant text response
+                raw = response.raw_message
+                if isinstance(raw.get("content"), str):
+                    assistant_text = raw["content"]
+                elif isinstance(raw.get("content"), list):
+                    assistant_text = " ".join(
+                        b.get("text", "") for b in raw["content"]
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                else:
+                    assistant_text = ""
+                if assistant_text:
+                    asyncio.ensure_future(self._log_message("assistant", assistant_text))
+                self._turn_index += 1
                 yield TurnDone(
                     tool_count=tool_count,
                     input_tokens=input_tokens,
@@ -453,23 +502,23 @@ class LoomSession:
                     dispatched = await self._dispatch_parallel(response.tool_uses)
                     for tu, result, duration_ms in dispatched:
                         tool_count += 1
+                        tool_output = str(result.output) if result.success else (result.error or "")
                         yield ToolEnd(
                             name=tu.name,
                             success=result.success,
-                            output=(str(result.output)[:200] if result.output else ""),
+                            output=tool_output[:200],
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
                         self.messages.append(
                             self.router.format_tool_result(
-                                self.model,
-                                tu.id,
-                                str(result.output)
-                                if result.success
-                                else (result.error or ""),
-                                result.success,
+                                self.model, tu.id, tool_output, result.success,
                             )
                         )
+                        asyncio.ensure_future(self._log_message(
+                            "tool", tool_output[:500],
+                            {"tool_call_id": tu.id, "tool_name": tu.name},
+                        ))
                 else:
                     # Sequential: single tool, or needs interactive confirmation
                     for tu in response.tool_uses:
@@ -478,23 +527,23 @@ class LoomSession:
                         result = await self._dispatch(tu.name, tu.args, tu.id)
                         duration_ms = (time.monotonic() - ts) * 1000
                         tool_count += 1
+                        tool_output = str(result.output) if result.success else (result.error or "")
                         yield ToolEnd(
                             name=tu.name,
                             success=result.success,
-                            output=(str(result.output)[:200] if result.output else ""),
+                            output=tool_output[:200],
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
                         self.messages.append(
                             self.router.format_tool_result(
-                                self.model,
-                                tu.id,
-                                str(result.output)
-                                if result.success
-                                else (result.error or ""),
-                                result.success,
+                                self.model, tu.id, tool_output, result.success,
                             )
                         )
+                        asyncio.ensure_future(self._log_message(
+                            "tool", tool_output[:500],
+                            {"tool_call_id": tu.id, "tool_name": tu.name},
+                        ))
 
                 # Check budget after tool results are appended — the next LLM
                 # call in this loop will include them and may push over the limit.
@@ -507,6 +556,7 @@ class LoomSession:
             else:
                 break
 
+        self._turn_index += 1
         yield TurnDone(
             tool_count=tool_count,
             input_tokens=input_tokens,
@@ -517,6 +567,16 @@ class LoomSession:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _log_message(
+        self, role: str, content: str, metadata: dict | None = None
+    ) -> None:
+        """Fire-and-forget session_log write. Exceptions are swallowed inside log_message."""
+        if self._session_log is None:
+            return
+        await self._session_log.log_message(
+            self.session_id, self._turn_index, role, content, metadata or {}
+        )
 
     async def _dispatch(self, tool_name: str, args: dict, call_id: str) -> ToolResult:
         tool_def = self.registry.get(tool_name)
@@ -794,16 +854,43 @@ def cli() -> None:
 @click.option("--model", default="MiniMax-M2.7", show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--tui", is_flag=True, default=False, help="Use Textual TUI interface.")
-def chat(model: str, db: str, tui: bool) -> None:
+@click.option("--resume", is_flag=True, default=False, help="Resume the most recent session.")
+@click.option("--session", "resume_id", default=None, metavar="ID", help="Resume a specific session by ID.")
+def chat(model: str, db: str, tui: bool, resume: bool, resume_id: str | None) -> None:
     """Start an interactive agent session."""
+    asyncio.run(_resolve_and_chat(model, db, tui, resume, resume_id))
+
+
+async def _resolve_and_chat(
+    model: str,
+    db: str,
+    tui: bool,
+    resume: bool,
+    resume_id: str | None,
+) -> None:
+    """Resolve --resume / --session flags, then launch the appropriate interface."""
+    resolved_id = resume_id
+    if resume and resolved_id is None:
+        store = SQLiteStore(db)
+        await store.initialize()
+        async with store.connect() as conn:
+            sl = SessionLog(conn)
+            rows = await sl.list_sessions(limit=1)
+        if rows:
+            resolved_id = rows[0]["session_id"]
+            title = rows[0].get("title") or "(no title)"
+            console.print(f"[dim]Resuming session [cyan]{resolved_id}[/cyan]: {title}[/dim]")
+        else:
+            console.print("[dim]No sessions found — starting a new session.[/dim]")
+
     if tui:
-        asyncio.run(_chat_tui(model, db))
+        await _chat_tui(model, db, resume_session_id=resolved_id)
     else:
-        asyncio.run(_chat(model, db))
+        await _chat(model, db, resume_session_id=resolved_id)
 
 
-async def _chat(model: str, db: str) -> None:
-    session = LoomSession(model=model, db_path=db)
+async def _chat(model: str, db: str, resume_session_id: str | None = None) -> None:
+    session = LoomSession(model=model, db_path=db, resume_session_id=resume_session_id)
     await session.start()
 
     console.print(render_header(model, db))
@@ -955,7 +1042,29 @@ class LoomChatApp:
                 self._session = session
 
             async def on_mount(self) -> None:
-                """Load knowledge graph counts from memory on startup."""
+                """Load knowledge graph counts and replay history on startup."""
+                from loom.platform.cli.tui.components.message_list import (
+                    MessageList,
+                    Role,
+                )
+                from textual.css.query import NoMatches
+
+                # Replay session history if resuming
+                if session._resume and session.messages:
+                    try:
+                        msg_list = self.query_one("#message-list", MessageList)
+                        for msg in session.messages:
+                            role = msg.get("role")
+                            content = msg.get("content", "")
+                            if not content:
+                                continue
+                            if role == "user":
+                                msg_list.add_message(Role.USER, content)
+                            elif role == "assistant":
+                                msg_list.add_message(Role.ASSISTANT, content)
+                    except (NoMatches, Exception):
+                        pass  # TUI not fully composed yet — skip replay
+
                 try:
                     semantic_entries = await session._semantic.list_recent(limit=999)
                     procedural_skills = await session._procedural.list_active()
@@ -1104,10 +1213,10 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
         app.notify(f"Unknown command '{command}'. Type /help.", severity="warning")
 
 
-async def _chat_tui(model: str, db: str) -> None:
+async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -> None:
     """Launch the Textual TUI chat session."""
     db_path = str(Path(db).expanduser())
-    session = LoomSession(model=model, db_path=db_path)
+    session = LoomSession(model=model, db_path=db_path, resume_session_id=resume_session_id)
     await session.start()
 
     app = LoomChatApp.create(session)
@@ -1264,6 +1373,116 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         console.print(clear_line_escape(), end="")
         console.print()
         console.print(f"[red]Error: {exc}[/red]")
+
+
+# ---------------------------------------------------------------------------
+# sessions commands
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def sessions() -> None:
+    """Manage saved conversation sessions."""
+
+
+@sessions.command("list")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--limit", default=20, show_default=True)
+def sessions_list(db: str, limit: int) -> None:
+    """List recent sessions."""
+    asyncio.run(_sessions_list(db, limit))
+
+
+@sessions.command("show")
+@click.argument("session_id")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def sessions_show(session_id: str, db: str) -> None:
+    """Print full conversation replay for SESSION_ID."""
+    asyncio.run(_sessions_show(session_id, db))
+
+
+@sessions.command("rm")
+@click.argument("session_id")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def sessions_rm(session_id: str, db: str) -> None:
+    """Delete SESSION_ID and all its messages."""
+    asyncio.run(_sessions_rm(session_id, db))
+
+
+async def _sessions_list(db: str, limit: int) -> None:
+    from rich.table import Table
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        sl = SessionLog(conn)
+        rows = await sl.list_sessions(limit)
+
+    if not rows:
+        console.print("[dim]No sessions found.[/dim]")
+        return
+
+    table = Table(title="Sessions", show_header=True, header_style="bold cyan")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Title", max_width=44)
+    table.add_column("Model", style="dim")
+    table.add_column("Turns", justify="right")
+    table.add_column("Last Active")
+    for r in rows:
+        table.add_row(
+            r["session_id"],
+            r["title"] or "[dim](no title)[/dim]",
+            r["model"],
+            str(r["turn_count"]),
+            r["last_active"][:16].replace("T", " "),
+        )
+    console.print(table)
+
+
+async def _sessions_show(session_id: str, db: str) -> None:
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        sl = SessionLog(conn)
+        meta = await sl.get_session(session_id)
+        messages = await sl.load_messages(session_id)
+
+    if meta is None:
+        console.print(f"[red]Session '{session_id}' not found.[/red]")
+        return
+
+    console.print(Rule(f"[cyan]Session {session_id}[/cyan]"))
+    console.print(
+        f"[dim]Model: {meta['model']}  |  "
+        f"Turns: {meta['turn_count']}  |  "
+        f"Started: {meta['started_at'][:16].replace('T', ' ')}[/dim]"
+    )
+    console.print()
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "") or ""
+        if role == "user":
+            console.print(f"[bold yellow]you>[/bold yellow] {content}")
+        elif role == "assistant":
+            if content:
+                console.print(Markdown(content))
+        elif role == "tool":
+            console.print(f"[dim]  [tool] {str(content)[:300]}[/dim]")
+        console.print()
+
+
+async def _sessions_rm(session_id: str, db: str) -> None:
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        sl = SessionLog(conn)
+        meta = await sl.get_session(session_id)
+        if meta is None:
+            console.print(f"[red]Session '{session_id}' not found.[/red]")
+            return
+        await sl.delete_session(session_id)
+    console.print(f"[dim]Session [cyan]{session_id}[/cyan] deleted.[/dim]")
 
 
 # ---------------------------------------------------------------------------
