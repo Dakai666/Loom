@@ -1092,7 +1092,7 @@ async def _chat_tui(model: str, db: str) -> None:
     from prompt_toolkit import prompt as pt_prompt
 
     async def _tui_confirm(call: ToolCall) -> bool:
-        async with app.suspend():
+        with app.suspend():  # sync contextmanager in Textual 8.x
             console.print()
             console.print(
                 Panel(
