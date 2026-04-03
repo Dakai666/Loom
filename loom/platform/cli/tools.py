@@ -14,9 +14,12 @@ The actual registration happens in main.py via ToolRegistry.
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import httpx
 
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
@@ -25,6 +28,30 @@ if TYPE_CHECKING:
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
+
+_WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
+_CONTENT_LIMIT = 2000     # max chars returned to agent
+_SEARCH_RESULTS = 5       # default Brave results
+
+
+def _html_to_text(html: str) -> tuple[str, str]:
+    """Extract title and clean body text from raw HTML."""
+    # Extract title
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
+
+    # Remove script/style/nav/header/footer blocks
+    cleaned = re.sub(r"<(script|style|nav|header|footer|aside)[^>]*>.*?</\1>",
+                     "", html, flags=re.I | re.S)
+    # Strip remaining tags
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    # Decode common HTML entities
+    for entity, char in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                         ("&quot;", '"'), ("&#39;", "'"), ("&nbsp;", " ")]:
+        cleaned = cleaned.replace(entity, char)
+    # Collapse whitespace
+    cleaned = re.sub(r"\s{2,}", "\n", cleaned).strip()
+    return title, cleaned
 
 
 async def _read_file(call: ToolCall) -> ToolResult:
@@ -327,6 +354,121 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
         },
         executor=_query_relations,
         tags=["memory", "search", "relational"],
+    )
+
+
+def make_fetch_url_tool() -> ToolDefinition:
+    """Return a SAFE tool that fetches a URL and returns cleaned text."""
+
+    async def _fetch_url(call: ToolCall) -> ToolResult:
+        url = call.args.get("url", "").strip()
+        if not url:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'url' argument is required")
+        try:
+            async with httpx.AsyncClient(follow_redirects=True,
+                                         timeout=_WEB_TIMEOUT) as client:
+                resp = await client.get(url, headers={"User-Agent": "Loom/0.3"})
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+                if "html" in content_type:
+                    title, body = _html_to_text(resp.text)
+                    body = body[:_CONTENT_LIMIT]
+                    output = f"Title: {title}\n\n{body}" if title else body
+                else:
+                    output = resp.text[:_CONTENT_LIMIT]
+        except httpx.HTTPStatusError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"HTTP {exc.response.status_code}: {url}")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=True, output=output)
+
+    return ToolDefinition(
+        name="fetch_url",
+        description=(
+            "Fetch a URL and return the page title and cleaned body text (scripts/styles removed). "
+            "Use this to read web pages, documentation, or articles. "
+            "Output is truncated to 2000 chars."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch (http/https)"},
+            },
+            "required": ["url"],
+        },
+        executor=_fetch_url,
+        tags=["web", "fetch"],
+    )
+
+
+def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
+    """Return a GUARDED tool that searches the web via Brave Search API."""
+
+    async def _web_search(call: ToolCall) -> ToolResult:
+        query = call.args.get("query", "").strip()
+        count = min(max(int(call.args.get("count", _SEARCH_RESULTS)), 1), 10)
+        if not query:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'query' argument is required")
+        try:
+            async with httpx.AsyncClient(timeout=_WEB_TIMEOUT) as client:
+                resp = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    params={"q": query, "count": count},
+                    headers={
+                        "Accept": "application/json",
+                        "Accept-Encoding": "gzip",
+                        "X-Subscription-Token": brave_api_key,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False,
+                              error=f"Brave API error {exc.response.status_code}")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+
+        results = data.get("web", {}).get("results", [])
+        if not results:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output="No results found.")
+
+        lines: list[str] = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "")
+            url = r.get("url", "")
+            desc = re.sub(r"\s+", " ", r.get("description", "")).strip()
+            lines.append(f"{i}. {title}\n   {url}\n   {desc}")
+        output = "\n\n".join(lines)
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=True, output=output)
+
+    return ToolDefinition(
+        name="web_search",
+        description=(
+            "Search the web via Brave Search and return top results with titles, URLs, and descriptions. "
+            "Use this to find current information, documentation, or answers that aren't in memory."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "count": {"type": "integer",
+                          "description": "Number of results to return (1–10, default 5)"},
+            },
+            "required": ["query"],
+        },
+        executor=_web_search,
+        tags=["web", "search"],
     )
 
 

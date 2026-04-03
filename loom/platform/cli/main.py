@@ -72,10 +72,12 @@ from loom.core.memory.search import MemorySearch
 from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
     BUILTIN_TOOLS,
+    make_fetch_url_tool,
     make_memorize_tool,
     make_query_relations_tool,
     make_recall_tool,
     make_relate_tool,
+    make_web_search_tool,
 )
 from loom.platform.cli.ui import (
     TextChunk,
@@ -357,6 +359,13 @@ class LoomSession:
         self.registry.register(make_memorize_tool(self._semantic))
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
+
+        # Register web tools (Phase 5D)
+        self.registry.register(make_fetch_url_tool())
+        env = _load_env()
+        brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
+        if brave_key:
+            self.registry.register(make_web_search_tool(brave_key))
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
