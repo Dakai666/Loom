@@ -49,7 +49,12 @@ class StatusBar(Widget):
 
     def _render(self) -> None:
         """Render the status bar."""
-        content = self.query_one("#status-content", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            content = self.query_one("#status-content", Static)
+        except NoMatches:
+            return
         pct = self.context_fraction * 100
         ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
 
@@ -58,11 +63,11 @@ class StatusBar(Widget):
         bar = "#" * filled + "." * (bar_len - filled)
 
         content.update(
-            f"[dim]-[/{dim}]"
+            f"[dim]-[/dim]"
             f"[{ctx_color}]{bar}[/{ctx_color}]"
             f"[dim] context {pct:.1f}%  |  "
             f"{self.input_tokens}in / {self.output_tokens}out  |  "
             f"{self.elapsed_ms / 1000:.1f}s  |  "
             f"{self.tool_count} tool{'s' if self.tool_count != 1 else ''}"
-            f"[dim]-[/{dim}]"
+            f"[/dim]"
         )

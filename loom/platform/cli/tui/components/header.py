@@ -41,6 +41,9 @@ class Header(Widget):
         yield logo
         yield info
 
+    def on_mount(self) -> None:
+        self._update_info()
+
     def watch_model(self, model: str) -> None:
         self._update_info()
 
@@ -48,7 +51,12 @@ class Header(Widget):
         self._update_info()
 
     def _update_info(self) -> None:
-        info = self.query_one("#header-info", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            info = self.query_one("#header-info", Static)
+        except NoMatches:
+            return  # called before compose() — skip until mounted
         parts = []
         if self.model:
             parts.append(f"[green]{self.model}[/green]")

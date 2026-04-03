@@ -49,15 +49,15 @@ class WorkspacePanel(Widget):
         self._kg_panel: KnowledgeGraph | None = None
 
     def compose(self) -> ComposeResult:
-        with Static(id="workspace-header"):
-            yield
+        yield Static("", id="workspace-header")
         yield ArtifactsPanel(id="artifacts-panel")
         yield KnowledgeGraph(id="knowledge-panel")
-        self._artifacts_panel = self.query_one("#artifacts-panel", ArtifactsPanel)
-        self._kg_panel = self.query_one("#knowledge-panel", KnowledgeGraph)
 
     def on_mount(self) -> None:
+        self._artifacts_panel = self.query_one("#artifacts-panel", ArtifactsPanel)
+        self._kg_panel = self.query_one("#knowledge-panel", KnowledgeGraph)
         self._update_visibility()
+        self._render_header()
 
     def watch_active_tab(self, tab: WorkspaceTab) -> None:
         self._update_visibility()
@@ -106,7 +106,13 @@ class WorkspacePanel(Widget):
             self._kg_panel.display = self.active_tab == WorkspaceTab.KNOWLEDGE
 
     def _render_header(self) -> None:
-        header = self.query_one("#workspace-header", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            header = self.query_one("#workspace-header", Static)
+        except NoMatches:
+            return
+
         artifacts_active = self.active_tab == WorkspaceTab.ARTIFACTS
         knowledge_active = self.active_tab == WorkspaceTab.KNOWLEDGE
 
