@@ -1008,7 +1008,17 @@ class LoomChatApp:
                                 )
                             )
                 except Exception as exc:
-                    self.notify(str(exc), severity="error")
+                    import traceback as _tb
+
+                    _log = Path.home() / ".loom" / "tui_error.log"
+                    _log.parent.mkdir(parents=True, exist_ok=True)
+                    with open(_log, "a") as _f:
+                        _f.write(_tb.format_exc())
+                    self.notify(
+                        f"Error: {exc}\n(details in ~/.loom/tui_error.log)",
+                        severity="error",
+                        timeout=20,
+                    )
 
         return _App()
 

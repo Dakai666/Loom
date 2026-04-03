@@ -27,8 +27,8 @@ class Header(Widget):
     personality: reactive[str | None] = reactive(None)
     db_path: reactive[str] = reactive("")
 
-    def __init__(self, model: str = "", db_path: str = "") -> None:
-        super().__init__()
+    def __init__(self, model: str = "", db_path: str = "", **kwargs) -> None:
+        super().__init__(**kwargs)
         self.model = model
         self.db_path = db_path
 
