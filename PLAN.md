@@ -648,11 +648,10 @@ CLI 從最小原型升級為接近生產品質的互動介面：
   - `sessions` metadata 表 + `session_log` 完整 message history 表
   - `loom chat --resume` / `--session <id>`；`loom sessions list/show/rm`
   - TUI resume 時回放歷史訊息至 MessageList
-- [ ] **Web Tools** ← **Phase 5D 當前重點**
-  - `fetch_url`（GUARDED）：HTTP GET → HTML 轉純文字（去 scripts/styles/nav），回傳 title + 清洗後正文，1000 字截斷
-  - `web_search`（GUARDED）：Brave Search API（`brave_search_key` from `.env`），返回 top-N snippet + URL 列表，內建 result 清洗
-  - 兩者都有 timeout（10s）+ 回傳字元數限制，避免把垃圾 log 塞進 context
-- [ ] **Sub-agent** ← **Phase 5E（重要，獨立架構設計）**
+- [x] **Web Tools** — **Phase 5D 完成**
+  - `fetch_url`（SAFE）：HTTP GET → HTML 轉純文字（去 scripts/styles/nav），回傳 title + 清洗後正文，2000 字截斷，10s timeout
+  - `web_search`（GUARDED）：Brave Search API（`brave_search_key` from `.env`），返回 top-N snippet + URL 列表；key 不存在時自動跳過不註冊
+- [ ] **Sub-agent** ← **Phase 5E 當前重點（重要，獨立架構設計）**
   - 父 session 透過 `spawn_agent` tool 建立子 `LoomSession`，帶獨立 context + memory scope
   - 子 agent 完成後結果序列化回父 session 的 message history
   - Trust 繼承：子 agent 預設 trust ≤ 父；父未授權的工具子也不能執行
