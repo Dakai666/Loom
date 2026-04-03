@@ -1087,28 +1087,21 @@ async def _chat_tui(model: str, db: str) -> None:
     app = LoomChatApp.create(session)
 
     # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
-    # suspends the Textual app, prompts in the raw terminal, then resumes.
+    # shows a ModalScreen dialog — no terminal suspension needed.
     from loom.core.harness.middleware import BlastRadiusMiddleware
-    from prompt_toolkit import prompt as pt_prompt
+    from loom.platform.cli.tui.components.confirm_modal import ConfirmModal
 
     async def _tui_confirm(call: ToolCall) -> bool:
-        with app.suspend():  # sync contextmanager in Textual 8.x
-            console.print()
-            console.print(
-                Panel(
-                    f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
-                    f"[dim]args: {call.args}[/dim]",
-                    title="[yellow]  Tool requires confirmation[/yellow]",
-                    border_style="yellow",
-                )
+        args_preview = "  ".join(
+            f"{k}={str(v)[:40]}" for k, v in call.args.items()
+        )[:120]
+        return await app.push_screen_wait(
+            ConfirmModal(
+                tool_name=call.tool_name,
+                trust_label=call.trust_level.label,
+                args_preview=args_preview,
             )
-            try:
-                answer = await asyncio.get_event_loop().run_in_executor(
-                    None, pt_prompt, "Allow? [y/N]: "
-                )
-            except (EOFError, KeyboardInterrupt):
-                answer = ""
-        return answer.strip().lower() in {"y", "yes"}
+        )
 
     for mw in session._pipeline._middlewares:
         if isinstance(mw, BlastRadiusMiddleware):

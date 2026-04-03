@@ -117,15 +117,15 @@ class ArtifactCard(Widget):
             for dl in a.diff_lines[:5]:
                 prefix = dl[0] if dl else " "
                 color = "green" if prefix == "+" else "red" if prefix == "-" else "dim"
-                lines.append(f"  [dim]{prefix}[/{color}] [dim]{dl[1:]}[/dim]")
+                lines.append(f"  [{color}]{prefix}[/{color}] [dim]{dl[1:]}[/dim]")
             if len(a.diff_lines) > 5:
                 lines.append(f"  [dim]... ({len(a.diff_lines) - 5} more lines)[/dim]")
             lines.append("  [dim]└──────────────────────────────────────┘[/dim]")
 
         lines.append(
-            f"  [dim][/dim][bold cyan]jump[/bold cyan][dim]  "
-            f"[bold cyan]diff[/bold cyan][dim]  "
-            f"[bold cyan]copy[/bold cyan]"
+            f"  [bold cyan]jump[/bold cyan]"
+            f"[dim]  |  [/dim][bold cyan]diff[/bold cyan]"
+            f"[dim]  |  [/dim][bold cyan]copy[/bold cyan]"
         )
         lines.append(
             "[dim]└──────────────────────────────────────────────────────┘[/dim]"

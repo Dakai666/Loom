@@ -14,6 +14,7 @@ from .artifact_card import Artifact, ArtifactCard, ArtifactState
 from .artifacts_panel import ArtifactsPanel
 from .knowledge_graph import KnowledgeGraph, KnowledgeNode
 from .workspace_panel import WorkspacePanel, WorkspaceTab
+from .confirm_modal import ConfirmModal
 
 __all__ = [
     "Header",
@@ -31,4 +32,5 @@ __all__ = [
     "KnowledgeNode",
     "WorkspacePanel",
     "WorkspaceTab",
+    "ConfirmModal",
 ]

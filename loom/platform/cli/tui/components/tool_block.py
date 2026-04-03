@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
@@ -172,7 +173,7 @@ class ToolBlock(Widget):
         parts: list[str] = []
         for k, v in args.items():
             if isinstance(v, str):
-                snippet = v[:40].replace("\n", "~")
+                snippet = markup_escape(v[:40].replace("\n", "~"))
                 parts.append(f'{k}="{snippet}{"..." if len(v) > 40 else ""}"')
             elif isinstance(v, (dict, list)):
                 parts.append(f"{k}={{...}}")

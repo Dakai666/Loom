@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Iterable
 
 from rich.text import Text as RichText
+from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.reactive import reactive
@@ -120,11 +121,12 @@ class MessageList(Widget):
             timestamp = msg.timestamp.strftime("%H:%M")
             cursor = " [bold yellow]>[/bold yellow]" if msg.streaming else ""
 
+            safe_content = markup_escape(msg.content)
             if msg.role == Role.USER:
-                lines.append(f"[dim]{timestamp}[/dim] {role_tag}: {msg.content}")
+                lines.append(f"[dim]{timestamp}[/dim] {role_tag}: {safe_content}")
             else:
                 lines.append(
-                    f"[dim]{timestamp}[/dim] {role_tag}:{cursor}\n{msg.content}"
+                    f"[dim]{timestamp}[/dim] {role_tag}:{cursor}\n{safe_content}"
                 )
             lines.append("")
 
