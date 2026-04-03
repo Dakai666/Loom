@@ -77,12 +77,12 @@ class ArtifactCard(Widget):
     def set_artifact(self, artifact: Artifact) -> None:
         """Set the artifact to display."""
         self._artifact = artifact
-        self._render()
+        self._update_display()
 
     def watch_artifact(self, artifact: Artifact | None) -> None:
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         content = self.query_one("#card-content", Static)
         if self._artifact is None:
             content.update("")

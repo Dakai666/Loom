@@ -60,15 +60,15 @@ class ArtifactsPanel(Widget):
             preview=preview,
         )
         self.artifacts = [*self.artifacts, artifact]
-        self._render()
+        self._update_display()
 
     def clear(self) -> None:
         """Clear all artifacts."""
         self.artifacts = []
         self._selected_index = 0
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         content = self.query_one("#artifacts-content", Static)
         if not self.artifacts:
             content.update("[dim](no artifacts yet)[/dim]")

@@ -71,7 +71,7 @@ class MessageList(Widget):
         msg = MessageItem(role=role, content=content, streaming=False)
         self.messages = [*self.messages, msg]
         self._current_assistant_buffer = ""
-        self._render()
+        self._update_display()
         self._scroll_to_bottom()
 
     def stream_text(self, text: str) -> None:
@@ -83,7 +83,7 @@ class MessageList(Widget):
         else:
             self.messages[-1].content = self._current_assistant_buffer
             self.messages = self.messages  # trigger reactivity
-        self._render()
+        self._update_display()
         self._scroll_to_bottom()
 
     def finish_streaming(self) -> None:
@@ -92,15 +92,15 @@ class MessageList(Widget):
             self.messages[-1].streaming = False
             self.messages = self.messages  # trigger reactivity
             self._current_assistant_buffer = ""
-            self._render()
+            self._update_display()
 
     def clear(self) -> None:
         """Clear all messages."""
         self.messages = []
         self._current_assistant_buffer = ""
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         """Render all messages to the Static widget."""
         content = self.query_one("#message-content", Static)
         lines: list[str] = []

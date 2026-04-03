@@ -42,12 +42,12 @@ class StatusBar(Widget):
         self.output_tokens = output_tokens
         self.elapsed_ms = elapsed_ms
         self.tool_count = tool_count
-        self._render()
+        self._update_display()
 
     def watch_context_fraction(self, fraction: float) -> None:
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         """Render the status bar."""
         from textual.css.query import NoMatches
 

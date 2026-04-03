@@ -114,7 +114,7 @@ class KnowledgeGraph(Widget):
     def set_nodes(self, nodes: list[KnowledgeNode]) -> None:
         """Set the knowledge graph nodes."""
         self.root_nodes = nodes
-        self._render()
+        self._update_display()
 
     def load_from_session(
         self, semantic_count: int, procedural_count: int, episodic_count: int
@@ -183,7 +183,7 @@ class KnowledgeGraph(Widget):
         ]
 
         self.root_nodes = [root, project, memory]
-        self._render()
+        self._update_display()
 
     def toggle_node(self, node_id: str) -> None:
         """Toggle expanded/collapsed state of a node."""
@@ -198,7 +198,7 @@ class KnowledgeGraph(Widget):
             return False
 
         find_and_toggle(self.root_nodes)
-        self._render()
+        self._update_display()
 
     def expand_all(self) -> None:
         """Expand all collapsible nodes."""
@@ -210,7 +210,7 @@ class KnowledgeGraph(Widget):
                     expand(node.children)
 
         expand(self.root_nodes)
-        self._render()
+        self._update_display()
 
     def collapse_all(self) -> None:
         """Collapse all expandable nodes."""
@@ -222,9 +222,9 @@ class KnowledgeGraph(Widget):
                 collapse(node.children)
 
         collapse(self.root_nodes)
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         content = self.query_one("#kg-content", Static)
         if not self.root_nodes:
             content.update("[dim](no knowledge graph)[/dim]")

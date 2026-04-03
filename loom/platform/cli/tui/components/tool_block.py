@@ -78,7 +78,7 @@ class ToolBlock(Widget):
         """Begin tracking a new tool call."""
         tool = ToolCall(name=name, args=args, call_id=call_id, state=ToolState.PENDING)
         self.active_tools = [*self.active_tools, tool]
-        self._render()
+        self._update_display()
         self._start_spinner(call_id)
 
     def complete_tool(
@@ -95,7 +95,7 @@ class ToolBlock(Widget):
         completed = [t for t in self.active_tools if t.call_id == call_id]
         self.completed_tools = [*self.completed_tools, *completed]
         self.active_tools = [t for t in self.active_tools if t.call_id != call_id]
-        self._render()
+        self._update_display()
 
         if not self.active_tools:
             self.post_message(self.ToolDone(self.completed_tools[-len(completed) :]))
@@ -113,7 +113,7 @@ class ToolBlock(Widget):
                 for tool in self.active_tools:
                     if tool.call_id == call_id:
                         tool.advance_spinner()
-                        self._render()
+                        self._update_display()
                         break
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
@@ -130,14 +130,14 @@ class ToolBlock(Widget):
         self._stop_spinner()
         self.active_tools = []
         self.completed_tools = []
-        self._render()
+        self._update_display()
 
     def toggle_verbose(self) -> None:
         """Toggle verbose mode."""
         self.verbose = not self.verbose
-        self._render()
+        self._update_display()
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         """Render tool states to the Static widget."""
         content = self.query_one("#tool-content", Static)
         lines: list[str] = []

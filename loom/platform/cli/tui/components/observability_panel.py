@@ -45,18 +45,18 @@ class ObservabilityPanel(Widget):
         """Show tool summary panel."""
         self.tools = tools
         self.visible = True
-        self._render()
+        self._update_display()
 
     def hide(self) -> None:
         """Hide the panel."""
         self.visible = False
         self.tools = []
-        self._render()
+        self._update_display()
 
     def watch_visible(self, visible: bool) -> None:
         self.set_class(visible, "visible")
 
-    def _render(self) -> None:
+    def _update_display(self) -> None:
         """Render the observability panel."""
         content = self.query_one("#obs-content", Static)
         if not self.visible or not self.tools:
