@@ -460,8 +460,12 @@ class LoomSession:
         ToolEnd     — just after a tool call finishes
         TurnDone    — once all tool loops are resolved
         """
-        self.messages.append({"role": "user", "content": user_input})
-        asyncio.ensure_future(self._log_message("user", user_input))
+        # Prepend current datetime so the LLM always has temporal context.
+        # The UI shows the original user_input; the history gets the annotated version.
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        annotated = f"[{now_str}]\n{user_input}"
+        self.messages.append({"role": "user", "content": annotated})
+        asyncio.ensure_future(self._log_message("user", annotated))
 
         await self._episodic.write(
             EpisodicEntry(
