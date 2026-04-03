@@ -184,4 +184,4 @@ StatusBar (dock bottom, 1 row)     — context bar ▓░ + tokens + elapsed
 
 - **v0.1** — Core framework: Harness + Memory + Cognition + Tasks + Autonomy + Notify + Extensibility + CLI streaming
 - **v0.2** — Textual TUI (`loom chat --tui`): dual-space layout, ModalScreen tool confirm, workspace panel, streaming cursor, status bar
-- **v0.3** — Session Management: `sessions` + `session_log` tables; `loom chat --resume/--session`; `loom sessions list/show/rm`; TUI history replay on resume
+- **v0.2.1** — Session management (`--resume`, `/sessions` TUI picker, auto-resume); web tools (`fetch_url` SAFE, `web_search` GUARDED via Brave API); workspace sandbox (all file ops scoped to CWD, injected into system prompt); memory: `recall` shows `[YYYY-MM-DD]` timestamps, periodic mid-session compression (threshold 30), deduplicated compress keys, datetime injected into every user turn; `_sanitize_history()` prevents resume 400 from incomplete tool_use sequences

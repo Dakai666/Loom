@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude Code is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2** — Textual TUI interface now available (`loom chat --tui`). Basic conversation, tool execution with modal confirmation, workspace panel (Artifacts + Knowledge Graph), and real-time status bar.
+**v0.2.1** — Session management, web tools, workspace sandbox, and memory improvements. Stable foundation before P5E sub-agent architecture.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -66,8 +66,15 @@ ANTHROPIC_API_KEY=your_anthropic_key_here   # optional
 # Classic CLI mode
 loom chat
 
-# Textual TUI mode (v0.2+)
+# TUI mode — auto-resumes last session (v0.2+)
 loom chat --tui
+
+# Session management (v0.2.1+)
+loom chat --resume                   # resume most recent session (CLI)
+loom chat --session <id>             # resume specific session
+loom sessions list                   # list recent sessions
+loom sessions show <id>              # show session details
+loom sessions rm <id>                # delete a session
 
 # Use a specific model
 loom chat --model claude-sonnet-4-6
@@ -90,6 +97,7 @@ loom autonomy emit <event_name>  # manually fire an EventTrigger
 | Command | Effect |
 |---------|--------|
 | `/compact` | LLM-summarize oldest conversation turns to free context |
+| `/sessions` | Browse and switch sessions (TUI picker) |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
 | `/personality off` | Remove active persona |
 | `/verbose` | Toggle tool output verbosity |
@@ -125,8 +133,17 @@ Embeddings are computed at write-time (`upsert`) and stored in SQLite. Failures 
 
 | Tool | Trust | Description |
 |------|-------|-------------|
-| `recall(query, type, limit)` | SAFE | BM25 + embedding search across semantic facts and skills |
+| `recall(query, type, limit)` | SAFE | BM25 + embedding search across semantic facts and skills — results show `[YYYY-MM-DD]` timestamps |
 | `memorize(key, value, confidence)` | GUARDED | Persist a fact to long-term semantic memory |
+| `relate(subject, predicate, object)` | GUARDED | Store a relationship triple in relational memory |
+| `query_relations(subject, predicate)` | SAFE | Query relational memory triples |
+
+### Web tools (agent-callable, v0.2.1+)
+
+| Tool | Trust | Description |
+|------|-------|-------------|
+| `fetch_url(url)` | SAFE | Fetch a URL, strip HTML noise, return title + body (≤2000 chars, 10s timeout) |
+| `web_search(query, count)` | GUARDED | Brave Search API — top-N results with title, URL, description (requires `brave_search_key` in `.env`) |
 
 ---
 
@@ -228,7 +245,10 @@ python -m pytest tests/test_integration.py -v
 | Phase 4.5 | CLI Platform maturity (streaming, smart compact, parallel tools) | ✅ Complete |
 | Phase 5A | Ecosystem foundations (REST API, Discord, memory search, skill eval) | ✅ Complete |
 | Phase 5B | Textual TUI (`loom chat --tui`) — dual-space interface, modal confirm | ✅ Complete (v0.2) |
-| Phase 5C | Session management (`--resume`, `loom sessions list/show`) | 🔄 Next |
+| Phase 5C | Session management (`--resume`, `/sessions` picker, TUI auto-resume) | ✅ Complete (v0.2.1) |
+| Phase 5D | Web tools (`fetch_url`, `web_search`) + workspace sandbox | ✅ Complete (v0.2.1) |
+| Phase 5D+ | Memory: timestamps in recall, periodic compression, datetime context | ✅ Complete (v0.2.1) |
+| Phase 5E | Sub-agent (`spawn_agent`) — isolated child LoomSession with trust inheritance | 🔄 Next |
 
 ---
 
