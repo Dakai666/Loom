@@ -98,9 +98,8 @@ class AutonomyDaemon:
             # processes the prompt and executes all tool calls.
             output_chunks: list[str] = []
             async for event in self._session.stream_turn(plan.prompt):
-                # TextChunk carries streaming text fragments
-                from loom.platform.cli.ui import TextChunk
-                if isinstance(event, TextChunk):
+                # Collect streaming text without importing platform event types
+                if hasattr(event, "text") and isinstance(event.text, str):
                     output_chunks.append(event.text)
 
             thread_id = plan.context.get("notify_thread_id", 0)

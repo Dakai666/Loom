@@ -37,18 +37,31 @@ class SkillGenome:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    # Minimum observations before a skill can be deprecated.  A brand-new skill
+    # with confidence=0.5 would be killed by its very first failure without this
+    # guard (0.5 * 0.9 = 0.45 < deprecation_threshold=0.3 after just one miss).
+    MIN_SAMPLES_BEFORE_DEPRECATION: int = 3
+
     @property
     def is_deprecated(self) -> bool:
+        if self.usage_count < self.MIN_SAMPLES_BEFORE_DEPRECATION:
+            return False
         return self.confidence <= self.deprecation_threshold
 
     def record_outcome(self, success: bool) -> None:
         """Update confidence and success_rate after an observed outcome."""
         self.usage_count += 1
-        # Exponential moving average — recent outcomes weighted more
-        alpha = 0.1
         outcome = 1.0 if success else 0.0
-        self.success_rate = (1 - alpha) * self.success_rate + alpha * outcome
-        self.confidence = self.success_rate
+        if self.usage_count == 1:
+            # First observation: set baseline directly instead of blending with
+            # the default 1.0 prior, which would misleadingly inflate confidence.
+            self.success_rate = outcome
+            self.confidence = outcome
+        else:
+            # Exponential moving average — recent outcomes weighted more
+            alpha = 0.1
+            self.success_rate = (1 - alpha) * self.success_rate + alpha * outcome
+            self.confidence = self.success_rate
         self.updated_at = datetime.now(UTC)
 
 
@@ -111,8 +124,11 @@ class ProceduralMemory:
         cursor = await self._db.execute(
             "SELECT id, name, version, confidence, usage_count, success_rate, "
             "parent_skill, deprecation_threshold, tags, body, created_at, updated_at "
-            "FROM skill_genomes WHERE confidence > deprecation_threshold "
-            "ORDER BY confidence DESC"
+            "FROM skill_genomes "
+            "WHERE confidence > deprecation_threshold "
+            "   OR usage_count < ? "
+            "ORDER BY confidence DESC",
+            (SkillGenome.MIN_SAMPLES_BEFORE_DEPRECATION,),
         )
         rows = await cursor.fetchall()
         return [

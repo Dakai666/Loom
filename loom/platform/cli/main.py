@@ -72,13 +72,13 @@ from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
-    BUILTIN_TOOLS,
     make_fetch_url_tool,
     make_filesystem_tools,
     make_memorize_tool,
     make_query_relations_tool,
     make_recall_tool,
     make_relate_tool,
+    make_run_bash_tool,
     make_spawn_agent_tool,
     make_web_search_tool,
 )
@@ -314,19 +314,18 @@ class LoomSession:
             [{"role": "system", "content": system_prompt}] if system_prompt else []
         )
 
-        # Registry — run_bash (workspace-independent) + workspace-aware filesystem tools
+        # Registry — run_bash + workspace-aware filesystem tools
+        _strict_sandbox: bool = config.get("harness", {}).get("strict_sandbox", False)
         self.registry = ToolRegistry()
-        for tool in BUILTIN_TOOLS:
-            self.registry.register(tool)
+        _run_bash_tool = make_run_bash_tool(self.workspace, strict_sandbox=_strict_sandbox)
+        self.registry.register(_run_bash_tool)
         _fs_tools = make_filesystem_tools(self.workspace)
         for tool in _fs_tools:
             self.registry.register(tool)
 
         # Permission context (SAFE tools pre-authorized)
         self.perm = PermissionContext(session_id=self.session_id)
-        for tool in BUILTIN_TOOLS:
-            if tool.trust_level == TrustLevel.SAFE:
-                self.perm.authorize(tool.name)
+        # run_bash is GUARDED — no pre-auth
         for tool in _fs_tools:
             if tool.trust_level == TrustLevel.SAFE:
                 self.perm.authorize(tool.name)
@@ -893,8 +892,9 @@ class LoomSession:
                     ))
 
             # Load the file — this executes @loom.tool / loom.register_plugin() calls
-            _loom_pkg._get_default_registry().__init__()      # reset so re-runs don't double-register
-            _loom_pkg._get_default_plugin_registry().__init__()
+            # No reset needed: ToolRegistry/PluginRegistry use name-keyed dicts, so
+            # re-registration is a safe upsert. Resetting would wipe tools registered
+            # by earlier plugin files in the same _load_plugins() loop.
             try:
                 _spec = _ilu.spec_from_file_location(plugin_path.stem, plugin_path)
                 if _spec and _spec.loader:
@@ -991,6 +991,7 @@ class LoomSession:
             tool_name=tool_name,
             args=args,
             trust_level=tool_def.trust_level,
+            capabilities=tool_def.capabilities,
             session_id=self.session_id,
         )
         return await self._pipeline.execute(call, tool_def.executor)

@@ -2,6 +2,8 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
+**v0.2.3.4** — `ToolCapability` flags for fine-grained tool risk classification; `run_bash` and `spawn_agent` now always re-confirm (never session-pre-authorized); `strict_sandbox` config option confines shell execution to the workspace; architecture guardrail tests enforce module import boundaries; Skill Genome early-death protection (`MIN_SAMPLES_BEFORE_DEPRECATION`).
+
 **v0.2.3.3** — Discord + Autonomy merged process (`--autonomy` flag), per-task Discord thread routing (`notify_thread`), configurable episodic compression threshold, memory compression notification in-thread, graceful shutdown with session compression.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
@@ -31,7 +33,7 @@ Platform (CLI)  →  Cognition  →  Harness  →  Memory
 
 | Layer | What it does |
 |-------|-------------|
-| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) |
+| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES) |
 | **Memory** | SQLite WAL; episodic (auto-compressed), semantic (key→value + embedding vectors), procedural (versioned skills with EMA confidence) |
 | **Cognition** | `LLMRouter` (prefix routing), `ContextBudget` (smart LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
@@ -148,21 +150,23 @@ recall(query)
 
 Embeddings are computed at write-time (`upsert`) and stored in SQLite. Failures fall through silently to BM25.
 
-### Memory tools (agent-callable)
+### Built-in tools
 
-| Tool | Trust | Description |
-|------|-------|-------------|
-| `recall(query, type, limit)` | SAFE | BM25 + embedding search across semantic facts and skills — results show `[YYYY-MM-DD]` timestamps |
-| `memorize(key, value, confidence)` | GUARDED | Persist a fact to long-term semantic memory |
-| `relate(subject, predicate, object)` | GUARDED | Store a relationship triple in relational memory |
-| `query_relations(subject, predicate)` | SAFE | Query relational memory triples |
+| Tool | Trust | Capabilities | Description |
+|------|-------|-------------|-------------|
+| `read_file` | SAFE | — | Read a file inside the workspace |
+| `list_dir` | SAFE | — | List directory contents |
+| `recall` | SAFE | — | BM25 + embedding search across semantic facts and skills |
+| `query_relations` | SAFE | — | Query relational memory triples |
+| `fetch_url` | SAFE | NETWORK | Fetch a URL, strip HTML noise, return title + body |
+| `write_file` | GUARDED | MUTATES | Write a file (path always confined to workspace) |
+| `memorize` | GUARDED | MUTATES | Persist a fact to long-term semantic memory |
+| `relate` | GUARDED | MUTATES | Store a relationship triple in relational memory |
+| `web_search` | GUARDED | NETWORK | Brave Search API top-N results |
+| `run_bash` | GUARDED | **EXEC** | Execute a shell command — **re-confirms every call** |
+| `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | Spawn a sub-agent — **re-confirms every call** |
 
-### Web tools (agent-callable, v0.2.1+)
-
-| Tool | Trust | Description |
-|------|-------|-------------|
-| `fetch_url(url)` | SAFE | Fetch a URL, strip HTML noise, return title + body (≤2000 chars, 10s timeout) |
-| `web_search(query, count)` | GUARDED | Brave Search API — top-N results with title, URL, description (requires `brave_search_key` in `.env`) |
+> **EXEC and AGENT_SPAN** tools never receive session-level pre-authorization. Each call triggers a fresh confirmation prompt, matching CRITICAL semantics even at GUARDED trust level.
 
 ---
 
@@ -179,7 +183,7 @@ LLM response: [read_file, list_dir, recall]  ← all SAFE / pre-authorized
        └─ recall      → result C
 ```
 
-Tools requiring interactive confirmation (GUARDED not yet approved, CRITICAL) always run sequentially to avoid interleaved prompts.
+Tools requiring interactive confirmation (GUARDED not yet approved, CRITICAL, or EXEC/AGENT_SPAN capability) always run sequentially to avoid interleaved prompts.
 
 ---
 
@@ -217,7 +221,11 @@ episodic_compress_threshold = 10   # compress to semantic after N episodic entri
 
 [harness]
 default_trust_level = "guarded"
-require_audit_log = true
+require_audit_log   = true
+
+# Confine run_bash to workspace root (cwd=workspace).
+# File I/O tools always enforce workspace boundaries regardless.
+strict_sandbox = false
 
 [autonomy]
 enabled = true
@@ -410,6 +418,7 @@ python -m pytest tests/test_integration.py -v
 | Phase 5G | HITL pause/resume/redirect (`/pause`, `/stop`); Discord bot frontend; three-frontend command parity | ✅ Complete (v0.2.3.1) |
 | Phase 5H | Action visibility (tool events inline in conversation); Discord display overhaul (reactions, typing indicator, split send, session persistence) | ✅ Complete (v0.2.3.2) |
 | Phase 5I | Discord + Autonomy merged process (`--autonomy`); per-task thread routing (`notify_thread`); configurable episodic compress threshold; graceful shutdown with compression; `CompressDone` in-thread notification | ✅ Complete (v0.2.3.3) |
+| Phase 5J | `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); EXEC+AGENT_SPAN always re-confirm; `strict_sandbox` workspace confinement; architecture guardrail tests; Skill Genome early-death protection | ✅ Complete (v0.2.3.4) |
 
 ---
 

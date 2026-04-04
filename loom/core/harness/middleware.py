@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable
 
-from .permissions import TrustLevel
+from .permissions import ToolCapability, TrustLevel
 
 # ---------------------------------------------------------------------------
 # Core data types
@@ -31,6 +31,7 @@ class ToolCall:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)
+    capabilities: ToolCapability = field(default_factory=lambda: ToolCapability.NONE)
 
 
 # Structured failure categories — used for reflexive learning and failure analysis.
@@ -194,8 +195,11 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        # Authorize at GUARDED level for the rest of this session.
-        if call.trust_level == TrustLevel.GUARDED:
+        # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
+        # Other GUARDED tools are pre-authorized for the rest of this session.
+        _high_risk = ToolCapability.EXEC | ToolCapability.AGENT_SPAN
+        if (call.trust_level == TrustLevel.GUARDED
+                and not (call.capabilities & _high_risk)):
             self._perm.authorize(call.tool_name)
 
         return await next(call)

@@ -1,5 +1,25 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, Flag, auto
+
+
+class ToolCapability(Flag):
+    """
+    Bit-flag capabilities for a tool — additive to TrustLevel.
+
+    These flags give the harness and UI layer finer-grained information about
+    *what* a GUARDED tool actually does, beyond the single tier label.
+
+    Use-cases:
+    - EXEC and AGENT_SPAN tools are never session-pre-authorized — they always
+      re-confirm (like CRITICAL) even when their trust level is GUARDED.
+    - The confirm UI can display a more specific warning message per capability.
+    - Future: capability-level rate-limiting, audit tagging, policy overrides.
+    """
+    NONE       = 0
+    EXEC       = auto()      # runs arbitrary shell / subprocess commands
+    NETWORK    = auto()      # makes outbound network calls
+    AGENT_SPAN = auto()      # spawns one or more sub-agents
+    MUTATES    = auto()      # modifies files, memory, or persistent state
 
 
 class TrustLevel(Enum):

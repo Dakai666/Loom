@@ -66,6 +66,13 @@ episodic_compress_threshold = 30
 default_trust_level = "guarded"   # "safe" | "guarded" | "critical"
 require_audit_log   = true
 
+# When true, confines shell execution (run_bash) to the workspace root by
+# launching the subprocess with cwd=workspace.  File I/O tools (read_file,
+# write_file, list_dir) always enforce workspace boundaries regardless of this
+# setting.  Does not prevent OS-level absolute-path escapes — for full
+# confinement use a container or OS sandbox.
+strict_sandbox = false
+
 # ─────────────────────────────────────────────
 # Autonomy Engine
 # ─────────────────────────────────────────────

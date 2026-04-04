@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from .middleware import ToolCall, ToolResult
-from .permissions import TrustLevel
+from .permissions import ToolCapability, TrustLevel
 
 
 @dataclass
@@ -17,6 +17,10 @@ class ToolDefinition:
 
     `executor` is an async function that receives a ToolCall and returns a
     ToolResult.  The harness calls it as the innermost step in the pipeline.
+
+    `capabilities` is an additive set of ToolCapability flags that further
+    qualify what the tool does, beyond its TrustLevel tier.  Defaults to NONE
+    so existing tool definitions require no changes.
     """
     name: str
     description: str
@@ -24,6 +28,7 @@ class ToolDefinition:
     input_schema: dict[str, Any]
     executor: Callable[[ToolCall], Awaitable[ToolResult]]
     tags: list[str] = field(default_factory=list)
+    capabilities: ToolCapability = field(default_factory=lambda: ToolCapability.NONE)
 
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Serialize to the format expected by the Anthropic messages API."""

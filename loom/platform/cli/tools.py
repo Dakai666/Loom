@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from loom.core.harness.middleware import ToolCall, ToolResult
-from loom.core.harness.permissions import TrustLevel
+from loom.core.harness.permissions import ToolCapability, TrustLevel
 
 if TYPE_CHECKING:
     from loom.core.memory.relational import RelationalMemory
@@ -146,6 +146,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
                 "Relative paths resolve inside the workspace."
             ),
             trust_level=TrustLevel.GUARDED,
+            capabilities=ToolCapability.MUTATES,
             input_schema={
                 "type": "object",
                 "properties": {
@@ -179,41 +180,72 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
     ]
 
 
-async def _run_bash(call: ToolCall) -> ToolResult:
-    command = call.args.get("command", "")
-    timeout = call.args.get("timeout", 30)
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=f"Command timed out after {timeout}s",
-                              failure_type="timeout")
-
-        output = stdout.decode("utf-8", errors="replace")
-        success = proc.returncode == 0
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=success, output=output,
-            error=None if success else f"Exit code {proc.returncode}",
-            metadata={"exit_code": proc.returncode},
-        )
-    except Exception as exc:
-        return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=False, error=str(exc))
-
-
 # ------------------------------------------------------------------
 # Tool definitions ready to be registered
 # ------------------------------------------------------------------
 
 from loom.core.harness.registry import ToolDefinition
+
+
+def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDefinition:
+    """
+    Return the ``run_bash`` tool definition.
+
+    When *strict_sandbox* is True (set via ``[harness] strict_sandbox = true``
+    in loom.toml), the subprocess is launched with ``cwd=workspace`` so that
+    relative paths and shell builtins stay inside the project folder.  This
+    does not prevent absolute-path escapes at the OS level — for full
+    confinement use an OS sandbox (e.g. Docker).
+    """
+    async def _run_bash(call: ToolCall) -> ToolResult:
+        command = call.args.get("command", "")
+        timeout = call.args.get("timeout", 30)
+        cwd = str(workspace) if strict_sandbox else None
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=False, error=f"Command timed out after {timeout}s",
+                                  failure_type="timeout")
+
+            output = stdout.decode("utf-8", errors="replace")
+            success = proc.returncode == 0
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=success, output=output,
+                error=None if success else f"Exit code {proc.returncode}",
+                metadata={"exit_code": proc.returncode},
+            )
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+
+    sandbox_note = " Shell is confined to the workspace directory." if strict_sandbox else ""
+    return ToolDefinition(
+        name="run_bash",
+        description=f"Execute a shell command and return stdout/stderr.{sandbox_note}",
+        trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.EXEC,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to run"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
+            },
+            "required": ["command"],
+        },
+        executor=_run_bash,
+        tags=["shell"],
+    )
+
 
 # ------------------------------------------------------------------
 # Memory tool factories (Phase 4B)
@@ -323,6 +355,7 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
             "should survive across sessions."
         ),
         trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.MUTATES,
         input_schema={
             "type": "object",
             "properties": {
@@ -386,6 +419,7 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
             "Upserting with the same subject+predicate replaces the previous object."
         ),
         trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.MUTATES,
         input_schema={
             "type": "object",
             "properties": {
@@ -485,6 +519,7 @@ def make_fetch_url_tool() -> ToolDefinition:
             "Output is truncated to 2000 chars."
         ),
         trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NETWORK,
         input_schema={
             "type": "object",
             "properties": {
@@ -549,6 +584,7 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
             "Use this to find current information, documentation, or answers that aren't in memory."
         ),
         trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.NETWORK,
         input_schema={
             "type": "object",
             "properties": {
@@ -627,6 +663,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             "The sub-agent cannot interact with the user — it works autonomously until done."
         ),
         trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.AGENT_SPAN | ToolCapability.MUTATES,
         input_schema={
             "type": "object",
             "properties": {
@@ -654,23 +691,6 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
     )
 
 
-# run_bash is workspace-independent (spawns a shell in CWD, which is fine)
-# read_file / write_file / list_dir are registered via make_filesystem_tools(workspace)
-# in LoomSession.start() so they close over the correct workspace path.
-BUILTIN_TOOLS: list[ToolDefinition] = [
-    ToolDefinition(
-        name="run_bash",
-        description="Execute a shell command and return stdout/stderr.",
-        trust_level=TrustLevel.GUARDED,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Shell command to run"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
-            },
-            "required": ["command"],
-        },
-        executor=_run_bash,
-        tags=["shell"],
-    ),
-]
+# run_bash is registered via make_run_bash_tool(workspace, strict_sandbox) in
+# LoomSession.start() so the sandbox setting can be wired in from loom.toml.
+# read_file / write_file / list_dir are registered via make_filesystem_tools(workspace).
