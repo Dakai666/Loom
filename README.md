@@ -2,6 +2,8 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
+**v0.2.4.0** — Security fixes + sqlite-vec memory upgrade: path traversal closed (`_resolve_workspace_path` now enforces `relative_to(workspace)` for all path types); prompt injection guardrails (`fetch_url`/`web_search` output wrapped in `<untrusted_external_content>` with XML chars escaped); `sqlite-vec` integration pushes cosine vector ranking into SQL (`vec_distance_cosine`), replacing Python-side loop; `SQLiteStore.connect()` auto-loads the extension; `LoomSession` stores `_db_ctx` for correct async context manager teardown.
+
 **v0.2.3.4** — `ToolCapability` flags for fine-grained tool risk classification; `run_bash` and `spawn_agent` now always re-confirm (never session-pre-authorized); `strict_sandbox` config option confines shell execution to the workspace; architecture guardrail tests enforce module import boundaries; Skill Genome early-death protection (`MIN_SAMPLES_BEFORE_DEPRECATION`).
 
 **v0.2.3.3** — Discord + Autonomy merged process (`--autonomy` flag), per-task Discord thread routing (`notify_thread`), configurable episodic compression threshold, memory compression notification in-thread, graceful shutdown with session compression.
