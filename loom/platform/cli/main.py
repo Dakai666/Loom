@@ -1381,6 +1381,14 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             f"[dim]Tool output: {'[green]verbose[/green]' if state else '[yellow]compact[/yellow]'}[/dim]"
         )
 
+    elif command == "/stop":
+        # In CLI the turn is a blocking await — the user can't type while it runs.
+        # /stop typed before a turn starts is a no-op; the real interrupt is Ctrl+C.
+        console.print(
+            "[dim]  /stop interrupts a running turn.  "
+            "In CLI mode, press [yellow]Ctrl+C[/yellow] while the agent is responding.[/dim]"
+        )
+
     elif command == "/pause":
         # Toggle HITL mode (auto-pause after every tool batch)
         session.hitl_mode = not session.hitl_mode
@@ -1412,6 +1420,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/compact[/yellow]                   Compress older context\n"
                 "  [yellow]/verbose[/yellow]                   Toggle tool output verbosity\n"
                 "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
+                "  [yellow]/stop[/yellow]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
                 "  [yellow]/help[/yellow]                      Show this message\n\n"
                 "[bold]Keyboard shortcuts[/bold]\n\n"
                 "  [dim]Ctrl-L[/dim]       Clear screen\n"
@@ -1688,6 +1697,10 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             + ("— agent will pause after each tool batch." if session.hitl_mode else ""),
             timeout=3,
         )
+
+    elif command == "/stop":
+        # Immediate cancel — same as pressing Escape
+        app.action_interrupt()
 
     elif command == "/new":
         # Exit with sentinel None so _chat_tui restart loop creates a fresh session.

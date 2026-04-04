@@ -110,6 +110,7 @@ _SLASH_WORDS = [
     "/compact",
     "/verbose",
     "/pause",
+    "/stop",
     "/help",
 ]
 

@@ -129,6 +129,8 @@ class LoomDiscordBot:
 
         # channel_id → LoomSession (started lazily)
         self._sessions: dict[int, "LoomSession"] = {}
+        # channel_id → currently running turn task (None when idle)
+        self._running_turns: dict[int, asyncio.Task] = {}
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -172,7 +174,11 @@ class LoomDiscordBot:
             if not content:
                 return
 
-            asyncio.ensure_future(bot._handle_message(message, content))
+            task = asyncio.ensure_future(bot._handle_message(message, content))
+            bot._running_turns[message.channel.id] = task
+            task.add_done_callback(
+                lambda _t, cid=message.channel.id: bot._running_turns.pop(cid, None)
+            )
 
     # ------------------------------------------------------------------
     # Message handling — slash commands + streaming turns
@@ -324,6 +330,14 @@ class LoomDiscordBot:
                 f"`{used:,}` / `{total:,}` tokens"
             )
 
+        elif command == "/stop":
+            task = self._running_turns.get(message.channel.id)
+            if task and not task.done():
+                task.cancel()
+                await message.channel.send("🛑 Stopped.")
+            else:
+                await message.channel.send("*(nothing is running)*")
+
         elif command == "/help":
             await message.channel.send(
                 "**Loom commands**\n\n"
@@ -335,6 +349,7 @@ class LoomDiscordBot:
                 "`/compact` — Compress older context\n"
                 "`/verbose` — Toggle tool output verbosity\n"
                 "`/pause` — Toggle HITL auto-pause after each tool batch\n"
+                "`/stop` — Immediately cancel the current running turn\n"
                 "`/budget` — Show context budget usage\n"
                 "`/help` — Show this message\n\n"
                 "Personalities: `adversarial` · `minimalist` · `architect` · `researcher` · `operator`"
@@ -414,6 +429,15 @@ class LoomDiscordBot:
 
                 elif isinstance(event, TurnDone):
                     pass  # final edit happens below
+
+        except asyncio.CancelledError:
+            # /stop was issued — finalize whatever text we have so far
+            final_so_far = text_buf.strip()
+            if final_so_far:
+                await _safe_edit(status_msg, final_so_far + "\n\n🛑 *(stopped)*")
+            else:
+                await _safe_edit(status_msg, "🛑 *(stopped)*")
+            raise  # re-raise so the task is properly marked cancelled
 
         except Exception as exc:
             await _safe_edit(status_msg, f"❌ Error: {exc}")
