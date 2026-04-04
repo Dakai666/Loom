@@ -2488,14 +2488,21 @@ def discord_bot() -> None:
 
 
 @discord_bot.command("start")
-@click.option("--token", envvar="DISCORD_BOT_TOKEN", required=True,
+@click.option("--token", envvar="DISCORD_BOT_TOKEN", default="",
               help="Discord bot token (or set DISCORD_BOT_TOKEN in .env)")
 @click.option("--channel", "channel_ids", multiple=True, type=int,
-              envvar="DISCORD_CHANNEL_ID",
-              help="Channel ID(s) to listen in. If omitted, responds to @mentions everywhere.")
+              help="Channel ID(s) to listen in (or set DISCORD_CHANNEL_ID in .env).")
+@click.option("--user", "user_ids", multiple=True, type=int,
+              help="User ID(s) to accept messages from (or set DISCORD_USER_ID in .env).")
 @click.option("--model", default="MiniMax-M2.7", show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
-def discord_start(token: str, channel_ids: tuple[int, ...], model: str, db: str) -> None:
+def discord_start(
+    token: str,
+    channel_ids: tuple[int, ...],
+    user_ids: tuple[int, ...],
+    model: str,
+    db: str,
+) -> None:
     """Start the Loom Discord bot (requires: pip install loom[discord])."""
     try:
         from loom.platform.discord.bot import LoomDiscordBot
@@ -2507,26 +2514,44 @@ def discord_start(token: str, channel_ids: tuple[int, ...], model: str, db: str)
         raise SystemExit(1)
 
     env = _load_env()
+
     resolved_token = token or env.get("DISCORD_BOT_TOKEN", "")
     if not resolved_token:
         console.print("[red]No Discord bot token.[/red] Set --token or DISCORD_BOT_TOKEN in .env")
         raise SystemExit(1)
 
-    channel_list = list(channel_ids) if channel_ids else []
-    if not channel_list:
-        raw = env.get("DISCORD_CHANNEL_ID", "")
+    def _parse_ids(cli_ids: tuple[int, ...], env_key: str) -> list[int]:
+        if cli_ids:
+            return list(cli_ids)
+        raw = env.get(env_key, "").strip()
         if raw:
             try:
-                channel_list = [int(raw)]
+                return [int(raw)]
             except ValueError:
                 pass
+        return []
 
-    bot = LoomDiscordBot(model=model, db_path=db, channel_ids=channel_list or None)
-    console.print(
-        f"[bold cyan]Loom Discord Bot[/bold cyan]  "
-        f"model: {model}  |  db: {db}\n"
-        + (f"[dim]Channels: {channel_list}[/dim]" if channel_list else "[dim]Listening for @mentions everywhere[/dim]")
+    channel_list = _parse_ids(channel_ids, "DISCORD_CHANNEL_ID")
+    user_list    = _parse_ids(user_ids,    "DISCORD_USER_ID")
+
+    bot = LoomDiscordBot(
+        model=model,
+        db_path=db,
+        channel_ids=channel_list or None,
+        allowed_user_ids=user_list or None,
     )
+
+    info_lines = [f"[bold cyan]Loom Discord Bot[/bold cyan]  model: {model}  |  db: {db}"]
+    if channel_list:
+        info_lines.append(f"[dim]  Channel:  {channel_list}[/dim]")
+    else:
+        info_lines.append("[dim]  Channels: @mentions everywhere[/dim]")
+    if user_list:
+        info_lines.append(f"[dim]  Users:    {user_list}[/dim]")
+    else:
+        info_lines.append("[dim]  Users:    unrestricted[/dim]")
+    console.print("\n".join(info_lines))
+
     bot.run(resolved_token)
 
 

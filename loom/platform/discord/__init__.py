@@ -1,4 +1,10 @@
 """Loom Discord Bot platform."""
-from .bot import LoomDiscordBot
 
 __all__ = ["LoomDiscordBot"]
+
+
+def __getattr__(name: str):
+    if name == "LoomDiscordBot":
+        from .bot import LoomDiscordBot
+        return LoomDiscordBot
+    raise AttributeError(name)
