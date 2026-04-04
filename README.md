@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2.3** — TUI overhaul: Parchment theme, agent activity indicator, Markdown rendering, Context Budget panel, Activity Log, HelpModal, IDE-safe keybindings.
+**v0.2.3.1** — HITL pause/resume/redirect (`/pause`, `/stop`), Discord bot frontend (`loom discord start`), three-frontend command parity (CLI / TUI / Discord).
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -36,7 +36,7 @@ Platform (CLI)  →  Cognition  →  Harness  →  Memory
 | **Cognition** | `LLMRouter` (prefix routing), `ContextBudget` (smart LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
 | **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision |
-| **Notify** | `NotificationRouter` fan-out; `CLINotifier`, `WebhookNotifier`, `TelegramNotifier`; `ConfirmFlow` with timeout |
+| **Notify** | `NotificationRouter` fan-out; `CLINotifier`, `WebhookNotifier`, `TelegramNotifier`, `DiscordBotNotifier`; `ConfirmFlow` with timeout |
 | **Extensibility** | `LoomPlugin` unified plugin interface; `HermesLens` / `OpenAIToolsLens`; Skill Import Pipeline; `@loom.tool` + `loom.register_plugin()` |
 
 ---
@@ -80,6 +80,9 @@ loom sessions rm <id>                # delete a session
 loom chat --model claude-sonnet-4-6
 loom chat --tui --model MiniMax-M2.7
 
+# Discord bot (v0.2.3.1+) — requires: pip install loom[discord]
+loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
+
 # Inspect memory
 loom memory list
 
@@ -94,21 +97,32 @@ loom autonomy emit <event_name>  # manually fire an EventTrigger
 
 ### In-session slash commands
 
+Available in **CLI**, **TUI**, and **Discord** — all three frontends have full command parity.
+
 | Command | Effect |
 |---------|--------|
 | `/think` | Show the full reasoning chain (`<think>…</think>`) from the last turn |
 | `/compact` | LLM-summarize oldest conversation turns to free context |
-| `/sessions` | Browse and switch sessions (TUI picker) |
+| `/sessions` | Browse and switch sessions |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
 | `/personality off` | Remove active persona |
 | `/verbose` | Toggle tool output verbosity |
+| `/pause` | Toggle HITL mode — agent pauses after each tool batch, awaiting your input |
+| `/stop` | **Immediately** cancel the current running turn (no waiting for a boundary) |
+| `/budget` | Show context token usage (Discord only; TUI has the Budget panel) |
+| `/new` | Start a fresh session |
 | `/help` | Show all commands |
+
+**HITL pause flow** — when `/pause` mode is on, after every tool batch the agent suspends and prompts:
+- `r` / Enter — resume as-is
+- `c` — cancel the rest of this turn
+- any text — inject as a redirect message and resume
 
 ### TUI keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
-| `Escape` | Interrupt current agent generation |
+| `Escape` | Same as `/stop` — immediately interrupt current generation |
 | `F1` | Toggle verbose tool output |
 | `F2` | Cycle Workspace tab (Artifacts → Activity → Budget) |
 | `Ctrl+L` | Clear conversation view |
@@ -218,6 +232,43 @@ default_channel = "cli"
 
 ---
 
+## Discord Bot
+
+The Discord bot turns any Discord channel into a full Loom frontend — useful for mobile access and 24/7 availability.
+
+### Setup
+
+```bash
+pip install 'loom[discord]'
+```
+
+1. Create a Discord application at [discord.com/developers](https://discord.com/developers/applications)
+2. Enable **Message Content Intent** under Bot → Privileged Gateway Intents
+3. Add to `.env`:
+
+```env
+DISCORD_BOT_TOKEN=your-bot-token-here
+DISCORD_CHANNEL_ID=123456789   # optional: restrict to one channel
+```
+
+```bash
+loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
+```
+
+### Usage
+
+@mention the bot or send a DM — Loom streams its response via live message edits.
+
+All slash commands work in Discord chat: `/new` `/sessions` `/think` `/compact` `/personality` `/verbose` `/pause` `/stop` `/budget` `/help`
+
+**Tool confirmation** — GUARDED/CRITICAL tools trigger a message with Allow / Deny buttons (60s timeout → auto-deny).
+
+**HITL pause** — `/pause` on: after each tool batch the bot posts a pause prompt; reply `r` / `c` / redirect text.
+
+**`/stop`** — cancels the running turn immediately; the partial response is preserved in the message.
+
+---
+
 ## Extensibility
 
 ### Plugin System
@@ -321,6 +372,7 @@ python -m pytest tests/test_integration.py -v
 | Phase 5F | Architecture hardening: failure taxonomy, confidence decay, memory provenance | ✅ Complete |
 | Phase UI | `<think>` reasoning collapse, `/think` command, streaming cursor improvements | ✅ Complete |
 | Phase TUI-2 | TUI overhaul: Parchment theme, AgentState indicator, Markdown rendering, Budget panel, Activity Log, HelpModal, IDE-safe keys | ✅ Complete (v0.2.3) |
+| Phase 5G | HITL pause/resume/redirect (`/pause`, `/stop`); Discord bot frontend; three-frontend command parity | ✅ Complete (v0.2.3.1) |
 
 ---
 
