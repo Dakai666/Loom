@@ -55,24 +55,21 @@ def _html_to_text(html: str) -> tuple[str, str]:
 
 
 def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
-    """Resolve a raw path string relative to workspace.
+    """Resolve a raw path string strictly relative to workspace.
 
-    - Relative paths → workspace / raw
-    - Absolute paths inside workspace → kept as-is
-    - Absolute paths OUTSIDE workspace → re-rooted under workspace
-      (strips leading / so the agent can't escape the sandbox)
+    - Escaping paths (e.g. ../../Windows) are rerouted back inside workspace
+      to safely contain prompt injection and path traversal attempts.
     """
     p = Path(raw)
-    if not p.is_absolute():
-        return (workspace / p).resolve()
-    resolved = p.resolve()
+    resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
+    
     try:
         resolved.relative_to(workspace)
-        return resolved  # already inside workspace
+        return resolved  # Check passed, securely inside workspace
     except ValueError:
-        # Reroute: strip root and place under workspace
-        # e.g. ~/tmp/foo.md → workspace/tmp/foo.md
-        parts = resolved.parts[1:]  # drop drive/root
+        # Reroute: strip root/drive and forcibly place under workspace
+        # e.g. /etc/passwd → workspace/etc/passwd, C:\Windows → workspace\Windows
+        parts = resolved.parts[1:]
         return (workspace / Path(*parts)).resolve()
 
 
