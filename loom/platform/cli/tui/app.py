@@ -106,8 +106,7 @@ class LoomApp(App):
 
     #tool-block {
         height: auto;
-        max-height: 6;
-        overflow-y: auto;
+        max-height: 2;
         background: #1c1814;
         border-top: solid #4a4038;
         padding: 0 1;
@@ -217,8 +216,6 @@ class LoomApp(App):
         self.workers.cancel_all()
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.end_turn()
-        header = self.query_one("#header-bar", Header)
-        header.set_ready()
         # Finalize any open streaming bubble so it renders as Markdown
         # instead of staying in cream-text streaming state indefinitely.
         msg_list = self.query_one("#message-list", MessageList)
@@ -274,9 +271,6 @@ class LoomApp(App):
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.start_turn()
 
-        header = self.query_one("#header-bar", Header)
-        header.set_thinking()
-
         status_bar = self.query_one("#status-bar", StatusBar)
         status_bar.update(fraction=event.context_pct)
 
@@ -288,8 +282,16 @@ class LoomApp(App):
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.start_tool(event.name, event.args, event.call_id)
 
-        header = self.query_one("#header-bar", Header)
-        header.set_running(event.name)
+        # Append tool call inline to the message bubble so the full action
+        # history is visible in the conversation (not erased after the turn).
+        msg_list = self.query_one("#message-list", MessageList)
+        primary = ""
+        if event.args:
+            first_val = next(iter(event.args.values()), "")
+            if isinstance(first_val, str):
+                primary = first_val.replace("\n", "↵")
+        label = f"\n⟳ {event.name}" + (f' — "{primary}"' if primary else "")
+        msg_list.stream_text(label)
 
     def _on_tool_end(self, event: ToolEnd) -> None:
         tool_block = self.query_one("#tool-block", ToolBlock)
@@ -297,8 +299,13 @@ class LoomApp(App):
             event.call_id, event.success, event.output, event.duration_ms
         )
 
-        header = self.query_one("#header-bar", Header)
-        header.set_thinking()
+        # Append result line inline to the message bubble.
+        msg_list = self.query_one("#message-list", MessageList)
+        if event.success:
+            msg_list.stream_text(f"\n  ✓ {event.duration_ms:.0f}ms")
+        else:
+            err = event.output[:100].replace("\n", " ") if event.output else "failed"
+            msg_list.stream_text(f"\n  ✗ {err} ({event.duration_ms:.0f}ms)")
 
         # Forward to Activity Log
         workspace = self.query_one("#workspace-panel", WorkspacePanel)
@@ -321,8 +328,6 @@ class LoomApp(App):
 
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.end_turn()
-        header = self.query_one("#header-bar", Header)
-        header.set_ready()
 
         result = await self.push_screen_wait(PauseModal(tool_count=event.tool_count_so_far))
 
@@ -344,10 +349,8 @@ class LoomApp(App):
 
         tool_block = self.query_one("#tool-block", ToolBlock)
         status_bar = self.query_one("#status-bar", StatusBar)
-        header = self.query_one("#header-bar", Header)
 
         tool_block.end_turn()
-        header.set_ready()
 
         status_bar.update(
             fraction=event.context_pct,

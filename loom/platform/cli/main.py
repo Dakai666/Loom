@@ -587,6 +587,12 @@ class LoomSession:
             response: Any = None
             _think_shown = False  # reset per streaming call (each tool round can think again)
 
+            # Repair any orphaned tool_call entries before each LLM call.
+            # This handles mid-turn cancellation (e.g. /stop while awaiting a
+            # Discord confirm button) that leaves the assistant message without
+            # matching tool results, which would produce a 2013 API error.
+            self._sanitize_history()
+
             async for chunk, final in self.router.stream_chat(
                 model=self.model,
                 messages=self.messages,

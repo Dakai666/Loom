@@ -12,15 +12,12 @@ Usage (from CLI):
 from __future__ import annotations
 
 import asyncio
-import tomllib
 from pathlib import Path
-from typing import Any
 
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
-from loom.core.harness.permissions import TrustLevel
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
 from loom.notify.types import Notification, NotificationType
@@ -39,7 +36,7 @@ class AutonomyDaemon:
         notify_router: NotificationRouter,
         confirm_flow: ConfirmFlow,
         loom_session=None,   # LoomSession for executing prompts
-        db=None,             # open aiosqlite.Connection for trigger_history persistence
+        db=None,            # open aiosqlite.Connection for trigger_history persistence
     ) -> None:
         self._notify = notify_router
         self._confirm = confirm_flow
@@ -92,8 +89,20 @@ class AutonomyDaemon:
     async def _run_agent(self, plan: PlannedAction) -> None:
         if self._session is None:
             return
+
+        # Collect text output from stream_turn (the session's interactive loop).
+        # We run it as an async generator and pull TurnDone to confirm completion.
         try:
-            response = await self._session.run_turn(plan.prompt)
+            # stream_turn is an async generator — consume it fully so the session
+            # processes the prompt and executes all tool calls.
+            output_chunks: list[str] = []
+            async for event in self._session.stream_turn(plan.prompt):
+                # TextChunk carries streaming text fragments
+                from loom.platform.cli.ui import TextChunk
+                if isinstance(event, TextChunk):
+                    output_chunks.append(event.text)
+
+            response = "".join(output_chunks).strip()
             if response:
                 await self._notify.send(Notification(
                     type=NotificationType.REPORT,
@@ -118,6 +127,8 @@ class AutonomyDaemon:
         Load triggers from a loom.toml file.
         Returns the number of triggers registered.
         """
+        import tomllib
+
         path = Path(config_path)
         if not path.exists():
             return 0
@@ -134,7 +145,7 @@ class AutonomyDaemon:
             trigger = CronTrigger(
                 name=sched["name"],
                 intent=sched["intent"],
-                cron=sched.get("cron", "0 9 * * *"),
+                cron=sched.get("cron", "0 9 * * 1-5"),
                 timezone=sched.get("timezone", "UTC"),
                 trust_level=sched.get("trust_level", "guarded"),
                 notify=sched.get("notify", True),

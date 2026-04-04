@@ -122,7 +122,7 @@ class ToolBlock(Widget):
         if args:
             first_val = next(iter(args.values()), "")
             if isinstance(first_val, str):
-                primary = first_val[:50].replace("\n", "↵")
+                primary = first_val[:80].replace("\n", "↵")
         self._active_tool_label = (
             f"{markup_escape(name)} — \"{markup_escape(primary)}\""
             if primary
@@ -235,47 +235,20 @@ class ToolBlock(Widget):
         except NoMatches:
             return
 
-        lines: list[str] = []
-
-        # ── Agent state line ──
+        # Single-line agent state indicator only.
+        # Tool history is rendered inline in the message bubble.
         state = self.agent_state
         if state == AgentState.THINKING:
             dots = "." * self._think_frame
-            lines.append(f"  [dim]◌ Thinking{dots}[/dim]")
+            line = f"  [dim]◌ Thinking{dots}[/dim]"
         elif state == AgentState.RUNNING:
-            lines.append(f"  [#c8a464]⟳[/#c8a464] [dim]{self._active_tool_label}[/dim]")
+            line = f"  [#c8a464]⟳[/#c8a464] [dim]{self._active_tool_label}[/dim]"
         elif state == AgentState.DONE:
-            lines.append("  [#7a9e78]✓ Done[/#7a9e78]")
-        # IDLE → no line
+            line = "  [#7a9e78]✓ Done[/#7a9e78]"
+        else:
+            line = ""  # IDLE → empty
 
-        # ── Active tool rows ──
-        for tool in self.active_tools:
-            if tool.state == ToolState.PENDING:
-                args_preview = self._format_args(tool.args)
-                lines.append(
-                    f"  [#c8a464]○[/#c8a464] [#c8a464]{markup_escape(tool.name)}[/#c8a464]"
-                    f"({args_preview})"
-                )
-            elif tool.state == ToolState.RUNNING:
-                lines.append(
-                    f"  [#c8a464]{tool.spinner_frame}[/#c8a464] "
-                    f"[dim]{markup_escape(tool.name)} running...[/dim]"
-                )
-
-        # ── Completed tool rows (last 5) ──
-        for tool in self.completed_tools[-5:]:
-            if tool.state == ToolState.DONE:
-                lines.append(
-                    f"  [#7a9e78]✓[/#7a9e78] [dim]{markup_escape(tool.name)}[/dim]"
-                    f"  [#7a9e78]{tool.duration_ms:.0f}ms[/#7a9e78]"
-                )
-            else:
-                lines.append(
-                    f"  [#b87060]✗[/#b87060] [dim]{markup_escape(tool.name)}[/dim]"
-                    f"  [#b87060]{tool.duration_ms:.0f}ms[/#b87060]"
-                )
-
-        content.update("\n".join(lines) if lines else "")
+        content.update(line)
 
     def _format_args(self, args: dict[str, Any]) -> str:
         if not args:

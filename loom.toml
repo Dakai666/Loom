@@ -23,8 +23,24 @@ default_trust_level = "guarded"
 require_audit_log = true
 
 [autonomy]
-enabled = false
+enabled = true
 timezone = "Asia/Taipei"
+
+[[autonomy.schedules]]
+name = "morning_briefing"
+cron = "0 0 * * *"
+intent = "生成每日晨報。使用 news-aggregator-skill 技能抓取今日重要新聞（建議來源：hackernews、github），以繁體中文生成簡要晨報（briefing），包含標題、熱度與一句話摘要。將報告寫入 news/YYYY-MM-DD/briefing.md，並截取關鍵趨勢存入 semantic memory。"
+timezone = "Asia/Taipei"
+trust_level = "safe"
+notify = false
+
+[[autonomy.schedules]]
+name = "daily_journal"
+cron = "30 15 * * *"
+intent = "撰寫今日日記。請回顧今天的工作內容、遇到的障礙與解決方式、任何值得記錄的發現或決定。寫入 diary/YYYY-MM-DD.md，並擷取關鍵事實存入 semantic memory。"
+timezone = "Asia/Taipei"
+trust_level = "guarded"
+notify = true
 
 [notify]
 default_channel = "cli"

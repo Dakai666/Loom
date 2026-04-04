@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2.3.1** — HITL pause/resume/redirect (`/pause`, `/stop`), Discord bot frontend (`loom discord start`), three-frontend command parity (CLI / TUI / Discord).
+**v0.2.3.2** — Action visibility (tool events inline in conversation), Discord display overhaul (reactions, typing indicator, Markdown-safe split send), thread session persistence across bot restarts.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -106,7 +106,6 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `/sessions` | Browse and switch sessions |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
 | `/personality off` | Remove active persona |
-| `/verbose` | Toggle tool output verbosity |
 | `/pause` | Toggle HITL mode — agent pauses after each tool batch, awaiting your input |
 | `/stop` | **Immediately** cancel the current running turn (no waiting for a boundary) |
 | `/budget` | Show context token usage (Discord only; TUI has the Budget panel) |
@@ -257,15 +256,22 @@ loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
 
 ### Usage
 
-@mention the bot or send a DM — Loom streams its response via live message edits.
+Send a message in the allowed channel to start a new thread, or continue an existing one. Each thread is a persistent session — context is restored automatically after a bot restart (`~/.loom/discord_threads.json`).
 
-All slash commands work in Discord chat: `/new` `/sessions` `/think` `/compact` `/personality` `/verbose` `/pause` `/stop` `/budget` `/help`
+**Turn flow:**
+1. `⚙️` reaction on your message — acknowledged
+2. *Bot is typing…* indicator — working
+3. Tool activity log message (if any tools ran): `⟳ name — "arg" ✓ Xms` per tool
+4. Response as a fresh message — full Markdown rendering, URL embeds stable
+5. `⚙️` → `✅` — done
+
+All slash commands work in Discord chat: `/new` `/sessions` `/think` `/compact` `/personality` `/pause` `/stop` `/budget` `/help`
 
 **Tool confirmation** — GUARDED/CRITICAL tools trigger a message with Allow / Deny buttons (60s timeout → auto-deny).
 
 **HITL pause** — `/pause` on: after each tool batch the bot posts a pause prompt; reply `r` / `c` / redirect text.
 
-**`/stop`** — cancels the running turn immediately; the partial response is preserved in the message.
+**`/stop`** — cancels the running turn immediately; partial response is sent as a new message.
 
 ---
 
@@ -373,6 +379,7 @@ python -m pytest tests/test_integration.py -v
 | Phase UI | `<think>` reasoning collapse, `/think` command, streaming cursor improvements | ✅ Complete |
 | Phase TUI-2 | TUI overhaul: Parchment theme, AgentState indicator, Markdown rendering, Budget panel, Activity Log, HelpModal, IDE-safe keys | ✅ Complete (v0.2.3) |
 | Phase 5G | HITL pause/resume/redirect (`/pause`, `/stop`); Discord bot frontend; three-frontend command parity | ✅ Complete (v0.2.3.1) |
+| Phase 5H | Action visibility (tool events inline in conversation); Discord display overhaul (reactions, typing indicator, split send, session persistence) | ✅ Complete (v0.2.3.2) |
 
 ---
 

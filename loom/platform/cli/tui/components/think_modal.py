@@ -43,6 +43,9 @@ class ThinkModal(ModalScreen[None]):
         background: #1c1814;
         color: #e0cfa0;
         border: solid #4a4038;
+        scrollbar-color: #4a4038;
+        scrollbar-color-hover: #c8a464;
+        scrollbar-background: #1c1814;
     }
 
     #think-close-row {

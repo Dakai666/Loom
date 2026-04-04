@@ -51,6 +51,7 @@ message in the thread and await the button interaction (60s timeout → deny).
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -113,7 +114,6 @@ class _ConfirmView(View):
 # LoomDiscordBot
 # ---------------------------------------------------------------------------
 
-_EDIT_INTERVAL = 0.8   # seconds between message edits while streaming
 _MAX_CHARS     = 2000  # Discord per-message limit
 _THREAD_ARCHIVE_MINUTES = 1440  # 24h auto-archive for threads
 
@@ -142,10 +142,16 @@ class LoomDiscordBot:
         self._allowed_channels: set[int] = set(channel_ids or [])
         self._allowed_users: set[int] = set(allowed_user_ids or [])
 
-        # thread_id → LoomSession
+        # thread_id → LoomSession (in-memory, cleared on restart)
         self._sessions: dict[int, "LoomSession"] = {}
         # thread_id → currently running turn Task
         self._running_turns: dict[int, asyncio.Task] = {}
+
+        # Persistent thread → session_id mapping so existing threads resume
+        # their context after a bot restart.
+        # Stored at ~/.loom/discord_threads.json as {str(thread_id): session_id}
+        self._thread_map_path = Path("~/.loom/discord_threads.json").expanduser()
+        self._thread_map: dict[str, str] = self._load_thread_map()
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -266,12 +272,42 @@ class LoomDiscordBot:
             await self._start_session(thread.id)
         return self._sessions[thread.id]
 
+    def _load_thread_map(self) -> dict[str, str]:
+        """Load persisted thread_id → session_id mapping from disk."""
+        try:
+            if self._thread_map_path.exists():
+                return json.loads(self._thread_map_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _save_thread_map(self) -> None:
+        """Persist the current thread → session mapping to disk."""
+        try:
+            self._thread_map_path.parent.mkdir(parents=True, exist_ok=True)
+            self._thread_map_path.write_text(
+                json.dumps(self._thread_map, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass  # never block on a save failure
+
     async def _start_session(self, thread_id: int) -> "LoomSession":
         from loom.platform.cli.main import LoomSession
         from loom.core.harness.middleware import BlastRadiusMiddleware
 
-        session = LoomSession(model=self._model, db_path=self._db_path)
+        # Resume the previous session for this thread if one was recorded.
+        resume_id = self._thread_map.get(str(thread_id))
+        session = LoomSession(
+            model=self._model,
+            db_path=self._db_path,
+            resume_session_id=resume_id,
+        )
         await session.start()
+
+        # Persist thread → session mapping immediately after start so a crash
+        # or clean restart can still find this thread's context.
+        self._thread_map[str(thread_id)] = session.session_id
+        self._save_thread_map()
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:
@@ -306,7 +342,7 @@ class LoomDiscordBot:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         # Commands that require being in a thread
-        _needs_session = {"/think", "/compact", "/verbose", "/pause", "/stop", "/budget"}
+        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget"}
         if command in _needs_session and not is_thread:
             await message.channel.send(
                 f"`{command}` must be used inside a session thread.  "
@@ -389,12 +425,6 @@ class LoomDiscordBot:
                         f"Available: `{'`, `'.join(avail) or '(none)'}`"
                     )
 
-        elif command == "/verbose":
-            assert session is not None
-            session._discord_verbose = not getattr(session, "_discord_verbose", False)
-            state = "on" if session._discord_verbose else "off"
-            await message.channel.send(f"Tool output verbosity: **{state}**")
-
         elif command == "/pause":
             assert session is not None
             session.hitl_mode = not session.hitl_mode
@@ -436,7 +466,6 @@ class LoomDiscordBot:
                 "`/personality off` — Remove active persona\n"
                 "`/think` — View last turn's reasoning chain\n"
                 "`/compact` — Compress older context\n"
-                "`/verbose` — Toggle tool output verbosity\n"
                 "`/pause` — Toggle HITL auto-pause after each tool batch\n"
                 "`/stop` — Immediately cancel the current running turn\n"
                 "`/budget` — Show context token usage\n"
@@ -460,95 +489,144 @@ class LoomDiscordBot:
         content: str,
         session: "LoomSession",
     ) -> None:
-        status_msg = await message.channel.send("◌ Thinking…")
+        """
+        Run one agent turn with a split display strategy:
 
-        text_buf = ""
-        last_edit = 0.0
-        verbose = getattr(session, "_discord_verbose", False)
-
+        - status_msg (edit-based): tool activity log only — sparse edits, no
+          text streaming, so Markdown renders correctly and URL embeds don't flicker.
+        - response (send-once): complete LLM text sent as a fresh new message
+          after the turn finishes — Markdown and embeds render properly.
+        - Reaction ⚙️ on the user's message: immediate "received" acknowledgement.
+        - channel.typing(): "Bot is typing…" indicator while the turn runs.
+        """
+        # ── Acknowledge receipt ───────────────────────────────────────────
         try:
-            async for event in session.stream_turn(content):
-                if isinstance(event, TextChunk):
-                    text_buf += event.text
-                    now = time.monotonic()
-                    if now - last_edit >= _EDIT_INTERVAL:
-                        await _safe_edit(status_msg, text_buf + " ▌")
-                        last_edit = now
+            await message.add_reaction("⚙️")
+        except discord.HTTPException:
+            pass
 
-                elif isinstance(event, ToolBegin):
-                    args_str = ", ".join(
-                        f"{k}={str(v)[:30]}" for k, v in event.args.items()
-                    )[:80]
-                    preview = f"\n`⟳ {event.name}({args_str})`"
-                    await _safe_edit(status_msg, (text_buf or "◌ Thinking…") + preview)
+        # status_msg will hold tool activity (edited sparsely — OK for Markdown)
+        status_msg = await message.channel.send("-# ◌ working…")
 
-                elif isinstance(event, ToolEnd):
-                    if verbose:
-                        status = "✓" if event.success else "✗"
-                        line = f"\n`{status} {event.name} ({event.duration_ms:.0f}ms)`"
-                        if event.output:
-                            line += f"\n```\n{event.output[:200]}\n```"
-                        await _safe_edit(status_msg, (text_buf or "…") + line)
+        tool_buf = ""      # accumulates tool activity lines
+        response_buf = ""  # accumulates LLM response text (NOT edited into status_msg)
 
-                elif isinstance(event, TurnPaused):
-                    await _safe_edit(
-                        status_msg,
-                        f"{text_buf or '…'}\n\n"
-                        f"⏸ **Paused** after {event.tool_count_so_far} tool call(s).\n"
-                        "Reply `r` to resume · `c` to cancel · or send a redirect message",
-                    )
+        # ── Run turn with typing indicator ────────────────────────────────
+        async with message.channel.typing():
+            try:
+                async for event in session.stream_turn(content):
+                    if isinstance(event, TextChunk):
+                        # "▸ thinking…" is a TUI collapse marker — skip in Discord.
+                        if event.text.strip() == "▸ thinking…":
+                            continue
+                        response_buf += event.text
 
-                    def _pause_check(m: discord.Message) -> bool:
-                        return (
-                            m.channel.id == message.channel.id
-                            and (
-                                not self._allowed_users
-                                or m.author.id in self._allowed_users
-                            )
-                            and not m.author.bot
-                        )
-
-                    try:
-                        reply = await self._client.wait_for(
-                            "message", check=_pause_check, timeout=120.0
-                        )
-                        raw = reply.content.strip()
-                        if raw.lower() in ("c", "cancel"):
-                            session.cancel()
-                        elif raw.lower() in ("r", "resume", ""):
-                            session.resume()
+                    elif isinstance(event, ToolBegin):
+                        # One line per tool call: ToolBegin starts it, ToolEnd
+                        # appends the result on the SAME line (no leading \n).
+                        if event.args:
+                            first_val = next(iter(event.args.values()), "")
+                            primary = str(first_val).replace("\n", "↵")[:120]
+                            args_str = f'"{primary}"' if primary else ""
                         else:
-                            session.resume_with(raw)
-                            text_buf += f"\n*(redirected: {raw[:60]})*"
-                    except asyncio.TimeoutError:
-                        session.cancel()
-                        await message.channel.send("*(pause timed out — turn cancelled)*")
+                            args_str = ""
+                        tool_line = (
+                            f"\n⟳ {event.name}"
+                            + (f" — {args_str}" if args_str else "")
+                        )
+                        tool_buf += tool_line
+                        await _safe_edit(status_msg, tool_buf.lstrip())
 
-                elif isinstance(event, TurnDone):
-                    pass
+                    elif isinstance(event, ToolEnd):
+                        if event.success:
+                            tool_buf += f" ✓ {event.duration_ms:.0f}ms"
+                        else:
+                            err = (
+                                event.output[:80].replace("\n", " ")
+                                if event.output else "failed"
+                            )
+                            tool_buf += f" ✗ {err}"
+                        await _safe_edit(status_msg, tool_buf.lstrip())
 
-        except asyncio.CancelledError:
-            final_so_far = text_buf.strip()
-            if final_so_far:
-                await _safe_edit(status_msg, final_so_far + "\n\n🛑 *(stopped)*")
-            else:
-                await _safe_edit(status_msg, "🛑 *(stopped)*")
-            raise
+                    elif isinstance(event, TurnPaused):
+                        pause_body = (
+                            (tool_buf.lstrip() + "\n\n" if tool_buf else "")
+                            + f"⏸ **Paused** after {event.tool_count_so_far} tool call(s).\n"
+                            "Reply `r` to resume · `c` to cancel · or send a redirect message"
+                        )
+                        await _safe_edit(status_msg, pause_body)
 
-        except Exception as exc:
-            await _safe_edit(status_msg, f"❌ Error: {exc}")
-            return
+                        def _pause_check(m: discord.Message) -> bool:
+                            return (
+                                m.channel.id == message.channel.id
+                                and (
+                                    not self._allowed_users
+                                    or m.author.id in self._allowed_users
+                                )
+                                and not m.author.bot
+                            )
 
-        # Final edit
-        final = text_buf.strip() or "*(no response)*"
-        if len(final) <= _MAX_CHARS:
-            await _safe_edit(status_msg, final)
+                        try:
+                            reply = await self._client.wait_for(
+                                "message", check=_pause_check, timeout=120.0
+                            )
+                            raw = reply.content.strip()
+                            if raw.lower() in ("c", "cancel"):
+                                session.cancel()
+                            elif raw.lower() in ("r", "resume", ""):
+                                session.resume()
+                            else:
+                                session.resume_with(raw)
+                                tool_buf += f"\n*(redirected: {raw[:60]})*"
+                        except asyncio.TimeoutError:
+                            session.cancel()
+                            tool_buf += "\n*(pause timed out — cancelled)*"
+
+                    elif isinstance(event, TurnDone):
+                        pass
+
+            except asyncio.CancelledError:
+                # /stop — finalize what we have so far
+                if tool_buf:
+                    await _safe_edit(
+                        status_msg, tool_buf.lstrip() + "\n\n🛑 *(stopped)*"
+                    )
+                else:
+                    await _safe_edit(status_msg, "🛑 *(stopped)*")
+                partial = response_buf.strip()
+                if partial:
+                    await message.channel.send(partial + "\n\n🛑 *(stopped)*")
+                raise
+
+            except Exception as exc:
+                await _safe_edit(status_msg, f"❌ Error: {exc}")
+                return
+
+        # typing() context exits here — "Bot is typing…" disappears.
+
+        # ── Finalise status_msg (tool activity log) ───────────────────────
+        if tool_buf:
+            await _safe_edit(status_msg, tool_buf.lstrip())
         else:
-            await _safe_edit(status_msg, final[:_MAX_CHARS])
-            remaining = final[_MAX_CHARS:]
-            while remaining:
-                chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
-                await message.channel.send(chunk)
+            # No tools were used — the placeholder is just noise; remove it.
+            try:
+                await status_msg.delete()
+            except discord.HTTPException:
+                pass
+
+        # ── Send response as a fresh message (full Markdown, no flicker) ──
+        final = response_buf.strip() or "*(no response)*"
+        remaining = final
+        while remaining:
+            chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
+            await message.channel.send(chunk)
+
+        # ── Mark done ─────────────────────────────────────────────────────
+        try:
+            await message.remove_reaction("⚙️", self._client.user)
+            await message.add_reaction("✅")
+        except discord.HTTPException:
+            pass
 
     # ------------------------------------------------------------------
     # Tool confirm via Discord buttons
