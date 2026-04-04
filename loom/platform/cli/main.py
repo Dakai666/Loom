@@ -87,6 +87,7 @@ from loom.platform.cli.ui import (
     ToolBegin,
     ToolEnd,
     TurnDone,
+    TurnPaused,
     clear_line_escape,
     is_verbose_mode,
     make_prompt_session,
@@ -344,6 +345,14 @@ class LoomSession:
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
 
+        # HITL pause/resume — stream_turn() checks _pause_requested at each
+        # tool-batch boundary.  The consumer calls pause() / resume() / cancel().
+        self._pause_requested: bool = False
+        self._cancel_requested: bool = False
+        self._resume_event: asyncio.Event = asyncio.Event()
+        # When True, stream_turn() auto-pauses after every tool batch.
+        self.hitl_mode: bool = False
+
     # ------------------------------------------------------------------
     # Personality management
     # ------------------------------------------------------------------
@@ -445,6 +454,39 @@ class LoomSession:
             ]
         )
 
+    # ------------------------------------------------------------------
+    # HITL pause / resume / cancel
+    # ------------------------------------------------------------------
+
+    def pause(self) -> None:
+        """Request a pause at the next tool-batch boundary in stream_turn()."""
+        self._pause_requested = True
+        self._cancel_requested = False
+
+    def resume(self) -> None:
+        """Resume a paused stream_turn() — continue the loop as-is."""
+        self._pause_requested = False
+        self._cancel_requested = False
+        self._resume_event.set()
+
+    def resume_with(self, message: str) -> None:
+        """
+        Resume and inject a human message into the conversation before continuing.
+
+        The message is appended to self.messages as a user turn so the next
+        LLM call will see it as context / a redirect.
+        """
+        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        self.messages.append({"role": "user", "content": f"[{now_str}]\n{message}"})
+        asyncio.ensure_future(self._log_message("user", message))
+        self.resume()
+
+    def cancel(self) -> None:
+        """Abandon the rest of a paused stream_turn() — yields TurnDone and exits."""
+        self._cancel_requested = True
+        self._pause_requested = False
+        self._resume_event.set()
+
     async def stop(self) -> None:
         if self._db is None:
             return
@@ -489,7 +531,7 @@ class LoomSession:
 
     async def stream_turn(
         self, user_input: str
-    ) -> AsyncIterator[TextChunk | ToolBegin | ToolEnd | TurnDone]:
+    ) -> AsyncIterator[TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone]:
         """
         Run one complete agent turn and yield typed UI events.
 
@@ -728,6 +770,29 @@ class LoomSession:
                         f" mid-turn — compressing…[/yellow]"
                     )
                     await self._smart_compact()
+
+                # ── HITL check point ─────────────────────────────────────
+                # Fires after every tool batch, before the next LLM call.
+                # pause() sets _pause_requested; hitl_mode auto-sets it each batch.
+                if self.hitl_mode:
+                    self._pause_requested = True
+                if self._pause_requested:
+                    self._pause_requested = False
+                    self._resume_event.clear()
+                    yield TurnPaused(tool_count_so_far=tool_count)
+                    await self._resume_event.wait()
+                    self._resume_event.clear()
+                    if self._cancel_requested:
+                        self._cancel_requested = False
+                        self._last_think = "".join(_think_parts).strip()
+                        self._turn_index += 1
+                        yield TurnDone(
+                            tool_count=tool_count,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            elapsed_ms=(time.monotonic() - t0) * 1000,
+                        )
+                        return
             else:
                 break
 
@@ -1316,6 +1381,20 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             f"[dim]Tool output: {'[green]verbose[/green]' if state else '[yellow]compact[/yellow]'}[/dim]"
         )
 
+    elif command == "/pause":
+        # Toggle HITL mode (auto-pause after every tool batch)
+        session.hitl_mode = not session.hitl_mode
+        state = "on" if session.hitl_mode else "off"
+        console.print(
+            f"[dim]HITL pause mode: [{'yellow' if session.hitl_mode else 'green'}]{state}"
+            f"[/{'yellow' if session.hitl_mode else 'green'}][/dim]"
+        )
+        if session.hitl_mode:
+            console.print(
+                "[dim]  The agent will pause after each tool batch for your input.[/dim]\n"
+                "[dim]  At pause> :  r(esume) · c(ancel) · <message>(redirect)[/dim]"
+            )
+
     elif command == "/help":
         console.print(
             Panel(
@@ -1332,6 +1411,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
                 "  [yellow]/compact[/yellow]                   Compress older context\n"
                 "  [yellow]/verbose[/yellow]                   Toggle tool output verbosity\n"
+                "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
                 "  [yellow]/help[/yellow]                      Show this message\n\n"
                 "[bold]Keyboard shortcuts[/bold]\n\n"
                 "  [dim]Ctrl-L[/dim]       Clear screen\n"
@@ -1369,12 +1449,14 @@ class LoomChatApp:
             ToolBegin as TuiToolBegin,
             ToolEnd as TuiToolEnd,
             TurnDone as TuiTurnDone,
+            TurnPaused as TuiTurnPaused,
         )
         from loom.platform.cli.ui import (
             TextChunk,
             ToolBegin,
             ToolEnd,
             TurnDone,
+            TurnPaused,
         )
 
         class _App(LoomApp):
@@ -1384,6 +1466,13 @@ class LoomChatApp:
                     db_path=str(session._store.path),
                 )
                 self._session = session
+                # HITL: the worker awaits this; on_loom_app_hitl_decision sets it
+                self._hitl_event: asyncio.Event = asyncio.Event()
+                self._hitl_decision: str | None = None
+
+            def on_loom_app_hitl_decision(self, msg: Any) -> None:
+                self._hitl_decision = msg.decision
+                self._hitl_event.set()
 
             async def on_mount(self) -> None:
                 """Replay history on startup and seed the Budget panel."""
@@ -1500,6 +1589,21 @@ class LoomChatApp:
                                 path = _pending_writes.pop(ev.call_id, "")
                                 if path:
                                     self.add_artifact(path, ArtifactState.MODIFIED)
+                        elif isinstance(ev, TurnPaused):
+                            # Show PauseModal and wait for the user's decision
+                            self._hitl_event.clear()
+                            self._hitl_decision = None
+                            await self.dispatch_stream_event(
+                                TuiTurnPaused(tool_count_so_far=ev.tool_count_so_far)
+                            )
+                            await self._hitl_event.wait()
+                            decision = self._hitl_decision
+                            if decision == "__cancel__":
+                                self._session.cancel()
+                            elif decision:
+                                self._session.resume_with(decision)
+                            else:
+                                self._session.resume()
                         elif isinstance(ev, TurnDone):
                             budget = self._session.budget
                             await self.dispatch_stream_event(
@@ -1575,6 +1679,15 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/verbose":
         app.action_toggle_verbose()
+
+    elif command == "/pause":
+        session.hitl_mode = not session.hitl_mode
+        state = "on" if session.hitl_mode else "off"
+        app.notify(
+            f"HITL pause mode: {state}  "
+            + ("— agent will pause after each tool batch." if session.hitl_mode else ""),
+            timeout=3,
+        )
 
     elif command == "/new":
         # Exit with sentinel None so _chat_tui restart loop creates a fresh session.
@@ -1771,6 +1884,38 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 at_line_start = True
                 active_tool = None
                 console.print()
+
+            elif isinstance(event, TurnPaused):
+                # ── HITL pause ────────────────────────────────────────────
+                _cancel_spinner()
+                console.print(clear_line_escape(), end="")
+                if not at_line_start:
+                    console.print()
+                console.print(
+                    Rule(
+                        f"[yellow]⏸  Paused[/yellow]  [dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
+                        style="yellow",
+                    )
+                )
+                console.print(
+                    "[dim]  r[/dim] resume  [dim]·[/dim]  "
+                    "[dim]c[/dim] cancel  [dim]·[/dim]  "
+                    "[dim]<message>[/dim] redirect and resume"
+                )
+                try:
+                    raw = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: input("pause> ").strip()
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    raw = "c"
+
+                if raw in ("c", "cancel"):
+                    session.cancel()
+                elif raw in ("r", "resume", ""):
+                    session.resume()
+                else:
+                    session.resume_with(raw)
+                    console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
 
             elif isinstance(event, TurnDone):
                 # Cancel any running spinner and clear cursor

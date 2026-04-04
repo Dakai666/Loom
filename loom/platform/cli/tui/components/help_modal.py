@@ -21,6 +21,7 @@ _COMMANDS = [
     ("/think",                  "View last turn's reasoning chain"),
     ("/compact",                "Compress older context (frees tokens)"),
     ("/verbose",                "Toggle verbose tool output"),
+    ("/pause",                  "Toggle HITL auto-pause after each tool batch"),
     ("/help",                   "Show this help"),
 ]
 

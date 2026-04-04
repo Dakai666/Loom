@@ -54,6 +54,13 @@ class ToolEnd(StreamEvent):
 
 
 @dataclass
+class TurnPaused(StreamEvent):
+    """Agent loop suspended at a tool boundary — waiting for human input."""
+
+    tool_count_so_far: int = 0
+
+
+@dataclass
 class TurnDone(StreamEvent):
     """Full turn complete (all tools done)."""
 

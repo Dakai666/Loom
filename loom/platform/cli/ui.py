@@ -70,6 +70,20 @@ class ToolEnd:
 
 
 @dataclass
+class TurnPaused:
+    """
+    The agent turn has been paused — all current tool calls are done but the
+    loop is suspended, waiting for human input before continuing.
+
+    The consumer should prompt the user and then call either:
+        session.resume()         — continue the turn as-is
+        session.resume_with(msg) — inject a message and continue
+        session.cancel()         — abandon the rest of this turn
+    """
+    tool_count_so_far: int = 0
+
+
+@dataclass
 class TurnDone:
     """The complete agent turn (including all tool loops) is done."""
 
@@ -95,6 +109,7 @@ _SLASH_WORDS = [
     "/new",
     "/compact",
     "/verbose",
+    "/pause",
     "/help",
 ]
 

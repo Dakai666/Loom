@@ -46,6 +46,7 @@ from .events import (
     ToolBegin,
     ToolEnd,
     TurnDone,
+    TurnPaused,
     BudgetUpdate,
 )
 
@@ -259,6 +260,8 @@ class LoomApp(App):
             self._on_tool_begin(event)
         elif isinstance(event, ToolEnd):
             self._on_tool_end(event)
+        elif isinstance(event, TurnPaused):
+            await self._on_turn_paused(event)
         elif isinstance(event, TurnDone):
             await self._on_turn_done(event)
         elif isinstance(event, BudgetUpdate):
@@ -312,6 +315,26 @@ class LoomApp(App):
             error_snippet=error_snippet,
             expanded=not event.success,
         ))
+
+    async def _on_turn_paused(self, event: TurnPaused) -> None:
+        from .components.pause_modal import PauseModal
+
+        tool_block = self.query_one("#tool-block", ToolBlock)
+        tool_block.end_turn()
+        header = self.query_one("#header-bar", Header)
+        header.set_ready()
+
+        result = await self.push_screen_wait(PauseModal(tool_count=event.tool_count_so_far))
+
+        # result is injected into the app; but we can't call session methods directly
+        # here (app.py has no session reference). We post a UserMessage with a
+        # special prefix that main.py's _run_turn intercepts.
+        if result == "__cancel__":
+            self.post_message(self.HitlDecision("__cancel__"))
+        elif result:
+            self.post_message(self.HitlDecision(result))
+        else:
+            self.post_message(self.HitlDecision(None))
 
     async def _on_turn_done(self, event: TurnDone) -> None:
         msg_list = self.query_one("#message-list", MessageList)
@@ -403,6 +426,12 @@ class LoomApp(App):
         def __init__(self, text: str) -> None:
             super().__init__()
             self.text = text
+
+    class HitlDecision(_Msg, bubble=True):
+        """User's decision from the PauseModal."""
+        def __init__(self, decision: str | None) -> None:
+            super().__init__()
+            self.decision = decision  # None=resume, "__cancel__"=cancel, str=redirect msg
 
     def on_input_area_submit(self, event: InputArea.Submit) -> None:
         self.post_message(self.UserMessage(event.text))

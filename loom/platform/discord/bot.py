@@ -53,7 +53,7 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install 'loom[discord]'"
     ) from exc
 
-from loom.platform.cli.ui import TextChunk, ToolBegin, ToolEnd, TurnDone
+from loom.platform.cli.ui import TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused
 
 if TYPE_CHECKING:
     from loom.platform.cli.main import LoomSession
@@ -175,7 +175,7 @@ class LoomDiscordBot:
             asyncio.ensure_future(bot._handle_message(message, content))
 
     # ------------------------------------------------------------------
-    # Message handling
+    # Message handling — slash commands + streaming turns
     # ------------------------------------------------------------------
 
     async def _handle_message(
@@ -185,17 +185,179 @@ class LoomDiscordBot:
     ) -> None:
         session = await self._get_or_start_session(message.channel.id)
 
-        # Handle /new and /sessions pseudo-commands
-        if content.strip() == "/new":
-            session = await self._new_session(message.channel.id)
-            await message.channel.send("✨ Started a fresh session.")
+        if content.startswith("/"):
+            await self._handle_slash(message, content.strip(), session)
             return
 
+        await self._run_turn(message, content, session)
+
+    async def _handle_slash(
+        self,
+        message: discord.Message,
+        cmd: str,
+        session: "LoomSession",
+    ) -> None:
+        """Dispatch slash commands — mirrors CLI / TUI parity."""
+        parts = cmd.split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if command == "/new":
+            await self._new_session(message.channel.id)
+            await message.channel.send("✨ Started a fresh session.")
+
+        elif command == "/sessions":
+            from loom.core.memory.session_log import SessionLog as _SL
+            async with session._store.connect() as conn:
+                rows = await _SL(conn).list_sessions(limit=10)
+            if not rows:
+                await message.channel.send("*(no saved sessions)*")
+                return
+            lines = ["**Sessions** (reply with number to switch)\n"]
+            for i, r in enumerate(rows, 1):
+                title = r.get("title") or "(untitled)"
+                sid = r["session_id"][:8]
+                active = " ◀ current" if r["session_id"] == session.session_id else ""
+                lines.append(f"`{i}.` `{sid}` — {title}{active}")
+            msg = await message.channel.send("\n".join(lines))
+            # Wait for a numeric reply for 30s
+            def check(m: discord.Message) -> bool:
+                return (
+                    m.channel.id == message.channel.id
+                    and m.author.id == message.author.id
+                    and m.content.strip().isdigit()
+                )
+            try:
+                reply = await self._client.wait_for("message", check=check, timeout=30.0)
+                idx = int(reply.content.strip()) - 1
+                if 0 <= idx < len(rows):
+                    chosen_id = rows[idx]["session_id"]
+                    if chosen_id != session.session_id:
+                        old = self._sessions.pop(message.channel.id, None)
+                        if old:
+                            await old.stop()
+                        from loom.platform.cli.main import LoomSession
+                        new_session = LoomSession(
+                            model=self._model,
+                            db_path=self._db_path,
+                            resume_session_id=chosen_id,
+                        )
+                        await new_session.start()
+                        self._sessions[message.channel.id] = new_session
+                        confirm_fn = self._make_confirm_fn(message.channel.id)
+                        from loom.core.harness.middleware import BlastRadiusMiddleware
+                        for mw in new_session._pipeline._middlewares:
+                            if isinstance(mw, BlastRadiusMiddleware):
+                                mw._confirm = confirm_fn
+                                break
+                        await message.channel.send(
+                            f"✅ Switched to session `{chosen_id[:8]}`."
+                        )
+                    else:
+                        await message.channel.send("Already in this session.")
+                else:
+                    await message.channel.send("Invalid selection.")
+            except asyncio.TimeoutError:
+                await message.channel.send("*(session picker timed out)*")
+
+        elif command == "/think":
+            think = session._last_think
+            if think:
+                # Discord 2000-char limit — truncate with notice
+                body = think[:1800]
+                if len(think) > 1800:
+                    body += "\n*(truncated)*"
+                await message.channel.send(f"**Reasoning chain:**\n```\n{body}\n```")
+            else:
+                await message.channel.send("*(no reasoning chain captured for the last turn)*")
+
+        elif command == "/compact":
+            pct = session.budget.usage_fraction * 100
+            msg = await message.channel.send(f"⏳ Compacting context ({pct:.1f}% used)…")
+            await session._smart_compact()
+            await _safe_edit(msg, "✅ Context compacted.")
+
+        elif command == "/personality":
+            if not arg:
+                p = session.current_personality
+                avail = session._stack.available_personalities()
+                await message.channel.send(
+                    f"Active: **{p or '(none)'}**  |  Available: `{'`, `'.join(avail) or '(none)'}`"
+                )
+            elif arg == "off":
+                session.switch_personality("off")
+                await message.channel.send("Personality cleared.")
+            else:
+                ok = session.switch_personality(arg)
+                if ok:
+                    await message.channel.send(f"Personality → **{arg}**")
+                else:
+                    avail = session._stack.available_personalities()
+                    await message.channel.send(
+                        f"❌ Unknown personality `{arg}`.  "
+                        f"Available: `{'`, `'.join(avail) or '(none)'}`"
+                    )
+
+        elif command == "/verbose":
+            session._discord_verbose = not getattr(session, "_discord_verbose", False)
+            state = "on" if session._discord_verbose else "off"
+            await message.channel.send(f"Tool output verbosity: **{state}**")
+
+        elif command == "/pause":
+            session.hitl_mode = not session.hitl_mode
+            state = "on" if session.hitl_mode else "off"
+            extra = (
+                "\nThe agent will pause after each tool batch. Reply `r` to resume, `c` to cancel, or send a redirect message."
+                if session.hitl_mode else ""
+            )
+            await message.channel.send(f"HITL pause mode: **{state}**{extra}")
+
+        elif command == "/budget":
+            pct = session.budget.usage_fraction * 100
+            used = session.budget.used_tokens
+            total = session.budget.total_tokens
+            bar_filled = int(pct / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+            await message.channel.send(
+                f"**Context Budget**\n"
+                f"`{bar}` {pct:.1f}%\n"
+                f"`{used:,}` / `{total:,}` tokens"
+            )
+
+        elif command == "/help":
+            await message.channel.send(
+                "**Loom commands**\n\n"
+                "`/new` — Start a fresh session\n"
+                "`/sessions` — Browse and switch sessions\n"
+                "`/personality [name]` — Switch cognitive persona\n"
+                "`/personality off` — Remove active persona\n"
+                "`/think` — View last turn's reasoning chain\n"
+                "`/compact` — Compress older context\n"
+                "`/verbose` — Toggle tool output verbosity\n"
+                "`/pause` — Toggle HITL auto-pause after each tool batch\n"
+                "`/budget` — Show context budget usage\n"
+                "`/help` — Show this message\n\n"
+                "Personalities: `adversarial` · `minimalist` · `architect` · `researcher` · `operator`"
+            )
+
+        else:
+            await message.channel.send(
+                f"Unknown command `{command}`. Type `/help` for the command list."
+            )
+
+    async def _run_turn(
+        self,
+        message: discord.Message,
+        content: str,
+        session: "LoomSession",
+    ) -> None:
+        """Execute one agent turn, streaming output into a Discord message."""
         # Post thinking placeholder
         status_msg = await message.channel.send("◌ Thinking…")
 
         text_buf = ""
         last_edit = 0.0
+        verbose = getattr(session, "_discord_verbose", False)
 
         try:
             async for event in session.stream_turn(content):
@@ -212,6 +374,43 @@ class LoomDiscordBot:
                     )[:80]
                     preview = f"\n`⟳ {event.name}({args_str})`"
                     await _safe_edit(status_msg, (text_buf or "◌ Thinking…") + preview)
+
+                elif isinstance(event, ToolEnd):
+                    if verbose:
+                        result_line = (
+                            f"\n`{'✓' if event.success else '✗'} {event.name}"
+                            f" ({event.duration_ms:.0f}ms)`"
+                            + (f"\n```\n{event.output[:200]}\n```" if event.output else "")
+                        )
+                        await _safe_edit(status_msg, (text_buf or "…") + result_line)
+
+                elif isinstance(event, TurnPaused):
+                    # HITL pause — ask user in Discord
+                    await _safe_edit(
+                        status_msg,
+                        f"{text_buf}\n\n"
+                        f"⏸ **Paused** after {event.tool_count_so_far} tool call(s).\n"
+                        f"Reply `r` to resume · `c` to cancel · or send a redirect message",
+                    )
+
+                    def check(m: discord.Message) -> bool:
+                        return (
+                            m.channel.id == message.channel.id
+                            and m.author.id == message.author.id
+                        )
+                    try:
+                        reply = await self._client.wait_for("message", check=check, timeout=120.0)
+                        raw = reply.content.strip()
+                        if raw.lower() in ("c", "cancel"):
+                            session.cancel()
+                        elif raw.lower() in ("r", "resume", ""):
+                            session.resume()
+                        else:
+                            session.resume_with(raw)
+                            text_buf += f"\n*(redirected: {raw[:60]})*"
+                    except asyncio.TimeoutError:
+                        session.cancel()
+                        await message.channel.send("*(pause timed out — turn cancelled)*")
 
                 elif isinstance(event, TurnDone):
                     pass  # final edit happens below
