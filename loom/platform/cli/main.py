@@ -336,6 +336,7 @@ class LoomSession:
         # Memory
         self._store = SQLiteStore(db_path)
         self._db = None
+        self._db_ctx = None
         self._episodic: EpisodicMemory | None = None
         self._semantic: SemanticMemory | None = None
         self._procedural: ProceduralMemory | None = None
@@ -388,7 +389,8 @@ class LoomSession:
 
     async def start(self) -> None:
         await self._store.initialize()
-        self._db = await self._store.connect().__aenter__()
+        self._db_ctx = self._store.connect()
+        self._db = await self._db_ctx.__aenter__()
         self._episodic = EpisodicMemory(self._db)
         emb_provider = build_embedding_provider(_load_env())
         self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
@@ -496,6 +498,7 @@ class LoomSession:
         # Grab the connection reference and immediately clear self._db so any
         # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
         db, self._db = self._db, None
+        db_ctx, self._db_ctx = self._db_ctx, None
         try:
             console.print(Rule("[dim]Compressing session to memory…[/dim]"))
             count = await compress_session(
@@ -524,7 +527,10 @@ class LoomSession:
             pass
         finally:
             try:
-                await db.close()
+                if db_ctx is not None:
+                    await db_ctx.__aexit__(None, None, None)
+                elif db is not None:
+                    await db.close()
             except Exception:
                 pass
 
