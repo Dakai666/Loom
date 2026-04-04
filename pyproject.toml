@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loom"
-version = "0.2.2"
+version = "0.2.3"
 description = "Harness-first, memory-native, self-directing agent framework"
 requires-python = ">=3.11"
 dependencies = [
@@ -31,3 +31,4 @@ asyncio_mode = "auto"
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-asyncio>=1.0"]
 api = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]
+discord = ["discord.py>=2.3.0"]

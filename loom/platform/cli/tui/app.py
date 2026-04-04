@@ -218,6 +218,10 @@ class LoomApp(App):
         tool_block.end_turn()
         header = self.query_one("#header-bar", Header)
         header.set_ready()
+        # Finalize any open streaming bubble so it renders as Markdown
+        # instead of staying in cream-text streaming state indefinitely.
+        msg_list = self.query_one("#message-list", MessageList)
+        msg_list.finish_streaming()
         self.notify("Interrupted.", severity="warning", timeout=2)
 
     def action_clear_screen(self) -> None:

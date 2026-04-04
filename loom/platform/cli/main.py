@@ -2320,5 +2320,57 @@ def api_start(host: str, port: int, db: str, reload: bool) -> None:
     run_server(host=host, port=port, db_path=db, reload=reload)
 
 
+# ---------------------------------------------------------------------------
+# Discord bot platform
+# ---------------------------------------------------------------------------
+
+@cli.group(name="discord")
+def discord_bot() -> None:
+    """Discord bot frontend for Loom."""
+
+
+@discord_bot.command("start")
+@click.option("--token", envvar="DISCORD_BOT_TOKEN", required=True,
+              help="Discord bot token (or set DISCORD_BOT_TOKEN in .env)")
+@click.option("--channel", "channel_ids", multiple=True, type=int,
+              envvar="DISCORD_CHANNEL_ID",
+              help="Channel ID(s) to listen in. If omitted, responds to @mentions everywhere.")
+@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def discord_start(token: str, channel_ids: tuple[int, ...], model: str, db: str) -> None:
+    """Start the Loom Discord bot (requires: pip install loom[discord])."""
+    try:
+        from loom.platform.discord.bot import LoomDiscordBot
+    except ImportError:
+        console.print(
+            "[red]discord.py not installed.[/red] "
+            "Run:  [bold]pip install loom[discord][/bold]"
+        )
+        raise SystemExit(1)
+
+    env = _load_env()
+    resolved_token = token or env.get("DISCORD_BOT_TOKEN", "")
+    if not resolved_token:
+        console.print("[red]No Discord bot token.[/red] Set --token or DISCORD_BOT_TOKEN in .env")
+        raise SystemExit(1)
+
+    channel_list = list(channel_ids) if channel_ids else []
+    if not channel_list:
+        raw = env.get("DISCORD_CHANNEL_ID", "")
+        if raw:
+            try:
+                channel_list = [int(raw)]
+            except ValueError:
+                pass
+
+    bot = LoomDiscordBot(model=model, db_path=db, channel_ids=channel_list or None)
+    console.print(
+        f"[bold cyan]Loom Discord Bot[/bold cyan]  "
+        f"model: {model}  |  db: {db}\n"
+        + (f"[dim]Channels: {channel_list}[/dim]" if channel_list else "[dim]Listening for @mentions everywhere[/dim]")
+    )
+    bot.run(resolved_token)
+
+
 if __name__ == "__main__":
     cli()
