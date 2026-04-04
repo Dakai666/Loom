@@ -84,6 +84,12 @@ class TurnPaused:
 
 
 @dataclass
+class CompressDone:
+    """Episodic memory was compressed to semantic facts mid-session."""
+    fact_count: int
+
+
+@dataclass
 class TurnDone:
     """The complete agent turn (including all tool loops) is done."""
 

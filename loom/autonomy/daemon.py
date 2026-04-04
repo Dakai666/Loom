@@ -70,6 +70,7 @@ class AutonomyDaemon:
             body=plan.intent,
             trigger_name=plan.trigger_name,
             timeout_seconds=60 if plan.decision == ActionDecision.NOTIFY else 300,
+            thread_id=plan.context.get("notify_thread_id", 0),
         )
 
         result = await self._confirm.ask(notif)
@@ -102,6 +103,7 @@ class AutonomyDaemon:
                 if isinstance(event, TextChunk):
                     output_chunks.append(event.text)
 
+            thread_id = plan.context.get("notify_thread_id", 0)
             response = "".join(output_chunks).strip()
             if response:
                 await self._notify.send(Notification(
@@ -109,6 +111,7 @@ class AutonomyDaemon:
                     title=f"Autonomy result: {plan.trigger_name}",
                     body=response[:1000],
                     trigger_name=plan.trigger_name,
+                    thread_id=thread_id,
                 ))
         except Exception as exc:
             await self._notify.send(Notification(
@@ -116,6 +119,7 @@ class AutonomyDaemon:
                 title=f"Autonomy error: {plan.trigger_name}",
                 body=str(exc),
                 trigger_name=plan.trigger_name,
+                thread_id=plan.context.get("notify_thread_id", 0),
             ))
 
     # ------------------------------------------------------------------
@@ -149,6 +153,7 @@ class AutonomyDaemon:
                 timezone=sched.get("timezone", "UTC"),
                 trust_level=sched.get("trust_level", "guarded"),
                 notify=sched.get("notify", True),
+                notify_thread_id=sched.get("notify_thread", 0),
             )
             self._evaluator.register(trigger)
             count += 1
@@ -160,6 +165,7 @@ class AutonomyDaemon:
                 event_name=evt.get("event", evt["name"]),
                 trust_level=evt.get("trust_level", "guarded"),
                 notify=evt.get("notify", True),
+                notify_thread_id=evt.get("notify_thread", 0),
             )
             self._evaluator.register(trigger)
             count += 1

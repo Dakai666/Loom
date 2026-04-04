@@ -33,6 +33,7 @@ class TriggerDefinition:
     trust_level: str = "guarded"      # "safe" | "guarded" | "critical"
     notify: bool = True               # push notification before acting?
     enabled: bool = True
+    notify_thread_id: int = 0         # Discord thread ID for result delivery (0 = default channel)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

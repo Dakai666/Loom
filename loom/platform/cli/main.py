@@ -83,6 +83,7 @@ from loom.platform.cli.tools import (
     make_web_search_tool,
 )
 from loom.platform.cli.ui import (
+    CompressDone,
     TextChunk,
     ToolBegin,
     ToolEnd,
@@ -290,6 +291,9 @@ class LoomSession:
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
         self._stack = PromptStack.from_config(config)
+        self._episodic_compress_threshold: int = (
+            config.get("memory", {}).get("episodic_compress_threshold", 30)
+        )
         system_prompt = self._stack.load()
 
         # Inject workspace context into system prompt
@@ -674,16 +678,17 @@ class LoomSession:
             if response.stop_reason == "end_turn":
                 self._turn_index += 1
 
-                # Mid-session episodic compression: once every 30 entries so
-                # long-running sessions don't accumulate stale episodic noise.
-                _EPISODIC_COMPRESS_THRESHOLD = 30
+                # Mid-session episodic compression: configurable via loom.toml
+                # [memory] episodic_compress_threshold (default 30).
                 try:
                     ep_count = await self._episodic.count_session(self.session_id)
-                    if ep_count >= _EPISODIC_COMPRESS_THRESHOLD:
-                        await compress_session(
+                    if ep_count >= self._episodic_compress_threshold:
+                        fact_count = await compress_session(
                             self.session_id, self._episodic, self._semantic,
                             self.router, self.model,
                         )
+                        if fact_count:
+                            yield CompressDone(fact_count=fact_count)
                 except Exception:
                     pass  # never block the turn on compression failure
 
@@ -2502,14 +2507,31 @@ def discord_bot() -> None:
               help="User ID(s) to accept messages from (or set DISCORD_USER_ID in .env).")
 @click.option("--model", default="MiniMax-M2.7", show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--autonomy/--no-autonomy", default=False,
+              help="Also start the autonomy daemon in the same process.")
+@click.option("--autonomy-config", default="loom.toml", show_default=True,
+              help="Path to loom.toml for autonomy trigger definitions.")
+@click.option("--autonomy-interval", default=60, show_default=True, type=int,
+              help="Autonomy daemon poll interval in seconds.")
+@click.option("--notify-channel", "notify_channel_id", default=0, type=int,
+              help="Discord channel ID for autonomy notifications. "
+                   "Defaults to the first --channel value.")
 def discord_start(
     token: str,
     channel_ids: tuple[int, ...],
     user_ids: tuple[int, ...],
     model: str,
     db: str,
+    autonomy: bool,
+    autonomy_config: str,
+    autonomy_interval: int,
+    notify_channel_id: int,
 ) -> None:
-    """Start the Loom Discord bot (requires: pip install loom[discord])."""
+    """Start the Loom Discord bot (requires: pip install loom[discord]).
+
+    Use --autonomy to also run the autonomy cron daemon in the same process,
+    routing trigger results and confirmations through Discord.
+    """
     try:
         from loom.platform.discord.bot import LoomDiscordBot
     except ImportError:
@@ -2556,9 +2578,93 @@ def discord_start(
         info_lines.append(f"[dim]  Users:    {user_list}[/dim]")
     else:
         info_lines.append("[dim]  Users:    unrestricted[/dim]")
-    console.print("\n".join(info_lines))
 
-    bot.run(resolved_token)
+    if autonomy:
+        # Resolve the notification channel: explicit flag > first bot channel > error
+        resolved_notify_ch = notify_channel_id or (channel_list[0] if channel_list else 0)
+        if not resolved_notify_ch:
+            console.print(
+                "[red]--autonomy requires a target channel.[/red] "
+                "Pass --channel <id> or --notify-channel <id>."
+            )
+            raise SystemExit(1)
+        info_lines.append(
+            f"[dim]  Autonomy: [green]on[/green]  "
+            f"config={autonomy_config}  notify-channel={resolved_notify_ch}[/dim]"
+        )
+        console.print("\n".join(info_lines))
+        asyncio.run(
+            _discord_with_autonomy(
+                bot, resolved_token, autonomy_config, model, db,
+                resolved_notify_ch, autonomy_interval,
+            )
+        )
+    else:
+        console.print("\n".join(info_lines))
+        asyncio.run(_discord_graceful_run(bot, resolved_token))
+
+
+async def _discord_graceful_run(bot: "LoomDiscordBot", token: str) -> None:
+    """Run the Discord bot and close all thread sessions on shutdown."""
+    try:
+        async with bot._client:
+            await bot._client.start(token)
+    finally:
+        for tid in list(bot._sessions):
+            await bot._close_session(tid)
+
+
+async def _discord_with_autonomy(
+    bot: "LoomDiscordBot",
+    token: str,
+    config_path: str,
+    model: str,
+    db: str,
+    notify_channel_id: int,
+    interval: int,
+) -> None:
+    """Run Discord bot + autonomy daemon in a single event loop."""
+    from loom.autonomy.daemon import AutonomyDaemon
+    from loom.notify.adapters.discord_bot import DiscordBotNotifier
+    from loom.notify.confirm import ConfirmFlow
+    from loom.notify.router import NotificationRouter
+
+    discord_notifier = DiscordBotNotifier(bot._client, notify_channel_id)
+    notify_router = NotificationRouter()
+    notify_router.register(discord_notifier)
+
+    confirm_flow = ConfirmFlow(
+        send_fn=notify_router.send,
+        wait_fn=discord_notifier.wait_reply,
+    )
+
+    # Autonomous session: separate from Discord thread sessions, shared db
+    session = LoomSession(model=model, db_path=db)
+    await session.start()
+
+    daemon = AutonomyDaemon(
+        notify_router=notify_router,
+        confirm_flow=confirm_flow,
+        loom_session=session,
+    )
+    n = daemon.load_config(config_path)
+    console.print(f"[dim]Autonomy: {n} trigger(s) loaded from {config_path}[/dim]")
+
+    async def _start_daemon_after_ready() -> None:
+        # Wait for the Discord connection before the daemon begins polling,
+        # so notifications can be delivered from the first fire onwards.
+        await bot._client.wait_until_ready()
+        console.print("[dim]Autonomy daemon started.[/dim]")
+        asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
+
+    try:
+        async with bot._client:
+            asyncio.ensure_future(_start_daemon_after_ready())
+            await bot._client.start(token)
+    finally:
+        for tid in list(bot._sessions):
+            await bot._close_session(tid)
+        await session.stop()  # autonomy session
 
 
 if __name__ == "__main__":

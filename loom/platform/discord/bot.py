@@ -66,7 +66,7 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install 'loom[discord]'"
     ) from exc
 
-from loom.platform.cli.ui import TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused
+from loom.platform.cli.ui import CompressDone, TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused
 
 if TYPE_CHECKING:
     from loom.platform.cli.main import LoomSession
@@ -581,6 +581,11 @@ class LoomDiscordBot:
                         except asyncio.TimeoutError:
                             session.cancel()
                             tool_buf += "\n*(pause timed out — cancelled)*"
+
+                    elif isinstance(event, CompressDone):
+                        await message.channel.send(
+                            f"-# 🧠 記憶壓縮：{event.fact_count} 條事實已存入語意記憶"
+                        )
 
                     elif isinstance(event, TurnDone):
                         pass

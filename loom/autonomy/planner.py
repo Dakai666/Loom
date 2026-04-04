@@ -85,6 +85,7 @@ class ActionPlanner:
         context = dict(fire_context)
         context["trigger_name"] = trigger.name
         context["intent"] = trigger.intent
+        context["notify_thread_id"] = getattr(trigger, "notify_thread_id", 0)
 
         if self._semantic is not None:
             try:

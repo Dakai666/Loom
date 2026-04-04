@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2.3.2** — Action visibility (tool events inline in conversation), Discord display overhaul (reactions, typing indicator, Markdown-safe split send), thread session persistence across bot restarts.
+**v0.2.3.3** — Discord + Autonomy merged process (`--autonomy` flag), per-task Discord thread routing (`notify_thread`), configurable episodic compression threshold, memory compression notification in-thread, graceful shutdown with session compression.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -82,6 +82,10 @@ loom chat --tui --model MiniMax-M2.7
 
 # Discord bot (v0.2.3.1+) — requires: pip install loom[discord]
 loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
+
+# Discord bot + autonomy daemon in one process (v0.2.3.3+)
+loom discord start --autonomy --channel <channel_id>
+loom discord start --autonomy --channel <channel_id> --notify-channel <notify_id>
 
 # Inspect memory
 loom memory list
@@ -209,21 +213,37 @@ backend = "sqlite"
 db_path = "~/.loom/memory.db"
 episodic_retention_days = 7
 skill_deprecation_threshold = 0.3
+episodic_compress_threshold = 10   # compress to semantic after N episodic entries
 
 [harness]
 default_trust_level = "guarded"
 require_audit_log = true
 
 [autonomy]
-enabled = false          # set true to activate daemon
+enabled = true
 timezone = "Asia/Taipei"
 
 [[autonomy.schedules]]
-name = "daily_review"
-cron = "0 9 * * 1-5"    # weekdays 09:00
-intent = "Review progress and surface priority tasks"
-trust_level = "guarded"
-notify = true
+name = "morning_briefing"
+cron = "0 9 * * *"
+intent = "Generate daily news briefing and write to news/YYYY-MM-DD/briefing.md"
+trust_level = "safe"     # safe = auto-execute, no confirmation needed
+notify = false
+notify_thread = 0        # Discord thread ID for results (0 = default notify channel)
+
+[[autonomy.schedules]]
+name = "daily_journal"
+cron = "30 17 * * *"
+intent = "Write today's journal: work done, obstacles, decisions"
+trust_level = "safe"
+notify = false
+notify_thread = 0        # separate thread for journal entries
+
+# trust_level + notify interaction:
+#   safe                  → execute immediately, no confirmation
+#   guarded + notify=false → execute immediately, no confirmation
+#   guarded + notify=true  → Discord Allow/Deny buttons (60s timeout)
+#   critical               → must confirm every time
 
 [notify]
 default_channel = "cli"
@@ -251,7 +271,11 @@ DISCORD_CHANNEL_ID=123456789   # optional: restrict to one channel
 ```
 
 ```bash
+# Bot only
 loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
+
+# Bot + autonomy daemon (recommended — one process)
+loom discord start --autonomy --channel <channel_id>
 ```
 
 ### Usage
@@ -272,6 +296,11 @@ All slash commands work in Discord chat: `/new` `/sessions` `/think` `/compact` 
 **HITL pause** — `/pause` on: after each tool batch the bot posts a pause prompt; reply `r` / `c` / redirect text.
 
 **`/stop`** — cancels the running turn immediately; partial response is sent as a new message.
+
+**Memory compression** — when episodic entries hit the threshold, the thread receives a small status line:
+```
+🧠 記憶壓縮：5 條事實已存入語意記憶
+```
 
 ---
 
@@ -380,6 +409,7 @@ python -m pytest tests/test_integration.py -v
 | Phase TUI-2 | TUI overhaul: Parchment theme, AgentState indicator, Markdown rendering, Budget panel, Activity Log, HelpModal, IDE-safe keys | ✅ Complete (v0.2.3) |
 | Phase 5G | HITL pause/resume/redirect (`/pause`, `/stop`); Discord bot frontend; three-frontend command parity | ✅ Complete (v0.2.3.1) |
 | Phase 5H | Action visibility (tool events inline in conversation); Discord display overhaul (reactions, typing indicator, split send, session persistence) | ✅ Complete (v0.2.3.2) |
+| Phase 5I | Discord + Autonomy merged process (`--autonomy`); per-task thread routing (`notify_thread`); configurable episodic compress threshold; graceful shutdown with compression; `CompressDone` in-thread notification | ✅ Complete (v0.2.3.3) |
 
 ---
 

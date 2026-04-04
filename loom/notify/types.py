@@ -39,6 +39,7 @@ class Notification:
     body: str
     trigger_name: str = ""
     timeout_seconds: int = 60
+    thread_id: int = 0                # target Discord thread (0 = default channel)
     metadata: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

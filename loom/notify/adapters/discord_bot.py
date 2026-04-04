@@ -108,7 +108,9 @@ class DiscordBotNotifier(BaseNotifier):
     # ------------------------------------------------------------------
 
     async def send(self, notification: Notification) -> None:
-        ch = self._client.get_channel(self._channel_id)
+        # Per-notification thread routing: use thread_id if set, else default channel
+        target_id = notification.thread_id or self._channel_id
+        ch = self._client.get_channel(target_id)
         if ch is None:
             return
 
