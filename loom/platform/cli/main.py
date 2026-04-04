@@ -448,29 +448,40 @@ class LoomSession:
     async def stop(self) -> None:
         if self._db is None:
             return
-        console.print(Rule("[dim]Compressing session to memory…[/dim]"))
-        count = await compress_session(
-            self.session_id,
-            self._episodic,
-            self._semantic,
-            self.router,
-            self.model,
-        )
-        if count:
-            console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
-        if self._session_log is not None:
-            first_user = next(
-                (m["content"] for m in self.messages if m["role"] == "user"), None
-            )
-            title = first_user[:60] if isinstance(first_user, str) else None
-            await self._session_log.update_session(
+        # Grab the connection reference and immediately clear self._db so any
+        # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
+        db, self._db = self._db, None
+        try:
+            console.print(Rule("[dim]Compressing session to memory…[/dim]"))
+            count = await compress_session(
                 self.session_id,
-                turn_count=self._turn_index,
-                last_active=datetime.now(UTC).isoformat(),
-                title=title,
+                self._episodic,
+                self._semantic,
+                self.router,
+                self.model,
             )
-        await self._db.close()
-        self._db = None  # guard against double stop() (e.g. /new → on_unmount)
+            if count:
+                console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+            if self._session_log is not None:
+                first_user = next(
+                    (m["content"] for m in self.messages if m["role"] == "user"), None
+                )
+                title = first_user[:60] if isinstance(first_user, str) else None
+                await self._session_log.update_session(
+                    self.session_id,
+                    turn_count=self._turn_index,
+                    last_active=datetime.now(UTC).isoformat(),
+                    title=title,
+                )
+        except Exception:
+            # DB connection may already be invalid when Textual cancels workers
+            # during shutdown — swallow the error so the process exits cleanly.
+            pass
+        finally:
+            try:
+                await db.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Streaming agent loop
