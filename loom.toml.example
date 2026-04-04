@@ -1,0 +1,139 @@
+# loom.toml — Loom configuration file
+# Copy this file to loom.toml and fill in your values.
+# API keys go in .env (never in this file).
+
+# ─────────────────────────────────────────────
+# Basic metadata
+# ─────────────────────────────────────────────
+
+[loom]
+name = "loom"
+version = "0.1.0"
+
+# ─────────────────────────────────────────────
+# Identity / Prompt Stack
+# ─────────────────────────────────────────────
+# Three-layer prompt composition:
+#   SOUL.md       — global identity, always in context
+#   Agent.md      — project / environment context, agent can edit
+#   personality   — temporary cognitive lens (leave blank to disable)
+
+[identity]
+soul        = "SOUL.md"
+agent       = "Agent.md"
+personality = ""
+# Example: personality = "personalities/adversarial.md"
+
+# ─────────────────────────────────────────────
+# Cognition
+# ─────────────────────────────────────────────
+# default_model is used by `loom autonomy start` and `loom discord start`
+# when no --model flag is given.
+# CLI / TUI sessions use --model flag or this value as fallback.
+#
+# Supported prefixes:
+#   MiniMax-*         → MiniMax provider (requires MINIMAX_API_KEY in .env)
+#   claude-*          → Anthropic provider (requires ANTHROPIC_API_KEY in .env)
+
+[cognition]
+default_model = "claude-sonnet-4-6"
+max_tokens    = 8096
+
+# ─────────────────────────────────────────────
+# Memory
+# ─────────────────────────────────────────────
+
+[memory]
+backend    = "sqlite"
+db_path    = "~/.loom/memory.db"
+
+# Episodic entries older than this are eligible for pruning.
+episodic_retention_days = 7
+
+# Skills whose EMA confidence drops below this are marked deprecated.
+skill_deprecation_threshold = 0.3
+
+# Compress episodic → semantic after this many entries accumulate per session.
+# Lower values keep semantic memory fresher; 10 is recommended for long-running
+# Discord sessions, 30 is fine for short CLI sessions.
+episodic_compress_threshold = 30
+
+# ─────────────────────────────────────────────
+# Harness
+# ─────────────────────────────────────────────
+
+[harness]
+default_trust_level = "guarded"   # "safe" | "guarded" | "critical"
+require_audit_log   = true
+
+# ─────────────────────────────────────────────
+# Autonomy Engine
+# ─────────────────────────────────────────────
+# Cron expressions use standard 5-field syntax:
+#   minute  hour  day-of-month  month  day-of-week
+# Day-of-week: 0=Sun, 1=Mon … 6=Sat  (same as standard cron)
+#
+# trust_level + notify interaction:
+#   safe                   → execute immediately, no confirmation
+#   guarded + notify=false → execute immediately, no confirmation
+#   guarded + notify=true  → Discord Allow/Deny buttons (60 s timeout → skip)
+#   critical               → must confirm every time
+#
+# notify_thread: Discord thread ID to post results into.
+#   0 = use the --notify-channel passed to `loom discord start`
+
+[autonomy]
+enabled  = false           # set true to activate daemon
+timezone = "UTC"           # IANA timezone, e.g. "Asia/Taipei", "America/New_York"
+
+# ── Example: daily news briefing ──────────────────────────────────────────────
+# [[autonomy.schedules]]
+# name         = "morning_briefing"
+# cron         = "0 9 * * *"        # 09:00 every day
+# intent       = "Fetch today's top stories from HackerNews and GitHub trending.
+#                 Write a concise briefing to news/YYYY-MM-DD/briefing.md and
+#                 store key trends in semantic memory."
+# timezone     = "UTC"
+# trust_level  = "safe"
+# notify       = false
+# notify_thread = 0                 # replace with Discord thread ID
+
+# ── Example: daily journal ────────────────────────────────────────────────────
+# [[autonomy.schedules]]
+# name         = "daily_journal"
+# cron         = "30 17 * * *"      # 17:30 every day
+# intent       = "Review today's work: what was done, obstacles encountered,
+#                 decisions made. Write to diary/YYYY-MM-DD.md and extract
+#                 key facts into semantic memory."
+# timezone     = "UTC"
+# trust_level  = "safe"
+# notify       = false
+# notify_thread = 0                 # replace with Discord thread ID
+
+# ── Example: weekday-only task ────────────────────────────────────────────────
+# [[autonomy.schedules]]
+# name         = "weekly_review"
+# cron         = "0 18 * * 5"       # 18:00 every Friday
+# intent       = "Summarise the week's progress and surface next week's priorities."
+# timezone     = "UTC"
+# trust_level  = "guarded"
+# notify       = true               # will send Discord Allow/Deny buttons
+# notify_thread = 0
+
+# ── Example: named event trigger ──────────────────────────────────────────────
+# [[autonomy.triggers]]
+# name         = "deploy_check"
+# event        = "deployment_done"  # fired by: loom autonomy emit deployment_done
+# intent       = "Run smoke tests and post results to #deployments channel."
+# trust_level  = "guarded"
+# notify       = true
+# notify_thread = 0
+
+# ─────────────────────────────────────────────
+# Notifications
+# ─────────────────────────────────────────────
+# default_channel is informational; actual routing is determined at runtime
+# by which notifiers are registered (CLI, DiscordBotNotifier, etc.)
+
+[notify]
+default_channel = "cli"

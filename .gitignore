@@ -58,9 +58,20 @@ UI_ISSUE_TEMPLATE.md
 CLI_UI_DESIGN.md
 IMPLEMENTATION_STATUS.md
 *.md.bak
-diary/
 scripts/
 tests/
 *.png
 *.jpg
 loom/_commit_msg.txt
+.參考
+
+
+#Loom 自用
+extensibility/
+diary/
+news/
+reports/
+outputs/
+
+# Personal config (use loom.toml.example as template)
+loom.toml
