@@ -479,6 +479,14 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
     )
 
 
+def sanitize_untrusted_text(text: str) -> str:
+    """Sanitize external text to prevent XML-based prompt injection."""
+    if not text:
+        return ""
+    safe_text = text.replace("<", "＜").replace(">", "＞")
+    return f"<untrusted_external_content>\n{safe_text}\n</untrusted_external_content>"
+
+
 def make_fetch_url_tool() -> ToolDefinition:
     """Return a SAFE tool that fetches a URL and returns cleaned text."""
 
@@ -496,9 +504,10 @@ def make_fetch_url_tool() -> ToolDefinition:
                 if "html" in content_type:
                     title, body = _html_to_text(resp.text)
                     body = body[:_CONTENT_LIMIT]
-                    output = f"Title: {title}\n\n{body}" if title else body
+                    raw_output = f"Title: {title}\n\n{body}" if title else body
                 else:
-                    output = resp.text[:_CONTENT_LIMIT]
+                    raw_output = resp.text[:_CONTENT_LIMIT]
+                output = sanitize_untrusted_text(raw_output)
         except httpx.HTTPStatusError as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=f"HTTP {exc.response.status_code}: {url}")
@@ -570,7 +579,8 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
             url = r.get("url", "")
             desc = re.sub(r"\s+", " ", r.get("description", "")).strip()
             lines.append(f"{i}. {title}\n   {url}\n   {desc}")
-        output = "\n\n".join(lines)
+        raw_output = "\n\n".join(lines)
+        output = sanitize_untrusted_text(raw_output)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=output)
 
