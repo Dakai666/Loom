@@ -6,10 +6,12 @@ single SQLite file.  Each memory class receives an open `aiosqlite`
 connection and operates on its own table(s).
 """
 
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 
 import aiosqlite
+import sqlite_vec
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -141,9 +143,13 @@ class SQLiteStore:
             except Exception:
                 pass  # Column already exists — this is expected on all but the first run
 
-    def connect(self) -> aiosqlite.Connection:
-        """Return an async context-manager that yields an open connection."""
-        return aiosqlite.connect(self.path)
+    @asynccontextmanager
+    async def connect(self):
+        """Return an async context-manager that yields an open connection with sqlite-vec."""
+        async with aiosqlite.connect(self.path) as db:
+            await db.enable_load_extension(True)
+            await db.load_extension(sqlite_vec.loadable_path())
+            yield db
 
     @staticmethod
     def _dumps(obj: dict) -> str:

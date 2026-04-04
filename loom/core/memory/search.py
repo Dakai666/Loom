@@ -18,9 +18,11 @@ Usage
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections import Counter
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -238,7 +240,7 @@ class MemorySearch:
     async def _search_semantic_embedding(
         self, query: str, limit: int
     ) -> list[MemorySearchResult]:
-        """Rank semantic entries by cosine similarity to the query embedding."""
+        """Rank semantic entries by cosine similarity using sqlite-vec."""
         provider = self._semantic._embeddings
         if provider is None:
             return []
@@ -248,36 +250,46 @@ class MemorySearch:
             return []
         query_vec = query_vectors[0]
 
-        entries_with_vecs = await self._semantic.list_with_embeddings(500)
+        cursor = await self._semantic._db.execute(
+            """
+            SELECT id, key, value, confidence, source, metadata, created_at, updated_at,
+                   1.0 - vec_distance_cosine(embedding, ?) AS score
+            FROM semantic_entries
+            WHERE embedding IS NOT NULL
+            ORDER BY vec_distance_cosine(embedding, ?) ASC
+            LIMIT ?
+            """,
+            (json.dumps(query_vec), json.dumps(query_vec), limit)
+        )
+        rows = await cursor.fetchall()
+        
+        from loom.core.memory.semantic import SemanticEntry
 
-        scored: list[tuple[float, int]] = []
-        for i, (_, vec) in enumerate(entries_with_vecs):
-            if vec is None:
-                continue
-            score = cosine_similarity(query_vec, vec)
-            if score > 0.0:
-                scored.append((score, i))
-
-        scored.sort(reverse=True)
-
-        return [
-            MemorySearchResult(
-                type="semantic",
-                key=entries_with_vecs[i][0].key,
-                value=entries_with_vecs[i][0].value,
-                score=score,
-                metadata={
-                    "confidence": entries_with_vecs[i][0].confidence,
-                    "effective_confidence": entries_with_vecs[i][0].effective_confidence(),
-                    "method": "embedding",
-                },
-                updated_at=(
-                    entries_with_vecs[i][0].updated_at.isoformat()
-                    if entries_with_vecs[i][0].updated_at else ""
-                ),
+        results: list[MemorySearchResult] = []
+        for r in rows:
+            entry = SemanticEntry(
+                id=r[0], key=r[1], value=r[2], confidence=r[3],
+                source=r[4], metadata=json.loads(r[5]),
+                created_at=datetime.fromisoformat(r[6]),
+                updated_at=datetime.fromisoformat(r[7]),
             )
-            for score, i in scored[:limit]
-        ]
+            score = r[8]
+            if score > 0.0:
+                results.append(
+                    MemorySearchResult(
+                        type="semantic",
+                        key=entry.key,
+                        value=entry.value,
+                        score=score,
+                        metadata={
+                            "confidence": entry.confidence,
+                            "effective_confidence": entry.effective_confidence(),
+                            "method": "embedding",
+                        },
+                        updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
+                    )
+                )
+        return results
 
     async def _recent_fallback(
         self, type: MemoryType, limit: int
