@@ -62,6 +62,9 @@ class TurnDone(StreamEvent):
     output_tokens: int
     elapsed_ms: float
     context_pct: float
+    used_tokens: int = 0    # absolute tokens used this turn
+    max_tokens: int = 0     # model context window size
+    think_text: str = ""    # full <think>…</think> content, if any
 
 
 @dataclass
@@ -80,11 +83,13 @@ class ToggleVerbose(StreamEvent):
 
 @dataclass
 class BudgetUpdate(StreamEvent):
-    """Token budget changed."""
+    """Token budget changed (mid-turn update)."""
 
     fraction: float
     input_tokens: int
     output_tokens: int
+    used_tokens: int = 0
+    max_tokens: int = 0
 
 
 @dataclass

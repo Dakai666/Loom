@@ -1,13 +1,21 @@
 """
-MessageList component — conversation history with streaming support.
+MessageList component — conversation history with streaming + Markdown rendering.
+
+Architecture: each message is a MessageBubble widget mounted dynamically.
+  - Streaming:          update bubble body with plain RichText (safe, no markup parsing)
+  - finish_streaming(): replace body with rich.markdown.Markdown (syntax-highlighted,
+                        white prose text — visually distinct from streaming cream text)
+  - Think content:      if the assistant turn contained a <think> block, a clickable
+                        "▸ thinking" indicator is mounted inside the bubble; click opens
+                        ThinkModal via a bubbled OpenThinkModal message.
 """
 
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass, field
 from enum import Enum
 
+from rich.markdown import Markdown
 from rich.style import Style
 from rich.text import Text as RichText
 from textual.app import ComposeResult
@@ -23,23 +31,180 @@ class Role(Enum):
     SYSTEM = "system"
 
 
-@dataclass
-class MessageItem:
-    """A single message in the conversation."""
+_ROLE_COLOR = {
+    Role.USER:      "#d4a853",   # warm amber/gold
+    Role.ASSISTANT: "#a0b898",   # sage / celadon
+    Role.SYSTEM:    "#8a7a5e",   # muted warm grey
+}
 
-    role: Role
-    content: str
-    timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
-    streaming: bool = False
 
+# ---------------------------------------------------------------------------
+# Think indicator
+# ---------------------------------------------------------------------------
+
+class ThinkIndicator(Static):
+    """
+    A small clickable line that appears when the assistant message had
+    a <think> reasoning block.  Clicking anywhere on it posts OpenThinkModal.
+
+    Shows: ▸ thinking  [click to expand]
+    """
+
+    DEFAULT_CSS = """
+    ThinkIndicator {
+        height: 1;
+        color: #8a7a5e;
+    }
+    ThinkIndicator:hover {
+        color: #c8a464;
+    }
+    """
+
+    class OpenThinkModal(Message, bubble=True):
+        """Posted up to the App to open ThinkModal with the reasoning text."""
+        def __init__(self, think_text: str) -> None:
+            super().__init__()
+            self.think_text = think_text
+
+    def __init__(self, think_text: str) -> None:
+        super().__init__("[dim]▸ thinking[/dim]  [dim italic](click to expand)[/dim italic]")
+        self._think_text = think_text
+
+    def on_click(self, _event) -> None:
+        self.post_message(self.OpenThinkModal(self._think_text))
+
+
+# ---------------------------------------------------------------------------
+# MessageBubble
+# ---------------------------------------------------------------------------
+
+class MessageBubble(Widget):
+    """
+    Single message: role header + optional think indicator + body content.
+
+    During streaming: body = plain RichText + ▌ cursor.
+    After finish_stream(): body = Markdown(content, code_theme="gruvbox-dark").
+    If think_text is set: a ThinkIndicator is mounted between header and body.
+    """
+
+    DEFAULT_CSS = """
+    MessageBubble {
+        height: auto;
+        padding: 0 1 1 1;
+    }
+    #bubble-header {
+        height: 1;
+    }
+    #bubble-body {
+        height: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        role: Role,
+        content: str = "",
+        streaming: bool = False,
+        msg_id: str = "",
+    ) -> None:
+        super().__init__(id=f"bubble-{msg_id}" if msg_id else None)
+        self._role = role
+        self._content = content
+        self._streaming = streaming
+        self._created_at = datetime.datetime.now()
+        self._think_text: str = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="bubble-header", markup=True)
+        yield Static("", id="bubble-body", markup=False)
+
+    def on_mount(self) -> None:
+        self._render_header()
+        self._render_body_text()
+
+    # ── Streaming API ─────────────────────────────────────────────────────────
+
+    def append_stream(self, text: str) -> None:
+        self._content += text
+        self._render_header()
+        self._render_body_text()
+
+    def finish_stream(self) -> None:
+        self._streaming = False
+        self._render_header()
+        if self._content.strip():
+            self._render_body_markdown()
+        else:
+            self._render_body_text()
+
+    def set_think_text(self, think_text: str) -> None:
+        """
+        Called after finish_stream() when the turn had reasoning content.
+        Mounts a ThinkIndicator between the header and body.
+        """
+        if not think_text or self._think_text:
+            return  # already set or no content
+        self._think_text = think_text
+        # Insert the indicator before the body static
+        try:
+            body = self.query_one("#bubble-body")
+            self.mount(ThinkIndicator(think_text), before=body)
+        except Exception:
+            pass  # widget not ready — skip silently
+
+    # ── Rendering ─────────────────────────────────────────────────────────────
+
+    def _render_header(self) -> None:
+        from textual.css.query import NoMatches
+        try:
+            header = self.query_one("#bubble-header", Static)
+        except NoMatches:
+            return
+
+        ts = self._created_at.strftime("%H:%M")
+        color = _ROLE_COLOR.get(self._role, "#8a7a5e")
+        label = self._role.value
+
+        if self._streaming:
+            header.update(
+                f"[dim]{ts}[/dim]  [bold {color}]{label}[/bold {color}]"
+                f"  [bold #d4a853]▌[/bold #d4a853]"
+            )
+        else:
+            header.update(
+                f"[dim]{ts}[/dim]  [bold {color}]{label}[/bold {color}]"
+            )
+
+    def _render_body_text(self) -> None:
+        from textual.css.query import NoMatches
+        try:
+            body = self.query_one("#bubble-body", Static)
+        except NoMatches:
+            return
+        text = RichText()
+        text.append(self._content, style=Style(color="#e0cfa0"))
+        body.update(text)
+
+    def _render_body_markdown(self) -> None:
+        from textual.css.query import NoMatches
+        try:
+            body = self.query_one("#bubble-body", Static)
+        except NoMatches:
+            return
+        # code_theme="gruvbox-dark" gives warm, dark code blocks that complement
+        # the parchment palette; prose text renders as white (Rich default) which
+        # distinguishes completed responses from streaming (#e0cfa0) cream text.
+        body.update(Markdown(self._content, code_theme="gruvbox-dark"))
+
+
+# ---------------------------------------------------------------------------
+# MessageList
+# ---------------------------------------------------------------------------
 
 class MessageList(Widget):
     """
-    Scrollable list of messages (user + assistant).
-
-    Uses Rich Text objects (not markup strings) for content rendering so
-    that arbitrary user/LLM text containing [ ] brackets never triggers
-    Textual's markup parser.
+    Scrollable conversation history.  Each message is a dynamically mounted
+    MessageBubble.  Handles OpenThinkModal messages by pushing ThinkModal.
     """
 
     DEFAULT_CSS = """
@@ -48,105 +213,64 @@ class MessageList(Widget):
     }
     """
 
-    messages: reactive[list[MessageItem]] = reactive([], layout=True)
-    _current_assistant_buffer: str = ""
-
-    class StreamingText(Message, bubble=True):
-        """New streaming text chunk arrived."""
-
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            self.text = text
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._bubbles: list[MessageBubble] = []
+        self._streaming_bubble: MessageBubble | None = None
+        self._msg_counter: int = 0
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="message-content", markup=False)
+        return iter([])
 
     def on_mount(self) -> None:
         self.border_title = "conversation"
 
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def add_message(self, role: Role, content: str) -> None:
-        """Add a complete message (user or assistant)."""
-        msg = MessageItem(role=role, content=content, streaming=False)
-        self.messages = [*self.messages, msg]
-        self._current_assistant_buffer = ""
-        self._update_display()
-        self._scroll_to_bottom()
+        self._streaming_bubble = None
+        self._msg_counter += 1
+        bubble = MessageBubble(role, content, streaming=False, msg_id=str(self._msg_counter))
+        self._bubbles.append(bubble)
+        self.mount(bubble)
+        self.scroll_end(animate=False)
 
     def stream_text(self, text: str) -> None:
-        """Append streaming text to the last assistant message, or create new one."""
-        self._current_assistant_buffer += text
-        if not self.messages or self.messages[-1].role != Role.ASSISTANT:
-            msg = MessageItem(role=Role.ASSISTANT, content=text, streaming=True)
-            self.messages = [*self.messages, msg]
+        if self._streaming_bubble is None:
+            self._msg_counter += 1
+            bubble = MessageBubble(
+                Role.ASSISTANT, text, streaming=True, msg_id=str(self._msg_counter)
+            )
+            self._bubbles.append(bubble)
+            self._streaming_bubble = bubble
+            self.mount(bubble)
         else:
-            self.messages[-1].content = self._current_assistant_buffer
-            self.messages = self.messages  # trigger reactivity
-        self._update_display()
-        self._scroll_to_bottom()
+            self._streaming_bubble.append_stream(text)
+        self.scroll_end(animate=False)
 
     def finish_streaming(self) -> None:
-        """Mark the current streaming assistant message as complete."""
-        if self.messages and self.messages[-1].streaming:
-            self.messages[-1].streaming = False
-            self.messages = self.messages  # trigger reactivity
-            self._current_assistant_buffer = ""
-            self._update_display()
+        if self._streaming_bubble is not None:
+            self._streaming_bubble.finish_stream()
+            self._streaming_bubble = None
+
+    def set_last_think(self, think_text: str) -> None:
+        """Attach think content to the last assistant bubble."""
+        for bubble in reversed(self._bubbles):
+            if bubble._role == Role.ASSISTANT:
+                bubble.set_think_text(think_text)
+                break
 
     def clear(self) -> None:
-        """Clear all messages."""
-        self.messages = []
-        self._current_assistant_buffer = ""
-        self._update_display()
+        self._streaming_bubble = None
+        self._bubbles.clear()
+        self._msg_counter = 0
+        self.remove_children()
 
-    def _update_display(self) -> None:
-        """Render all messages as a Rich Text object (no markup parsing)."""
-        from textual.css.query import NoMatches
+    # ── Think modal relay ─────────────────────────────────────────────────────
 
-        try:
-            content = self.query_one("#message-content", Static)
-        except NoMatches:
-            return
-
-        if not self.messages:
-            # markup=False Static — pass a RichText with dim style
-            placeholder = RichText("(no messages yet)", style=Style(dim=True))
-            content.update(placeholder)
-            return
-
-        # Build one big RichText by concatenating per-message Text objects.
-        # Using Rich Text.append() means content is NEVER parsed as markup.
-        combined = RichText()
-
-        role_styles = {
-            Role.USER:      ("user",      Style(bold=True, color="yellow")),
-            Role.ASSISTANT: ("assistant", Style(bold=True, color="green")),
-            Role.SYSTEM:    ("system",    Style(dim=True)),
-        }
-
-        for i, msg in enumerate(self.messages):
-            role_label, role_style = role_styles[msg.role]
-            timestamp = msg.timestamp.strftime("%H:%M")
-
-            # timestamp
-            combined.append(timestamp, style=Style(dim=True))
-            combined.append(" ")
-            # role
-            combined.append(role_label, style=role_style)
-            combined.append(":")
-
-            # streaming cursor
-            if msg.streaming:
-                combined.append(" ▌", style=Style(bold=True, color="yellow"))
-
-            combined.append("\n")
-
-            # content — plain append, no escaping, no markup parsing
-            combined.append(msg.content)
-
-            combined.append("\n\n")
-
-        content.update(combined)
-
-    def _scroll_to_bottom(self) -> None:
-        """Auto-scroll to bottom."""
-        self.scroll_end(animate=False)
+    def on_think_indicator_open_think_modal(
+        self, event: ThinkIndicator.OpenThinkModal
+    ) -> None:
+        """Relay ThinkIndicator clicks to the App to open ThinkModal."""
+        from loom.platform.cli.tui.components.think_modal import ThinkModal
+        self.app.push_screen(ThinkModal(event.think_text))

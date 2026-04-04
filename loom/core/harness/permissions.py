@@ -17,7 +17,13 @@ class TrustLevel(Enum):
     CRITICAL = "critical"
 
     @property
+    def plain(self) -> str:
+        """Plain uppercase name — use when the caller controls styling."""
+        return self.value.upper()
+
+    @property
     def label(self) -> str:
+        """Rich markup label — for CLI console output only."""
         colours = {
             TrustLevel.SAFE: "[green]SAFE[/green]",
             TrustLevel.GUARDED: "[yellow]GUARDED[/yellow]",

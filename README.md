@@ -2,7 +2,7 @@
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**v0.2.2** — Sub-agent, Plugin system, `<think>` reasoning collapse, `loom import`, Skill eval loop, and architecture hardening.
+**v0.2.3** — TUI overhaul: Parchment theme, agent activity indicator, Markdown rendering, Context Budget panel, Activity Log, HelpModal, IDE-safe keybindings.
 
 **Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
 
@@ -108,10 +108,11 @@ loom autonomy emit <event_name>  # manually fire an EventTrigger
 
 | Key | Action |
 |-----|--------|
+| `Escape` | Interrupt current agent generation |
+| `F1` | Toggle verbose tool output |
+| `F2` | Cycle Workspace tab (Artifacts → Activity → Budget) |
+| `Ctrl+L` | Clear conversation view |
 | `Ctrl+C` | Quit |
-| `Ctrl+L` | Clear conversation |
-| `Ctrl+O` | Toggle tool output verbosity |
-| `Ctrl+W` | Toggle Workspace tab (Artifacts ↔ Knowledge) |
 | `Tab` | Autocomplete slash commands |
 | `Y` / `N` | Approve / deny tool confirmation dialogs |
 
@@ -319,6 +320,7 @@ python -m pytest tests/test_integration.py -v
 | Phase 5E | Sub-agent (`spawn_agent`) — isolated child LoomSession with trust inheritance | ✅ Complete |
 | Phase 5F | Architecture hardening: failure taxonomy, confidence decay, memory provenance | ✅ Complete |
 | Phase UI | `<think>` reasoning collapse, `/think` command, streaming cursor improvements | ✅ Complete |
+| Phase TUI-2 | TUI overhaul: Parchment theme, AgentState indicator, Markdown rendering, Budget panel, Activity Log, HelpModal, IDE-safe keys | ✅ Complete (v0.2.3) |
 
 ---
 

@@ -1,5 +1,13 @@
 """
-ToolBlock component — tool execution with three visual states.
+ToolBlock component — tool execution status with agent state awareness.
+
+Agent states (shown above tool list):
+  IDLE      — nothing shown (height collapses)
+  THINKING  — "◌ Thinking..."  animated dots
+  RUNNING   — "⟳ <tool_name> — <primary_arg>"
+  DONE      — "✓ Done"  (shown briefly, then clears to IDLE)
+
+Tool rows beneath the agent state line show the current turn's history.
 """
 
 from __future__ import annotations
@@ -15,6 +23,13 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
+
+
+class AgentState(Enum):
+    IDLE = "idle"
+    THINKING = "thinking"
+    RUNNING = "running"
+    DONE = "done"
 
 
 class ToolState(Enum):
@@ -47,18 +62,18 @@ class ToolCall:
 
 class ToolBlock(Widget):
     """
-    Displays active and recent tool calls.
+    Displays overall agent activity status and active/recent tool calls.
 
-    States:
-    - PENDING: tool called but not yet executing (shows args)
-    - RUNNING: executing (shows animated spinner)
-    - DONE: completed successfully (shows ok + duration)
-    - FAILED: completed with error (shows !! + duration)
+    Layout (when active):
+      ◌ Thinking...               ← agent state line
+      ✓ read_file  45ms           ← completed tools (last 5)
+      ⟳ run_bash running...       ← active tools with spinner
     """
 
     active_tools: reactive[list[ToolCall]] = reactive([])
     completed_tools: reactive[list[ToolCall]] = reactive([])
     verbose: reactive[bool] = reactive(False)
+    agent_state: reactive[AgentState] = reactive(AgentState.IDLE)
 
     class ToolDone(Message, bubble=True):
         """All tools for current turn are done."""
@@ -70,12 +85,51 @@ class ToolBlock(Widget):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._spinner_task: asyncio.Task | None = None
+        self._think_task: asyncio.Task | None = None
+        self._done_task: asyncio.Task | None = None
+        self._think_frame: int = 0
+        self._active_tool_label: str = ""
 
     def compose(self) -> ComposeResult:
         yield Static("", id="tool-content")
 
+    # ── Agent lifecycle ────────────────────────────────────────────────────────
+
+    def start_turn(self) -> None:
+        """Call when TurnStart fires — enter THINKING state."""
+        self._cancel_done_task()
+        self.agent_state = AgentState.THINKING
+        self._start_think_animation()
+        self._update_display()
+
+    def end_turn(self) -> None:
+        """Call when TurnDone fires — show DONE briefly then go IDLE."""
+        self._stop_think_animation()
+        self._stop_spinner()
+        self.agent_state = AgentState.DONE
+        self._update_display()
+        self._done_task = asyncio.create_task(self._clear_done_after_delay())
+
+    # ── Tool lifecycle ─────────────────────────────────────────────────────────
+
     def start_tool(self, name: str, args: dict[str, Any], call_id: str) -> None:
-        """Begin tracking a new tool call."""
+        """Begin tracking a new tool call — enter RUNNING state."""
+        self._stop_think_animation()
+        self._cancel_done_task()
+
+        # Build a compact label: "tool_name — primary_arg"
+        primary = ""
+        if args:
+            first_val = next(iter(args.values()), "")
+            if isinstance(first_val, str):
+                primary = first_val[:50].replace("\n", "↵")
+        self._active_tool_label = (
+            f"{markup_escape(name)} — \"{markup_escape(primary)}\""
+            if primary
+            else markup_escape(name)
+        )
+
+        self.agent_state = AgentState.RUNNING
         tool = ToolCall(name=name, args=args, call_id=call_id, state=ToolState.PENDING)
         self.active_tools = [*self.active_tools, tool]
         self._update_display()
@@ -95,17 +149,53 @@ class ToolBlock(Widget):
         completed = [t for t in self.active_tools if t.call_id == call_id]
         self.completed_tools = [*self.completed_tools, *completed]
         self.active_tools = [t for t in self.active_tools if t.call_id != call_id]
-        self._update_display()
 
         if not self.active_tools:
-            self.post_message(self.ToolDone(self.completed_tools[-len(completed) :]))
+            # All tools done — back to THINKING (LLM will process results)
+            self.agent_state = AgentState.THINKING
+            self._start_think_animation()
+            self.post_message(self.ToolDone(self.completed_tools[-len(completed):]))
+
+        self._update_display()
+
+    def clear(self) -> None:
+        """Clear all tool history (called on TurnDone after obs panel update)."""
+        self._stop_spinner()
+        self._stop_think_animation()
+        self._cancel_done_task()
+        self.active_tools = []
+        self.completed_tools = []
+        self._update_display()
+
+    def toggle_verbose(self) -> None:
+        self.verbose = not self.verbose
+        self._update_display()
+
+    # ── Animations ────────────────────────────────────────────────────────────
+
+    def _start_think_animation(self) -> None:
+        self._stop_think_animation()
+        self._think_frame = 0
+        self._think_task = asyncio.create_task(self._think_loop())
+
+    def _stop_think_animation(self) -> None:
+        if self._think_task:
+            self._think_task.cancel()
+            self._think_task = None
+
+    async def _think_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.4)
+                self._think_frame = (self._think_frame + 1) % 4
+                self._update_display()
+        except asyncio.CancelledError:
+            pass
 
     def _start_spinner(self, call_id: str) -> None:
-        """Start the spinner animation for a running tool."""
         self._spinner_task = asyncio.create_task(self._spin_loop(call_id))
 
     async def _spin_loop(self, call_id: str) -> None:
-        """Animate spinner for running tool."""
         try:
             while True:
                 for tool in self.active_tools:
@@ -118,57 +208,76 @@ class ToolBlock(Widget):
             pass
 
     def _stop_spinner(self) -> None:
-        """Stop the spinner animation."""
         if self._spinner_task:
             self._spinner_task.cancel()
             self._spinner_task = None
 
-    def clear(self) -> None:
-        """Clear all tool history."""
-        self._stop_spinner()
-        self.active_tools = []
-        self.completed_tools = []
-        self._update_display()
+    def _cancel_done_task(self) -> None:
+        if self._done_task:
+            self._done_task.cancel()
+            self._done_task = None
 
-    def toggle_verbose(self) -> None:
-        """Toggle verbose mode."""
-        self.verbose = not self.verbose
-        self._update_display()
+    async def _clear_done_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(1.5)
+            self.agent_state = AgentState.IDLE
+            self._update_display()
+        except asyncio.CancelledError:
+            pass
+
+    # ── Rendering ─────────────────────────────────────────────────────────────
 
     def _update_display(self) -> None:
-        """Render tool states to the Static widget."""
-        content = self.query_one("#tool-content", Static)
+        from textual.css.query import NoMatches
+
+        try:
+            content = self.query_one("#tool-content", Static)
+        except NoMatches:
+            return
+
         lines: list[str] = []
 
-        # Active tools
+        # ── Agent state line ──
+        state = self.agent_state
+        if state == AgentState.THINKING:
+            dots = "." * self._think_frame
+            lines.append(f"  [dim]◌ Thinking{dots}[/dim]")
+        elif state == AgentState.RUNNING:
+            lines.append(f"  [#c8a464]⟳[/#c8a464] [dim]{self._active_tool_label}[/dim]")
+        elif state == AgentState.DONE:
+            lines.append("  [#7a9e78]✓ Done[/#7a9e78]")
+        # IDLE → no line
+
+        # ── Active tool rows ──
         for tool in self.active_tools:
             if tool.state == ToolState.PENDING:
                 args_preview = self._format_args(tool.args)
                 lines.append(
-                    f"  [yellow]○[/yellow] [yellow]{tool.name}[/yellow]({args_preview})"
+                    f"  [#c8a464]○[/#c8a464] [#c8a464]{markup_escape(tool.name)}[/#c8a464]"
+                    f"({args_preview})"
                 )
             elif tool.state == ToolState.RUNNING:
                 lines.append(
-                    f"  [yellow]{tool.spinner_frame}[/yellow] [dim]{tool.name} running...[/dim]"
+                    f"  [#c8a464]{tool.spinner_frame}[/#c8a464] "
+                    f"[dim]{markup_escape(tool.name)} running...[/dim]"
                 )
 
-        # Completed tools (most recent last)
+        # ── Completed tool rows (last 5) ──
         for tool in self.completed_tools[-5:]:
             if tool.state == ToolState.DONE:
                 lines.append(
-                    f"  [green]✓[/green] [dim]{tool.name}[/dim]"
-                    f"  [green]{tool.duration_ms:.0f}ms[/green]"
+                    f"  [#7a9e78]✓[/#7a9e78] [dim]{markup_escape(tool.name)}[/dim]"
+                    f"  [#7a9e78]{tool.duration_ms:.0f}ms[/#7a9e78]"
                 )
             else:
                 lines.append(
-                    f"  [red]✗[/red] [dim]{tool.name}[/dim]"
-                    f"  [red]{tool.duration_ms:.0f}ms[/red]"
+                    f"  [#b87060]✗[/#b87060] [dim]{markup_escape(tool.name)}[/dim]"
+                    f"  [#b87060]{tool.duration_ms:.0f}ms[/#b87060]"
                 )
 
         content.update("\n".join(lines) if lines else "")
 
     def _format_args(self, args: dict[str, Any]) -> str:
-        """Compact one-line preview of tool arguments."""
         if not args:
             return ""
         parts: list[str] = []

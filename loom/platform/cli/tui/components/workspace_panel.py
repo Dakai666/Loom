@@ -1,5 +1,8 @@
 """
-WorkspacePanel component — container for Artifacts + Knowledge Graph.
+WorkspacePanel — three-tab sidebar (Artifacts / Activity / Budget).
+
+Tabs are switched by clicking the tab header or pressing F2 (cycles).
+Width is 25% of the screen (set in App.CSS).
 """
 
 from __future__ import annotations
@@ -12,48 +15,60 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
-from .artifact_card import Artifact, ArtifactState
+from .artifact_card import ArtifactState
 from .artifacts_panel import ArtifactsPanel
-from .knowledge_graph import KnowledgeGraph, KnowledgeNode
+from .activity_log import ActivityLog, ActivityEntry
+from .budget_panel import BudgetPanel
 
 
 class WorkspaceTab(Enum):
     ARTIFACTS = "artifacts"
-    KNOWLEDGE = "knowledge"
+    ACTIVITY = "activity"
+    BUDGET = "budget"
 
 
 class WorkspacePanel(Widget):
     """
-    Container panel with two tabs: Artifacts and Knowledge Graph.
+    Container panel with three tabs: Artifacts, Activity, Budget.
 
-    Layout:
-    ┌─ WORKSPACE ─── [Artifacts] [Knowledge] ────────────────────┐
-    │                                                                  │
-    │  (active tab content)                                          │
-    │                                                                  │
-    │  ArtifactsPanel or KnowledgeGraph                              │
-    │                                                                  │
-    └──────────────────────────────────────────────────────────────────┘
+    Tab header is clickable — click the label text to switch tabs.
+    F2 cycles through tabs.
     """
 
     DEFAULT_CSS = """
     WorkspacePanel {
-        overflow-y: auto;
+        layout: vertical;
+        overflow: hidden hidden;
         padding: 0 1;
     }
-
     #workspace-header {
-        height: 2;
-        border-bottom: solid $border;
-        margin-bottom: 1;
+        height: 1;
+        /* No padding or border — height 1 = exactly one text row, always visible */
     }
-
+    #workspace-divider {
+        height: 1;
+        border-bottom: solid #4a4038;
+    }
     #artifacts-panel {
-        height: auto;
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-color: #4a4038;
+        scrollbar-color-hover: #c8a464;
+        scrollbar-background: #1c1814;
     }
-
-    #knowledge-panel {
-        height: auto;
+    #activity-panel {
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-color: #4a4038;
+        scrollbar-color-hover: #c8a464;
+        scrollbar-background: #1c1814;
+    }
+    #budget-panel {
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-color: #4a4038;
+        scrollbar-color-hover: #c8a464;
+        scrollbar-background: #1c1814;
     }
     """
 
@@ -67,34 +82,60 @@ class WorkspacePanel(Widget):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._artifacts_panel: ArtifactsPanel | None = None
-        self._kg_panel: KnowledgeGraph | None = None
+        self._activity_panel: ActivityLog | None = None
+        self._budget_panel: BudgetPanel | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="workspace-header")
+        yield Static("", id="workspace-divider")
         yield ArtifactsPanel(id="artifacts-panel")
-        yield KnowledgeGraph(id="knowledge-panel")
+        yield ActivityLog(id="activity-panel")
+        yield BudgetPanel(id="budget-panel")
 
     def on_mount(self) -> None:
         self._artifacts_panel = self.query_one("#artifacts-panel", ArtifactsPanel)
-        self._kg_panel = self.query_one("#knowledge-panel", KnowledgeGraph)
+        self._activity_panel = self.query_one("#activity-panel", ActivityLog)
+        self._budget_panel = self.query_one("#budget-panel", BudgetPanel)
         self._update_visibility()
         self._render_header()
 
-    def watch_active_tab(self, tab: WorkspaceTab) -> None:
+    def watch_active_tab(self, _: WorkspaceTab) -> None:
         self._update_visibility()
         self._render_header()
+
+    # ── Tab switching ─────────────────────────────────────────────────────────
 
     def switch_tab(self, tab: WorkspaceTab) -> None:
-        """Switch to a different tab."""
         self.active_tab = tab
 
     def toggle_tab(self) -> None:
-        """Toggle between Artifacts and Knowledge Graph."""
-        self.active_tab = (
-            WorkspaceTab.KNOWLEDGE
-            if self.active_tab == WorkspaceTab.ARTIFACTS
-            else WorkspaceTab.ARTIFACTS
-        )
+        """Cycle Artifacts → Activity → Budget → Artifacts."""
+        order = [WorkspaceTab.ARTIFACTS, WorkspaceTab.ACTIVITY, WorkspaceTab.BUDGET]
+        idx = order.index(self.active_tab)
+        self.active_tab = order[(idx + 1) % len(order)]
+
+    def on_click(self, event) -> None:
+        """Handle clicks on tab header labels to switch tabs."""
+        # We detect clicks only in the header area (first 2 rows).
+        try:
+            if event.y >= 2:
+                return
+        except AttributeError:
+            return
+        # Use x position to guess which tab label was clicked.
+        # Layout: "WORKSPACE  [Art] [Act] [Bud]"
+        # Rough column ranges (at 25% width ≈ 25 chars):
+        x = event.x
+        if x < 8:
+            return  # "WORKSPACE" label area
+        if x < 14:
+            self.active_tab = WorkspaceTab.ARTIFACTS
+        elif x < 20:
+            self.active_tab = WorkspaceTab.ACTIVITY
+        else:
+            self.active_tab = WorkspaceTab.BUDGET
+
+    # ── Data feeds ────────────────────────────────────────────────────────────
 
     def add_artifact(
         self,
@@ -103,53 +144,52 @@ class WorkspacePanel(Widget):
         diff_lines: list[str] | None = None,
         preview: str = "",
     ) -> None:
-        """Add an artifact to the Artifacts panel."""
         if self._artifacts_panel:
             self._artifacts_panel.add_artifact(path, state, diff_lines, preview)
 
-    def load_knowledge_graph(
+    def append_activity(self, entry: ActivityEntry) -> None:
+        """Add a completed tool call to the Activity log."""
+        if self._activity_panel:
+            self._activity_panel.append_entry(entry)
+
+    def update_budget(
         self,
-        semantic_count: int = 0,
-        procedural_count: int = 0,
-        episodic_count: int = 0,
+        fraction: float,
+        used_tokens: int,
+        max_tokens: int,
+        input_tokens: int,
+        output_tokens: int,
     ) -> None:
-        """Load knowledge graph from session memory stats."""
-        if self._kg_panel:
-            self._kg_panel.load_from_session(
-                semantic_count, procedural_count, episodic_count
+        if self._budget_panel:
+            self._budget_panel.update_budget(
+                fraction, used_tokens, max_tokens, input_tokens, output_tokens
             )
 
+    # ── Internal ──────────────────────────────────────────────────────────────
+
     def _update_visibility(self) -> None:
-        """Show/hide panels based on active tab."""
         if self._artifacts_panel:
             self._artifacts_panel.display = self.active_tab == WorkspaceTab.ARTIFACTS
-        if self._kg_panel:
-            self._kg_panel.display = self.active_tab == WorkspaceTab.KNOWLEDGE
+        if self._activity_panel:
+            self._activity_panel.display = self.active_tab == WorkspaceTab.ACTIVITY
+        if self._budget_panel:
+            self._budget_panel.display = self.active_tab == WorkspaceTab.BUDGET
 
     def _render_header(self) -> None:
         from textual.css.query import NoMatches
-
         try:
             header = self.query_one("#workspace-header", Static)
         except NoMatches:
             return
 
-        artifacts_active = self.active_tab == WorkspaceTab.ARTIFACTS
-        knowledge_active = self.active_tab == WorkspaceTab.KNOWLEDGE
-
-        artifacts_tag = (
-            "[reverse cyan] Artifacts [/reverse cyan]"
-            if artifacts_active
-            else "[dim][ Artifacts ][/dim]"
-        )
-        knowledge_tag = (
-            "[reverse cyan] Knowledge [/reverse cyan]"
-            if knowledge_active
-            else "[dim][ Knowledge ][/dim]"
-        )
+        def _tab(label: str, tab: WorkspaceTab) -> str:
+            if self.active_tab == tab:
+                return f"[reverse #c8a464] {label} [/reverse #c8a464]"
+            return f"[dim] {label} [/dim]"
 
         header.update(
-            f"[bold dim]WORKSPACE[/bold dim]  "
-            f"{artifacts_tag}  {knowledge_tag}  "
-            f"[dim]Ctrl+W[/dim]"
+            f"{_tab('Art', WorkspaceTab.ARTIFACTS)} "
+            f"{_tab('Act', WorkspaceTab.ACTIVITY)} "
+            f"{_tab('Bgt', WorkspaceTab.BUDGET)} "
+            f" [dim]F2[/dim]"
         )

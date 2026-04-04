@@ -470,6 +470,7 @@ class LoomSession:
                 title=title,
             )
         await self._db.close()
+        self._db = None  # guard against double stop() (e.g. /new → on_unmount)
 
     # ------------------------------------------------------------------
     # Streaming agent loop
@@ -1308,26 +1309,26 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         console.print(
             Panel(
                 "[bold]Session[/bold]\n\n"
-                "  Start a new session:    [cyan]loom chat[/cyan]\n"
-                "  Resume last session:    [cyan]loom chat --resume[/cyan]\n"
-                "  Resume specific:        [cyan]loom chat --session <id>[/cyan]\n"
-                "  List sessions:          [cyan]loom sessions list[/cyan]\n\n"
+                "  Start a new session:    [yellow]loom chat[/yellow]\n"
+                "  Resume last session:    [yellow]loom chat --resume[/yellow]\n"
+                "  Resume specific:        [yellow]loom chat --session <id>[/yellow]\n"
+                "  List sessions:          [yellow]loom sessions list[/yellow]\n\n"
                 "[bold]Slash commands[/bold]\n\n"
-                "  [cyan]/personality[/cyan] [dim]<name>[/dim]   Switch cognitive persona\n"
-                "  [cyan]/personality off[/cyan]        Remove active persona\n"
-                "  [cyan]/personality[/cyan]             Show active + available personas\n"
-                "  [cyan]/think[/cyan]                   Show reasoning chain from last turn\n"
-                "  [cyan]/compact[/cyan]                 Summarize older context (smart compress)\n"
-                "  [cyan]/verbose[/cyan]                 Toggle tool output verbosity\n"
-                "  [cyan]/help[/cyan]                    Show this message\n\n"
+                "  [yellow]/new[/yellow]                       Start a fresh session\n"
+                "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
+                "  [yellow]/personality[/yellow] [dim]<name>[/dim]      Switch cognitive persona\n"
+                "  [yellow]/personality off[/yellow]           Remove active persona\n"
+                "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
+                "  [yellow]/compact[/yellow]                   Compress older context\n"
+                "  [yellow]/verbose[/yellow]                   Toggle tool output verbosity\n"
+                "  [yellow]/help[/yellow]                      Show this message\n\n"
                 "[bold]Keyboard shortcuts[/bold]\n\n"
-                "  [dim]Ctrl-L[/dim]  Clear screen\n"
-                "  [dim]Ctrl-O[/dim]  Toggle tool output verbosity\n"
-                "  [dim]up / down[/dim]  Browse input history\n"
-                "  [dim]Tab[/dim]    Autocomplete slash commands\n"
-                "  [dim]exit[/dim] / [dim]Ctrl-C[/dim]  End session",
-                title="[cyan]Help[/cyan]",
-                border_style="cyan",
+                "  [dim]Ctrl-L[/dim]       Clear screen\n"
+                "  [dim]up / down[/dim]    Browse input history\n"
+                "  [dim]Tab[/dim]          Autocomplete slash commands\n"
+                "  [dim]exit / Ctrl-C[/dim]  End session",
+                title="[yellow] Loom — command reference [/yellow]",
+                border_style="yellow",
             )
         )
 
@@ -1374,7 +1375,7 @@ class LoomChatApp:
                 self._session = session
 
             async def on_mount(self) -> None:
-                """Load knowledge graph counts and replay history on startup."""
+                """Replay history on startup and seed the Budget panel."""
                 from loom.platform.cli.tui.components.message_list import (
                     MessageList,
                     Role,
@@ -1397,19 +1398,22 @@ class LoomChatApp:
                     except (NoMatches, Exception):
                         pass  # TUI not fully composed yet — skip replay
 
+                # Seed Budget panel with current token state
                 try:
-                    semantic_entries = await session._semantic.list_recent(limit=999)
-                    procedural_skills = await session._procedural.list_active()
-                    episodic_count = await session._episodic.count_session(
-                        session.session_id
-                    )
-                    self.load_knowledge_graph(
-                        semantic_count=len(semantic_entries),
-                        procedural_count=len(procedural_skills),
-                        episodic_count=episodic_count,
+                    from loom.platform.cli.tui.components import WorkspacePanel
+                    frac = session.budget.usage_fraction
+                    used = session.budget.used_tokens
+                    total = session.budget.total_tokens
+                    ws = self.query_one("#workspace-panel", WorkspacePanel)
+                    ws.update_budget(
+                        fraction=frac,
+                        used_tokens=used,
+                        max_tokens=total,
+                        input_tokens=0,
+                        output_tokens=0,
                     )
                 except Exception:
-                    pass  # memory not ready yet — workspace stays empty
+                    pass  # budget not ready yet — panel stays at defaults
 
             async def on_unmount(self) -> None:
                 await self._session.stop()
@@ -1440,13 +1444,23 @@ class LoomChatApp:
                         )
                     )
 
-                    # call_id → (tool_name, path) for artifact tracking
+                    # call_id → write path (for artifact tracking)
                     _pending_writes: dict[str, str] = {}
+                    # call_id → primary arg preview (for ActivityLog args column)
+                    _tool_args_preview: dict[str, str] = {}
 
                     async for ev in self._session.stream_turn(text):
                         if isinstance(ev, TextChunk):
                             await self.dispatch_stream_event(TuiChunk(text=ev.text))
                         elif isinstance(ev, ToolBegin):
+                            # Capture primary arg for ActivityLog display
+                            _primary_arg = ""
+                            if ev.args:
+                                first_val = next(iter(ev.args.values()), "")
+                                if isinstance(first_val, str):
+                                    _primary_arg = first_val[:40].replace("\n", "↵")
+                            _tool_args_preview[ev.call_id] = _primary_arg
+
                             await self.dispatch_stream_event(
                                 TuiToolBegin(
                                     name=ev.name,
@@ -1457,28 +1471,36 @@ class LoomChatApp:
                             if ev.name == "write_file":
                                 _pending_writes[ev.call_id] = ev.args.get("path", "")
                         elif isinstance(ev, ToolEnd):
-                            await self.dispatch_stream_event(
-                                TuiToolEnd(
-                                    name=ev.name,
-                                    success=ev.success,
-                                    output=ev.output,
-                                    duration_ms=ev.duration_ms,
-                                    call_id=ev.call_id,
-                                )
+                            # Patch args_preview into the ToolEnd event for ActivityLog
+                            _args_preview = _tool_args_preview.pop(ev.call_id, "")
+                            _tui_tool_end = TuiToolEnd(
+                                name=ev.name,
+                                success=ev.success,
+                                output=ev.output,
+                                duration_ms=ev.duration_ms,
+                                call_id=ev.call_id,
                             )
+                            # Stash preview on the event object so app._on_tool_end can use it
+                            _tui_tool_end._args_preview = _args_preview  # type: ignore[attr-defined]
+                            await self.dispatch_stream_event(_tui_tool_end)
+
                             if ev.name == "write_file" and ev.success:
                                 from loom.platform.cli.tui.components import ArtifactState
                                 path = _pending_writes.pop(ev.call_id, "")
                                 if path:
                                     self.add_artifact(path, ArtifactState.MODIFIED)
                         elif isinstance(ev, TurnDone):
+                            budget = self._session.budget
                             await self.dispatch_stream_event(
                                 TuiTurnDone(
                                     tool_count=ev.tool_count,
                                     input_tokens=ev.input_tokens,
                                     output_tokens=ev.output_tokens,
                                     elapsed_ms=ev.elapsed_ms,
-                                    context_pct=self._session.budget.usage_fraction,
+                                    context_pct=budget.usage_fraction,
+                                    used_tokens=budget.used_tokens,
+                                    max_tokens=budget.total_tokens,
+                                    think_text=self._session._last_think,
                                 )
                             )
                 except asyncio.CancelledError:
@@ -1563,10 +1585,8 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             app.notify("Already in this session.", severity="information")
 
     elif command == "/help":
-        app.notify(
-            "Commands: /new, /sessions, /personality [name|off], /think, /compact, /verbose, /help  |  "
-            "Keys: Ctrl+L clear · Ctrl+O verbose · Ctrl+W workspace"
-        )
+        from loom.platform.cli.tui.components.help_modal import HelpModal
+        await app.push_screen_wait(HelpModal())
 
     else:
         app.notify(f"Unknown command '{command}'. Type /help.", severity="warning")
@@ -1611,7 +1631,7 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
             return await app.push_screen_wait(
                 ConfirmModal(
                     tool_name=call.tool_name,
-                    trust_label=call.trust_level.label,
+                    trust_label=call.trust_level.plain,
                     args_preview=args_preview,
                 )
             )
