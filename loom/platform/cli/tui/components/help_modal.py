@@ -27,11 +27,15 @@ _COMMANDS = [
 ]
 
 _KEYS = [
-    ("Escape",   "Interrupt current generation"),
-    ("F1",       "Toggle verbose tool output"),
-    ("F2",       "Cycle workspace tab (Art / Act / $)"),
-    ("Ctrl+L",   "Clear conversation view"),
-    ("Ctrl+C",   "Quit Loom"),
+    ("Escape",      "Interrupt current generation"),
+    ("Ctrl+S",      "Browse & switch sessions"),
+    ("Ctrl+L",      "Clear conversation view"),
+    ("F1 / Ctrl+K", "Command Palette — fuzzy search all actions"),
+    ("F2",          "Cycle workspace tab  Art → Swa → Bgt"),
+    ("F3",          "Toggle verbose tool output"),
+    ("F4 / Ctrl+B", "Toggle right sidebar"),
+    ("F5",          "Time-Travel — fork conversation at any past turn"),
+    ("Ctrl+C",      "Quit Loom"),
 ]
 
 
@@ -61,9 +65,9 @@ class HelpModal(ModalScreen[None]):
         background: #242018;
         border: thick #4a4038;
         padding: 1 2;
-        width: 72;
+        width: 78;
         height: auto;
-        max-height: 36;
+        max-height: 44;
     }
 
     #help-title {
@@ -108,7 +112,7 @@ class HelpModal(ModalScreen[None]):
         body = (
             _section("Slash commands", _COMMANDS, cmd_width=28)
             + "\n\n"
-            + _section("Keyboard shortcuts", _KEYS, cmd_width=12)
+            + _section("Keyboard shortcuts", _KEYS, cmd_width=18)
         )
         with Vertical(id="help-dialog"):
             yield Static("  Loom — command reference", id="help-title")
