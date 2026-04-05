@@ -150,16 +150,25 @@ class MessageBubble(Widget):
     def _scan_and_mount_images(self) -> None:
         import re
         from pathlib import Path
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
         from .image_widget import ImageWidget
 
         # match markdown images ![alt](path)
         matches = re.findall(r'!\[.*?\]\((.*?)\)', self._content)
         for url in matches:
             try:
-                # ignore http urls, we only render local files natively right now
                 if url.startswith("http"):
                     continue
-                p = Path(url).resolve()
+                
+                if url.startswith("file://"):
+                    parsed = urlparse(url)
+                    # Handle Windows drive letters properly
+                    local_path = url2pathname(parsed.path)
+                    p = Path(local_path).resolve()
+                else:
+                    p = Path(url).resolve()
+                    
                 if p.exists() and p.is_file():
                     ext = p.suffix.lower()
                     if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]:
