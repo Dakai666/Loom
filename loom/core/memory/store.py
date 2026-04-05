@@ -104,11 +104,13 @@ CREATE TABLE IF NOT EXISTS session_log (
     turn_index  INTEGER NOT NULL,
     role        TEXT NOT NULL,
     content     TEXT NOT NULL,
+    raw_json    TEXT,             -- tool_use/tool_result blocks preserved as JSON; NULL for plain text
     metadata    TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_session_log_role    ON session_log(session_id, role);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 """
 
@@ -132,16 +134,29 @@ class SQLiteStore:
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
             await db.commit()
-            # Runtime migration: add `embedding` column to existing databases.
+            # Runtime migrations: ALTER TABLE for columns added in later versions.
             # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so we
-            # attempt the ALTER and silently ignore the "duplicate column" error.
-            try:
-                await db.execute(
-                    "ALTER TABLE semantic_entries ADD COLUMN embedding TEXT"
-                )
-                await db.commit()
-            except Exception:
-                pass  # Column already exists — this is expected on all but the first run
+            # attempt each ALTER and silently ignore "duplicate column" errors.
+            for _migration in [
+                "ALTER TABLE semantic_entries ADD COLUMN embedding TEXT",
+                # Issue #11: add raw_json column to capture tool_use/tool_result
+                # blocks separately from the human-readable content field.
+                "ALTER TABLE session_log ADD COLUMN raw_json TEXT",
+            ]:
+                try:
+                    await db.execute(_migration)
+                    await db.commit()
+                except Exception:
+                    pass  # Column already exists — expected on all but the first run
+            # Ensure new indexes exist even on pre-existing databases.
+            for _index_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_session_log_role ON session_log(session_id, role)",
+            ]:
+                try:
+                    await db.execute(_index_sql)
+                    await db.commit()
+                except Exception:
+                    pass
 
     @asynccontextmanager
     async def connect(self):
