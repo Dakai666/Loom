@@ -7,20 +7,20 @@ resulting insights as Relational triples tagged ``source="dreaming"``.
 
 Integration points
 ------------------
-* `SemanticMemory.get_random()`   — random fact sampler (added in this PR)
+* `SemanticMemory.get_random()`   — random fact sampler
 * `RelationalMemory.upsert()`     — stores the extracted triples
 * Any async LLM callable          — invoked with a structured prompt
 
 Design decisions
 ----------------
-* **No imports from platform or harness layers** — dreaming is a pure cognition
-  module; it does not depend on session, bot, or tool registry.
+* **Pure cognition module** — no imports from platform, harness, or extensibility.
 * **Async, cancellation-safe** — each sub-task can be awaited from the autonomy
   daemon without blocking the Discord event loop.
 * **JSON parsing is defensive** — if the LLM returns malformed JSON the cycle
   logs a warning and stores whatever well-formed triples it could decode.
-* **Plugin wrapper** (`DreamingPlugin`) registers `dream_cycle` as a SAFE tool
-  so the Autonomy Agent can call it by name from its natural-language intent.
+
+The LoomPlugin wrapper (``DreamingPlugin``) lives in
+``loom.extensibility.dreaming_plugin`` to keep the layer dependency clean.
 """
 
 from __future__ import annotations
@@ -215,146 +215,3 @@ def _is_valid_triple(obj: object) -> bool:
         and isinstance(obj.get("predicate"), str)
         and isinstance(obj.get("object"), str)
     )
-
-
-# ---------------------------------------------------------------------------
-# DreamingPlugin — LoomPlugin wrapper
-# ---------------------------------------------------------------------------
-
-def _make_dreaming_plugin(session):
-    """
-    Build and return a DreamingPlugin instance wired to *session*.
-
-    Called by ``DreamingPlugin.on_session_start(session)`` so the tool
-    always closes over the live session's memory references.
-    """
-    from loom.core.harness.registry import ToolDefinition
-    from loom.core.harness.middleware import ToolResult
-    from loom.core.harness.permissions import TrustLevel
-
-    async def _dream_cycle_executor(call) -> ToolResult:
-        """
-        Execute one offline dreaming cycle.
-
-        Samples random semantic facts, asks the LLM to discover non-obvious
-        connections, and stores the resulting insights as Relational triples
-        tagged source="dreaming". Returns a brief summary.
-        """
-        sample = int(call.args.get("sample_size", 15))
-        dry_run = bool(call.args.get("dry_run", False))
-
-        # Build an llm_fn from the session's router.
-        # We call router.chat(model, messages) directly — bypassing the full
-        # turn pipeline — so dreaming never writes episodic events or triggers
-        # harness middleware.
-        async def llm_fn(messages):
-            response = await session.router.chat(
-                model=session.model,
-                messages=messages,
-                max_tokens=2048,
-            )
-            return response.text or ""
-
-        sem = getattr(session, "_semantic", None)
-        rel = getattr(session, "_relational", None)
-        if sem is None or rel is None:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name, success=False,
-                error="Dreaming skipped — memory subsystems not available.",
-            )
-
-        result = await dream_cycle(
-            semantic=sem,
-            relational=rel,
-            llm_fn=llm_fn,
-            sample_size=sample,
-            dry_run=dry_run,
-        )
-
-        lines = [
-            "Dream cycle complete",
-            f"  Facts sampled: {result['facts_sampled']}",
-            f"  Triples found: {result['triples_found']}",
-            f"  Triples written: {result['triples_written']}",
-        ]
-        if result["errors"]:
-            lines.append(f"  Warnings: {'; '.join(result['errors'])}")
-        if dry_run:
-            lines.append("  (dry-run — nothing was written)")
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name, success=True,
-            output="\n".join(lines),
-        )
-
-    tool_def = ToolDefinition(
-        name="dream_cycle",
-        description=(
-            "Run an offline dreaming cycle: sample random semantic facts, "
-            "discover non-obvious connections via the LLM, and store the resulting "
-            "insights as Relational triples (source='dreaming'). "
-            "Use this when the autonomy scheduler triggers a background synthesis task."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "sample_size": {
-                    "type": "integer",
-                    "description": "Number of random facts to sample (default 15, max 30).",
-                    "default": 15,
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, run the full cycle but skip writing to the DB.",
-                    "default": False,
-                },
-            },
-        },
-        executor=_dream_cycle_executor,
-        trust_level=TrustLevel.SAFE,
-    )
-    return tool_def
-
-
-class DreamingPlugin:
-    """
-    LoomPlugin that registers the ``dream_cycle`` tool.
-
-    Drop this file in ``~/.loom/plugins/dreaming.py`` and add the autonomy
-    schedule (see loom.toml.example).  The plugin wires itself to the session's
-    memory and router on ``on_session_start``.
-
-    Alternatively, install it programmatically in a session bootstrap script:
-
-        from loom.core.cognition.dreaming import DreamingPlugin
-        import loom
-        loom.register_plugin(DreamingPlugin())
-    """
-
-    name = "dreaming"
-    version = "1.0"
-
-    def __init__(self) -> None:
-        self._tool_def = None
-
-    # -- LoomPlugin required interface --
-
-    def tools(self) -> list:
-        # Dynamic tool is wired in on_session_start; return empty here.
-        return []
-
-    def middleware(self) -> list:
-        return []
-
-    def lenses(self) -> list:
-        return []
-
-    def notifiers(self) -> list:
-        return []
-
-    def on_session_start(self, session) -> None:
-        """Wire dream_cycle tool into the session's tool registry."""
-        self._tool_def = _make_dreaming_plugin(session)
-        session.registry.register(self._tool_def)
-
-    def on_session_stop(self, session) -> None:
-        pass

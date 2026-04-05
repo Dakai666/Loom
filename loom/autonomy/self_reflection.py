@@ -1,37 +1,13 @@
 """
-SelfReflectionPlugin — Relational Memory as Mirror (Issue #26).
+Self-reflection core logic — Relational Memory as Mirror (Issue #26).
 
-A ``LoomPlugin`` that observes the agent's own behaviour across sessions and
-writes self-observations as RelationalMemory triples with ``subject="loom-self"``.
+``run_self_reflection()`` analyses recent episodic entries and writes
+behavioural observations as RelationalMemory triples (subject="loom-self").
 
-Behaviour
----------
-*  ``on_session_stop``: queues a background reflection after each session ends.
-   Queries recent episodic entries → LLM identifies behavioural patterns
-   → writes ``(loom-self, <predicate>, <observation>)`` triples.
-*  ``tools()``: exposes a ``reflect_self`` tool so the agent can trigger
-   self-reflection on demand (also available via the autonomy daemon).
+The LoomPlugin wrapper (``SelfReflectionPlugin``) lives in
+``loom.extensibility.self_reflection_plugin`` to keep the layer dependency clean.
 
-Triple predicates
------------------
-``tends_to``       — recurring behavioural tendency (positive or neutral)
-``should_avoid``   — identified anti-pattern or failure mode
-``discovered``     — open-ended self-observation
-
-The agent loads ``loom-self`` triples at session start via ``MemoryIndex``
-(``index.py`` already surfaces ``anti_pattern_count``).
-``MemoryIndex.render()`` is extended here to show the full self-portrait
-in a dedicated section when ``loom-self`` triples are present.
-
-Usage
------
-Drop in ``~/.loom/plugins/self_reflection.py``::
-
-    from loom.autonomy.self_reflection import SelfReflectionPlugin
-    import loom
-    loom.register_plugin(SelfReflectionPlugin())
-
-Or call directly from the autonomy daemon / tests::
+Usage::
 
     from loom.autonomy.self_reflection import run_self_reflection
     await run_self_reflection(episodic=..., relational=..., llm_fn=...)
@@ -46,7 +22,6 @@ from typing import Any, Awaitable, Callable
 
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.relational import RelationalEntry, RelationalMemory
-from loom.extensibility.plugin import LoomPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -236,169 +211,3 @@ def _parse_observations(raw: str) -> list[dict[str, Any]]:
 
     return []
 
-
-# ---------------------------------------------------------------------------
-# LoomPlugin implementation
-# ---------------------------------------------------------------------------
-
-
-class SelfReflectionPlugin(LoomPlugin):
-    """
-    Plugin that hooks into session stop to reflect on behavioural patterns.
-
-    Installs a ``reflect_self`` tool (SAFE trust) so the agent can also
-    trigger reflection on demand via a slash command or autonomy trigger.
-
-    Example drop-in (``~/.loom/plugins/self_reflection.py``)::
-
-        from loom.autonomy.self_reflection import SelfReflectionPlugin
-        import loom
-        loom.register_plugin(SelfReflectionPlugin())
-    """
-
-    name = "self_reflection"
-    version = "1.0"
-
-    # ------------------------------------------------------------------
-    # LoomPlugin.tools()
-    # ------------------------------------------------------------------
-
-    def tools(self):
-        """Register the ``reflect_self`` tool into the session registry."""
-        from loom.core.harness.registry import ToolDefinition
-        from loom.core.harness.middleware import ToolResult
-        from loom.core.harness.permissions import TrustLevel
-
-        async def _reflect_self_executor(call) -> ToolResult:
-            """Run a self-reflection cycle and return a summary."""
-            session = call.args.get("_session")  # injected by on_session_start
-            if session is None:
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name, success=False,
-                    error="reflect_self: session context not available.",
-                )
-
-            episodic = getattr(session, "_episodic", None)
-            relational = getattr(session, "_relational", None)
-            if episodic is None or relational is None:
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name, success=False,
-                    error="reflect_self: memory stores not initialised.",
-                )
-
-            async def _llm(prompt: str) -> str:
-                resp = await session.router.chat(
-                    model=session.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=512,
-                )
-                return resp.text or ""
-
-            written = await run_self_reflection(
-                episodic=episodic,
-                relational=relational,
-                llm_fn=_llm,
-                session_id=session.session_id,
-            )
-            if not written:
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name, success=True,
-                    output="Self-reflection complete — no new patterns identified.",
-                )
-            lines = [f"Self-reflection: {len(written)} pattern(s) recorded:"]
-            for e in written:
-                lines.append(f"  [{e.predicate}] {e.object}")
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name, success=True,
-                output="\n".join(lines),
-            )
-
-        tool = ToolDefinition(
-            name="reflect_self",
-            description=(
-                "Trigger a self-reflection cycle: analyse recent episodic memory and "
-                "write behavioural observations (tends_to / should_avoid / discovered) "
-                "as loom-self relational triples. No arguments required."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-            executor=_reflect_self_executor,
-            trust_level=TrustLevel.SAFE,
-        )
-        return [tool]
-
-    # ------------------------------------------------------------------
-    # LoomPlugin.on_session_start()
-    # ------------------------------------------------------------------
-
-    def on_session_start(self, session: object) -> None:
-        """
-        Inject the session reference into tool args so the executor can
-        access memory stores without a global.  We store the session on
-        ``self`` — the plugin instance is unique per session.
-        """
-        self._session = session
-
-        # Patch the reflect_self executor's closure to include the session.
-        # We do this by monkey-patching the tool's executor via a wrapper.
-        tool_def = session.registry.get("reflect_self")  # type: ignore[attr-defined]
-        if tool_def is None:
-            return
-
-        _original_executor = tool_def.executor
-
-        async def _bound_executor(call):
-            # Inject session reference into the args dict (ephemeral, not sent to LLM)
-            call.args["_session"] = session
-            return await _original_executor(call)
-
-        tool_def.executor = _bound_executor  # type: ignore[attr-defined]
-
-    # ------------------------------------------------------------------
-    # LoomPlugin.on_session_stop()
-    # ------------------------------------------------------------------
-
-    def on_session_stop(self, session: object) -> None:
-        """
-        Schedule a post-session reflection.
-
-        The reflection is fire-and-forget: failures are logged but never
-        block session teardown.  We use ``asyncio.ensure_future`` so this
-        is non-blocking.
-        """
-        import asyncio
-
-        episodic = getattr(session, "_episodic", None)
-        relational = getattr(session, "_relational", None)
-        if episodic is None or relational is None:
-            return
-
-        async def _llm(prompt: str) -> str:
-            try:
-                resp = await session.router.chat(  # type: ignore[attr-defined]
-                    model=session.model,  # type: ignore[attr-defined]
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=512,
-                )
-                return resp.text or ""
-            except Exception:
-                return ""
-
-        async def _run():
-            try:
-                await run_self_reflection(
-                    episodic=episodic,
-                    relational=relational,
-                    llm_fn=_llm,
-                    session_id=getattr(session, "session_id", None),
-                )
-            except Exception as exc:
-                logger.warning("SelfReflectionPlugin.on_session_stop failed: %s", exc)
-
-        try:
-            asyncio.ensure_future(_run())
-        except RuntimeError:
-            pass  # No running event loop — skip silently
