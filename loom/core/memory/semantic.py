@@ -167,6 +167,30 @@ class SemanticMemory:
             for r in rows
         ]
 
+    async def get_random(self, limit: int = 15) -> list[SemanticEntry]:
+        """
+        Return up to *limit* entries chosen at random from all semantic facts.
+
+        Used by the dreaming cycle so each dream surfaces a varied, non-recency-
+        biased sample of the knowledge base.  SQLite's ORDER BY RANDOM() is fine
+        for typical Loom memory sizes (< 50k rows).
+        """
+        cursor = await self._db.execute(
+            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
+            "FROM semantic_entries ORDER BY RANDOM() LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            SemanticEntry(
+                id=r[0], key=r[1], value=r[2], confidence=r[3],
+                source=r[4], metadata=json.loads(r[5]),
+                created_at=datetime.fromisoformat(r[6]),
+                updated_at=datetime.fromisoformat(r[7]),
+            )
+            for r in rows
+        ]
+
     async def list_with_embeddings(
         self, limit: int = 500
     ) -> list[tuple[SemanticEntry, list[float] | None]]:
