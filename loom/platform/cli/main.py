@@ -707,11 +707,19 @@ class LoomSession:
             output_tokens += response.output_tokens
 
             # Log the full raw_message as JSON so tool_calls are preserved for resume.
-            # format="raw_message" signals load_messages() to parse it back directly.
+            # New path: raw_message goes into the dedicated `raw_json` column.
+            # The content field gets a plain-text representation for human readability
+            # (e.g. in observability queries). Legacy format=raw_message flag is
+            # preserved so old rows can still be replayed without migration.
+            _raw_json_str = json.dumps(response.raw_message, ensure_ascii=False)
+            _content_text = (
+                response.text or "[tool_use]"
+            )
             asyncio.ensure_future(self._log_message(
                 "assistant",
-                json.dumps(response.raw_message, ensure_ascii=False),
+                _content_text,
                 {"format": "raw_message"},
+                raw_json=_raw_json_str,
             ))
 
             if response.stop_reason == "end_turn":
@@ -1010,13 +1018,15 @@ class LoomSession:
             i -= 1
 
     async def _log_message(
-        self, role: str, content: str, metadata: dict | None = None
+        self, role: str, content: str, metadata: dict | None = None,
+        raw_json: str | None = None,
     ) -> None:
         """Fire-and-forget session_log write. Exceptions are swallowed inside log_message."""
         if self._session_log is None:
             return
         await self._session_log.log_message(
-            self.session_id, self._turn_index, role, content, metadata or {}
+            self.session_id, self._turn_index, role, content, metadata or {},
+            raw_json=raw_json,
         )
 
     async def _dispatch(self, tool_name: str, args: dict, call_id: str) -> ToolResult:

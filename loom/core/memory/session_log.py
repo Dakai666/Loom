@@ -51,20 +51,31 @@ class SessionLog:
         role: str,
         content: str,
         metadata: dict[str, Any] | None = None,
+        raw_json: str | None = None,
     ) -> None:
-        """Append one message row.  Swallows all exceptions — never blocks the loop."""
+        """Append one message row.  Swallows all exceptions — never blocks the loop.
+
+        Parameters
+        ----------
+        raw_json:
+            For ``role="assistant"`` messages that contain tool_call blocks, pass the
+            full serialised ``raw_message`` JSON here so it can be stored in the
+            dedicated ``raw_json`` column (rather than the human-readable ``content``).
+            ``load_messages()`` will prefer this column for assistant-message replay.
+        """
         try:
             await self._db.execute(
                 """
                 INSERT INTO session_log
-                    (session_id, turn_index, role, content, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (session_id, turn_index, role, content, raw_json, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
                     turn_index,
                     role,
                     content,
+                    raw_json,
                     json.dumps(metadata or {}, ensure_ascii=False),
                     datetime.now(UTC).isoformat(),
                 ),
@@ -126,8 +137,8 @@ class SessionLog:
         await self._db.execute(
             """
             INSERT INTO session_log
-                (session_id, turn_index, role, content, metadata, created_at)
-            SELECT ?, turn_index, role, content, metadata, created_at
+                (session_id, turn_index, role, content, raw_json, metadata, created_at)
+            SELECT ?, turn_index, role, content, raw_json, metadata, created_at
             FROM session_log
             WHERE session_id = ? AND turn_index <= ?
             """,
@@ -183,10 +194,16 @@ class SessionLog:
 
         System messages are excluded — the system prompt is always rebuilt
         fresh from PromptStack + MemoryIndex on resume.
+
+        Reconstruction priority for each row:
+        1. ``raw_json`` column (non-NULL) — parsed directly; preserves tool_calls.
+        2. ``metadata.format == "raw_message"`` — legacy fallback; ``content`` is
+           the full JSON blob (written before the raw_json column existed).
+        3. Plain text reconstruction (user / tool messages).
         """
         cursor = await self._db.execute(
             """
-            SELECT role, content, metadata
+            SELECT role, content, raw_json, metadata
             FROM session_log
             WHERE session_id = ? AND role != 'system'
             ORDER BY turn_index ASC, id ASC
@@ -195,12 +212,19 @@ class SessionLog:
         )
         rows = await cursor.fetchall()
         result: list[dict[str, Any]] = []
-        for role, content, metadata_raw in rows:
+        for role, content, raw_json, metadata_raw in rows:
             meta: dict[str, Any] = json.loads(metadata_raw)
 
+            # Priority 1: raw_json column (structured, new path)
+            if raw_json:
+                try:
+                    result.append(json.loads(raw_json))
+                    continue
+                except Exception:
+                    pass  # fall through to legacy / plain-text path
+
+            # Priority 2: legacy raw_message stored in content column
             if role == "assistant" and meta.get("format") == "raw_message":
-                # Full raw_message was stored as JSON — parse it back directly so
-                # tool_calls, content lists, etc. are all intact for the API.
                 try:
                     msg = json.loads(content)
                     result.append(msg)
@@ -208,6 +232,7 @@ class SessionLog:
                 except Exception:
                     pass  # fall through to plain text reconstruction
 
+            # Priority 3: plain text
             msg: dict[str, Any] = {"role": role, "content": content}
             # Re-attach tool_call_id for tool messages (required by OpenAI format)
             if role == "tool" and "tool_call_id" in meta:
