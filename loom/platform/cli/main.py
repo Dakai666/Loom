@@ -2806,5 +2806,131 @@ async def _discord_with_autonomy(
         await session.stop()  # autonomy session
 
 
+# ---------------------------------------------------------------------------
+# MCP (Model Context Protocol) — Issue #9
+# ---------------------------------------------------------------------------
+
+@cli.group(name="mcp")
+def mcp_cmd() -> None:
+    """MCP (Model Context Protocol) server and client commands."""
+
+
+@mcp_cmd.command("serve")
+@click.option("--db", default="~/.loom/memory.db", show_default=True,
+              help="Path to Loom's memory database.")
+@click.option("--model", default="MiniMax-M2.7", show_default=True,
+              help="Model used when starting the session.")
+def mcp_serve(db: str, model: str) -> None:
+    """Start Loom as an MCP stdio server.
+
+    Exposes all SAFE (and optionally GUARDED) Loom tools to any MCP-compatible
+    client such as Claude Desktop, Cursor, or Continue.
+
+    Add to claude_desktop_config.json:
+
+    \b
+        {
+          "mcpServers": {
+            "loom": {
+              "command": "loom",
+              "args": ["mcp", "serve"],
+              "env": {}
+            }
+          }
+        }
+    """
+    try:
+        from loom.extensibility.mcp_server import run_mcp_server
+    except ImportError:
+        console.print(
+            "[red]MCP SDK not installed.[/red] "
+            "Run: [bold]pip install 'loom[mcp]'[/bold]"
+        )
+        raise SystemExit(1)
+
+    async def _run() -> None:
+        session = LoomSession(model=model, db_path=db)
+        await session.start()
+        try:
+            await run_mcp_server(session.registry)
+        finally:
+            await session.stop()
+
+    asyncio.run(_run())
+
+
+@mcp_cmd.command("connect")
+@click.argument("server_spec")
+@click.option("--trust", default="safe", show_default=True,
+              type=click.Choice(["safe", "guarded"], case_sensitive=False),
+              help="Trust level for imported tools.")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--model", default="MiniMax-M2.7", show_default=True)
+def mcp_connect(server_spec: str, trust: str, db: str, model: str) -> None:
+    """Connect to an external MCP server and list its available tools.
+
+    SERVER_SPEC is a command to start the MCP server process, e.g.:
+
+    \b
+        loom mcp connect "npx -y @modelcontextprotocol/server-filesystem /tmp"
+        loom mcp connect "uvx mcp-server-git"
+        loom mcp connect "python -m my_mcp_server"
+    """
+    try:
+        from loom.extensibility.mcp_client import LoomMCPClient, MCPServerConfig
+    except ImportError:
+        console.print(
+            "[red]MCP SDK not installed.[/red] "
+            "Run: [bold]pip install 'loom[mcp]'[/bold]"
+        )
+        raise SystemExit(1)
+
+    parts = server_spec.split()
+    command = parts[0]
+    args = parts[1:]
+
+    cfg = MCPServerConfig(
+        name="remote",
+        command=command,
+        args=args,
+        trust_level=trust,
+    )
+
+    async def _run() -> None:
+        client = LoomMCPClient(cfg)
+        try:
+            tools = await client.connect_and_list_tools()
+        except Exception as exc:
+            console.print(f"[red]Failed to connect:[/red] {exc}")
+            raise SystemExit(1)
+        finally:
+            await client.disconnect()
+
+        if not tools:
+            console.print("[yellow]No tools found on this MCP server.[/yellow]")
+            return
+
+        console.print(
+            f"[bold cyan]{len(tools)} tool(s)[/bold cyan] available from "
+            f"[bold]{server_spec}[/bold]:\n"
+        )
+        for t in tools:
+            desc = t.description or "(no description)"
+            console.print(f"  [green]{t.name}[/green]  [dim]{desc[:80]}[/dim]")
+        console.print(
+            "\n[dim]Add this server to loom.toml [[mcp.servers]] "
+            "to load it automatically:[/dim]"
+        )
+        console.print(
+            f"\n  [dim][[mcp.servers]]\n"
+            f"  name    = \"remote\"\n"
+            f"  command = \"{command}\"\n"
+            f"  args    = {json.dumps(args)}\n"
+            f"  trust_level = \"{trust}\"[/dim]"
+        )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     cli()

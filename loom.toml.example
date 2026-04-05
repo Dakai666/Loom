@@ -150,3 +150,30 @@ enabled  = false           # set true to activate daemon
 
 [notify]
 default_channel = "cli"
+
+# ─────────────────────────────────────────────
+# MCP (Model Context Protocol) — Issue #9
+# ─────────────────────────────────────────────
+# Requires: pip install loom[mcp]
+#
+# Each [[mcp.servers]] entry starts an external MCP server subprocess
+# and imports its tools into the Loom session registry at startup.
+# Tools are prefixed with the server name: "filesystem:list_files"
+#
+# trust_level controls what Loom trust tier the imported tools receive:
+#   safe    → auto-executed (SAFE tier)
+#   guarded → confirmation required (GUARDED tier)
+
+# ── Example: MCP filesystem server ───────────────────────────────────────────
+# [[mcp.servers]]
+# name        = "filesystem"
+# command     = "npx"
+# args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# trust_level = "safe"
+
+# ── Example: MCP git server ───────────────────────────────────────────────────
+# [[mcp.servers]]
+# name        = "git"
+# command     = "uvx"
+# args        = ["mcp-server-git", "--repository", "."]
+# trust_level = "guarded"

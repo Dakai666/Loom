@@ -33,3 +33,4 @@ asyncio_mode = "auto"
 dev = ["pytest>=9.0", "pytest-asyncio>=1.0"]
 api = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]
 discord = ["discord.py>=2.3.0"]
+mcp = ["mcp>=1.0.0"]
