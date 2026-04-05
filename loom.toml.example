@@ -59,6 +59,22 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Session
+# ─────────────────────────────────────────────
+
+[session]
+# Issue #28: Predictive memory pre-fetcher.
+# When enabled, _dispatch_parallel() runs a lightweight MemorySearch query
+# before each parallel tool batch and injects top results as an ephemeral
+# system message so the LLM has "déjà vu" context for the upcoming tools.
+# The ephemeral message is removed after tool execution — history stays clean.
+#
+# Recommended: keep off until you have substantial semantic memory.
+# Performance cost: one extra DB query per parallel tool batch.
+prefetch_enabled = false
+prefetch_top_n   = 3       # number of memory hits to inject (keep small)
+
+# ─────────────────────────────────────────────
 # Harness
 # ─────────────────────────────────────────────
 

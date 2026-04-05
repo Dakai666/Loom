@@ -361,6 +361,14 @@ class LoomSession:
         # When True, stream_turn() auto-pauses after every tool batch.
         self.hitl_mode: bool = False
 
+        # Issue #28: Predictive memory pre-fetcher — default off (opt-in)
+        self._prefetch_enabled: bool = (
+            config.get("session", {}).get("prefetch_enabled", False)
+        )
+        self._prefetch_top_n: int = (
+            config.get("session", {}).get("prefetch_top_n", 3)
+        )
+
     # ------------------------------------------------------------------
     # Personality management
     # ------------------------------------------------------------------
@@ -1118,12 +1126,47 @@ class LoomSession:
         execute via asyncio.gather under the TaskScheduler.  Results are returned
         in the original tool_uses order.
 
+        When ``_prefetch_enabled`` is True, a lightweight MemorySearch query is
+        run before tool execution and results are injected as an ephemeral system
+        message.  The message is removed immediately after tools complete so it
+        never pollutes the persistent history.
+
         Returns
         -------
         list of (ToolUse, ToolResult, duration_ms) tuples.
         """
         from loom.core.tasks.graph import TaskGraph, TaskNode
         from loom.core.tasks.scheduler import TaskScheduler
+
+        # Issue #28: pre-fetch relevant memory before executing tool batch
+        _ephemeral_idx: int | None = None
+        if self._prefetch_enabled and self._semantic is not None and self._procedural is not None:
+            try:
+                _query = " ".join(
+                    tu.name + " " + " ".join(str(v) for v in tu.args.values())[:120]
+                    for tu in tool_uses
+                ).strip()[:300]
+                if _query:
+                    _search = MemorySearch(self._semantic, self._procedural)
+                    _hits = await _search.recall(_query, limit=self._prefetch_top_n)
+                    if _hits:
+                        _snippets = "\n".join(
+                            f"- {h.key}: {h.value[:200]}" for h in _hits
+                        )
+                        _ephemeral = (
+                            "[Pre-loaded context for upcoming tools]\n"
+                            f"{_snippets}"
+                        )
+                        # Insert ephemeral message just before the last assistant message
+                        _insert_pos = len(self.messages)
+                        self.messages.insert(_insert_pos, {
+                            "role": "system",
+                            "content": _ephemeral,
+                            "_ephemeral": True,  # marker for removal
+                        })
+                        _ephemeral_idx = _insert_pos
+            except Exception:
+                pass  # pre-fetch must never block tool execution
 
         graph = TaskGraph()
         pairs: list[tuple] = []  # (ToolUse, TaskNode)
@@ -1143,6 +1186,17 @@ class LoomSession:
         plan = graph.compile()
         scheduler = TaskScheduler(executor=_execute, stop_on_failure=False)
         await scheduler.run(plan)
+
+        # Remove the ephemeral message — keep history clean
+        if _ephemeral_idx is not None:
+            try:
+                if (
+                    _ephemeral_idx < len(self.messages)
+                    and self.messages[_ephemeral_idx].get("_ephemeral")
+                ):
+                    self.messages.pop(_ephemeral_idx)
+            except Exception:
+                pass
 
         return [(tu, timings[node.id][1], timings[node.id][0]) for tu, node in pairs]
 
