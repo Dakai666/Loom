@@ -1501,6 +1501,58 @@ class LoomChatApp:
                 self._hitl_decision = msg.decision
                 self._hitl_event.set()
 
+            async def action_time_travel(self) -> None:
+                async with self._session._store.connect() as conn:
+                    cursor = await conn.execute(
+                        "SELECT turn_index, role, content FROM session_log WHERE session_id = ? ORDER BY turn_index ASC, id ASC",
+                        (self._session.session_id,)
+                    )
+                    rows = await cursor.fetchall()
+
+                from collections import defaultdict
+                turns = defaultdict(list)
+                for t_idx, role, content in rows:
+                    if not content: continue
+                    cont = str(content)
+                    if role == "tool":
+                        cont = f"[tool] {cont[:40]}"
+                    turns[t_idx].append((role, cont.strip()))
+
+                turns_data = []
+                for t_idx, items in sorted(turns.items()):
+                    user_text = ""
+                    agent_texts = []
+                    for r, c in items:
+                        if r == "user":
+                            user_text = c[:80].replace("\n", " ")
+                        else:
+                            agent_texts.append(c[:60].replace("\n", " "))
+                    
+                    sum_text = f"[bold yellow]Turn {t_idx}[/] [cyan]{user_text}[/]"
+                    if agent_texts:
+                        sum_text += f"\n   [dim]↳ {' | '.join(agent_texts)[:120]}[/]"
+                    
+                    turns_data.append((t_idx, sum_text))
+                
+                if not turns_data:
+                    self.notify("No history to time travel.", severity="information")
+                    return
+
+                from loom.platform.cli.tui.components.minimap_modal import MiniMapModal
+                target_turn = await self.push_screen_wait(MiniMapModal(turns_data))
+                
+                if target_turn is not None:
+                    old_id = self._session.session_id
+                    import uuid
+                    new_id = f"{old_id}-fork-{uuid.uuid4().hex[:6]}"
+                    async with self._session._store.connect() as conn:
+                        from loom.core.memory.session_log import SessionLog
+                        await SessionLog(conn).fork_session(old_id, new_id, target_turn)
+                    
+                    self.workers.cancel_all()
+                    await self._session.stop()
+                    self.exit(new_id)
+
             async def on_mount(self) -> None:
                 """Replay history on startup and seed the Budget panel."""
                 from loom.platform.cli.tui.components.message_list import (

@@ -102,6 +102,39 @@ class SessionLog:
         )
         await self._db.commit()
 
+    async def fork_session(self, old_session_id: str, new_session_id: str, target_turn_index: int) -> None:
+        """
+        Duplicate an existing session up to a specific turn_index.
+        This enables "Time-Travel", allowing branching off the conversation.
+        """
+        now = datetime.now(UTC).isoformat()
+        parent = await self.get_session(old_session_id)
+        if not parent:
+            raise ValueError(f"Session {old_session_id} not found")
+            
+        new_title = f"{parent['title'] or 'Session'} (分岐)"
+        
+        await self._db.execute(
+            """
+            INSERT INTO sessions
+                (session_id, model, title, started_at, last_active, turn_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (new_session_id, parent["model"], new_title, now, now, target_turn_index),
+        )
+        
+        await self._db.execute(
+            """
+            INSERT INTO session_log
+                (session_id, turn_index, role, content, metadata, created_at)
+            SELECT ?, turn_index, role, content, metadata, created_at
+            FROM session_log
+            WHERE session_id = ? AND turn_index <= ?
+            """,
+            (new_session_id, old_session_id, target_turn_index)
+        )
+        await self._db.commit()
+
     # ------------------------------------------------------------------
     # Read path
     # ------------------------------------------------------------------

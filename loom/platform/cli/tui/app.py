@@ -228,6 +228,7 @@ class LoomApp(App):
         Binding("f2", "toggle_space", "Workspace", show=True),
         Binding("f3", "toggle_verbose", "Verbose", show=True),
         Binding("f4", "toggle_sidebar", "Sidebar", show=True),
+        Binding("f5", "time_travel", "Time-Travel", show=True),
         # Fallback VS Code style hotkeys (might be intercepted by IDEs)
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
         Binding("ctrl+k", "command_palette", "Commands", show=False),

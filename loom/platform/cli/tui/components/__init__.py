@@ -16,6 +16,7 @@ from .swarm_dashboard import SwarmDashboard, ActivityEntry
 from .budget_panel import BudgetPanel
 from .workspace_panel import WorkspacePanel, WorkspaceTab
 from .interactive_widgets import InlineConfirmWidget, InlinePauseWidget
+from .minimap_modal import MiniMapModal
 
 __all__ = [
     "Header",
@@ -37,4 +38,5 @@ __all__ = [
     "WorkspaceTab",
     "InlineConfirmWidget",
     "InlinePauseWidget",
+    "MiniMapModal",
 ]
