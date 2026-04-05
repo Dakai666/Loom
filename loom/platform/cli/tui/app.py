@@ -76,9 +76,7 @@ class LoomCommandProvider(Provider):
 
     def _focus_tab(self, tab: WorkspaceTab):
         workspace = self.app.query_one("#workspace-panel", WorkspacePanel)
-        workspace.active_tab = tab
-        workspace._update_tab_headers()
-        workspace.query_one("#tab-content").update(workspace._render_tab_content())
+        workspace.active_tab = tab  # triggers watch_active_tab → _render_header + _update_visibility
         self.app.notify(f"Switched to {tab.name.title()} tab", timeout=1)
 
 
