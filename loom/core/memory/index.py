@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
@@ -71,6 +72,8 @@ class MemoryIndex:
     relational_count: int = 0
     relational_predicates: list[str] = field(default_factory=list)
     anti_pattern_count: int = 0
+    # Issue #26: full loom-self triples for the Self-Portrait section
+    self_triples: list[Any] = field(default_factory=list)
 
     _WIDTH = 45
 
@@ -105,6 +108,14 @@ class MemoryIndex:
         ]
         if self.relational_count > 0:
             lines.append("Use query_relations(subject) to look up relationships.")
+
+        # Issue #26: Self-Portrait — show agent's own behavioural notes inline
+        if self.self_triples:
+            lines.append("")
+            lines.append("Self-Portrait (loom-self observations):")
+            for t in self.self_triples[:8]:  # cap at 8 to avoid context bloat
+                lines.append(f"  [{t.predicate}] {t.object}")
+
         return "\n".join(lines)
 
     @property
@@ -174,12 +185,20 @@ class MemoryIndexer:
                 seen[t.predicate] = seen.get(t.predicate, 0) + 1
             relational_predicates = sorted(seen, key=lambda p: seen[p], reverse=True)[:8]
 
-        # Anti-pattern count — loom-self triples with predicate starting "should_avoid:"
+        # Anti-pattern count + Self-Portrait triples (Issue #26)
         anti_pattern_count = 0
+        self_triples: list = []
         if self._relational is not None:
-            self_triples = await self._relational.query(subject="loom-self")
+            self_entries = await self._relational.query(subject="loom-self")
             anti_pattern_count = sum(
-                1 for t in self_triples if t.predicate.startswith("should_avoid:")
+                1 for t in self_entries if t.predicate.startswith("should_avoid")
+            )
+            # Sort: should_avoid first, then tends_to, then others
+            _order = {"should_avoid": 0, "tends_to": 1}
+            self_triples = sorted(
+                self_entries,
+                key=lambda t: (_order.get(t.predicate, 2), t.updated_at),
+                reverse=False,
             )
 
         return MemoryIndex(
@@ -191,4 +210,5 @@ class MemoryIndexer:
             relational_count=relational_count,
             relational_predicates=relational_predicates,
             anti_pattern_count=anti_pattern_count,
+            self_triples=self_triples,
         )
