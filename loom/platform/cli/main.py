@@ -712,6 +712,9 @@ class LoomSession:
                         )
                         if fact_count:
                             yield CompressDone(fact_count=fact_count)
+                        # Rebuild MemoryIndex so long-running sessions (Discord)
+                        # see updated fact/anti-pattern counts without restarting.
+                        await self._refresh_memory_index()
                 except Exception:
                     pass  # never block the turn on compression failure
 
@@ -1145,6 +1148,69 @@ class LoomSession:
         await scheduler.run(plan)
 
         return [(tu, timings[node.id][1], timings[node.id][0]) for tu, node in pairs]
+
+    async def _refresh_memory_index(self) -> None:
+        """
+        Rebuild MemoryIndex and update the system prompt in-place.
+
+        Called after mid-session episodic compression so long-running sessions
+        (e.g. Discord bots that never restart) see fresh fact/anti-pattern counts
+        without waiting for the next session start.
+
+        Finds the existing MemoryIndex block in messages[0] by the sentinel line
+        "Memory Index" and replaces everything from that line to the closing rule
+        line. If no existing block is found, appends the new block as usual.
+        """
+        if self._semantic is None or self._procedural is None:
+            return
+        try:
+            indexer = MemoryIndexer(
+                self._semantic, self._procedural, self._episodic, self._relational
+            )
+            new_index = await indexer.build()
+            if new_index.is_empty:
+                return
+            self._memory_index = new_index
+            new_text = new_index.render()
+
+            if not self.messages or self.messages[0]["role"] != "system":
+                return
+
+            current = self.messages[0]["content"]
+            sentinel = "Memory Index\n"
+            pos = current.find(sentinel)
+            if pos != -1:
+                # Replace from "Memory Index\n" to end of the block.
+                # The block ends after the second rule line (─────…).
+                # Find the second occurrence of the rule separator after pos.
+                rule = "─" * 45
+                first_rule = current.find(rule, pos)
+                second_rule = current.find(rule, first_rule + len(rule)) if first_rule != -1 else -1
+                if second_rule != -1:
+                    # Keep everything before the block and after the closing rule line.
+                    end = second_rule + len(rule)
+                    # Also swallow trailing newlines and hint lines until next blank line.
+                    tail = current[end:]
+                    # Drop the hint lines that were part of the old block.
+                    lines = tail.splitlines(keepends=True)
+                    skip = 0
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped.startswith("Use ") or stripped == "":
+                            skip += len(line)
+                        else:
+                            break
+                    self.messages[0]["content"] = (
+                        current[:pos].rstrip("\n") + "\n\n" + new_text + current[end + skip:]
+                    )
+                else:
+                    # Fallback: just replace from sentinel to end
+                    self.messages[0]["content"] = current[:pos].rstrip("\n") + "\n\n" + new_text
+            else:
+                # No existing block — append
+                self.messages[0]["content"] += f"\n\n{new_text}"
+        except Exception:
+            pass  # never block the session on a MemoryIndex refresh failure
 
     async def _smart_compact(self) -> None:
         """
