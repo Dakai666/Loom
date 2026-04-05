@@ -34,6 +34,35 @@ _CONTENT_LIMIT = 2000     # max chars returned to agent
 _SEARCH_RESULTS = 5       # default Brave results
 
 
+async def _race_abort(coro, abort_signal):
+    """
+    Run *coro*, cancelling it if *abort_signal* fires first.
+
+    Returns ``(result, aborted)``.  When ``aborted=True``, ``result`` is
+    ``None`` and the caller should return an "aborted" ToolResult.
+    Any exception raised by *coro* propagates normally.
+    """
+    if abort_signal is None:
+        return await coro, False
+    if abort_signal.is_set():
+        coro.close()  # prevent "coroutine was never awaited" ResourceWarning
+        return None, True
+    task = asyncio.ensure_future(coro)
+    wait_task = asyncio.ensure_future(abort_signal.wait())
+    done, pending = await asyncio.wait(
+        [task, wait_task], return_when=asyncio.FIRST_COMPLETED
+    )
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+    if wait_task in done and task not in done:
+        return None, True
+    return task.result(), False
+
+
 def _html_to_text(html: str) -> tuple[str, str]:
     """Extract title and clean body text from raw HTML."""
     # Extract title
@@ -521,22 +550,32 @@ def make_fetch_url_tool() -> ToolDefinition:
 
     async def _fetch_url(call: ToolCall) -> ToolResult:
         url = call.args.get("url", "").strip()
+        abort = call.abort_signal
         if not url:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'url' argument is required")
-        try:
+
+        async def _get():
             async with httpx.AsyncClient(follow_redirects=True,
                                          timeout=_WEB_TIMEOUT) as client:
-                resp = await client.get(url, headers={"User-Agent": "Loom/0.3"})
-                resp.raise_for_status()
-                content_type = resp.headers.get("content-type", "")
-                if "html" in content_type:
-                    title, body = _html_to_text(resp.text)
-                    body = body[:_CONTENT_LIMIT]
-                    raw_output = f"Title: {title}\n\n{body}" if title else body
-                else:
-                    raw_output = resp.text[:_CONTENT_LIMIT]
-                output = sanitize_untrusted_text(raw_output)
+                r = await client.get(url, headers={"User-Agent": "Loom/0.3"})
+                r.raise_for_status()
+                return r
+
+        try:
+            resp, aborted = await _race_abort(_get(), abort)
+            if aborted:
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=False, error="Request cancelled",
+                                  failure_type="execution_error")
+            content_type = resp.headers.get("content-type", "")
+            if "html" in content_type:
+                title, body = _html_to_text(resp.text)
+                body = body[:_CONTENT_LIMIT]
+                raw_output = f"Title: {title}\n\n{body}" if title else body
+            else:
+                raw_output = resp.text[:_CONTENT_LIMIT]
+            output = sanitize_untrusted_text(raw_output)
         except httpx.HTTPStatusError as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=f"HTTP {exc.response.status_code}: {url}")
@@ -573,12 +612,14 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     async def _web_search(call: ToolCall) -> ToolResult:
         query = call.args.get("query", "").strip()
         count = min(max(int(call.args.get("count", _SEARCH_RESULTS)), 1), 10)
+        abort = call.abort_signal
         if not query:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'query' argument is required")
-        try:
+
+        async def _search():
             async with httpx.AsyncClient(timeout=_WEB_TIMEOUT) as client:
-                resp = await client.get(
+                r = await client.get(
                     "https://api.search.brave.com/res/v1/web/search",
                     params={"q": query, "count": count},
                     headers={
@@ -587,8 +628,16 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
                         "X-Subscription-Token": brave_api_key,
                     },
                 )
-                resp.raise_for_status()
-                data = resp.json()
+                r.raise_for_status()
+                return r.json()
+
+        try:
+            result, aborted = await _race_abort(_search(), abort)
+            if aborted:
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=False, error="Request cancelled",
+                                  failure_type="execution_error")
+            data = result
         except httpx.HTTPStatusError as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False,

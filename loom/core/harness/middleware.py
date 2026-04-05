@@ -8,6 +8,7 @@ Execution order (outermost → innermost):
     LogMiddleware → TraceMiddleware → BlastRadiusMiddleware → tool handler
 """
 
+import asyncio
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -32,6 +33,7 @@ class ToolCall:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = field(default_factory=dict)
     capabilities: ToolCapability = field(default_factory=lambda: ToolCapability.NONE)
+    abort_signal: asyncio.Event | None = field(default=None, compare=False, repr=False)
 
 
 # Structured failure categories — used for reflexive learning and failure analysis.

@@ -18,6 +18,7 @@ from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
+from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
 from loom.notify.types import Notification, NotificationType
@@ -41,6 +42,7 @@ class AutonomyDaemon:
         self._notify = notify_router
         self._confirm = confirm_flow
         self._session = loom_session
+        self._abort = AbortController()
 
         history = TriggerHistory(db) if db is not None else None
         self._planner = ActionPlanner(
@@ -94,10 +96,10 @@ class AutonomyDaemon:
         # Collect text output from stream_turn (the session's interactive loop).
         # We run it as an async generator and pull TurnDone to confirm completion.
         try:
-            # stream_turn is an async generator — consume it fully so the session
-            # processes the prompt and executes all tool calls.
             output_chunks: list[str] = []
-            async for event in self._session.stream_turn(plan.prompt):
+            async for event in self._session.stream_turn(
+                plan.prompt, abort_signal=self._abort.signal
+            ):
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
                     output_chunks.append(event.text)
@@ -176,8 +178,24 @@ class AutonomyDaemon:
     # ------------------------------------------------------------------
 
     async def start(self, poll_interval: float = 60.0) -> None:
-        """Run the evaluator loop (blocking)."""
-        await self._evaluator.run_forever(poll_interval=poll_interval)
+        """Run the evaluator loop (blocking). Returns when stop() is called."""
+        run_task = asyncio.ensure_future(
+            self._evaluator.run_forever(poll_interval=poll_interval)
+        )
+        abort_task = asyncio.ensure_future(wait_aborted(self._abort.signal))
+        done, pending = await asyncio.wait(
+            [run_task, abort_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def stop(self) -> None:
+        """Signal the daemon to stop — aborts any in-flight stream_turn() and exits the loop."""
+        self._abort.abort()
 
     @property
     def evaluator(self) -> TriggerEvaluator:
