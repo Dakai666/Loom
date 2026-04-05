@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import Provider, Hit
 from textual.containers import Horizontal, Vertical
 from textual.widget import Widget
 
@@ -52,6 +53,31 @@ from .events import (
 
 if TYPE_CHECKING:
     from loom.core.memory.store import SQLiteStore
+
+
+class LoomCommandProvider(Provider):
+    async def search(self, query: str):
+        matcher = self.matcher(query)
+        app = self.app
+        commands = [
+            ("Toggle Workspace Sidebar", app.action_toggle_sidebar, "Hide/show the right sidebar"),
+            ("Switch to Artifacts Tab", lambda: self._focus_tab(WorkspaceTab.ARTIFACTS), "View created artifacts"),
+            ("Switch to Swarm Dashboard", lambda: self._focus_tab(WorkspaceTab.SWARM), "View active agents and history"),
+            ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
+            ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
+            ("Toggle Verbose Tools", app.action_toggle_verbose, "Switch between compact and verbose tool logs"),
+            ("Quit Loom", app.action_quit, "Exit the application"),
+        ]
+
+        for name, callback, help_text in commands:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), callback, help=help_text)
+
+    def _focus_tab(self, tab: WorkspaceTab):
+        workspace = self.app.query_one("#workspace-panel", WorkspacePanel)
+        workspace.active_tab = tab  # triggers watch_active_tab → _render_header + _update_visibility
+        self.app.notify(f"Switched to {tab.name.title()} tab", timeout=1)
 
 
 class LoomApp(App):
@@ -98,6 +124,11 @@ class LoomApp(App):
         border-right: solid #4a4038;
     }
 
+    .sidebar-hidden #conversation-pane {
+        width: 100%;
+        border-right: none;
+    }
+
     #message-list {
         height: 1fr;
         background: #1c1814;
@@ -113,14 +144,28 @@ class LoomApp(App):
     }
 
     #input-area {
-        height: 4;
-        background: #242018;
+        height: auto;
+        background: #1c1814;
         border-top: solid #4a4038;
+        padding: 0 1;
+    }
+
+    #input-text {
+        border: solid #4a4038;
+        background: #1c1814;
+    }
+    
+    #input-text:focus {
+        border: solid #c8a464;
     }
 
     #workspace-panel {
         width: 25%;
         background: #1c1814;
+    }
+
+    .sidebar-hidden #workspace-panel {
+        display: none;
     }
 
     #obs-panel {
@@ -178,12 +223,24 @@ class LoomApp(App):
     }
     """
 
+    COMMANDS = App.COMMANDS | {LoomCommandProvider}
+
     BINDINGS = [
+        # Primary global hotkeys (shown in footer)
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
-        Binding("escape", "interrupt", "Interrupt", show=True),
+        Binding("escape", "interrupt", "Stop", show=True),
+        Binding("ctrl+s", "session_picker", "Sessions", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
-        Binding("f1", "toggle_verbose", "Verbose", show=True),
+        # F-keys for functions (resilient in IDE terminals)
+        Binding("f1", "command_palette", "Commands", show=True),
         Binding("f2", "toggle_space", "Workspace", show=True),
+        Binding("f3", "toggle_verbose", "Verbose", show=True),
+        Binding("f4", "toggle_sidebar", "Sidebar", show=True),
+        Binding("f5", "time_travel", "Time-Travel", show=True),
+        # Fallback VS Code style hotkeys (might be intercepted by IDEs)
+        Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
+        Binding("ctrl+k", "command_palette", "Commands", show=False),
+        Binding("ctrl+p", "command_palette", "Commands", show=False),
     ]
 
     def __init__(
@@ -196,6 +253,24 @@ class LoomApp(App):
         self._model = model
         self._db_path = db_path
         self._verbose = verbose
+        
+        try:
+            from textual.theme import Theme
+            loom_theme = Theme(
+                name="loom",
+                primary="#c8a464",
+                secondary="#8a7a5e",
+                warning="#c8924a",
+                error="#b87060",
+                success="#7a9e78",
+                background="#1c1814",
+                surface="#2a241e",
+                panel="#242018",
+                dark=True,
+            )
+            self.register_theme(loom_theme)
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header(id="header-bar", model=self._model, db_path=self._db_path)
@@ -229,12 +304,17 @@ class LoomApp(App):
         tool_block.clear()
         self.notify("Screen cleared.")
 
+    def action_toggle_sidebar(self) -> None:
+        self.toggle_class("sidebar-hidden")
+        has_sidebar = not self.has_class("sidebar-hidden")
+        self.notify(f"Sidebar {'shown' if has_sidebar else 'hidden'}", timeout=1)
+
     def action_toggle_space(self) -> None:
         workspace = self.query_one("#workspace-panel", WorkspacePanel)
         workspace.toggle_tab()
         labels = {
             WorkspaceTab.ARTIFACTS: "Artifacts",
-            WorkspaceTab.ACTIVITY:  "Activity",
+            WorkspaceTab.SWARM:     "Swarm",
             WorkspaceTab.BUDGET:    "Budget",
         }
         self.notify(f"Workspace: {labels[workspace.active_tab]}", timeout=1)
@@ -324,12 +404,19 @@ class LoomApp(App):
         ))
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
-        from .components.pause_modal import PauseModal
+        from .components.interactive_widgets import InlinePauseWidget
+        import asyncio
 
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.end_turn()
 
-        result = await self.push_screen_wait(PauseModal(tool_count=event.tool_count_so_far))
+        msg_list = self.query_one("#message-list", MessageList)
+        future = asyncio.Future()
+        widget = InlinePauseWidget(tool_count=event.tool_count_so_far, future=future)
+        msg_list.mount(widget)
+        msg_list.scroll_end(animate=False)
+
+        result = await future
 
         # result is injected into the app; but we can't call session methods directly
         # here (app.py has no session reference). We post a UserMessage with a

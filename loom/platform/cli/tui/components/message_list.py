@@ -120,7 +120,15 @@ class MessageBubble(Widget):
 
     def on_mount(self) -> None:
         self._render_header()
-        self._render_body_text()
+        if not self._streaming:
+            if self._content.strip():
+                self._render_body_markdown()
+            else:
+                self._render_body_text()
+            # Must run after mounting self or at the end of mount
+            self.set_timer(0.01, self._scan_and_mount_images)
+        else:
+            self._render_body_text()
 
     # ── Streaming API ─────────────────────────────────────────────────────────
 
@@ -136,6 +144,37 @@ class MessageBubble(Widget):
             self._render_body_markdown()
         else:
             self._render_body_text()
+            
+        self._scan_and_mount_images()
+
+    def _scan_and_mount_images(self) -> None:
+        import re
+        from pathlib import Path
+        from urllib.parse import urlparse
+        from urllib.request import url2pathname
+        from .image_widget import ImageWidget
+
+        # match markdown images ![alt](path)
+        matches = re.findall(r'!\[.*?\]\((.*?)\)', self._content)
+        for url in matches:
+            try:
+                if url.startswith("http"):
+                    continue
+                
+                if url.startswith("file://"):
+                    parsed = urlparse(url)
+                    # Handle Windows drive letters properly
+                    local_path = url2pathname(parsed.path)
+                    p = Path(local_path).resolve()
+                else:
+                    p = Path(url).resolve()
+                    
+                if p.exists() and p.is_file():
+                    ext = p.suffix.lower()
+                    if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]:
+                        self.mount(ImageWidget(p))
+            except Exception:
+                pass
 
     def set_think_text(self, think_text: str) -> None:
         """

@@ -17,13 +17,13 @@ from textual.widgets import Static
 
 from .artifact_card import ArtifactState
 from .artifacts_panel import ArtifactsPanel
-from .activity_log import ActivityLog, ActivityEntry
+from .swarm_dashboard import SwarmDashboard, ActivityEntry
 from .budget_panel import BudgetPanel
 
 
 class WorkspaceTab(Enum):
     ARTIFACTS = "artifacts"
-    ACTIVITY = "activity"
+    SWARM = "swarm"
     BUDGET = "budget"
 
 
@@ -56,7 +56,7 @@ class WorkspacePanel(Widget):
         scrollbar-color-hover: #c8a464;
         scrollbar-background: #1c1814;
     }
-    #activity-panel {
+    #swarm-panel {
         height: 1fr;
         overflow-y: auto;
         scrollbar-color: #4a4038;
@@ -82,19 +82,19 @@ class WorkspacePanel(Widget):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._artifacts_panel: ArtifactsPanel | None = None
-        self._activity_panel: ActivityLog | None = None
+        self._swarm_panel: SwarmDashboard | None = None
         self._budget_panel: BudgetPanel | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="workspace-header")
         yield Static("", id="workspace-divider")
         yield ArtifactsPanel(id="artifacts-panel")
-        yield ActivityLog(id="activity-panel")
+        yield SwarmDashboard(id="swarm-panel")
         yield BudgetPanel(id="budget-panel")
 
     def on_mount(self) -> None:
         self._artifacts_panel = self.query_one("#artifacts-panel", ArtifactsPanel)
-        self._activity_panel = self.query_one("#activity-panel", ActivityLog)
+        self._swarm_panel = self.query_one("#swarm-panel", SwarmDashboard)
         self._budget_panel = self.query_one("#budget-panel", BudgetPanel)
         self._update_visibility()
         self._render_header()
@@ -109,8 +109,8 @@ class WorkspacePanel(Widget):
         self.active_tab = tab
 
     def toggle_tab(self) -> None:
-        """Cycle Artifacts → Activity → Budget → Artifacts."""
-        order = [WorkspaceTab.ARTIFACTS, WorkspaceTab.ACTIVITY, WorkspaceTab.BUDGET]
+        """Cycle Artifacts → Swarm → Budget → Artifacts."""
+        order = [WorkspaceTab.ARTIFACTS, WorkspaceTab.SWARM, WorkspaceTab.BUDGET]
         idx = order.index(self.active_tab)
         self.active_tab = order[(idx + 1) % len(order)]
 
@@ -131,7 +131,7 @@ class WorkspacePanel(Widget):
         if x < 14:
             self.active_tab = WorkspaceTab.ARTIFACTS
         elif x < 20:
-            self.active_tab = WorkspaceTab.ACTIVITY
+            self.active_tab = WorkspaceTab.SWARM
         else:
             self.active_tab = WorkspaceTab.BUDGET
 
@@ -148,9 +148,9 @@ class WorkspacePanel(Widget):
             self._artifacts_panel.add_artifact(path, state, diff_lines, preview)
 
     def append_activity(self, entry: ActivityEntry) -> None:
-        """Add a completed tool call to the Activity log."""
-        if self._activity_panel:
-            self._activity_panel.append_entry(entry)
+        """Add a completed tool call to the Swarm Dashboard."""
+        if self._swarm_panel:
+            self._swarm_panel.append_entry(entry)
 
     def update_budget(
         self,
@@ -170,8 +170,8 @@ class WorkspacePanel(Widget):
     def _update_visibility(self) -> None:
         if self._artifacts_panel:
             self._artifacts_panel.display = self.active_tab == WorkspaceTab.ARTIFACTS
-        if self._activity_panel:
-            self._activity_panel.display = self.active_tab == WorkspaceTab.ACTIVITY
+        if self._swarm_panel:
+            self._swarm_panel.display = self.active_tab == WorkspaceTab.SWARM
         if self._budget_panel:
             self._budget_panel.display = self.active_tab == WorkspaceTab.BUDGET
 
@@ -189,7 +189,7 @@ class WorkspacePanel(Widget):
 
         header.update(
             f"{_tab('Art', WorkspaceTab.ARTIFACTS)} "
-            f"{_tab('Act', WorkspaceTab.ACTIVITY)} "
+            f"{_tab('Swa', WorkspaceTab.SWARM)} "
             f"{_tab('Bgt', WorkspaceTab.BUDGET)} "
             f" [dim]F2[/dim]"
         )

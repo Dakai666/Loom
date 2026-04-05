@@ -1501,6 +1501,59 @@ class LoomChatApp:
                 self._hitl_decision = msg.decision
                 self._hitl_event.set()
 
+            from textual import work
+            @work(exclusive=True)
+            async def action_time_travel(self) -> None:
+                async with self._session._store.connect() as conn:
+                    cursor = await conn.execute(
+                        "SELECT turn_index, role, content FROM session_log WHERE session_id = ? ORDER BY turn_index ASC, id ASC",
+                        (self._session.session_id,)
+                    )
+                    rows = await cursor.fetchall()
+
+                from collections import defaultdict
+                turns = defaultdict(list)
+                for t_idx, role, content in rows:
+                    if not content: continue
+                    cont = str(content)
+                    if role == "tool":
+                        cont = f"[tool] {cont[:40]}"
+                    turns[t_idx].append((role, cont.strip()))
+
+                turns_data = []
+                for t_idx, items in sorted(turns.items()):
+                    user_text = ""
+                    agent_texts = []
+                    for r, c in items:
+                        if r == "user":
+                            user_text = c[:80].replace("\n", " ")
+                        else:
+                            agent_texts.append(c[:60].replace("\n", " "))
+                    
+                    sum_text = f"[bold yellow]Turn {t_idx}[/] [cyan]{user_text}[/]"
+                    if agent_texts:
+                        sum_text += f"\n   [dim]↳ {' | '.join(agent_texts)[:120]}[/]"
+                    
+                    turns_data.append((t_idx, sum_text))
+                
+                if not turns_data:
+                    self.notify("No history to time travel.", severity="information")
+                    return
+
+                from loom.platform.cli.tui.components.minimap_modal import MiniMapModal
+                target_turn = await self.push_screen_wait(MiniMapModal(turns_data))
+                
+                if target_turn is not None:
+                    old_id = self._session.session_id
+                    import uuid
+                    new_id = f"{old_id}-fork-{uuid.uuid4().hex[:6]}"
+                    async with self._session._store.connect() as conn:
+                        from loom.core.memory.session_log import SessionLog
+                        await SessionLog(conn).fork_session(old_id, new_id, target_turn)
+                    
+                    self.workers.cancel_all()
+                    self.exit(new_id)
+
             async def on_mount(self) -> None:
                 """Replay history on startup and seed the Budget panel."""
                 from loom.platform.cli.tui.components.message_list import (
@@ -1722,7 +1775,6 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/new":
         # Exit with sentinel None so _chat_tui restart loop creates a fresh session.
-        await session.stop()
         app.exit("__new__")
 
     elif command == "/sessions":
@@ -1777,19 +1829,26 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
         # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
         # shows a ModalScreen dialog — no terminal suspension needed.
         from loom.core.harness.middleware import BlastRadiusMiddleware
-        from loom.platform.cli.tui.components.confirm_modal import ConfirmModal
+        from loom.platform.cli.tui.components.interactive_widgets import InlineConfirmWidget
+        import asyncio
 
-        async def _tui_confirm(call: ToolCall) -> bool:
+        async def _tui_confirm(call: "ToolCall") -> bool:
             args_preview = "  ".join(
                 f"{k}={str(v)[:40]}" for k, v in call.args.items()
             )[:120]
-            return await app.push_screen_wait(
-                ConfirmModal(
-                    tool_name=call.tool_name,
-                    trust_label=call.trust_level.plain,
-                    args_preview=args_preview,
-                )
+            
+            msg_list = app.query_one("#message-list")
+            future = asyncio.Future()
+            widget = InlineConfirmWidget(
+                tool_name=call.tool_name,
+                trust_label=call.trust_level.plain,
+                args_preview=args_preview,
+                future=future
             )
+            msg_list.mount(widget)
+            msg_list.scroll_end(animate=False)
+            
+            return await future
 
         for mw in session._pipeline._middlewares:
             if isinstance(mw, BlastRadiusMiddleware):

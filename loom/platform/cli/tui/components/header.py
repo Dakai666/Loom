@@ -22,18 +22,22 @@ class Header(Widget):
     DEFAULT_CSS = """
     Header {
         layout: horizontal;
-        height: 2;
+        height: 1;
         background: #1c1814;
         border-bottom: solid #4a4038;
+        padding: 0 1;
     }
     #header-logo {
         width: auto;
-        padding: 0 2;
         content-align: left middle;
     }
-    #header-info {
+    #header-hints {
         width: 1fr;
-        padding: 0 2;
+        padding: 0 4;
+        content-align: center middle;
+    }
+    #header-info {
+        width: auto;
         content-align: right middle;
     }
     """
@@ -48,9 +52,11 @@ class Header(Widget):
         self.db_path = db_path
 
     def compose(self) -> ComposeResult:
+        logo = "[bold #c8a464]❖ LOOM[/bold #c8a464] [dim]v0.4[/dim]"
+        yield Static(logo, id="header-logo")
         yield Static(
-            "[bold #c8a464]Loom[/bold #c8a464][dim] v0.3[/dim]",
-            id="header-logo",
+            "[dim]F1: [white]Cmds[/white]  ·  F2: [white]Tabs[/white]  ·  F3: [white]Traces[/white]  ·  F4: [white]Sidebar[/white]  ·  F5: [bold #d4a853]Time-Travel[/bold #d4a853][/dim]",
+            id="header-hints"
         )
         yield Static("", id="header-info")
 

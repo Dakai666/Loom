@@ -12,10 +12,12 @@ from .input_area import InputArea
 from .observability_panel import ObservabilityPanel
 from .artifact_card import Artifact, ArtifactCard, ArtifactState
 from .artifacts_panel import ArtifactsPanel
-from .activity_log import ActivityLog, ActivityEntry
+from .swarm_dashboard import SwarmDashboard, ActivityEntry
 from .budget_panel import BudgetPanel
 from .workspace_panel import WorkspacePanel, WorkspaceTab
-from .confirm_modal import ConfirmModal
+from .interactive_widgets import InlineConfirmWidget, InlinePauseWidget
+from .minimap_modal import MiniMapModal
+from .image_widget import ImageWidget
 
 __all__ = [
     "Header",
@@ -30,10 +32,13 @@ __all__ = [
     "ArtifactCard",
     "ArtifactState",
     "ArtifactsPanel",
-    "ActivityLog",
+    "SwarmDashboard",
     "ActivityEntry",
     "BudgetPanel",
     "WorkspacePanel",
     "WorkspaceTab",
-    "ConfirmModal",
+    "InlineConfirmWidget",
+    "InlinePauseWidget",
+    "MiniMapModal",
+    "ImageWidget",
 ]
