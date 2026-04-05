@@ -1501,6 +1501,8 @@ class LoomChatApp:
                 self._hitl_decision = msg.decision
                 self._hitl_event.set()
 
+            from textual import work
+            @work(exclusive=True)
             async def action_time_travel(self) -> None:
                 async with self._session._store.connect() as conn:
                     cursor = await conn.execute(
