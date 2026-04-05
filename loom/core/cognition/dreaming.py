@@ -228,12 +228,11 @@ def _make_dreaming_plugin(session):
     Called by ``DreamingPlugin.on_session_start(session)`` so the tool
     always closes over the live session's memory references.
     """
-    import loom
-    from loom.extensibility.plugin import LoomPlugin
     from loom.core.harness.registry import ToolDefinition
+    from loom.core.harness.middleware import ToolResult
     from loom.core.harness.permissions import TrustLevel
 
-    async def _dream_cycle_tool(call):
+    async def _dream_cycle_executor(call) -> ToolResult:
         """
         Execute one offline dreaming cycle.
 
@@ -254,12 +253,15 @@ def _make_dreaming_plugin(session):
                 messages=messages,
                 max_tokens=2048,
             )
-            return response.content  # LLMResponse.content is the assistant text
+            return response.text or ""
 
         sem = getattr(session, "_semantic", None)
         rel = getattr(session, "_relational", None)
         if sem is None or rel is None:
-            return "⚠️ Dreaming skipped — memory subsystems not available."
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error="Dreaming skipped — memory subsystems not available.",
+            )
 
         result = await dream_cycle(
             semantic=sem,
@@ -270,16 +272,19 @@ def _make_dreaming_plugin(session):
         )
 
         lines = [
-            f"🌙 Dream cycle complete",
-            f"  • Facts sampled: {result['facts_sampled']}",
-            f"  • Triples found: {result['triples_found']}",
-            f"  • Triples written: {result['triples_written']}",
+            "Dream cycle complete",
+            f"  Facts sampled: {result['facts_sampled']}",
+            f"  Triples found: {result['triples_found']}",
+            f"  Triples written: {result['triples_written']}",
         ]
         if result["errors"]:
-            lines.append(f"  • Warnings: {'; '.join(result['errors'])}")
+            lines.append(f"  Warnings: {'; '.join(result['errors'])}")
         if dry_run:
-            lines.append("  *(dry-run — nothing was written)*")
-        return "\n".join(lines)
+            lines.append("  (dry-run — nothing was written)")
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output="\n".join(lines),
+        )
 
     tool_def = ToolDefinition(
         name="dream_cycle",
@@ -304,7 +309,7 @@ def _make_dreaming_plugin(session):
                 },
             },
         },
-        fn=_dream_cycle_tool,
+        executor=_dream_cycle_executor,
         trust_level=TrustLevel.SAFE,
     )
     return tool_def
