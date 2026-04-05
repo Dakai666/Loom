@@ -24,10 +24,10 @@ class InlineConfirmWidget(Widget):
     }
     InlineConfirmWidget.critical { border-left: thick #b87060; }
     .confirm-content { margin-right: 2; width: 1fr; }
-    .confirm-buttons { height: 1; width: auto; align: right middle; margin-top: 1; }
-    .btn-allow { background: #7a9e78; color: #1c1814; border: none; min-width: 10; margin-right: 1; height: 1; }
+    .confirm-buttons { height: auto; width: auto; align: right middle; }
+    .btn-allow { background: #7a9e78; color: #1c1814; border: none; min-width: 10; margin-right: 1; min-height: 1; padding: 0 1; }
     .btn-allow:hover { background: #9abf98; }
-    .btn-deny { background: #b87060; color: #1c1814; border: none; min-width: 10; height: 1; }
+    .btn-deny { background: #b87060; color: #1c1814; border: none; min-width: 10; min-height: 1; padding: 0 1; }
     .btn-deny:hover { background: #d09080; }
     """
 
@@ -71,12 +71,12 @@ class InlinePauseWidget(Widget):
         border-left: thick #8a7a5e;
     }
     .pause-content { margin-bottom: 1; color: #8a7a5e; }
-    .pause-input { background: #1c1814; color: #e0cfa0; border: none; height: 1; width: 1fr; margin-right: 1; }
+    .pause-input { background: #1c1814; color: #e0cfa0; border: none; height: auto; min-height: 1; padding: 0 1; width: 1fr; margin-right: 1; }
     .pause-input:focus { border: none; background: #2a241e; }
-    .pause-buttons { height: 1; width: auto; align: right middle; margin-top: 1; }
-    .btn-resume { background: #3a4a38; color: #7a9e78; border: none; height: 1; margin-right: 1; }
+    .pause-buttons { height: auto; width: auto; align: right middle; }
+    .btn-resume { background: #3a4a38; color: #7a9e78; border: none; min-height: 1; padding: 0 1; margin-right: 1; }
     .btn-resume:hover { background: #4a5a48; }
-    .btn-cancel { background: #4a2a28; color: #b87060; border: none; height: 1; }
+    .btn-cancel { background: #4a2a28; color: #b87060; border: none; min-height: 1; padding: 0 1; }
     .btn-cancel:hover { background: #5a3a38; }
     """
 
