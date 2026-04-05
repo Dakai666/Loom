@@ -1034,6 +1034,7 @@ class LoomSession:
             trust_level=tool_def.trust_level,
             capabilities=tool_def.capabilities,
             session_id=self.session_id,
+            abort_signal=self._abort.signal,
         )
         return await self._pipeline.execute(call, tool_def.executor)
 
