@@ -266,18 +266,25 @@ class SelfReflectionPlugin(LoomPlugin):
     def tools(self):
         """Register the ``reflect_self`` tool into the session registry."""
         from loom.core.harness.registry import ToolDefinition
+        from loom.core.harness.middleware import ToolResult
         from loom.core.harness.permissions import TrustLevel
 
-        async def _reflect_self_executor(call) -> str:
+        async def _reflect_self_executor(call) -> ToolResult:
             """Run a self-reflection cycle and return a summary."""
             session = call.args.get("_session")  # injected by on_session_start
             if session is None:
-                return "reflect_self: session context not available."
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=False,
+                    error="reflect_self: session context not available.",
+                )
 
             episodic = getattr(session, "_episodic", None)
             relational = getattr(session, "_relational", None)
             if episodic is None or relational is None:
-                return "reflect_self: memory stores not initialised."
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=False,
+                    error="reflect_self: memory stores not initialised.",
+                )
 
             async def _llm(prompt: str) -> str:
                 resp = await session.router.chat(
@@ -294,11 +301,17 @@ class SelfReflectionPlugin(LoomPlugin):
                 session_id=session.session_id,
             )
             if not written:
-                return "Self-reflection complete — no new patterns identified."
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=True,
+                    output="Self-reflection complete — no new patterns identified.",
+                )
             lines = [f"Self-reflection: {len(written)} pattern(s) recorded:"]
             for e in written:
                 lines.append(f"  [{e.predicate}] {e.object}")
-            return "\n".join(lines)
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=True,
+                output="\n".join(lines),
+            )
 
         tool = ToolDefinition(
             name="reflect_self",
