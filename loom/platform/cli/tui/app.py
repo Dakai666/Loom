@@ -244,6 +244,24 @@ class LoomApp(App):
         self._model = model
         self._db_path = db_path
         self._verbose = verbose
+        
+        try:
+            from textual.theme import Theme
+            loom_theme = Theme(
+                name="loom",
+                primary="#c8a464",
+                secondary="#8a7a5e",
+                warning="#c8924a",
+                error="#b87060",
+                success="#7a9e78",
+                background="#1c1814",
+                surface="#2a241e",
+                panel="#242018",
+                dark=True,
+            )
+            self.register_theme(loom_theme)
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header(id="header-bar", model=self._model, db_path=self._db_path)
