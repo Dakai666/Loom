@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.widgets import Button, Static, Input
 from textual.widget import Widget
 
@@ -15,46 +15,19 @@ class InlineConfirmWidget(Widget):
     DEFAULT_CSS = """
     InlineConfirmWidget {
         height: auto;
+        padding: 1;
         margin: 1 0;
-        padding: 1 2;
         background: #242018;
         border-left: thick #c8924a;
+        layout: horizontal;
+        align: left middle;
     }
-    InlineConfirmWidget.critical {
-        border-left: thick #b87060;
-    }
-    .confirm-title {
-        color: #c8924a;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    InlineConfirmWidget.critical .confirm-title {
-        color: #b87060;
-    }
-    .confirm-content {
-        color: #e0cfa0;
-    }
-    .confirm-args {
-        color: #8a7a5e;
-        margin-bottom: 1;
-    }
-    .confirm-buttons {
-        height: 3;
-    }
-    .btn-allow {
-        background: #7a9e78;
-        color: #1c1814;
-        border: solid #4a4038;
-        min-width: 14;
-        margin-right: 1;
-    }
+    InlineConfirmWidget.critical { border-left: thick #b87060; }
+    .confirm-content { margin-right: 2; width: 1fr; }
+    .confirm-buttons { height: 1; width: auto; align: right middle; margin-top: 1; }
+    .btn-allow { background: #7a9e78; color: #1c1814; border: none; min-width: 10; margin-right: 1; height: 1; }
     .btn-allow:hover { background: #9abf98; }
-    .btn-deny {
-        background: #b87060;
-        color: #1c1814;
-        border: solid #4a4038;
-        min-width: 14;
-    }
+    .btn-deny { background: #b87060; color: #1c1814; border: none; min-width: 10; height: 1; }
     .btn-deny:hover { background: #d09080; }
     """
 
@@ -67,16 +40,14 @@ class InlineConfirmWidget(Widget):
         self._resolved = False
 
     def compose(self) -> ComposeResult:
-        if self._trust_label == "CRITICAL":
-            self.add_class("critical")
-        
+        if self._trust_label == "CRITICAL": self.add_class("critical")
         colour = "#b87060" if self._trust_label == "CRITICAL" else "#c8924a"
         if self._trust_label == "SAFE": colour = "#7a9e78"
 
-        yield Static("Action Required", classes="confirm-title")
-        yield Static(f"[bold]{escape(self._tool_name)}[/bold] [bold {colour}]{self._trust_label}[/]", classes="confirm-content")
-        yield Static(f"[dim]{escape(self._args_preview)}[/dim]", classes="confirm-args")
-        with Horizontal(classes="confirm-buttons", id="btn-group"):
+        yield Static(f"[bold {colour}]Action Required ({self._trust_label})[/]\n"
+                     f"[bold]{escape(self._tool_name)}[/] [dim]{escape(self._args_preview)}[/dim]", 
+                     classes="confirm-content")
+        with Horizontal(classes="confirm-buttons"):
             yield Button("✓ Allow", id="btn-allow", classes="btn-allow")
             yield Button("✗ Deny", id="btn-deny", classes="btn-deny")
 
@@ -85,48 +56,27 @@ class InlineConfirmWidget(Widget):
         self._resolved = True
         is_allow = event.button.id == "btn-allow"
         
-        self.query_one("#btn-group").remove()
-        status = "[#7a9e78]✓ Accepted[/]" if is_allow else "[#b87060]✗ Denied[/]"
-        self.mount(Static(status))
-        
         if not self._future.done():
             self._future.set_result(is_allow)
+        
+        self.remove()
 
 class InlinePauseWidget(Widget):
     DEFAULT_CSS = """
     InlinePauseWidget {
         height: auto;
+        padding: 1;
         margin: 1 0;
-        padding: 1 2;
         background: #242018;
         border-left: thick #8a7a5e;
     }
-    .pause-title {
-        color: #c8a464;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    .pause-body { color: #8a7a5e; margin-bottom: 1; }
-    .pause-input {
-        background: #1c1814;
-        color: #e0cfa0;
-        border: solid #4a4038;
-        margin-bottom: 1;
-    }
-    .pause-input:focus { border: solid #c8a464; }
-    .pause-buttons { height: 3; }
-    .btn-resume {
-        background: #3a4a38;
-        color: #7a9e78;
-        border: solid #4a4038;
-        margin-right: 1;
-    }
+    .pause-content { margin-bottom: 1; color: #8a7a5e; }
+    .pause-input { background: #1c1814; color: #e0cfa0; border: none; height: 1; width: 1fr; margin-right: 1; }
+    .pause-input:focus { border: none; background: #2a241e; }
+    .pause-buttons { height: 1; width: auto; align: right middle; margin-top: 1; }
+    .btn-resume { background: #3a4a38; color: #7a9e78; border: none; height: 1; margin-right: 1; }
     .btn-resume:hover { background: #4a5a48; }
-    .btn-cancel {
-        background: #4a2a28;
-        color: #b87060;
-        border: solid #4a4038;
-    }
+    .btn-cancel { background: #4a2a28; color: #b87060; border: none; height: 1; }
     .btn-cancel:hover { background: #5a3a38; }
     """
 
@@ -137,12 +87,12 @@ class InlinePauseWidget(Widget):
         self._resolved = False
 
     def compose(self) -> ComposeResult:
-        yield Static("⏸ Agent Paused", classes="pause-title")
-        yield Static(f"Completed {self._tool_count} tool call(s). Waiting for your input.", classes="pause-body")
-        yield Input(placeholder="Redirect message (or leave empty to resume)...", classes="pause-input")
-        with Horizontal(classes="pause-buttons", id="btn-group"):
+        yield Static(f"[bold #c8a464]⏸ Paused[/] [dim]({self._tool_count} tool calls so far)[/]", classes="pause-content")
+        with Horizontal():
+            yield Input(placeholder="Redirect message (or empty to resume)...", classes="pause-input")
+        with Horizontal(classes="pause-buttons"):
             yield Button("▶ Resume", id="btn-resume", classes="btn-resume")
-            yield Button("✕ Cancel (Stop)", id="btn-cancel", classes="btn-cancel")
+            yield Button("✕ Stop", id="btn-cancel", classes="btn-cancel")
 
     def on_mount(self) -> None:
         safe_focus = self.query_one(Input)
@@ -165,15 +115,7 @@ class InlinePauseWidget(Widget):
         if self._resolved: return
         self._resolved = True
         
-        self.query_one(Input).remove()
-        self.query_one("#btn-group").remove()
-        
-        if result == "__cancel__":
-            self.mount(Static("[#b87060]✕ Turn Cancelled[/]"))
-        elif result:
-            self.mount(Static(f"[#7a9e78]▶ Resumed with:[/] [dim]{escape(result)}[/]"))
-        else:
-            self.mount(Static("[#7a9e78]▶ Resumed[/]"))
-            
         if not self._future.done():
             self._future.set_result(result)
+            
+        self.remove()
