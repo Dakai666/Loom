@@ -62,7 +62,7 @@ class LoomCommandProvider(Provider):
         commands = [
             ("Toggle Workspace Sidebar", app.action_toggle_sidebar, "Hide/show the right sidebar"),
             ("Switch to Artifacts Tab", lambda: self._focus_tab(WorkspaceTab.ARTIFACTS), "View created artifacts"),
-            ("Switch to Activity Log Tab", lambda: self._focus_tab(WorkspaceTab.ACTIVITY), "View tool activity timeline"),
+            ("Switch to Swarm Dashboard", lambda: self._focus_tab(WorkspaceTab.SWARM), "View active agents and history"),
             ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
             ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
             ("Toggle Verbose Tools", app.action_toggle_verbose, "Switch between compact and verbose tool logs"),
@@ -280,7 +280,7 @@ class LoomApp(App):
         workspace.toggle_tab()
         labels = {
             WorkspaceTab.ARTIFACTS: "Artifacts",
-            WorkspaceTab.ACTIVITY:  "Activity",
+            WorkspaceTab.SWARM:     "Swarm",
             WorkspaceTab.BUDGET:    "Budget",
         }
         self.notify(f"Workspace: {labels[workspace.active_tab]}", timeout=1)
