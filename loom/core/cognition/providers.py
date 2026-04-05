@@ -17,6 +17,8 @@ Assistant: {"role": "assistant", "content": "...", "tool_calls": [...]}  # tool_
 Tool:      {"role": "tool", "tool_call_id": "...", "content": "..."}
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
@@ -65,7 +67,7 @@ async def _retry_async(
             if not retryable or attempt == max_retries - 1:
                 raise
             await asyncio.sleep(base_delay * (2 ** attempt))
-    raise last_exc  # unreachable, but satisfies type checkers
+    raise last_exc  # unreachable
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +131,21 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 8096,
-    ) -> AsyncIterator[tuple[str, "LLMResponse | None"]]:
+        *,
+        abort_signal: Any = None,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
         """
-        Stream a chat response.  Yields ``(chunk, None)`` for each text
-        fragment and ``("", LLMResponse)`` once as the final item.
-        Default implementation falls back to non-streaming ``chat()``.
+        Stream a chat response.
+
+        Yields ``(chunk, None)`` for each text fragment and
+        ``("", LLMResponse)`` once as the final item.
+
+        Parameters
+        ----------
+        abort_signal:
+            An ``asyncio.Event`` from an ``AbortController``. When the event
+            is set (abort requested), the HTTP request is cancelled and the
+            stream exits cleanly.  Pass ``None`` for no abort support.
         """
         response = await self.chat(messages=messages, tools=tools, max_tokens=max_tokens)
         if response.text:
@@ -181,7 +193,6 @@ def _parse_xml_tool_calls(content: str) -> list[ToolUse]:
         args: dict[str, Any] = {}
         for pm in _XML_PARAM_RE.finditer(m.group(2)):
             raw_val = pm.group(2).strip()
-            # Try to deserialise JSON values; fall back to raw string.
             try:
                 args[pm.group(1)] = json.loads(raw_val)
             except (json.JSONDecodeError, ValueError):
@@ -211,7 +222,9 @@ class MiniMaxProvider(LLMProvider):
         from openai import OpenAI, AsyncOpenAI
         self._api_key = api_key
         self._client = OpenAI(api_key=api_key, base_url=self.BASE_URL, timeout=timeout)
-        self._async_client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL, timeout=timeout)
+        self._async_client = AsyncOpenAI(
+            api_key=api_key, base_url=self.BASE_URL, timeout=timeout,
+        )
         self.model = model
         self._timeout = timeout
         self._max_retries = max_retries
@@ -226,7 +239,9 @@ class MiniMaxProvider(LLMProvider):
 
         async def _call() -> LLMResponse:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, self._sync_chat, messages, tools, max_tokens),
+                loop.run_in_executor(
+                    None, self._sync_chat, messages, tools, max_tokens,
+                ),
                 timeout=self._timeout,
             )
 
@@ -251,11 +266,8 @@ class MiniMaxProvider(LLMProvider):
         msg = choice.message
         content_text: str = msg.content or ""
 
-        # --- Normalize tool calls ---
         tool_uses: list[ToolUse] = []
-
         if msg.tool_calls:
-            # Standard OpenAI-style tool_calls (preferred)
             for tc in msg.tool_calls:
                 try:
                     args = json.loads(tc.function.arguments)
@@ -267,10 +279,8 @@ class MiniMaxProvider(LLMProvider):
                     args=args,
                 ))
         elif content_text and "<minimax:tool_call>" in content_text:
-            # XML fallback
             tool_uses = _parse_xml_tool_calls(content_text)
 
-        # --- Normalize stop_reason ---
         finish = choice.finish_reason or "stop"
         if finish in ("tool_calls", "function_call"):
             stop_reason = "tool_use"
@@ -278,11 +288,9 @@ class MiniMaxProvider(LLMProvider):
             stop_reason = "max_tokens"
         else:
             stop_reason = "end_turn"
-
         if tool_uses and stop_reason != "tool_use":
             stop_reason = "tool_use"
 
-        # --- Build raw_message for history ---
         raw_message: dict[str, Any] = {"role": "assistant", "content": content_text}
         if msg.tool_calls:
             raw_message["tool_calls"] = [
@@ -312,6 +320,8 @@ class MiniMaxProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -324,43 +334,44 @@ class MiniMaxProvider(LLMProvider):
             kwargs["tools"] = self.format_tools(tools)
 
         full_content = ""
-        tc_accum: dict[int, dict] = {}   # index → {id, name, arguments}
+        tc_accum: dict[int, dict] = {}
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
 
-        stream = await self._async_client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            # Usage-only final chunk
-            if not chunk.choices:
-                if chunk.usage:
-                    input_tokens = chunk.usage.prompt_tokens or 0
-                    output_tokens = chunk.usage.completion_tokens or 0
-                continue
+        stream = self._async_client.chat.completions.create(**kwargs)
+        try:
+            # When abort_signal is set, break after the next chunk.
+            # httpx closes the underlying connection on stream exit.
+            async for chunk in stream:
+                if abort_signal is not None and abort_signal.is_set():
+                    break
+                if not chunk.choices:
+                    if chunk.usage:
+                        input_tokens = chunk.usage.prompt_tokens or 0
+                        output_tokens = chunk.usage.completion_tokens or 0
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    full_content += delta.content
+                    yield (delta.content, None)
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tc_accum[idx]["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            tc_accum[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            tc_accum[idx]["arguments"] += tc_delta.function.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+        finally:
+            await stream.aclose()
 
-            choice = chunk.choices[0]
-            delta = choice.delta
-
-            if delta.content:
-                full_content += delta.content
-                yield (delta.content, None)
-
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tc_accum:
-                        tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
-                    if tc_delta.id:
-                        tc_accum[idx]["id"] = tc_delta.id
-                    if tc_delta.function and tc_delta.function.name:
-                        tc_accum[idx]["name"] = tc_delta.function.name
-                    if tc_delta.function and tc_delta.function.arguments:
-                        tc_accum[idx]["arguments"] += tc_delta.function.arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        # Build normalized response
         tool_uses: list[ToolUse] = []
         for idx in sorted(tc_accum):
             tc = tc_accum[idx]
@@ -383,7 +394,6 @@ class MiniMaxProvider(LLMProvider):
             stop_reason = "max_tokens"
         else:
             stop_reason = "end_turn"
-
         if tool_uses and stop_reason != "tool_use":
             stop_reason = "tool_use"
 
@@ -392,22 +402,11 @@ class MiniMaxProvider(LLMProvider):
             tool_calls_out = []
             for i in sorted(tc_accum):
                 raw_args = tc_accum[i]["arguments"]
-                # Validate the accumulated arguments JSON.  If MiniMax truncated
-                # the stream mid-JSON (e.g. server load, context overflow) the
-                # string is malformed.  Re-serialize from the already-parsed args
-                # dict so the stored raw_message is always valid JSON — otherwise
-                # a resumed session will send bad arguments and get a 2013 error.
                 try:
-                    json.loads(raw_args)   # just validate; keep original string if OK
+                    json.loads(raw_args)
                     valid_args = raw_args
                 except (json.JSONDecodeError, ValueError):
-                    # Fall back to the parsed (possibly partial) dict, re-serialized
                     parsed_args = {}
-                    try:
-                        parsed_args = json.loads(raw_args)
-                    except Exception:
-                        pass
-                    # tool_uses already parsed this above; find the matching entry
                     for tu in tool_uses:
                         if tu.id == tc_accum[i]["id"] or tu.name == tc_accum[i]["name"]:
                             parsed_args = tu.args
@@ -481,7 +480,9 @@ class AnthropicProvider(LLMProvider):
 
         async def _call() -> LLMResponse:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, self._sync_chat, messages, tools, max_tokens),
+                loop.run_in_executor(
+                    None, self._sync_chat, messages, tools, max_tokens,
+                ),
                 timeout=self._timeout,
             )
 
@@ -526,7 +527,6 @@ class AnthropicProvider(LLMProvider):
         }
         stop_reason = stop_reason_map.get(response.stop_reason, "end_turn")
 
-        # Build OpenAI-style raw_message
         raw_message: dict[str, Any] = {"role": "assistant", "content": text or ""}
         if tool_uses:
             raw_message["tool_calls"] = [
@@ -555,6 +555,8 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
         anthropic_msgs = _to_anthropic_messages(messages)
         kwargs: dict[str, Any] = {
@@ -579,29 +581,36 @@ class AnthropicProvider(LLMProvider):
         stop_reason = "end_turn"
 
         async with self._async_client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                full_text += text
-                yield (text, None)
+            try:
+                async for text in stream.text_stream:
+                    if abort_signal is not None and abort_signal.is_set():
+                        break
+                    full_text += text
+                    yield (text, None)
+                final = await stream.get_final_message()
+            except Exception:
+                # Stream exited via break above or external cancellation.
+                # Proceed to build the response from whatever we accumulated.
+                final = None
+                pass
 
-            final = await stream.get_final_message()
-
-        for block in final.content:
-            if block.type == "tool_use":
-                tool_uses.append(ToolUse(
-                    id=block.id,
-                    name=block.name,
-                    args=dict(block.input),
-                ))
-
-        stop_reason = {
-            "end_turn": "end_turn",
-            "tool_use": "tool_use",
-            "max_tokens": "max_tokens",
-        }.get(final.stop_reason, "end_turn")
-
-        if final.usage:
-            input_tokens = final.usage.input_tokens
-            output_tokens = final.usage.output_tokens
+        if final is not None:
+            for block in final.content:
+                if block.type == "tool_use":
+                    tool_uses.append(ToolUse(
+                        id=block.id,
+                        name=block.name,
+                        args=dict(block.input),
+                    ))
+            stop_reason_map = {
+                "end_turn": "end_turn",
+                "tool_use": "tool_use",
+                "max_tokens": "max_tokens",
+            }
+            stop_reason = stop_reason_map.get(final.stop_reason, "end_turn")
+            if final.usage:
+                input_tokens = final.usage.input_tokens
+                output_tokens = final.usage.output_tokens
 
         raw_message: dict[str, Any] = {"role": "assistant", "content": full_text or ""}
         if tool_uses:
@@ -629,8 +638,6 @@ class AnthropicProvider(LLMProvider):
     def format_tool_result(
         self, tool_use_id: str, content: str, success: bool = True
     ) -> dict[str, Any]:
-        # Anthropic tool results also go back in OpenAI format at the router level;
-        # conversion happens inside _sync_chat via _to_anthropic_messages.
         return {
             "role": "tool",
             "tool_call_id": tool_use_id,
@@ -638,7 +645,6 @@ class AnthropicProvider(LLMProvider):
         }
 
     def format_tools(self, tools: list[dict]) -> list[dict]:
-        # Anthropic does not use the OpenAI wrapper format.
         return [
             {
                 "name": t["name"],
@@ -658,14 +664,6 @@ def _to_anthropic_messages(
 ) -> list[dict[str, Any]]:
     """
     Convert OpenAI-style canonical messages to Anthropic wire format.
-
-    OpenAI tool result: {"role": "tool", "tool_call_id": "...", "content": "..."}
-    Anthropic tool result: {"role": "user", "content": [{"type": "tool_result", ...}]}
-
-    OpenAI assistant with tool_calls:
-        {"role": "assistant", "content": "...", "tool_calls": [...]}
-    Anthropic:
-        {"role": "assistant", "content": [{"type": "text"}, {"type": "tool_use", ...}]}
     """
     result: list[dict[str, Any]] = []
     i = 0
@@ -689,12 +687,13 @@ def _to_anthropic_messages(
                     "name": tc["function"]["name"],
                     "input": json.loads(tc["function"]["arguments"]),
                 })
-            result.append({"role": "assistant",
-                           "content": content_blocks or msg.get("content", "")})
+            result.append({
+                "role": "assistant",
+                "content": content_blocks or msg.get("content", ""),
+            })
             i += 1
 
         elif role == "tool":
-            # Collect consecutive tool results into one user message
             tool_results: list[dict] = []
             while i < len(messages) and messages[i]["role"] == "tool":
                 tr = messages[i]

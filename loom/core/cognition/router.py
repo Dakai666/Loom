@@ -24,6 +24,7 @@ Usage
 """
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 from .providers import LLMProvider, LLMResponse
 
@@ -79,11 +80,22 @@ class LLMRouter:
         messages: list[dict],
         tools: list[dict] | None = None,
         max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
-        """Yield ``(chunk, None)`` text fragments then ``("", LLMResponse)``."""
+        """
+        Yield ``(chunk, None)`` text fragments then ``("", LLMResponse)`` once done.
+
+        Parameters
+        ----------
+        abort_signal:
+            An ``asyncio.Event`` from an ``AbortController``. When set, the
+            in-flight HTTP request is cancelled and the stream exits cleanly.
+        """
         provider = self.get_provider(model)
         async for item in provider.stream_chat(
-            messages=messages, tools=tools, max_tokens=max_tokens
+            messages=messages, tools=tools, max_tokens=max_tokens,
+            abort_signal=abort_signal,
         ):
             yield item
 
@@ -100,3 +112,19 @@ class LLMRouter:
     @property
     def providers(self) -> list[str]:
         return list(self._providers)
+
+
+from .providers import LLMProvider, LLMResponse, ToolUse
+from .router import LLMRouter
+from .context import ContextBudget
+from .reflection import ReflectionAPI
+from .prompt_stack import PromptStack, PromptLayer
+
+__all__ = [
+    "LLMProvider", "LLMResponse", "ToolUse",
+    "LLMRouter",
+    "ContextBudget",
+    "ReflectionAPI",
+    "PromptStack",
+    "PromptLayer",
+]

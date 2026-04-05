@@ -62,6 +62,7 @@ from loom.core.harness.middleware import (
     TraceMiddleware,
 )
 from loom.core.harness.permissions import PermissionContext, TrustLevel
+from loom.core.infra import AbortController, wait_aborted
 from loom.core.harness.registry import ToolRegistry
 from loom.core.memory.embeddings import build_embedding_provider
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
@@ -360,6 +361,8 @@ class LoomSession:
         self._resume_event: asyncio.Event = asyncio.Event()
         # When True, stream_turn() auto-pauses after every tool batch.
         self.hitl_mode: bool = False
+        # Abort controller for cancellation of in-flight LLM streaming calls.
+        self._abort = AbortController()
 
     # ------------------------------------------------------------------
     # Personality management
@@ -506,6 +509,7 @@ class LoomSession:
 
     def cancel(self) -> None:
         """Abandon the rest of a paused stream_turn() — yields TurnDone and exits."""
+        self._abort.abort()
         self._cancel_requested = True
         self._pause_requested = False
         self._resume_event.set()
@@ -557,7 +561,10 @@ class LoomSession:
     # ------------------------------------------------------------------
 
     async def stream_turn(
-        self, user_input: str
+        self,
+        user_input: str,
+        *,
+        abort_signal: "asyncio.Event | None" = None,
     ) -> AsyncIterator[TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone]:
         """
         Run one complete agent turn and yield typed UI events.
@@ -611,6 +618,12 @@ class LoomSession:
         _think_parts: list[str] = []  # accumulates think content for /think command
 
         while True:
+            # Check abort signal at top of each LLM call iteration.
+            # abort_signal is external (e.g. from AutonomyDaemon);
+            # self._abort.signal is internal (from cancel()).
+            sig = abort_signal if abort_signal is not None else self._abort.signal
+            if sig.is_set():
+                break
             response: Any = None
             _think_shown = False  # reset per streaming call (each tool round can think again)
 
@@ -625,6 +638,7 @@ class LoomSession:
                 messages=self.messages,
                 tools=tools,
                 max_tokens=8096,
+                abort_signal=abort_signal,
             ):
                 if final is None:
                     if chunk:
