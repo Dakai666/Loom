@@ -218,13 +218,20 @@ class LoomApp(App):
     COMMANDS = App.COMMANDS | {LoomCommandProvider}
 
     BINDINGS = [
+        # Primary global hotkeys (shown in footer)
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
-        Binding("ctrl+k", "command_palette", "Cmd Palette", show=True),
-        Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=True),
-        Binding("escape", "interrupt", "Interrupt", show=True),
+        Binding("escape", "interrupt", "Stop", show=True),
+        Binding("ctrl+s", "session_picker", "Sessions", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
-        Binding("f1", "toggle_verbose", "Verbose", show=True),
-        Binding("f2", "toggle_space", "Workspace", show=False),
+        # F-keys for functions (resilient in IDE terminals)
+        Binding("f1", "command_palette", "Commands", show=True),
+        Binding("f2", "toggle_space", "Workspace", show=True),
+        Binding("f3", "toggle_verbose", "Verbose", show=True),
+        Binding("f4", "toggle_sidebar", "Sidebar", show=True),
+        # Fallback VS Code style hotkeys (might be intercepted by IDEs)
+        Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
+        Binding("ctrl+k", "command_palette", "Commands", show=False),
+        Binding("ctrl+p", "command_palette", "Commands", show=False),
     ]
 
     def __init__(
