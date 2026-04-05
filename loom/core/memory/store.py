@@ -110,6 +110,36 @@ CREATE TABLE IF NOT EXISTS session_log (
 
 CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
+
+-- FTS5 Virtual Tables & Sync Triggers
+
+CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
+USING fts5(key, value, content='semantic_entries', content_rowid='rowid');
+
+CREATE TRIGGER IF NOT EXISTS semantic_entries_ai AFTER INSERT ON semantic_entries BEGIN
+  INSERT INTO semantic_fts(rowid, key, value) VALUES (new.rowid, new.key, new.value);
+END;
+CREATE TRIGGER IF NOT EXISTS semantic_entries_ad AFTER DELETE ON semantic_entries BEGIN
+  INSERT INTO semantic_fts(semantic_fts, rowid, key, value) VALUES ('delete', old.rowid, old.key, old.value);
+END;
+CREATE TRIGGER IF NOT EXISTS semantic_entries_au AFTER UPDATE ON semantic_entries BEGIN
+  INSERT INTO semantic_fts(semantic_fts, rowid, key, value) VALUES ('delete', old.rowid, old.key, old.value);
+  INSERT INTO semantic_fts(rowid, key, value) VALUES (new.rowid, new.key, new.value);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts
+USING fts5(name, tags, body, content='skill_genomes', content_rowid='rowid');
+
+CREATE TRIGGER IF NOT EXISTS skill_genomes_ai AFTER INSERT ON skill_genomes BEGIN
+  INSERT INTO skill_fts(rowid, name, tags, body) VALUES (new.rowid, new.name, new.tags, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS skill_genomes_ad AFTER DELETE ON skill_genomes BEGIN
+  INSERT INTO skill_fts(skill_fts, rowid, name, tags, body) VALUES ('delete', old.rowid, old.name, old.tags, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS skill_genomes_au AFTER UPDATE ON skill_genomes BEGIN
+  INSERT INTO skill_fts(skill_fts, rowid, name, tags, body) VALUES ('delete', old.rowid, old.name, old.tags, old.body);
+  INSERT INTO skill_fts(rowid, name, tags, body) VALUES (new.rowid, new.name, new.tags, new.body);
+END;
 """
 
 
@@ -142,6 +172,14 @@ class SQLiteStore:
                 await db.commit()
             except Exception:
                 pass  # Column already exists — this is expected on all but the first run
+
+            # Ensure FTS indexes are up-to-date with existing content (idempotent, fast)
+            try:
+                await db.execute("INSERT INTO semantic_fts(semantic_fts) VALUES ('rebuild')")
+                await db.execute("INSERT INTO skill_fts(skill_fts) VALUES ('rebuild')")
+                await db.commit()
+            except Exception:
+                pass
 
     @asynccontextmanager
     async def connect(self):
