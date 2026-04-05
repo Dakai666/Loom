@@ -142,6 +142,21 @@ enabled  = false           # set true to activate daemon
 # notify       = true
 # notify_thread = 0
 
+# ── Example: offline dreaming (background knowledge synthesis) ─────────────────
+# Requires the DreamingPlugin to be registered (auto-loads from ~/.loom/plugins/
+# if you place dreaming.py there, or use loom.register_plugin() in a startup
+# script).  The agent's dream_cycle tool does the actual work.
+#
+# [[autonomy.schedules]]
+# name         = "offline_dreaming"
+# cron         = "0 3 * * *"        # 03:00 UTC = 11:00 Asia/Taipei
+# intent       = """Run dream_cycle to synthesise insights from semantic memory.
+#                   Call the dream_cycle tool with default settings and report
+#                   how many new relational insights were written."""
+# trust_level  = "safe"             # no confirmation needed — pure memory write
+# notify       = false
+# notify_thread = 0                 # replace with a Discord thread ID to log results
+
 # ─────────────────────────────────────────────
 # Notifications
 # ─────────────────────────────────────────────
