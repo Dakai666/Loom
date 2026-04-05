@@ -59,12 +59,22 @@ class PermissionContext:
     session_id: str
     # Tools the user has explicitly authorized for this session (GUARDED level).
     session_authorized: set[str] = field(default_factory=set)
+    # When True, EXEC-capability tools (run_bash) are session-pre-authorized
+    # provided strict_sandbox is enabled and the command does not escape the
+    # workspace via absolute paths.  Toggled by /auto.
+    exec_auto: bool = False
 
     def authorize(self, tool_name: str) -> None:
         self.session_authorized.add(tool_name)
 
     def revoke(self, tool_name: str) -> None:
         self.session_authorized.discard(tool_name)
+
+    def enable_exec_auto(self) -> None:
+        self.exec_auto = True
+
+    def disable_exec_auto(self) -> None:
+        self.exec_auto = False
 
     def is_authorized(self, tool_name: str, trust_level: TrustLevel) -> bool:
         if trust_level == TrustLevel.SAFE:

@@ -342,7 +342,7 @@ class LoomDiscordBot:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         # Commands that require being in a thread
-        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget"}
+        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto"}
         if command in _needs_session and not is_thread:
             await message.channel.send(
                 f"`{command}` must be used inside a session thread.  "
@@ -425,6 +425,27 @@ class LoomDiscordBot:
                         f"Available: `{'`, `'.join(avail) or '(none)'}`"
                     )
 
+        elif command == "/auto":
+            assert session is not None
+            if not session._strict_sandbox:
+                await message.channel.send(
+                    "❌ `/auto` requires `strict_sandbox = true` in `loom.toml`.\n"
+                    "Without workspace confinement, auto-approving `run_bash` "
+                    "would grant unrestricted shell access."
+                )
+            else:
+                session.perm.exec_auto = not session.perm.exec_auto
+                state = "on" if session.perm.exec_auto else "off"
+                if session.perm.exec_auto:
+                    await message.channel.send(
+                        f"✅ Exec auto-approve: **{state}** — `run_bash` pre-authorized within workspace.\n"
+                        "Absolute paths that escape the workspace still require confirmation."
+                    )
+                else:
+                    await message.channel.send(
+                        f"🔒 Exec auto-approve: **{state}** — `run_bash` will confirm every call."
+                    )
+
         elif command == "/pause":
             assert session is not None
             session.hitl_mode = not session.hitl_mode
@@ -466,6 +487,7 @@ class LoomDiscordBot:
                 "`/personality off` — Remove active persona\n"
                 "`/think` — View last turn's reasoning chain\n"
                 "`/compact` — Compress older context\n"
+                "`/auto` — Toggle run_bash auto-approve (requires strict_sandbox)\n"
                 "`/pause` — Toggle HITL auto-pause after each tool batch\n"
                 "`/stop` — Immediately cancel the current running turn\n"
                 "`/budget` — Show context token usage\n"
@@ -505,11 +527,11 @@ class LoomDiscordBot:
         except discord.HTTPException:
             pass
 
-        # status_msg will hold tool activity (edited sparsely — OK for Markdown)
+        # Placeholder shown while working; deleted if no tools were used.
         status_msg = await message.channel.send("-# ◌ working…")
 
-        tool_buf = ""      # accumulates tool activity lines
-        response_buf = ""  # accumulates LLM response text (NOT edited into status_msg)
+        tool_buf = ""       # accumulates tool activity lines (edited into status_msg)
+        narration_buf = ""  # accumulates LLM text; flushed as send-once before each tool
 
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
@@ -519,19 +541,26 @@ class LoomDiscordBot:
                         # "▸ thinking…" is a TUI collapse marker — skip in Discord.
                         if event.text.strip() == "▸ thinking…":
                             continue
-                        response_buf += event.text
+                        narration_buf += event.text
 
                     elif isinstance(event, ToolBegin):
-                        # One line per tool call: ToolBegin starts it, ToolEnd
-                        # appends the result on the SAME line (no leading \n).
+                        # Flush narration before tool activity (send-once, ⬥ prefix).
+                        narration = narration_buf.strip()
+                        narration_buf = ""
+                        if len(narration) >= 10:
+                            await message.channel.send(f"⬥ {narration}")
+
+                        # Build tool line with kimaki-style symbol:
+                        #   ◼︎ for file writes, ┣ for everything else.
                         if event.args:
                             first_val = next(iter(event.args.values()), "")
                             primary = str(first_val).replace("\n", "↵")[:120]
                             args_str = f'"{primary}"' if primary else ""
                         else:
                             args_str = ""
+                        symbol = "◼︎" if event.name in ("write_file",) else "┣"
                         tool_line = (
-                            f"\n⟳ {event.name}"
+                            f"\n{symbol} {event.name}"
                             + (f" — {args_str}" if args_str else "")
                         )
                         tool_buf += tool_line
@@ -598,9 +627,9 @@ class LoomDiscordBot:
                     )
                 else:
                     await _safe_edit(status_msg, "🛑 *(stopped)*")
-                partial = response_buf.strip()
+                partial = narration_buf.strip()
                 if partial:
-                    await message.channel.send(partial + "\n\n🛑 *(stopped)*")
+                    await message.channel.send(f"⬥ {partial}\n\n🛑 *(stopped)*")
                 raise
 
             except Exception as exc:
@@ -613,18 +642,28 @@ class LoomDiscordBot:
         if tool_buf:
             await _safe_edit(status_msg, tool_buf.lstrip())
         else:
-            # No tools were used — the placeholder is just noise; remove it.
             try:
                 await status_msg.delete()
             except discord.HTTPException:
                 pass
 
-        # ── Send response as a fresh message (full Markdown, no flicker) ──
-        final = response_buf.strip() or "*(no response)*"
-        remaining = final
-        while remaining:
-            chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
-            await message.channel.send(chunk)
+        # ── Send any remaining narration ──────────────────────────────────
+        final = narration_buf.strip()
+        if not final and not tool_buf:
+            final = "*(no response)*"
+        if final:
+            remaining = f"⬥ {final}" if not final.startswith("⬥") else final
+            while remaining:
+                chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
+                await message.channel.send(chunk)
+
+        # ── Footer: persona / context / model ────────────────────────────
+        persona = session.current_personality or "default"
+        pct = session.budget.usage_fraction * 100
+        model = session.model
+        await message.channel.send(
+            f"-# {persona}  ·  context {pct:.0f}%  ·  {model}"
+        )
 
         # ── Mark done ─────────────────────────────────────────────────────
         try:

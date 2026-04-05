@@ -114,6 +114,7 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `/sessions` | Browse and switch sessions |
 | `/personality <name>` | Switch cognitive persona (adversarial / minimalist / architect / researcher / operator) |
 | `/personality off` | Remove active persona |
+| `/auto` | Toggle `run_bash` session auto-approve — requires `strict_sandbox = true`; absolute paths escaping the workspace still re-confirm |
 | `/pause` | Toggle HITL mode — agent pauses after each tool batch, awaiting your input |
 | `/stop` | **Immediately** cancel the current running turn (no waiting for a boundary) |
 | `/budget` | Show context token usage (Discord only; TUI has the Budget panel) |
@@ -227,6 +228,9 @@ require_audit_log   = true
 
 # Confine run_bash to workspace root (cwd=workspace).
 # File I/O tools always enforce workspace boundaries regardless.
+# Enable this together with /auto for the recommended balanced workflow:
+# run_bash auto-approved for workspace-relative commands, but still
+# re-confirmed when an absolute path escaping the workspace is detected.
 strict_sandbox = false
 
 [autonomy]

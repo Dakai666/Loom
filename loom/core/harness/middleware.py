@@ -171,18 +171,48 @@ class BlastRadiusMiddleware(Middleware):
 
     `confirm_fn` is injected by the platform layer so the middleware
     stays platform-agnostic (CLI prompt vs. webhook vs. Telegram).
+
+    `exec_escape_fn` is an optional callable injected by the platform layer
+    when strict_sandbox is enabled.  It receives a ToolCall and returns True
+    if the command would escape the workspace via absolute paths.  When it
+    returns True, exec_auto pre-authorization is bypassed and the user is
+    prompted even in auto mode.
     """
 
     def __init__(
         self,
         perm_ctx: Any,
         confirm_fn: Callable[[ToolCall], Awaitable[bool]],
+        exec_escape_fn: Callable[[ToolCall], bool] | None = None,
     ) -> None:
         self._perm = perm_ctx
         self._confirm = confirm_fn
+        self._exec_escape_fn = exec_escape_fn
+
+    def _exec_auto_approved(self, call: ToolCall) -> bool:
+        """
+        Return True if exec_auto mode can skip confirmation for this call.
+
+        Conditions (all must hold):
+        1. User has toggled exec_auto on this session.
+        2. The tool has EXEC capability (currently: run_bash).
+        3. Either no escape-detector is wired, OR the command does not escape
+           the workspace via absolute paths.
+        """
+        if not self._perm.exec_auto:
+            return False
+        if not (call.capabilities & ToolCapability.EXEC):
+            return False
+        if self._exec_escape_fn is not None and self._exec_escape_fn(call):
+            return False   # escape detected — fall through to confirmation
+        return True
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         if self._perm.is_authorized(call.tool_name, call.trust_level):
+            return await next(call)
+
+        # exec_auto: session-level pre-authorization for sandboxed shell commands
+        if self._exec_auto_approved(call):
             return await next(call)
 
         allowed = await self._confirm(call)

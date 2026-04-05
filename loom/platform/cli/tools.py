@@ -184,6 +184,35 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
 from loom.core.harness.registry import ToolDefinition
 
 
+def make_exec_escape_fn(workspace: Path):
+    """
+    Return an escape-detector callable for use with BlastRadiusMiddleware.
+
+    The returned function inspects a run_bash ToolCall's `command` argument and
+    returns True if any token looks like an absolute path that resolves outside
+    *workspace*.  False positives are acceptable (they cause an extra confirm
+    prompt); false negatives would silently bypass the sandbox.
+
+    Only injected when strict_sandbox=True.  When strict_sandbox=False the
+    detector is not wired — the user has explicitly opted out of workspace
+    confinement, so there is nothing meaningful to check.
+    """
+    def _would_escape(call: "ToolCall") -> bool:
+        command = call.args.get("command", "")
+        # Match tokens that start with / or a Windows drive letter (C:\)
+        for token in re.findall(r'(?:^|(?<=\s))[/\\][^\s;|&>\'\"]*|[A-Za-z]:[/\\][^\s;|&>\'\"]*', command):
+            try:
+                candidate = Path(token).resolve()
+                candidate.relative_to(workspace)
+                # Relative_to succeeded → inside workspace, fine
+            except ValueError:
+                return True   # resolves outside workspace
+            except Exception:
+                pass          # can't resolve — ignore
+        return False
+    return _would_escape
+
+
 def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDefinition:
     """
     Return the ``run_bash`` tool definition.

@@ -72,6 +72,7 @@ from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
+    make_exec_escape_fn,
     make_fetch_url_tool,
     make_filesystem_tools,
     make_memorize_tool,
@@ -316,6 +317,7 @@ class LoomSession:
 
         # Registry — run_bash + workspace-aware filesystem tools
         _strict_sandbox: bool = config.get("harness", {}).get("strict_sandbox", False)
+        self._strict_sandbox = _strict_sandbox
         self.registry = ToolRegistry()
         _run_bash_tool = make_run_bash_tool(self.workspace, strict_sandbox=_strict_sandbox)
         self.registry.register(_run_bash_tool)
@@ -450,11 +452,18 @@ class LoomSession:
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
+        # Wire escape detector only when strict_sandbox is on — that's the
+        # only case where /auto pre-authorizes EXEC tools within workspace.
+        _exec_escape_fn = (
+            make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
+        )
         self._pipeline = MiddlewarePipeline(
             [
                 TraceMiddleware(on_trace=self._on_trace),
                 BlastRadiusMiddleware(
-                    perm_ctx=self.perm, confirm_fn=self._confirm_tool
+                    perm_ctx=self.perm,
+                    confirm_fn=self._confirm_tool,
+                    exec_escape_fn=_exec_escape_fn,
                 ),
             ]
         )
@@ -1407,6 +1416,25 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             "In CLI mode, press [yellow]Ctrl+C[/yellow] while the agent is responding.[/dim]"
         )
 
+    elif command == "/auto":
+        if not session._strict_sandbox:
+            console.print(
+                "[yellow]  /auto requires strict_sandbox = true in loom.toml.[/yellow]\n"
+                "[dim]  Without workspace confinement, auto-approving run_bash "
+                "would grant unrestricted shell access.[/dim]"
+            )
+        else:
+            session.perm.exec_auto = not session.perm.exec_auto
+            state = "on" if session.perm.exec_auto else "off"
+            if session.perm.exec_auto:
+                console.print(
+                    f"[dim]Exec auto-approve: [green]{state}[/green] — "
+                    "run_bash pre-authorized within workspace. "
+                    "Absolute paths that escape the workspace still require confirmation.[/dim]"
+                )
+            else:
+                console.print(f"[dim]Exec auto-approve: [yellow]{state}[/yellow] — run_bash will confirm every call.[/dim]")
+
     elif command == "/pause":
         # Toggle HITL mode (auto-pause after every tool batch)
         session.hitl_mode = not session.hitl_mode
@@ -1437,6 +1465,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
                 "  [yellow]/compact[/yellow]                   Compress older context\n"
                 "  [yellow]/verbose[/yellow]                   Toggle tool output verbosity\n"
+                "  [yellow]/auto[/yellow]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
                 "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
                 "  [yellow]/stop[/yellow]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
                 "  [yellow]/help[/yellow]                      Show this message\n\n"
@@ -1759,6 +1788,26 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/verbose":
         app.action_toggle_verbose()
+
+    elif command == "/auto":
+        if not session._strict_sandbox:
+            app.notify(
+                "/auto requires strict_sandbox = true in loom.toml. "
+                "Without workspace confinement, auto-approving run_bash "
+                "would grant unrestricted shell access.",
+                severity="warning",
+                timeout=6,
+            )
+        else:
+            session.perm.exec_auto = not session.perm.exec_auto
+            state = "on" if session.perm.exec_auto else "off"
+            msg = (
+                f"Exec auto-approve: {state} — run_bash pre-authorized within workspace. "
+                "Absolute paths that escape the workspace still require confirmation."
+                if session.perm.exec_auto
+                else f"Exec auto-approve: {state} — run_bash will confirm every call."
+            )
+            app.notify(msg, timeout=5)
 
     elif command == "/pause":
         session.hitl_mode = not session.hitl_mode
@@ -2430,6 +2479,9 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
         confirm_flow=confirm_flow,
         loom_session=session,
     )
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+
     n = daemon.load_config(config)
     console.print(
         Panel(
@@ -2713,6 +2765,9 @@ async def _discord_with_autonomy(
         confirm_flow=confirm_flow,
         loom_session=session,
     )
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+
     n = daemon.load_config(config_path)
     console.print(f"[dim]Autonomy: {n} trigger(s) loaded from {config_path}[/dim]")
 

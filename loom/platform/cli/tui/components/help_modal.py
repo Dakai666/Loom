@@ -21,6 +21,7 @@ _COMMANDS = [
     ("/think",                  "View last turn's reasoning chain"),
     ("/compact",                "Compress older context (frees tokens)"),
     ("/verbose",                "Toggle verbose tool output"),
+    ("/auto",                   "Toggle run_bash auto-approve (requires strict_sandbox)"),
     ("/pause",                  "Toggle HITL auto-pause after each tool batch"),
     ("/stop",                   "Immediately cancel the current running turn"),
     ("/help",                   "Show this help"),

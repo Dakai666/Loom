@@ -128,6 +128,72 @@ strict_sandbox = true   # 預設 false
 
 ---
 
+## /auto — session 內 EXEC 自動批准（v0.2.3.4+）
+
+`/auto` 是一個 in-session 切換指令，讓使用者在 session 生命週期內臨時放寬 `run_bash` 的確認需求。
+
+### 前提條件
+
+`/auto` **必須搭配 `strict_sandbox = true`** 才能啟用：
+
+```
+/auto   →  ⚠️  需要 strict_sandbox = true in loom.toml
+```
+
+這個設計是刻意的：沒有 workspace 沙箱的情況下，pre-authorize `run_bash` 等於把整台機器交給 agent，不應該允許。
+
+### 啟用後的行為
+
+```
+/auto on  （strict_sandbox = true）
+
+workspace 內的命令（相對路徑或無路徑）：
+  Agent 請求 run_bash → BlastRadiusMiddleware →
+    exec_auto=true + 無逃逸路徑 → 直接執行（無確認）
+
+逃逸 workspace 的命令（絕對路徑）：
+  Agent 請求 run_bash "cat /etc/passwd" → BlastRadiusMiddleware →
+    exec_auto=true + 偵測到逃逸路徑 → ⚠️ 強制確認
+```
+
+### 逃逸偵測邏輯
+
+`make_exec_escape_fn(workspace)` 掃描命令字串中所有看起來像路徑的 token（`/` 或 `C:\` 開頭），對每個 token 做 `Path.resolve().relative_to(workspace)` 驗證：
+
+```
+cat /etc/passwd         → /etc/passwd 不在 workspace 內 → 逃逸 → 確認
+rm -rf /tmp/foo         → /tmp/foo 不在 workspace 內 → 逃逸 → 確認
+python test.py          → 無絕對路徑 → 安全 → 自動批准
+cd src && ls            → 無絕對路徑 → 安全 → 自動批准
+pip install numpy       → 無絕對路徑 → 安全 → 自動批准
+```
+
+### 推薦使用場景
+
+```toml
+# loom.toml
+[harness]
+strict_sandbox = true
+```
+
+Session 開始後：
+```
+/auto          ← 開啟，之後連續 shell 操作不再逐一確認
+...工作中...
+/auto          ← 關閉（或 session 結束自動重置）
+```
+
+### 行為矩陣
+
+| strict_sandbox | /auto | 行為 |
+|---------------|-------|------|
+| `false` | off | 每次確認 |
+| `false` | on | ❌ 不允許（警告提示） |
+| `true` | off | 每次確認 |
+| `true` | on | workspace 內自動批准；偵測到逃逸絕對路徑仍強制確認 |
+
+---
+
 ## PermissionContext
 
 `PermissionContext` 是 Trust Level 在 session 內的運行時授權狀態：
@@ -194,3 +260,11 @@ A: 不能。它只是設定子程序的起始目錄（`cwd`）。指令仍然可
 **Q: GUARDED 有 session 內免確認，CRITICAL / EXEC 沒有，為什麼？**
 
 A: GUARDED 的典型場景是「連續寫入多個檔案」，每次詢問會造成操作中斷。EXEC 和 AGENT_SPAN 的影響範圍依命令而異，無法在首次確認時預判後續呼叫的風險。
+
+**Q: 我有 `strict_sandbox = true` + `/auto`，agent 連續跑了 6 個 run_bash 都沒問我，這正常嗎？**
+
+A: 正常，這正是設計目標。只要這 6 個命令都沒有使用 workspace 外的絕對路徑，`exec_auto` 就會讓它們靜默通過。若其中有任何一個命令像 `cat /etc/passwd`，那一個會被攔下來確認。
+
+**Q: `/auto` session 結束後會保留嗎？**
+
+A: 不會。`exec_auto` 是 `PermissionContext` 上的 in-memory 旗標，session 結束後重置。下次 session 開始預設為 off，需要重新 `/auto`。
