@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import Provider, Hit
 from textual.containers import Horizontal, Vertical
 from textual.widget import Widget
 
@@ -52,6 +53,33 @@ from .events import (
 
 if TYPE_CHECKING:
     from loom.core.memory.store import SQLiteStore
+
+
+class LoomCommandProvider(Provider):
+    async def search(self, query: str):
+        matcher = self.matcher(query)
+        app = self.app
+        commands = [
+            ("Toggle Workspace Sidebar", app.action_toggle_sidebar, "Hide/show the right sidebar"),
+            ("Switch to Artifacts Tab", lambda: self._focus_tab(WorkspaceTab.ARTIFACTS), "View created artifacts"),
+            ("Switch to Activity Log Tab", lambda: self._focus_tab(WorkspaceTab.ACTIVITY), "View tool activity timeline"),
+            ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
+            ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
+            ("Toggle Verbose Tools", app.action_toggle_verbose, "Switch between compact and verbose tool logs"),
+            ("Quit Loom", app.action_quit, "Exit the application"),
+        ]
+
+        for name, callback, help_text in commands:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), callback, help=help_text)
+
+    def _focus_tab(self, tab: WorkspaceTab):
+        workspace = self.app.query_one("#workspace-panel", WorkspacePanel)
+        workspace.active_tab = tab
+        workspace._update_tab_headers()
+        workspace.query_one("#tab-content").update(workspace._render_tab_content())
+        self.app.notify(f"Switched to {tab.name.title()} tab", timeout=1)
 
 
 class LoomApp(App):
@@ -98,6 +126,11 @@ class LoomApp(App):
         border-right: solid #4a4038;
     }
 
+    .sidebar-hidden #conversation-pane {
+        width: 100%;
+        border-right: none;
+    }
+
     #message-list {
         height: 1fr;
         background: #1c1814;
@@ -121,6 +154,10 @@ class LoomApp(App):
     #workspace-panel {
         width: 25%;
         background: #1c1814;
+    }
+
+    .sidebar-hidden #workspace-panel {
+        display: none;
     }
 
     #obs-panel {
@@ -178,12 +215,16 @@ class LoomApp(App):
     }
     """
 
+    COMMANDS = App.COMMANDS | {LoomCommandProvider}
+
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
+        Binding("ctrl+k", "command_palette", "Cmd Palette", show=True),
+        Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=True),
         Binding("escape", "interrupt", "Interrupt", show=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
         Binding("f1", "toggle_verbose", "Verbose", show=True),
-        Binding("f2", "toggle_space", "Workspace", show=True),
+        Binding("f2", "toggle_space", "Workspace", show=False),
     ]
 
     def __init__(
@@ -228,6 +269,11 @@ class LoomApp(App):
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.clear()
         self.notify("Screen cleared.")
+
+    def action_toggle_sidebar(self) -> None:
+        self.toggle_class("sidebar-hidden")
+        has_sidebar = not self.has_class("sidebar-hidden")
+        self.notify(f"Sidebar {'shown' if has_sidebar else 'hidden'}", timeout=1)
 
     def action_toggle_space(self) -> None:
         workspace = self.query_one("#workspace-panel", WorkspacePanel)
