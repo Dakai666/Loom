@@ -1552,7 +1552,6 @@ class LoomChatApp:
                         await SessionLog(conn).fork_session(old_id, new_id, target_turn)
                     
                     self.workers.cancel_all()
-                    await self._session.stop()
                     self.exit(new_id)
 
             async def on_mount(self) -> None:
@@ -1776,7 +1775,6 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     elif command == "/new":
         # Exit with sentinel None so _chat_tui restart loop creates a fresh session.
-        await session.stop()
         app.exit("__new__")
 
     elif command == "/sessions":
