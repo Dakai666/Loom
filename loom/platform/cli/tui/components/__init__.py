@@ -17,6 +17,7 @@ from .budget_panel import BudgetPanel
 from .workspace_panel import WorkspacePanel, WorkspaceTab
 from .interactive_widgets import InlineConfirmWidget, InlinePauseWidget
 from .minimap_modal import MiniMapModal
+from .image_widget import ImageWidget
 
 __all__ = [
     "Header",
@@ -39,4 +40,5 @@ __all__ = [
     "InlineConfirmWidget",
     "InlinePauseWidget",
     "MiniMapModal",
+    "ImageWidget",
 ]

@@ -136,6 +136,28 @@ class MessageBubble(Widget):
             self._render_body_markdown()
         else:
             self._render_body_text()
+            
+        self._scan_and_mount_images()
+
+    def _scan_and_mount_images(self) -> None:
+        import re
+        from pathlib import Path
+        from .image_widget import ImageWidget
+
+        # match markdown images ![alt](path)
+        matches = re.findall(r'!\[.*?\]\((.*?)\)', self._content)
+        for url in matches:
+            try:
+                # ignore http urls, we only render local files natively right now
+                if url.startswith("http"):
+                    continue
+                p = Path(url).resolve()
+                if p.exists() and p.is_file():
+                    ext = p.suffix.lower()
+                    if ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]:
+                        self.mount(ImageWidget(p))
+            except Exception:
+                pass
 
     def set_think_text(self, think_text: str) -> None:
         """
