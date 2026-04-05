@@ -339,10 +339,8 @@ class MiniMaxProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
 
-        stream = self._async_client.chat.completions.create(**kwargs)
+        stream = await self._async_client.chat.completions.create(**kwargs)
         try:
-            # When abort_signal is set, break after the next chunk.
-            # httpx closes the underlying connection on stream exit.
             async for chunk in stream:
                 if abort_signal is not None and abort_signal.is_set():
                     break
@@ -580,19 +578,15 @@ class AnthropicProvider(LLMProvider):
         output_tokens = 0
         stop_reason = "end_turn"
 
+        aborted = False
         async with self._async_client.messages.stream(**kwargs) as stream:
-            try:
-                async for text in stream.text_stream:
-                    if abort_signal is not None and abort_signal.is_set():
-                        break
-                    full_text += text
-                    yield (text, None)
-                final = await stream.get_final_message()
-            except Exception:
-                # Stream exited via break above or external cancellation.
-                # Proceed to build the response from whatever we accumulated.
-                final = None
-                pass
+            async for text in stream.text_stream:
+                if abort_signal is not None and abort_signal.is_set():
+                    aborted = True
+                    break
+                full_text += text
+                yield (text, None)
+            final = None if aborted else await stream.get_final_message()
 
         if final is not None:
             for block in final.content:
