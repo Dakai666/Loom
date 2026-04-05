@@ -50,6 +50,7 @@ from rich.rule import Rule
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider, MiniMaxProvider
+from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
 from loom.core.harness.middleware import (
@@ -344,6 +345,7 @@ class LoomSession:
         self._procedural: ProceduralMemory | None = None
         self._relational: RelationalMemory | None = None
         self._reflection: ReflectionAPI | None = None
+        self._reflector: CounterFactualReflector | None = None
         self._pipeline: MiddlewarePipeline | None = None
         self._memory_index: MemoryIndex = MemoryIndex()
         self._session_log: SessionLog | None = None
@@ -399,6 +401,13 @@ class LoomSession:
         self._procedural = ProceduralMemory(self._db)
         self._relational = RelationalMemory(self._db)
         self._reflection = ReflectionAPI(self._episodic, self._procedural)
+        self._reflector = CounterFactualReflector(
+            router=self.router,
+            model=self.model,
+            procedural=self._procedural,
+            semantic=self._semantic,
+            relational=self._relational,
+        )
         self._session_log = SessionLog(self._db)
 
         # Build MemoryIndex and inject into system prompt
@@ -1048,6 +1057,15 @@ class LoomSession:
                     await self._procedural.upsert(skill)
             except Exception:
                 pass  # Never let skill accounting block the trace callback
+
+        # Counter-factual reflection: fire-and-forget for execution_error failures.
+        # Only triggers when a SkillGenome exists for the tool (checked inside reflector).
+        if (
+            self._reflector is not None
+            and not result.success
+            and result.failure_type == "execution_error"
+        ):
+            self._reflector.maybe_reflect(call, result, self.session_id)
 
     async def _confirm_tool(self, call: ToolCall) -> bool:
         # Stop any running spinner before printing the confirm panel so the

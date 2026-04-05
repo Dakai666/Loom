@@ -70,6 +70,7 @@ class MemoryIndex:
     episode_sessions: int = 0
     relational_count: int = 0
     relational_predicates: list[str] = field(default_factory=list)
+    anti_pattern_count: int = 0
 
     _WIDTH = 45
 
@@ -92,6 +93,11 @@ class MemoryIndex:
                 f"Relations : {self.relational_count} {'triple' if self.relational_count == 1 else 'triples'}"
                 f"  [predicates: {preds}]"
             )
+        if self.anti_pattern_count > 0:
+            lines.append(
+                f"Anti-patterns: {self.anti_pattern_count} recorded"
+                "  [recall 'anti_pattern' to review]"
+            )
         lines += [
             bar,
             "Use recall(query) to retrieve relevant entries.",
@@ -103,7 +109,12 @@ class MemoryIndex:
 
     @property
     def is_empty(self) -> bool:
-        return self.semantic_count == 0 and self.skill_count == 0 and self.relational_count == 0
+        return (
+            self.semantic_count == 0
+            and self.skill_count == 0
+            and self.relational_count == 0
+            and self.anti_pattern_count == 0
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +174,14 @@ class MemoryIndexer:
                 seen[t.predicate] = seen.get(t.predicate, 0) + 1
             relational_predicates = sorted(seen, key=lambda p: seen[p], reverse=True)[:8]
 
+        # Anti-pattern count — loom-self triples with predicate starting "should_avoid:"
+        anti_pattern_count = 0
+        if self._relational is not None:
+            self_triples = await self._relational.query(subject="loom-self")
+            anti_pattern_count = sum(
+                1 for t in self_triples if t.predicate.startswith("should_avoid:")
+            )
+
         return MemoryIndex(
             semantic_count=semantic_count,
             semantic_topics=semantic_topics,
@@ -171,4 +190,5 @@ class MemoryIndexer:
             episode_sessions=episode_sessions,
             relational_count=relational_count,
             relational_predicates=relational_predicates,
+            anti_pattern_count=anti_pattern_count,
         )
