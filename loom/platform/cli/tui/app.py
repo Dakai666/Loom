@@ -146,9 +146,19 @@ class LoomApp(App):
     }
 
     #input-area {
-        height: 4;
-        background: #242018;
+        height: auto;
+        background: #1c1814;
         border-top: solid #4a4038;
+        padding: 0 1;
+    }
+
+    #input-text {
+        border: solid #4a4038;
+        background: #1c1814;
+    }
+    
+    #input-text:focus {
+        border: solid #c8a464;
     }
 
     #workspace-panel {
