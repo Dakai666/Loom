@@ -61,6 +61,7 @@ from loom.core.harness.middleware import (
     ToolResult,
     TraceMiddleware,
 )
+from loom.core.harness.validation import SchemaValidationMiddleware
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolRegistry
 from loom.core.memory.embeddings import build_embedding_provider
@@ -469,6 +470,7 @@ class LoomSession:
         self._pipeline = MiddlewarePipeline(
             [
                 TraceMiddleware(on_trace=self._on_trace),
+                SchemaValidationMiddleware(registry=self.registry),
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool,

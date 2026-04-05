@@ -73,6 +73,7 @@ async def run_subagent(
         MiddlewarePipeline, TraceMiddleware, BlastRadiusMiddleware,
         ToolCall, ToolResult,
     )
+    from loom.core.harness.validation import SchemaValidationMiddleware
     from loom.core.harness.permissions import PermissionContext, TrustLevel
     from loom.core.memory.episodic import EpisodicEntry
     from loom.core.memory.semantic import SemanticEntry
@@ -157,6 +158,7 @@ async def run_subagent(
 
     pipeline = MiddlewarePipeline([
         TraceMiddleware(on_trace=on_trace),
+        SchemaValidationMiddleware(registry=child_registry),
         BlastRadiusMiddleware(perm_ctx=perm, confirm_fn=auto_confirm),
     ])
 
