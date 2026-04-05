@@ -1,5 +1,5 @@
-"""Loom core package."""
+"""Loom core package — namespace only.
 
-from loom.core.infra import AbortController, abort_bound, wait_aborted
-
-__all__ = ["AbortController", "wait_aborted", "abort_bound"]
+Sub-modules are imported explicitly by consumers.
+Do not add implicit side-effects here.
+"""

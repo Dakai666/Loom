@@ -27,7 +27,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
 
 class AbortController:
@@ -104,11 +104,11 @@ async def wait_aborted(signal: asyncio.Event) -> None:
     """
     Wait until the signal is set.
 
-    If the signal is already aborted when this is called, returns
-    immediately.  If the current task is externally cancelled
-    (asyncio.CancelledError) that exception is swallowed — this is
-    intentional: external cancellation and abort signal are treated
-    equivalently.
+    If the signal is already aborted, returns immediately.
+    ``asyncio.CancelledError`` from an external task cancellation is
+    **not caught** — it propagates normally up the call stack.
+    Callers that need to handle both abort and external cancellation
+    should wrap this function as needed.
 
     Parameters
     ----------
@@ -117,10 +117,7 @@ async def wait_aborted(signal: asyncio.Event) -> None:
     """
     if signal.is_set():
         return
-    try:
-        await signal.wait()
-    except asyncio.CancelledError:
-        pass  # treat external cancellation as normal abort
+    await signal.wait()
 
 
 def abort_bound(controller: AbortController) -> Callable[[], None]:
