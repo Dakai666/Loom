@@ -67,6 +67,7 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from loom.platform.cli.ui import CompressDone, TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused
+from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
 
 if TYPE_CHECKING:
     from loom.platform.cli.main import LoomSession
@@ -209,7 +210,7 @@ class LoomDiscordBot:
 
             # Strip bot @mention from content
             content = message.content.replace(f"<@{client.user.id}>", "").strip()
-            if not content:
+            if not content and not message.attachments:
                 return
 
             task = asyncio.ensure_future(bot._handle_message(message, content, is_thread))
@@ -240,11 +241,35 @@ class LoomDiscordBot:
         if is_thread:
             # Message inside an existing thread → continue that session
             session = await self._get_thread_session(message.channel)  # type: ignore[arg-type]
-            await self._run_turn(message, content, session)
         else:
             # Message in main channel → create a new thread and start there
             thread = await self._create_session_thread(message, content)
             session = await self._start_session(thread.id)
+
+        # Process attachments
+        if getattr(message, "attachments", None):
+            dl_dir = session.workspace / ".discord_downloads"
+            dl_dir.mkdir(parents=True, exist_ok=True)
+            attachment_notes = []
+            for att in message.attachments:
+                dest = dl_dir / att.filename
+                try:
+                    await att.save(dest)
+                    attachment_notes.append(f"- {att.filename} (saved to .discord_downloads/{att.filename})")
+                except Exception as e:
+                    attachment_notes.append(f"- {att.filename} (failed to download: {e})")
+            
+            if attachment_notes:
+                notes_str = "\n".join(attachment_notes)
+                content += f"\n\n[系統通知：使用者上傳了附件]\n{notes_str}"
+            
+            # Start message if empty
+            if not content.strip():
+                content = "[系統通知：使用者僅上傳了附件]"
+
+        if is_thread:
+            await self._run_turn(message, content, session)
+        else:
             # Re-route to thread (message is already the first user turn)
             fake_msg = await thread.send(f"> {content[:100]}")  # echo starter
             await self._run_turn(fake_msg, content, session)
@@ -308,6 +333,12 @@ class LoomDiscordBot:
         # or clean restart can still find this thread's context.
         self._thread_map[str(thread_id)] = session.session_id
         self._save_thread_map()
+
+        # Inject Discord tools
+        session.registry.register(make_send_discord_file_tool(self._client, thread_id, session.workspace))
+        session.registry.register(make_send_discord_embed_tool(self._client, thread_id))
+        session.perm.authorize("send_discord_file")
+        session.perm.authorize("send_discord_embed")
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:
