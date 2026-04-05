@@ -1777,19 +1777,26 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
         # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
         # shows a ModalScreen dialog — no terminal suspension needed.
         from loom.core.harness.middleware import BlastRadiusMiddleware
-        from loom.platform.cli.tui.components.confirm_modal import ConfirmModal
+        from loom.platform.cli.tui.components.interactive_widgets import InlineConfirmWidget
+        import asyncio
 
-        async def _tui_confirm(call: ToolCall) -> bool:
+        async def _tui_confirm(call: "ToolCall") -> bool:
             args_preview = "  ".join(
                 f"{k}={str(v)[:40]}" for k, v in call.args.items()
             )[:120]
-            return await app.push_screen_wait(
-                ConfirmModal(
-                    tool_name=call.tool_name,
-                    trust_label=call.trust_level.plain,
-                    args_preview=args_preview,
-                )
+            
+            msg_list = app.query_one("#message-list")
+            future = asyncio.Future()
+            widget = InlineConfirmWidget(
+                tool_name=call.tool_name,
+                trust_label=call.trust_level.plain,
+                args_preview=args_preview,
+                future=future
             )
+            msg_list.mount(widget)
+            msg_list.scroll_end(animate=False)
+            
+            return await future
 
         for mw in session._pipeline._middlewares:
             if isinstance(mw, BlastRadiusMiddleware):

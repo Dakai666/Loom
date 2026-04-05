@@ -370,12 +370,19 @@ class LoomApp(App):
         ))
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
-        from .components.pause_modal import PauseModal
+        from .components.interactive_widgets import InlinePauseWidget
+        import asyncio
 
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.end_turn()
 
-        result = await self.push_screen_wait(PauseModal(tool_count=event.tool_count_so_far))
+        msg_list = self.query_one("#message-list", MessageList)
+        future = asyncio.Future()
+        widget = InlinePauseWidget(tool_count=event.tool_count_so_far, future=future)
+        msg_list.mount(widget)
+        msg_list.scroll_end(animate=False)
+
+        result = await future
 
         # result is injected into the app; but we can't call session methods directly
         # here (app.py has no session reference). We post a UserMessage with a

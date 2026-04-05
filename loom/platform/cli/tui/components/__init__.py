@@ -15,7 +15,7 @@ from .artifacts_panel import ArtifactsPanel
 from .swarm_dashboard import SwarmDashboard, ActivityEntry
 from .budget_panel import BudgetPanel
 from .workspace_panel import WorkspacePanel, WorkspaceTab
-from .confirm_modal import ConfirmModal
+from .interactive_widgets import InlineConfirmWidget, InlinePauseWidget
 
 __all__ = [
     "Header",
@@ -35,5 +35,6 @@ __all__ = [
     "BudgetPanel",
     "WorkspacePanel",
     "WorkspaceTab",
-    "ConfirmModal",
+    "InlineConfirmWidget",
+    "InlinePauseWidget",
 ]
