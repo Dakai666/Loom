@@ -2844,6 +2844,16 @@ async def _discord_with_autonomy(
     session = LoomSession(model=model, db_path=db)
     await session.start()
 
+    # Patch autonomy session's confirm → Discord notify channel button,
+    # same as thread sessions. Without this, GUARDED tool confirmations
+    # fall through to the CLI prompt (Allow? [y/N]:) on shutdown.
+    from loom.core.harness.middleware import BlastRadiusMiddleware as _BRM
+    _confirm_fn = bot._make_confirm_fn(notify_channel_id)
+    for _mw in session._pipeline._middlewares:
+        if isinstance(_mw, _BRM):
+            _mw._confirm = _confirm_fn
+            break
+
     daemon = AutonomyDaemon(
         notify_router=notify_router,
         confirm_flow=confirm_flow,
