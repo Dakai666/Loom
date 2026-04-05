@@ -31,97 +31,10 @@ from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import SemanticMemory
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer
-# ---------------------------------------------------------------------------
-
-def _tokenize(text: str) -> list[str]:
-    """Lowercase and split on non-word characters."""
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", " ", text)
-    return [t for t in text.split() if t]
-
-
-# ---------------------------------------------------------------------------
-# BM25
-# ---------------------------------------------------------------------------
-
-class BM25:
-    """
-    Okapi BM25 ranking function over an in-memory corpus.
-
-    Parameters
-    ----------
-    k1:  Term frequency saturation factor (default 1.5).
-    b:   Length normalization factor (default 0.75).
-    """
-
-    def __init__(self, k1: float = 1.5, b: float = 0.75) -> None:
-        self.k1 = k1
-        self.b = b
-        self._docs: list[list[str]] = []
-        self._idf: dict[str, float] = {}
-        self._avgdl: float = 0.0
-
-    def index(self, documents: list[str]) -> None:
-        """Build the index from a list of document strings."""
-        self._docs = [_tokenize(doc) for doc in documents]
-        n = len(self._docs)
-        if n == 0:
-            self._avgdl = 0.0
-            self._idf = {}
-            return
-
-        self._avgdl = sum(len(d) for d in self._docs) / n
-
-        # Document frequency per term
-        df: dict[str, int] = {}
-        for tokens in self._docs:
-            for term in set(tokens):
-                df[term] = df.get(term, 0) + 1
-
-        # Smoothed IDF (always positive)
-        self._idf = {
-            term: math.log((n - count + 0.5) / (count + 0.5) + 1)
-            for term, count in df.items()
-        }
-
-    def score(self, query: str, doc_idx: int) -> float:
-        """Return the BM25 score for one document."""
-        if doc_idx >= len(self._docs) or self._avgdl == 0:
-            return 0.0
-
-        tokens = self._docs[doc_idx]
-        dl = len(tokens)
-        if dl == 0:
-            return 0.0
-
-        tf = Counter(tokens)
-        total = 0.0
-
-        for term in _tokenize(query):
-            idf = self._idf.get(term, 0.0)
-            if idf == 0.0:
-                continue
-            f = tf.get(term, 0)
-            num = f * (self.k1 + 1)
-            den = f + self.k1 * (1.0 - self.b + self.b * dl / self._avgdl)
-            total += idf * num / den
-
-        return total
-
-    def top_k(self, query: str, k: int = 5) -> list[tuple[int, float]]:
-        """
-        Return (doc_idx, score) pairs for the top-k highest-scoring documents.
-        Only documents with score > 0 are included.
-        """
-        scores = [
-            (i, self.score(query, i))
-            for i in range(len(self._docs))
-        ]
-        scores = [(i, s) for i, s in scores if s > 0.0]
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return scores[:k]
+def _sanitize_fts(query: str) -> str:
+    """Sanitize natural language into safe SQLite FTS5 MATCH format (AND logic)."""
+    # Remove quotes to avoid syntax issues, then wrap each word in double quotes
+    return " ".join(f'"{t}"' for t in query.replace('"', " ").split() if t)
 
 
 # ---------------------------------------------------------------------------
@@ -172,14 +85,6 @@ class MemorySearch:
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
-        # BM25 cache for semantic entries
-        self._sem_bm25: BM25 | None = None
-        self._sem_entries: list = []
-        self._sem_fp: tuple | None = None
-        # BM25 cache for skill entries
-        self._skill_bm25: BM25 | None = None
-        self._skill_entries: list = []
-        self._skill_fp: tuple | None = None
 
     async def recall(
         self,
@@ -333,78 +238,105 @@ class MemorySearch:
 
     # ------------------------------------------------------------------
 
-    async def _sem_fingerprint(self) -> tuple:
-        """Cheap query to detect corpus changes: (row_count, max_updated_at)."""
-        async with self._semantic._db.execute(
-            "SELECT COUNT(*), MAX(updated_at) FROM semantic_entries"
-        ) as cur:
-            row = await cur.fetchone()
-        return (row[0] or 0, row[1] or "")
-
-    async def _skill_fingerprint(self) -> tuple:
-        """Cheap query to detect skill corpus changes: (row_count, max_updated_at)."""
-        async with self._procedural._db.execute(
-            "SELECT COUNT(*), MAX(updated_at) FROM skill_genomes "
-            "WHERE confidence > deprecation_threshold"
-        ) as cur:
-            row = await cur.fetchone()
-        return (row[0] or 0, row[1] or "")
-
     async def _search_semantic(self, query: str, limit: int) -> list[MemorySearchResult]:
-        fp = await self._sem_fingerprint()
-        if fp != self._sem_fp or self._sem_bm25 is None:
-            entries = await self._semantic.list_recent(500)
-            docs = [f"{e.key} {e.value}" for e in entries]
-            bm25 = BM25()
-            bm25.index(docs)
-            self._sem_entries = entries
-            self._sem_bm25 = bm25
-            self._sem_fp = fp
-        else:
-            entries = self._sem_entries
-
-        if not entries:
+        if not query.strip():
+            return []
+            
+        safe_query = _sanitize_fts(query)
+        if not safe_query:
             return []
 
-        return [
-            MemorySearchResult(
-                type="semantic",
-                key=entries[i].key,
-                value=entries[i].value,
-                score=score,
-                metadata={
-                    "confidence": entries[i].confidence,
-                    "effective_confidence": entries[i].effective_confidence(),
-                },
-                updated_at=entries[i].updated_at.isoformat() if entries[i].updated_at else "",
+        # FTS5 returns negative scores for bm25 by default, smaller = better.
+        # We order by rank and return absolute values for positive compatibility.
+        cursor = await self._semantic._db.execute(
+            """
+            SELECT
+                e.id, e.key, e.value, e.confidence, e.source, e.metadata, e.created_at, e.updated_at,
+                bm25(semantic_fts) AS fts_score
+            FROM semantic_fts
+            JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
+            WHERE semantic_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (safe_query, limit)
+        )
+        rows = await cursor.fetchall()
+
+        from loom.core.memory.semantic import SemanticEntry
+        results: list[MemorySearchResult] = []
+        for r in rows:
+            entry = SemanticEntry(
+                id=r[0], key=r[1], value=r[2], confidence=r[3],
+                source=r[4], metadata=json.loads(r[5]),
+                created_at=datetime.fromisoformat(r[6]),
+                updated_at=datetime.fromisoformat(r[7]),
             )
-            for i, score in self._sem_bm25.top_k(query, k=limit)
-        ]
+            # Convert negative rank to positive score
+            score = abs(r[8]) if r[8] else 0.0
+            results.append(
+                MemorySearchResult(
+                    type="semantic",
+                    key=entry.key,
+                    value=entry.value,
+                    score=score,
+                    metadata={
+                        "confidence": entry.confidence,
+                        "effective_confidence": entry.effective_confidence(),
+                    },
+                    updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
+                )
+            )
+        return results
 
     async def _search_skills(self, query: str, limit: int) -> list[MemorySearchResult]:
-        fp = await self._skill_fingerprint()
-        if fp != self._skill_fp or self._skill_bm25 is None:
-            skills = await self._procedural.list_active()
-            docs = [f"{s.name} {' '.join(s.tags)} {s.body}" for s in skills]
-            bm25 = BM25()
-            bm25.index(docs)
-            self._skill_entries = skills
-            self._skill_bm25 = bm25
-            self._skill_fp = fp
-        else:
-            skills = self._skill_entries
-
-        if not skills:
+        if not query.strip():
+            return []
+            
+        safe_query = _sanitize_fts(query)
+        if not safe_query:
             return []
 
-        return [
-            MemorySearchResult(
-                type="skill",
-                key=skills[i].name,
-                value=skills[i].body,
-                score=score,
-                metadata={"confidence": skills[i].confidence, "tags": skills[i].tags},
-                updated_at=skills[i].updated_at.isoformat() if skills[i].updated_at else "",
+        cursor = await self._procedural._db.execute(
+            """
+            SELECT
+                g.id, g.name, g.version, g.confidence, g.usage_count, 
+                g.success_rate, g.parent_skill, g.deprecation_threshold, 
+                g.tags, g.body, g.created_at, g.updated_at,
+                bm25(skill_fts) AS fts_score
+            FROM skill_fts
+            JOIN skill_genomes g ON skill_fts.rowid = g.rowid
+            WHERE skill_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (safe_query, limit)
+        )
+        rows = await cursor.fetchall()
+
+        from loom.core.memory.procedural import SkillGenome
+        results: list[MemorySearchResult] = []
+        for r in rows:
+            skill = SkillGenome(
+                id=r[0], name=r[1], version=r[2], confidence=r[3], usage_count=r[4],
+                success_rate=r[5], parent_skill=r[6], deprecation_threshold=r[7],
+                tags=json.loads(r[8]), body=r[9],
+                created_at=datetime.fromisoformat(r[10]),
+                updated_at=datetime.fromisoformat(r[11]),
             )
-            for i, score in self._skill_bm25.top_k(query, k=limit)
-        ]
+            if skill.confidence <= skill.deprecation_threshold:
+                continue
+
+            score = abs(r[12]) if r[12] else 0.0
+            results.append(
+                MemorySearchResult(
+                    type="skill",
+                    key=skill.name,
+                    value=skill.body,
+                    score=score,
+                    metadata={"confidence": skill.confidence, "tags": skill.tags},
+                    updated_at=skill.updated_at.isoformat() if skill.updated_at else "",
+                )
+            )
+
+        return results[:limit]
