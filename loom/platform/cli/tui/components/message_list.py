@@ -120,7 +120,15 @@ class MessageBubble(Widget):
 
     def on_mount(self) -> None:
         self._render_header()
-        self._render_body_text()
+        if not self._streaming:
+            if self._content.strip():
+                self._render_body_markdown()
+            else:
+                self._render_body_text()
+            # Must run after mounting self or at the end of mount
+            self.set_timer(0.01, self._scan_and_mount_images)
+        else:
+            self._render_body_text()
 
     # ── Streaming API ─────────────────────────────────────────────────────────
 
