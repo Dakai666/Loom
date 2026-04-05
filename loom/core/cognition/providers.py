@@ -368,7 +368,7 @@ class MiniMaxProvider(LLMProvider):
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
         finally:
-            await stream.aclose()
+            await stream.close()
 
         tool_uses: list[ToolUse] = []
         for idx in sorted(tc_accum):

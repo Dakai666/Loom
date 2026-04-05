@@ -2946,16 +2946,22 @@ async def _discord_with_autonomy(
     n = daemon.load_config(config_path)
     console.print(f"[dim]Autonomy: {n} trigger(s) loaded from {config_path}[/dim]")
 
+    _background_tasks: set[asyncio.Task] = set()  # strong refs prevent GC
+
     async def _start_daemon_after_ready() -> None:
         # Wait for the Discord connection before the daemon begins polling,
         # so notifications can be delivered from the first fire onwards.
         await bot._client.wait_until_ready()
         console.print("[dim]Autonomy daemon started.[/dim]")
-        asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
+        _t = asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
+        _background_tasks.add(_t)
+        _t.add_done_callback(_background_tasks.discard)
 
     try:
         async with bot._client:
-            asyncio.ensure_future(_start_daemon_after_ready())
+            _t = asyncio.ensure_future(_start_daemon_after_ready())
+            _background_tasks.add(_t)
+            _t.add_done_callback(_background_tasks.discard)
             await bot._client.start(token)
     finally:
         for tid in list(bot._sessions):

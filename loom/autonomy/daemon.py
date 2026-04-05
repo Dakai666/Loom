@@ -12,7 +12,10 @@ Usage (from CLI):
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
@@ -93,6 +96,7 @@ class AutonomyDaemon:
         if self._session is None:
             return
 
+        logger.info("[autonomy] trigger=%s — starting agent run", plan.trigger_name)
         # Collect text output from stream_turn (the session's interactive loop).
         # We run it as an async generator and pull TurnDone to confirm completion.
         try:
@@ -106,6 +110,7 @@ class AutonomyDaemon:
 
             thread_id = plan.context.get("notify_thread_id", 0)
             response = "".join(output_chunks).strip()
+            logger.info("[autonomy] trigger=%s — completed (%d chars)", plan.trigger_name, len(response))
             if response:
                 await self._notify.send(Notification(
                     type=NotificationType.REPORT,
@@ -115,6 +120,7 @@ class AutonomyDaemon:
                     thread_id=thread_id,
                 ))
         except Exception as exc:
+            logger.error("[autonomy] trigger=%s — error: %s", plan.trigger_name, exc, exc_info=True)
             await self._notify.send(Notification(
                 type=NotificationType.ALERT,
                 title=f"Autonomy error: {plan.trigger_name}",
