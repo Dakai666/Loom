@@ -25,9 +25,11 @@ from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 
 if TYPE_CHECKING:
+    from loom.core.memory.procedural import ProceduralMemory
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
+    from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
@@ -617,6 +619,210 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
         tags=["memory", "search", "relational"],
         scope="memory",
     )
+
+
+# ------------------------------------------------------------------
+# Skill loading tool (Issue #56 — Agent Skills spec Tier 2)
+# ------------------------------------------------------------------
+
+def make_load_skill_tool(
+    procedural: "ProceduralMemory",
+    skills_dirs: list[Path] | None = None,
+    outcome_tracker: "SkillOutcomeTracker | None" = None,
+) -> ToolDefinition:
+    """
+    Create a SAFE ``load_skill`` tool that loads full skill instructions.
+
+    Implements the Agent Skills spec Tier 2: on-demand activation.
+    - Returns the full SKILL.md body wrapped in ``<skill_content>`` XML
+    - Lists bundled resources (scripts/, references/, assets/)
+    - Attaches evolution hints if available
+    - Deduplicates: returns a short note on second activation in same session
+    """
+    from loom.core.memory.procedural import ProceduralMemory  # type: ignore[attr-defined]
+
+    # Per-session dedup tracking (set of already-loaded skill names)
+    _loaded_this_session: set[str] = set()
+    _dirs = skills_dirs or []
+
+    async def _load_skill(call: ToolCall) -> ToolResult:
+        name = call.args.get("name", "").strip()
+        if not name:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'name' argument is required",
+            )
+
+        # Dedup check
+        if name in _loaded_this_session:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=f"Skill '{name}' is already loaded in this session. "
+                       f"Refer to the previously loaded instructions.",
+            )
+
+        # Try ProceduralMemory first
+        skill = await procedural.get(name)
+        if skill is None:
+            # Also try with underscores converted to hyphens and vice versa
+            alt_name = name.replace("-", "_") if "-" in name else name.replace("_", "-")
+            skill = await procedural.get(alt_name)
+            if skill is not None:
+                name = alt_name
+
+        if skill is None:
+            # List available skills to help
+            active = await procedural.list_active()
+            available = ", ".join(s.name for s in active[:10])
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=f"Skill '{name}' not found. Available: {available or '(none)'}",
+            )
+
+        # Build structured <skill_content> output
+        body = skill.body or "(no instructions)"
+
+        # Strip YAML frontmatter from body (it's metadata, already parsed)
+        body = _strip_frontmatter(body)
+
+        # Find skill directory and list bundled resources
+        skill_dir, resources = _find_skill_resources(name, _dirs)
+
+        lines = [f'<skill_content name="{name}">']
+
+        # Evolution hints (from semantic memory, if available)
+        evolution_hints = await _get_evolution_hints(procedural, name)
+        if evolution_hints:
+            lines.append("<evolution_hints>")
+            for hint in evolution_hints:
+                lines.append(f"  {hint}")
+            lines.append("</evolution_hints>")
+            lines.append("")
+
+        lines.append(body)
+
+        if skill_dir:
+            lines.append("")
+            lines.append(f"Skill directory: {skill_dir}")
+            lines.append(
+                "Relative paths in this skill are relative to the skill directory."
+            )
+
+        if resources:
+            lines.append("")
+            lines.append("<skill_resources>")
+            for res in resources:
+                lines.append(f"  <file>{res}</file>")
+            lines.append("</skill_resources>")
+
+        lines.append("</skill_content>")
+
+        output = "\n".join(lines)
+
+        # Record activation
+        _loaded_this_session.add(name)
+        if outcome_tracker is not None:
+            # Use a placeholder turn_index; the actual turn is tracked by session
+            outcome_tracker.record_activation(name, 0)
+
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=output,
+            metadata={"skill_name": name, "skill_confidence": skill.confidence},
+        )
+
+    return ToolDefinition(
+        name="load_skill",
+        description=(
+            "Load a skill's full instructions into context. Call this when a task "
+            "matches a skill listed in <available_skills>. The skill's workflow, "
+            "principles, and output format will be returned for you to follow."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the skill to load (from <available_skills>)",
+                },
+            },
+            "required": ["name"],
+        },
+        executor=_load_skill,
+        tags=["skill", "memory", "activation"],
+        scope="memory",
+    )
+
+
+def _strip_frontmatter(body: str) -> str:
+    """Remove YAML frontmatter (--- delimited) from skill body."""
+    if not body.startswith("---"):
+        return body
+    parts = body.split("---", 2)
+    if len(parts) >= 3:
+        return parts[2].strip()
+    return body
+
+
+def _find_skill_resources(
+    skill_name: str, skills_dirs: list[Path],
+) -> tuple[str | None, list[str]]:
+    """Locate skill directory and list bundled files (scripts/, references/, assets/)."""
+    resource_dirs = ("scripts", "references", "assets")
+    # Try both hyphenated and underscored variants
+    variants = [skill_name, skill_name.replace("-", "_"), skill_name.replace("_", "-")]
+
+    for base_dir in skills_dirs:
+        if not base_dir.is_dir():
+            continue
+        for variant in variants:
+            skill_dir = base_dir / variant
+            if not skill_dir.is_dir():
+                continue
+
+            resources: list[str] = []
+            for res_name in resource_dirs:
+                res_dir = skill_dir / res_name
+                if res_dir.is_dir():
+                    for f in sorted(res_dir.rglob("*")):
+                        if f.is_file():
+                            resources.append(str(f.relative_to(skill_dir)))
+
+            # Also list top-level non-SKILL.md files
+            for f in sorted(skill_dir.iterdir()):
+                if f.is_file() and f.name != "SKILL.md":
+                    rel = str(f.relative_to(skill_dir))
+                    if rel not in resources:
+                        resources.append(rel)
+
+            return str(skill_dir), resources
+
+    return None, []
+
+
+async def _get_evolution_hints(
+    procedural: "ProceduralMemory", skill_name: str,
+) -> list[str]:
+    """Fetch evolution hints from semantic memory for a skill."""
+    # Evolution hints are written by SkillEvolutionHook as semantic entries
+    # with key pattern: skill:<name>:evolution_hint:*
+    # Since we can't do wildcard queries on semantic memory easily here,
+    # we check the skill's confidence and return a hint if it's low.
+    skill = await procedural.get(skill_name)
+    if skill is None:
+        return []
+
+    hints: list[str] = []
+    if skill.confidence < 0.6 and skill.usage_count >= 3:
+        hints.append(
+            f"⚠ This skill's confidence is {skill.confidence:.2f} "
+            f"(usage: {skill.usage_count}×). "
+            f"Consider reviewing recent outcomes and improving the workflow."
+        )
+    return hints
 
 
 def sanitize_untrusted_text(text: str) -> str:
