@@ -21,6 +21,13 @@ class ToolDefinition:
     `capabilities` is an additive set of ToolCapability flags that further
     qualify what the tool does, beyond its TrustLevel tier.  Defaults to NONE
     so existing tool definitions require no changes.
+
+    Action Lifecycle fields (Issue #42)
+    ------------------------------------
+    `preconditions` — human-readable descriptions of required preconditions.
+    `rollback_fn`   — async function to undo the tool's effect on failure.
+    `post_validator` — async function to verify the tool's effect after execution.
+    `scope`         — impact scope classification for the tool.
     """
     name: str
     description: str
@@ -29,6 +36,12 @@ class ToolDefinition:
     executor: Callable[[ToolCall], Awaitable[ToolResult]]
     tags: list[str] = field(default_factory=list)
     capabilities: ToolCapability = field(default_factory=lambda: ToolCapability.NONE)
+
+    # --- Action Lifecycle (Issue #42) ---
+    preconditions: list[str] = field(default_factory=list)
+    rollback_fn: Callable[[ToolCall, ToolResult], Awaitable[ToolResult]] | None = None
+    post_validator: Callable[[ToolCall, ToolResult], Awaitable[bool]] | None = None
+    scope: str = "general"
 
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Serialize to the format expected by the Anthropic messages API."""

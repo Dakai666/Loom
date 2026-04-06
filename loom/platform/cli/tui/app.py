@@ -49,6 +49,8 @@ from .events import (
     TurnDone,
     TurnPaused,
     BudgetUpdate,
+    ActionStateChange,
+    ActionRolledBack,
 )
 
 if TYPE_CHECKING:
@@ -343,6 +345,10 @@ class LoomApp(App):
             await self._on_turn_done(event)
         elif isinstance(event, BudgetUpdate):
             self._on_budget_update(event)
+        elif isinstance(event, ActionStateChange):
+            self._on_action_state_change(event)
+        elif isinstance(event, ActionRolledBack):
+            self._on_action_rolled_back(event)
 
     async def _on_turn_start(self, event: TurnStart) -> None:
         msg_list = self.query_one("#message-list", MessageList)
@@ -402,6 +408,22 @@ class LoomApp(App):
             error_snippet=error_snippet,
             expanded=not event.success,
         ))
+
+    def _on_action_state_change(self, event: ActionStateChange) -> None:
+        """Update ToolBlock to reflect lifecycle state changes (Issue #42)."""
+        tool_block = self.query_one("#tool-block", ToolBlock)
+        tool_block.update_tool_lifecycle(
+            event.call_id, event.old_state, event.new_state, event.reason
+        )
+
+    def _on_action_rolled_back(self, event: ActionRolledBack) -> None:
+        """Show rollback notification inline in the conversation (Issue #42)."""
+        msg_list = self.query_one("#message-list", MessageList)
+        icon = "✓" if event.rollback_success else "✗"
+        msg_list.stream_text(
+            f"\n  ↩ {icon} {event.tool_name} rolled back"
+            + (f" — {event.message}" if event.message else "")
+        )
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
         from .components.interactive_widgets import InlinePauseWidget

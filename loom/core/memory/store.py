@@ -113,6 +113,27 @@ CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, tu
 CREATE INDEX IF NOT EXISTS idx_session_log_role    ON session_log(session_id, role);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 
+-- Issue #42: Action lifecycle records
+CREATE TABLE IF NOT EXISTS action_records (
+    id             TEXT PRIMARY KEY,
+    envelope_id    TEXT NOT NULL,
+    session_id     TEXT NOT NULL,
+    turn_index     INTEGER NOT NULL,
+    tool_name      TEXT NOT NULL,
+    call_id        TEXT NOT NULL DEFAULT '',
+    final_state    TEXT NOT NULL,
+    intent_summary TEXT,
+    scope          TEXT NOT NULL DEFAULT 'general',
+    duration_ms    REAL NOT NULL DEFAULT 0.0,
+    state_history  TEXT NOT NULL DEFAULT '[]',
+    has_rollback   INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
+CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
+
 -- FTS5 Virtual Tables & Sync Triggers
 
 CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts

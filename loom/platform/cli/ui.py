@@ -99,6 +99,27 @@ class TurnDone:
     elapsed_ms: float
 
 
+@dataclass
+class ActionStateChange:
+    """An action transitioned to a new lifecycle state (Issue #42)."""
+    action_id: str
+    tool_name: str
+    call_id: str
+    old_state: str
+    new_state: str
+    reason: str | None = None
+
+
+@dataclass
+class ActionRolledBack:
+    """An action was rolled back after post-validation failure (Issue #42)."""
+    action_id: str
+    tool_name: str
+    call_id: str
+    rollback_success: bool
+    message: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Slash command autocomplete
 # ---------------------------------------------------------------------------

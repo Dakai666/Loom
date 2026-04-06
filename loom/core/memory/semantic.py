@@ -235,3 +235,17 @@ class SemanticMemory:
             )
             for r in rows
         ]
+
+    async def delete(self, key: str) -> bool:
+        """
+        Delete a semantic entry by key.
+
+        Returns True if an entry was actually deleted, False if no such key.
+        Used by the memorize rollback function (Issue #42).
+        """
+        cursor = await self._db.execute(
+            "DELETE FROM semantic_entries WHERE key = ?", (key,)
+        )
+        await self._db.commit()
+        return (cursor.rowcount or 0) > 0
+

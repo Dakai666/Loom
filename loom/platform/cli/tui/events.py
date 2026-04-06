@@ -111,3 +111,24 @@ class ErrorOccurred(StreamEvent):
     """An error occurred during streaming."""
 
     message: str
+
+
+@dataclass
+class ActionStateChange(StreamEvent):
+    """An action transitioned to a new lifecycle state (Issue #42)."""
+    action_id: str
+    tool_name: str
+    call_id: str
+    old_state: str
+    new_state: str
+    reason: str | None = None
+
+
+@dataclass
+class ActionRolledBack(StreamEvent):
+    """An action was rolled back after post-validation failure (Issue #42)."""
+    action_id: str
+    tool_name: str
+    call_id: str
+    rollback_success: bool
+    message: str = ""

@@ -66,7 +66,10 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install 'loom[discord]'"
     ) from exc
 
-from loom.platform.cli.ui import CompressDone, TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused
+from loom.platform.cli.ui import (
+    ActionRolledBack, ActionStateChange,
+    CompressDone, TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused,
+)
 from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
 
 if TYPE_CHECKING:
@@ -647,8 +650,15 @@ class LoomDiscordBot:
                             f"-# 🧠 記憶壓縮：{event.fact_count} 條事實已存入語意記憶"
                         )
 
-                    elif isinstance(event, TurnDone):
-                        pass
+                    elif isinstance(event, ActionRolledBack):
+                        icon = "✓" if event.rollback_success else "✗"
+                        tool_buf += f"\n↩ {icon} {event.tool_name} rolled back"
+                        if event.message:
+                            tool_buf += f" — {event.message[:80]}"
+                        await _safe_edit(status_msg, tool_buf.lstrip())
+
+                    elif isinstance(event, (ActionStateChange, TurnDone)):
+                        pass  # ActionStateChange: too granular for Discord display
 
             except asyncio.CancelledError:
                 # /stop — finalize what we have so far
