@@ -9,6 +9,8 @@ Supported providers
 -------------------
 MiniMaxProvider   — minimax.io (OpenAI-compatible, model MiniMax-M2.7)
 AnthropicProvider — api.anthropic.com
+OllamaProvider    — local Ollama server (default http://localhost:11434/v1)
+LMStudioProvider  — local LM Studio server (default http://localhost:1234/v1)
 
 Internal message format (OpenAI-style, used as canonical across the framework)
 ----
@@ -647,6 +649,238 @@ class AnthropicProvider(LLMProvider):
             }
             for t in tools
         ]
+
+
+# ---------------------------------------------------------------------------
+# Local OpenAI-compatible providers (Ollama, LM Studio)
+# ---------------------------------------------------------------------------
+
+class _OpenAICompatibleBase(LLMProvider):
+    """
+    Shared base for any provider that speaks the OpenAI REST API.
+
+    Subclasses set:
+      name            — provider name used in the registry
+      ROUTING_PREFIX  — e.g. "ollama/" stripped before the API call
+      DEFAULT_BASE_URL
+      DEFAULT_MODEL   — bare model name (no prefix)
+      DEFAULT_TIMEOUT — local models may need more time
+    """
+
+    name: str = ""
+    ROUTING_PREFIX: str = ""
+    DEFAULT_BASE_URL: str = ""
+    DEFAULT_MODEL: str = ""
+    DEFAULT_TIMEOUT: float = 120.0
+
+    def __init__(
+        self,
+        base_url: str = "",
+        model: str = "",
+        api_key: str = "local",
+        timeout: float = 0.0,
+        max_retries: int = 2,
+    ) -> None:
+        from openai import AsyncOpenAI
+        self._base_url = base_url or self.DEFAULT_BASE_URL
+        # Accept bare names ("llama3.2") or prefixed ("ollama/llama3.2") — both work
+        self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
+        self._timeout = timeout or self.DEFAULT_TIMEOUT
+        self._max_retries = max_retries
+        self._async_client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+        )
+
+    def _api_model(self) -> str:
+        """Strip routing prefix before sending to the API."""
+        return self.model.removeprefix(self.ROUTING_PREFIX)
+
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+    ) -> LLMResponse:
+        # Collect the full stream into a single response
+        text_parts: list[str] = []
+        final: LLMResponse | None = None
+        async for chunk, resp in self.stream_chat(
+            messages=messages, tools=tools, max_tokens=max_tokens
+        ):
+            if resp is not None:
+                final = resp
+            elif chunk:
+                text_parts.append(chunk)
+        return final or LLMResponse(
+            text="".join(text_parts) or None,
+            tool_uses=[],
+            stop_reason="end_turn",
+        )
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        kwargs: dict[str, Any] = {
+            "model": self._api_model(),
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = self.format_tools(tools)
+
+        full_content = ""
+        tc_accum: dict[int, dict] = {}
+        finish_reason: str | None = None
+        input_tokens = 0
+        output_tokens = 0
+
+        stream = await self._async_client.chat.completions.create(**kwargs)
+        try:
+            async for chunk in stream:
+                if abort_signal is not None and abort_signal.is_set():
+                    break
+                if not chunk.choices:
+                    if chunk.usage:
+                        input_tokens = chunk.usage.prompt_tokens or 0
+                        output_tokens = chunk.usage.completion_tokens or 0
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    full_content += delta.content
+                    yield (delta.content, None)
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tc_accum:
+                            tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc_delta.id:
+                            tc_accum[idx]["id"] = tc_delta.id
+                        if tc_delta.function and tc_delta.function.name:
+                            tc_accum[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            tc_accum[idx]["arguments"] += tc_delta.function.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+        finally:
+            await stream.close()
+
+        tool_uses: list[ToolUse] = []
+        for idx in sorted(tc_accum):
+            tc = tc_accum[idx]
+            try:
+                args = json.loads(tc["arguments"])
+            except (json.JSONDecodeError, ValueError):
+                args = {"_raw": tc["arguments"]}
+            tool_uses.append(ToolUse(
+                id=tc["id"] or str(uuid.uuid4()),
+                name=tc["name"],
+                args=args,
+            ))
+
+        if finish_reason in ("tool_calls", "function_call"):
+            stop_reason = "tool_use"
+        elif finish_reason == "length":
+            stop_reason = "max_tokens"
+        else:
+            stop_reason = "end_turn"
+        if tool_uses and stop_reason != "tool_use":
+            stop_reason = "tool_use"
+
+        raw_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+        if tc_accum:
+            raw_message["tool_calls"] = [
+                {
+                    "id": tc_accum[i]["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc_accum[i]["name"],
+                        "arguments": tc_accum[i]["arguments"],
+                    },
+                }
+                for i in sorted(tc_accum)
+            ]
+
+        yield ("", LLMResponse(
+            text=full_content or None,
+            tool_uses=tool_uses,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            raw_message=raw_message,
+        ))
+
+    def format_tool_result(
+        self, tool_use_id: str, content: str, success: bool = True
+    ) -> dict[str, Any]:
+        return {
+            "role": "tool",
+            "tool_call_id": tool_use_id,
+            "content": content if success else f"Error: {content}",
+        }
+
+
+class OllamaProvider(_OpenAICompatibleBase):
+    """
+    Ollama local model server via its OpenAI-compatible endpoint.
+
+    Routing prefix: ``ollama/``
+    Default base URL: ``http://localhost:11434/v1``
+
+    Usage::
+
+        /model ollama/llama3.2
+        /model ollama/qwen2.5-coder:7b
+
+    Configure in loom.toml::
+
+        [providers.ollama]
+        enabled = true
+        base_url = "http://localhost:11434/v1"   # optional override
+        default_model = "llama3.2"
+    """
+
+    name = "ollama"
+    ROUTING_PREFIX = "ollama/"
+    DEFAULT_BASE_URL = "http://localhost:11434/v1"
+    DEFAULT_MODEL = "llama3.2"
+    DEFAULT_TIMEOUT = 180.0
+
+
+class LMStudioProvider(_OpenAICompatibleBase):
+    """
+    LM Studio local inference server via its OpenAI-compatible endpoint.
+
+    Routing prefix: ``lmstudio/``
+    Default base URL: ``http://localhost:1234/v1``
+
+    Usage::
+
+        /model lmstudio/phi-4
+        /model lmstudio/mistral-7b-instruct
+
+    Configure in loom.toml::
+
+        [providers.lmstudio]
+        enabled = true
+        base_url = "http://localhost:1234/v1"    # optional override
+        default_model = "phi-4"
+    """
+
+    name = "lmstudio"
+    ROUTING_PREFIX = "lmstudio/"
+    DEFAULT_BASE_URL = "http://localhost:1234/v1"
+    DEFAULT_MODEL = "phi-4"
+    DEFAULT_TIMEOUT = 180.0
 
 
 # ---------------------------------------------------------------------------
