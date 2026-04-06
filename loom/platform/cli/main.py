@@ -1714,9 +1714,14 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     if command == "/model":
         if not arg:
+            providers = ", ".join(session.router.providers)
             console.print(
                 f"[dim]Current model: [bold]{session.model}[/bold]  "
-                f"providers: {', '.join(session.router.providers)}[/dim]"
+                f"providers: {providers}[/dim]\n"
+                "[dim]  MiniMax-*        requires MINIMAX_API_KEY in .env[/dim]\n"
+                "[dim]  claude-*         requires ANTHROPIC_API_KEY in .env[/dim]\n"
+                "[dim]  ollama/<name>    enable [providers.ollama] in loom.toml[/dim]\n"
+                "[dim]  lmstudio/<name>  enable [providers.lmstudio] in loom.toml[/dim]"
             )
         else:
             ok = session.set_model(arg)
@@ -1725,7 +1730,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             else:
                 console.print(
                     f"[red]Could not switch to '{arg}'.[/red] "
-                    "[dim]Check that the API key for this provider is set in .env.[/dim]"
+                    "[dim]Either the prefix is not recognised, or the provider is not registered "
+                    "(check API key in .env or enable in loom.toml).[/dim]"
                 )
 
     if command == "/personality":
@@ -1824,7 +1830,12 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "[bold]Slash commands[/bold]\n\n"
                 "  [yellow]/new[/yellow]                       Start a fresh session\n"
                 "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
-                "  [yellow]/model[/yellow] [dim]<name>[/dim]         Switch LLM model/provider (e.g. claude-sonnet-4-6)\n"
+                "  [yellow]/model[/yellow]                     Show current model + registered providers\n"
+                "  [yellow]/model[/yellow] [dim]<name>[/dim]              Switch model at runtime\n"
+                "    [dim]MiniMax-M2.7            → MiniMax (MINIMAX_API_KEY)[/dim]\n"
+                "    [dim]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/dim]\n"
+                "    [dim]ollama/<model>          → local Ollama  (enable in loom.toml)[/dim]\n"
+                "    [dim]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/dim]\n"
                 "  [yellow]/personality[/yellow] [dim]<name>[/dim]      Switch cognitive persona\n"
                 "  [yellow]/personality off[/yellow]           Remove active persona\n"
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
@@ -2143,8 +2154,10 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     if command == "/model":
         if not arg:
+            providers = ", ".join(session.router.providers)
             app.notify(
-                f"Model: {session.model}  providers: {', '.join(session.router.providers)}"
+                f"Model: {session.model}  |  providers: {providers}\n"
+                "Prefixes: MiniMax-*  claude-*  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)
@@ -2152,7 +2165,8 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                 app.notify(f"Model switched to: {arg}")
             else:
                 app.notify(
-                    f"Could not switch to '{arg}'. Check API key in .env.",
+                    f"Cannot switch to '{arg}' — prefix not recognised or provider "
+                    "not registered (check .env key or loom.toml [providers.*]).",
                     severity="error",
                 )
 

@@ -16,6 +16,8 @@ from textual.widgets import Button, Static
 _COMMANDS = [
     ("/new",                    "Start a fresh session"),
     ("/sessions",               "Browse and switch sessions"),
+    ("/model",                  "Show current model + registered providers"),
+    ("/model <name>",           "Switch model  e.g. ollama/llama3.2  claude-sonnet-4-6"),
     ("/personality [name]",     "Switch cognitive persona"),
     ("/personality off",        "Remove active persona"),
     ("/think",                  "View last turn's reasoning chain"),
