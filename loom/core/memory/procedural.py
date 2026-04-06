@@ -49,7 +49,14 @@ class SkillGenome:
         return self.confidence <= self.deprecation_threshold
 
     def record_outcome(self, success: bool) -> None:
-        """Update confidence and success_rate after an observed outcome."""
+        """Update confidence and success_rate after an observed outcome.
+
+        .. deprecated:: Issue #56
+            Binary success/failure tracking is replaced by quality-gradient
+            self-assessment in ``SkillOutcomeTracker``.  This method is kept
+            for backward compatibility but is no longer called by the core
+            session loop.
+        """
         self.usage_count += 1
         outcome = 1.0 if success else 0.0
         if self.usage_count == 1:

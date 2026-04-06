@@ -1370,16 +1370,15 @@ class LoomSession:
             )
         )
 
-        # Skill evaluation loop: if this tool_name matches a SkillGenome,
-        # update its confidence via EMA and persist the updated genome.
-        if self._procedural is not None:
-            try:
-                skill = await self._procedural.get(call.tool_name)
-                if skill is not None:
-                    skill.record_outcome(result.success)
-                    await self._procedural.upsert(skill)
-            except Exception:
-                pass  # Never let skill accounting block the trace callback
+        # Issue #56: Old binary record_outcome() loop removed.
+        # Skill confidence is now updated by SkillOutcomeTracker via
+        # quality-gradient self-assessment (1-5 score EMA), not per-tool
+        # success/failure.  The old loop also never hit because tool_name
+        # (e.g. "read_file") rarely matches a SkillGenome name (e.g. "loom-engineer").
+
+        # Track tool usage for SkillOutcomeTracker
+        if self._skill_outcome_tracker is not None:
+            self._skill_outcome_tracker.record_tool_usage()
 
         # Counter-factual reflection: fire-and-forget for execution_error failures.
         # Only triggers when a SkillGenome exists for the tool (checked inside reflector).
