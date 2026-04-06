@@ -27,17 +27,34 @@ personality = ""
 # ─────────────────────────────────────────────
 # Cognition
 # ─────────────────────────────────────────────
-# default_model is used by `loom autonomy start` and `loom discord start`
-# when no --model flag is given.
-# CLI / TUI sessions use --model flag or this value as fallback.
+# default_model is used by all entrypoints when no --model flag is given.
 #
 # Supported prefixes:
-#   MiniMax-*         → MiniMax provider (requires MINIMAX_API_KEY in .env)
-#   claude-*          → Anthropic provider (requires ANTHROPIC_API_KEY in .env)
+#   MiniMax-*         → MiniMax provider     (requires MINIMAX_API_KEY in .env)
+#   claude-*          → Anthropic provider   (requires ANTHROPIC_API_KEY in .env)
+#   ollama/<name>     → local Ollama server  (enable [providers.ollama] below)
+#   lmstudio/<name>   → local LM Studio      (enable [providers.lmstudio] below)
 
 [cognition]
 default_model = "claude-sonnet-4-6"
 max_tokens    = 8096
+
+# ─────────────────────────────────────────────
+# Local providers
+# ─────────────────────────────────────────────
+# Enable Ollama or LM Studio without any API key.
+# base_url defaults shown below; override if you run on a different port.
+# You can also set OLLAMA_BASE_URL / LMSTUDIO_BASE_URL in .env instead.
+
+# [providers.ollama]
+# enabled       = true
+# base_url      = "http://localhost:11434/v1"
+# default_model = "llama3.2"           # bare model name — no "ollama/" prefix here
+
+# [providers.lmstudio]
+# enabled       = true
+# base_url      = "http://localhost:1234/v1"
+# default_model = "phi-4"              # must match the model loaded in LM Studio
 
 # ─────────────────────────────────────────────
 # Memory

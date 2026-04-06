@@ -248,12 +248,23 @@ def build_router() -> LLMRouter:
     """
     Build the LLM router with all available providers registered.
 
-    Both providers are always registered (if their API keys exist), each with
-    their own canonical default model.  The session's ``model`` attribute
-    controls which provider is used at runtime via ``switch_model()``.
+    Providers are registered if their credentials / config exist.
+    The session's ``model`` attribute controls which provider is active at
+    runtime via ``switch_model()``.
+
+    Cloud providers (require API keys in .env):
+      MiniMax   — MINIMAX_API_KEY
+      Anthropic — ANTHROPIC_API_KEY
+
+    Local providers (no key needed; enable in loom.toml or via env):
+      Ollama    — [providers.ollama] enabled=true  or  OLLAMA_BASE_URL
+      LM Studio — [providers.lmstudio] enabled=true  or  LMSTUDIO_BASE_URL
     """
     from loom.core.cognition.router import get_default_model
+    from loom.core.cognition.providers import OllamaProvider, LMStudioProvider
+
     env = _load_env()
+    cfg = _load_loom_config()
     router = LLMRouter()
     default = get_default_model()
 
@@ -278,10 +289,43 @@ def build_router() -> LLMRouter:
         ant_model = default if default.startswith("claude") else "claude-sonnet-4-6"
         router.register(AnthropicProvider(api_key=anthropic_key, model=ant_model))
 
+    # Ollama — local server, no API key required
+    ollama_cfg = cfg.get("providers", {}).get("ollama", {})
+    ollama_url = (
+        env.get("OLLAMA_BASE_URL")
+        or os.environ.get("OLLAMA_BASE_URL", "")
+        or ollama_cfg.get("base_url", "")
+    )
+    if ollama_url or ollama_cfg.get("enabled", False):
+        base_url = ollama_url or OllamaProvider.DEFAULT_BASE_URL
+        raw_model = ollama_cfg.get("default_model", OllamaProvider.DEFAULT_MODEL)
+        ollama_model = (
+            default if default.startswith("ollama/")
+            else f"ollama/{raw_model}"
+        )
+        router.register(OllamaProvider(base_url=base_url, model=ollama_model))
+
+    # LM Studio — local server, no API key required
+    lmstudio_cfg = cfg.get("providers", {}).get("lmstudio", {})
+    lmstudio_url = (
+        env.get("LMSTUDIO_BASE_URL")
+        or os.environ.get("LMSTUDIO_BASE_URL", "")
+        or lmstudio_cfg.get("base_url", "")
+    )
+    if lmstudio_url or lmstudio_cfg.get("enabled", False):
+        base_url = lmstudio_url or LMStudioProvider.DEFAULT_BASE_URL
+        raw_model = lmstudio_cfg.get("default_model", LMStudioProvider.DEFAULT_MODEL)
+        lmstudio_model = (
+            default if default.startswith("lmstudio/")
+            else f"lmstudio/{raw_model}"
+        )
+        router.register(LMStudioProvider(base_url=base_url, model=lmstudio_model))
+
     if not router.providers:
         raise RuntimeError(
             "No LLM provider configured. "
-            "Add MINIMAX_API_KEY or ANTHROPIC_API_KEY to .env"
+            "Add MINIMAX_API_KEY or ANTHROPIC_API_KEY to .env, "
+            "or enable a local provider in loom.toml ([providers.ollama] / [providers.lmstudio])."
         )
     return router
 
@@ -299,6 +343,9 @@ class LoomSession:
         resume_session_id: str | None = None,
         workspace: Path | None = None,
     ) -> None:
+        if model is None:
+            from loom.core.cognition.router import get_default_model
+            model = get_default_model()
         self._model = model
         self.session_id = resume_session_id or str(uuid.uuid4())[:8]
         self._resume = resume_session_id is not None
@@ -1667,9 +1714,14 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     if command == "/model":
         if not arg:
+            providers = ", ".join(session.router.providers)
             console.print(
                 f"[dim]Current model: [bold]{session.model}[/bold]  "
-                f"providers: {', '.join(session.router.providers)}[/dim]"
+                f"providers: {providers}[/dim]\n"
+                "[dim]  MiniMax-*        requires MINIMAX_API_KEY in .env[/dim]\n"
+                "[dim]  claude-*         requires ANTHROPIC_API_KEY in .env[/dim]\n"
+                "[dim]  ollama/<name>    enable [providers.ollama] in loom.toml[/dim]\n"
+                "[dim]  lmstudio/<name>  enable [providers.lmstudio] in loom.toml[/dim]"
             )
         else:
             ok = session.set_model(arg)
@@ -1678,7 +1730,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             else:
                 console.print(
                     f"[red]Could not switch to '{arg}'.[/red] "
-                    "[dim]Check that the API key for this provider is set in .env.[/dim]"
+                    "[dim]Either the prefix is not recognised, or the provider is not registered "
+                    "(check API key in .env or enable in loom.toml).[/dim]"
                 )
 
     if command == "/personality":
@@ -1777,7 +1830,12 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "[bold]Slash commands[/bold]\n\n"
                 "  [yellow]/new[/yellow]                       Start a fresh session\n"
                 "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
-                "  [yellow]/model[/yellow] [dim]<name>[/dim]         Switch LLM model/provider (e.g. claude-sonnet-4-6)\n"
+                "  [yellow]/model[/yellow]                     Show current model + registered providers\n"
+                "  [yellow]/model[/yellow] [dim]<name>[/dim]              Switch model at runtime\n"
+                "    [dim]MiniMax-M2.7            → MiniMax (MINIMAX_API_KEY)[/dim]\n"
+                "    [dim]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/dim]\n"
+                "    [dim]ollama/<model>          → local Ollama  (enable in loom.toml)[/dim]\n"
+                "    [dim]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/dim]\n"
                 "  [yellow]/personality[/yellow] [dim]<name>[/dim]      Switch cognitive persona\n"
                 "  [yellow]/personality off[/yellow]           Remove active persona\n"
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
@@ -2096,8 +2154,10 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
 
     if command == "/model":
         if not arg:
+            providers = ", ".join(session.router.providers)
             app.notify(
-                f"Model: {session.model}  providers: {', '.join(session.router.providers)}"
+                f"Model: {session.model}  |  providers: {providers}\n"
+                "Prefixes: MiniMax-*  claude-*  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)
@@ -2105,7 +2165,8 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                 app.notify(f"Model switched to: {arg}")
             else:
                 app.notify(
-                    f"Could not switch to '{arg}'. Check API key in .env.",
+                    f"Cannot switch to '{arg}' — prefix not recognised or provider "
+                    "not registered (check .env key or loom.toml [providers.*]).",
                     severity="error",
                 )
 
@@ -2785,7 +2846,7 @@ def autonomy() -> None:
 @click.option(
     "--config", default="loom.toml", show_default=True, help="Path to loom.toml"
 )
-@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--model", default=None, show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option(
     "--interval", default=60, show_default=True, help="Poll interval in seconds"
@@ -2898,7 +2959,7 @@ def autonomy_status(config: str) -> None:
 @autonomy.command("emit")
 @click.argument("event_name")
 @click.option("--config", default="loom.toml", show_default=True)
-@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--model", default=None, show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 def autonomy_emit(event_name: str, config: str, model: str, db: str) -> None:
     """Manually emit an event to trigger matching EventTriggers."""
@@ -3177,7 +3238,7 @@ def mcp_cmd() -> None:
 @mcp_cmd.command("serve")
 @click.option("--db", default="~/.loom/memory.db", show_default=True,
               help="Path to Loom's memory database.")
-@click.option("--model", default="MiniMax-M2.7", show_default=True,
+@click.option("--model", default=None, show_default=True,
               help="Model used when starting the session.")
 def mcp_serve(db: str, model: str) -> None:
     """Start Loom as an MCP stdio server.
@@ -3224,7 +3285,7 @@ def mcp_serve(db: str, model: str) -> None:
               type=click.Choice(["safe", "guarded"], case_sensitive=False),
               help="Trust level for imported tools.")
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
-@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--model", default=None, show_default=True)
 def mcp_connect(server_spec: str, trust: str, db: str, model: str) -> None:
     """Connect to an external MCP server and list its available tools.
 

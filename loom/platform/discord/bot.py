@@ -443,9 +443,10 @@ class LoomDiscordBot:
         elif command == "/model":
             assert session is not None
             if not arg:
+                providers = ", ".join(session.router.providers)
                 await message.channel.send(
-                    f"Current model: **{session.model}**  "
-                    f"providers: `{', '.join(session.router.providers)}`"
+                    f"Current model: **{session.model}**  providers: `{providers}`\n"
+                    "Prefixes: `MiniMax-*` · `claude-*` · `ollama/<name>` · `lmstudio/<name>`"
                 )
             else:
                 ok = session.set_model(arg)
@@ -453,7 +454,8 @@ class LoomDiscordBot:
                     await message.channel.send(f"Model switched to: **{arg}**")
                 else:
                     await message.channel.send(
-                        f"Could not switch to `{arg}`. Check API key in .env."
+                        f"Cannot switch to `{arg}` — prefix not recognised or provider "
+                        "not registered (check `.env` key or `loom.toml [providers.*]`)."
                     )
 
         elif command == "/personality":
@@ -537,7 +539,8 @@ class LoomDiscordBot:
                 "**Loom commands**\n\n"
                 "`/new` — Open a new session thread\n"
                 "`/sessions` — List recent sessions\n"
-                "`/model [name]` — Switch LLM model/provider\n"
+                "`/model` — Show current model + registered providers\n"
+                "`/model <name>` — Switch model  e.g. `ollama/llama3.2`  `claude-sonnet-4-6`\n"
                 "`/personality [name]` — Switch cognitive persona\n"
                 "`/personality off` — Remove active persona\n"
                 "`/think` — View last turn's reasoning chain\n"

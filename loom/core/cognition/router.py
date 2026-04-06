@@ -6,18 +6,22 @@ then delegates to that provider's chat() method.
 
 Model routing rules
 -------------------
-"MiniMax-*"        → MiniMaxProvider
-"claude-*"          → AnthropicProvider
-(default)           → first registered provider
+"MiniMax-*"    → MiniMaxProvider
+"minimax-*"    → MiniMaxProvider
+"claude-*"     → AnthropicProvider
+"ollama/*"     → OllamaProvider    (local Ollama server)
+"lmstudio/*"   → LMStudioProvider  (local LM Studio server)
+(default)      → first registered provider
 
 Usage
 -----
     router = LLMRouter()
     router.register(MiniMaxProvider(api_key="...", model="MiniMax-M2.7"))
     router.register(AnthropicProvider(api_key="..."))
+    router.register(OllamaProvider())   # no key needed
 
     response = await router.chat(
-        model="MiniMax-M2.7",
+        model="ollama/llama3.2",
         messages=[...],
         tools=[...],
     )
@@ -63,10 +67,12 @@ class LLMRouter:
 
     # Model-name prefix → provider name
     _ROUTING: list[tuple[str, str]] = [
-        ("MiniMax-", "minimax"),
-        ("minimax-", "minimax"),
-        ("claude-",  "anthropic"),
-        ("gpt-",     "openai"),
+        ("MiniMax-",   "minimax"),
+        ("minimax-",   "minimax"),
+        ("claude-",    "anthropic"),
+        ("gpt-",       "openai"),
+        ("ollama/",    "ollama"),
+        ("lmstudio/",  "lmstudio"),
     ]
 
     def __init__(self) -> None:
@@ -147,7 +153,10 @@ class LLMRouter:
 
         Searches the routing table to find the provider that handles the
         given model name prefix, then updates that provider's model attribute.
-        Returns True if the provider was found and updated.
+        Returns True only if a matching provider was found and updated.
+        Returns False if no provider recognises the model prefix — the caller
+        should surface an error rather than silently applying the name to the
+        default provider.
         """
         for prefix, provider_name in self._ROUTING:
             if model.startswith(prefix):
@@ -155,9 +164,7 @@ class LLMRouter:
                 if provider:
                     provider.model = model
                     return True
-        if self._default:
-            provider = self._providers.get(self._default)
-            if provider:
-                provider.model = model
-                return True
+                # Provider registered in routing table but not in registry
+                # (e.g. key not set) — still a valid prefix, just unavailable.
+                return False
         return False
