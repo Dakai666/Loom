@@ -48,6 +48,7 @@ from .events import (
     ToolEnd,
     TurnDone,
     TurnPaused,
+    ThinkCollapsed,
     BudgetUpdate,
     ActionStateChange,
     ActionRolledBack,
@@ -335,6 +336,8 @@ class LoomApp(App):
             await self._on_turn_start(event)
         elif isinstance(event, TextChunk):
             self._on_text_chunk(event)
+        elif isinstance(event, ThinkCollapsed):
+            self._on_think_collapsed(event)
         elif isinstance(event, ToolBegin):
             self._on_tool_begin(event)
         elif isinstance(event, ToolEnd):
@@ -363,6 +366,11 @@ class LoomApp(App):
     def _on_text_chunk(self, event: TextChunk) -> None:
         msg_list = self.query_one("#message-list", MessageList)
         msg_list.stream_text(event.text)
+
+    def _on_think_collapsed(self, event: ThinkCollapsed) -> None:
+        """Inline think block: insert a clickable summary into the streaming bubble."""
+        msg_list = self.query_one("#message-list", MessageList)
+        msg_list.stream_think(event.summary, event.full)
 
     def _on_tool_begin(self, event: ToolBegin) -> None:
         tool_block = self.query_one("#tool-block", ToolBlock)

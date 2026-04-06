@@ -68,7 +68,7 @@ except ImportError as exc:  # pragma: no cover
 
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
-    CompressDone, TextChunk, ToolBegin, ToolEnd, TurnDone, TurnPaused,
+    CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd, TurnDone, TurnPaused,
 )
 from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
 
@@ -595,16 +595,19 @@ class LoomDiscordBot:
 
         tool_buf = ""       # accumulates tool activity lines (edited into status_msg)
         narration_buf = ""  # accumulates LLM text; flushed as send-once before each tool
+        _pending_think = ""  # dim think summary, flushed into tool_buf before next tool
 
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
                     if isinstance(event, TextChunk):
-                        # "▸ thinking…" is a TUI collapse marker — skip in Discord.
-                        if event.text.strip() == "▸ thinking…":
-                            continue
                         narration_buf += event.text
+
+                    elif isinstance(event, ThinkCollapsed):
+                        # Store summary; it will be prepended before the next tool batch
+                        # so reasoning context is visible inline in the activity log.
+                        _pending_think = f"-# 💭 {event.summary}"
 
                     elif isinstance(event, ToolBegin):
                         # Flush narration before tool activity (send-once, ⬥ prefix).
@@ -612,6 +615,11 @@ class LoomDiscordBot:
                         narration_buf = ""
                         if len(narration) >= 10:
                             await message.channel.send(f"⬥ {narration}")
+
+                        # Flush pending think summary before this tool batch.
+                        if _pending_think:
+                            tool_buf += ("\n" if tool_buf else "") + _pending_think
+                            _pending_think = ""
 
                         # Build tool line with kimaki-style symbol:
                         #   ◼︎ for file writes, ┣ for everything else.

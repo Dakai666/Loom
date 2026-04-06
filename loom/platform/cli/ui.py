@@ -120,6 +120,21 @@ class ActionRolledBack:
     message: str = ""
 
 
+@dataclass
+class ThinkCollapsed:
+    """A <think>…</think> block closed during streaming.
+
+    Replaces the old ``TextChunk("▸ thinking…\\n")`` placeholder so each
+    platform can render reasoning content in its own style.
+
+    ``summary`` — first ~120 chars of the reasoning block, single line.
+    ``full``    — complete think content for the detail view.
+    """
+
+    summary: str
+    full: str
+
+
 # ---------------------------------------------------------------------------
 # Slash command autocomplete
 # ---------------------------------------------------------------------------

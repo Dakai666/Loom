@@ -132,3 +132,11 @@ class ActionRolledBack(StreamEvent):
     call_id: str
     rollback_success: bool
     message: str = ""
+
+
+@dataclass
+class ThinkCollapsed(StreamEvent):
+    """A <think>…</think> block closed — carries summary and full reasoning text."""
+
+    summary: str   # first ~120 chars, one line
+    full: str      # complete think content

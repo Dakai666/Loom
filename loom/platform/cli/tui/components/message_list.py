@@ -44,10 +44,13 @@ _ROLE_COLOR = {
 
 class ThinkIndicator(Static):
     """
-    A small clickable line that appears when the assistant message had
-    a <think> reasoning block.  Clicking anywhere on it posts OpenThinkModal.
+    A small clickable line that represents a <think> reasoning block.
+    Clicking anywhere on it posts OpenThinkModal.
 
-    Shows: ▸ thinking  [click to expand]
+    When ``summary`` is provided (inline think blocks during streaming):
+        💭 <summary>…  (click to expand)
+    When no summary (legacy post-turn mount via set_think_text):
+        ▸ thinking  (click to expand)
     """
 
     DEFAULT_CSS = """
@@ -66,8 +69,12 @@ class ThinkIndicator(Static):
             super().__init__()
             self.think_text = think_text
 
-    def __init__(self, think_text: str) -> None:
-        super().__init__("[dim]▸ thinking[/dim]  [dim italic](click to expand)[/dim italic]")
+    def __init__(self, think_text: str, *, summary: str = "") -> None:
+        if summary:
+            label = f"[dim]💭 {summary[:100]}{'…' if len(summary) > 100 else ''}[/dim]  [dim italic](click to expand)[/dim italic]"
+        else:
+            label = "[dim]▸ thinking[/dim]  [dim italic](click to expand)[/dim italic]"
+        super().__init__(label)
         self._think_text = think_text
 
     def on_click(self, _event) -> None:
@@ -80,11 +87,15 @@ class ThinkIndicator(Static):
 
 class MessageBubble(Widget):
     """
-    Single message: role header + optional think indicator + body content.
+    Single message: role header + optional think indicator(s) + body content.
 
     During streaming: body = plain RichText + ▌ cursor.
     After finish_stream(): body = Markdown(content, code_theme="gruvbox-dark").
-    If think_text is set: a ThinkIndicator is mounted between header and body.
+
+    Think blocks during streaming are handled inline via ``stream_think()``:
+    each call seals the current body segment, mounts a clickable ThinkIndicator,
+    then opens a new body Static for subsequent content.  This lets the user see
+    and click reasoning summaries without waiting for TurnDone.
     """
 
     DEFAULT_CSS = """
@@ -109,14 +120,28 @@ class MessageBubble(Widget):
     ) -> None:
         super().__init__(id=f"bubble-{msg_id}" if msg_id else None)
         self._role = role
-        self._content = content
+        # _segments holds text per body section; segment[-1] is the active one.
+        self._segments: list[str] = [content]
         self._streaming = streaming
         self._created_at = datetime.datetime.now()
         self._think_text: str = ""
+        self._has_inline_thinks: bool = False  # True once stream_think() is called
+        # Sealed body Statics with their corresponding text segment, for Markdown
+        # rendering at finish_stream() time.
+        self._sealed_bodies: list[tuple[Static, str]] = []
+        # Active body widget (updated by _render_body_text).
+        self._current_body: Static | None = None
+
+    @property
+    def _content(self) -> str:
+        """Full text content — all segments joined (backward compat)."""
+        return "".join(self._segments)
 
     def compose(self) -> ComposeResult:
         yield Static("", id="bubble-header", markup=True)
-        yield Static("", id="bubble-body", markup=False)
+        body = Static("", id="bubble-body", markup=False)
+        self._current_body = body
+        yield body
 
     def on_mount(self) -> None:
         self._render_header()
@@ -133,18 +158,52 @@ class MessageBubble(Widget):
     # ── Streaming API ─────────────────────────────────────────────────────────
 
     def append_stream(self, text: str) -> None:
-        self._content += text
+        self._segments[-1] += text
         self._render_header()
         self._render_body_text()
+
+    def stream_think(self, summary: str, full: str) -> None:
+        """
+        Insert an inline think block at the current streaming position.
+
+        Seals the current body segment (keeps its RichText content), mounts a
+        clickable ThinkIndicator summarising the reasoning, then opens a fresh
+        body Static that receives all subsequent ``append_stream()`` calls.
+        """
+        self._has_inline_thinks = True
+        # Record the sealed segment + its widget for Markdown rendering later.
+        if self._current_body is not None:
+            self._sealed_bodies.append((self._current_body, self._segments[-1]))
+        # Mount ThinkIndicator after the current body.
+        indicator = ThinkIndicator(full, summary=summary)
+        self.mount(indicator)
+        # Open a new segment + new body Static for continued streaming.
+        self._segments.append("")
+        new_body = Static("", markup=False)
+        self._current_body = new_body
+        self.mount(new_body)
+        self.scroll_visible()
 
     def finish_stream(self) -> None:
         self._streaming = False
         self._render_header()
-        if self._content.strip():
-            self._render_body_markdown()
+        if self._sealed_bodies:
+            # Multi-segment turn: render each sealed segment as Markdown, then
+            # render the final (active) segment.
+            for body_widget, seg_text in self._sealed_bodies:
+                if seg_text.strip():
+                    body_widget.update(Markdown(seg_text, code_theme="gruvbox-dark"))
+            last_seg = self._segments[-1]
+            if last_seg.strip() and self._current_body is not None:
+                self._current_body.update(
+                    Markdown(last_seg, code_theme="gruvbox-dark")
+                )
         else:
-            self._render_body_text()
-            
+            # Single-segment turn (no inline think blocks) — original behaviour.
+            if self._content.strip():
+                self._render_body_markdown()
+            else:
+                self._render_body_text()
         self._scan_and_mount_images()
 
     def _scan_and_mount_images(self) -> None:
@@ -180,11 +239,14 @@ class MessageBubble(Widget):
         """
         Called after finish_stream() when the turn had reasoning content.
         Mounts a ThinkIndicator between the header and body.
+
+        Skipped when inline think blocks have already been mounted via
+        ``stream_think()`` to avoid duplicate indicators.
         """
-        if not think_text or self._think_text:
-            return  # already set or no content
+        if not think_text or self._think_text or self._has_inline_thinks:
+            return  # already set, no content, or inline thinks handle it
         self._think_text = think_text
-        # Insert the indicator before the body static
+        # Insert the indicator before the first body static
         try:
             body = self.query_one("#bubble-body")
             self.mount(ThinkIndicator(think_text), before=body)
@@ -215,13 +277,16 @@ class MessageBubble(Widget):
             )
 
     def _render_body_text(self) -> None:
-        from textual.css.query import NoMatches
-        try:
-            body = self.query_one("#bubble-body", Static)
-        except NoMatches:
-            return
+        body = self._current_body
+        if body is None:
+            from textual.css.query import NoMatches
+            try:
+                body = self.query_one("#bubble-body", Static)
+                self._current_body = body
+            except NoMatches:
+                return
         text = RichText()
-        text.append(self._content, style=Style(color="#e0cfa0"))
+        text.append(self._segments[-1], style=Style(color="#e0cfa0"))
         body.update(text)
 
     def _render_body_markdown(self) -> None:
@@ -285,6 +350,20 @@ class MessageList(Widget):
             self.mount(bubble)
         else:
             self._streaming_bubble.append_stream(text)
+        self.scroll_end(animate=False)
+
+    def stream_think(self, summary: str, full: str) -> None:
+        """Insert an inline think indicator into the current streaming bubble."""
+        if self._streaming_bubble is None:
+            # No active bubble yet — create one so the indicator has a home.
+            self._msg_counter += 1
+            bubble = MessageBubble(
+                Role.ASSISTANT, "", streaming=True, msg_id=str(self._msg_counter)
+            )
+            self._bubbles.append(bubble)
+            self._streaming_bubble = bubble
+            self.mount(bubble)
+        self._streaming_bubble.stream_think(summary, full)
         self.scroll_end(animate=False)
 
     def finish_streaming(self) -> None:

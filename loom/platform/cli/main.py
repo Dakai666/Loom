@@ -32,6 +32,7 @@ from typing import Any, Callable
 import click
 from dotenv import dotenv_values
 from rich.console import Console
+from rich.text import Text
 
 # Force UTF-8 output on Windows so the Rich console can render full Unicode.
 import sys as _sys
@@ -93,6 +94,7 @@ from loom.platform.cli.ui import (
     ActionStateChange,
     CompressDone,
     TextChunk,
+    ThinkCollapsed,
     ToolBegin,
     ToolEnd,
     TurnDone,
@@ -702,10 +704,11 @@ class LoomSession:
 
         # Think-block filter state — persists across the whole turn so multi-step
         # reasoning (think → tool use → think again) is handled correctly.
-        _think_in = False       # currently inside <think>…</think>?
-        _think_shown = False    # emitted the collapsed indicator for this streaming call?
-        _tbuf = ""              # partial-tag lookahead buffer
+        _think_in = False           # currently inside <think>…</think>?
+        _think_shown = False        # emitted ThinkCollapsed for this streaming call?
+        _tbuf = ""                  # partial-tag lookahead buffer
         _think_parts: list[str] = []  # accumulates think content for /think command
+        _current_think_start = 0    # index into _think_parts where current block began
 
         while True:
             # Check abort signal at top of each LLM call iteration.
@@ -742,7 +745,20 @@ class LoomSession:
                                     _think_in = False
                                     _tbuf = _tbuf[close_idx + len("</think>"):]
                                     if not _think_shown:
-                                        out_parts.append("▸ thinking…\n")
+                                        # Flush text accumulated before the think block,
+                                        # then emit a dedicated ThinkCollapsed event so
+                                        # each platform can render it in its own style.
+                                        if out_parts:
+                                            yield TextChunk(text="".join(out_parts))
+                                            out_parts = []
+                                        _think_full = "".join(
+                                            _think_parts[_current_think_start:]
+                                        ).strip()
+                                        _think_summary = _think_full[:120].replace("\n", " ")
+                                        yield ThinkCollapsed(
+                                            summary=_think_summary,
+                                            full=_think_full,
+                                        )
                                         _think_shown = True
                                 else:
                                     # Partial </think> at end? Accumulate up to lookahead.
@@ -761,6 +777,7 @@ class LoomSession:
                                     if before:
                                         out_parts.append(before)
                                     _think_in = True
+                                    _current_think_start = len(_think_parts)
                                     _tbuf = _tbuf[open_idx + len("<think>"):]
                                 else:
                                     # Partial <think> at end? Keep lookahead.
@@ -787,6 +804,21 @@ class LoomSession:
 
             if response is None:
                 break
+
+            # Surface native thinking blocks (Anthropic extended thinking API).
+            # stream.text_stream skips thinking content entirely — the blocks only
+            # appear in raw_message["_thinking_blocks"] after streaming finishes.
+            # Yield ThinkCollapsed *before* tool dispatch so the UI shows reasoning
+            # context inline, ahead of the resulting tool calls.
+            for _tb in response.raw_message.get("_thinking_blocks", []):
+                _tb_text = _tb.get("thinking", "").strip()
+                if not _tb_text:
+                    continue
+                _think_parts.append(_tb_text)   # include in /think output
+                yield ThinkCollapsed(
+                    summary=_tb_text[:120].replace("\n", " "),
+                    full=_tb_text,
+                )
 
             # Replace (not accumulate) — input_tokens is the total context this call.
             self.budget.record_response(response.input_tokens, response.output_tokens)
@@ -1909,11 +1941,13 @@ class LoomChatApp:
             ToolEnd as TuiToolEnd,
             TurnDone as TuiTurnDone,
             TurnPaused as TuiTurnPaused,
+            ThinkCollapsed as TuiThinkCollapsed,
             ActionStateChange as TuiActionStateChange,
             ActionRolledBack as TuiActionRolledBack,
         )
         from loom.platform.cli.ui import (
             TextChunk,
+            ThinkCollapsed,
             ToolBegin,
             ToolEnd,
             TurnDone,
@@ -2068,6 +2102,10 @@ class LoomChatApp:
                     async for ev in self._session.stream_turn(text):
                         if isinstance(ev, TextChunk):
                             await self.dispatch_stream_event(TuiChunk(text=ev.text))
+                        elif isinstance(ev, ThinkCollapsed):
+                            await self.dispatch_stream_event(
+                                TuiThinkCollapsed(summary=ev.summary, full=ev.full)
+                            )
                         elif isinstance(ev, ToolBegin):
                             # Capture primary arg for ActivityLog display
                             _primary_arg = ""
@@ -2440,6 +2478,16 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 at_line_start = event.text.endswith("\n")
                 # Print streaming cursor at end
                 console.print(render_cursor(), end="")
+
+            elif isinstance(event, ThinkCollapsed):
+                # Show condensed reasoning summary inline; use /think for full content.
+                console.print(clear_line_escape(), end="")
+                if not at_line_start:
+                    console.print()
+                console.print(
+                    Text.from_markup(f"[dim]💭 {event.summary}[/dim]")
+                )
+                at_line_start = True
 
             elif isinstance(event, ToolBegin):
                 # Cancel any running spinner
