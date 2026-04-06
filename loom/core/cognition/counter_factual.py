@@ -245,3 +245,172 @@ def _fmt_args(args: dict) -> str:
             v_str = v_str[:77] + "..."
         parts.append(f"{k}={v_str!r}")
     return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Skill Evolution Hook (Issue #56)
+# ---------------------------------------------------------------------------
+
+_EVOLUTION_PROMPT = """\
+The skill "{skill_name}" has been used {usage_count} times.
+Current confidence: {confidence:.2f}
+Success rate: {success_rate:.2f}
+
+Recent outcomes:
+{recent_outcomes}
+
+Anti-patterns associated with this skill:
+{anti_patterns}
+
+Based on the above data, provide 1-2 specific, actionable suggestions for \
+improving this skill's workflow or instructions. Focus on patterns of \
+inefficiency or repeated issues. Be concise.
+"""
+
+
+class SkillEvolutionHook:
+    """
+    Proactively triggers improvement analysis when a skill's confidence
+    drops below threshold.
+
+    Unlike CounterFactualReflector (which reacts to individual failures),
+    SkillEvolutionHook looks at aggregate trends and generates forward-looking
+    improvement suggestions.
+
+    Trigger conditions:
+    - confidence < 0.6  AND  usage_count >= 3
+    - OR: recent 3 outcomes average score < 3.0
+
+    Generated suggestions are written to SemanticMemory and surfaced by
+    ``load_skill`` via ``<evolution_hints>`` tags.
+    """
+
+    CONFIDENCE_THRESHOLD = 0.6
+    MIN_USAGE_FOR_EVOLUTION = 3
+
+    def __init__(
+        self,
+        router: "LLMRouter",
+        model: str,
+        procedural: "ProceduralMemory",
+        semantic: SemanticMemory,
+    ) -> None:
+        self._router = router
+        self._model = model
+        self._procedural = procedural
+        self._semantic = semantic
+
+    async def check_all_skills(self) -> int:
+        """
+        Check all active skills and trigger evolution for those that qualify.
+
+        Returns the number of skills that received evolution hints.
+        """
+        skills = await self._procedural.list_active()
+        count = 0
+        for skill in skills:
+            if self._should_evolve(skill):
+                task = asyncio.create_task(
+                    self._evolve(skill),
+                    name=f"skill_evolve:{skill.name}",
+                )
+                task.add_done_callback(_on_evolve_done)
+                count += 1
+        return count
+
+    def _should_evolve(self, skill) -> bool:
+        """Check if a skill qualifies for evolution analysis."""
+        if skill.usage_count < self.MIN_USAGE_FOR_EVOLUTION:
+            return False
+        return skill.confidence < self.CONFIDENCE_THRESHOLD
+
+    async def _evolve(self, skill) -> None:
+        """Generate improvement suggestions for a struggling skill."""
+        # Gather recent outcomes from semantic memory
+        recent_outcomes = await self._get_recent_outcomes(skill.name)
+        anti_patterns = await self._get_anti_patterns(skill.name)
+
+        prompt = _EVOLUTION_PROMPT.format(
+            skill_name=skill.name,
+            usage_count=skill.usage_count,
+            confidence=skill.confidence,
+            success_rate=skill.success_rate,
+            recent_outcomes=recent_outcomes or "(no recorded outcomes)",
+            anti_patterns=anti_patterns or "(none)",
+        )
+
+        try:
+            response = await self._router.chat(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+            )
+            suggestion = (response.text or "").strip()
+        except Exception as exc:
+            logger.debug("Skill evolution LLM call failed: %s", exc)
+            return
+
+        if not suggestion:
+            return
+
+        # Write evolution hint to semantic memory
+        ts = datetime.now(UTC).isoformat(timespec="seconds")
+        await self._semantic.upsert(
+            SemanticEntry(
+                key=f"skill:{skill.name}:evolution_hint:{ts}",
+                value=suggestion,
+                source=f"skill_evolution",
+                metadata={
+                    "skill_name": skill.name,
+                    "confidence_at_generation": skill.confidence,
+                },
+            )
+        )
+        logger.debug(
+            "Evolution hint generated for skill '%s': %s",
+            skill.name, suggestion[:80],
+        )
+
+    async def _get_recent_outcomes(self, skill_name: str) -> str:
+        """Fetch recent outcome entries from semantic memory."""
+        # Search for outcome records
+        try:
+            from loom.core.memory.search import MemorySearch
+            search = MemorySearch(self._semantic, self._procedural)
+            results = await search.recall(
+                f"skill:{skill_name}:outcome", type="semantic", limit=5
+            )
+            if results:
+                return "\n".join(
+                    f"- {r.value}" for r in results if "outcome" in r.key
+                )
+        except Exception:
+            pass
+        return ""
+
+    async def _get_anti_patterns(self, skill_name: str) -> str:
+        """Fetch anti-patterns associated with this skill."""
+        try:
+            from loom.core.memory.search import MemorySearch
+            search = MemorySearch(self._semantic, self._procedural)
+            results = await search.recall(
+                f"skill:{skill_name}:anti_pattern", type="semantic", limit=3
+            )
+            if results:
+                return "\n".join(
+                    f"- {r.value}" for r in results if "anti_pattern" in r.key
+                )
+        except Exception:
+            pass
+        return ""
+
+
+def _on_evolve_done(task: asyncio.Task) -> None:
+    """Log but never re-raise — evolution failure is non-fatal."""
+    exc = task.exception() if not task.cancelled() else None
+    if exc is not None:
+        logger.debug(
+            "Skill evolution failed silently: %s: %s",
+            type(exc).__name__, exc,
+        )
+

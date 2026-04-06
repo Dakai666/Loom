@@ -74,13 +74,14 @@ from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
-from loom.core.memory.index import MemoryIndex, MemoryIndexer
+from loom.core.memory.index import MemoryIndex, MemoryIndexer, SkillCatalogEntry
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.tools import (
     make_exec_escape_fn,
     make_fetch_url_tool,
     make_filesystem_tools,
+    make_load_skill_tool,
     make_memorize_tool,
     make_query_relations_tool,
     make_recall_tool,
@@ -244,6 +245,40 @@ def _load_env(project_root: Path | None = None) -> dict[str, str]:
         if path.exists():
             return dict(dotenv_values(str(path)))
     return {}
+
+
+def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str]]:
+    """
+    Parse YAML frontmatter from a SKILL.md file.
+
+    Returns (name, description, tags).  On parse failure returns empty strings.
+    Follows Agent Skills spec lenient validation: best-effort parsing.
+    """
+    if not raw.startswith("---"):
+        return "", "", []
+
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return "", "", []
+
+    yaml_text = parts[1].strip()
+    try:
+        import yaml
+        data = yaml.safe_load(yaml_text)
+        if not isinstance(data, dict):
+            return "", "", []
+    except Exception:
+        return "", "", []
+
+    name = str(data.get("name", "")).strip()
+    description = str(data.get("description", "")).strip()
+    tags = data.get("tags", [])
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",")]
+    elif not isinstance(tags, list):
+        tags = []
+
+    return name, description, tags
 
 
 def build_router() -> LLMRouter:
@@ -424,6 +459,8 @@ class LoomSession:
         self._turn_index: int = 0  # increments once per completed stream_turn()
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
+        # Issue #56: Skill outcome tracking
+        self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
 
         # HITL pause/resume — stream_turn() checks _pause_requested at each
         # tool-batch boundary.  The consumer calls pause() / resume() / cancel().
@@ -497,8 +534,11 @@ class LoomSession:
         self._session_log = SessionLog(self._db)
 
         # Build MemoryIndex and inject into system prompt
+        # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
+        skill_catalog = await self._auto_import_skills()
         indexer = MemoryIndexer(
-            self._semantic, self._procedural, self._episodic, self._relational
+            self._semantic, self._procedural, self._episodic, self._relational,
+            skill_catalog=skill_catalog,
         )
         self._memory_index = await indexer.build()
         if not self._memory_index.is_empty:
@@ -529,6 +569,22 @@ class LoomSession:
         self.registry.register(make_memorize_tool(self._semantic))
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
+
+        # Issue #56: Register load_skill tool with outcome tracker
+        from loom.core.memory.skill_outcome import SkillOutcomeTracker
+        self._skill_outcome_tracker = SkillOutcomeTracker(
+            procedural=self._procedural,
+            semantic=self._semantic,
+            session_id=self.session_id,
+        )
+        skills_dirs = [
+            self.workspace / "skills",
+            Path.home() / ".loom" / "skills",
+        ]
+        self.registry.register(make_load_skill_tool(
+            self._procedural, skills_dirs,
+            outcome_tracker=self._skill_outcome_tracker,
+        ))
 
         # Register web tools (Phase 5D)
         self.registry.register(make_fetch_url_tool())
@@ -993,6 +1049,97 @@ class LoomSession:
         )
 
     # ------------------------------------------------------------------
+    # Issue #56: Auto-import skills from SKILL.md files
+    # ------------------------------------------------------------------
+
+    async def _auto_import_skills(self) -> list["SkillCatalogEntry"]:
+        """
+        Scan skills/ directories for SKILL.md files and auto-import them
+        into ProceduralMemory.  Returns a catalog of discovered skills
+        for injection into the system prompt (Agent Skills spec Tier 1).
+
+        Scan locations (in priority order):
+          1. <workspace>/skills/*/SKILL.md  — project-level skills
+          2. ~/.loom/skills/*/SKILL.md      — user-level skills
+
+        Follows lenient validation: malformed YAML → skip, name mismatch → warn.
+        """
+        import yaml  # lazy import — only needed for frontmatter parsing
+
+        catalog: list[SkillCatalogEntry] = []
+        seen_names: set[str] = set()
+
+        scan_dirs = [
+            self.workspace / "skills",
+            Path.home() / ".loom" / "skills",
+        ]
+
+        for scan_dir in scan_dirs:
+            if not scan_dir.is_dir():
+                continue
+
+            for skill_dir in sorted(scan_dir.iterdir()):
+                if not skill_dir.is_dir():
+                    continue
+
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.is_file():
+                    continue
+
+                try:
+                    raw = skill_md.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+
+                # Parse YAML frontmatter
+                name, description, tags = _parse_skill_frontmatter(raw)
+                if not name:
+                    # Fallback: use directory name
+                    name = skill_dir.name
+                if not description:
+                    logger.debug("Skipping skill '%s': no description", name)
+                    continue
+
+                # Dedup: project-level skills take priority
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+
+                # Upsert to ProceduralMemory if new or stale
+                from loom.core.memory.procedural import SkillGenome
+
+                existing = await self._procedural.get(name)
+                file_mtime = skill_md.stat().st_mtime
+
+                needs_update = (
+                    existing is None
+                    or (existing.updated_at and existing.updated_at.timestamp() < file_mtime)
+                    or existing.body != raw
+                )
+
+                if needs_update:
+                    genome = SkillGenome(
+                        name=name,
+                        body=raw,
+                        version=(existing.version + 1) if existing else 1,
+                        confidence=existing.confidence if existing else 0.8,
+                        usage_count=existing.usage_count if existing else 0,
+                        success_rate=existing.success_rate if existing else 0.0,
+                        tags=tags or (existing.tags if existing else []),
+                    )
+                    await self._procedural.upsert(genome)
+                    logger.debug("Auto-imported skill '%s' from %s", name, skill_md)
+
+                # Add to catalog for Tier 1 disclosure
+                catalog.append(SkillCatalogEntry(
+                    name=name,
+                    description=description,
+                    location=str(skill_md),
+                ))
+
+        return catalog
+
+    # ------------------------------------------------------------------
     # Plugin loader
     # ------------------------------------------------------------------
 
@@ -1223,16 +1370,15 @@ class LoomSession:
             )
         )
 
-        # Skill evaluation loop: if this tool_name matches a SkillGenome,
-        # update its confidence via EMA and persist the updated genome.
-        if self._procedural is not None:
-            try:
-                skill = await self._procedural.get(call.tool_name)
-                if skill is not None:
-                    skill.record_outcome(result.success)
-                    await self._procedural.upsert(skill)
-            except Exception:
-                pass  # Never let skill accounting block the trace callback
+        # Issue #56: Old binary record_outcome() loop removed.
+        # Skill confidence is now updated by SkillOutcomeTracker via
+        # quality-gradient self-assessment (1-5 score EMA), not per-tool
+        # success/failure.  The old loop also never hit because tool_name
+        # (e.g. "read_file") rarely matches a SkillGenome name (e.g. "loom-engineer").
+
+        # Track tool usage for SkillOutcomeTracker
+        if self._skill_outcome_tracker is not None:
+            self._skill_outcome_tracker.record_tool_usage()
 
         # Counter-factual reflection: fire-and-forget for execution_error failures.
         # Only triggers when a SkillGenome exists for the tool (checked inside reflector).

@@ -5,15 +5,25 @@ Shown at the start of every session so the agent knows what is available
 without loading the full memory into context. The agent then uses the
 ``recall`` tool to pull specific entries on demand.
 
+Skill catalog follows the Agent Skills spec (agentskills.io) progressive
+disclosure model:
+  Tier 1 (startup) — name + description in ``<available_skills>`` XML
+  Tier 2 (on demand) — ``load_skill(name)`` returns full SKILL.md body
+  Tier 3 (as needed) — agent reads bundled scripts/references/assets
+
 Rendered format (example)
 -------------------------
     Memory Index
     ─────────────────────────────────────────────
     Semantic  : 47 facts   [topics: python, loom, testing, config]
-    Skills    : 12 active  [tags: refactor, bash, git, python]
     Episodes  : 8 sessions compressed
     ─────────────────────────────────────────────
     Use recall(query) to retrieve relevant entries.
+
+    <available_skills>
+    <skill><name>loom-engineer</name>
+    <description>Full implementation cycle from issue to PR.</description></skill>
+    </available_skills>
 """
 
 from __future__ import annotations
@@ -62,12 +72,22 @@ def _extract_topics(facts: list[SemanticEntry], max_topics: int = 6) -> list[str
 # ---------------------------------------------------------------------------
 
 @dataclass
+class SkillCatalogEntry:
+    """Tier-1 metadata for a single skill (Agent Skills spec)."""
+    name: str
+    description: str
+    location: str = ""  # absolute path to SKILL.md
+
+
+@dataclass
 class MemoryIndex:
     """Lightweight summary of the current memory state."""
     semantic_count: int = 0
     semantic_topics: list[str] = field(default_factory=list)
     skill_count: int = 0
     skill_tags: list[str] = field(default_factory=list)
+    # Issue #56: full skill catalog for progressive disclosure
+    skill_catalog: list[SkillCatalogEntry] = field(default_factory=list)
     episode_sessions: int = 0
     relational_count: int = 0
     relational_predicates: list[str] = field(default_factory=list)
@@ -78,16 +98,19 @@ class MemoryIndex:
     _WIDTH = 45
 
     def render(self) -> str:
-        """Return a compact, fixed-width text block for the system prompt."""
+        """Return a compact, fixed-width text block for the system prompt.
+
+        Includes an ``<available_skills>`` XML catalog following the Agent
+        Skills spec progressive disclosure model (Tier 1: metadata only).
+        """
         topics = ", ".join(self.semantic_topics) if self.semantic_topics else "(none)"
-        tags = ", ".join(self.skill_tags) if self.skill_tags else "(none)"
         bar = "─" * self._WIDTH
         lines = [
             "Memory Index",
             bar,
             f"Semantic  : {self.semantic_count} {'fact' if self.semantic_count == 1 else 'facts'}"
             f"   [topics: {topics}]",
-            f"Skills    : {self.skill_count} active  [tags: {tags}]",
+            f"Skills    : {self.skill_count} active",
             f"Episodes  : {self.episode_sessions} sessions compressed",
         ]
         if self.relational_count > 0:
@@ -115,6 +138,28 @@ class MemoryIndex:
             lines.append("Self-Portrait (loom-self observations):")
             for t in self.self_triples[:8]:  # cap at 8 to avoid context bloat
                 lines.append(f"  [{t.predicate}] {t.object}")
+
+        # Issue #56: Skill catalog — Agent Skills spec progressive disclosure
+        # Tier 1: name + description in XML, injected at session start.
+        if self.skill_catalog:
+            lines.append("")
+            lines.append("<available_skills>")
+            for entry in self.skill_catalog:
+                lines.append("<skill>")
+                lines.append(f"  <name>{entry.name}</name>")
+                lines.append(f"  <description>{entry.description}</description>")
+                lines.append("</skill>")
+            lines.append("</available_skills>")
+            lines.append("")
+            lines.append(
+                "The skills listed above provide specialized instructions for "
+                "specific tasks. When a task matches a skill's description, call "
+                "load_skill(name) to load its full instructions before proceeding."
+            )
+        elif self.skill_count > 0:
+            # Fallback: skills in DB but no catalog entries (no SKILL.md files found)
+            tags = ", ".join(self.skill_tags) if self.skill_tags else "(none)"
+            lines.append(f"  [tags: {tags}]")
 
         return "\n".join(lines)
 
@@ -145,11 +190,13 @@ class MemoryIndexer:
         procedural: ProceduralMemory,
         episodic: EpisodicMemory | None = None,
         relational: RelationalMemory | None = None,
+        skill_catalog: list[SkillCatalogEntry] | None = None,
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
         self._episodic = episodic
         self._relational = relational
+        self._skill_catalog: list[SkillCatalogEntry] = skill_catalog or []
 
     async def build(self) -> MemoryIndex:
         """Fetch counts and metadata; return a MemoryIndex."""
@@ -202,6 +249,7 @@ class MemoryIndexer:
             semantic_topics=semantic_topics,
             skill_count=skill_count,
             skill_tags=skill_tags,
+            skill_catalog=self._skill_catalog,
             episode_sessions=episode_sessions,
             relational_count=relational_count,
             relational_predicates=relational_predicates,
