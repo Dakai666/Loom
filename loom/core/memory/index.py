@@ -153,17 +153,13 @@ class MemoryIndexer:
 
     async def build(self) -> MemoryIndex:
         """Fetch counts and metadata; return a MemoryIndex."""
-        # Semantic facts (fetch up to 500 recent for topic analysis)
+        # Semantic facts — true count from DB, sample 500 recent for topic analysis
+        semantic_count = await self._semantic.count()
         facts = await self._semantic.list_recent(500)
-        semantic_count = len(facts)
         semantic_topics = _extract_topics(facts)
 
-        # Distinct compressed sessions — normalize "session:<id>:fact:<n>" → "session:<id>"
-        episode_sessions = len({
-            ":".join(f.source.split(":")[:2])
-            for f in facts
-            if f.source and f.source.startswith("session:")
-        })
+        # Distinct compressed sessions — count directly from DB, not from the 500-row sample
+        episode_sessions = await self._semantic.count_compressed_sessions()
 
         # Active skills
         skills = await self._procedural.list_active()
