@@ -213,17 +213,19 @@ class ToolBlock(Widget):
         Maps ActionState values to ToolState enum members for visualization.
         """
         _MAP = {
-            "authorized": ToolState.AUTHORIZED,
-            "prepared":   ToolState.PREPARED,
-            "executing":  ToolState.RUNNING,
-            "observed":   ToolState.OBSERVED,
-            "validated":  ToolState.VALIDATED,
-            "committed":  ToolState.DONE,
-            "reverting":  ToolState.REVERTING,
-            "reverted":   ToolState.REVERTED,
-            "denied":     ToolState.DENIED,
-            "aborted":    ToolState.FAILED,
-            "timed_out":  ToolState.FAILED,
+            "declared":    ToolState.PENDING,     # queued, awaiting authorization
+            "authorized":  ToolState.AUTHORIZED,
+            "prepared":    ToolState.PREPARED,
+            "executing":   ToolState.RUNNING,
+            "observed":    ToolState.OBSERVED,
+            "validated":   ToolState.VALIDATED,
+            "committed":   ToolState.DONE,
+            "memorialized": ToolState.DONE,       # audit written — final resting state
+            "reverting":   ToolState.REVERTING,
+            "reverted":    ToolState.REVERTED,
+            "denied":      ToolState.DENIED,
+            "aborted":     ToolState.FAILED,
+            "timed_out":   ToolState.FAILED,
         }
         ts = _MAP.get(new_state)
         if ts is None:
