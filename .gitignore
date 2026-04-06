@@ -72,6 +72,7 @@ news/
 reports/
 outputs/
 tmp/
+skills/pdf/
 
 # Personal config (use loom.toml.example as template)
 loom.toml
