@@ -173,6 +173,26 @@ enabled  = false           # set true to activate daemon
 # notify       = false
 # notify_thread = 0                 # replace with a Discord thread ID to log results
 
+# ── Example: weekly memory housekeeping ──────────────────────────────────────────
+# Prunes semantic facts whose effective_confidence has decayed below threshold.
+# Effective confidence uses a 90-day half-life: a session-compressed fact
+# (confidence=0.8) drops below 0.1 after ~282 days without being refreshed.
+# Runs dry_run first as a preview, then deletes if any entries qualify.
+#
+# Requires DreamingPlugin (same as offline_dreaming above) — it registers
+# the memory_prune tool alongside dream_cycle.
+#
+# [[autonomy.schedules]]
+# name         = "memory_housekeeping"
+# cron         = "0 19 * * 0"       # 19:00 UTC Sunday = 03:00 Monday Asia/Taipei
+# intent       = """Run memory housekeeping. First call memory_prune with
+#                   dry_run=true to preview decayed entries. If any qualify,
+#                   call again with dry_run=false to delete them. Report:
+#                   total examined, pruned, and retained."""
+# trust_level  = "safe"
+# notify       = false
+# notify_thread = 0
+
 # ─────────────────────────────────────────────
 # Notifications
 # ─────────────────────────────────────────────
