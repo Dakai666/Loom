@@ -55,12 +55,14 @@ from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
 from loom.core.harness.middleware import (
     BlastRadiusMiddleware,
+    LifecycleMiddleware,
     LogMiddleware,
     MiddlewarePipeline,
     ToolCall,
     ToolResult,
     TraceMiddleware,
 )
+from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope
 from loom.core.harness.validation import SchemaValidationMiddleware
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.infra import AbortController, wait_aborted
@@ -87,6 +89,8 @@ from loom.platform.cli.tools import (
     make_web_search_tool,
 )
 from loom.platform.cli.ui import (
+    ActionRolledBack,
+    ActionStateChange,
     CompressDone,
     TextChunk,
     ToolBegin,
@@ -365,6 +369,10 @@ class LoomSession:
         # Abort controller for cancellation of in-flight LLM streaming calls.
         self._abort = AbortController()
 
+        # Issue #42: Action lifecycle tracking
+        self._current_envelope: ExecutionEnvelope | None = None
+        self._lifecycle_events: asyncio.Queue = asyncio.Queue()
+
         # Issue #28: Predictive memory pre-fetcher — default off (opt-in)
         self._prefetch_enabled: bool = (
             config.get("session", {}).get("prefetch_enabled", False)
@@ -480,6 +488,11 @@ class LoomSession:
         )
         self._pipeline = MiddlewarePipeline(
             [
+                LifecycleMiddleware(
+                    registry=self.registry,
+                    on_lifecycle=self._on_lifecycle,
+                    on_state_change=self._on_state_change,
+                ),
                 TraceMiddleware(on_trace=self._on_trace),
                 SchemaValidationMiddleware(registry=self.registry),
                 BlastRadiusMiddleware(
@@ -575,7 +588,10 @@ class LoomSession:
         user_input: str,
         *,
         abort_signal: "asyncio.Event | None" = None,
-    ) -> AsyncIterator[TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone]:
+    ) -> AsyncIterator[
+        TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone
+        | ActionStateChange | ActionRolledBack
+    ]:
         """
         Run one complete agent turn and yield typed UI events.
 
@@ -783,6 +799,9 @@ class LoomSession:
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
+                        # Drain lifecycle events queued during dispatch
+                        while not self._lifecycle_events.empty():
+                            yield self._lifecycle_events.get_nowait()
                         self.messages.append(
                             self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
@@ -821,6 +840,9 @@ class LoomSession:
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
+                        # Drain lifecycle events queued during dispatch
+                        while not self._lifecycle_events.empty():
+                            yield self._lifecycle_events.get_nowait()
                         self.messages.append(
                             self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
@@ -1104,6 +1126,80 @@ class LoomSession:
             and result.failure_type == "execution_error"
         ):
             self._reflector.maybe_reflect(call, result, self.session_id)
+
+    async def _on_lifecycle(self, record: ActionRecord) -> None:
+        """
+        Persist a completed ActionRecord to the action_records table (Issue #42).
+
+        Called by LifecycleMiddleware after an action reaches a terminal state.
+        Stores full state_history as JSON for complete audit trail.
+        """
+        import json as _json
+        try:
+            envelope_id = self._current_envelope.id if self._current_envelope else ""
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO action_records
+                    (id, envelope_id, session_id, turn_index, tool_name, call_id,
+                     final_state, intent_summary, scope, duration_ms,
+                     state_history, has_rollback, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    envelope_id,
+                    self.session_id,
+                    self._turn_index,
+                    record.tool_name,
+                    record.call.id if record.call else "",
+                    record.final_state,
+                    record.intent.intent_summary,
+                    record.intent.scope,
+                    record.elapsed_ms,
+                    _json.dumps(record.history_dicts(), ensure_ascii=False),
+                    1 if record.rollback_result is not None else 0,
+                    record.created_at.isoformat(),
+                ),
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # DB write must never crash the pipeline
+
+    async def _on_state_change(
+        self, record: ActionRecord, old_state: str, new_state: str
+    ) -> None:
+        """
+        Enqueue an ActionStateChange event for stream_turn() to yield.
+
+        Called by LifecycleMiddleware on each state transition.
+        Also enqueues ActionRolledBack when transitioning to 'reverted'.
+        """
+        call_id = record.call.id if record.call else ""
+        self._lifecycle_events.put_nowait(
+            ActionStateChange(
+                action_id=record.id,
+                tool_name=record.tool_name,
+                call_id=call_id,
+                old_state=old_state,
+                new_state=new_state,
+                reason=record.state_history[-1].reason if record.state_history else None,
+            )
+        )
+        # Emit a specialized rollback event
+        if new_state == "reverted":
+            rb_success = record.rollback_result.success if record.rollback_result else False
+            rb_msg = ""
+            if record.rollback_result:
+                rb_msg = record.rollback_result.output or record.rollback_result.error or ""
+            self._lifecycle_events.put_nowait(
+                ActionRolledBack(
+                    action_id=record.id,
+                    tool_name=record.tool_name,
+                    call_id=call_id,
+                    rollback_success=rb_success,
+                    message=str(rb_msg)[:200],
+                )
+            )
 
     async def _confirm_tool(self, call: ToolCall) -> bool:
         # Stop any running spinner before printing the confirm panel so the
@@ -1681,6 +1777,8 @@ class LoomChatApp:
             ToolEnd as TuiToolEnd,
             TurnDone as TuiTurnDone,
             TurnPaused as TuiTurnPaused,
+            ActionStateChange as TuiActionStateChange,
+            ActionRolledBack as TuiActionRolledBack,
         )
         from loom.platform.cli.ui import (
             TextChunk,
@@ -1688,6 +1786,8 @@ class LoomChatApp:
             ToolEnd,
             TurnDone,
             TurnPaused,
+            ActionStateChange,
+            ActionRolledBack,
         )
 
         class _App(LoomApp):
@@ -1900,6 +2000,27 @@ class LoomChatApp:
                                     used_tokens=budget.used_tokens,
                                     max_tokens=budget.total_tokens,
                                     think_text=self._session._last_think,
+                                )
+                            )
+                        elif isinstance(ev, ActionStateChange):
+                            await self.dispatch_stream_event(
+                                TuiActionStateChange(
+                                    action_id=ev.action_id,
+                                    tool_name=ev.tool_name,
+                                    call_id=ev.call_id,
+                                    old_state=ev.old_state,
+                                    new_state=ev.new_state,
+                                    reason=ev.reason,
+                                )
+                            )
+                        elif isinstance(ev, ActionRolledBack):
+                            await self.dispatch_stream_event(
+                                TuiActionRolledBack(
+                                    action_id=ev.action_id,
+                                    tool_name=ev.tool_name,
+                                    call_id=ev.call_id,
+                                    rollback_success=ev.rollback_success,
+                                    message=ev.message,
                                 )
                             )
                 except asyncio.CancelledError:

@@ -33,10 +33,56 @@ class AgentState(Enum):
 
 
 class ToolState(Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    DONE = "done"
-    FAILED = "failed"
+    PENDING    = "pending"
+    AUTHORIZED = "authorized"    # Issue #42: passed permission check
+    PREPARED   = "prepared"      # Issue #42: preconditions verified
+    RUNNING    = "running"
+    OBSERVED   = "observed"      # Issue #42: executor returned, awaiting validation
+    VALIDATED  = "validated"     # Issue #42: post-validator passed
+    DONE       = "done"
+    REVERTING  = "reverting"     # Issue #42: rollback in progress
+    REVERTED   = "reverted"      # Issue #42: rollback completed
+    FAILED     = "failed"
+    DENIED     = "denied"        # Issue #42: permission denied
+
+    @property
+    def icon(self) -> str:
+        """Lifecycle state icon for TUI display."""
+        return _STATE_ICONS.get(self, "?")
+
+    @property
+    def style(self) -> str:
+        """Rich markup colour for the state."""
+        return _STATE_STYLES.get(self, "dim")
+
+
+_STATE_ICONS: dict[ToolState, str] = {
+    ToolState.PENDING:    "◌",
+    ToolState.AUTHORIZED: "🔓",
+    ToolState.PREPARED:   "📋",
+    ToolState.RUNNING:    "⟳",
+    ToolState.OBSERVED:   "👁",
+    ToolState.VALIDATED:  "✓",
+    ToolState.DONE:       "✓",
+    ToolState.REVERTING:  "↩",
+    ToolState.REVERTED:   "↩✗",
+    ToolState.FAILED:     "✗",
+    ToolState.DENIED:     "🚫",
+}
+
+_STATE_STYLES: dict[ToolState, str] = {
+    ToolState.PENDING:    "dim",
+    ToolState.AUTHORIZED: "#c8a464",
+    ToolState.PREPARED:   "#6a9fcc",
+    ToolState.RUNNING:    "yellow",
+    ToolState.OBSERVED:   "dim",
+    ToolState.VALIDATED:  "#7a9e78",
+    ToolState.DONE:       "#7a9e78",
+    ToolState.REVERTING:  "#c8924a",
+    ToolState.REVERTED:   "#b87060",
+    ToolState.FAILED:     "#b87060",
+    ToolState.DENIED:     "#b87060",
+}
 
 
 @dataclass
@@ -156,6 +202,42 @@ class ToolBlock(Widget):
             self._start_think_animation()
             self.post_message(self.ToolDone(self.completed_tools[-len(completed):]))
 
+        self._update_display()
+
+    def update_tool_lifecycle(
+        self, call_id: str, old_state: str, new_state: str, reason: str | None = None
+    ) -> None:
+        """
+        Update a tool's displayed state from a lifecycle state change event (Issue #42).
+
+        Maps ActionState values to ToolState enum members for visualization.
+        """
+        _MAP = {
+            "authorized": ToolState.AUTHORIZED,
+            "prepared":   ToolState.PREPARED,
+            "executing":  ToolState.RUNNING,
+            "observed":   ToolState.OBSERVED,
+            "validated":  ToolState.VALIDATED,
+            "committed":  ToolState.DONE,
+            "reverting":  ToolState.REVERTING,
+            "reverted":   ToolState.REVERTED,
+            "denied":     ToolState.DENIED,
+            "aborted":    ToolState.FAILED,
+            "timed_out":  ToolState.FAILED,
+        }
+        ts = _MAP.get(new_state)
+        if ts is None:
+            return
+        for tool in self.active_tools:
+            if tool.call_id == call_id:
+                tool.state = ts
+                break
+        else:
+            # Tool might already be in completed list
+            for tool in self.completed_tools:
+                if tool.call_id == call_id:
+                    tool.state = ts
+                    break
         self._update_display()
 
     def clear(self) -> None:

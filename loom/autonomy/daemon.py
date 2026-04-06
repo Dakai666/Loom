@@ -107,6 +107,8 @@ class AutonomyDaemon:
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
                     output_chunks.append(event.text)
+                # ActionStateChange / ActionRolledBack events are silently
+                # consumed — daemon doesn't need lifecycle visualization.
 
             thread_id = plan.context.get("notify_thread_id", 0)
             response = "".join(output_chunks).strip()

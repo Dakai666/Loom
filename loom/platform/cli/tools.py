@@ -121,14 +121,52 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
         content = call.args.get("content", "")
         path = _resolve_workspace_path(raw, workspace)
         try:
+            # Capture original content for rollback (Issue #42)
+            original_content: str | None = None
+            file_existed = path.exists()
+            if file_existed:
+                try:
+                    original_content = path.read_text(encoding="utf-8")
+                except Exception:
+                    pass  # binary file or unreadable — rollback will delete
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True,
-                              output=f"Written {len(content)} chars to {path}")
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=f"Written {len(content)} chars to {path}",
+                metadata={
+                    "_original_content": original_content,
+                    "_file_existed": file_existed,
+                    "_resolved_path": str(path),
+                },
+            )
         except Exception as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
+
+    async def _write_file_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
+        """Restore original file content (or delete if newly created)."""
+        resolved = result.metadata.get("_resolved_path", "")
+        path = Path(resolved) if resolved else _resolve_workspace_path(
+            call.args.get("path", ""), workspace
+        )
+        original = result.metadata.get("_original_content")
+        existed = result.metadata.get("_file_existed", True)
+        try:
+            if not existed:
+                path.unlink(missing_ok=True)
+                msg = f"Rolled back: deleted newly created {path}"
+            elif original is not None:
+                path.write_text(original, encoding="utf-8")
+                msg = f"Rolled back: restored original content of {path}"
+            else:
+                msg = f"Rollback: no original content captured for {path}"
+            return ToolResult(call_id=call.id, tool_name="write_file",
+                              success=True, output=msg)
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name="write_file",
+                              success=False, error=f"Rollback failed: {exc}")
 
     async def _list_dir(call: ToolCall) -> ToolResult:
         raw = call.args.get("path", "")
@@ -164,6 +202,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_read_file,
             tags=["filesystem", "read"],
+            scope="filesystem",
         ),
         ToolDefinition(
             name="write_file",
@@ -184,6 +223,9 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_write_file,
             tags=["filesystem", "write"],
+            scope="filesystem",
+            rollback_fn=_write_file_rollback,
+            preconditions=["target directory must be writable"],
         ),
         ToolDefinition(
             name="list_dir",
@@ -202,6 +244,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_list_dir,
             tags=["filesystem", "read"],
+            scope="filesystem",
         ),
     ]
 
@@ -299,6 +342,7 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
         },
         executor=_run_bash,
         tags=["shell"],
+        scope="shell",
     )
 
 
@@ -371,6 +415,7 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
         },
         executor=_recall,
         tags=["memory", "search", "recall"],
+        scope="memory",
     )
 
 
@@ -400,7 +445,22 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
         else:
             msg = f"Memorized: {key!r}"
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=msg)
+                          success=True, output=msg,
+                          metadata={"_memorized_key": key})
+
+    async def _memorize_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
+        """Delete the key that was just memorized."""
+        key = result.metadata.get("_memorized_key") or call.args.get("key", "").strip()
+        if not key:
+            return ToolResult(call_id=call.id, tool_name="memorize",
+                              success=False, error="No key to rollback")
+        try:
+            await semantic.delete(key)
+            return ToolResult(call_id=call.id, tool_name="memorize",
+                              success=True, output=f"Rolled back: deleted key {key!r}")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name="memorize",
+                              success=False, error=f"Rollback failed: {exc}")
 
     return ToolDefinition(
         name="memorize",
@@ -431,6 +491,8 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
         },
         executor=_memorize,
         tags=["memory", "write", "memorize"],
+        scope="memory",
+        rollback_fn=_memorize_rollback,
     )
 
 
@@ -463,7 +525,24 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
         )
         await relational.upsert(entry)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}")
+                          success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}",
+                          metadata={"_subject": subject, "_predicate": predicate})
+
+    async def _relate_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
+        """Delete the triple that was just stored."""
+        subject = result.metadata.get("_subject") or call.args.get("subject", "").strip()
+        predicate = result.metadata.get("_predicate") or call.args.get("predicate", "").strip()
+        if not subject or not predicate:
+            return ToolResult(call_id=call.id, tool_name="relate",
+                              success=False, error="No subject/predicate to rollback")
+        try:
+            await relational.delete(subject, predicate)
+            return ToolResult(call_id=call.id, tool_name="relate",
+                              success=True,
+                              output=f"Rolled back: deleted ({subject!r}, {predicate!r})")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name="relate",
+                              success=False, error=f"Rollback failed: {exc}")
 
     return ToolDefinition(
         name="relate",
@@ -487,6 +566,8 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
         },
         executor=_relate,
         tags=["memory", "write", "relational"],
+        scope="memory",
+        rollback_fn=_relate_rollback,
     )
 
 
@@ -534,6 +615,7 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
         },
         executor=_query_relations,
         tags=["memory", "search", "relational"],
+        scope="memory",
     )
 
 
@@ -603,6 +685,7 @@ def make_fetch_url_tool() -> ToolDefinition:
         },
         executor=_fetch_url,
         tags=["web", "fetch"],
+        scope="network",
     )
 
 
@@ -681,6 +764,7 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
         },
         executor=_web_search,
         tags=["web", "search"],
+        scope="network",
     )
 
 
@@ -773,6 +857,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         },
         executor=_spawn_agent,
         tags=["agent", "spawn"],
+        scope="agent",
     )
 
 
