@@ -20,6 +20,7 @@ Usage
 
 import asyncio
 import json
+import logging
 import os
 import time
 import tomllib
@@ -113,6 +114,7 @@ from loom.platform.cli.ui import (
 )
 
 console = Console(highlight=False)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Session compression (episodic → semantic)
