@@ -230,7 +230,8 @@ class TestBuiltinTools:
 
     @pytest.mark.asyncio
     async def test_run_bash_timeout(self):
-        call = make_call("run_bash", args={"command": "sleep 10", "timeout": 1})
+        # Use python -c so the sleep command works on Windows (cmd.exe has no sleep)
+        call = make_call("run_bash", args={"command": 'python -c "import time; time.sleep(10)"', "timeout": 1})
         result = await _run_bash(call)
         assert result.success is False
         assert "timed out" in result.error.lower()
