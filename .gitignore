@@ -59,7 +59,6 @@ CLI_UI_DESIGN.md
 IMPLEMENTATION_STATUS.md
 *.md.bak
 scripts/
-tests/
 *.png
 *.jpg
 loom/_commit_msg.txt

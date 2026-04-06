@@ -236,6 +236,64 @@ class SemanticMemory:
             for r in rows
         ]
 
+    async def prune_decayed(
+        self,
+        threshold: float = 0.1,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Delete semantic entries whose effective_confidence has decayed below *threshold*.
+
+        Effective confidence = stored_confidence × 2^(-days_since_update / half_life).
+        A 90-day half-life means:
+          - confidence=0.8 → drops below 0.1 after ~282 days of no update
+          - confidence=1.0 → drops below 0.1 after ~299 days of no update
+
+        Returns a dict: {examined, pruned, threshold, dry_run}
+        If dry_run=True the query runs but nothing is deleted.
+        """
+        cursor = await self._db.execute(
+            "SELECT key, confidence, updated_at FROM semantic_entries"
+        )
+        rows = await cursor.fetchall()
+
+        to_prune: list[str] = []
+        for key, confidence, updated_at_str in rows:
+            updated_at = datetime.fromisoformat(updated_at_str)
+            if _effective_confidence(confidence, updated_at) < threshold:
+                to_prune.append(key)
+
+        if not dry_run and to_prune:
+            placeholders = ",".join("?" * len(to_prune))
+            await self._db.execute(
+                f"DELETE FROM semantic_entries WHERE key IN ({placeholders})",
+                to_prune,
+            )
+            await self._db.commit()
+
+        return {
+            "examined": len(rows),
+            "pruned": len(to_prune),
+            "retained": len(rows) - len(to_prune),
+            "threshold": threshold,
+            "dry_run": dry_run,
+        }
+
+    async def count(self) -> int:
+        """Return the total number of semantic entries in the database."""
+        cursor = await self._db.execute("SELECT COUNT(*) FROM semantic_entries")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def count_compressed_sessions(self) -> int:
+        """Return the number of distinct sessions that have been compressed into semantic memory."""
+        cursor = await self._db.execute(
+            "SELECT COUNT(DISTINCT substr(source, 1, instr(source, ':fact:') - 1)) "
+            "FROM semantic_entries WHERE source LIKE 'session:%:fact:%'"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def delete(self, key: str) -> bool:
         """
         Delete a semantic entry by key.

@@ -141,6 +141,10 @@ class LoomDiscordBot:
         channel_ids: list[int] | None = None,
         allowed_user_ids: list[int] | None = None,
     ) -> None:
+        # Resolve None to the default model from loom.toml
+        if model is None:
+            from loom.core.cognition.router import get_default_model
+            model = get_default_model()
         self._model = model
         self._db_path = str(Path(db_path).expanduser())
         self._allowed_channels: set[int] = set(channel_ids or [])
@@ -436,6 +440,22 @@ class LoomDiscordBot:
             await session._smart_compact()
             await _safe_edit(msg, "✅ Context compacted.")
 
+        elif command == "/model":
+            assert session is not None
+            if not arg:
+                await message.channel.send(
+                    f"Current model: **{session.model}**  "
+                    f"providers: `{', '.join(session.router.providers)}`"
+                )
+            else:
+                ok = session.set_model(arg)
+                if ok:
+                    await message.channel.send(f"Model switched to: **{arg}**")
+                else:
+                    await message.channel.send(
+                        f"Could not switch to `{arg}`. Check API key in .env."
+                    )
+
         elif command == "/personality":
             assert session is not None
             if not arg:
@@ -517,6 +537,7 @@ class LoomDiscordBot:
                 "**Loom commands**\n\n"
                 "`/new` — Open a new session thread\n"
                 "`/sessions` — List recent sessions\n"
+                "`/model [name]` — Switch LLM model/provider\n"
                 "`/personality [name]` — Switch cognitive persona\n"
                 "`/personality off` — Remove active persona\n"
                 "`/think` — View last turn's reasoning chain\n"

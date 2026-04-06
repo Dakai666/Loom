@@ -97,6 +97,66 @@ def _make_dream_cycle_tool(session):
     )
 
 
+def _make_memory_prune_tool(session):
+    """Build a memory_prune ToolDefinition wired to *session*."""
+    from loom.core.harness.registry import ToolDefinition
+    from loom.core.harness.middleware import ToolResult
+    from loom.core.harness.permissions import TrustLevel
+
+    async def _memory_prune_executor(call) -> ToolResult:
+        threshold = float(call.args.get("threshold", 0.1))
+        dry_run = bool(call.args.get("dry_run", False))
+
+        sem = getattr(session, "_semantic", None)
+        if sem is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error="Memory prune skipped — semantic memory not available.",
+            )
+
+        result = await sem.prune_decayed(threshold=threshold, dry_run=dry_run)
+
+        lines = [
+            "Memory prune complete",
+            f"  Examined : {result['examined']} facts",
+            f"  Pruned   : {result['pruned']} (effective_confidence < {threshold})",
+            f"  Retained : {result['retained']}",
+        ]
+        if dry_run:
+            lines.append("  (dry-run — nothing was deleted)")
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output="\n".join(lines),
+        )
+
+    return ToolDefinition(
+        name="memory_prune",
+        description=(
+            "Remove semantic memory entries whose effective confidence has decayed "
+            "below a threshold. Effective confidence uses a 90-day half-life: a fact "
+            "with initial confidence 0.8 drops below 0.1 after ~282 days of no update. "
+            "Use dry_run=true to preview what would be deleted."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "threshold": {
+                    "type": "number",
+                    "description": "Delete entries with effective_confidence below this value (default 0.1).",
+                    "default": 0.1,
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, report what would be pruned without deleting anything.",
+                    "default": False,
+                },
+            },
+        },
+        executor=_memory_prune_executor,
+        trust_level=TrustLevel.SAFE,
+    )
+
+
 class DreamingPlugin(LoomPlugin):
     """LoomPlugin that registers the ``dream_cycle`` tool."""
 
@@ -120,9 +180,11 @@ class DreamingPlugin(LoomPlugin):
         return []
 
     def on_session_start(self, session) -> None:
-        """Wire dream_cycle tool into the session's tool registry."""
+        """Wire dream_cycle and memory_prune tools into the session's tool registry."""
         self._tool_def = _make_dream_cycle_tool(session)
         session.registry.register(self._tool_def)
+        self._prune_tool_def = _make_memory_prune_tool(session)
+        session.registry.register(self._prune_tool_def)
 
     def on_session_stop(self, session) -> None:
         pass
