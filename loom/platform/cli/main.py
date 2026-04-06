@@ -244,28 +244,38 @@ def _load_env(project_root: Path | None = None) -> dict[str, str]:
     return {}
 
 
-def build_router(model: str) -> LLMRouter:
+def build_router() -> LLMRouter:
+    """
+    Build the LLM router with all available providers registered.
+
+    Both providers are always registered (if their API keys exist), each with
+    their own canonical default model.  The session's ``model`` attribute
+    controls which provider is used at runtime via ``switch_model()``.
+    """
+    from loom.core.cognition.router import get_default_model
     env = _load_env()
     router = LLMRouter()
+    default = get_default_model()
 
-    # MiniMax — primary provider
+    # MiniMax — registered with its own default model
     minimax_key = (
         env.get("minimax.io_key")
         or env.get("MINIMAX_API_KEY")
         or os.environ.get("MINIMAX_API_KEY", "")
     )
     if minimax_key:
-        mm_model = model if model.startswith("MiniMax") else "MiniMax-M2.7"
+        mm_model = default if default.startswith("MiniMax") else "MiniMax-M2.7"
         router.register(
-            MiniMaxProvider(api_key=minimax_key, model=mm_model), default=True
+            MiniMaxProvider(api_key=minimax_key, model=mm_model),
+            default=True,
         )
 
-    # Anthropic — fallback
+    # Anthropic — registered with its own default model
     anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get(
         "ANTHROPIC_API_KEY", ""
     )
     if anthropic_key:
-        ant_model = model if model.startswith("claude") else "claude-sonnet-4-6"
+        ant_model = default if default.startswith("claude") else "claude-sonnet-4-6"
         router.register(AnthropicProvider(api_key=anthropic_key, model=ant_model))
 
     if not router.providers:
@@ -289,12 +299,12 @@ class LoomSession:
         resume_session_id: str | None = None,
         workspace: Path | None = None,
     ) -> None:
-        self.model = model
+        self._model = model
         self.session_id = resume_session_id or str(uuid.uuid4())[:8]
         self._resume = resume_session_id is not None
         # Workspace root — all relative file paths resolve here; defaults to CWD
         self.workspace: Path = (workspace or Path.cwd()).resolve()
-        self.router = build_router(model)
+        self.router = build_router()
 
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
@@ -1531,6 +1541,23 @@ class LoomSession:
     def reflection(self) -> ReflectionAPI:
         return self._reflection
 
+    @property
+    def model(self) -> str:
+        """Return the currently active model name."""
+        return self._model
+
+    def set_model(self, model: str) -> bool:
+        """
+        Switch to a different LLM model/provider at runtime.
+
+        Looks up the provider for the given model name via the routing table
+        and updates the provider's model attribute.  Returns True on success.
+        """
+        ok = self.router.switch_model(model)
+        if ok:
+            self._model = model
+        return ok
+
 
 # ---------------------------------------------------------------------------
 # CLI commands
@@ -1543,7 +1570,7 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--model", default=None, show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--tui", is_flag=True, default=False, help="Use Textual TUI interface.")
 @click.option("--resume", is_flag=True, default=False, help="Resume the most recent session.")
@@ -1561,6 +1588,9 @@ async def _resolve_and_chat(
     resume_id: str | None,
 ) -> None:
     """Resolve --resume / --session flags, then launch the appropriate interface."""
+    if model is None:
+        from loom.core.cognition.router import get_default_model
+        model = get_default_model()
     resolved_id = resume_id
     if resume and resolved_id is None:
         store = SQLiteStore(db)
@@ -1634,6 +1664,22 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
     parts = cmd.split(maxsplit=1)
     command = parts[0]
     arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if command == "/model":
+        if not arg:
+            console.print(
+                f"[dim]Current model: [bold]{session.model}[/bold]  "
+                f"providers: {', '.join(session.router.providers)}[/dim]"
+            )
+        else:
+            ok = session.set_model(arg)
+            if ok:
+                console.print(f"[dim]Model switched to: [bold]{arg}[/bold][/dim]")
+            else:
+                console.print(
+                    f"[red]Could not switch to '{arg}'.[/red] "
+                    "[dim]Check that the API key for this provider is set in .env.[/dim]"
+                )
 
     if command == "/personality":
         if not arg:
@@ -1731,6 +1777,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "[bold]Slash commands[/bold]\n\n"
                 "  [yellow]/new[/yellow]                       Start a fresh session\n"
                 "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
+                "  [yellow]/model[/yellow] [dim]<name>[/dim]         Switch LLM model/provider (e.g. claude-sonnet-4-6)\n"
                 "  [yellow]/personality[/yellow] [dim]<name>[/dim]      Switch cognitive persona\n"
                 "  [yellow]/personality off[/yellow]           Remove active persona\n"
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
@@ -2047,6 +2094,21 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
     command = parts[0]
     arg = parts[1].strip() if len(parts) > 1 else ""
 
+    if command == "/model":
+        if not arg:
+            app.notify(
+                f"Model: {session.model}  providers: {', '.join(session.router.providers)}"
+            )
+        else:
+            ok = session.set_model(arg)
+            if ok:
+                app.notify(f"Model switched to: {arg}")
+            else:
+                app.notify(
+                    f"Could not switch to '{arg}'. Check API key in .env.",
+                    severity="error",
+                )
+
     if command == "/personality":
         if not arg:
             p = session.current_personality
@@ -2150,6 +2212,9 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
     If no resume_session_id is given, auto-resume the most recent saved session
     so users continue where they left off without extra flags.
     """
+    if model is None:
+        from loom.core.cognition.router import get_default_model
+        model = get_default_model()
     db_path = str(Path(db).expanduser())
 
     # Auto-resume last session when no explicit target is given
@@ -2919,7 +2984,7 @@ def discord_bot() -> None:
               help="Channel ID(s) to listen in (or set DISCORD_CHANNEL_ID in .env).")
 @click.option("--user", "user_ids", multiple=True, type=int,
               help="User ID(s) to accept messages from (or set DISCORD_USER_ID in .env).")
-@click.option("--model", default="MiniMax-M2.7", show_default=True)
+@click.option("--model", default=None, show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--autonomy/--no-autonomy", default=False,
               help="Also start the autonomy daemon in the same process.")

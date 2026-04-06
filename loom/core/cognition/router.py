@@ -7,8 +7,8 @@ then delegates to that provider's chat() method.
 Model routing rules
 -------------------
 "MiniMax-*"        → MiniMaxProvider
-"claude-*"         → AnthropicProvider
-(default)          → first registered provider
+"claude-*"          → AnthropicProvider
+(default)           → first registered provider
 
 Usage
 -----
@@ -24,9 +24,38 @@ Usage
 """
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from .providers import LLMProvider, LLMResponse
+
+
+def _load_loom_config() -> dict:
+    """Load loom.toml from cwd or the package root; return {} on miss."""
+    candidates = [
+        Path.cwd() / "loom.toml",
+        Path(__file__).parents[3] / "loom.toml",
+    ]
+    for path in candidates:
+        if path.exists():
+            with open(path, "rb") as fh:
+                return tomllib.load(fh)
+    return {}
+
+
+def get_default_model() -> str:
+    """
+    Return the default model from loom.toml [cognition]default_model,
+    falling back to "MiniMax-M2.7".
+    """
+    config = _load_loom_config()
+    model = config.get("cognition", {}).get("default_model", "")
+    return model if model else "MiniMax-M2.7"
 
 
 class LLMRouter:
@@ -56,13 +85,25 @@ class LLMRouter:
                 p = self._providers.get(provider_name)
                 if p:
                     return p
-        # Fall back to default
         if self._default:
             return self._providers[self._default]
         raise RuntimeError(
             f"No provider registered for model '{model}'. "
             f"Registered providers: {list(self._providers)}"
         )
+
+    @property
+    def providers(self) -> list[str]:
+        """Names of all registered providers."""
+        return list(self._providers)
+
+    def registered_models(self) -> list[str]:
+        """List known model names from all registered providers."""
+        models = []
+        for provider in self._providers.values():
+            if hasattr(provider, "model"):
+                models.append(provider.model)
+        return models
 
     async def chat(
         self,
@@ -83,15 +124,6 @@ class LLMRouter:
         *,
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
-        """
-        Yield ``(chunk, None)`` text fragments then ``("", LLMResponse)`` once done.
-
-        Parameters
-        ----------
-        abort_signal:
-            An ``asyncio.Event`` from an ``AbortController``. When set, the
-            in-flight HTTP request is cancelled and the stream exits cleanly.
-        """
         provider = self.get_provider(model)
         async for item in provider.stream_chat(
             messages=messages, tools=tools, max_tokens=max_tokens,
@@ -109,6 +141,23 @@ class LLMRouter:
         provider = self.get_provider(model)
         return provider.format_tool_result(tool_use_id, content, success)
 
-    @property
-    def providers(self) -> list[str]:
-        return list(self._providers)
+    def switch_model(self, model: str) -> bool:
+        """
+        Switch to a different model/provider.
+
+        Searches the routing table to find the provider that handles the
+        given model name prefix, then updates that provider's model attribute.
+        Returns True if the provider was found and updated.
+        """
+        for prefix, provider_name in self._ROUTING:
+            if model.startswith(prefix):
+                provider = self._providers.get(provider_name)
+                if provider:
+                    provider.model = model
+                    return True
+        if self._default:
+            provider = self._providers.get(self._default)
+            if provider:
+                provider.model = model
+                return True
+        return False
