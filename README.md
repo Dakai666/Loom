@@ -55,6 +55,7 @@ Create a `.env` file in the project root with at least one provider credential:
 # Cloud providers (at least one required, unless using a local provider)
 MINIMAX_API_KEY=your_minimax_key_here
 ANTHROPIC_API_KEY=your_anthropic_key_here
+api_key_env=your_embeddings_key_here
 
 # Local providers — set base URL to enable (or use loom.toml, see below)
 OLLAMA_BASE_URL=http://localhost:11434/v1

@@ -49,7 +49,7 @@ from rich.rule import Rule
 
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
-from loom.core.cognition.providers import AnthropicProvider, MiniMaxProvider
+from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
@@ -253,7 +253,7 @@ def build_router() -> LLMRouter:
     runtime via ``switch_model()``.
 
     Cloud providers (require API keys in .env):
-      MiniMax   — MINIMAX_API_KEY
+      MiniMax   — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
       Anthropic — ANTHROPIC_API_KEY
 
     Local providers (no key needed; enable in loom.toml or via env):
@@ -268,7 +268,9 @@ def build_router() -> LLMRouter:
     router = LLMRouter()
     default = get_default_model()
 
-    # MiniMax — registered with its own default model
+    # MiniMax — Anthropic-compatible endpoint, registered under provider name "minimax"
+    # so the routing table ("MiniMax-" → "minimax") and switch_model() continue to work.
+    # NOTE: MINIMAX_API_KEY also drives MiniMaxEmbeddingProvider (separate /v1 endpoint).
     minimax_key = (
         env.get("minimax.io_key")
         or env.get("MINIMAX_API_KEY")
@@ -277,7 +279,12 @@ def build_router() -> LLMRouter:
     if minimax_key:
         mm_model = default if default.startswith("MiniMax") else "MiniMax-M2.7"
         router.register(
-            MiniMaxProvider(api_key=minimax_key, model=mm_model),
+            AnthropicProvider(
+                api_key=minimax_key,
+                model=mm_model,
+                base_url="https://api.minimax.io/anthropic",
+                name="minimax",
+            ),
             default=True,
         )
 
@@ -473,7 +480,7 @@ class LoomSession:
         self._db_ctx = self._store.connect()
         self._db = await self._db_ctx.__aenter__()
         self._episodic = EpisodicMemory(self._db)
-        emb_provider = build_embedding_provider(_load_env())
+        emb_provider = build_embedding_provider(_load_env(), _load_loom_config())
         self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         self._procedural = ProceduralMemory(self._db)
         self._relational = RelationalMemory(self._db)
@@ -1087,6 +1094,7 @@ class LoomSession:
                         fn["arguments"] = "{}"
 
         # Pass 2: trim orphaned tool_call sequences
+        # (assistant has tool_calls but matching tool results are missing)
         i = len(msgs) - 1
         while i >= 0:
             msg = msgs[i]
@@ -1103,6 +1111,25 @@ class LoomSession:
                     self.messages = msgs[:i]
                     return
             i -= 1
+
+        # Pass 3: remove orphaned tool_result messages
+        # (tool result exists but no assistant message has a matching tool_call id)
+        # This handles the concurrent-turn race condition: a parallel stream_turn()
+        # may trim the assistant+tool_calls entry via Pass 2 while the original turn
+        # is still awaiting confirmation, then appends the tool result after the
+        # assistant entry is already gone — leaving a dangling role:"tool" message.
+        all_tool_call_ids: set[str] = set()
+        for msg in self.messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls", []):
+                    all_tool_call_ids.add(tc["id"])
+        self.messages = [
+            msg for msg in self.messages
+            if not (
+                msg.get("role") == "tool"
+                and msg.get("tool_call_id") not in all_tool_call_ids
+            )
+        ]
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,
@@ -1718,7 +1745,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             console.print(
                 f"[dim]Current model: [bold]{session.model}[/bold]  "
                 f"providers: {providers}[/dim]\n"
-                "[dim]  MiniMax-*        requires MINIMAX_API_KEY in .env[/dim]\n"
+                "[dim]  MiniMax-*        requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/dim]\n"
                 "[dim]  claude-*         requires ANTHROPIC_API_KEY in .env[/dim]\n"
                 "[dim]  ollama/<name>    enable [providers.ollama] in loom.toml[/dim]\n"
                 "[dim]  lmstudio/<name>  enable [providers.lmstudio] in loom.toml[/dim]"
@@ -1832,7 +1859,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
                 "  [yellow]/model[/yellow]                     Show current model + registered providers\n"
                 "  [yellow]/model[/yellow] [dim]<name>[/dim]              Switch model at runtime\n"
-                "    [dim]MiniMax-M2.7            → MiniMax (MINIMAX_API_KEY)[/dim]\n"
+                "    [dim]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/dim]\n"
                 "    [dim]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/dim]\n"
                 "    [dim]ollama/<model>          → local Ollama  (enable in loom.toml)[/dim]\n"
                 "    [dim]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/dim]\n"

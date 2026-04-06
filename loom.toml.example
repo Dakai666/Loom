@@ -30,8 +30,8 @@ personality = ""
 # default_model is used by all entrypoints when no --model flag is given.
 #
 # Supported prefixes:
-#   MiniMax-*         → MiniMax provider     (requires MINIMAX_API_KEY in .env)
-#   claude-*          → Anthropic provider   (requires ANTHROPIC_API_KEY in .env)
+#   MiniMax-*         → MiniMax via Anthropic-compatible endpoint  (MINIMAX_API_KEY in .env)
+#   claude-*          → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
 #   ollama/<name>     → local Ollama server  (enable [providers.ollama] below)
 #   lmstudio/<name>   → local LM Studio      (enable [providers.lmstudio] below)
 
@@ -215,6 +215,16 @@ enabled  = false           # set true to activate daemon
 # ─────────────────────────────────────────────
 # default_channel is informational; actual routing is determined at runtime
 # by which notifiers are registered (CLI, DiscordBotNotifier, etc.)
+
+# ─────────────────────────────────────────────
+# Embeddings
+# ─────────────────────────────────────────────
+# MiniMax embo-01 is the default embedding model.
+# By default MINIMAX_API_KEY is used for both chat and embeddings.
+# Set api_key_env to use a separate dedicated key for embeddings only.
+
+[embeddings]
+# api_key_env = "EMBEDDING_API_KEY"   # optional; falls back to MINIMAX_API_KEY
 
 [notify]
 default_channel = "cli"

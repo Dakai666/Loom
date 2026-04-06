@@ -84,15 +84,35 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def build_embedding_provider(env: dict[str, Any]) -> MiniMaxEmbeddingProvider | None:
+def build_embedding_provider(
+    env: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> MiniMaxEmbeddingProvider | None:
     """
     Construct a MiniMaxEmbeddingProvider from the loaded .env dict.
     Returns None if no API key is found — callers must handle the None case
     and fall through to BM25 search.
+
+    Configuration priority:
+    1. loom.toml [embeddings] api_key_env — name of the env var holding the key
+       (allows a dedicated embedding key separate from the chat API key)
+    2. MINIMAX_API_KEY / minimax.io_key  — shared fallback (default)
+
+    Example loom.toml:
+        [embeddings]
+        api_key_env = "EMBEDDING_API_KEY"   # optional dedicated key
     """
-    key = (
-        env.get("minimax.io_key")
-        or env.get("MINIMAX_API_KEY")
-        or ""
-    )
+    cfg = cfg or {}
+    embeddings_cfg = cfg.get("embeddings", {})
+    key_env_name: str = embeddings_cfg.get("api_key_env", "")
+
+    if key_env_name:
+        import os
+        key = env.get(key_env_name) or os.environ.get(key_env_name, "")
+    else:
+        key = (
+            env.get("minimax.io_key")
+            or env.get("MINIMAX_API_KEY")
+            or ""
+        )
     return MiniMaxEmbeddingProvider(api_key=key) if key else None

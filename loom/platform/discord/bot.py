@@ -220,9 +220,14 @@ class LoomDiscordBot:
             if not content and not message.attachments:
                 return
 
-            task = asyncio.ensure_future(bot._handle_message(message, content, is_thread))
-            # Track running turn by thread/channel id
+            # Cancel any in-progress turn for this channel before starting a new one.
+            # Without this, concurrent stream_turn() calls on the same session corrupt
+            # message history (race between Pass-2 trim and tool_result append → 2013).
             key = message.channel.id
+            existing = bot._running_turns.get(key)
+            if existing and not existing.done():
+                existing.cancel()
+            task = asyncio.ensure_future(bot._handle_message(message, content, is_thread))
             bot._running_turns[key] = task
             task.add_done_callback(lambda _t, k=key: bot._running_turns.pop(k, None))
 
