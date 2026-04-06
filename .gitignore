@@ -71,6 +71,7 @@ diary/
 news/
 reports/
 outputs/
+tmp/
 
 # Personal config (use loom.toml.example as template)
 loom.toml

@@ -39,6 +39,9 @@ loom chat --tui --session <session_id>
 │  ◌ Thinking...                         │                           │
 │  ⟳ read_file — "loom/core/..."         │                           │
 │                                        │                           │
+│  HITL: Paused — awaiting your decision │                           │
+│  > resume  c=cancel  any text=redirect │                           │
+│                                        │                           │
 │  > 輸入訊息...（Tab 自動補全）         │                           │
 ├────────────────────────────────────────┴───────────────────────────┤
 │  ctx ████████░░ 62%  |  48.2k in / 1.3k out  |  2.3s              │
@@ -57,6 +60,7 @@ ToolBlock 與 Header 同步顯示 agent 當前動作：
 | THINKING | `◌ Thinking...`（三點動畫）| 每次 turn 開始、每個工具呼叫完成後 |
 | RUNNING | `⟳ read_file — "path/to/file"` | 工具執行中 |
 | DONE | `✓ Done`（1.5s 後消失）| turn 完成 |
+| HITL PAUSED | `HITL: Paused — awaiting your decision` | `/pause` 後工具批次完成 |
 
 ---
 
@@ -73,9 +77,9 @@ ToolBlock 與 Header 同步顯示 agent 當前動作：
 ~ loom/core/harness/middleware.py  modified   5m ago
 ```
 
-### Tab 2：Activity Log（Act）
+### Tab 2：Swarm Dashboard（Act）
 
-本 session 所有工具呼叫的時間軸：
+v0.2.5.0 起 Activity Log 升級為 Swarm Dashboard，展示活躍節點時間軸：
 
 ```
 5 calls  ·  1.3s total
@@ -112,14 +116,60 @@ This turn
 
 ---
 
+## HITL 模式：/pause 與 /stop
+
+### /pause — 人機協作監控
+
+`/pause` 在每個工具批次執行完成後暫停 agent，等候人類決策：
+
+```
+HITL: Paused — awaiting your decision
+> resume  c=cancel  any text=redirect
+```
+
+| 輸入 | 行為 |
+|------|------|
+| `r` + Enter | 直接恢復，不改變 |
+| `c` | 取消其餘回合 |
+| 任意文字 + Enter | 注入為重導向訊息並恢復 |
+
+### /stop — 緊急停止
+
+`/stop` 立即取消當前 turn，不等候邊界。部分輸出保留。
+
+等價於按 **Escape**。
+
+> 用 `/pause` 進行逐步監督；用 `/stop` 緊急剎車。
+
+---
+
+## Command Palette（F1 / Ctrl+K，v0.2.5.0）
+
+按 **F1** 或 **Ctrl+K** 開啟全螢幕 Command Palette，支援模糊搜尋所有操作：
+
+- 切換 Tab
+- 清除畫面
+- 切換 Verbose
+- 開啟/關閉特定人格
+- 開啟 HelpModal
+- 其他 TUI 操作
+
+按 **Escape** 關閉。
+
+側邊欄收折：**F4** 或 **Ctrl+B**。
+
+---
+
 ## 快捷鍵
 
 | 按鍵 | 功能 |
 |------|------|
-| `Escape` | 中斷當前 agent 生成 |
-| `F1` | Toggle verbose 工具輸出 |
-| `F2` | Workspace tab 循環（Art → Act → Bgt） |
-| `Ctrl+L` | 清除對話視圖（不清歷史） |
+| `Escape` | 立即取消當前 agent 生成（`/stop` 等價）|
+| `F1` / `Ctrl+K` | 開啟 Command Palette（模糊搜尋）|
+| `F2` | Workspace tab 循環（Art → Act → Bgt）|
+| `F4` / `Ctrl+B` | 收折/展開側邊欄 |
+| `F5` | Time-Travel Session Map（v0.2.5.0：分岔歷史瀏覽）|
+| `Ctrl+L` | 清除對話視圖（不清歷史）|
 | `Ctrl+C` | 退出 TUI |
 | `Tab` | 自動補全 slash command |
 | `Y` / `N` | 工具確認對話框：允許 / 拒絕 |
@@ -132,13 +182,16 @@ This turn
 
 | 命令 | 功能 |
 |------|------|
-| `/think` | 開啟上一回覆的完整推理鏈（ThinkModal） |
-| `/compact` | 手動壓縮較舊的對話上下文 |
+| `/pause` | 切換 HITL 模式：批次工具完成後暫停等候確認 |
+| `/stop` | 立即取消當前 turn |
+| `/think` | 開啟上一回覆的完整推理鏈（ThinkModal）|
+| `/compact` | 手動壓縮對話上下文 |
 | `/sessions` | 開啟 session 選擇器，切換至其他 session |
 | `/new` | 結束當前 session，開始全新 session |
-| `/personality <name>` | 切換認知人格（adversarial / minimalist / architect / researcher / operator） |
+| `/personality <name>` | 切換認知人格（adversarial / minimalist / architect / researcher / operator）|
 | `/personality off` | 移除當前人格設定 |
 | `/verbose` | Toggle 工具輸出詳細度 |
+| `/budget` | 顯示 Context Budget 面板 |
 | `/help` | 顯示所有命令與快捷鍵的 HelpModal |
 
 ---
@@ -181,13 +234,32 @@ GUARDED 授權後本 session 不再詢問；CRITICAL 每次都需確認。
 
 ---
 
+## Time-Travel Session Map（F5，v0.2.5.0）
+
+`SessionLog.fork_session()` API 複製 session 歷史至指定 turn_index，建立平行分支。
+
+按 **F5** 開啟 MiniMapModal，以 `OptionList` 呈現每個 turn 摘要，選取後熱重啟至分岔 session。
+
+---
+
+## Native Terminal Image Rendering（v0.2.5.0）
+
+`ImageWidget`（`rich-pixels` + Pillow）在 `MessageBubble.finish_stream()` 後自動掃描 Markdown 圖片連結：
+
+- 支援 `file://` URI（含 Windows 磁碟路徑）與相對路徑
+- 渲染為 half-block 像素畫
+
+未安裝 `rich-pixels` 時優雅降級，顯示說明文字而非錯誤。
+
+---
+
 ## Parchment 配色
 
 | 用途 | 色值 |
 |------|------|
 | Screen 背景 | `#1c1814` |
 | Widget 表面 | `#242018` |
-| 主文字 | `#e0cfa0`（米白） |
+| 主文字 | `#e0cfa0`（米白）|
 | 強調/焦點 | `#c8a464`（琥珀）|
 | 成功 | `#7a9e78`（霧綠）|
 | 警告/GUARDED | `#c8924a`（赭石）|

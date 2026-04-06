@@ -26,6 +26,8 @@ cp loom.toml.example loom.toml
 [[autonomy.schedules]]   # Cron 排程（可多個）
 [[autonomy.triggers]]    # Event 觸發（可多個）
 [notify]         # 通知層設定
+[mcp]            # MCP Server/Client 設定（v0.2.6.0）
+[session]        # Session 行為設定（v0.2.6.0）
 ```
 
 ---
@@ -121,6 +123,25 @@ Bot 關機 / session.stop()
 
 ---
 
+## [session]（v0.2.6.0）
+
+控制 Session 行為選項。
+
+```toml
+[session]
+prefetch_enabled = false    # Predictive Memory Pre-fetcher
+prefetch_top_n   = 3        # 每次批次前預取的記憶條數
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `prefetch_enabled` | boolean | `false` | 是否在每個並行工具批次前執行輕量搜尋並注入相關記憶 |
+| `prefetch_top_n` | integer | `3` | 每次預取的記憶條數（結果以 ephemeral 注入，不進入歷史）|
+
+> `prefetch_enabled` 預設為 `false`，不影響既有行為。開啟後，工具批次執行前自動查詢 `MemorySearch` 並將 top N 結果注入上下文，批次結束後自動移除，保持歷史乾淨。失敗時完全非 fatal（包在 try/except 中）。
+
+---
+
 ## [harness]
 
 ```toml
@@ -139,7 +160,7 @@ require_audit_log   = true
 | 等級 | 行為 |
 |------|------|
 | `safe` | 直接執行，無需確認 |
-| `guarded` | 首次需確認，session 內後續自動允許 |
+| `guarded` | 首次需確認，session 內後續自動允許；`exec_auto=true` 時支援工作區範圍內工具的白名單免確認 |
 | `critical` | 每次都需確認 |
 
 ---
@@ -261,6 +282,29 @@ default_channel = "cli"
 
 ---
 
+## [mcp]（v0.2.6.0）
+
+Model Context Protocol 整合設定。支援多個外部 MCP 伺服器。
+
+```toml
+[[mcp.servers]]
+name        = "filesystem"
+command     = "npx"
+args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+trust_level = "safe"
+```
+
+| 欄位 | 類型 | 必填 | 說明 |
+|------|------|------|------|
+| `name` | string | ✅ | 伺服器唯一識別名稱；工具前綴（如 `filesystem:list_files`）|
+| `command` | string | ✅ | 啟動命令（絕對路徑或 PATH 中的可執行檔）|
+| `args` | list[string] | ✅ | 命令列參數 |
+| `trust_level` | string | | 此伺服器所有工具的預設 trust level，`"safe"` / `"guarded"` |
+
+> **MCP Server**（`loom mcp serve`）與 **MCP Client**（`[[mcp.servers]]`）為同一設定區塊。SAFE 工具自動暴露至 MCP；GUARDED 工具標記擴展欄位；CRITICAL 不暴露。
+
+---
+
 ## .env 環境變數
 
 API key 一律放 `.env`，不放 `loom.toml`。
@@ -277,6 +321,9 @@ DISCORD_USER_ID=987654321             # optional: restrict to one user
 
 # Web search (fetch_url + web_search tools)
 brave_search_key=your_brave_key       # optional
+
+# MCP（loom mcp serve）
+# MCP SDK 由 pip install -e ".[mcp]" 安裝
 ```
 
 ---
@@ -288,11 +335,9 @@ brave_search_key=your_brave_key       # optional
 loom chat
 loom chat --model claude-sonnet-4-6
 loom chat --resume                    # 續接上次 session
+loom chat --tui                       # TUI 介面
 
-# TUI 對話
-loom chat --tui
-
-# Discord bot（推薦：加 --autonomy 一次啟動兩個功能）
+# Discord bot（含 Autonomy）
 loom discord start --autonomy --channel <CHANNEL_ID>
 loom discord start --autonomy \
   --channel <CHANNEL_ID> \
@@ -304,6 +349,10 @@ loom discord start --autonomy \
 loom autonomy start --config loom.toml
 loom autonomy status
 loom autonomy emit <event_name>
+
+# MCP
+loom mcp serve                        # 啟動 Loom MCP Server
+loom mcp connect "npx -y @modelcontextprotocol/server-filesystem /tmp"
 
 # 記憶
 loom memory list

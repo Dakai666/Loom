@@ -233,7 +233,7 @@ class MiniMaxProvider(LLMProvider):
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
-        max_tokens: int = 8096,
+        max_tokens: int = 32768,
     ) -> LLMResponse:
         loop = asyncio.get_event_loop()
 
@@ -319,7 +319,7 @@ class MiniMaxProvider(LLMProvider):
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
-        max_tokens: int = 8096,
+        max_tokens: int = 32768,
         *,
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:

@@ -19,6 +19,12 @@ Extensibility 是 Loom 的「擴充系統」。它讓開發者可以新增工具
 │   │  增強功能   │  │  新增模組   │  │  審查流程   │    │
 │   └─────────────┘  └─────────────┘  └─────────────┘    │
 │                                                             │
+│   ┌─────────────┐  ┌─────────────┐                       │
+│   │     MCP     │  │  Dreaming   │                       │
+│   │   整合      │  │   Plugin   │                       │
+│   │            │  │  離線夢境   │                       │
+│   └─────────────┘  └─────────────┘                       │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,6 +64,57 @@ Plugin 是功能的「插件」。它允許新增全新的模組：
 
 ---
 
+## 內建模 Plugin（v0.2.5.3 / v0.2.6.1）
+
+Loom 框架自帶兩個 Plugin，放在 `loom/extensibility/` 下：
+
+| Plugin | 檔案 | 觸發時機 |
+|--------|------|----------|
+| `DreamingPlugin` | `dreaming_plugin.py` | 由 AutonomyDaemon cron 或手動呼叫 `dream_cycle` |
+| `SelfReflectionPlugin` | `self_reflection_plugin.py` | 每次 `session.stop()` 後自動（背景非同步）|
+
+### DreamingPlugin
+
+```python
+# loom/extensibility/dreaming_plugin.py
+class DreamingPlugin(LoomPlugin):
+    name = "dreaming"
+    version = "1.0"
+
+    def tools(self) -> list[ToolDefinition]:
+        return [dream_cycle_tool]  # SAFE tool
+```
+
+`dream_cycle` 工具（SAFE）實現：
+1. `SemanticMemory.get_random(limit=15)` 隨機抽樣事實
+2. LLM 分析：這些事實之間有什麼非顯而易見的關聯？
+3. 寫入 RelationalMemory 三元組（`source="dreaming"`）
+
+### SelfReflectionPlugin
+
+```python
+# loom/extensibility/self_reflection_plugin.py
+class SelfReflectionPlugin(LoomPlugin):
+    name = "self_reflection"
+    version = "1.0"
+
+    def tools(self) -> list[ToolDefinition]:
+        return [reflect_self_tool]  # SAFE tool
+
+    def on_session_stop(self, session: object) -> None:
+        # 背景非同步執行
+        asyncio.create_task(run_self_reflection(session))
+```
+
+`run_self_reflection` 分析情節模式，寫入三種 `loom-self` 三元組：
+- `should_avoid:<行為>` — 應避免的重複錯誤
+- `tends_to:<行為>` — 持續的傾向性
+- `discovered:<觀察>` — 新發現
+
+> **v0.2.6.1 架構修復**：DreamingPlugin（cognition/）和 SelfReflectionPlugin（autonomy/）之前違反了「下層不能依賴上層」的架構約束。兩者現在都放在 `loom/extensibility/`（正確的擴充層），各自的核心邏輯（`dream_cycle`、`run_self_reflection`）留在原來的 cognition/autonomy 模組。
+
+---
+
 ## Skill Import
 
 ### 用途
@@ -75,6 +132,19 @@ Skill Import 允許從外部匯入技能到 Loom：
 
 ---
 
+## MCP 整合（v0.2.6.0）
+
+Model Context Protocol（MCP）提供完整的雙向整合：
+
+| 方向 | 說明 |
+|------|------|
+| **MCP Server** | 將 Loom 工具暴露給任何 MCP 客戶端（Claude Desktop、Cursor、Continue）|
+| **MCP Client** | 將外部 MCP 伺服器的工具導入 Loom |
+
+詳見 [31-Plugin-系統.md](31-Plugin-系統.md)。
+
+---
+
 ## 擴充的層級
 
 ```
@@ -84,7 +154,7 @@ Skill Import 允許從外部匯入技能到 Loom：
 │                                                             │
 │   Level 1: Configuration（配置層）                           │
 │   │   直接修改 loom.toml                                     │
-│   │   新增工具定義、通知設定、觸發器                          │
+│   │   新增工具定義、通知設定、觸發器、MCP servers             │
 │   │                                                           │
 │   ├─▶ Level 2: Lens（鏡片層）                               │
 │   │   為工具添加包裝器，不需要修改工具本身                    │
@@ -161,7 +231,7 @@ PLUGIN_PATHS = [
 ~/.loom/plugins/
 └── my-plugin/
     ├── __init__.py
-    ├── plugin.py          # Plugin 實現
+    ├── plugin.py          # Plugin 實作
     └── manifest.toml       # Plugin 描述
 ```
 
@@ -213,6 +283,31 @@ filesystem = "read-only"  # 只讀檔案系統
 
 ---
 
+## skills/ 目錄命名（v0.2.6.1）
+
+> **變更背景**：根目錄的 `extensibility/`（用戶-authored 技能包）與 `loom/extensibility/`（框架代碼）同名，造成混淆。
+>
+> v0.2.6.1 起，用戶技能包目錄統一改名為 `skills/`。
+
+```
+# 舊（v0.2.5.x）
+extensibility/           # 用戶技能包 ❌ 與 loom/extensibility/ 同名混淆
+
+# 新（v0.2.6.1）
+skills/                  # 用戶技能包 ✅
+loom/extensibility/      # 框架 Plugin 代碼 ✅
+```
+
+**與 Plugin 的分工：**
+
+| 放置位置 | 類型 | 用途 |
+|----------|------|------|
+| `~/.loom/plugins/<name>/` | Plugin | 含 tools/middleware/notifiers/lenses 的完整擴充單元 |
+| `skills/<name>/` | Skill Package | 用 Markdown 撰寫的技能，可被 Skill Import Pipeline 匯入 |
+| `loom/extensibility/` | 框架代碼 | 框架內建 Lens / Plugin / Adapter |
+
+---
+
 ## loom.toml 配置
 
 ```toml
@@ -236,6 +331,13 @@ auto_wrap = false  # 不自動包裝所有工具
 [extensibility.security]
 sandbox = true
 allow_unsigned = false  # 必須有簽章
+
+# MCP Servers（v0.2.6.0）
+[[mcp.servers]]
+name        = "filesystem"
+command     = "npx"
+args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+trust_level = "safe"
 ```
 
 ---
@@ -246,9 +348,10 @@ Loom 的擴充系統提供多層次的客製化能力：
 
 | 層級 | 機制 | 用途 |
 |------|------|------|
-| 配置層 | loom.toml | 工具定義、通知設定、觸發器 |
+| 配置層 | loom.toml | 工具定義、通知設定、觸發器、MCP servers |
 | Lens 層 | Lens 包裝器 | 為工具添加功能 |
-| Plugin 層 | Plugin 系統 | 新增功能模組 |
+| Plugin 層 | Plugin 系統 | 新增功能模組（含內建 DreamingPlugin / SelfReflectionPlugin）|
+| MCP 層 | MCP 整合 | 雙向整合外部 MCP 工具生態 |
 | 核心層 | Fork | 修改核心行為 |
 
 選擇合適的層級可以保持向後相容性，減少維護成本。

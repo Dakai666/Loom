@@ -58,12 +58,17 @@ Middleware_1 → Middleware_2 → ... → Middleware_N → 實際工具執行
                           └──────────────────────────────────┘
                                                ↓
                               ┌─────────────────────────────┐
-                              │  ToolRegistry.execute()      │
-                              │  實際工具函數執行             │
+                              │  SchemaValidationMiddleware  │
+                              │  （JSON Schema 參數驗證）    │
+                              └─────────────────────────────┘
+                                               ↓
+                              ┌─────────────────────────────┐
+                              │  ToolRegistry.execute()     │
+                              │  實際工具函數執行            │
                               └─────────────────────────────┘
                                                ↓
                            ┌──────────────────────────────────┐
-                           │  MiddlewarePipeline.on_result()  │
+                           │  MiddlewarePipeline.on_result() │
                            │  （回傳方向，清理 / 寫入等）      │
                            └──────────────────────────────────┘
 ```
@@ -76,7 +81,75 @@ Middleware_1 → Middleware_2 → ... → Middleware_N → 實際工具執行
 |------------|------|------|
 | `LogMiddleware` | 雙向 | Rich 格式化輸出每次工具調用與結果到終端 |
 | `TraceMiddleware` | 雙向 | 計時 + 每次 tool call/write 寫入 EpisodicMemory |
-| `BlastRadiusMiddleware` | 雙向 | Trust Level 判斷 + 人類確認請求 |
+| `BlastRadiusMiddleware` | 雙向 | Trust Level 判斷 + 人類確認請求（含 `exec_auto` 模式）|
+| `SchemaValidationMiddleware` | 前向 | 工具參數 JSON Schema 驗證；string→int/float/bool 安全強制轉換 |
+
+### SchemaValidationMiddleware（v0.2.5.2）
+
+`SchemaValidationMiddleware` 在工具執行前，依據工具定義中的 JSON Schema 驗證參數：
+
+```python
+# loom/core/harness/validation.py
+class SchemaValidationMiddleware(Middleware):
+    """工具參數 JSON Schema 驗證"""
+
+    name = "schema_validation"
+
+    async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        tool_def = call.tool_def
+
+        if not tool_def.parameters:
+            return await next(call)
+
+        # 安全類型強制轉換（string → int/float/bool）
+        coerced = self._coerce(call.args, tool_def.parameters)
+
+        # JSON Schema 驗證
+        errors = validate(coerced, tool_def.parameters)
+        if errors:
+            return ToolResult(
+                success=False,
+                error=f"Schema validation failed: {errors}",
+            )
+
+        call.args = coerced
+        return await next(call)
+```
+
+驗證失敗時，工具**不會執行**，直接返回錯誤。這能防止 LLM 幻觉参数（hallucinated parameters）在送達工具前就被攔截。
+
+---
+
+## AbortController 基礎設施（v0.2.5.1）
+
+`loom/core/infra/` 提供標準的跨任務取消訊號，用於整個 async pipeline：
+
+```python
+# loom/core/infra/abort.py
+class AbortController:
+    """包裝 asyncio.Event，支援跨任務取消"""
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+        self._aborted = False
+
+    def abort(self) -> None:
+        self._aborted = True
+        self._event.set()
+
+    async def wait_aborted(self) -> None:
+        """等待 abort 信號；收到 CancelledError 時正常傳播，不會被吞掉"""
+        await self._event.wait()
+
+    def bind(self):
+        """返回綁定方法，__closure__=None，避免閉包捕獲記憶體洩漏"""
+        return self._event.wait
+
+# 非 Loom 原生，用於 httpx tool calls
+def wait_aborted(controller: AbortController):
+    return controller._event.wait()
+```
+
+> Issue #16：目前 Step 1（infra）已完成；Step 2–3（接入 `stream_turn()` 和 httpx tool calls）在追蹤中。
 
 ---
 
@@ -99,8 +172,10 @@ Platform CLI ──依賴──▶ ToolRegistry（輸出可用工具列表）
 | 等級 | 定義 | 行為 |
 |------|------|------|
 | **SAFE** | 唯讀、本地、可逆 | 自動執行，session 開始時預授權 |
-| **GUARDED** | 寫入、網路、有副作用 | 首次需確認，session 內授權後免再詢問 |
+| **GUARDED** | 寫入、網路、有副作用 | 首次需確認，session 內授權後免再詢問；`exec_auto=true` 時支援白名單免確認 |
 | **CRITICAL** | 破壞性、跨系統、不可逆 | 每次強制確認，不可 session 授權 |
+
+`BlastRadiusMiddleware` 在 `exec_auto` 模式（v0.2.5.1）下，攜帶 `EXEC` capability 且工作區範圍內的工具跳過逐次確認。
 
 詳細說明：請參閱 [05-Trust-Level.md](05-Trust-Level.md)
 
@@ -114,19 +189,19 @@ Loom 的 Middleware 是可堆疊的。你可以在 Plugin 中實作新的 Middle
 class MyMiddleware(Middleware):
     name = "my_middleware"
 
-    async def before(self, call: ToolCall, next):
-        # 工具執行前的邏輯
-        return await next(call)  # 呼叫下一個 middleware 或工具
-
-    async def after(self, result: ToolResult, next):
-        # 工具執行後的邏輯
-        return await next(result)
+    async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        # 工具執行前的邏輯（例如：計時、驗證）
+        result = await next(call)
+        # 工具執行後的邏輯（例如：日誌、後處理）
+        return result
 ```
+
+所有 Middleware 只需實現一個方法：`process(call, next)`。`next` 是鏈中下一個 handler（另一個 Middleware 或最終的工具執行器）。呼叫 `await next(call)` 將控制權向下傳遞，並取得 `ToolResult` 後再執行清理邏輯。
 
 ---
 
 ## 什麼不該在 Harness 做
 
 - **不應**在 Middleware 內直接執行耗時 I/O（如大量 DB 寫入）——交給 async task
-- **不應**在 Middleware 內改變工具參數——使用 `before()` 修飾，不使用 `after()` 注入
+- **不應**在 Middleware 內改變工具參數——在 `await next(call)` 之前修飾 call
 - **不應**在 Middleware 內存取其他工具的內部狀態——每個 Middleware 應該無狀態或只讀 session state

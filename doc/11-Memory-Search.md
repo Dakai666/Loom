@@ -1,6 +1,6 @@
 # Memory Search
 
-Loom 的記憶搜尋系統支援兩種機制：**傳統關鍵字搜尋（BM25/TF-IDF）**和**向量相似度搜尋（Phase 5）**。
+Loom 的記憶搜尋系統支援兩種機制：**傳統關鍵字搜尋（BM25）**和**向量相似度搜尋（Phase 5）**。
 
 ---
 
@@ -13,7 +13,7 @@ recall(query)
     │       │
     │       └─▶ 找到相似結果 → 返回
     │
-    ├─▶ Phase 4: BM25 加權搜尋
+    ├─▶ Phase 4: BM25 (FTS5) 加權搜尋
     │       │
     │       └─▶ 找到結果 → 返回
     │
@@ -23,197 +23,106 @@ recall(query)
 
 ---
 
-## Phase 4：BM25 / TF-IDF
+## Phase 5：向量相似度（第一優先）
 
-### BM25 原理
+### 前提條件
 
-BM25（Best Matching 25）是一種基於關鍵字匹配的文件排序演算法，比簡單的 TF-IDF 更精細：
+`SemanticMemory` 需持有 `EmbeddingProvider` 實例（`has_embeddings == True`）。若未配置或 embedding 失敗，自動 fallback 至 BM25。
 
-```python
-def bm25_score(document: str, query: str, avg_dl: float, k1=1.5, b=0.75) -> float:
-    """
-    document: 待評分文件
-    query: 查詢關鍵字（已分詞）
-    avg_dl: 平均文檔長度
-    k1, b: BM25 參數
-    """
-    score = 0.0
-    doc_len = len(document)
+### 實現機制
 
-    for term in query:
-        tf = document.count(term)  # 詞項頻率
-        if tf == 0:
-            continue
+向量儲存於 `semantic_entries.embedding` 欄位（JSON 字串）。查詢時以 `sqlite-vec` 的 `vec_distance_cosine()` 計算餘弦距離：
 
-        # IDF（逆文檔頻率）：詞在越多文檔出現，IDF 越低
-        idf = log((N - n + 0.5) / (n + 0.5) + 1)
-
-        # TF 正規化（長文檔的 TF 不會無限放大）
-        tf_normalized = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_dl))
-
-        score += idf * tf_normalized
-
-    return score
+```sql
+SELECT id, key, value, confidence, source, metadata, created_at, updated_at,
+       1.0 - vec_distance_cosine(embedding, ?) AS score
+FROM semantic_entries
+WHERE embedding IS NOT NULL
+ORDER BY vec_distance_cosine(embedding, ?) ASC
+LIMIT ?
 ```
 
-### Loom 的 BM25 實現
-
-```python
-# loom/core/memory/search.py
-class MemorySearch:
-    def __init__(self, store: SQLiteStore):
-        self.store = store
-
-    def search(self, query: str, limit: int = 5) -> list[dict]:
-        # 1. 分詞（簡單空格 split，實際可用 jieba 等）
-        terms = query.lower().split()
-
-        # 2. 讀取所有 semantic entries
-        entries = self.store.fetch_all("SELECT * FROM semantic_entries")
-
-        # 3. 計算每個 entry 的 BM25 分數
-        scores = []
-        avg_dl = sum(len(e.value) for e in entries) / len(entries)
-
-        for entry in entries:
-            score = bm25_score(entry.value, terms, avg_dl)
-            if score > 0:
-                scores.append((score, entry))
-
-        # 4. 排序返回 top N
-        scores.sort(reverse=True)
-        return [e for _, e in scores[:limit]]
-```
-
-### 問題：每次搜尋重建索引
-
-BM25 需要知道 corpus 內所有文檔的長度分佈。初始實現每次 `recall()` 都重新讀取所有 entries——在 entry 數量很大時是 O(n) 瓶頸。
-
-**Phase 5 解決方案**：見下文「Cache 機制」。
-
----
-
-## Phase 5：向量相似度
-
-### MiniMax Embedding
-
-Phase 5 引入 MiniMax Embedding API 計算 semantic entries 的向量表示：
-
-```python
-# loom/core/cognition/embeddings.py
-class MiniMaxEmbeddingProvider:
-    def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.minimax.io/v1",
-        )
-        self.model = "embo-01"
-
-    async def embed(self, text: str) -> list[float]:
-        response = await self.client.embeddings.create(
-            model=self.model,
-            text=text,
-        )
-        return response.data[0].embedding
-```
-
-### Cosine Similarity
-
-```python
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """計算兩個向量的餘弦相似度"""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sqrt(sum(x * x for x in a))
-    norm_b = sqrt(sum(x * x for x in b))
-    return dot / (norm_a * norm_b) if norm_a * norm_b > 0 else 0.0
-```
+距離越小越相似，取 `1.0 - distance` 轉換為相似度分數（0–1）。
 
 ### SemanticMemory.upsert() 中的自動嵌入
 
 ```python
-async def upsert(self, key: str, value: str, confidence: float = 0.8):
-    # 先寫入文字
-    await self._upsert_text(key, value, confidence)
+async def upsert(self, entry: SemanticEntry) -> bool:
+    # 先 upsert 文字內容
+    await self._db.execute(...)
+    await self._db.commit()
 
-    # 背景嘗試計算 embedding
-    try:
-        embedding = await self.embedding_provider.embed(value)
-        await self._update_embedding(key, embedding)
-    except Exception:
-        # embedding 失敗不阻擋 upsert
-        pass
-```
-
-### recall() 的向量搜尋路徑
-
-```python
-async def recall(self, query: str, limit: int = 5) -> list[SemanticEntry]:
-    # 1. 計算 query 的向量
-    query_embedding = await self.embedding_provider.embed(query)
-
-    # 2. 讀取所有有 embedding 的 entries
-    entries = await self._fetch_all_with_embeddings()
-
-    # 3. 計算 cosine similarity
-    scored = []
-    for entry in entries:
-        emb = json.loads(entry.embedding)
-        sim = cosine_similarity(query_embedding, emb)
-        scored.append((sim, entry))
-
-    # 4. 排序
-    scored.sort(reverse=True)
-
-    return [entry for _, entry in scored[:limit]]
+    # 背景嘗試計算並寫入向量
+    if self._embeddings is not None:
+        try:
+            vectors = await self._embeddings.embed([text])
+            if vectors:
+                await self._db.execute(
+                    "UPDATE semantic_entries SET embedding = ? WHERE key = ?",
+                    (json.dumps(vectors[0]), entry.key),
+                )
+                await self._db.commit()
+        except Exception:
+            pass  # embedding 失敗不阻擋 upsert
 ```
 
 ---
 
-## BM25 Cache 機制
+## Phase 4：BM25（經 SQLite FTS5）
 
-### 指紋（Fingerprint）
+### 實現機制
 
-BM25 index 的核心是 corpus 的文檔長度分佈。只要 corpus 不變，就不需要重建：
+Loom 不在 Python 層自實現 BM25，而是利用 **SQLite FTS5**。FTS5 內建 BM25 排序，由 SQL 引擎直接計算。
 
-```python
-class Bm25Cache:
-    def __init__(self, store: SQLiteStore):
-        self.store = store
+> **v0.2.5.2 更新**：先前版本曾有 Python 層的 `Bm25Cache` 類別實驗性實作，已移除。v0.2.5.2 起全面採用 SQLite FTS5，無需 Python 層 Cache。
+>
+> **v0.2.6.1 清理**：`loom/core/memory/__init__.py` 中殘留的 stale `BM25` export（在 v0.2.5.2 FTS5 替換時未清除）已移除（#36）。
 
-    def _fingerprint(self) -> tuple[int, str]:
-        """返回 corpus 的指紋：(count, max_updated_at)"""
-        row = self.store.fetch_one(
-            "SELECT COUNT(*), MAX(updated_at) FROM semantic_entries"
-        )
-        return (row[0], row[1])
+### FTS5 虛擬表與同步觸發
 
-    def get_or_build(self) -> dict:
-        """如果 cache 有效則返回，否則重建"""
-        current_fp = self._fingerprint()
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
+USING fts5(key, value, content='semantic_entries', content_rowid='rowid');
 
-        if self._cache and self._cache_fp == current_fp:
-            return self._cache  # Cache hit
-
-        # Cache miss → rebuild
-        self._cache = self._build_index()
-        self._cache_fp = current_fp
-        return self._cache
+-- 每次 semantic_entries INSERT/UPDATE/DELETE 時自動同步 FTS 表
+CREATE TRIGGER IF NOT EXISTS semantic_entries_ai AFTER INSERT ON semantic_entries BEGIN
+  INSERT INTO semantic_fts(rowid, key, value)
+    VALUES (new.rowid, new.key, new.value);
+END;
 ```
 
-`fingerprint` 改變的條件：
-- 有新的 semantic entry 寫入（count 改變）
-- 任何 entry 的 `updated_at` 改變（max_updated_at 改變）
+### BM25 查詢
+
+```python
+async def _search_semantic(self, query: str, limit: int) -> list[MemorySearchResult]:
+    safe_query = _sanitize_fts(query)  # 將自然語言轉為 FTS5 AND 格式
+
+    # SQLite FTS5 的 bm25() 預設為負值（越小越相關），取絕對值為正分數
+    cursor = await self._semantic._db.execute("""
+        SELECT e.id, e.key, e.value, e.confidence, e.source,
+               e.metadata, e.created_at, e.updated_at,
+               bm25(semantic_fts) AS fts_score
+        FROM semantic_fts
+        JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
+        WHERE semantic_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+    """, (safe_query, limit))
+
+    for r in rows:
+        score = abs(r[8]) if r[8] else 0.0  # 負值 → 正分數
+```
 
 ---
 
 ## 衝突時的 BM25 vs 向量
 
-| 情況 | 向量相似度 | BM25 |
-|------|-----------|------|
+| 情況 | 向量相似度 | BM25（FTS5） |
+|------|-----------|--------------|
 | 語義相似但用詞不同 | ✅ 匹配 | ❌ 不匹配 |
 | 精確關鍵字匹配 | ✅ 匹配 | ✅ 匹配 |
-| embedding API 失敗 | ❌ 無結果 | ✅ fallback 可用 |
-| corpus 很大時的召回 | ✅ 更精確 | ⚠️ 需 BM25 cache |
+| embedding 未配置或 API 失敗 | ❌ 跳過 | ✅ fallback 可用 |
+| corpus 很大時的召回 | ✅ 更精確 | ⚠️ SQLite FTS5 原生支援 |
 
 ---
 
@@ -225,6 +134,7 @@ MemoryIndex（每次 session 開始時生成）
     ├─ 總 fact 數量
     ├─ 總 skill 數量
     ├─ 總 compressed episode 數量
+    ├─ Anti-patterns 數量（should_avoid 三元組）
     └─ 主題關鍵詞（top topics）
            │
            ▼
@@ -237,7 +147,7 @@ recall(query)  ← Agent 按需呼叫
     返回相關 entries
 ```
 
-Memory Index 是「目錄」，MemorySearch 是「圖書館員」——目錄告訴你哪裡有東西，圖書館員幫你找到具體的書。
+Memory Index 是「目錄」，Memory Search 是「圖書館員」——目錄告訴你哪裡有東西，圖書館員幫你找到具體的書。
 
 ---
 
@@ -245,7 +155,8 @@ Memory Index 是「目錄」，MemorySearch 是「圖書館員」——目錄告
 
 | 優化 | Phase | 說明 |
 |------|-------|------|
-| BM25 Cache | Phase 5 | 指紋比對避免每次重建 |
+| SQLite FTS5 內建 BM25 | Phase 4 | SQL 引擎直接計算，無 Python Cache 需求 |
+| FTS5 觸發器同步 | Phase 4 | INSERT/UPDATE/DELETE 自動同步，無需手動維護 |
 | 向量預計算 | Phase 5 | upsert 時計算，讀取時直接用 |
 | 混合策略 | Phase 5 | 向量 → BM25 → recency 三層 fallback |
 | SQLite WAL | 初始 | 讀取不阻塞寫入 |

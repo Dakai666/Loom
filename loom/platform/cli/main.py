@@ -1209,24 +1209,34 @@ class LoomSession:
         async def _execute(node: TaskNode) -> ToolResult:
             tu = node.metadata["tu"]
             t0 = time.monotonic()
-            result = await self._dispatch(tu.name, tu.args, tu.id)
+            try:
+                result = await self._dispatch(tu.name, tu.args, tu.id)
+            except Exception as _exc:
+                result = ToolResult(
+                    call_id=tu.id,
+                    tool_name=tu.name,
+                    success=False,
+                    error=f"Internal dispatch error: {_exc}",
+                    failure_type="execution_error",
+                )
             timings[node.id] = ((time.monotonic() - t0) * 1000, result)
             return result
 
         plan = graph.compile()
         scheduler = TaskScheduler(executor=_execute, stop_on_failure=False)
-        await scheduler.run(plan)
-
-        # Remove the ephemeral message — keep history clean
-        if _ephemeral_idx is not None:
-            try:
-                if (
-                    _ephemeral_idx < len(self.messages)
-                    and self.messages[_ephemeral_idx].get("_ephemeral")
-                ):
-                    self.messages.pop(_ephemeral_idx)
-            except Exception:
-                pass
+        try:
+            await scheduler.run(plan)
+        finally:
+            # Remove the ephemeral message — keep history clean even if scheduler raises
+            if _ephemeral_idx is not None:
+                try:
+                    if (
+                        _ephemeral_idx < len(self.messages)
+                        and self.messages[_ephemeral_idx].get("_ephemeral")
+                    ):
+                        self.messages.pop(_ephemeral_idx)
+                except Exception:
+                    pass
 
         return [(tu, timings[node.id][1], timings[node.id][0]) for tu, node in pairs]
 

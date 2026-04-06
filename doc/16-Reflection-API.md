@@ -22,6 +22,12 @@ Reflection 不是簡單的「總結」。它是多維度的分析：
 │   Episodic Memory   Skill Genome    Notification          │
 │   （寫入）           （更新 confidence）  （觸發警告）         │
 │                                                             │
+│   ┌─────────────┐  ┌─────────────┐                         │
+│   │ Counter-    │  │ Self-      │                         │
+│   │ factual     │  │ Reflection │                         │
+│   │ 反事實反思  │  │ 自我反思   │                         │
+│   └─────────────┘  └─────────────┘                         │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,7 +51,7 @@ class SessionSummary:
     topics_discussed: list[str]      # 討論的主題
     decisions_made: list[str]        # 做出的決定
     tasks_completed: list[str]       # 完成的任務
-    tasks_pending: list[str]         # 未完成的任務
+    tasks_pending: list[str]          # 未完成的任務
     
     # 用戶偏好（如有觀察到）
     user_preferences: list[str]      # 觀察到的用戶偏好
@@ -323,6 +329,47 @@ async def generate_health_report(
 
 ---
 
+## Counter-factual Reflection（v0.2.5.1）
+
+當工具執行失敗且該工具有 SkillGenome 記錄時，觸發反事實反思（非同步 fire-and-forget）：
+
+```
+execution_error 發生
+    ↓
+LLM 提問：「什麼 pattern 導致了這個失敗？下次應避免什麼？」
+    ↓
+寫入 SemanticMemory：  key = "skill:<name>:anti_pattern:<timestamp>"
+                       value = "[Anti-pattern] <LLM 分析內容>"
+                       source = "reflection"
+寫入 RelationalMemory：(skill:<name>, has_anti_pattern, <分析>)
+                       (loom-self, should_avoid:<tool_name>, <行為>)
+```
+
+**觸發條件：**
+- `execution_error` 類型的失敗（工具執行時拋出異常）
+- 該工具有 SkillGenome 記錄
+
+**寫入位置：**
+- SemanticMemory — `skill:<name>:anti_pattern:<timestamp>` key
+- RelationalMemory — `(skill:<name>, has_anti_pattern, …)` 和 `(loom-self, should_avoid:<tool_name>, …)` 三元組
+
+**Session 開始時：**
+`MemoryIndex` 讀取 `should_avoid` 三元組，agent 在每次對話開始就知道自己過去踩過的坑。
+
+> 反思失敗完全 non-fatal，不會阻斷任何流程。
+
+---
+
+## Self-Reflection（v0.2.5.3）
+
+詳見 [19-Autonomy-概述.md](19-Autonomy-概述.md) 和 [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md)。
+
+由 `SelfReflectionPlugin` 在 session 結束後自動執行（`run_self_reflection`），產出 `loom-self` 三元組。
+
+`reflect_self` 工具（SAFE）可用於手動觸發。
+
+---
+
 ## Reflection Pipeline
 
 ### 觸發時機
@@ -388,7 +435,7 @@ loom reflect --format json
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Reflection Pipeline                      │
+│                    Reflection Pipeline                       │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │   Input                                                     │
@@ -402,8 +449,15 @@ loom reflect --format json
 │   ├──▶ Tool Report Generator                               │
 │   │      └──▶ Skill Genome (update confidence)             │
 │   │                                                           │
-│   └──▶ Health Report Generator                             │
-│          └──▶ Notification (if critical)                   │
+│   ├──▶ Health Report Generator                             │
+│   │      └──▶ Notification (if critical)                   │
+│   │                                                           │
+│   ├──▶ Counter-factual Reflection                          │
+│   │      ├──▶ SemanticMemory (anti_pattern keys)           │
+│   │      └──▶ RelationalMemory (should_avoid triples)     │
+│   │                                                           │
+│   └──▶ Self-Reflection (via SelfReflectionPlugin)         │
+│          └──▶ RelationalMemory (loom-self triples)          │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -419,5 +473,7 @@ Reflection API 讓 Loom 每次 session 後都「反省」：
 | Session Summary | 對話壓縮摘要 | Episodic Memory |
 | Tool Report | 每個工具的成功率 | Skill Genome |
 | Health Report | 問題預警 | Notification |
+| Counter-factual | Anti-pattern 分析 | Semantic + Relational Memory |
+| Self-Reflection | loom-self 行為觀察 | Relational Memory |
 
 這確保了 Loom 的「經驗」得以累積，而不是每次 session 都是獨立的。

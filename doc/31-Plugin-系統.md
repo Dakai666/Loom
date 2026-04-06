@@ -1,386 +1,259 @@
 # Plugin 系統
 
-Plugin 是 Loom 的「功能插件」。它允許新增全新的元件類型，包括工具、Notifier、Trigger 等，而不需要修改核心程式碼。
+Plugin 是 Loom 的「功能插件」。Plugin 可以同時攜帶 tools、middleware、lenses、notifiers，並透過 `PluginRegistry.install_into(session)` 無縫整合進 LoomSession。
 
 ---
 
-## Plugin 結構
-
-```
-my-plugin/
-├── __init__.py          # Plugin 入口
-├── plugin.py            # Plugin 主類
-├── manifest.toml        # Plugin 描述
-├── tools/               # 工具定義
-│   ├── __init__.py
-│   └── my_tool.py
-├── notifiers/           # Notifier 定義
-│   └── my_notifier.py
-└── triggers/            # Trigger 定義
-    └── my_trigger.py
-```
-
----
-
-## LoomPlugin 抽象
+## LoomPlugin 抽象（loom/extensibility/plugin.py）
 
 ```python
-# loom/core/plugin/abc.py
 class LoomPlugin(ABC):
     """Plugin 抽象基類"""
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Plugin 名稱"""
-        pass
-    
-    @property
-    @abstractmethod
-    def version(self) -> str:
-        """Plugin 版本"""
-        pass
-    
-    @property
-    def dependencies(self) -> list[str]:
-        """依賴的其他 Plugins"""
+
+    name: str = ""       # 唯一識別名稱
+    version: str = "1.0" # 版本字串
+
+    def tools(self) -> list["ToolDefinition"]:
+        """返回要註冊進 session 的工具"""
         return []
-    
-    async def install(self, registry: PluginRegistry):
-        """Plugin 安裝鉤子"""
-        pass
-    
-    async def uninstall(self, registry: PluginRegistry):
-        """Plugin 卸載鉤子"""
-        pass
-    
-    async def on_load(self):
-        """Plugin 載入時呼叫"""
-        pass
-    
-    async def on_unload(self):
-        """Plugin 卸載時呼叫"""
-        pass
+
+    def middleware(self) -> list["Middleware"]:
+        """返回要加入 pipeline 的 middleware"""
+        return []
+
+    def lenses(self) -> list["BaseLens"]:
+        """返回要註冊到 LensRegistry 的 Lens"""
+        return []
+
+    def notifiers(self) -> list["BaseNotifier"]:
+        """返回要加入 NotificationRouter 的 notifier"""
+        return []
+
+    def on_session_start(self, session: object) -> None:
+        """所有貢獻安裝完成後呼叫"""
+
+    def on_session_stop(self, session: object) -> None:
+        """session.stop() 前呼叫"""
 ```
 
 ---
 
-## Plugin 註冊
-
-### 工具註冊
+## PluginRegistry
 
 ```python
-# loom/core/plugin/registry.py
 class PluginRegistry:
-    def __init__(self):
-        self._tools: dict[str, Tool] = {}
-        self._notifiers: dict[str, Notifier] = {}
-        self._triggers: dict[str, type[Trigger]] = {}
-        self._lenses: dict[str, BaseLens] = {}
-    
-    def register_tool(self, tool: Tool):
-        """註冊工具"""
-        if tool.name in self._tools:
-            raise PluginConflictError(f"Tool already exists: {tool.name}")
-        self._tools[tool.name] = tool
-    
-    def register_notifier(self, notifier: Notifier):
-        """註冊 Notifier"""
-        self._notifiers[notifier.name] = notifier
-    
-    def register_trigger(self, trigger_class: type[Trigger]):
-        """註冊 Trigger"""
-        self._triggers[trigger_class.__name__] = trigger_class
-    
-    def register_lens(self, lens: BaseLens):
-        """註冊 Lens"""
-        self._lenses[lens.name] = lens
+    def __init__(self) -> None:
+        self._plugins: list[LoomPlugin] = []
+
+    def register(self, plugin: LoomPlugin) -> None:
+        """註冊 Plugin（同名替換）"""
+        self._plugins = [p for p in self._plugins if p.name != plugin.name]
+        self._plugins.append(plugin)
+
+    def all(self) -> list[LoomPlugin]: ...
+
+    def install_into(self, session: object) -> dict[str, int]:
+        """
+        將所有 Plugin 的貢獻安裝進 live session。
+        返回摘要：{plugin_name: tools_installed, ...}
+        """
+        summary: dict[str, int] = {}
+        for plugin in self._plugins:
+            count = 0
+            for tool_def in plugin.tools():
+                session.registry.register(tool_def)  # type: ignore
+                count += 1
+            # Middleware → 插入 pipeline 頭部（TraceMiddleware 之前）
+            for mw in plugin.middleware():
+                if session._pipeline is not None:
+                    session._pipeline._chain.insert(0, mw)  # type: ignore
+            # Notifier → 加入 NotificationRouter
+            for notifier in plugin.notifiers():
+                router = getattr(session, "_notifier_router", None)
+                if router is not None:
+                    router.register(notifier)
+            plugin.on_session_start(session)  # type: ignore
+            summary[plugin.name or "(anonymous)"] = count
+        return summary
 ```
 
 ---
 
-## 完整 Plugin 範例
+## 內建 Plugin
 
-### manifest.toml
+Loom 框架自帶兩個 Plugin，位於 `loom/extensibility/`：
 
-```toml
-[plugin]
-name = "example-plugin"
-version = "1.0.0"
-description = "一個範例 Plugin"
-author = "developer@example.com"
-license = "MIT"
+| Plugin | 檔案 | 說明 |
+|--------|------|------|
+| `DreamingPlugin` | `dreaming_plugin.py` | `dream_cycle` 離線夢境（v0.2.5.3）|
+| `SelfReflectionPlugin` | `self_reflection_plugin.py` | 每次 session 結束後自我反思（v0.2.5.3）|
 
-[plugin.dependencies]
-loom = ">=1.0.0"
+> **v0.2.6.1 架構修復**：兩者之前定義在 `cognition/dreaming.py` 和 `autonomy/self_reflection.py`，違反「下層不能依賴上層」的架構約束。現在已移至 `loom/extensibility/`。
 
-[plugin.provides]
-tools = ["example_tool", "example_tool2"]
-notifiers = ["example_notifier"]
-triggers = ["ExampleTrigger"]
-
-[plugin.permissions]
-network = "required"
-filesystem = "read-only"
-```
-
-### __init__.py
+### DreamingPlugin
 
 ```python
-# example_plugin/__init__.py
-from .plugin import ExamplePlugin
+# loom/extensibility/dreaming_plugin.py
+class DreamingPlugin(LoomPlugin):
+    name = "dreaming"
+    version = "1.0"
 
-__all__ = ["ExamplePlugin"]
+    def tools(self) -> list[ToolDefinition]:
+        return [dream_cycle_tool]  # dream_cycle: SAFE tool
 ```
 
-### plugin.py
+### SelfReflectionPlugin
 
 ```python
-# example_plugin/plugin.py
-from loom.core.plugin.abc import LoomPlugin
-from loom.core.plugin.registry import PluginRegistry
+# loom/extensibility/self_reflection_plugin.py
+class SelfReflectionPlugin(LoomPlugin):
+    name = "self_reflection"
+    version = "1.0"
 
-class ExamplePlugin(LoomPlugin):
-    """範例 Plugin"""
-    
-    name = "example-plugin"
-    version = "1.0.0"
-    description = "一個範例 Plugin"
-    
-    def __init__(self):
-        self._registry: PluginRegistry | None = None
-    
-    async def install(self, registry: PluginRegistry):
-        """安裝 Plugin"""
-        self._registry = registry
-        
-        # 註冊工具
-        from .tools.example_tool import ExampleTool
-        registry.register_tool(ExampleTool())
-        
-        # 註冊 Notifier
-        from .notifiers.example_notifier import ExampleNotifier
-        registry.register_notifier(ExampleNotifier())
-        
-        # 註冊 Trigger
-        from .triggers.example_trigger import ExampleTrigger
-        registry.register_trigger(ExampleTrigger)
-    
-    async def uninstall(self, registry: PluginRegistry):
-        """卸載 Plugin"""
-        # 移除已註冊的元件
-        registry._tools.pop("example_tool", None)
-        registry._notifiers.pop("example_notifier", None)
-        registry._triggers.pop("ExampleTrigger", None)
-    
-    async def on_load(self):
-        """Plugin 載入時"""
-        logger.info(f"Plugin {self.name} loaded")
-    
-    async def on_unload(self):
-        """Plugin 卸載時"""
-        logger.info(f"Plugin {self.name} unloaded")
-```
+    def tools(self) -> list[ToolDefinition]:
+        return [reflect_self_tool]  # reflect_self: SAFE tool
 
-### 工具定義
-
-```python
-# example_plugin/tools/example_tool.py
-from dataclasses import dataclass
-from loom.core.harness.tool import Tool, ToolResult
-
-@dataclass
-class ExampleTool(Tool):
-    """範例工具"""
-    
-    name = "example_tool"
-    description = "這是一個範例工具"
-    trust_level = "SAFE"
-    
-    async def execute(self, args: dict, context: dict) -> ToolResult:
-        """執行工具"""
-        
-        action = args.get("action", "greet")
-        
-        if action == "greet":
-            return ToolResult(
-                success=True,
-                output=f"Hello, {args.get('name', 'World')}!"
-            )
-        elif action == "echo":
-            return ToolResult(
-                success=True,
-                output=args.get("message", "")
-            )
-        else:
-            return ToolResult(
-                success=False,
-                error=f"Unknown action: {action}"
-            )
-    
-    def get_openai_schema(self) -> dict:
-        """返回 OpenAI 格式的 schema"""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["greet", "echo"],
-                            "description": "要執行的動作"
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "名字（用於 greet 動作）"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "訊息（用於 echo 動作）"
-                        }
-                    },
-                    "required": ["action"]
-                }
-            }
-        }
-```
-
-### Notifier 定義
-
-```python
-# example_plugin/notifiers/example_notifier.py
-from loom.core.notification.adapters.base import Notifier
-from loom.core.notification.models import Notification
-
-class ExampleNotifier(Notifier):
-    """範例 Notifier"""
-    
-    name = "example_notifier"
-    
-    def __init__(self, webhook_url: str):
-        self.webhook_url = webhook_url
-    
-    async def send(self, notification: Notification) -> bool:
-        """發送通知"""
-        
-        payload = {
-            "title": notification.title,
-            "message": notification.message,
-            "type": notification.type.value,
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.webhook_url, json=payload) as response:
-                return response.status == 200
+    def on_session_stop(self, session: object) -> None:
+        # 背景非同步執行，不阻斷 session.stop()
+        asyncio.create_task(run_self_reflection(session))
 ```
 
 ---
 
-## Plugin 安裝流程
+## @loom.tool 裝飾器
+
+對於簡單的單工具擴展，不需要完整的 Plugin 類。可以直接使用 `@loom.tool` decorator：
+
+```python
+# loom/extensibility/adapter.py
+@loom.tool(trust_level="guarded", description="部署服務")
+async def deploy(call: ToolCall) -> ToolResult:
+    service = call.args.get("service_name")
+    return ToolResult(success=True, output=f"Deployed {service}")
+```
+
+`@loom.tool` 會自動：
+1. 從函數簽名推斷 JSON Schema
+2. 從 docstring 提取 description
+3. 包裝為 `executor` 函數
+4. 註冊進模組級的 `AdapterRegistry`
+
+簡單工具視為一個「匿名 Plugin」，由 Session 載入時統一處理。
+
+---
+
+## 簡單 Plugin 範例
+
+```python
+# ~/.loom/plugins/git_tools/plugin.py
+from loom.extensibility import LoomPlugin
+from loom.core.harness.registry import ToolDefinition
+from loom.core.harness.permissions import TrustLevel, ToolCapability
+
+class GitPlugin(LoomPlugin):
+    name = "git"
+    version = "1.0"
+
+    def tools(self) -> list[ToolDefinition]:
+        return [git_status_tool, git_diff_tool]
+
+# ~/.loom/plugins/git_tools/loom_tools.py
+# 此檔案會被 loom_tools.py 工作區掃描器自動發現並載入
+```
+
+---
+
+## MCP 整合（v0.2.6.0）
+
+`loom/extensibility/` 中有兩個 MCP 相關檔案：
+
+| 檔案 | 說明 |
+|------|------|
+| `mcp_client.py` | MCP Client：將外部 MCP 伺服器工具導入 Loom |
+| `mcp_server.py` | MCP Server：將 Loom 工具暴露給外部 MCP 客戶端 |
+
+### MCP Server 啟動
 
 ```bash
-# 從目錄安裝
-loom plugin install ./my-plugin
+# 啟動 Loom MCP Server（將 Loom 工具暴露給 MCP 客戶端）
+loom mcp serve
+```
 
-# 從 URL 安裝
-loom plugin install https://example.com/plugins/my-plugin.tar.gz
+SAFE 工具自動暴露；GUARDED 工具標記 `x-loom-guarded=true`；CRITICAL 工具不暴露。
 
-# 從 registry 安裝
-loom plugin install example-plugin
+### MCP Client 配置
 
-# 列出已安裝的 plugins
-loom plugin list
+在 `loom.toml` 中新增 MCP servers：
 
-# 卸載 plugin
-loom plugin uninstall example-plugin
+```toml
+[[mcp.servers]]
+name        = "filesystem"
+command     = "npx"
+args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+trust_level = "safe"
+```
 
-# 更新 plugin
-loom plugin update example-plugin
+外部工具以前綴 `server_name:` 註冊（如 `filesystem:list_files`）。
+
+### 工具發現
+
+```bash
+# 探索 MCP 伺服器上的可用工具
+loom mcp connect "npx -y @modelcontextprotocol/server-filesystem /tmp"
 ```
 
 ---
 
-## Plugin Registry
+## 安全性：首次執行確認
 
-### 本地 Registry
+Plugin 首次被發現時（新的 `.py` 檔案），使用者會被詢問是否批准：
 
-```toml
-# ~/.loom/plugins/registry.json
-{
-  "plugins": [
-    {
-      "name": "example-plugin",
-      "version": "1.0.0",
-      "path": "~/.loom/plugins/example-plugin",
-      "enabled": true,
-      "installed_at": "2024-01-01T00:00:00Z"
-    }
-  ]
-}
+```
+⚠️ New plugin found: git_tools
+Path: ~/.loom/plugins/git_tools/plugin.py
+Tools: git_status, git_diff
+Trust level: SAFE
+
+Approve? [y/N]:
 ```
 
-### 官方 Registry
-
-```toml
-# loom.toml
-[plugin.registry]
-official = "https://registry.loom.dev/plugins"
-community = "https://registry.loom.community/plugins"
-
-# 鏡像設定
-[plugin.registry.mirrors]
-asia = "https://asia.registry.loom.dev/plugins"
-```
+批准記錄寫入 `RelationalMemory`（`plugin:approved` 三元組），\
+未來 session 無需再確認。
 
 ---
 
-## Plugin 安全性
+## 與 Lens 的分工
 
-### 簽章驗證
+| | Plugin | Lens |
+|---|---|---|
+| 攜帶內容 | tools + middleware + lenses + notifiers | 只攜帶 tools/schema |
+| 注入方式 | `PluginRegistry.install_into(session)` | `LensRegistry.extract()` |
+| 觸發時機 | Session 啟動 | 外部技能匯入時 |
+| 用途 | 功能擴充 | 外部框架相容性 |
 
-```python
-# 驗證 Plugin 簽章
-async def verify_plugin(plugin_path: str) -> bool:
-    """驗證 Plugin 簽章"""
-    
-    # 檢查是否有簽章文件
-    sig_file = Path(plugin_path) / "manifest.toml.sig"
-    if not sig_file.exists():
-        return False
-    
-    # 驗證簽章
-    with open(sig_file, "r") as f:
-        signature = f.read()
-    
-    with open(Path(plugin_path) / "manifest.toml", "r") as f:
-        manifest = f.read()
-    
-    return verify_signature(manifest, signature, LOOM_PUBLIC_KEY)
-```
+---
 
-### 權限控制
+## Plugin 放置位置
 
-```toml
-[plugin.permissions]
-network = "required"        # 需要網路權限
-filesystem = "read-only"    # 只讀檔案系統
-env = ["VAR1", "VAR2"]     # 可訪問的環境變數
-```
+| 位置 | 掃描時機 | 用途 |
+|------|----------|------|
+| `~/.loom/plugins/<name>/` | 每次 session | 用戶全域 plugins |
+| `./loom/plugins/<name>/` | 每次 session | 專案 plugins |
+| `loom/extensibility/` | 框架啟動時 | 內建模組（DreamingPlugin、SelfReflectionPlugin、MCP）|
+
+> **不建議**將 Plugin 放入 `loom/extensibility/`——那是框架內建擴充的範圍。自訂 Plugin 應放在 `~/.loom/plugins/` 或專案 `loom/plugins/`。
 
 ---
 
 ## 總結
 
-Plugin 系統提供完整的功能擴充能力：
-
 | 功能 | 說明 |
 |------|------|
-| 工具擴充 | 註冊新工具 |
-| Notifier 擴充 | 新增通知方式 |
-| Trigger 擴充 | 新增觸發器類型 |
-| Lens 擴充 | 新增工具包裝器 |
-| 安裝管理 | CLI 安裝/卸載/更新 |
-| 安全性 | 簽章驗證、權限控制 |
+| 多類型貢獻 | tools / middleware / lenses / notifiers |
+| 無縫整合 | `install_into(session)` 自動合併進 live session |
+| 匿名工具 | `@loom.tool` decorator 支援簡單擴展 |
+| 內建 Plugin | DreamingPlugin、SelfReflectionPlugin、MCP server/client |
+| 首次確認 | 新 plugin 首次被發現時詢問用戶 |
+| 同名替換 | 同一 session 內後註冊的同名 Plugin 覆蓋先前的 |
+| 生命週期 | `on_session_start` / `on_session_stop` 鉤子 |
+| MCP 整合 | 雙向 MCP Server/Client 支援 |

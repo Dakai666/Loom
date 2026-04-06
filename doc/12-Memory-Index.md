@@ -35,67 +35,63 @@ Memory Search  →  運行時按需呼叫
 @dataclass
 class MemoryIndex:
     """Session 開始時生成的輕量目錄"""
-    
+
     # 數量統計
-    semantic_count: int       # 總 fact 數量
-    episodic_count: int       # 總壓縮 episode 數量
-    skill_count: int         # 總 skill 基因組數量
-    relational_count: int     # 總關係三元組數量
-    
-    # 主題摘要（按 confidence 排序的 top topics）
-    top_topics: list[str]
-    
-    # 最近 context（最近 N 次 session 的壓縮摘要）
-    recent_contexts: list[str]
-    
-    # 健康狀態
-    low_confidence_skills: list[str]   # confidence < 0.3 的 skill
-    stale_episodes: list[str]           # 超過 30 天未更新的 episode
-    
-    # 生成時間戳
-    generated_at: datetime
+    semantic_count: int              # 總 semantic fact 數量
+    semantic_topics: list[str]       # 從 semantic value 詞頻統計出的熱門主題（上限 6 個）
+    skill_count: int                 # 主動（未廢棄）skill 基因組數量
+    skill_tags: list[str]           # 所有主動 skill 的 tags 合併去重（上限 10 個）
+    episode_sessions: int            # 壓縮後的獨立 session 數量（從 semantic source 解析）
+    relational_count: int            # 總關係三元組數量
+    relational_predicates: list[str]  # 出現頻率最高的前 8 個 predicate
+
+    # Anti-pattern 追蹤（Issue #26 Self-Portrait）
+    anti_pattern_count: int          # 帶有 should_avoid predicate 的三元組數量
+    self_triples: list[Any]          # loom-self 主詞的所有三元組（供 Self-Portrait 展示）
+
+    _WIDTH: int = 45                # 渲染時分隔線寬度
 ```
+
+> **說明**：doc/11-Memory-Search.md 先前版本的 `Bm25Cache` 類別於實際源碼中並不存在，已移除。
 
 ---
 
 ## 生成時機
 
+`MemoryIndexer` 在 session 啟動時查詢各 Memory 類，產生 `MemoryIndex`：
+
 ```python
-# loom/core/memory/index.py
-class MemoryIndexBuilder:
-    """在 session 啟動時自動生成"""
-    
+class MemoryIndexer:
     async def build(self) -> MemoryIndex:
-        store = self._get_store()
-        
-        # 並行讀取各類記憶的元數據（不走完整內容）
-        semantic_count = store.count("semantic_entries")
-        episodic_count = store.count("episodes")
-        skill_count = store.count("skill_genomes")
-        relational_count = store.count("relational_triples")
-        
-        # 提取 top topics（從 key 欄位做簡單聚合）
-        top_topics = self._aggregate_topics(limit=10)
-        
-        # 讀取最近 N 次 session 的壓縮摘要
-        recent_contexts = store.fetch_recent_episodes(limit=3)
-        
-        # 健康檢查
-        low_conf_skills = store.fetch_skills_where("confidence < 0.3")
-        stale_episodes = store.fetch_episodes_where(
-            "last_accessed < datetime('now', '-30 days')"
-        )
-        
-        return MemoryIndex(
-            semantic_count=semantic_count,
-            episodic_count=episodic_count,
-            skill_count=skill_count,
-            relational_count=relational_count,
-            top_topics=top_topics,
-            recent_contexts=recent_contexts,
-            low_confidence_skills=low_conf_skills,
-            stale_episodes=stale_episodes,
-            generated_at=datetime.now(),
+        # 讀取最多 500 筆 recent semantic entries（用於話題統計）
+        facts = await self._semantic.list_recent(limit=500)
+
+        # 話題：從 value 欄位分詞，取最高頻的非停用詞（上限 6 個）
+        semantic_topics = _extract_topics(facts)
+
+        # Episode sessions：從 source 解析 session ID 去重
+        # 格式 "session:abc123:fact:5" → "session:abc123" 取前兩段
+        episode_sessions = len({
+            ":".join(f.source.split(":")[:2])
+            for f in facts if f.source and f.source.startswith("session:")
+        })
+
+        # Skills
+        skills = await self._procedural.list_active()
+        all_tags = {tag for s in skills for tag in s.tags}
+
+        # Relational triples
+        triples = await self._relational.query()
+        relational_predicates = sorted(
+            {p: sum(1 for t in triples if t.predicate == p) for p in set(t.predicate for t in triples)}.items(),
+            key=lambda x: x[1], reverse=True
+        )[:8]
+
+        # Self-portrait：loom-self 三元組，should_avoid 排在最前
+        self_entries = await self._relational.query(subject="loom-self")
+        self_triples = sorted(
+            self_entries,
+            key=lambda t: ({"should_avoid": 0, "tends_to": 1}.get(t.predicate, 2), t.updated_at),
         )
 ```
 
@@ -103,31 +99,28 @@ class MemoryIndexBuilder:
 
 ## 注入 System Prompt
 
-Memory Index 的內容會在 session 初始化時注入到 system prompt 的開頭：
+Memory Index 的內容以固定格式渲染後，成為 session system prompt 的一部分：
 
-```markdown
-## 📊 Memory Index（本次 session 生成）
-
-**記憶總覽**
-- 12 個 Facts（topics: loom, harness, tool, middleware, memory, system）
-- 14 次 Session 的壓縮記憶
-- 8 個 Skills（0 active）
-- 8 個關係三元組
-
-**最近上下文**
-- 上次修改 loom.toml 的決策（trust level 設定）
-- 用戶偏好簡潔回答
-- 專案 Next 框架的擴充規劃
-
-**⚠️ 注意**
-- 2 個低 confidence skills（需關注）
-- 1 個 30+ 天未訪問的 episode
-
----
-
-## 你的身份（SOUL.md）
-...
 ```
+Memory Index
+─────────────────────────────────────────────
+Semantic  : 47 facts   [topics: python, loom, testing, config]
+Skills    : 12 active  [tags: refactor, bash, git, python]
+Episodes  : 8 sessions compressed
+Relations : 34 triples  [predicates: first_applied, has_known_gap, applied_on]
+─────────────────────────────────────────────
+Use recall(query) to retrieve relevant entries.
+Use memorize(key, value) to store a new fact.
+Use query_relations(subject) to look up relationships.
+
+Self-Portrait (loom-self observations):
+  [should_avoid] write long summaries without checking context
+  [tends_to] start with recall before major tasks
+```
+
+### Self-Portrait（Issue #26）
+
+`self_triples` 中 `subject="loom-self"` 的三元組會在 Index 中直接展示，讓 agent 看到自己的行為觀察記録（「我之前應該避免什麼」、「我傾向於什麼」）。
 
 ---
 
@@ -137,10 +130,10 @@ Memory Index 的設計嚴守輕量原則：
 
 | 設計決策 | 理由 |
 |----------|------|
-| 只讀取元數據（count/key/summary），不讀取完整內容 | 避免 O(n) 讀取 |
-| 固定長度列表（top topics 限制 10 個） | 防止膨脹 |
-| 壓縮過的 episode 直接取摘要，不重新處理 | 節省 CPU |
-| 定期失效（每個新 session 重新生成） | 確保時效性 |
+| 話題從 recent entries 抽而非全 corpus | 避免大量 DB 掃描 |
+| 上限限制（topics ≤ 6, predicates ≤ 8）| 防止膨脹 |
+| episode sessions 從 source 解析而非獨立表 | 節省查詢 |
+| 每次 session 重新生成 | 確保時效性 |
 
 ---
 
@@ -153,11 +146,13 @@ Memory Index 的設計嚴守輕量原則：
 │                                         │
 │   MemoryIndex.build()                   │
 │       │                                 │
-│       ├── semantic_count: 12            │  ← 輕量統計
-│       ├── top_topics: ["loom", ...]     │  ← 從 key 聚合
-│       └── low_confidence_skills: [...]  │  ← 健康檢查
+│       ├── semantic_count: 47            │  ← 輕量統計
+│       ├── semantic_topics: ["loom", ...] │  ← 從 value 詞頻
+│       ├── episode_sessions: 8           │  ← 從 source 解析
+│       ├── relational_predicates: [...]  │  ← 從 predicate 頻率
+│       └── self_triples: [...]          │  ← loom-self 觀察
 │                                         │
-│   ↓ 注入 system prompt                  │
+│   ↓ 渲染後注入 system prompt            │
 │                                         │
 ├─────────────────────────────────────────┤
 │           運行時（Agent 呼叫 recall）      │
@@ -166,7 +161,7 @@ Memory Index 的設計嚴守輕量原則：
 │   recall("harness middleware")          │
 │       │                                 │
 │       ├── Phase 5: cosine_similarity   │  ← 精確匹配
-│       ├── Phase 4: BM25                 │
+│       ├── Phase 4: BM25 (FTS5)          │
 │       └── recency fallback             │
 │                                         │
 └─────────────────────────────────────────┘
@@ -176,25 +171,8 @@ Memory Index 的設計嚴守輕量原則：
 |---|---|---|
 | 時機 | session 開始（一次性） | 運行時按需 |
 | 目的 | 告訴 agent「你知道什麼」 | 幫 agent「找到什麼」 |
-| 內容 | 統計 + 摘要 | 完整 entry 內容 |
+| 內容 | 統計 + 話題 + predicates | 完整 entry 內容 |
 | token 影響 | ~200-500 tokens | 不影響 prompt |
-
----
-
-## 低 Confidence Skills 的特殊處理
-
-當 Memory Index 偵測到 confidence < 0.3 的 skill，會在 index 中特別標記：
-
-```python
-# MemoryIndexBuilder 中的邏輯
-if low_conf_skills:
-    self._append_warning(
-        f"⚠️ {len(low_conf_skills)} 個 skills 處於低 confidence 狀態，"
-        f"可能不準確：{', '.join(low_conf_skills[:3])}"
-    )
-```
-
-這讓 agent 在看到明顯不靠譜的 skill 時能有所警覺，特別是當用戶問到相關領域時。
 
 ---
 
@@ -203,6 +181,6 @@ if low_conf_skills:
 Memory Index 是 Loom 記憶系統的「入口目錄」：
 
 1. **Session 開始時生成** — 一次性，不影響運行時效能
-2. **輕量統計** — 只讀元數據，不掃描完整內容
-3. **雙重角色** — 既告訴 agent 自己的知識邊界，也標記需要注意的問題
+2. **輕量統計** — 從現有表格解析，不另建昂貴索引
+3. **雙重角色** — 既告訴 agent 自己的知識邊界，也展示自我行為觀察（Self-Portrait）
 4. **明確分工** — Index 管「我知道多少」，Search 管「找到我需要的」

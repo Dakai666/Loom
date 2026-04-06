@@ -1,6 +1,6 @@
 # Web Tools
 
-Web Tools 是 Loom 的網路工具集，允許 agent 訪問網頁和搜尋資訊。
+Web Tools 是 Loom 的網路工具集，允許 agent 訪問網頁和搜尋資訊，以及 Discord 多媒體互動。
 
 ---
 
@@ -10,6 +10,8 @@ Web Tools 是 Loom 的網路工具集，允許 agent 訪問網頁和搜尋資訊
 |------|------|-------------|
 | `fetch_url` | 讀取網頁內容 | SAFE |
 | `web_search` | 搜尋網路 | SAFE |
+| `send_discord_file` | 發送工作區檔案至 Discord | GUARDED |
+| `send_discord_embed` | 發送 Rich Embed 面板至 Discord | SAFE |
 
 ---
 
@@ -101,12 +103,6 @@ result = await harness.execute(
 )
 ```
 
-### CLI 測試
-
-```bash
-loom tool test fetch_url url="https://example.com"
-```
-
 ### 限制
 
 - 輸出限制 2000 字元
@@ -195,30 +191,70 @@ class WebSearchTool(Tool):
         return "\n".join(lines)
 ```
 
-### 使用方式
-
-```python
-# Agent 呼叫
-result = await harness.execute(
-    tool="web_search",
-    args={
-        "query": "Python async await tutorial",
-        "count": 5,
-    },
-)
-```
-
-### CLI 測試
-
-```bash
-loom tool test web_search query="Loom framework" count=5
-```
-
 ### 限制
 
 - 最多返回 10 個結果
 - 請求逾時 15 秒
 - 需要 Brave Search API key
+
+---
+
+## send_discord_file（v0.2.5.2）
+
+### 功能
+
+將工作區中的檔案直接發送至當前 Discord thread。Agent 可主動輸出文件、圖片、截圖等。
+
+```python
+# loom/notify/adapters/discord.py
+async def send_discord_file(filepath: str, thread_id: int | None = None) -> ToolResult:
+    """
+    發送工作區檔案至 Discord。
+    filepath: 相對於工作區根目錄的路徑
+    thread_id: 可選，發送至指定 thread
+    """
+```
+
+### Discord 多媒體支援（v0.2.5.2）
+
+Agent 接收 Discord 用戶的附件時，自動下載至 `.discord_downloads/` 並注入 prompt：
+
+```
+[User uploaded a file: screenshot.png]
+→ 下載至 .discord_downloads/screenshot.png
+→ prompt 注入：「User uploaded: .discord_downloads/screenshot.png」
+```
+
+---
+
+## send_discord_embed（v0.2.5.2）
+
+### 功能
+
+發送 Rich Embed 面板至 Discord，格式化呈現結構化資料。
+
+```python
+# loom/notify/adapters/discord.py
+async def send_discord_embed(
+    title: str,
+    description: str,
+    color: str = "#0099ff",
+    fields: list[dict] | None = None,
+    thread_id: int | None = None,
+) -> ToolResult:
+    """
+    發送 Discord Rich Embed 面板。
+    color: Hex 色碼，如 #ff0000
+    fields: [{"name": "...", "value": "...", "inline": true/false}, ...]
+    thread_id: 可選，發送至指定 thread
+    """
+```
+
+### 用途
+
+- 格式化呈現搜尋結果、分析報告
+- 結構化通知
+- 代替 plain text，提供更好的閱讀體驗
 
 ---
 
@@ -335,9 +371,9 @@ cx = "${GOOGLE_CX}"
 
 ## 總結
 
-Web Tools 提供網路訪問能力：
-
-| 工具 | 功能 | 限制 |
-|------|------|------|
-| fetch_url | 讀取網頁 | 2000 字元、10 秒逾時 |
-| web_search | 搜尋網路 | 10 結果、15 秒逾時 |
+| 工具 | 功能 | Trust Level | 限制 |
+|------|------|-------------|------|
+| fetch_url | 讀取網頁 | SAFE | 2000 字元、10 秒逾時 |
+| web_search | 搜尋網路 | SAFE | 10 結果、15 秒逾時 |
+| send_discord_file | 發送檔案至 Discord | GUARDED | — |
+| send_discord_embed | 發送 Rich Embed 至 Discord | SAFE | — |

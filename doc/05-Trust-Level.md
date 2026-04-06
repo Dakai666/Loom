@@ -117,12 +117,13 @@ strict_sandbox = true   # 預設 false
 
 **效果與限制**：
 
-| 工具 | strict_sandbox = false | strict_sandbox = true |
-|------|----------------------|-----------------------|
-| `read_file` | 路徑強制重新路由至 workspace（無論此設定） | 同左 |
-| `write_file` | 路徑強制重新路由至 workspace（無論此設定） | 同左 |
-| `list_dir` | 路徑強制重新路由至 workspace（無論此設定） | 同左 |
-| `run_bash` | 以呼叫者的 CWD 執行 | 以 `workspace` 為 cwd 執行 |
+| 工具 | 行為 |
+|------|------|
+| `read_file` | **始終**重新路由至 workspace，與 `strict_sandbox` 無關 |
+| `write_file` | **始終**重新路由至 workspace，與 `strict_sandbox` 無關 |
+| `list_dir` | **始終**重新路由至 workspace，與 `strict_sandbox` 無關 |
+| `run_bash` | `strict_sandbox=false`：以呼叫者的 CWD 執行；`strict_sandbox=true`：以 `workspace` 為 cwd 執行 |
+| `spawn_agent` | 與 `strict_sandbox` 無關；`AGENT_SPAN` 能力使每次執行都重新確認，不受沙箱設定影響 |
 
 > **注意**：`strict_sandbox` 對 `run_bash` 只鎖定工作目錄，無法防止使用絕對路徑存取 workspace 外的檔案。若需要完整隔離，請搭配容器（Docker）或 OS 層級沙箱使用。
 

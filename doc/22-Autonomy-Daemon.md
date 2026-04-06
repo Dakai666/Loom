@@ -1,470 +1,299 @@
 # Autonomy Daemon
 
-Autonomy Daemon 是 Loom 的後台常駐服務。它監控觸發器條件、執行決策、並在必要時調度行動。
+AutonomyDaemon 是 Loom 的背景服務。它從 `loom.toml` 載入觸發器，在後台執行 `TriggerEvaluator`，並將觸發的 `PlannedAction` 交給 `ActionPlanner` → `ConfirmFlow` → Session 執行。
 
 ---
 
-## Daemon 角色
+## Daemon 職責
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Autonomy Daemon                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐  │
-│   │  Trigger    │────▶│  Decision   │────▶│   Action    │  │
-│   │  Monitor     │     │  Pipeline   │     │   Planner   │  │
-│   └─────────────┘     └─────────────┘     └─────────────┘  │
-│          │                                       │          │
-│          │              ┌─────────────┐          │          │
-│          └─────────────▶│   Task      │◀─────────┘          │
-│                         │  Scheduler  │                     │
-│                         └─────────────┘                     │
-│                                │                            │
-│                                ▼                            │
-│                         ┌─────────────┐                     │
-│                         │ Notification│                     │
-│                         │   Router    │                     │
-│                         └─────────────┘                     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+loom.toml
+  │
+  ├─ [[autonomy.schedules]]   → CronTrigger
+  └─ [[autonomy.triggers]]    → EventTrigger
+           │
+           ▼
+AutonomyDaemon.load_config()
+           │
+           ▼
+TriggerEvaluator.register(trigger)
+           │
+           ▼
+TriggerEvaluator.run_forever(poll_interval=60s)
+           │
+           ├─ CronTrigger.should_fire()  ← 每分鐘評估
+           ├─ EventTrigger             ← loom autonomy emit 觸發
+           └─ ConditionTrigger         ← 每分鐘 poll
+           │
+           ▼
+_planner.handle(trigger, context) → PlannedAction
+           │
+           ▼
+_execute_plan(plan)
+           │
+           ├─ EXECUTE  → _run_agent(plan)
+           ├─ NOTIFY   → NotificationRouter.send(CONFIRM) → wait → _run_agent or skip
+           └─ HOLD     → NotificationRouter.send(CONFIRM) → wait 300s → skip
 ```
 
 ---
 
-## Daemon 結構
+## 實際建構子（loom/autonomy/daemon.py）
 
 ```python
-# loom/core/autonomy/daemon.py
 class AutonomyDaemon:
-    """Autonomy 常駐程式"""
-    
     def __init__(
         self,
-        config: AutonomyConfig,
-        trigger_registry: TriggerRegistry,
-        decision_pipeline: DecisionPipeline,
-        action_planner: ActionPlanner,
-        task_scheduler: TaskScheduler,
-        notification_router: NotificationRouter,
-    ):
-        self.config = config
-        self.trigger_registry = trigger_registry
-        self.decision_pipeline = decision_pipeline
-        self.action_planner = action_planner
-        self.task_scheduler = task_scheduler
-        self.notification_router = notification_router
-        
-        self._running = False
-        self._task: asyncio.Task | None = None
-        
-        # 統計
-        self._stats = DaemonStats()
+        notify_router: NotificationRouter,
+        confirm_flow: ConfirmFlow,
+        loom_session=None,    # LoomSession：用於實際執行 prompt
+        db=None,            # aiosqlite.Connection：用於 trigger_history 持久化
+    ) -> None:
+        self._notify = notify_router
+        self._confirm = confirm_flow
+        self._session = loom_session
+        self._abort = AbortController()
+
+        history = TriggerHistory(db) if db is not None else None
+        self._planner = ActionPlanner(
+            semantic_memory=getattr(loom_session, "_semantic", None)
+                if loom_session else None,
+        )
+        self._evaluator = TriggerEvaluator(on_fire=self._planner.handle, history=history)
 ```
 
 ---
 
-## 主循環
-
-### 啟動與停止
+## loom.toml 配置載入
 
 ```python
-# loom/core/autonomy/daemon.py
-class AutonomyDaemon:
-    async def start(self):
-        """啟動 daemon"""
-        if self._running:
-            logger.warning("Daemon already running")
-            return
-        
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        
-        logger.info("Autonomy Daemon started")
-        
-        # 發送啟動通知
-        await self.notification_router.send(
-            NotificationType.INFO,
-            "Autonomy Daemon started"
-        )
-    
-    async def stop(self):
-        """停止 daemon"""
-        if not self._running:
-            return
-        
-        self._running = False
-        
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        
-        logger.info("Autonomy Daemon stopped")
-        
-        # 發送停止通知
-        await self.notification_router.send(
-            NotificationType.INFO,
-            "Autonomy Daemon stopped"
-        )
-```
+def load_config(self, config_path: str | Path) -> int:
+    """從 loom.toml 載入觸發器，返回註冊數量"""
+    with open(path, "rb") as f:
+        config = tomllib.load(f)
 
-### 主循環
+    autonomy_cfg = config.get("autonomy", {})
+    if not autonomy_cfg.get("enabled", False):
+        return 0
 
-```python
-async def _run_loop(self):
-    """主事件循環"""
-    
-    while self._running:
-        try:
-            # 1. 檢查所有啟用的觸發器
-            triggered = await self._check_triggers()
-            
-            # 2. 處理觸發的事件
-            for trigger in triggered:
-                await self._handle_trigger(trigger)
-            
-            # 3. 統計報告
-            self._stats.record_cycle(len(triggered))
-            
-            # 4. 休眠
-            await asyncio.sleep(self.config.check_interval)
-        
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Daemon loop error: {e}")
-            self._stats.increment("errors")
-            await asyncio.sleep(5)  # 錯誤後短暫休眠
+    for sched in autonomy_cfg.get("schedules", []):
+        trigger = CronTrigger(
+            name=sched["name"],
+            intent=sched["intent"],
+            cron=sched.get("cron", "0 9 * * 1-5"),
+            timezone=sched.get("timezone", "UTC"),
+            trust_level=sched.get("trust_level", "guarded"),
+            notify=sched.get("notify", True),
+            notify_thread_id=sched.get("notify_thread", 0),
+        )
+        self._evaluator.register(trigger)
+
+    for evt in autonomy_cfg.get("triggers", []):
+        trigger = EventTrigger(
+            name=evt["name"],
+            intent=evt["intent"],
+            event_name=evt.get("event", evt["name"]),
+            trust_level=evt.get("trust_level", "guarded"),
+            notify=evt.get("notify", True),
+            notify_thread_id=evt.get("notify_thread", 0),
+        )
+        self._evaluator.register(trigger)
+
+    return count
 ```
 
 ---
 
-## 觸發器檢查
-
-### 檢查邏輯
+## 執行階段
 
 ```python
-async def _check_triggers(self) -> list[Trigger]:
-    """檢查所有觸發器，返回已觸發的列表"""
-    
-    enabled_triggers = self.trigger_registry.list_enabled()
-    triggered = []
-    
-    for trigger in enabled_triggers:
-        try:
-            if await trigger.should_fire():
-                triggered.append(trigger)
-                logger.info(f"Trigger fired: {trigger.id}")
-        
-        except Exception as e:
-            logger.error(f"Error checking trigger {trigger.id}: {e}")
-            self._stats.increment("trigger_errors")
-    
-    return triggered
-```
+async def _execute_plan(self, plan: PlannedAction) -> None:
+    if plan.decision == ActionDecision.SKIP:
+        return
 
-### 觸發器去重
+    if plan.decision == ActionDecision.EXECUTE:
+        await self._run_agent(plan)
+        return
 
-為避免同一觸發器在短時間內重複觸發（如 cron 精確到分鐘但檢查更頻繁）：
-
-```python
-class TriggerCooldown:
-    """觸發器冷卻機制"""
-    
-    def __init__(self):
-        self._last_fired: dict[str, datetime] = {}
-        self._cooldown_seconds: dict[str, float] = {}
-    
-    def should_fire(self, trigger_id: str, min_interval: float = 60) -> bool:
-        """檢查是否在冷卻中"""
-        last = self._last_fired.get(trigger_id)
-        
-        if last is None:
-            return True
-        
-        elapsed = (datetime.now() - last).total_seconds()
-        return elapsed >= min_interval
-    
-    def record_fire(self, trigger_id: str):
-        """記錄觸發時間"""
-        self._last_fired[trigger_id] = datetime.now()
-```
-
----
-
-## 觸發處理
-
-### 處理流程
-
-```python
-async def _handle_trigger(self, trigger: Trigger):
-    """處理已觸發的觸發器"""
-    
-    start_time = datetime.now()
-    
-    try:
-        # 1. 獲取上下文
-        context = await trigger.get_context()
-        
-        # 2. 決策
-        decision = await self.decision_pipeline.decide(trigger, context)
-        
-        # 3. 生成行動計劃
-        plan = self.action_planner.plan(decision, trigger, context)
-        
-        # 4. 執行計劃
-        if not plan.is_empty:
-            await self._execute_plan(plan, trigger, context)
-        
-        # 5. 記錄統計
-        self._stats.record_execution(
-            trigger_id=trigger.id,
-            decision=decision,
-            duration=(datetime.now() - start_time).total_seconds(),
-        )
-    
-    except Exception as e:
-        logger.error(f"Error handling trigger {trigger.id}: {e}")
-        self._stats.increment("execution_errors")
-        
-        # 發送錯誤通知
-        await self.notification_router.send(
-            NotificationType.ERROR,
-            f"Trigger {trigger.id} execution failed: {e}"
-        )
-```
-
----
-
-## 行動執行
-
-```python
-async def _execute_plan(
-    self,
-    plan: ActionPlan,
-    trigger: Trigger,
-    context: dict,
-):
-    """執行行動計劃"""
-    
-    action_executor = ActionExecutor(
-        task_scheduler=self.task_scheduler,
-        memory=self.memory,
-        notification_router=self.notification_router,
-        tool_registry=self.tool_registry,
+    # NOTIFY 或 HOLD → 發送確認請求
+    notif = Notification(
+        type=NotificationType.CONFIRM,
+        title=f"Loom autonomy: {plan.trigger_name}",
+        body=plan.intent,
+        timeout_seconds=60 if plan.decision == ActionDecision.NOTIFY else 300,
+        thread_id=plan.context.get("notify_thread_id", 0),
     )
-    
-    result = await action_executor.execute(plan)
-    
-    if result.overall_success:
-        logger.info(f"Action plan executed successfully for {trigger.id}")
-    else:
-        logger.warning(f"Action plan partially failed for {trigger.id}")
-        
-        # 發送失敗通知
-        await self.notification_router.send(
-            NotificationType.WARNING,
-            f"Action plan for {trigger.id} completed with errors"
-        )
+    result = await self._confirm.ask(notif)
+
+    if result == ConfirmResult.APPROVED:
+        await self._run_agent(plan)
+    elif result == ConfirmResult.TIMEOUT and plan.decision == ActionDecision.NOTIFY:
+        # GUARDED + notify 超時 → 跳過（不下放到 EXECUTE）
+        await self._notify.send(Notification(
+            type=NotificationType.INFO,
+            title=f"Autonomy: {plan.trigger_name} skipped",
+            body="No response within timeout — action was skipped.",
+        ))
+
+async def _run_agent(self, plan: PlannedAction) -> None:
+    """透過 Session 的 stream_turn 執行自主任務"""
+    if self._session is None:
+        return
+    try:
+        output_chunks: list[str] = []
+        async for event in self._session.stream_turn(
+            plan.prompt, abort_signal=self._abort.signal
+        ):
+            if hasattr(event, "text") and isinstance(event.text, str):
+                output_chunks.append(event.text)
+        response = "".join(output_chunks).strip()
+        thread_id = plan.context.get("notify_thread_id", 0)
+        if response:
+            await self._notify.send(Notification(
+                type=NotificationType.REPORT,
+                title=f"Autonomy result: {plan.trigger_name}",
+                body=response[:1000],
+                thread_id=thread_id,
+            ))
+    except Exception as exc:
+        await self._notify.send(Notification(
+            type=NotificationType.ALERT,
+            title=f"Autonomy error: {plan.trigger_name}",
+            body=str(exc),
+            thread_id=plan.context.get("notify_thread_id", 0),
+        ))
 ```
 
 ---
 
-## loom.toml 配置
+## Runtime 控制
 
-### 完整配置範例
+```python
+async def start(self, poll_interval: float = 60.0) -> None:
+    """啟動後台迴圈（阻塞，直到 stop() 被呼叫）"""
+    run_task = asyncio.ensure_future(
+        self._evaluator.run_forever(poll_interval=poll_interval)
+    )
+    abort_task = asyncio.ensure_future(wait_aborted(self._abort.signal))
+    done, pending = await asyncio.wait(
+        [run_task, abort_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+def stop(self) -> None:
+    """發送中止信號，連帶中止 stream_turn"""
+    self._abort.abort()
+```
+
+---
+
+## Offline Dreaming（v0.2.5.3）
+
+DreamingPlugin 將 `dream_cycle` 註冊為 SAFE 工具，可在 AutonomyDaemon 中透過 cron 觸發：
 
 ```toml
-[autonomy]
-
-# 是否啟用 daemon
-enabled = true
-
-# 檢查間隔（秒）
-check_interval = 60
-
-# 信任級別
-trust_level = "GUARDED"
-
-# 關閉開啟時的通知
-notify_on_start = true
-notify_on_stop = true
-
-# 觸發器設定
-[autonomy.triggers]
-
-# 定時任務
-[[autonomy.triggers.cron]]
-id = "daily_summary"
-cron = "0 9 * * *"
-action = "send_daily_summary"
-enabled = true
-
-# 事件觸發
-[[autonomy.triggers.event]]
-id = "test_on_save"
-event = "file_modified"
-filter = "**/test_*.py"
-action = "run_tests"
-enabled = false
-
-# 條件觸發
-[[autonomy.triggers.condition]]
-id = "memory_warning"
-conditions = [
-    { type = "memory_low", threshold = 10, operator = "<" }
-]
-logic = "AND"
-action = "notify_memory_low"
-check_interval = 300
-enabled = true
-
-# 觸發器冷卻（避免重複觸發）
-[autonomy.triggers.cooldown]
-default_seconds = 60
-# 特定觸發器可以覆蓋
-"daily_summary" = 3600
+[[autonomy.schedules]]
+name = "nightly_dream"
+cron = "0 3 * * *"
+intent = "執行 dream_cycle，探索記憶中的隱藏關聯"
+trust_level = "safe"
+notify = false
 ```
+
+DreamingPlugin 程式碼位於 `loom/extensibility/dreaming_plugin.py`，由 `PluginRegistry.install_into(session)` 自動安裝。
+
+---
+
+## SelfReflectionPlugin（v0.2.5.3）
+
+`SelfReflectionPlugin`（`loom/extensibility/self_reflection_plugin.py`）在 session 結束時自動觸發：
+
+```python
+class SelfReflectionPlugin(LoomPlugin):
+    name = "self_reflection"
+    version = "1.0"
+
+    def tools(self) -> list[ToolDefinition]:
+        return [reflect_self_tool]  # reflect_self tool (SAFE)
+
+    def on_session_stop(self, session: object) -> None:
+        """Session 結束時自動呼叫（背景非同步）"""
+        asyncio.create_task(run_self_reflection(session))
+```
+
+每次 session 結束後，分析情節模式並寫入 RelationalMemory：
+- `(loom-self, tends_to, <observation>)`
+- `(loom-self, should_avoid, <observation>)`
+- `(loom-self, discovered, <observation>)`
+
+`MemoryIndex` 在下次 session 開始時展示 Self-Portrait。
 
 ---
 
 ## CLI 命令
 
 ```bash
-# 啟動 daemon
-loom autonomy start
-
-# 停止 daemon
-loom autonomy stop
-
-# 查看狀態
-loom autonomy status
-
-# 查看觸發器列表
-loom autonomy triggers list
-
-# 啟用/停用觸發器
-loom autonomy triggers enable daily_summary
-loom autonomy triggers disable test_on_save
-
-# 手動觸發觸發器
-loom autonomy trigger fire daily_summary
-
-# 查看執行日誌
-loom autonomy logs --tail 100
-loom autonomy logs --trigger daily_summary
+loom autonomy start            # 前台啟動 daemon（blocking）
+loom autonomy status           # 顯示已註冊的觸發器列表
+loom autonomy emit <event>    # 發送事件，觸發 EventTrigger
 ```
+
+> `start` 為 blocking（使用 `asyncio.wait`），適合 systemd/supervisord 管理；\
+> `--daemon` flag 不存在，後台執行請透過 OS 服務管理工具。
 
 ---
 
-## 統計與監控
+## loom.toml 實際支援的觸發器格式
 
-### 統計資料
+```toml
+[autonomy]
+enabled  = true
+timezone = "Asia/Taipei"   # IANA timezone，全域預設
 
-```python
-# loom/core/autonomy/daemon.py
-@dataclass
-class DaemonStats:
-    """Daemon 統計"""
-    
-    cycles: int = 0
-    triggers_fired: int = 0
-    actions_executed: int = 0
-    errors: int = 0
-    trigger_errors: int = 0
-    execution_errors: int = 0
-    
-    last_cycle_at: datetime | None = None
-    uptime_seconds: float = 0.0
-    
-    def record_cycle(self, triggers_fired: int):
-        self.cycles += 1
-        self.triggers_fired += triggers_fired
-        self.last_cycle_at = datetime.now()
-    
-    def record_execution(
-        self,
-        trigger_id: str,
-        decision: Decision,
-        duration: float,
-    ):
-        self.actions_executed += 1
-    
-    @property
-    def success_rate(self) -> float:
-        total = self.errors + self.trigger_errors + self.execution_errors + self.actions_executed
-        return self.actions_executed / total if total > 0 else 0.0
+[[autonomy.schedules]]
+name         = "morning_briefing"
+cron         = "0 0 * * *"   # UTC 00:00 = 台北 08:00
+intent       = "生成每日晨報..."
+trust_level  = "safe"
+notify       = false
+notify_thread = 1490024181994225744  # Discord thread ID
+
+[[autonomy.triggers]]
+name         = "deploy_done"
+event        = "deployment_done"
+intent       = "跑 smoke test 並回報結果"
+trust_level  = "guarded"
+notify       = true
 ```
 
-### 狀態報告
-
-```bash
-$ loom autonomy status
-
-Autonomy Daemon Status
-======================
-Status:        Running
-Uptime:        2h 34m
-Last Cycle:    45 seconds ago
-
-Statistics
-----------
-Cycles:           9,240
-Triggers Fired:   127
-Actions Executed: 124
-Errors:           3
-Success Rate:     97.7%
-
-Trigger Breakdown
------------------
-daily_summary:     45 fires, 44 executed, 1 skipped
-memory_warning:     2 fires, 2 executed, 0 skipped
-```
+> 完整的 `[[autonomy.triggers]]` 格式說明見 [37-loom-toml-參考.md](37-loom-toml-參考.md)。
 
 ---
 
-## 開機啟動
+## 與 TaskScheduler 的關係
 
-### 系統服務（systemd）
+AutonomyDaemon **不直接持有** `TaskScheduler`。\
+觸發後的任務透過 `LoomSession.stream_turn()` 執行，這是 LLM streaming 互動迴圈，非 Task Scheduler 的 DAG 執行。\
+兩者是不同的執行模式：
 
-```ini
-# /etc/systemd/system/loom-autonomy.service
-[Unit]
-Description=Loom Autonomy Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=loom
-WorkingDirectory=/home/loom
-ExecStart=/usr/bin/loom autonomy start
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-# 啟用開機啟動
-sudo systemctl enable loom-autonomy
-sudo systemctl start loom-autonomy
-```
+| | Autonomy Daemon | Task Scheduler |
+|---|---|---|
+| 執行模式 | LLM streaming prompt | DAG `asyncio.gather` |
+| 觸發來源 | cron / event / condition | LLM 拆解 |
+| 整合點 | `_session.stream_turn()` | `_session._dispatch_parallel()` |
+| 配置位置 | `loom.toml` | 程式呼叫 |
 
 ---
 
 ## 總結
 
-Autonomy Daemon 是 Loom 的「自動化引擎核心」：
-
 | 功能 | 說明 |
 |------|------|
-| 主循環 | 定期檢查觸發器狀態 |
-| 觸發器管理 | 維護啟用/停用狀態、冷卻機制 |
-| 決策執行 | 觸發 → 決策 → 行動 → 執行 |
-| 統計監控 | 追蹤執行次數、成功率和錯誤 |
-| CLI 控制 | start/stop/status/logs 命令 |
-| 系統整合 | 支援 systemd 開機啟動 |
+| 觸發器載入 | 從 loom.toml 解析並註冊 CronTrigger + EventTrigger |
+| 後台評估 | `TriggerEvaluator.run_forever()` 每分鐘檢查 cron/condition |
+| 決策執行 | `ActionPlanner.handle()` → EXECUTE / NOTIFY / HOLD |
+| 確認流程 | `ConfirmFlow.ask()` → APPROVED / DENIED / TIMEOUT |
+| 任務執行 | 透過 Session streaming，**非** TaskScheduler |
+| 結果通知 | `NotificationRouter` 發送 REPORT / ALERT |
+| DreamingPlugin | Cron 排程 dream_cycle，探索隱藏關聯 |
+| SelfReflectionPlugin | 每次 session 結束後分析模式寫入 loom-self 三元組 |

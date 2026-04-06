@@ -21,6 +21,22 @@ Loom 的記憶系統模擬人類認知中的四種記憶類型：
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### Anti-pattern 記憶（v0.2.5.1）
+
+當工具執行失敗且該工具有 SkillGenome 記錄時，會觸發**反事實反思**（Counter-factual Reflection）：
+
+```
+execution_error 發生
+    ↓
+LLM 分析：「這個失敗是什麼 pattern 造成的？下次應避免什麼？」
+    ↓
+寫入 SemanticMemory：  key = "skill:<name>:anti_pattern:<timestamp>"
+寫入 RelationalMemory：(skill:<name>, has_anti_pattern, …)
+                       (loom-self, should_avoid:<tool_name>, …)
+```
+
+`MemoryIndex` 在 session 啟動時讀取 `should_avoid` 三元組，agent 在每次對話開始就知道自己過去踩過的坑。
+
 ---
 
 ## 後端：SQLite WAL 模式
@@ -40,6 +56,22 @@ store.execute("PRAGMA journal_mode=WAL")
 | 併發需求 | WAL 模式支援讀者並行寫入（寫不阻塞讀）|
 | 部署複雜度 | 單檔案，無需 DBA |
 | 故障恢復 | WAL 確保 transactions 的 durability |
+
+---
+
+## Session Log 結構化（v0.2.5.3）
+
+`session_log` 表格（記錄對話歷史）新增結構化欄位：
+
+| 欄位 | 說明 |
+|------|------|
+| `raw_json` | 工具 `tool_use` / `tool_result` blocks 分別儲存，與 human-readable `content` 分離 |
+| `idx_session_log_role` | 加速查詢特定 role 的所有訊息（如「列出 session X 的所有工具呼叫」）|
+
+`load_messages()` 三層 fallback：
+1. `raw_json` 欄位 → 結構化解析
+2. legacy `format=raw_message` → 向後相容
+3. plain text → 最舊記錄的純文字 fallback
 
 ---
 
@@ -117,14 +149,22 @@ MemoryIndex 是一個極輕量的摘要（約 100-200 tokens），永遠駐留 c
 
 ---
 
-## Phase 5 升級：Embedding 搜尋
+## Phase 5 升級：Embedding 搜尋 + SQLite FTS5
 
 | 階段 | 機制 |
 |------|------|
-| Phase 4 | BM25 / TF-IDF 關鍵字加權 |
-| Phase 5 | MiniMax Embedding cosine similarity（第一優先）→ BM25 fallback → recency fallback |
+| Phase 5 | MiniMax Embedding cosine similarity（**第一優先**）→ SQLite FTS5 BM25 fallback → recency fallback |
+| Phase 4 | SQLite FTS5 BM25（全功能）|
 
-`SemanticMemory.upsert()` 寫入時自動計算向量，失敗不阻擋寫入。搜尋時先用向量相似度，再用 BM25 fallback。
+v0.2.5.2 將 Phase 4 的 Python 層 BM25 替換為 **SQLite FTS5**：
+
+```sql
+-- 自動同步的虛擬表（INSERT/UPDATE/DELETE 觸發器）
+CREATE VIRTUAL TABLE semantic_fts
+USING fts5(key, value, content='semantic_entries', content_rowid='rowid');
+```
+
+優點：SQLite 原生 BM25 計算、正確 Unicode 分詞、記憶體佔用低。`initialize()` 啟動時執行 `rebuild`，所有現有記錄自動建立索引。
 
 ---
 
@@ -135,7 +175,7 @@ MemoryIndex 是一個極輕量的摘要（約 100-200 tokens），永遠駐留 c
 | Episodic | ✅ 每次 tool call | 壓縮為 FACT | ❌ | ❌（已轉移）|
 | Semantic | ✅ Agent 呼叫 memorize | — | ✅ | ✅ 可驗證 |
 | Procedural | ✅ Skill 評估結果 | — | ✅ | ✅ confidence ≤ 閾值 |
-| Relational | ✅ Agent 呼叫 relate | — | ✅ | ✅ 可刪除 |
+| Relational | ✅ Agent 呼叫 relate、Anti-pattern 反思寫入 | — | ✅ | ✅ 可刪除 |
 
 ---
 
