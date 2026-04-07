@@ -715,6 +715,20 @@ class LoomSession:
             # during shutdown — swallow the error so the process exits cleanly.
             pass
         finally:
+            # Issue #61 Bug 2: wait for pending skill_eval background tasks
+            # before closing the DB so their upsert writes can complete.
+            pending_evals = [
+                t for t in asyncio.all_tasks()
+                if t.get_name().startswith("skill_eval:")
+            ]
+            if pending_evals:
+                done, still_pending = await asyncio.wait(pending_evals, timeout=5.0)
+                if still_pending:
+                    logger.warning(
+                        "%d skill evaluation(s) unfinished on shutdown",
+                        len(still_pending),
+                    )
+
             try:
                 if db_ctx is not None:
                     await db_ctx.__aexit__(None, None, None)

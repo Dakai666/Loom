@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
@@ -254,14 +255,22 @@ class SkillOutcomeTracker:
 # ---------------------------------------------------------------------------
 
 def _parse_assessment(raw: str) -> tuple[int | None, str]:
-    """Parse the LLM's JSON response into (score, summary)."""
+    """Parse the LLM's JSON response into (score, summary).
+
+    Handles three cases in order:
+    1. Pure JSON (ideal path)
+    2. Markdown-fenced JSON (```json ... ```)
+    3. Natural language with embedded JSON object (MiniMax fallback)
+    """
     cleaned = raw.strip()
+
     # Strip markdown code fencing if present
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
         lines = [ln for ln in lines if not ln.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
 
+    # Attempt 1: direct JSON parse
     try:
         data = _json.loads(cleaned)
         score = int(data.get("score", 0))
@@ -270,6 +279,28 @@ def _parse_assessment(raw: str) -> tuple[int | None, str]:
             return score, summary
     except (ValueError, TypeError, _json.JSONDecodeError):
         pass
+
+    # Attempt 2: extract first {...} block from mixed natural-language output
+    # Handles models that ignore "ONLY a JSON object" instructions
+    match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
+    if match:
+        try:
+            data = _json.loads(match.group())
+            score = int(data.get("score", 0))
+            summary = str(data.get("summary", ""))
+            if 1 <= score <= 5:
+                return score, summary
+        except (ValueError, TypeError, _json.JSONDecodeError):
+            pass
+
+    # Attempt 3: extract score integer and any quoted summary from raw text
+    score_match = re.search(r'"score"\s*:\s*([1-5])', raw)
+    summary_match = re.search(r'"summary"\s*:\s*"([^"]*)"', raw)
+    if score_match:
+        score = int(score_match.group(1))
+        summary = summary_match.group(1) if summary_match else ""
+        return score, summary
+
     return None, ""
 
 
