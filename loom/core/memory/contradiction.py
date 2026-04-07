@@ -49,7 +49,7 @@ class Resolution(str, Enum):
     REPLACE = "replace"       # overwrite existing with proposed
     KEEP = "keep"             # keep existing, drop proposed
     SUPERSEDE = "supersede"   # same trust → most recent wins
-    MERGE = "merge"           # LLM merges both (future enhancement)
+    MERGE = "merge"           # TODO: LLM arbitration — not yet implemented
 
 
 @dataclass
@@ -116,14 +116,22 @@ class ContradictionDetector:
             return contradictions
 
         # ── Tier 2: prefix key match ────────────────────────────────────
-        # Look for entries with similar key structure (e.g. "user:pref:*")
+        # Only flag as prefix conflict when:
+        #   - Both keys have the same depth (same number of ':' segments)
+        #   - The prefix matches up to at least 3 segments
+        # This prevents false positives like user:preference:theme vs
+        # user:preference:font (PR #65 review).
         parts = proposed.key.split(":")
-        if len(parts) >= 2:
-            prefix = ":".join(parts[:2])
+        if len(parts) >= 3:
+            prefix = ":".join(parts[:3])
             related = await self._semantic.list_by_prefix(prefix, limit=5)
+            proposed_depth = len(parts)
             for entry in related:
                 if entry.key == proposed.key:
                     continue  # skip self
+                existing_depth = len(entry.key.split(":"))
+                if existing_depth != proposed_depth:
+                    continue  # different key structure, not a conflict
                 # Only flag as conflict if values are substantially different
                 if (entry.value != proposed.value
                         and _text_overlap(entry.value, proposed.value) < 0.3):

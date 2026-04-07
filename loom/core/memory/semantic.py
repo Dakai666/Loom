@@ -25,14 +25,15 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 TRUST_TIERS: dict[str, float] = {
-    "user_explicit": 1.0,       # User directly told us (via memorize tool)
+    "user_explicit": 1.0,       # User directly told us (via manual input)
     "tool_verified": 0.9,       # Verified by tool execution result
+    "agent_memorize": 0.85,     # Agent invoked memorize tool (PR #65 review)
     "session_compress": 0.8,    # LLM-compressed from episodic
     "agent_inferred": 0.7,      # Agent's own inference
     "dreaming": 0.6,            # Offline dream synthesis
     "skill_evolution": 0.65,    # Skill evolution hints
     "counter_factual": 0.75,    # Counter-factual reflections (tried & failed)
-    "external": 0.5,            # From external sources (URLs, etc.)
+    "external": 0.5,            # From external sources (URLs, fetch, web)
     "unknown": 0.5,             # Unclassified
 }
 
@@ -61,8 +62,10 @@ def classify_source(source: str | None) -> tuple[str, float]:
 
     s = source.lower()
 
-    if s in ("manual", "memorize", "user"):
+    if s in ("manual", "user"):
         return "user_explicit", TRUST_TIERS["user_explicit"]
+    if s == "memorize":
+        return "agent_memorize", TRUST_TIERS["agent_memorize"]
     if s.startswith("counter_factual"):
         return "counter_factual", TRUST_TIERS["counter_factual"]
     if s.startswith("skill_eval"):
@@ -75,6 +78,8 @@ def classify_source(source: str | None) -> tuple[str, float]:
         return "session_compress", TRUST_TIERS["session_compress"]
     if s.startswith("tool:"):
         return "tool_verified", TRUST_TIERS["tool_verified"]
+    if s.startswith("fetch:") or s.startswith("web:"):
+        return "external", TRUST_TIERS["external"]
 
     return "unknown", TRUST_TIERS["unknown"]
 

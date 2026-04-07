@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
@@ -37,6 +38,15 @@ if TYPE_CHECKING:
     from loom.core.memory.semantic import SemanticMemory
 
 logger = logging.getLogger(__name__)
+
+# Module-level constant — avoid re-creating per call (PR #65 review)
+_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be",
+    "to", "of", "in", "on", "at", "for", "with", "by",
+    "and", "or", "not", "it", "this", "that", "as",
+    "的", "是", "了", "在", "有", "和", "就", "不",
+    "也", "都", "而", "及", "與", "但", "或",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +143,9 @@ class MemoryGovernor:
         """
         tier_name, tier_confidence = classify_source(entry.source)
 
-        # Ensure confidence is at least the trust tier floor
+        # Ensure confidence is at least the trust tier's default
         # (but don't lower an explicitly-set high confidence)
-        adjusted = max(entry.confidence, tier_confidence * 0.5)
+        adjusted = max(entry.confidence, tier_confidence)
         entry.confidence = adjusted
 
         # Contradiction check
@@ -272,13 +282,7 @@ class MemoryGovernor:
         if not words:
             return 0.1, "empty"
 
-        _STOPWORDS = frozenset({
-            "the", "a", "an", "is", "are", "was", "were", "be",
-            "to", "of", "in", "on", "at", "for", "with", "by",
-            "and", "or", "not", "it", "this", "that", "as",
-            "的", "是", "了", "在", "有", "和", "就", "不",
-            "也", "都", "而", "及", "與", "但", "或",
-        })
+        # _STOPWORDS defined at module level
         info_words = [w for w in words if w not in _STOPWORDS and len(w) > 1]
         scores["info_density"] = min(1.0, len(info_words) / max(len(words), 1))
 
@@ -376,16 +380,18 @@ class MemoryGovernor:
 
         Only triples with source='dreaming' are subject to accelerated decay.
         """
-        import math
-
         base_half_life = 90.0  # days
         effective_half_life = base_half_life / self._relational_decay_factor
 
-        cursor = await self._db.execute(
-            "SELECT id, confidence, updated_at FROM relational_entries "
-            "WHERE source = 'dreaming'"
-        )
-        rows = await cursor.fetchall()
+        try:
+            cursor = await self._db.execute(
+                "SELECT id, confidence, updated_at FROM relational_entries "
+                "WHERE source = 'dreaming'"
+            )
+            rows = await cursor.fetchall()
+        except Exception as exc:
+            logger.debug("Relational decay query failed: %s", exc)
+            return 0
 
         to_prune: list[str] = []
         for row_id, confidence, updated_at_str in rows:
@@ -399,12 +405,16 @@ class MemoryGovernor:
                 continue
 
         if to_prune:
-            placeholders = ",".join("?" * len(to_prune))
-            await self._db.execute(
-                f"DELETE FROM relational_entries WHERE id IN ({placeholders})",
-                to_prune,
-            )
-            await self._db.commit()
+            try:
+                placeholders = ",".join("?" * len(to_prune))
+                await self._db.execute(
+                    f"DELETE FROM relational_entries WHERE id IN ({placeholders})",
+                    to_prune,
+                )
+                await self._db.commit()
+            except Exception as exc:
+                logger.debug("Relational decay delete failed: %s", exc)
+                return 0
 
         return len(to_prune)
 

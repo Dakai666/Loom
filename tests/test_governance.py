@@ -113,10 +113,15 @@ class TestTrustTiers:
     """Verify that source strings map to the correct trust tiers."""
 
     def test_user_explicit_sources(self):
-        for src in ("manual", "memorize", "user"):
+        for src in ("manual", "user"):
             tier, conf = classify_source(src)
             assert tier == "user_explicit"
             assert conf == 1.0
+
+    def test_agent_memorize(self):
+        tier, conf = classify_source("memorize")
+        assert tier == "agent_memorize"
+        assert conf == 0.85
 
     def test_session_compress(self):
         tier, conf = classify_source("session:abc123")
@@ -168,6 +173,16 @@ class TestTrustTiers:
         assert tier == "user_explicit"
         tier2, _ = classify_source("Session:ABC")
         assert tier2 == "session_compress"
+
+    def test_external_fetch(self):
+        tier, conf = classify_source("fetch:https://example.com")
+        assert tier == "external"
+        assert conf == 0.5
+
+    def test_external_web(self):
+        tier, conf = classify_source("web:search_query")
+        assert tier == "external"
+        assert conf == 0.5
 
 
 # ===========================================================================
@@ -224,21 +239,39 @@ class TestContradictionDetector:
 
     @pytest.mark.asyncio
     async def test_detect_prefix_match(self, semantic):
-        """Same prefix with substantially different values → potential conflict."""
+        """Same 3-segment prefix with same depth and different values → conflict."""
+        await semantic.upsert(SemanticEntry(
+            key="user:preference:theme:main", value="dark mode with blue accents",
+            source="manual",
+        ))
+
+        proposed = SemanticEntry(
+            key="user:preference:theme:alt", value="bright yellow everywhere please",
+            source="session:abc",
+        )
+
+        detector = ContradictionDetector(semantic)
+        results = await detector.detect(proposed)
+        # Same 3-segment prefix + same depth → should detect
+        assert any(c.conflict_type == ConflictType.KEY_PREFIX for c in results)
+
+    @pytest.mark.asyncio
+    async def test_no_prefix_conflict_different_third_segment(self, semantic):
+        """Different 3rd segment should NOT flag as prefix conflict."""
         await semantic.upsert(SemanticEntry(
             key="user:preference:theme", value="dark mode with blue accents",
             source="manual",
         ))
 
         proposed = SemanticEntry(
-            key="user:preference:color", value="bright yellow everywhere please",
+            key="user:preference:font", value="JetBrains Mono for everything",
             source="session:abc",
         )
 
         detector = ContradictionDetector(semantic)
         results = await detector.detect(proposed)
-        # Should detect as KEY_PREFIX (different enough values)
-        assert any(c.conflict_type == ConflictType.KEY_PREFIX for c in results)
+        # Different 3rd segment → no conflict
+        assert not any(c.conflict_type == ConflictType.KEY_PREFIX for c in results)
 
     def test_resolve_trust_wins(self):
         """Higher trust tier wins."""
@@ -331,7 +364,7 @@ class TestGovernedUpsert:
         result = await governor.governed_upsert(entry)
 
         assert result.written is True
-        assert result.trust_tier == "user_explicit"
+        assert result.trust_tier == "agent_memorize"
         assert result.contradictions_found == 0
 
         # Verify it was actually written
@@ -341,15 +374,15 @@ class TestGovernedUpsert:
 
     @pytest.mark.asyncio
     async def test_upsert_adjusts_confidence_floor(self, governor, semantic):
-        """Low confidence should be raised to trust tier floor * 0.5."""
+        """Low confidence should be raised to trust tier default."""
         entry = SemanticEntry(
             key="fact:x", value="something", confidence=0.1,
-            source="memorize",  # user_explicit → trust=1.0 → floor=0.5
+            source="memorize",  # agent_memorize → trust=0.85 → floor=0.85
         )
         result = await governor.governed_upsert(entry)
 
         assert result.written is True
-        assert result.adjusted_confidence >= 0.5
+        assert result.adjusted_confidence >= 0.85
 
     @pytest.mark.asyncio
     async def test_upsert_with_contradiction_replace(self, governor, semantic):
