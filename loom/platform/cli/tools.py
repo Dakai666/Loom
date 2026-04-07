@@ -629,6 +629,8 @@ def make_load_skill_tool(
     procedural: "ProceduralMemory",
     skills_dirs: list[Path] | None = None,
     outcome_tracker: "SkillOutcomeTracker | None" = None,
+    semantic: "SemanticMemory | None" = None,
+    turn_index_fn: "Callable[[], int] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -693,7 +695,7 @@ def make_load_skill_tool(
         lines = [f'<skill_content name="{name}">']
 
         # Evolution hints (from semantic memory, if available)
-        evolution_hints = await _get_evolution_hints(procedural, name)
+        evolution_hints = await _get_evolution_hints(procedural, semantic, name)
         if evolution_hints:
             lines.append("<evolution_hints>")
             for hint in evolution_hints:
@@ -724,8 +726,8 @@ def make_load_skill_tool(
         # Record activation
         _loaded_this_session.add(name)
         if outcome_tracker is not None:
-            # Use a placeholder turn_index; the actual turn is tracked by session
-            outcome_tracker.record_activation(name, 0)
+            _turn = turn_index_fn() if turn_index_fn else 0
+            outcome_tracker.record_activation(name, _turn)
 
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
@@ -804,24 +806,40 @@ def _find_skill_resources(
 
 
 async def _get_evolution_hints(
-    procedural: "ProceduralMemory", skill_name: str,
+    procedural: "ProceduralMemory",
+    semantic: "SemanticMemory | None",
+    skill_name: str,
 ) -> list[str]:
-    """Fetch evolution hints from semantic memory for a skill."""
-    # Evolution hints are written by SkillEvolutionHook as semantic entries
-    # with key pattern: skill:<name>:evolution_hint:*
-    # Since we can't do wildcard queries on semantic memory easily here,
-    # we check the skill's confidence and return a hint if it's low.
-    skill = await procedural.get(skill_name)
-    if skill is None:
-        return []
+    """Fetch evolution hints for a skill.
 
+    Reads real evolution hints written by ``SkillEvolutionHook`` from
+    SemanticMemory (key pattern ``skill:<name>:evolution_hint:*``).
+    Falls back to a confidence-based generic warning if no stored hints.
+    """
     hints: list[str] = []
-    if skill.confidence < 0.6 and skill.usage_count >= 3:
-        hints.append(
-            f"⚠ This skill's confidence is {skill.confidence:.2f} "
-            f"(usage: {skill.usage_count}×). "
-            f"Consider reviewing recent outcomes and improving the workflow."
-        )
+
+    # Query real evolution hints from semantic memory
+    if semantic is not None:
+        try:
+            entries = await semantic.list_by_prefix(
+                f"skill:{skill_name}:evolution_hint:", limit=3,
+            )
+            for entry in entries:
+                hints.append(entry.value)
+        except Exception:
+            pass  # semantic query failure must never block load_skill
+
+    # Fallback: confidence-based warning if no stored hints
+    if not hints:
+        skill = await procedural.get(skill_name)
+        if (skill is not None
+                and skill.confidence < 0.6
+                and skill.usage_count >= 3):
+            hints.append(
+                f"⚠ This skill's confidence is {skill.confidence:.2f} "
+                f"(usage: {skill.usage_count}×). "
+                f"Consider reviewing recent outcomes and improving the workflow."
+            )
     return hints
 
 

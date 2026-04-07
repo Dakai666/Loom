@@ -304,18 +304,23 @@ class SkillEvolutionHook:
         """
         Check all active skills and trigger evolution for those that qualify.
 
+        Runs sequentially so the caller can await completion before closing
+        DB connections (e.g. in ``LoomSession.stop()``).
+
         Returns the number of skills that received evolution hints.
         """
         skills = await self._procedural.list_active()
         count = 0
         for skill in skills:
             if self._should_evolve(skill):
-                task = asyncio.create_task(
-                    self._evolve(skill),
-                    name=f"skill_evolve:{skill.name}",
-                )
-                task.add_done_callback(_on_evolve_done)
-                count += 1
+                try:
+                    await self._evolve(skill)
+                    count += 1
+                except Exception as exc:
+                    logger.debug(
+                        "Skill evolution failed for '%s': %s: %s",
+                        skill.name, type(exc).__name__, exc,
+                    )
         return count
 
     def _should_evolve(self, skill) -> bool:
