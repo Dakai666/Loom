@@ -330,14 +330,34 @@ class AnthropicProvider(LLMProvider):
         stop_reason = "end_turn"
 
         aborted = False
-        async with self._async_client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                if abort_signal is not None and abort_signal.is_set():
-                    aborted = True
-                    break
-                full_text += text
-                yield (text, None)
-            final = None if aborted else await stream.get_final_message()
+        _base_delay = 1.0
+        for _attempt in range(self._max_retries):
+            _yielded_any = False
+            try:
+                async with self._async_client.messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        if abort_signal is not None and abort_signal.is_set():
+                            aborted = True
+                            break
+                        _yielded_any = True
+                        full_text += text
+                        yield (text, None)
+                    final = None if aborted else await stream.get_final_message()
+                break  # success
+            except BaseException as _exc:
+                if _yielded_any:
+                    raise  # mid-stream failure — can't retry safely
+                exc_name = type(_exc).__name__.lower()
+                status = getattr(_exc, "status_code", None) or getattr(_exc, "status", None)
+                retryable = (
+                    isinstance(_exc, asyncio.TimeoutError)
+                    or (isinstance(status, int) and status in _RETRYABLE_STATUSES)
+                    or "timeout" in exc_name
+                    or "connection" in exc_name
+                )
+                if not retryable or _attempt == self._max_retries - 1:
+                    raise
+                await asyncio.sleep(_base_delay * (2 ** _attempt))
 
         thinking_blocks: list[dict] = []
         if final is not None:

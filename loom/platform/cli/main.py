@@ -321,6 +321,7 @@ def build_router() -> LLMRouter:
                 model=mm_model,
                 base_url="https://api.minimax.io/anthropic",
                 name="minimax",
+                timeout=120.0,
             ),
             default=True,
         )
