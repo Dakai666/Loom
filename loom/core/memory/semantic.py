@@ -236,6 +236,28 @@ class SemanticMemory:
             for r in rows
         ]
 
+    async def list_by_prefix(self, prefix: str, limit: int = 10) -> list[SemanticEntry]:
+        """Return entries whose key starts with *prefix*, newest first.
+
+        Used by skill evolution hints to query entries matching
+        ``skill:<name>:evolution_hint:*`` without full-text search overhead.
+        """
+        cursor = await self._db.execute(
+            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
+            "FROM semantic_entries WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?",
+            (f"{prefix}%", limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            SemanticEntry(
+                id=r[0], key=r[1], value=r[2], confidence=r[3],
+                source=r[4], metadata=json.loads(r[5]),
+                created_at=datetime.fromisoformat(r[6]),
+                updated_at=datetime.fromisoformat(r[7]),
+            )
+            for r in rows
+        ]
+
     async def prune_decayed(
         self,
         threshold: float = 0.1,

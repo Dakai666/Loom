@@ -585,6 +585,8 @@ class LoomSession:
         self.registry.register(make_load_skill_tool(
             self._procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
+            semantic=self._semantic,
+            turn_index_fn=lambda: self._turn_index,
         ))
 
         # Register web tools (Phase 5D)
@@ -678,6 +680,23 @@ class LoomSession:
             )
             if count:
                 console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+
+            # Issue #58: trigger evolution analysis for low-confidence skills
+            if self._procedural is not None and self._semantic is not None:
+                try:
+                    from loom.core.cognition.counter_factual import SkillEvolutionHook
+                    evolution_hook = SkillEvolutionHook(
+                        router=self.router, model=self.model,
+                        procedural=self._procedural, semantic=self._semantic,
+                    )
+                    evolved = await evolution_hook.check_all_skills()
+                    if evolved:
+                        console.print(
+                            f"[dim]  Queued evolution analysis for {evolved} skill(s).[/dim]"
+                        )
+                except Exception:
+                    pass  # evolution failure must never block shutdown
+
             if self._session_log is not None:
                 first_user = next(
                     (m["content"] for m in self.messages if m["role"] == "user"), None
@@ -902,6 +921,9 @@ class LoomSession:
             if response.stop_reason == "end_turn":
                 self._turn_index += 1
 
+                # Issue #58: trigger skill self-assessment before TurnDone
+                self._trigger_skill_assessment()
+
                 # Mid-session episodic compression: configurable via loom.toml
                 # [memory] episodic_compress_threshold (default 30).
                 try:
@@ -1030,6 +1052,8 @@ class LoomSession:
                         self._cancel_requested = False
                         self._last_think = "".join(_think_parts).strip()
                         self._turn_index += 1
+                        # Issue #58: trigger skill self-assessment before TurnDone
+                        self._trigger_skill_assessment()
                         yield TurnDone(
                             tool_count=tool_count,
                             input_tokens=input_tokens,
@@ -1042,11 +1066,50 @@ class LoomSession:
 
         self._last_think = "".join(_think_parts).strip()
         self._turn_index += 1
+        # Issue #58: trigger skill self-assessment before TurnDone
+        self._trigger_skill_assessment()
         yield TurnDone(
             tool_count=tool_count,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             elapsed_ms=(time.monotonic() - t0) * 1000,
+        )
+
+    # ------------------------------------------------------------------
+    # Issue #58: Skill self-assessment trigger
+    # ------------------------------------------------------------------
+
+    def _trigger_skill_assessment(self) -> None:
+        """
+        Fire-and-forget: schedule skill self-assessment if a skill was
+        activated during this session.
+
+        Called at each TurnDone point in stream_turn(). The LLM self-assessment
+        runs as a background task and never blocks the conversation.
+        """
+        if (
+            self._skill_outcome_tracker is None
+            or not self._skill_outcome_tracker.has_active_skills()
+        ):
+            return
+
+        # Extract last assistant message as turn summary
+        turn_summary = ""
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    turn_summary = content[:2000]
+                break
+
+        if not turn_summary:
+            return
+
+        self._skill_outcome_tracker.maybe_evaluate(
+            router=self.router,
+            model=self.model,
+            turn_index=self._turn_index,
+            turn_summary=turn_summary,
         )
 
     # ------------------------------------------------------------------
