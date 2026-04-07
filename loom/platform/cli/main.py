@@ -57,6 +57,7 @@ from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
 from loom.core.harness.middleware import (
     BlastRadiusMiddleware,
+    LifecycleGateMiddleware,
     LifecycleMiddleware,
     LogMiddleware,
     MiddlewarePipeline,
@@ -627,6 +628,7 @@ class LoomSession:
                     confirm_fn=self._confirm_tool,
                     exec_escape_fn=_exec_escape_fn,
                 ),
+                LifecycleGateMiddleware(registry=self.registry),
             ]
         )
 
