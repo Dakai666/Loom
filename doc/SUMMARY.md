@@ -23,7 +23,8 @@
 |------|------|
 | [04-Harness-概述.md](04-Harness-概述.md) | Middleware Pipeline 設計 + SchemaValidationMiddleware + AbortController |
 | [05-Trust-Level.md](05-Trust-Level.md) | SAFE / GUARDED / CRITICAL 三級權限 |
-| [06-Middleware-詳解.md](06-Middleware-詳解.md) | Log / Trace / BlastRadius / SchemaValidation 四種 Middleware |
+| [06-Middleware-詳解.md](06-Middleware-詳解.md) | Log / Trace / BlastRadius / SchemaValidation / LifecycleMiddleware / LifecycleGateMiddleware |
+| [06b-Action-Lifecycle.md](06b-Action-Lifecycle.md) | Control-first 狀態機詳解：兩層架構、各狀態場景、precondition 失敗情況、abort racing、post-validator + rollback |
 | [07-Tool-Registry.md](07-Tool-Registry.md) | 工具定義格式與雙 provider schema 輸出 |
 
 ### 3. Memory Layer（記憶系統）
@@ -108,7 +109,7 @@
 
 ---
 
-## 版本對照（v0.2.5.1 → v0.2.6.1 新功能）
+## 版本對照（v0.2.5.1 → v0.2.8.0 新功能）
 
 | 版本 | 主要新功能 |
 |------|-----------|
@@ -117,18 +118,19 @@
 | v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin、Session Log 結構化 |
 | v0.2.6.0 | MCP 整合（Server + Client）、Predictive Memory Pre-fetcher |
 | v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
+| v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；handler 例外保護；移除 `/verbose` F3（Issue #63） |
 
 ---
 
 ## ✅ 文件撰寫狀態
 
-全部 43 個文件已完成！
+全部 44 個文件已完成！
 
 | 區塊 | 完成數 |
 |------|--------|
 | 0. 總覽與概念 | 2/2 |
 | 1. 架構導讀 | 2/2 |
-| 2. Harness Layer | 4/4 |
+| 2. Harness Layer | 5/5 |
 | 3. Memory Layer | 5/5 |
 | 4. Cognition Layer | 4/4 |
 | 5. Task Engine | 2/2 |
@@ -143,4 +145,4 @@
 
 ---
 
-> 📚 Loom 文檔 v0.2.6.1 同步完成！
+> 📚 Loom 文檔 v0.2.8.0 同步完成！

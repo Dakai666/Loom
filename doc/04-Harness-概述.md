@@ -44,45 +44,53 @@ Middleware_1 → Middleware_2 → ... → Middleware_N → 實際工具執行
               │  MiddlewarePipeline.run()   │
               └─────────────────────────────┘
                            ↓
-    ┌──────────┐    ┌──────────┐    ┌──────────────────┐
-    │ Log      │ →  │ Trace    │ →  │ BlastRadius      │
-    │Middleware │    │Middleware│    │ Middleware       │
-    └──────────┘    └──────────┘    └──────────────────┘
-                                               ↓
-                          ┌──────────────────────────────────┐
-                          │  BlastRadiusMiddleware.decide()  │
-                          │                                    │
-                          │  SAFE     → 放行（已預授權）      │
-                          │  GUARDED  → 首次確認，session內免  │
-                          │  CRITICAL → 每次都確認             │
-                          └──────────────────────────────────┘
-                                               ↓
-                              ┌─────────────────────────────┐
-                              │  SchemaValidationMiddleware  │
-                              │  （JSON Schema 參數驗證）    │
-                              └─────────────────────────────┘
-                                               ↓
-                              ┌─────────────────────────────┐
-                              │  ToolRegistry.execute()     │
-                              │  實際工具函數執行            │
-                              └─────────────────────────────┘
-                                               ↓
-                           ┌──────────────────────────────────┐
-                           │  MiddlewarePipeline.on_result() │
-                           │  （回傳方向，清理 / 寫入等）      │
-                           └──────────────────────────────────┘
+    ┌───────────────────┐
+    │LifecycleMiddleware│  ← 最外層：DECLARED + post-OBSERVED + MEMORIALIZED
+    └───────────────────┘
+              ↓
+    ┌──────────┐    ┌──────────┐
+    │   Log    │ →  │  Trace   │  ← 計時 + EpisodicMemory 寫入
+    │Middleware│    │Middleware│
+    └──────────┘    └──────────┘
+              ↓
+    ┌──────────────────────────────────┐
+    │  SchemaValidationMiddleware      │  ← JSON Schema 參數驗證
+    └──────────────────────────────────┘
+              ↓
+    ┌──────────────────────────────────┐
+    │  BlastRadiusMiddleware           │  ← Trust Level 判斷 + 用戶確認
+    │                                  │    寫入 LifecycleContext.authorization_result
+    │  SAFE     → 放行（已預授權）      │
+    │  GUARDED  → 首次確認，session免  │
+    │  CRITICAL → 每次都確認           │
+    └──────────────────────────────────┘
+              ↓
+    ┌──────────────────────────────────┐
+    │  LifecycleGateMiddleware         │  ← 最內層：即時控制閘門
+    │                                  │
+    │  AUTHORIZED ← ctx 授權結果      │
+    │  PREPARED   ← precondition_checks│
+    │  EXECUTING  ← 精確時刻 + abort   │
+    │  OBSERVED   ← handler 回傳       │
+    └──────────────────────────────────┘
+              ↓
+    ┌──────────────────────────────────┐
+    │  工具 handler 實際執行           │
+    └──────────────────────────────────┘
 ```
 
 ---
 
 ## 已實作的 Middleware
 
-| Middleware | 方向 | 職責 |
+| Middleware | 位置 | 職責 |
 |------------|------|------|
-| `LogMiddleware` | 雙向 | Rich 格式化輸出每次工具調用與結果到終端 |
-| `TraceMiddleware` | 雙向 | 計時 + 每次 tool call/write 寫入 EpisodicMemory |
-| `BlastRadiusMiddleware` | 雙向 | Trust Level 判斷 + 人類確認請求（含 `exec_auto` 模式）|
-| `SchemaValidationMiddleware` | 前向 | 工具參數 JSON Schema 驗證；string→int/float/bool 安全強制轉換 |
+| `LifecycleMiddleware` | 最外層 | DECLARED + LifecycleContext 注入；DENIED / TIMED_OUT 處理；post_validator + rollback_fn；MEMORIALIZED 保證 |
+| `LogMiddleware` | 外層 | Rich 格式化輸出每次工具調用與結果到終端 |
+| `TraceMiddleware` | 外層 | 計時 + 每次 tool call/write 寫入 EpisodicMemory |
+| `SchemaValidationMiddleware` | 中層 | 工具參數 JSON Schema 驗證；string→int/float/bool 安全強制轉換 |
+| `BlastRadiusMiddleware` | 中層 | Trust Level 判斷 + 人類確認請求（含 `exec_auto` 模式）；寫入 `LifecycleContext.authorization_result` |
+| `LifecycleGateMiddleware` | 最內層 | AUTHORIZED → PREPARED（precondition_checks）→ EXECUTING（abort racing）→ OBSERVED |
 
 ### SchemaValidationMiddleware（v0.2.5.2）
 

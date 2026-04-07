@@ -208,6 +208,59 @@ class BlastRadiusMiddleware:
 
 ---
 
+## LifecycleMiddleware（v0.2.8.0）
+
+### 職責
+
+最外層的 lifecycle 管理者。每次工具呼叫的 **起點**（DECLARED）與 **終點**（MEMORIALIZED）都在這裡。
+
+- 建立 `ActionRecord`，注入 `LifecycleContext` 到 `call.metadata`
+- 處理授權失敗路徑（DENIED）、Schema 驗證失敗、超時（TIMED_OUT）
+- 執行 `post_validator`（VALIDATED）與 `rollback_fn`（REVERTING → REVERTED）
+- 觸發 MEMORIALIZED（保證，所有路徑都到）
+
+### 建構函數參數
+
+```python
+LifecycleMiddleware(
+    registry: ToolRegistry,
+    on_lifecycle: Callable[[ActionRecord], Awaitable[None]] | None = None,
+    on_state_change: Callable[[ActionRecord, str, str], Awaitable[None]] | None = None,
+)
+```
+
+> `on_lifecycle` 在每次 MEMORIALIZED 觸發——這是連接 Memory Layer 的橋，確保每個工具呼叫都有完整記錄。
+> `on_state_change` 在每次狀態轉換觸發——TUI 用此更新工具狀態顯示。
+
+---
+
+## LifecycleGateMiddleware（v0.2.8.0）
+
+### 職責
+
+最內層的 lifecycle 閘門，緊貼工具 handler 之前執行。`next` 就是工具 handler 本身。
+
+- **AUTHORIZED**：讀取 `BlastRadiusMiddleware` 寫入的 `ctx.authorization_result`，驅動狀態轉換
+- **PREPARED**：依序執行 `ToolDefinition.precondition_checks[]`，任一失敗 → ABORTED
+- **EXECUTING**：在呼叫 handler 的精確時刻觸發；若有 `call.abort_signal`，以 `asyncio.wait()` racing 執行
+- **OBSERVED**：handler 回傳後觸發（timeout 除外，留給外層處理）
+
+### 透明直通
+
+當 `call.metadata` 沒有 `LifecycleContext`（sub-agent pipeline、plugin 測試環境等），此 middleware 是完全透明的 pass-through，不影響既有行為。
+
+### 建構函數參數
+
+```python
+LifecycleGateMiddleware(
+    registry: ToolRegistry,    # 用於讀取 precondition_checks
+)
+```
+
+> 詳細場景說明（precondition 失敗情況、abort racing、例外保護）請參閱 [06b-Action-Lifecycle.md](06b-Action-Lifecycle.md)。
+
+---
+
 ## 自定義 Middleware 範例
 
 ### RateLimitMiddleware（頻率限制）
