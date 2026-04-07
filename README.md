@@ -133,7 +133,6 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `Escape` | Interrupt current generation (`/stop`) |
 | `F1` / `Ctrl+K` | Command Palette — fuzzy search all actions |
 | `F2` | Cycle Workspace tab (Artifacts → Activity → Budget) |
-| `F3` | Toggle verbose tool output |
 | `F4` / `Ctrl+B` | Toggle right sidebar |
 | `Ctrl+L` | Clear conversation view |
 | `Ctrl+C` | Quit |

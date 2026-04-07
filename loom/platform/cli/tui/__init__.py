@@ -41,7 +41,6 @@ from .events import (
     ToolEnd,
     TurnDone,
     ClearScreen,
-    ToggleVerbose,
     BudgetUpdate,
 )
 
@@ -70,6 +69,5 @@ __all__ = [
     "ToolEnd",
     "TurnDone",
     "ClearScreen",
-    "ToggleVerbose",
     "BudgetUpdate",
 ]

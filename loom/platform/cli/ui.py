@@ -150,7 +150,6 @@ _SLASH_WORDS = [
     "/think",
     "/new",
     "/compact",
-    "/verbose",
     "/pause",
     "/stop",
     "/help",
@@ -179,7 +178,7 @@ _PT_STYLE = Style.from_dict(
 
 
 def _build_key_bindings() -> KeyBindings:
-    """Build key bindings for Ctrl+L (clear) and Ctrl+O (verbose toggle)."""
+    """Build key bindings for Ctrl+L (clear)."""
     kb = KeyBindings()
 
     @kb.add("c-l")
@@ -189,17 +188,6 @@ def _build_key_bindings() -> KeyBindings:
 
         _console = Console()
         _console.clear()
-
-    @kb.add("c-o")
-    def toggle_verbose(_) -> None:
-        """Ctrl+O: toggle tool output verbosity."""
-        new_state = toggle_verbose_mode()
-        from rich.console import Console
-
-        _console = Console()
-        _console.print(
-            f"[dim]Tool output verbosity: {'[green]verbose[/green]' if new_state else '[yellow]compact[/yellow]'}[/dim]"
-        )
 
     return kb
 
@@ -276,28 +264,6 @@ def response_panel(
 # ASCII spinner frames (cp950 safe)
 _SPINNER_FRAMES = ["-", "\\", "|", "/"]
 
-# Verbosity mode (shared state, toggled by Ctrl+O)
-_verbose_mode = False
-
-
-def toggle_verbose_mode() -> bool:
-    """Toggle verbose mode, return new state."""
-    global _verbose_mode
-    _verbose_mode = not _verbose_mode
-    return _verbose_mode
-
-
-def is_verbose_mode() -> bool:
-    """Return current verbosity mode."""
-    return _verbose_mode
-
-
-def set_verbose_mode(enabled: bool) -> None:
-    """Enable or disable verbose tool output."""
-    global _verbose_mode
-    _verbose_mode = enabled
-
-
 def tool_spinner_line(name: str, args: dict[str, Any], frame_index: int = 0) -> Text:
     """
     Rich Text for a tool-call-in-progress line with ASCII spinner.
@@ -338,25 +304,6 @@ def tool_end_line(name: str, success: bool, duration_ms: float) -> Text:
         f"[dim]{name}[/dim]  "
         f"[{('green' if success else 'red')}]{duration_ms:.0f}ms[/{('green' if success else 'red')}]  "
         f"[dim]{status}[/dim]"
-    )
-
-
-def tool_end_verbose_line(
-    name: str, success: bool, duration_ms: float, output: str
-) -> Text:
-    """
-    Rich Text for a completed tool-call line with full output preview.
-    Only used when verbose mode is enabled.
-    """
-    icon = "[green]ok[/green]" if success else "[red]!![/red]"
-    output_preview = output[:120].replace("\n", " ") if output else ""
-    if len(output) > 120:
-        output_preview += "..."
-    return Text.from_markup(
-        f"  [dim][[/dim]{icon}[dim]][/dim] "
-        f"[dim]{name}[/dim]  "
-        f"[{('green' if success else 'red')}]{duration_ms:.0f}ms[/{('green' if success else 'red')}]\n"
-        f"       [dim]result:[/dim] {output_preview}"
     )
 
 

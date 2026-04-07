@@ -103,14 +103,12 @@ from loom.platform.cli.ui import (
     TurnDone,
     TurnPaused,
     clear_line_escape,
-    is_verbose_mode,
     make_prompt_session,
     render_cursor,
     render_header,
     status_bar,
     tool_begin_line,
     tool_end_line,
-    tool_end_verbose_line,
     tool_running_line,
 )
 
@@ -2057,14 +2055,6 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         console.print(f"[dim]  Compacting context ({pct:.1f}% used)…[/dim]")
         await session._smart_compact()
 
-    elif command == "/verbose":
-        from loom.platform.cli.ui import toggle_verbose_mode, is_verbose_mode
-
-        state = toggle_verbose_mode()
-        console.print(
-            f"[dim]Tool output: {'[green]verbose[/green]' if state else '[yellow]compact[/yellow]'}[/dim]"
-        )
-
     elif command == "/stop":
         # In CLI the turn is a blocking await — the user can't type while it runs.
         # /stop typed before a turn starts is a no-op; the real interrupt is Ctrl+C.
@@ -2127,7 +2117,6 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/personality off[/yellow]           Remove active persona\n"
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
                 "  [yellow]/compact[/yellow]                   Compress older context\n"
-                "  [yellow]/verbose[/yellow]                   Toggle tool output verbosity\n"
                 "  [yellow]/auto[/yellow]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
                 "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
                 "  [yellow]/stop[/yellow]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
@@ -2498,9 +2487,6 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
         await session._smart_compact()
         app.notify("Context compacted.")
 
-    elif command == "/verbose":
-        app.action_toggle_verbose()
-
     elif command == "/auto":
         if not session._strict_sandbox:
             app.notify(
@@ -2734,17 +2720,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # Cancel spinner and clear its line
                 _cancel_spinner()
                 console.print(clear_line_escape(), end="")
-                # Print tool result (verbose if enabled)
-                if is_verbose_mode() and event.output:
-                    console.print(
-                        tool_end_verbose_line(
-                            event.name, event.success, event.duration_ms, event.output
-                        )
-                    )
-                else:
-                    console.print(
-                        tool_end_line(event.name, event.success, event.duration_ms)
-                    )
+                console.print(
+                    tool_end_line(event.name, event.success, event.duration_ms)
+                )
                 at_line_start = True
                 active_tool = None
                 console.print()

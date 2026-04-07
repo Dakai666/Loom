@@ -30,7 +30,6 @@ class InputArea(Widget):
         "/personality researcher",
         "/personality operator",
         "/compact",
-        "/verbose",
         "/help",
     ]
 
