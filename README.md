@@ -29,7 +29,7 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 
 | Layer | What it does |
 |-------|-------------|
-| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES) |
+| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`, `LifecycleMiddleware` + `LifecycleGateMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); full Action Lifecycle state machine with real-time control gates |
 | **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors), procedural (versioned skills with quality-gradient EMA + self-assessment) |
 | **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
@@ -252,6 +252,71 @@ Skills whose `confidence` drops below `skill_deprecation_threshold` (default 0.3
 
 ---
 
+## Action Lifecycle
+
+Every tool call in Loom is wrapped in an `ActionRecord` that tracks its complete lifecycle through a deterministic state machine. Unlike logging frameworks that annotate events after the fact, Loom's lifecycle states are **real-time control gates** — each transition must complete before execution proceeds to the next stage.
+
+```
+DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED → VALIDATED → COMMITTED → MEMORIALIZED
+                                       ↓                       ↓
+                                    ABORTED               REVERTING → REVERTED → MEMORIALIZED
+```
+
+Terminal failure paths: `DENIED`, `ABORTED`, `TIMED_OUT` → `MEMORIALIZED`
+
+### Two-layer middleware architecture
+
+The lifecycle is implemented as two cooperating middleware layers that share state through `LifecycleContext`:
+
+| Layer | Position | Responsibilities |
+|-------|----------|-----------------|
+| `LifecycleMiddleware` | Outermost | `DECLARED` — creates `ActionRecord` + injects `LifecycleContext`; post-`OBSERVED` states (`VALIDATED`, `COMMITTED`, `REVERTING`, `REVERTED`, `MEMORIALIZED`); failure paths (`DENIED`, `ABORTED` from schema/auth) |
+| `LifecycleGateMiddleware` | Innermost (just before handler) | `AUTHORIZED` ← reads from `BlastRadiusMiddleware`; `PREPARED` ← evaluates `precondition_checks[]`; `EXECUTING` ← fires at exact dispatch moment + races abort signal; `OBSERVED` ← fires when executor returns |
+
+**Why two layers?** A single middleware cannot intercept both *before* and *at* the moment the tool executor runs. `next(call)` fires the entire remaining chain as one opaque call — the outermost layer has no way to inject logic immediately before the handler. Splitting into two layers solves this cleanly.
+
+### Precondition gates
+
+`ToolDefinition.precondition_checks` is a list of async callables evaluated before dispatch. All must pass for the tool to proceed to `EXECUTING`. Failure aborts with no side effects.
+
+```python
+async def require_write_lock(call: ToolCall) -> bool:
+    return await lock_manager.is_held(call.session_id)
+
+tool = ToolDefinition(
+    name="write_critical_file",
+    preconditions=["Requires active write lock"],        # human-readable audit trail
+    precondition_checks=[require_write_lock],            # callable gate
+    trust_level=TrustLevel.GUARDED,
+)
+```
+
+Tools with no `precondition_checks` follow the same happy path as before — zero migration cost.
+
+### Abort signal racing
+
+When a tool call carries an `abort_signal` (`asyncio.Event`), `LifecycleGateMiddleware` races the executor against it using `asyncio.wait()`. If the signal fires during execution, the tool is cancelled, the record transitions to `ABORTED`, and `MEMORIALIZED` fires — the lifecycle always completes cleanly regardless of how execution ends.
+
+### Post-validation and rollback
+
+Attach `post_validator` and `rollback_fn` to any `ToolDefinition` to enable transactional semantics:
+
+```python
+tool = ToolDefinition(
+    name="deploy",
+    post_validator=verify_deployment_health,   # async (call, result) -> bool
+    rollback_fn=rollback_deployment,           # async (call, result) -> ToolResult
+)
+```
+
+If `post_validator` returns `False`, the lifecycle transitions `OBSERVED → VALIDATED → REVERTING → REVERTED → MEMORIALIZED`. The result returned to the LLM reflects the rollback, with `metadata["rolled_back"] = True`.
+
+### Audit trail
+
+Every tool call — success, failure, abort, timeout, or rollback — ends in `MEMORIALIZED`, firing the `on_lifecycle` callback. `TraceMiddleware` wires this to episodic memory: the complete lifecycle of every action is recorded, queryable, and available to reflection.
+
+---
+
 ## Parallel Tool Execution
 
 When the LLM requests multiple tools simultaneously, Loom runs them concurrently via `TaskGraph`:
@@ -423,7 +488,7 @@ loom import skills.json --dry-run --min-confidence 0.7
 ## Running Tests
 
 ```bash
-python -m pytest tests/          # 374 tests
+python -m pytest tests/          # 395+ tests
 python -m pytest tests/test_harness.py -v
 python -m pytest tests/test_memory.py -v
 python -m pytest tests/test_cognition.py -v
