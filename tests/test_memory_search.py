@@ -361,7 +361,7 @@ class TestMemorizeTool:
         stored = await semantic.get("project:arch")
         assert stored is not None
         assert stored.value == "Loom uses SQLite WAL"
-        assert stored.source == "agent"
+        assert stored.source == "memorize"
 
     async def test_missing_key_returns_error(self, semantic):
         tool = make_memorize_tool(semantic)

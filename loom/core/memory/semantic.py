@@ -20,6 +20,70 @@ if TYPE_CHECKING:
     from loom.core.memory.embeddings import EmbeddingProvider
 
 
+# ---------------------------------------------------------------------------
+# Trust-tier classification (Issue #43: Memory Governance)
+# ---------------------------------------------------------------------------
+
+TRUST_TIERS: dict[str, float] = {
+    "user_explicit": 1.0,       # User directly told us (via manual input)
+    "tool_verified": 0.9,       # Verified by tool execution result
+    "agent_memorize": 0.85,     # Agent invoked memorize tool (PR #65 review)
+    "session_compress": 0.8,    # LLM-compressed from episodic
+    "agent_inferred": 0.7,      # Agent's own inference
+    "dreaming": 0.6,            # Offline dream synthesis
+    "skill_evolution": 0.65,    # Skill evolution hints
+    "counter_factual": 0.75,    # Counter-factual reflections (tried & failed)
+    "external": 0.5,            # From external sources (URLs, fetch, web)
+    "unknown": 0.5,             # Unclassified
+}
+
+
+def classify_source(source: str | None) -> tuple[str, float]:
+    """Classify a memory source string into a trust tier.
+
+    Returns (tier_name, default_confidence).  The caller can use the
+    default_confidence as a floor when the entry's explicit confidence
+    is not set or to blend with the stored confidence.
+
+    Classification uses prefix matching on the ``source`` field that is
+    already written by every memory producer in the codebase::
+
+        "session:<id>"           → session_compress
+        "session:<id>:fact:<n>"  → session_compress
+        "counter_factual:<id>"  → counter_factual
+        "skill_eval:<id>"       → agent_inferred
+        "skill_evolution"       → skill_evolution
+        "dreaming"              → dreaming
+        "manual" / "memorize"   → user_explicit
+        None / ""               → unknown
+    """
+    if not source:
+        return "unknown", TRUST_TIERS["unknown"]
+
+    s = source.lower()
+
+    if s in ("manual", "user"):
+        return "user_explicit", TRUST_TIERS["user_explicit"]
+    if s == "memorize":
+        return "agent_memorize", TRUST_TIERS["agent_memorize"]
+    if s.startswith("counter_factual"):
+        return "counter_factual", TRUST_TIERS["counter_factual"]
+    if s.startswith("skill_eval"):
+        return "agent_inferred", TRUST_TIERS["agent_inferred"]
+    if s == "skill_evolution":
+        return "skill_evolution", TRUST_TIERS["skill_evolution"]
+    if s == "dreaming":
+        return "dreaming", TRUST_TIERS["dreaming"]
+    if s.startswith("session:"):
+        return "session_compress", TRUST_TIERS["session_compress"]
+    if s.startswith("tool:"):
+        return "tool_verified", TRUST_TIERS["tool_verified"]
+    if s.startswith("fetch:") or s.startswith("web:"):
+        return "external", TRUST_TIERS["external"]
+
+    return "unknown", TRUST_TIERS["unknown"]
+
+
 _DEFAULT_HALF_LIFE_DAYS = 90.0  # confidence halves after this many days of no update
 
 

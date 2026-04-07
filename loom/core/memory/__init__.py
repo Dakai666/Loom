@@ -6,6 +6,8 @@ from .relational import RelationalEntry, RelationalMemory
 from .search import MemorySearchResult, MemorySearch
 from .index import MemoryIndex, MemoryIndexer
 from .session_log import SessionLog
+from .governance import MemoryGovernor, GovernedWriteResult, AdmissionResult, DecayCycleResult
+from .contradiction import ContradictionDetector, Contradiction, ResolutionResult
 
 __all__ = [
     "SQLiteStore",
@@ -16,4 +18,6 @@ __all__ = [
     "MemorySearchResult", "MemorySearch",
     "MemoryIndex", "MemoryIndexer",
     "SessionLog",
+    "MemoryGovernor", "GovernedWriteResult", "AdmissionResult", "DecayCycleResult",
+    "ContradictionDetector", "Contradiction", "ResolutionResult",
 ]
