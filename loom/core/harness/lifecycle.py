@@ -16,8 +16,11 @@ inheritance), so the existing API is fully backward-compatible.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
 from datetime import datetime, UTC
 from enum import Enum
 from typing import Any
@@ -198,8 +201,10 @@ class LifecycleContext:
         if self._on_state_change is not None:
             try:
                 await self._on_state_change(self.record, old, self.record.state.value)
-            except Exception:
-                pass  # UI callback must never crash the pipeline
+            except Exception as exc:
+                _log.warning(
+                    "on_state_change callback raised (suppressed): %s", exc, exc_info=True,
+                )
 
     async def memorialize(self, reason: str) -> None:
         """Transition to MEMORIALIZED and fire the on_lifecycle callback."""
@@ -207,8 +212,10 @@ class LifecycleContext:
         if self._on_lifecycle is not None:
             try:
                 await self._on_lifecycle(self.record)
-            except Exception:
-                pass  # lifecycle callback must never crash the pipeline
+            except Exception as exc:
+                _log.warning(
+                    "on_lifecycle callback raised (suppressed): %s", exc, exc_info=True,
+                )
 
 
 # Metadata key for LifecycleContext in ToolCall.metadata

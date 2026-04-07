@@ -407,7 +407,21 @@ class LifecycleGateMiddleware(Middleware):
                     pass
 
             if exec_task in done:
-                result = exec_task.result()
+                exc = exec_task.exception()
+                if exc is not None:
+                    # Tool raised instead of returning ToolResult — convert and
+                    # continue through OBSERVED so MEMORIALIZED always fires.
+                    _log.warning(
+                        "tool %r raised during abort-raced execution: %s",
+                        call.tool_name, exc,
+                    )
+                    result = ToolResult(
+                        call_id=call.id, tool_name=call.tool_name,
+                        success=False, error=str(exc),
+                        failure_type="execution_error",
+                    )
+                else:
+                    result = exec_task.result()
             else:
                 # Abort signal fired during execution
                 await ctx.transition(
@@ -423,7 +437,19 @@ class LifecycleGateMiddleware(Middleware):
                 await ctx.memorialize("aborted")
                 return result
         else:
-            result = await next(call)
+            try:
+                result = await next(call)
+            except Exception as exc:
+                # Tool raised instead of returning ToolResult — convert and
+                # continue through OBSERVED so MEMORIALIZED always fires.
+                _log.warning(
+                    "tool %r raised during execution: %s", call.tool_name, exc,
+                )
+                result = ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False, error=str(exc),
+                    failure_type="execution_error",
+                )
 
         # ── OBSERVED — executor returned ──────────────────────────────
         # If the handler returned a timeout result, do NOT transition to
@@ -597,8 +623,14 @@ class LifecycleMiddleware(Middleware):
 
         # ── Happy path: OBSERVED already fired by LifecycleGateMiddleware ─
         if record.state != ActionState.OBSERVED:
-            # Safety fallback: if LifecycleGateMiddleware didn't run
-            # (shouldn't happen in production), gracefully stamp states.
+            # Safety fallback: LifecycleGateMiddleware did not run, which
+            # means the pipeline is misconfigured.  Log at ERROR so the gap
+            # is immediately visible rather than silently papered over.
+            _log.error(
+                "LifecycleGateMiddleware did not run for %r (state=%s) — "
+                "pipeline may be misconfigured; stamping states retroactively",
+                call.tool_name, record.state.value,
+            )
             if record.state == ActionState.DECLARED:
                 auth_reason = ctx.authorization_reason or "passed blast radius"
                 await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
