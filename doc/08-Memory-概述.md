@@ -100,6 +100,19 @@ class SQLiteStore:
 
 ---
 
+## Memory Governance（v0.2.9.0）
+
+所有語義記憶寫入都通過一個永遠開啟的治理層 `MemoryGovernor`，提供：
+
+- **Trust-tier 信任分級**：每個來源字串（`"manual"`, `"session:*"`, `"dreaming"` 等）映射至 0.5–1.0 的信任等級，confidence floor 由 tier 決定
+- **矛盾偵測**：寫入前比對現有事實，依信任等級自動 REPLACE / KEEP / SUPERSEDE
+- **Admission Gate**：Session 壓縮前過濾低品質 / 重複事實（信心值 < 0.5）
+- **Decay Cycle**：Session 結束時清除 Episodic TTL 過期條目、Semantic 低信心條目、Relational dreaming 三元組
+
+詳見 [08b-Memory-Governance.md](08b-Memory-Governance.md)
+
+---
+
 ## Session 生命週期的記憶流向
 
 ```
@@ -107,7 +120,12 @@ Agent 執行任務
     ↓
 每次 tool call → TraceMiddleware → EpisodicMemory.write()
     ↓
-Session 結束 → Compression → 轉換為 FACT → SemanticMemory.upsert()
+Session 結束 → compress_session()
+    → MemoryGovernor.evaluate_admission()  ← Admission Gate（v0.2.9.0）
+    → 轉換為 FACT → MemoryGovernor.governed_upsert()
+    → 矛盾偵測 → SemanticMemory.upsert() 或跳過
+    ↓
+Session.stop() → MemoryGovernor.run_decay_cycle()  ← Decay Cycle（v0.2.9.0）
     ↓
 Semantic / Procedural / Relational → 長期保存
 ```
@@ -172,10 +190,10 @@ USING fts5(key, value, content='semantic_entries', content_rowid='rowid');
 
 | 類型 | Session 內寫入 | Session 結束後 | 長期保存 | 可失效 |
 |------|---------------|----------------|---------|-------|
-| Episodic | ✅ 每次 tool call | 壓縮為 FACT | ❌ | ❌（已轉移）|
-| Semantic | ✅ Agent 呼叫 memorize | — | ✅ | ✅ 可驗證 |
+| Episodic | ✅ 每次 tool call | 壓縮為 FACT（Admission Gate 過濾） | ❌ | ✅ TTL 30 天（Decay Cycle）|
+| Semantic | ✅ governed_upsert（Trust tier + 矛盾偵測） | — | ✅ | ✅ confidence 衰減 < 0.1 |
 | Procedural | ✅ Skill 評估結果 | — | ✅ | ✅ confidence ≤ 閾值 |
-| Relational | ✅ Agent 呼叫 relate、Anti-pattern 反思寫入 | — | ✅ | ✅ 可刪除 |
+| Relational | ✅ Agent 呼叫 relate、Anti-pattern 反思寫入 | — | ✅ | ✅ dreaming 加速衰減 |
 
 ---
 

@@ -30,8 +30,9 @@
 ### 3. Memory Layer（記憶系統）
 | 文件 | 說明 |
 |------|------|
-| [08-Memory-概述.md](08-Memory-概述.md) | 四種記憶類型、SQLite FTS5、Anti-pattern、Session Log 結構化 |
-| [09-四種記憶詳解.md](09-四種記憶詳解.md) | Episodic / Semantic（含 Anti-pattern）/ Procedural / Relational（含 loom-self 三元組）|
+| [08-Memory-概述.md](08-Memory-概述.md) | 四種記憶類型、SQLite FTS5、Anti-pattern、Session Log 結構化、Governance 概覽 |
+| [08b-Memory-Governance.md](08b-Memory-Governance.md) | Trust Tier 分級、矛盾偵測 + 自動解決、Admission Gate、Decay Cycle |
+| [09-四種記憶詳解.md](09-四種記憶詳解.md) | Episodic / Semantic（含 Trust Tier + Anti-pattern）/ Procedural / Relational |
 | [10-Skill-Genome.md](10-Skill-Genome.md) | EMA confidence 機制與自動廢棄 |
 | [11-Memory-Search.md](11-Memory-Search.md) | Phase 5 向量相似度 → FTS5 BM25 → recency 三層混合搜尋 |
 | [12-Memory-Index.md](12-Memory-Index.md) | 輕量目錄，含 Anti-pattern count 與 Self-Portrait |
@@ -119,19 +120,20 @@
 | v0.2.6.0 | MCP 整合（Server + Client）、Predictive Memory Pre-fetcher |
 | v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
 | v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；handler 例外保護；移除 `/verbose` F3（Issue #63） |
+| v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE / KEEP / SUPERSEDE）；Admission Gate；Decay Cycle；`agent_memorize` tier；external source 分類 |
 
 ---
 
 ## ✅ 文件撰寫狀態
 
-全部 44 個文件已完成！
+全部 45 個文件已完成！
 
 | 區塊 | 完成數 |
 |------|--------|
 | 0. 總覽與概念 | 2/2 |
 | 1. 架構導讀 | 2/2 |
 | 2. Harness Layer | 5/5 |
-| 3. Memory Layer | 5/5 |
+| 3. Memory Layer | 6/6 |
 | 4. Cognition Layer | 4/4 |
 | 5. Task Engine | 2/2 |
 | 6. Autonomy Engine | 4/4 |
@@ -145,4 +147,4 @@
 
 ---
 
-> 📚 Loom 文檔 v0.2.8.0 同步完成！
+> 📚 Loom 文檔 v0.2.9.0 同步完成！

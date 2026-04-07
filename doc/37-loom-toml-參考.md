@@ -113,13 +113,37 @@ episodic_compress_threshold = 30
 每次 tool call → EpisodicMemory.write()
     ↓
 每個 turn 結束，若 episodic count ≥ episodic_compress_threshold
-    → compress_session() → 轉換為 FACT → SemanticMemory.upsert()
+    → compress_session()
+    → Admission Gate（MemoryGovernor）過濾低品質事實
+    → 轉換為 FACT → MemoryGovernor.governed_upsert()
+    → 矛盾偵測 → SemanticMemory.upsert() 或跳過
     → 舊 episodic entries 刪除
-    → Discord 該 thread 顯示：🧠 記憶壓縮：N 條事實已存入語意記憶
     ↓
 Bot 關機 / session.stop()
-    → 最終一次 compress_session()（清理剩餘 entries）
+    → 最終一次 compress_session()
+    → MemoryGovernor.run_decay_cycle()（清除 TTL 過期 + 衰減條目）
 ```
+
+---
+
+## [memory.governance]（v0.2.9.0）
+
+Memory Governance 治理層的細部設定。所有欄位均有預設值，可不設定。
+
+```toml
+[memory.governance]
+admission_threshold      = 0.5    # Admission Gate 門檻，0.0–1.0
+episodic_ttl_days        = 30     # Episodic entries TTL（天）
+semantic_decay_threshold = 0.1    # Semantic prune 門檻
+relational_decay_factor  = 1.5    # Dreaming triples 加速衰減係數
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `admission_threshold` | float | `0.5` | Admission Gate：低於此分數的事實在壓縮時被過濾 |
+| `episodic_ttl_days` | integer | `30` | Episodic TTL：超過此天數的 episodic entries 在 decay cycle 中刪除 |
+| `semantic_decay_threshold` | float | `0.1` | Semantic prune：有效信心值低於此閾值的條目被清除 |
+| `relational_decay_factor` | float | `1.5` | Dreaming triples 的加速衰減係數，有效半衰期 = 90 / factor 天 |
 
 ---
 

@@ -30,7 +30,7 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 | Layer | What it does |
 |-------|-------------|
 | **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`, `LifecycleMiddleware` + `LifecycleGateMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); full Action Lifecycle state machine with real-time control gates |
-| **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors), procedural (versioned skills with quality-gradient EMA + self-assessment) |
+| **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors + trust-tier governance), procedural (versioned skills with quality-gradient EMA + self-assessment); always-on `MemoryGovernor` (contradiction detection, admission gate, decay cycle) |
 | **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
 | **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision |
@@ -182,7 +182,20 @@ recall(query)
 
 Embeddings are computed at write-time (`upsert`) and stored in SQLite. Failures fall through silently to BM25.
 
-**Semantic memory** entries carry a confidence score that decays over time (90-day half-life). The `DreamingPlugin` registers a `memory_prune` tool that removes entries whose effective confidence has fallen below a threshold.
+**Semantic memory** entries carry a confidence score that decays over time (90-day half-life). All writes pass through the **Memory Governance** layer:
+
+```
+write request
+  ├─ classify_source()  → trust tier (user_explicit 1.0 → external 0.5)
+  ├─ confidence floor   = max(entry.confidence, tier_confidence)
+  ├─ ContradictionDetector — REPLACE / KEEP / SUPERSEDE by trust tier
+  └─ SemanticMemory.upsert() or skip
+
+session.stop()
+  └─ Decay Cycle — episodic TTL prune + semantic low-confidence prune + relational dreaming decay
+```
+
+**Trust tiers** (highest → lowest): `user_explicit` (1.0) → `tool_verified` (0.9) → `agent_memorize` (0.85) → `session_compress` (0.8) → `counter_factual` (0.75) → `agent_inferred` (0.7) → `skill_evolution` (0.65) → `dreaming` (0.6) → `external/unknown` (0.5)
 
 ### Built-in tools
 
@@ -366,6 +379,12 @@ episodic_retention_days     = 7
 skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 10
 
+[memory.governance]
+admission_threshold      = 0.5    # filter low-quality facts before promotion
+episodic_ttl_days        = 30     # delete episodic entries older than N days
+semantic_decay_threshold = 0.1    # prune semantic entries below this confidence
+relational_decay_factor  = 1.5    # accelerate dreaming triple decay (half-life = 90/factor)
+
 [harness]
 default_trust_level = "guarded"
 require_audit_log   = true
@@ -488,7 +507,7 @@ loom import skills.json --dry-run --min-confidence 0.7
 ## Running Tests
 
 ```bash
-python -m pytest tests/          # 395+ tests
+python -m pytest tests/          # 527+ tests
 python -m pytest tests/test_harness.py -v
 python -m pytest tests/test_memory.py -v
 python -m pytest tests/test_cognition.py -v
