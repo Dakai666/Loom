@@ -68,7 +68,7 @@ class LoomCommandProvider(Provider):
             ("Switch to Swarm Dashboard", lambda: self._focus_tab(WorkspaceTab.SWARM), "View active agents and history"),
             ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
             ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
-            ("Toggle Verbose Tools", app.action_toggle_verbose, "Switch between compact and verbose tool logs"),
+
             ("Quit Loom", app.action_quit, "Exit the application"),
         ]
 
@@ -101,8 +101,9 @@ class LoomApp(App):
     Bindings:
         Escape:  interrupt current generation
         Ctrl+L:  clear screen
-        F1:      toggle verbose tool output
+        F1:      command palette
         F2:      cycle workspace tab
+        F4:      toggle sidebar
         Ctrl+C:  quit
     """
 
@@ -237,7 +238,6 @@ class LoomApp(App):
         # F-keys for functions (resilient in IDE terminals)
         Binding("f1", "command_palette", "Commands", show=True),
         Binding("f2", "toggle_space", "Workspace", show=True),
-        Binding("f3", "toggle_verbose", "Verbose", show=True),
         Binding("f4", "toggle_sidebar", "Sidebar", show=True),
         Binding("f5", "time_travel", "Time-Travel", show=True),
         # Fallback VS Code style hotkeys (might be intercepted by IDEs)
@@ -250,12 +250,10 @@ class LoomApp(App):
         self,
         model: str = "",
         db_path: str = "",
-        verbose: bool = False,
     ) -> None:
         super().__init__()
         self._model = model
         self._db_path = db_path
-        self._verbose = verbose
         
         try:
             from textual.theme import Theme
@@ -321,12 +319,6 @@ class LoomApp(App):
             WorkspaceTab.BUDGET:    "Budget",
         }
         self.notify(f"Workspace: {labels[workspace.active_tab]}", timeout=1)
-
-    def action_toggle_verbose(self) -> None:
-        self._verbose = not self._verbose
-        tool_block = self.query_one("#tool-block", ToolBlock)
-        tool_block.verbose = self._verbose
-        self.notify(f"Tool output: {'verbose' if self._verbose else 'compact'}", timeout=1)
 
     # ── Stream event dispatch ─────────────────────────────────────────────────
 

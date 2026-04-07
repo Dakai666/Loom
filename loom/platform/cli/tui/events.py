@@ -82,13 +82,6 @@ class ClearScreen(StreamEvent):
 
 
 @dataclass
-class ToggleVerbose(StreamEvent):
-    """Toggle tool output verbosity."""
-
-    pass
-
-
-@dataclass
 class BudgetUpdate(StreamEvent):
     """Token budget changed (mid-turn update)."""
 

@@ -118,7 +118,6 @@ class ToolBlock(Widget):
 
     active_tools: reactive[list[ToolCall]] = reactive([])
     completed_tools: reactive[list[ToolCall]] = reactive([])
-    verbose: reactive[bool] = reactive(False)
     agent_state: reactive[AgentState] = reactive(AgentState.IDLE)
 
     class ToolDone(Message, bubble=True):
@@ -249,10 +248,6 @@ class ToolBlock(Widget):
         self._cancel_done_task()
         self.active_tools = []
         self.completed_tools = []
-        self._update_display()
-
-    def toggle_verbose(self) -> None:
-        self.verbose = not self.verbose
         self._update_display()
 
     # ── Animations ────────────────────────────────────────────────────────────

@@ -55,7 +55,7 @@ class Header(Widget):
         logo = "[bold #c8a464]❖ LOOM[/bold #c8a464] [dim]v0.4[/dim]"
         yield Static(logo, id="header-logo")
         yield Static(
-            "[dim]F1: [white]Cmds[/white]  ·  F2: [white]Tabs[/white]  ·  F3: [white]Traces[/white]  ·  F4: [white]Sidebar[/white]  ·  F5: [bold #d4a853]Time-Travel[/bold #d4a853][/dim]",
+            "[dim]F1: [white]Cmds[/white]  ·  F2: [white]Tabs[/white]  ·  F4: [white]Sidebar[/white]  ·  F5: [bold #d4a853]Time-Travel[/bold #d4a853][/dim]",
             id="header-hints"
         )
         yield Static("", id="header-info")
