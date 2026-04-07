@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     success      INTEGER NOT NULL,
     duration_ms  REAL,
     error        TEXT,
+    details      TEXT NOT NULL DEFAULT '{}',
     created_at   TEXT NOT NULL
 );
 
@@ -193,6 +194,8 @@ class SQLiteStore:
                 # Issue #11: add raw_json column to capture tool_use/tool_result
                 # blocks separately from the human-readable content field.
                 "ALTER TABLE session_log ADD COLUMN raw_json TEXT",
+                # Issue #43: governance events stored in audit_log.details
+                "ALTER TABLE audit_log ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
             ]:
                 try:
                     await db.execute(_migration)

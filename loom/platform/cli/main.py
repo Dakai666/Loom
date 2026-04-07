@@ -76,6 +76,7 @@ from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
+from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.index import MemoryIndex, MemoryIndexer, SkillCatalogEntry
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.session_log import SessionLog
@@ -150,12 +151,17 @@ async def compress_session(
     semantic: SemanticMemory,
     router: LLMRouter,
     model: str,
+    *,
+    governor: "MemoryGovernor | None" = None,
 ) -> int:
     """Compress unprocessed episodic entries to semantic facts, then delete them.
 
     Uses a timestamp in the semantic key so repeated compressions (mid-session
     and on close) never overwrite each other.  Episodic entries are deleted
     after a successful compression to prevent redundant re-processing.
+
+    When a MemoryGovernor is provided, candidate facts are filtered through
+    the admission gate before being written to semantic memory (Issue #43).
     """
     entries = await episodic.read_session(session_id)
     if not entries:
@@ -179,17 +185,27 @@ async def compress_session(
     if not facts and raw.strip():
         facts = [raw.strip()[:800]]
 
+    # Issue #43: Admission gate — filter facts through governance
+    if governor is not None and facts:
+        admission_results = await governor.evaluate_admission(
+            facts, source=f"session:{session_id}",
+        )
+        facts = [r.fact for r in admission_results if r.admitted]
+
     # Use a timestamp suffix so repeated compressions don't overwrite each other
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    source = f"session:{session_id}"
     for i, fact in enumerate(facts):
-        await semantic.upsert(
-            SemanticEntry(
-                key=f"session:{session_id}:{ts}:fact:{i}",
-                value=fact,
-                confidence=0.8,
-                source=f"session:{session_id}",
-            )
+        entry = SemanticEntry(
+            key=f"session:{session_id}:{ts}:fact:{i}",
+            value=fact,
+            confidence=0.8,
+            source=source,
         )
+        if governor is not None:
+            await governor.governed_upsert(entry)
+        else:
+            await semantic.upsert(entry)
 
     # Delete processed episodic entries so they aren't re-compressed on next stop()
     if facts:
@@ -458,6 +474,7 @@ class LoomSession:
         self._pipeline: MiddlewarePipeline | None = None
         self._memory_index: MemoryIndex = MemoryIndex()
         self._session_log: SessionLog | None = None
+        self._governor: MemoryGovernor | None = None  # Issue #43
         self._turn_index: int = 0  # increments once per completed stream_turn()
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
@@ -535,6 +552,17 @@ class LoomSession:
         )
         self._session_log = SessionLog(self._db)
 
+        # Issue #43: Memory Governance — always-on
+        _gov_cfg = _load_loom_config().get("memory", {}).get("governance", {})
+        self._governor = MemoryGovernor(
+            semantic=self._semantic,
+            procedural=self._procedural,
+            relational=self._relational,
+            episodic=self._episodic,
+            db=self._db,
+            config=_gov_cfg,
+        )
+
         # Build MemoryIndex and inject into system prompt
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
         skill_catalog = await self._auto_import_skills()
@@ -568,7 +596,7 @@ class LoomSession:
         # Register memory tools with injected stores
         search = MemorySearch(self._semantic, self._procedural)
         self.registry.register(make_recall_tool(search))
-        self.registry.register(make_memorize_tool(self._semantic))
+        self.registry.register(make_memorize_tool(self._semantic, governor=self._governor))
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
 
@@ -679,6 +707,7 @@ class LoomSession:
                 self._semantic,
                 self.router,
                 self.model,
+                governor=self._governor,
             )
             if count:
                 console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
@@ -698,6 +727,20 @@ class LoomSession:
                         )
                 except Exception:
                     pass  # evolution failure must never block shutdown
+
+            # Issue #43: run memory decay cycle
+            if self._governor is not None:
+                try:
+                    decay = await self._governor.run_decay_cycle()
+                    if decay.total_pruned > 0:
+                        console.print(
+                            f"[dim]  Decayed {decay.total_pruned} stale entries "
+                            f"(semantic={decay.semantic_pruned}, "
+                            f"episodic={decay.episodic_pruned}, "
+                            f"relational={decay.relational_pruned}).[/dim]"
+                        )
+                except Exception:
+                    pass  # decay failure must never block shutdown
 
             if self._session_log is not None:
                 first_user = next(
@@ -948,6 +991,7 @@ class LoomSession:
                         fact_count = await compress_session(
                             self.session_id, self._episodic, self._semantic,
                             self.router, self.model,
+                            governor=self._governor,
                         )
                         if fact_count:
                             yield CompressDone(fact_count=fact_count)

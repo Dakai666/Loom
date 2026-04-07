@@ -421,11 +421,16 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
     )
 
 
-def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
+def make_memorize_tool(
+    semantic: "SemanticMemory",
+    governor: "MemoryGovernor | None" = None,
+) -> ToolDefinition:
     """
     Create a GUARDED ``memorize`` tool bound to the given SemanticMemory instance.
 
     Stores a key→value fact in semantic memory for future sessions.
+    When a MemoryGovernor is provided, writes go through the governance
+    pipeline (trust classification + contradiction detection).
     """
     from loom.core.memory.semantic import SemanticEntry
 
@@ -439,13 +444,32 @@ def make_memorize_tool(semantic: "SemanticMemory") -> ToolDefinition:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="Both 'key' and 'value' are required")
 
-        entry = SemanticEntry(key=key, value=value, confidence=confidence, source="agent")
-        conflicted = await semantic.upsert(entry)
+        # Agent-invoked memorize is treated as user_explicit trust
+        entry = SemanticEntry(key=key, value=value, confidence=confidence, source="memorize")
 
-        if conflicted:
-            msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
+        if governor is not None:
+            gov_result = await governor.governed_upsert(entry)
+            if not gov_result.written:
+                msg = (
+                    f"Memorize skipped for {key!r}: existing entry has higher trust "
+                    f"(tier={gov_result.trust_tier}, contradictions={gov_result.contradictions_found})"
+                )
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=True, output=msg)
+            if gov_result.contradictions_found > 0:
+                msg = (
+                    f"Memorized: {key!r} (resolved {gov_result.contradictions_found} "
+                    f"contradiction(s) — {gov_result.resolution})"
+                )
+            else:
+                msg = f"Memorized: {key!r}"
         else:
-            msg = f"Memorized: {key!r}"
+            conflicted = await semantic.upsert(entry)
+            if conflicted:
+                msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
+            else:
+                msg = f"Memorized: {key!r}"
+
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=msg,
                           metadata={"_memorized_key": key})
