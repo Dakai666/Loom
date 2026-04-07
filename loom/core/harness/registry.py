@@ -39,6 +39,18 @@ class ToolDefinition:
 
     # --- Action Lifecycle (Issue #42) ---
     preconditions: list[str] = field(default_factory=list)
+    precondition_checks: list[Callable[[ToolCall], Awaitable[bool]]] = field(default_factory=list)
+    """
+    Callable gates evaluated before tool dispatch (Issue #50).
+
+    Each check receives the ToolCall and returns True (pass) or False (fail).
+    ALL checks must pass for the tool to proceed to EXECUTING.
+    Failure → ABORTED with no tool call made.
+
+    These complement ``preconditions`` (human-readable strings kept for
+    documentation and audit trail).  Tools with no checks behave
+    identically to the Phase 1 lifecycle.
+    """
     rollback_fn: Callable[[ToolCall, ToolResult], Awaitable[ToolResult]] | None = None
     post_validator: Callable[[ToolCall, ToolResult], Awaitable[bool]] | None = None
     scope: str = "general"

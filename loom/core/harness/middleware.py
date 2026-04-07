@@ -5,7 +5,8 @@ Every tool call flows through this pipeline before and after execution.
 Middleware is composable: add, remove, or reorder without touching tool code.
 
 Execution order (outermost → innermost):
-    LogMiddleware → TraceMiddleware → BlastRadiusMiddleware → tool handler
+    LifecycleMiddleware → TraceMiddleware → SchemaValidationMiddleware
+    → BlastRadiusMiddleware → LifecycleGateMiddleware → tool handler
 """
 
 import asyncio
@@ -212,16 +213,37 @@ class BlastRadiusMiddleware(Middleware):
             return False   # escape detected — fall through to confirmation
         return True
 
+    def _notify_lifecycle(self, call: ToolCall, result: bool, reason: str) -> None:
+        """
+        Write authorization decision to LifecycleContext (Issue #50).
+
+        If the call carries a LifecycleContext (injected by LifecycleMiddleware),
+        record the real-time auth result so the lifecycle state machine can
+        transition DECLARED → AUTHORIZED (or → DENIED) at the moment the
+        decision is actually made — not retroactively.
+
+        When no LifecycleContext is present (e.g. sub-agent pipeline),
+        this is a no-op — full backward compatibility.
+        """
+        from .lifecycle import LIFECYCLE_CTX_KEY
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is not None:
+            ctx.authorization_result = result
+            ctx.authorization_reason = reason
+
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         if self._perm.is_authorized(call.tool_name, call.trust_level):
+            self._notify_lifecycle(call, True, "pre-authorized")
             return await next(call)
 
         # exec_auto: session-level pre-authorization for sandboxed shell commands
         if self._exec_auto_approved(call):
+            self._notify_lifecycle(call, True, "exec_auto")
             return await next(call)
 
         allowed = await self._confirm(call)
         if not allowed:
+            self._notify_lifecycle(call, False, "user denied")
             return ToolResult(
                 call_id=call.id,
                 tool_name=call.tool_name,
@@ -229,6 +251,8 @@ class BlastRadiusMiddleware(Middleware):
                 error="User denied tool execution.",
                 failure_type="permission_denied",
             )
+
+        self._notify_lifecycle(call, True, "user confirmed")
 
         # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
         # Other GUARDED tools are pre-authorized for the rest of this session.
@@ -241,28 +265,226 @@ class BlastRadiusMiddleware(Middleware):
 
 
 # ---------------------------------------------------------------------------
-# Action Lifecycle Middleware (Issue #42)
+# Action Lifecycle Middleware — two-layer architecture (Issue #42 + #50)
+#
+# The lifecycle is split into TWO cooperating middleware layers:
+#
+#   Pipeline order:
+#     LifecycleMiddleware (outer)          ← DECLARED, post-OBSERVED states
+#       → TraceMiddleware
+#       → SchemaValidationMiddleware
+#       → BlastRadiusMiddleware
+#       → LifecycleGateMiddleware (inner)  ← AUTHORIZED → PREPARED → EXECUTING → OBSERVED
+#         → handler (tool executor)
+#
+#   Why two layers?
+#     A single middleware cannot intercept both BEFORE and AT the moment
+#     the tool executor runs.  ``next(call)`` fires the entire remaining
+#     chain as one opaque call — the outermost middleware has no way to
+#     inject logic immediately before the handler.
+#
+#     The outer layer creates the ActionRecord and handles states that
+#     occur after execution (validation, rollback, memorialized).
+#     The inner layer sits right before the handler and fires EXECUTING
+#     at the exact dispatch moment, with abort-signal racing.
+#
+#   They share state through LifecycleContext in call.metadata.
 # ---------------------------------------------------------------------------
+
+
+class LifecycleGateMiddleware(Middleware):
+    """
+    Inner lifecycle middleware — real-time control gates.
+
+    Sits at the innermost position in the pipeline, just before the tool
+    executor (handler).  When ``process(call, next)`` is called, ``next``
+    is the actual tool executor function.
+
+    Responsibilities:
+        AUTHORIZED  — read from LifecycleContext (set by BlastRadiusMiddleware)
+        PREPARED    — evaluate ToolDefinition.precondition_checks[]
+        EXECUTING   — fire at the exact moment ``next(call)`` is invoked
+                      race abort_signal for real-time abort
+        OBSERVED    — fire when the executor returns
+
+    When no LifecycleContext is present (e.g. sub-agent pipeline without
+    LifecycleMiddleware), this middleware is a transparent pass-through.
+    """
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+
+    async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        from .lifecycle import LIFECYCLE_CTX_KEY, ActionState
+
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is None:
+            # No lifecycle context → pass through (sub-agent, plugin, etc.)
+            return await next(call)
+
+        record = ctx.record
+        tool_def = self._registry.get(call.tool_name)
+
+        # ── AUTHORIZED ────────────────────────────────────────────────
+        # BlastRadiusMiddleware already wrote authorization_result to ctx
+        # at the moment the decision was made.  We now fire the state
+        # transition.  If it didn't write (SAFE tool, auto-authorized),
+        # treat as authorized.
+        auth_reason = ctx.authorization_reason or "passed blast radius"
+        await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+
+        # ── PREPARED — callable precondition gates ────────────────────
+        precondition_checks = (
+            getattr(tool_def, "precondition_checks", []) if tool_def else []
+        )
+        precondition_descs = (
+            getattr(tool_def, "preconditions", []) if tool_def else []
+        )
+
+        for i, check in enumerate(precondition_checks):
+            try:
+                passed = await check(call)
+            except Exception as exc:
+                _log.warning(
+                    "precondition_check[%d] for %r raised: %s — treating as failed",
+                    i, call.tool_name, exc,
+                )
+                passed = False
+
+            if not passed:
+                desc = (
+                    precondition_descs[i]
+                    if i < len(precondition_descs)
+                    else f"precondition_check[{i}]"
+                )
+                await ctx.transition(
+                    ActionState.ABORTED,
+                    reason=f"Precondition failed: {desc}",
+                )
+                result = ToolResult(
+                    call_id=call.id,
+                    tool_name=call.tool_name,
+                    success=False,
+                    error=f"Precondition failed: {desc}",
+                    failure_type="execution_error",
+                )
+                record.result = result
+                await ctx.memorialize("precondition_failed")
+                return result
+
+        await ctx.transition(ActionState.PREPARED)
+
+        # ── EXECUTING — fire at the exact dispatch moment ─────────────
+        await ctx.transition(ActionState.EXECUTING)
+
+        # Race executor against abort signal for real-time cancellation
+        if call.abort_signal is not None and call.abort_signal.is_set():
+            # Already aborted before we started
+            await ctx.transition(
+                ActionState.ABORTED, reason="abort signal (pre-execution)",
+            )
+            result = ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="Aborted before execution.",
+                failure_type="execution_error",
+            )
+            record.result = result
+            await ctx.memorialize("aborted")
+            return result
+
+        if call.abort_signal is not None:
+            exec_task = asyncio.create_task(next(call))
+            abort_task = asyncio.create_task(call.abort_signal.wait())
+            done, pending = await asyncio.wait(
+                {exec_task, abort_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+                try:
+                    await p
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            if exec_task in done:
+                result = exec_task.result()
+            else:
+                # Abort signal fired during execution
+                await ctx.transition(
+                    ActionState.ABORTED,
+                    reason="abort signal during execution",
+                )
+                result = ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False, error="Execution aborted by signal.",
+                    failure_type="execution_error",
+                )
+                record.result = result
+                await ctx.memorialize("aborted")
+                return result
+        else:
+            result = await next(call)
+
+        # ── OBSERVED — executor returned ──────────────────────────────
+        # If the handler returned a timeout result, do NOT transition to
+        # OBSERVED — leave at EXECUTING so the outer LifecycleMiddleware
+        # can correctly drive EXECUTING → TIMED_OUT.
+        if result.failure_type == "timeout":
+            record.result = result
+            return result
+
+        await ctx.transition(ActionState.OBSERVED)
+        record.result = result
+        return result
+
 
 class LifecycleMiddleware(Middleware):
     """
-    Outermost middleware that wraps every tool call in an ActionRecord
-    and drives the full lifecycle state machine.
+    Outer lifecycle middleware — ActionRecord bookends and post-execution flow.
 
-    Lifecycle flow:
-    1. DECLARED — ActionRecord created from incoming ToolCall
-    2. Inner pipeline runs (Authorization → Schema validation → Execution)
-    3. OBSERVED — Raw result captured
-    4. VALIDATED — post_validator called (if defined on ToolDefinition)
-    5. COMMITTED or REVERTING → REVERTED (if validation fails + rollback_fn exists)
-    6. MEMORIALIZED — on_lifecycle callback fires
+    Sits at the outermost position in the middleware pipeline.  Wraps every
+    tool call in an ActionRecord and drives the lifecycle state machine.
 
-    When no post_validator or rollback_fn is defined on the ToolDefinition,
-    the lifecycle collapses to: DECLARED → OBSERVED → COMMITTED → MEMORIALIZED,
-    preserving backward-compatible behavior.
+    Architecture (Issue #50: Control-first Lifecycle)
+    -------------------------------------------------
+    Phase 1 (Issue #42) stamped states retroactively after the inner
+    pipeline completed.  Phase 2 makes each state a genuine gate by
+    splitting the lifecycle into two cooperating middleware layers.
 
-    The ``on_state_change`` callback fires on each state transition for UI
-    updates (e.g. TUI tool block state visualization).
+    This outer layer handles:
+        DECLARED        — create ActionRecord, inject LifecycleContext
+        post-OBSERVED   — VALIDATED, COMMITTED, REVERTING, REVERTED
+        MEMORIALIZED    — trace written to audit / episodic
+        failure paths   — DENIED, ABORTED (from inner middleware)
+
+    The inner layer (LifecycleGateMiddleware) handles:
+        AUTHORIZED → PREPARED → EXECUTING → OBSERVED
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ LifecycleMiddleware (outer)                                     │
+    │   DECLARED — ActionRecord created, LifecycleContext injected   │
+    │                                                                 │
+    │   ↓ inner pipeline                                             │
+    │     TraceMiddleware → SchemaValidation → BlastRadius           │
+    │                                                                 │
+    │   ↓ LifecycleGateMiddleware (inner)                            │
+    │     AUTHORIZED ← BlastRadius wrote to LifecycleContext         │
+    │     PREPARED   ← precondition_checks[] evaluated               │
+    │     EXECUTING  ← fires at exact dispatch + abort racing        │
+    │     OBSERVED   ← executor returned                             │
+    │                                                                 │
+    │   ↑ back to this outer layer                                   │
+    │   VALIDATED → COMMITTED  or  REVERTING → REVERTED              │
+    │   MEMORIALIZED                                                  │
+    └─────────────────────────────────────────────────────────────────┘
+
+    Terminal failure states: DENIED, ABORTED, TIMED_OUT.
+
+    Backward compatibility
+    ----------------------
+    Tools with no precondition_checks, post_validator, or rollback_fn
+    follow: DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED
+    → COMMITTED → MEMORIALIZED — identical to Phase 1 happy path.
     """
 
     def __init__(
@@ -271,30 +493,26 @@ class LifecycleMiddleware(Middleware):
         on_lifecycle: Callable[["ActionRecord"], Awaitable[None]] | None = None,
         on_state_change: Callable[["ActionRecord", str, str], Awaitable[None]] | None = None,
     ) -> None:
-        from .lifecycle import ActionRecord, ActionIntent, ActionState
+        from .lifecycle import (
+            ActionRecord, ActionIntent, ActionState,
+            LifecycleContext, LIFECYCLE_CTX_KEY,
+        )
         self._registry = registry
         self._on_lifecycle = on_lifecycle
         self._on_state_change = on_state_change
-        # Store references to avoid circular imports at call time
+        # Store class references to avoid circular imports at call time
         self._ActionRecord = ActionRecord
         self._ActionIntent = ActionIntent
         self._ActionState = ActionState
-
-    async def _fire_state_change(
-        self, record: "ActionRecord", old_state: str, new_state: str
-    ) -> None:
-        if self._on_state_change is not None:
-            try:
-                await self._on_state_change(record, old_state, new_state)
-            except Exception:
-                pass  # state change notifications must never crash the pipeline
+        self._LifecycleContext = LifecycleContext
+        self._CTX_KEY = LIFECYCLE_CTX_KEY
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         ActionRecord = self._ActionRecord
         ActionIntent = self._ActionIntent
         ActionState = self._ActionState
 
-        # --- Build intent from tool definition ---
+        # ── Build intent from tool definition ─────────────────────────
         tool_def = self._registry.get(call.tool_name)
         intent = ActionIntent(
             intent_summary=f"{call.tool_name}({', '.join(f'{k}=...' for k in call.args)})",
@@ -302,100 +520,97 @@ class LifecycleMiddleware(Middleware):
             preconditions=list(getattr(tool_def, "preconditions", [])) if tool_def else [],
         )
 
-        # --- DECLARED ---
+        # ── DECLARED ──────────────────────────────────────────────────
         record = ActionRecord(call=call, intent=intent)
 
-        # --- Run inner pipeline (handles Authorization, Validation, Execution) ---
+        # Inject LifecycleContext with shared callbacks
+        ctx = self._LifecycleContext(
+            record=record,
+            _on_state_change=self._on_state_change,
+            _on_lifecycle=self._on_lifecycle,
+        )
+        call.metadata[self._CTX_KEY] = ctx
+
+        # ── Run inner pipeline ────────────────────────────────────────
+        # The chain: Trace → SchemaValidation → BlastRadius →
+        # LifecycleGateMiddleware → handler.
+        #
+        # LifecycleGateMiddleware drives AUTHORIZED → PREPARED →
+        # EXECUTING → OBSERVED as real control gates.
+        # BlastRadiusMiddleware writes auth decisions to ctx.
         result = await next(call)
 
-        # Determine if it was denied (permission_denied) or failed
-        if not result.success and result.failure_type == "permission_denied":
-            old = record.state.value
-            record.transition(ActionState.DENIED, reason=result.error)
-            await self._fire_state_change(record, old, record.state.value)
-            record.result = result
-            # Memorialize denied actions
-            old = record.state.value
-            record.transition(ActionState.MEMORIALIZED, reason="denied")
-            await self._fire_state_change(record, old, record.state.value)
-            if self._on_lifecycle is not None:
-                await self._on_lifecycle(record)
+        # ── Post-pipeline analysis ────────────────────────────────────
+        # If the record already reached a terminal state (precondition
+        # failure, abort during execution), everything is done.
+        if record.is_terminal:
             return result
 
-        if not result.success and result.failure_type == "validation_error":
-            old = record.state.value
-            record.transition(ActionState.AUTHORIZED, reason="passed blast radius")
-            await self._fire_state_change(record, old, record.state.value)
-            old = record.state.value
-            record.transition(ActionState.ABORTED, reason=result.error)
-            await self._fire_state_change(record, old, record.state.value)
-            record.result = result
-            old = record.state.value
-            record.transition(ActionState.MEMORIALIZED, reason="validation_error")
-            await self._fire_state_change(record, old, record.state.value)
-            if self._on_lifecycle is not None:
-                await self._on_lifecycle(record)
-            return result
+        # ── Handle failures from inner middleware ─────────────────────
+        # These come from SchemaValidation or BlastRadius, BEFORE
+        # LifecycleGateMiddleware ever ran.
+
+        if not result.success and result.failure_type == "permission_denied":
+            if record.state == ActionState.DECLARED:
+                await ctx.transition(ActionState.DENIED, reason=result.error)
+                record.result = result
+                await ctx.memorialize("denied")
+                return result
 
         if not result.success and result.failure_type == "tool_not_found":
+            if record.state == ActionState.DECLARED:
+                record.result = result
+                await ctx.transition(ActionState.DENIED, reason="tool not found")
+                await ctx.memorialize("tool_not_found")
+                return result
+
+        if not result.success and result.failure_type == "validation_error":
+            # Schema validation failed AFTER authorization passed
+            auth_reason = ctx.authorization_reason or "passed blast radius"
+            await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            await ctx.transition(ActionState.ABORTED, reason=result.error)
             record.result = result
-            old = record.state.value
-            record.transition(ActionState.DENIED, reason="tool not found")
-            await self._fire_state_change(record, old, record.state.value)
-            old = record.state.value
-            record.transition(ActionState.MEMORIALIZED, reason="tool_not_found")
-            await self._fire_state_change(record, old, record.state.value)
-            if self._on_lifecycle is not None:
-                await self._on_lifecycle(record)
+            await ctx.memorialize("validation_error")
             return result
 
         if not result.success and result.failure_type == "timeout":
-            old = record.state.value
-            record.transition(ActionState.AUTHORIZED, reason="passed blast radius")
-            await self._fire_state_change(record, old, record.state.value)
-            old = record.state.value
-            record.transition(ActionState.PREPARED)
-            await self._fire_state_change(record, old, record.state.value)
-            old = record.state.value
-            record.transition(ActionState.EXECUTING)
-            await self._fire_state_change(record, old, record.state.value)
-            old = record.state.value
-            record.transition(ActionState.TIMED_OUT, reason=result.error)
-            await self._fire_state_change(record, old, record.state.value)
-            record.result = result
-            old = record.state.value
-            record.transition(ActionState.MEMORIALIZED, reason="timed_out")
-            await self._fire_state_change(record, old, record.state.value)
-            if self._on_lifecycle is not None:
-                await self._on_lifecycle(record)
+            # Timeout from the handler (e.g. run_bash timeout).
+            # LifecycleGateMiddleware already transitioned through
+            # AUTHORIZED → PREPARED → EXECUTING.
+            if record.state == ActionState.EXECUTING:
+                await ctx.transition(ActionState.TIMED_OUT, reason=result.error)
+                record.result = result
+                await ctx.memorialize("timed_out")
+                return result
+            # Fallback: force through remaining states
+            if not record.state.is_terminal:
+                if record.state == ActionState.DECLARED:
+                    await ctx.transition(ActionState.AUTHORIZED, reason="passed blast radius")
+                if record.state == ActionState.AUTHORIZED:
+                    await ctx.transition(ActionState.PREPARED)
+                if record.state == ActionState.PREPARED:
+                    await ctx.transition(ActionState.EXECUTING)
+                await ctx.transition(ActionState.TIMED_OUT, reason=result.error)
+                record.result = result
+                await ctx.memorialize("timed_out")
             return result
 
-        # --- Happy path: tool executed (success or execution_error) ---
-        # Reconstruct lifecycle states retroactively (inner pipeline has
-        # already executed by the time we get here).
+        # ── Happy path: OBSERVED already fired by LifecycleGateMiddleware ─
+        if record.state != ActionState.OBSERVED:
+            # Safety fallback: if LifecycleGateMiddleware didn't run
+            # (shouldn't happen in production), gracefully stamp states.
+            if record.state == ActionState.DECLARED:
+                auth_reason = ctx.authorization_reason or "passed blast radius"
+                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            if record.state == ActionState.AUTHORIZED:
+                await ctx.transition(ActionState.PREPARED)
+            if record.state == ActionState.PREPARED:
+                await ctx.transition(ActionState.EXECUTING)
+            if record.state == ActionState.EXECUTING:
+                await ctx.transition(ActionState.OBSERVED)
+            record.result = result
 
-        # DECLARED → AUTHORIZED
-        old = record.state.value
-        record.transition(ActionState.AUTHORIZED, reason="passed blast radius")
-        await self._fire_state_change(record, old, record.state.value)
-
-        # AUTHORIZED → PREPARED
-        old = record.state.value
-        record.transition(ActionState.PREPARED)
-        await self._fire_state_change(record, old, record.state.value)
-
-        # PREPARED → EXECUTING
-        old = record.state.value
-        record.transition(ActionState.EXECUTING)
-        await self._fire_state_change(record, old, record.state.value)
-
-        # EXECUTING → OBSERVED
-        old = record.state.value
-        record.transition(ActionState.OBSERVED)
-        await self._fire_state_change(record, old, record.state.value)
-        record.result = result
-
-        # --- Post-validation (if post_validator is defined) ---
+        # ── Post-validation (if post_validator defined) ───────────────
         post_validator = getattr(tool_def, "post_validator", None) if tool_def else None
         rollback_fn = getattr(tool_def, "rollback_fn", None) if tool_def else None
 
@@ -411,22 +626,16 @@ class LifecycleMiddleware(Middleware):
 
             if validated:
                 # OBSERVED → VALIDATED → COMMITTED
-                old = record.state.value
-                record.transition(ActionState.VALIDATED)
-                await self._fire_state_change(record, old, record.state.value)
-                old = record.state.value
-                record.transition(ActionState.COMMITTED)
-                await self._fire_state_change(record, old, record.state.value)
+                await ctx.transition(ActionState.VALIDATED)
+                await ctx.transition(ActionState.COMMITTED)
             else:
                 # OBSERVED → VALIDATED (fail) → REVERTING → REVERTED
-                old = record.state.value
-                record.transition(ActionState.VALIDATED)
-                await self._fire_state_change(record, old, record.state.value)
+                await ctx.transition(ActionState.VALIDATED)
 
                 if rollback_fn is not None:
-                    old = record.state.value
-                    record.transition(ActionState.REVERTING, reason="post-validation failed")
-                    await self._fire_state_change(record, old, record.state.value)
+                    await ctx.transition(
+                        ActionState.REVERTING, reason="post-validation failed",
+                    )
                     try:
                         rb_result = await rollback_fn(call, result)
                         record.rollback_result = rb_result
@@ -437,41 +646,26 @@ class LifecycleMiddleware(Middleware):
                             success=False,
                             error=f"Rollback failed: {exc}",
                         )
-                    old = record.state.value
-                    record.transition(ActionState.REVERTED)
-                    await self._fire_state_change(record, old, record.state.value)
+                    await ctx.transition(ActionState.REVERTED)
                     # Modify the result to indicate rollback
                     result = ToolResult(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
                         success=False,
-                        error=f"Post-validation failed; action rolled back.",
+                        error="Post-validation failed; action rolled back.",
                         failure_type="execution_error",
                         duration_ms=result.duration_ms,
                         metadata={**result.metadata, "rolled_back": True},
                     )
                     record.result = result
                 else:
-                    # No rollback_fn: validation failed but can't revert → commit anyway
-                    old = record.state.value
-                    record.transition(ActionState.COMMITTED)
-                    await self._fire_state_change(record, old, record.state.value)
+                    # No rollback_fn: can't revert → commit anyway
+                    await ctx.transition(ActionState.COMMITTED)
         else:
             # No post_validator → skip VALIDATED, go directly to COMMITTED
-            old = record.state.value
-            record.transition(ActionState.COMMITTED)
-            await self._fire_state_change(record, old, record.state.value)
+            await ctx.transition(ActionState.COMMITTED)
 
-        # --- MEMORIALIZED ---
-        old = record.state.value
-        record.transition(ActionState.MEMORIALIZED)
-        await self._fire_state_change(record, old, record.state.value)
-
-        if self._on_lifecycle is not None:
-            try:
-                await self._on_lifecycle(record)
-            except Exception:
-                pass  # lifecycle callback must never crash the pipeline
+        # ── MEMORIALIZED ──────────────────────────────────────────────
+        await ctx.memorialize(record.state.value)
 
         return result
-

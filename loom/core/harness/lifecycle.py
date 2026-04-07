@@ -132,6 +132,90 @@ class ActionIntent:
 
 
 # ---------------------------------------------------------------------------
+# LifecycleContext — shared state for real-time lifecycle coordination
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LifecycleContext:
+    """
+    Shared context injected into ``ToolCall.metadata["_lifecycle_ctx"]``.
+
+    Purpose: enable **two** middleware layers plus downstream middleware
+    (BlastRadiusMiddleware) to coordinate lifecycle state transitions in
+    real time through a single shared object.
+
+    Participants:
+        LifecycleMiddleware (outer)
+            Creates this context, attaches it to the call.
+            After the inner pipeline returns, drives post-OBSERVED states
+            (VALIDATED, COMMITTED, REVERTING, REVERTED, MEMORIALIZED).
+
+        LifecycleGateMiddleware (inner, just before handler)
+            Reads authorization_result from BlastRadius.
+            Fires AUTHORIZED → PREPARED → EXECUTING → OBSERVED as real
+            control gates.
+
+        BlastRadiusMiddleware
+            Writes authorization_result / reason at the moment the
+            auth decision is made.
+
+    The ``transition()`` and ``memorialize()`` helpers centralize all
+    state-change bookkeeping so every call site is a single line.
+    """
+    record: ActionRecord = field(repr=False)
+    """The ActionRecord being tracked (reference, not copy)."""
+
+    authorization_result: bool | None = None
+    """
+    Set by BlastRadiusMiddleware:
+      True  → tool was authorized (pre-auth, exec_auto, or user confirmed)
+      False → user denied execution
+      None  → not yet decided (default)
+    """
+
+    authorization_reason: str | None = None
+    """Human-readable reason for the authorization decision."""
+
+    # --- Internal callbacks (set by LifecycleMiddleware, used by all) ---
+    _on_state_change: Any = field(default=None, repr=False)
+    """Callable[[ActionRecord, str, str], Awaitable[None]] | None"""
+
+    _on_lifecycle: Any = field(default=None, repr=False)
+    """Callable[[ActionRecord], Awaitable[None]] | None"""
+
+    async def transition(
+        self, new_state: ActionState, reason: str | None = None,
+    ) -> None:
+        """
+        Transition the record to *new_state* and fire the UI callback.
+
+        One-liner replacement for the old three-line pattern of
+        saving old state, calling record.transition(), and firing
+        the state change callback.
+        """
+        old = self.record.state.value
+        self.record.transition(new_state, reason=reason)
+        if self._on_state_change is not None:
+            try:
+                await self._on_state_change(self.record, old, self.record.state.value)
+            except Exception:
+                pass  # UI callback must never crash the pipeline
+
+    async def memorialize(self, reason: str) -> None:
+        """Transition to MEMORIALIZED and fire the on_lifecycle callback."""
+        await self.transition(ActionState.MEMORIALIZED, reason=reason)
+        if self._on_lifecycle is not None:
+            try:
+                await self._on_lifecycle(self.record)
+            except Exception:
+                pass  # lifecycle callback must never crash the pipeline
+
+
+# Metadata key for LifecycleContext in ToolCall.metadata
+LIFECYCLE_CTX_KEY = "_lifecycle_ctx"
+
+
+# ---------------------------------------------------------------------------
 # ActionRecord — single tool call lifecycle
 # ---------------------------------------------------------------------------
 
