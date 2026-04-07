@@ -12,7 +12,7 @@
 |-----------|---------|
 | **Harness-first** | Every tool call flows through a middleware pipeline — logging, tracing, and blast-radius control are built in, not bolted on |
 | **Memory-native** | Memory is a substrate, not a plugin. Four types (episodic, semantic, procedural, relational) share one SQLite store with vector search |
-| **Reflexive** | The agent can observe and reason about its own execution history and skill health |
+| **Reflexive** | The agent observes its own execution history, self-assesses skill quality after each turn, and evolves low-performing skills automatically |
 | **Self-directing** | Cron, event, and condition triggers fire autonomously without human prompting |
 | **Model-agnostic** | Routes between cloud and local providers by model name prefix; switch mid-session with `/model` |
 
@@ -30,7 +30,7 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 | Layer | What it does |
 |-------|-------------|
 | **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES) |
-| **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors), procedural (versioned skills with EMA confidence) |
+| **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors), procedural (versioned skills with quality-gradient EMA + self-assessment) |
 | **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
 | **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision |
@@ -200,8 +200,56 @@ Embeddings are computed at write-time (`upsert`) and stored in SQLite. Failures 
 | `web_search` | GUARDED | NETWORK | Brave Search API top-N results |
 | `run_bash` | GUARDED | **EXEC** | Execute a shell command — **re-confirms every call** |
 | `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | Spawn a sub-agent — **re-confirms every call** |
+| `load_skill` | SAFE | — | Load a skill's full instructions on demand (Agent Skills spec Tier 2) |
 
 > **EXEC and AGENT_SPAN** tools never receive session-level pre-authorization — each call triggers a fresh confirmation, matching CRITICAL semantics regardless of trust level.
+
+---
+
+## Skills — Procedural Memory with Self-Assessment
+
+Skills are versioned, self-evaluating instruction sets stored in `SkillGenome`. They follow the [Agent Skills spec](https://agentskills.io/specification) three-tier progressive disclosure model:
+
+| Tier | When | Content |
+|------|------|---------|
+| **Tier 1** | Session startup | `<available_skills>` XML injected into system prompt — name + description only |
+| **Tier 2** | On demand | `load_skill(name)` → full SKILL.md body + evolution hints + resource list |
+| **Tier 3** | As needed | Agent reads bundled `scripts/` / `references/` / `assets/` files directly |
+
+### Auto-import
+
+Drop a `SKILL.md` into the `skills/` directory — Loom auto-imports it at session start:
+
+```
+<workspace>/skills/<skill-name>/SKILL.md   ← project-level (priority)
+~/.loom/skills/<skill-name>/SKILL.md       ← user-level
+```
+
+```markdown
+---
+name: loom-engineer
+description: Full implementation cycle from issue to PR.
+tags: [git, python, engineering]
+---
+
+# Loom Engineer
+Skill body here...
+```
+
+### Self-Assessment Feedback Loop
+
+After each turn where a skill was used, Loom triggers a background LLM self-assessment (1–5 score). The result feeds into the skill's `confidence` via EMA (α=0.15):
+
+```
+load_skill() → Agent executes task → TurnDone
+    → LLM self-rates quality (1–5)
+    → EMA update: confidence = 0.85 × old + 0.15 × (score/5)
+    → outcome persisted to SemanticMemory
+```
+
+At session end, `SkillEvolutionHook` analyses low-confidence skills (confidence < 0.6, usage ≥ 3) and writes improvement suggestions. Next `load_skill()` surfaces these as `<evolution_hints>`.
+
+Skills whose `confidence` drops below `skill_deprecation_threshold` (default 0.3) are automatically deprecated and removed from the Tier 1 catalog.
 
 ---
 
@@ -362,6 +410,8 @@ loom.register_plugin(GitPlugin())
 | Lifecycle hooks | `on_session_start(session)` / `on_session_stop(session)` |
 
 ### Importing external skills
+
+Skills in the `skills/` directory are auto-imported at session start. For external formats:
 
 ```bash
 loom import skills.json                          # Hermes format
