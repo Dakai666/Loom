@@ -154,6 +154,8 @@ class LoomDiscordBot:
         self._sessions: dict[int, "LoomSession"] = {}
         # thread_id → currently running turn Task
         self._running_turns: dict[int, asyncio.Task] = {}
+        # thread_id → currently active confirmation message (Allow/Deny prompt)
+        self._active_confirmations: dict[int, discord.Message] = {}
 
         # Persistent thread → session_id mapping so existing threads resume
         # their context after a bot restart.
@@ -698,6 +700,14 @@ class LoomDiscordBot:
                         pass  # ActionStateChange: too granular for Discord display
 
             except asyncio.CancelledError:
+                # Cleanup any pending confirmation buttons in this thread immediately
+                conf_msg = self._active_confirmations.pop(message.channel.id, None)
+                if conf_msg:
+                    try:
+                        await _safe_edit(conf_msg, "🛑 **Turn Cancelled** — authorization revoked.", view=None)
+                    except Exception:
+                        pass
+
                 # /stop — finalize what we have so far
                 if tool_buf:
                     await _safe_edit(
@@ -769,14 +779,19 @@ class LoomDiscordBot:
             color = "🟡" if trust == "GUARDED" else "🔴"
             view = _ConfirmView(timeout=60.0)
 
-            await channel.send(
+            msg = await channel.send(
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"*Timeout 60s → auto-deny*",
                 view=view,
             )
-            return await view.wait_decision()
+            self._active_confirmations[thread_id] = msg
+            try:
+                res = await view.wait_decision()
+                return res
+            finally:
+                self._active_confirmations.pop(thread_id, None)
 
         return _confirm
 
@@ -804,8 +819,15 @@ class LoomDiscordBot:
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _safe_edit(message: discord.Message, content: str) -> None:
+async def _safe_edit(
+    message: discord.Message, 
+    content: str, 
+    view: discord.ui.View | None = None
+) -> None:
     try:
-        await message.edit(content=content[:_MAX_CHARS])
+        kwargs = {"content": content[:_MAX_CHARS]}
+        if view is not None or "view" in str(message.components):  # detect if view needs clearing
+             kwargs["view"] = view
+        await message.edit(**kwargs)
     except discord.HTTPException:
         pass
