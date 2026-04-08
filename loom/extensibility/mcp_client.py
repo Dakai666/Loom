@@ -235,11 +235,25 @@ class LoomMCPClient:
                 args=self._cfg.args,
                 env=self._cfg.env or None,
             )
-            self._cm = stdio_client(params)
-            self._read, self._write = await self._cm.__aenter__()
-            self._session = ClientSession(self._read, self._write)
-            await self._session.__aenter__()
-            await self._session.initialize()
+            cm = stdio_client(params)
+            read, write = await cm.__aenter__()
+            try:
+                session = ClientSession(read, write)
+                await session.__aenter__()
+                await session.initialize()
+            except BaseException:
+                # Clean up the stdio_client CM immediately so it is not
+                # orphaned.  An un-exited anyio task group inside the CM
+                # would later crash when Python's async-generator GC
+                # finalises it in a different task.
+                try:
+                    await cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                raise
+            self._cm = cm
+            self._read, self._write = read, write
+            self._session = session
 
     async def _call_tool(self, name: str, arguments: dict) -> "CallToolResult":
         await self._ensure_connected()
@@ -293,4 +307,7 @@ async def load_mcp_servers_into_session(
                 "mcp_client: failed to connect to %r: %s — skipping",
                 cfg.name, exc
             )
+            # Ensure any partially-opened stdio_client CM is closed so
+            # its anyio task group doesn't leak and crash later.
+            await client.disconnect()
     return clients
