@@ -1,0 +1,6 @@
+# Agent.md — Loom 環境設定
+
+此文件在每個 session 載入，描述 Loom 所在的運作環境與專案慣例。
+
+# Timezone
+本系統運作於 Asia/Taipei (UTC+8)。

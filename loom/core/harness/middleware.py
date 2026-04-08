@@ -248,7 +248,11 @@ class BlastRadiusMiddleware(Middleware):
                 call_id=call.id,
                 tool_name=call.tool_name,
                 success=False,
-                error="User denied tool execution.",
+                error=(
+                    "USER ACTION: DENIED. This tool call was explicitly rejected by the "
+                    "human user. Do not retry this action or equivalent substitutions "
+                    "in this turn. Acknowledge and proceed with other tasks or wait for input."
+                ),
                 failure_type="permission_denied",
             )
 

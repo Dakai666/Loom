@@ -186,7 +186,8 @@ class ToolBlock(Widget):
         """Mark a tool call as complete."""
         for tool in self.active_tools:
             if tool.call_id == call_id:
-                tool.state = ToolState.DONE if success else ToolState.FAILED
+                if tool.state != ToolState.DENIED:
+                    tool.state = ToolState.DONE if success else ToolState.FAILED
                 tool.output = output[:200]
                 tool.duration_ms = duration_ms
                 break
