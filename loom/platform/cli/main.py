@@ -969,6 +969,7 @@ class LoomSession:
                     stop_reason="stream_none",
                     retry_count=_stream_retry,
                     tool_count=tool_count,
+                    exhausted=True,
                 )
                 break
 

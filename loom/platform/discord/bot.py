@@ -694,13 +694,13 @@ class LoomDiscordBot:
                         # Surface silent drops so the user knows what happened
                         # instead of the turn just vanishing with no feedback.
                         if event.stop_reason == "stream_none":
-                            if event.retry_count > 0:
+                            if event.exhausted:
                                 drop_msg = (
-                                    f"-# ⚠️ 連線中斷，正在重試（第 {event.retry_count} 次）…"
+                                    f"-# ⚠️ 連線中斷且重試失敗（已完成 {event.tool_count} 個工具）"
                                 )
                             else:
                                 drop_msg = (
-                                    f"-# ⚠️ 連線中斷且重試失敗（已完成 {event.tool_count} 個工具）"
+                                    f"-# ⚠️ 連線中斷，正在重試（第 {event.retry_count} 次）…"
                                 )
                         else:
                             drop_msg = (

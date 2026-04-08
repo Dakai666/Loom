@@ -118,6 +118,7 @@ class TurnDropped:
     stop_reason: str
     retry_count: int = 0
     tool_count: int = 0
+    exhausted: bool = False
 
 
 @dataclass
