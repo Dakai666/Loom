@@ -100,6 +100,27 @@ class TurnDone:
 
 
 @dataclass
+class TurnDropped:
+    """The agent turn was dropped mid-stream due to an unexpected stop.
+
+    This happens when:
+    - The LLM API returns ``stop_reason`` that is neither ``end_turn`` nor
+      ``tool_use`` (e.g. ``max_tokens``, provider-specific error codes).
+    - The streaming response object is ``None`` (connection dropped before
+      any final message arrived).
+
+    ``stop_reason`` — the raw stop_reason string from the provider, or
+                      ``"stream_none"`` when response was None.
+    ``retry_count``  — how many automatic retries have already been attempted.
+    ``tool_count``   — number of tools called before the drop.
+    """
+
+    stop_reason: str
+    retry_count: int = 0
+    tool_count: int = 0
+
+
+@dataclass
 class ActionStateChange:
     """An action transitioned to a new lifecycle state (Issue #42)."""
     action_id: str

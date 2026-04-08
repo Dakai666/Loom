@@ -102,6 +102,7 @@ from loom.platform.cli.ui import (
     ToolBegin,
     ToolEnd,
     TurnDone,
+    TurnDropped,
     TurnPaused,
     clear_line_escape,
     make_prompt_session,
@@ -790,7 +791,7 @@ class LoomSession:
         *,
         abort_signal: "asyncio.Event | None" = None,
     ) -> AsyncIterator[
-        TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone
+        TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ActionStateChange | ActionRolledBack
     ]:
         """
@@ -845,6 +846,8 @@ class LoomSession:
         _think_parts: list[str] = []  # accumulates think content for /think command
         _current_think_start = 0    # index into _think_parts where current block began
 
+        _stream_retry = 0         # counts back-to-back stream_none retries
+        _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
         while True:
             # Check abort signal at top of each LLM call iteration.
             # abort_signal is external (e.g. from AutonomyDaemon);
@@ -938,6 +941,35 @@ class LoomSession:
                 _tbuf = ""
 
             if response is None:
+                # Stream ended without a final message — connection likely dropped.
+                # Attempt a transparent retry (up to _MAX_STREAM_RETRIES) before
+                # giving up so transient MiniMax/network glitches don't silently
+                # kill long-running tasks.
+                if _stream_retry < _MAX_STREAM_RETRIES:
+                    _stream_retry += 1
+                    logger.warning(
+                        "stream_turn: response is None on attempt %d/%d — retrying…",
+                        _stream_retry, _MAX_STREAM_RETRIES,
+                    )
+                    yield TurnDropped(
+                        stop_reason="stream_none",
+                        retry_count=_stream_retry,
+                        tool_count=tool_count,
+                    )
+                    await asyncio.sleep(1.0 * _stream_retry)  # brief back-off
+                    # Re-sanitize history before retry in case partial state was appended
+                    self._sanitize_history()
+                    continue
+                # All retries exhausted
+                logger.error(
+                    "stream_turn: response is None after %d retries — dropping turn",
+                    _MAX_STREAM_RETRIES,
+                )
+                yield TurnDropped(
+                    stop_reason="stream_none",
+                    retry_count=_stream_retry,
+                    tool_count=tool_count,
+                )
                 break
 
             # Surface native thinking blocks (Anthropic extended thinking API).
@@ -1122,6 +1154,19 @@ class LoomSession:
                         )
                         return
             else:
+                # Unexpected stop_reason (e.g. 'max_tokens', unknown provider value).
+                # Log and surface via TurnDropped so platforms can show a warning
+                # rather than silently dropping the turn.
+                _raw_stop = getattr(response, "stop_reason", "unknown")
+                logger.warning(
+                    "stream_turn: unexpected stop_reason=%r after %d tool(s) — stopping",
+                    _raw_stop, tool_count,
+                )
+                yield TurnDropped(
+                    stop_reason=str(_raw_stop),
+                    retry_count=0,
+                    tool_count=tool_count,
+                )
                 break
 
         self._last_think = "".join(_think_parts).strip()
