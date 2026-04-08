@@ -826,8 +826,8 @@ async def _safe_edit(
 ) -> None:
     try:
         kwargs = {"content": content[:_MAX_CHARS]}
-        if view is not None or "view" in str(message.components):  # detect if view needs clearing
-             kwargs["view"] = view
+        if view is not None or bool(message.components):  # clear buttons if message has a View
+            kwargs["view"] = view
         await message.edit(**kwargs)
     except discord.HTTPException:
         pass
