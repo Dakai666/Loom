@@ -68,7 +68,8 @@ except ImportError as exc:  # pragma: no cover
 
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
-    CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd, TurnDone, TurnPaused,
+    CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd,
+    TurnDone, TurnDropped, TurnPaused,
 )
 from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
 
@@ -688,6 +689,25 @@ class LoomDiscordBot:
                         await message.channel.send(
                             f"-# 🧠 記憶壓縮：{event.fact_count} 條事實已存入語意記憶"
                         )
+
+                    elif isinstance(event, TurnDropped):
+                        # Surface silent drops so the user knows what happened
+                        # instead of the turn just vanishing with no feedback.
+                        if event.stop_reason == "stream_none":
+                            if event.retry_count > 0:
+                                drop_msg = (
+                                    f"-# ⚠️ 連線中斷，正在重試（第 {event.retry_count} 次）…"
+                                )
+                            else:
+                                drop_msg = (
+                                    f"-# ⚠️ 連線中斷且重試失敗（已完成 {event.tool_count} 個工具）"
+                                )
+                        else:
+                            drop_msg = (
+                                f"-# ⚠️ 任務中止：`stop_reason={event.stop_reason}` "
+                                f"（已完成 {event.tool_count} 個工具）"
+                            )
+                        await message.channel.send(drop_msg)
 
                     elif isinstance(event, ActionRolledBack):
                         icon = "✓" if event.rollback_success else "✗"
