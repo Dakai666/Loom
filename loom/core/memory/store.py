@@ -196,6 +196,8 @@ class SQLiteStore:
                 "ALTER TABLE session_log ADD COLUMN raw_json TEXT",
                 # Issue #43: governance events stored in audit_log.details
                 "ALTER TABLE audit_log ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
+                # Issue #64: skill-declared precondition check references
+                "ALTER TABLE skill_genomes ADD COLUMN precondition_check_refs TEXT NOT NULL DEFAULT '[]'",
             ]:
                 try:
                     await db.execute(_migration)

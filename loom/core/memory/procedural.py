@@ -34,6 +34,13 @@ class SkillGenome:
     parent_skill: str | None = None    # Inheritance lineage
     deprecation_threshold: float = 0.3
     tags: list[str] = field(default_factory=list)
+    precondition_check_refs: list[dict] = field(default_factory=list)
+    """
+    Skill-declared precondition check references (Issue #64 Phase B).
+
+    Each dict: {"ref": "checks.fn_name", "applies_to": ["run_bash"], "description": "..."}
+    Parsed from SKILL.md frontmatter, resolved to callables at load_skill() time.
+    """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -92,17 +99,18 @@ class ProceduralMemory:
             INSERT INTO skill_genomes
                 (id, name, version, confidence, usage_count, success_rate,
                  parent_skill, deprecation_threshold, tags, body,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 precondition_check_refs, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-                version               = excluded.version,
-                confidence            = excluded.confidence,
-                usage_count           = excluded.usage_count,
-                success_rate          = excluded.success_rate,
-                deprecation_threshold = excluded.deprecation_threshold,
-                tags                  = excluded.tags,
-                body                  = excluded.body,
-                updated_at            = excluded.updated_at
+                version                = excluded.version,
+                confidence             = excluded.confidence,
+                usage_count            = excluded.usage_count,
+                success_rate           = excluded.success_rate,
+                deprecation_threshold  = excluded.deprecation_threshold,
+                tags                   = excluded.tags,
+                body                   = excluded.body,
+                precondition_check_refs = excluded.precondition_check_refs,
+                updated_at             = excluded.updated_at
             """,
             (
                 skill.id, skill.name, skill.version, skill.confidence,
@@ -110,6 +118,7 @@ class ProceduralMemory:
                 skill.deprecation_threshold,
                 json.dumps(skill.tags, ensure_ascii=False),
                 skill.body,
+                json.dumps(skill.precondition_check_refs, ensure_ascii=False),
                 skill.created_at.isoformat(), now,
             ),
         )
@@ -118,7 +127,8 @@ class ProceduralMemory:
     async def get(self, name: str) -> SkillGenome | None:
         cursor = await self._db.execute(
             "SELECT id, name, version, confidence, usage_count, success_rate, "
-            "parent_skill, deprecation_threshold, tags, body, created_at, updated_at "
+            "parent_skill, deprecation_threshold, tags, body, "
+            "precondition_check_refs, created_at, updated_at "
             "FROM skill_genomes WHERE name = ?",
             (name,),
         )
@@ -129,15 +139,17 @@ class ProceduralMemory:
             id=row[0], name=row[1], version=row[2], confidence=row[3],
             usage_count=row[4], success_rate=row[5], parent_skill=row[6],
             deprecation_threshold=row[7], tags=json.loads(row[8]),
-            body=row[9], created_at=datetime.fromisoformat(row[10]),
-            updated_at=datetime.fromisoformat(row[11]),
+            body=row[9], precondition_check_refs=json.loads(row[10]),
+            created_at=datetime.fromisoformat(row[11]),
+            updated_at=datetime.fromisoformat(row[12]),
         )
 
     async def list_active(self) -> list[SkillGenome]:
         """Return all non-deprecated skills ordered by confidence."""
         cursor = await self._db.execute(
             "SELECT id, name, version, confidence, usage_count, success_rate, "
-            "parent_skill, deprecation_threshold, tags, body, created_at, updated_at "
+            "parent_skill, deprecation_threshold, tags, body, "
+            "precondition_check_refs, created_at, updated_at "
             "FROM skill_genomes "
             "WHERE confidence > deprecation_threshold "
             "   OR usage_count < ? "
@@ -150,8 +162,9 @@ class ProceduralMemory:
                 id=r[0], name=r[1], version=r[2], confidence=r[3],
                 usage_count=r[4], success_rate=r[5], parent_skill=r[6],
                 deprecation_threshold=r[7], tags=json.loads(r[8]),
-                body=r[9], created_at=datetime.fromisoformat(r[10]),
-                updated_at=datetime.fromisoformat(r[11]),
+                body=r[9], precondition_check_refs=json.loads(r[10]),
+                created_at=datetime.fromisoformat(r[11]),
+                updated_at=datetime.fromisoformat(r[12]),
             )
             for r in rows
         ]

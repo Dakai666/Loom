@@ -792,6 +792,8 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
             if isinstance(mw, BlastRadiusMiddleware):
                 mw._confirm = _tui_confirm
                 break
+        # Also patch skill check approval so it uses TUI confirm widgets
+        session._confirm_fn = _tui_confirm
 
         result = await app.run_async()
         # /sessions exits with a session_id string → resume that session.
@@ -1660,6 +1662,8 @@ async def _discord_with_autonomy(
         if isinstance(_mw, _BRM):
             _mw._confirm = _confirm_fn
             break
+    # Also patch skill check approval so it uses Discord confirm buttons
+    session._confirm_fn = _confirm_fn
 
     daemon = AutonomyDaemon(
         notify_router=notify_router,

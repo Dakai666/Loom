@@ -1,6 +1,10 @@
 ---
 name: systematic_code_analyst
 description: "系統化程式碼分析技能。透過結構化的多層次掃描（結構→依賴→行為→評估）快速理解陌生程式碼庫，輸出架構快照、依賴拓撲、觀察優缺點、學習點與適用場景。當使用者要求「分析這個專案」、「幫我 review code」、「說說這個架構」、「评估開源專案」時使用。"
+precondition_checks:
+  - ref: checks.reject_write_operations
+    applies_to: [write_file]
+    description: "分析技能為唯讀模式，禁止寫入任何檔案"
 ---
 
 # 系統化程式碼分析技能（Systematic Code Analyst）

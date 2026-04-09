@@ -242,6 +242,13 @@ Drop a `SKILL.md` into the `skills/` directory — Loom auto-imports it at sessi
 name: loom-engineer
 description: Full implementation cycle from issue to PR.
 tags: [git, python, engineering]
+precondition_checks:
+  - ref: checks.require_git_repo
+    applies_to: [run_bash, write_file]
+    description: "Must be inside a git repository"
+  - ref: checks.reject_force_push
+    applies_to: [run_bash]
+    description: "Block git push --force"
 ---
 
 # Loom Engineer
@@ -262,6 +269,73 @@ load_skill() → Agent executes task → TurnDone
 At session end, `SkillEvolutionHook` analyses low-confidence skills (confidence < 0.6, usage ≥ 3) and writes improvement suggestions. Next `load_skill()` surfaces these as `<evolution_hints>`.
 
 Skills whose `confidence` drops below `skill_deprecation_threshold` (default 0.3) are automatically deprecated and removed from the Tier 1 catalog.
+
+### Skill Precondition Checks — Framework-Enforced Safety Rails
+
+SKILL.md tells the LLM what it *should* do. But LLMs are probabilistic — a strongly worded "never run `rm -rf`" in a skill document is a suggestion, not a guarantee. **Precondition checks** close this gap by moving safety rules from text into code that the framework executes before every tool call.
+
+**Why this matters:**
+
+| Without precondition checks | With precondition checks |
+|----------------------------|--------------------------|
+| "Don't run destructive commands" — LLM *might* comply | `reject_destructive_commands()` — framework **blocks** `rm -rf` before shell sees it |
+| "This skill is read-only" — LLM *usually* respects it | `reject_write_operations()` — `write_file` is **impossible** while skill is loaded |
+| "Only modify files in skills/" — LLM *tries* to follow | `require_skills_dir_target()` — paths outside `skills/` are **rejected** at PREPARED gate |
+
+**How it works:**
+
+Skills declare checks in their SKILL.md frontmatter. Each check is an async Python function in the skill's `checks.py` that returns `True` (allow) or `False` (block):
+
+```yaml
+# skills/security_assessment/SKILL.md
+---
+name: security_assessment
+precondition_checks:
+  - ref: checks.reject_destructive_commands
+    applies_to: [run_bash]
+    description: "Block rm -rf, DROP TABLE, dd, etc."
+  - ref: checks.reject_production_env
+    applies_to: [run_bash]
+    description: "Block execution in production environments"
+---
+```
+
+```python
+# skills/security_assessment/checks.py
+async def reject_destructive_commands(call) -> bool:
+    cmd = call.args.get("command", "")
+    destructive = ["rm -rf", "DROP TABLE", "dd if="]
+    return not any(p in cmd.lower() for p in destructive)
+```
+
+**Lifecycle integration:**
+
+```
+load_skill("security_assessment")
+  → First load: user sees confirmation panel listing all checks → approves
+  → Approval stored in RelationalMemory (one-time)
+  → checks.py functions mounted onto target ToolDefinitions
+  → Every run_bash call now passes through PREPARED gate checks
+
+load_skill("loom_engineer")
+  → Previous skill's checks auto-unmounted (no cross-skill contamination)
+  → loom_engineer's own checks mounted instead
+```
+
+Checks are evaluated at the `PREPARED` stage of the [Action Lifecycle](#action-lifecycle) — after authorization but before execution. All checks must pass; any failure aborts the tool call with zero side effects.
+
+**Built-in skill checks:**
+
+| Skill | Check | Protects against |
+|-------|-------|-----------------|
+| `loom_engineer` | `require_git_repo` | Running git commands outside a repository |
+| `loom_engineer` | `reject_force_push` | Accidental `git push --force` |
+| `systematic_code_analyst` | `reject_write_operations` | Analysis skill writing files |
+| `meta-skill-engineer` | `require_skills_dir_target` | Skill engineer modifying framework code |
+| `security_assessment` | `reject_destructive_commands` | Destructive commands during security scans |
+| `security_assessment` | `reject_production_env` | Running scans in production |
+| `memory_hygiene` | `require_memory_backup` | Cleanup without backup |
+| `memory_hygiene` | `reject_direct_db_mutation` | Bypassing framework APIs with raw SQL |
 
 ---
 

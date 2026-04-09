@@ -1,6 +1,13 @@
 ---
 name: loom_engineer
 description: "Loom 框架的實作技能，覆蓋從 issue 分析到 PR 產出的完整實作迴圈。當使用者要求「幫我修這個 issue」、「這個 PR 要怎麼 review」、「幫我寫一個功能」、「debug 這個問題」時使用。是 systematic_code_analyst 的下游：分析完成後的實作、驗證與產出由本技能負責。"
+precondition_checks:
+  - ref: checks.require_git_repo
+    applies_to: [run_bash, write_file]
+    description: "必須在 git repository 內操作"
+  - ref: checks.reject_force_push
+    applies_to: [run_bash]
+    description: "禁止 git push --force，防止歷史被覆寫"
 ---
 
 # Loom Engineer

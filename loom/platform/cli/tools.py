@@ -24,8 +24,14 @@ import httpx
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 
+import logging
+
+_log = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from loom.core.memory.procedural import ProceduralMemory
+    from collections.abc import Callable
+    from loom.core.harness.skill_checks import SkillCheckManager
+    from loom.core.memory.procedural import ProceduralMemory, SkillGenome
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
@@ -655,6 +661,9 @@ def make_load_skill_tool(
     outcome_tracker: "SkillOutcomeTracker | None" = None,
     semantic: "SemanticMemory | None" = None,
     turn_index_fn: "Callable[[], int] | None" = None,
+    skill_check_manager: "SkillCheckManager | None" = None,
+    relational: "RelationalMemory | None" = None,
+    confirm_fn: "Callable | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -664,6 +673,7 @@ def make_load_skill_tool(
     - Lists bundled resources (scripts/, references/, assets/)
     - Attaches evolution hints if available
     - Deduplicates: returns a short note on second activation in same session
+    - Issue #64 Phase B: mounts skill-declared precondition checks
     """
     from loom.core.memory.procedural import ProceduralMemory  # type: ignore[attr-defined]
 
@@ -673,6 +683,7 @@ def make_load_skill_tool(
 
     async def _load_skill(call: ToolCall) -> ToolResult:
         name = call.args.get("name", "").strip()
+        keep_existing = call.args.get("keep_existing", False)
         if not name:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -743,6 +754,18 @@ def make_load_skill_tool(
                 lines.append(f"  <file>{res}</file>")
             lines.append("</skill_resources>")
 
+        # Issue #64 Phase B: mount skill-declared precondition checks
+        checks_summary = await _mount_skill_checks(
+            name, skill, skill_dir, skill_check_manager, relational,
+            keep_existing=keep_existing,
+        )
+        if checks_summary:
+            lines.append("")
+            lines.append("<mounted_precondition_checks>")
+            for desc in checks_summary:
+                lines.append(f"  {desc}")
+            lines.append("</mounted_precondition_checks>")
+
         lines.append("</skill_content>")
 
         output = "\n".join(lines)
@@ -759,6 +782,81 @@ def make_load_skill_tool(
             metadata={"skill_name": name, "skill_confidence": skill.confidence},
         )
 
+    async def _mount_skill_checks(
+        name: str,
+        skill: "SkillGenome",
+        skill_dir_str: str | None,
+        manager: "SkillCheckManager | None",
+        rel: "RelationalMemory | None",
+        keep_existing: bool = False,
+    ) -> list[str]:
+        """Resolve and mount precondition checks for a skill. Returns descriptions."""
+        if manager is None or not skill.precondition_check_refs:
+            return []
+
+        from loom.core.harness.skill_checks import SkillPreconditionRef, SkillCheckManager
+
+        refs = [SkillPreconditionRef.from_dict(d) for d in skill.precondition_check_refs]
+
+        # Approval gate: first-time approval via RelationalMemory
+        rel_key = f"skill_checks:{name}"
+        approved = False
+        if rel is not None:
+            entry = await rel.get(rel_key, "approved")
+            approved = entry is not None and entry.object == "true"
+
+        if not approved:
+            # Build a description of what the skill wants to mount
+            check_lines = []
+            for ref in refs:
+                tools_str = ", ".join(ref.applies_to)
+                check_lines.append(f"  {ref.ref} → [{tools_str}]: {ref.description}")
+            check_preview = "\n".join(check_lines)
+
+            if confirm_fn is not None:
+                # Use the platform-aware confirm callback (works on CLI, TUI, Discord)
+                from loom.core.harness.middleware import ToolCall as _ToolCall
+                from loom.core.harness.registry import TrustLevel
+                synthetic_call = _ToolCall(
+                    tool_name=f"load_skill({name})",
+                    args={"action": "mount_precondition_checks", "checks": check_preview},
+                    trust_level=TrustLevel.GUARDED,
+                    session_id="",
+                )
+                try:
+                    user_ok = await confirm_fn(synthetic_call)
+                except (EOFError, KeyboardInterrupt):
+                    user_ok = False
+            else:
+                user_ok = False
+
+            if not user_ok:
+                return []
+
+            # Persist approval
+            if rel is not None:
+                from loom.core.memory.relational import RelationalEntry
+                await rel.upsert(RelationalEntry(
+                    subject=rel_key,
+                    predicate="approved",
+                    object="true",
+                    source="user",
+                ))
+
+        # Resolve callables from skill directory
+        if not skill_dir_str:
+            return []
+
+        skill_dir_path = Path(skill_dir_str)
+        try:
+            callables = SkillCheckManager.resolve_all(skill_dir_path, refs)
+        except (FileNotFoundError, AttributeError, ImportError, ValueError) as exc:
+            _log.warning("Failed to resolve checks for skill %r: %s", name, exc)
+            return []
+
+        # Mount
+        return manager.mount(name, refs, callables, keep_existing=keep_existing)
+
     return ToolDefinition(
         name="load_skill",
         description=(
@@ -774,11 +872,79 @@ def make_load_skill_tool(
                     "type": "string",
                     "description": "Name of the skill to load (from <available_skills>)",
                 },
+                "keep_existing": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, keep the previous skill's precondition checks "
+                        "mounted alongside the new skill's. Default: false "
+                        "(auto-unmount previous skill's checks)."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["name"],
         },
         executor=_load_skill,
         tags=["skill", "memory", "activation"],
+        scope="memory",
+    )
+
+
+def make_unload_skill_tool(
+    skill_check_manager: "SkillCheckManager",
+) -> ToolDefinition:
+    """
+    Create a SAFE ``unload_skill`` tool for explicit skill check removal.
+
+    Issue #64 Phase B: allows the agent (or user) to manually unmount
+    a skill's precondition checks without loading a replacement skill.
+    """
+    async def _unload_skill(call: ToolCall) -> ToolResult:
+        name = call.args.get("name", "").strip()
+        if not name:
+            # No name → list currently mounted skills
+            mounted = skill_check_manager.mounted_skills()
+            if not mounted:
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=True,
+                    output="No skill precondition checks are currently mounted.",
+                )
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=f"Skills with mounted checks: {', '.join(mounted)}",
+            )
+
+        removed = skill_check_manager.unmount(name)
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=(
+                f"Unmounted {removed} precondition check(s) for skill '{name}'."
+                if removed > 0
+                else f"Skill '{name}' had no mounted precondition checks."
+            ),
+        )
+
+    return ToolDefinition(
+        name="unload_skill",
+        description=(
+            "Remove a skill's precondition checks from the tool pipeline. "
+            "Call with no name to list skills with mounted checks."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the skill to unload checks for",
+                },
+            },
+        },
+        executor=_unload_skill,
+        tags=["skill", "memory"],
         scope="memory",
     )
 

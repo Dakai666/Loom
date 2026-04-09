@@ -233,28 +233,29 @@ def _load_env(project_root: Path | None = None) -> dict[str, str]:
     return {}
 
 
-def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str]]:
+def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str], list[dict]]:
     """
     Parse YAML frontmatter from a SKILL.md file.
 
-    Returns (name, description, tags).  On parse failure returns empty strings.
+    Returns (name, description, tags, precondition_check_refs).
+    On parse failure returns empty strings/lists.
     Follows Agent Skills spec lenient validation: best-effort parsing.
     """
     if not raw.startswith("---"):
-        return "", "", []
+        return "", "", [], []
 
     parts = raw.split("---", 2)
     if len(parts) < 3:
-        return "", "", []
+        return "", "", [], []
 
     yaml_text = parts[1].strip()
     try:
         import yaml
         data = yaml.safe_load(yaml_text)
         if not isinstance(data, dict):
-            return "", "", []
+            return "", "", [], []
     except Exception:
-        return "", "", []
+        return "", "", [], []
 
     name = str(data.get("name", "")).strip()
     description = str(data.get("description", "")).strip()
@@ -264,7 +265,17 @@ def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str]]:
     elif not isinstance(tags, list):
         tags = []
 
-    return name, description, tags
+    # Issue #64 Phase B: skill-declared precondition checks
+    pc_refs = data.get("precondition_checks", [])
+    if not isinstance(pc_refs, list):
+        pc_refs = []
+    # Validate each entry has at minimum 'ref' and 'applies_to'
+    valid_refs: list[dict] = []
+    for entry in pc_refs:
+        if isinstance(entry, dict) and entry.get("ref") and entry.get("applies_to"):
+            valid_refs.append(entry)
+
+    return name, description, tags, valid_refs
 
 
 def build_router() -> LLMRouter:
@@ -450,6 +461,10 @@ class LoomSession:
         self._turn_index: int = 0  # increments once per completed stream_turn()
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
+        # Platform-swappable confirmation callback.  Defaults to CLI prompt.
+        # TUI replaces with InlineConfirmWidget; Discord replaces with button view.
+        # Used by BlastRadiusMiddleware AND skill check approval.
+        self._confirm_fn: "Callable[[ToolCall], Any] | None" = None  # set in start()
         # Issue #56: Skill outcome tracking
         self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
         self._mcp_clients: list[Any] = []
@@ -595,11 +610,31 @@ class LoomSession:
             self.workspace / "skills",
             Path.home() / ".loom" / "skills",
         ]
+
+        # Issue #64 Phase B: SkillCheckManager for dynamic precondition mounting
+        from loom.core.harness.skill_checks import SkillCheckManager
+        self._skill_check_manager = SkillCheckManager(self.registry)
+
+        # Platform-swappable confirm — defaults to CLI.  TUI/Discord replace
+        # this after start() via ``session._confirm_fn = <their_version>``.
+        # BlastRadiusMiddleware._confirm is also patched by TUI/Discord;
+        # skill check approval uses _confirm_fn so both paths stay in sync.
+        self._confirm_fn = self._confirm_tool_cli
+
         self.registry.register(make_load_skill_tool(
             self._procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
             semantic=self._semantic,
             turn_index_fn=lambda: self._turn_index,
+            skill_check_manager=self._skill_check_manager,
+            relational=self._relational,
+            confirm_fn=lambda call: self._confirm_fn(call),
+        ))
+
+        # Issue #64 Phase B: Register unload_skill tool
+        from loom.platform.cli.tools import make_unload_skill_tool
+        self.registry.register(make_unload_skill_tool(
+            self._skill_check_manager,
         ))
 
         # Register web tools (Phase 5D)
@@ -650,7 +685,7 @@ class LoomSession:
                 SchemaValidationMiddleware(registry=self.registry),
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
-                    confirm_fn=self._confirm_tool,
+                    confirm_fn=self._confirm_tool_cli,
                     exec_escape_fn=_exec_escape_fn,
                 ),
                 LifecycleGateMiddleware(registry=self.registry),
@@ -694,6 +729,9 @@ class LoomSession:
     async def stop(self) -> None:
         if self._db is None:
             return
+        # Issue #64: unmount all skill-declared checks before closing
+        if hasattr(self, "_skill_check_manager"):
+            self._skill_check_manager.unmount_all()
         # Grab the connection reference and immediately clear self._db so any
         # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
         db, self._db = self._db, None
@@ -1267,7 +1305,7 @@ class LoomSession:
                     continue
 
                 # Parse YAML frontmatter
-                name, description, tags = _parse_skill_frontmatter(raw)
+                name, description, tags, pc_refs = _parse_skill_frontmatter(raw)
                 if not name:
                     # Fallback: use directory name
                     name = skill_dir.name
@@ -1301,6 +1339,7 @@ class LoomSession:
                         usage_count=existing.usage_count if existing else 0,
                         success_rate=existing.success_rate if existing else 0.0,
                         tags=tags or (existing.tags if existing else []),
+                        precondition_check_refs=pc_refs,
                     )
                     await self._procedural.upsert(genome)
                     logger.debug("Auto-imported skill '%s' from %s", name, skill_md)
@@ -1651,7 +1690,8 @@ class LoomSession:
                 )
             )
 
-    async def _confirm_tool(self, call: ToolCall) -> bool:
+    async def _confirm_tool_cli(self, call: ToolCall) -> bool:
+        """CLI-specific confirmation prompt (stdin / Rich panel)."""
         # Stop any running spinner before printing the confirm panel so the
         # spinner animation doesn't overwrite the prompt input line.
         _CLEAR_LINE = "\r\033[K"  # ANSI: carriage-return + erase to end of line
