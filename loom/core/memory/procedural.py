@@ -10,6 +10,7 @@ Phase 2: skill evaluation and auto-deprecation will be wired in.
 
 import json
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
@@ -57,6 +58,12 @@ class SkillGenome:
             for backward compatibility but is no longer called by the core
             session loop.
         """
+        warnings.warn(
+            "SkillGenome.record_outcome() is deprecated; "
+            "use SkillOutcomeTracker quality-gradient assessment instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.usage_count += 1
         outcome = 1.0 if success else 0.0
         if self.usage_count == 1:

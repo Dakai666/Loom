@@ -125,6 +125,7 @@ class MemoryGovernor:
         self._episodic_ttl_days: int = cfg.get("episodic_ttl_days", 30)
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
         self._relational_decay_factor: float = cfg.get("relational_decay_factor", 1.5)
+        self._governance_log_write_warning_emitted = False
 
     # ------------------------------------------------------------------
     # 1. Governed upsert
@@ -456,7 +457,11 @@ class MemoryGovernor:
             )
             await self._db.commit()
         except Exception as exc:
-            logger.debug("Governance audit log write failed: %s", exc)
+            if not self._governance_log_write_warning_emitted:
+                logger.warning("Governance audit log write failed: %s", exc)
+                self._governance_log_write_warning_emitted = True
+            else:
+                logger.debug("Governance audit log write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
