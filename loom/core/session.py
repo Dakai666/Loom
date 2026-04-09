@@ -209,7 +209,7 @@ def _load_loom_config() -> dict:
     """Load loom.toml from cwd or the package root; return {} on miss."""
     candidates = [
         Path.cwd() / "loom.toml",
-        Path(__file__).parents[3] / "loom.toml",
+        Path(__file__).parents[2] / "loom.toml",
     ]
     for path in candidates:
         if path.exists():
@@ -222,7 +222,7 @@ def _load_env(project_root: Path | None = None) -> dict[str, str]:
     """Load .env from project root or current directory."""
     search = [
         Path.cwd() / ".env",
-        Path(__file__).parents[3] / ".env",
+        Path(__file__).parents[2] / ".env",
     ]
     if project_root:
         search.insert(0, project_root / ".env")

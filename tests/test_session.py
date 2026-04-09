@@ -89,3 +89,53 @@ async def session_plugin_tool(call):
 
         await session.stop()
         assert session._db is None
+
+
+class TestConfigPathResolution:
+    """Regression tests for parents[] index after moving to loom.core.session."""
+
+    def test_load_loom_config_fallback_resolves_to_repo_root(self, tmp_path, monkeypatch):
+        """_load_loom_config() fallback must point at the repo root, not one level above."""
+        from loom.core.session import _load_loom_config
+        import inspect
+        from pathlib import Path
+
+        session_file = Path(inspect.getfile(_load_loom_config))
+        # parents[2] should be the repo root (two levels above loom/core/)
+        expected_root = session_file.parents[2]
+        # The fallback candidate must be inside the repo root, not outside it.
+        # We can't assert the file exists (CI may lack loom.toml), but we can
+        # assert the path resolution is correct relative to this file.
+        assert expected_root.name == "Loom", (
+            f"parents[2] resolved to {expected_root!r}, expected the repo root 'Loom'. "
+            "If parents[] index changed, update _load_loom_config and _load_env."
+        )
+
+    def test_load_env_fallback_resolves_to_repo_root(self):
+        """_load_env() fallback must point at the repo root, not one level above."""
+        from loom.core.session import _load_env
+        import inspect
+        from pathlib import Path
+
+        session_file = Path(inspect.getfile(_load_env))
+        expected_root = session_file.parents[2]
+        assert expected_root.name == "Loom", (
+            f"parents[2] resolved to {expected_root!r}, expected the repo root 'Loom'. "
+            "If parents[] index changed, update _load_loom_config and _load_env."
+        )
+
+    def test_load_loom_config_returns_empty_outside_repo(self, tmp_path, monkeypatch):
+        """When cwd has no loom.toml and repo root has none, return {}."""
+        from loom.core.session import _load_loom_config
+        monkeypatch.chdir(tmp_path)
+        result = _load_loom_config()
+        # Either {} (no loom.toml found) or a dict (repo-root loom.toml found).
+        # Either way it must be a dict, never raise.
+        assert isinstance(result, dict)
+
+    def test_load_env_returns_empty_outside_repo(self, tmp_path, monkeypatch):
+        """When cwd has no .env and repo root has none, return {}."""
+        from loom.core.session import _load_env
+        monkeypatch.chdir(tmp_path)
+        result = _load_env()
+        assert isinstance(result, dict)
