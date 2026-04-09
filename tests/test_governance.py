@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, UTC
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -426,6 +427,39 @@ class TestGovernedUpsert:
         # Original should be preserved
         stored = await semantic.get("user:color")
         assert stored.value == "blue"
+
+    @pytest.mark.asyncio
+    async def test_log_governance_warns_once_then_debug(self, caplog):
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("audit write failed"))
+        db.commit = AsyncMock()
+
+        governor = MemoryGovernor(
+            semantic=MagicMock(),
+            procedural=MagicMock(),
+            relational=MagicMock(),
+            episodic=MagicMock(),
+            db=db,
+            config={},
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="loom.core.memory.governance"):
+            await governor._log_governance("governance:test", "note", {})
+            await governor._log_governance("governance:test", "note", {})
+
+        warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "Governance audit log write failed" in record.message
+        ]
+        debugs = [
+            record for record in caplog.records
+            if record.levelno == logging.DEBUG
+            and "Governance audit log write failed" in record.message
+        ]
+
+        assert len(warnings) == 1
+        assert len(debugs) == 1
 
 
 # ===========================================================================

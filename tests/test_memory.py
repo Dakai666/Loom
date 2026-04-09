@@ -8,6 +8,7 @@ Tests for the Memory Layer:
 """
 
 import asyncio
+import warnings
 import pytest
 import pytest_asyncio
 import tempfile
@@ -231,27 +232,40 @@ class TestSkillGenome:
 
     def test_record_outcome_increments_usage_count(self):
         skill = SkillGenome(name="s", body="x")
-        skill.record_outcome(True)
-        skill.record_outcome(False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            skill.record_outcome(True)
+            skill.record_outcome(False)
         assert skill.usage_count == 2
 
     def test_record_outcome_success_keeps_high_confidence(self):
         skill = SkillGenome(name="s", body="x", confidence=1.0, success_rate=1.0)
-        for _ in range(10):
-            skill.record_outcome(True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            for _ in range(10):
+                skill.record_outcome(True)
         assert skill.confidence > 0.9
 
     def test_record_outcome_failures_lower_confidence(self):
         skill = SkillGenome(name="s", body="x", confidence=1.0, success_rate=1.0)
-        for _ in range(30):
-            skill.record_outcome(False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            for _ in range(30):
+                skill.record_outcome(False)
         assert skill.confidence < 0.5
 
     def test_record_outcome_updates_timestamp(self):
         skill = SkillGenome(name="s", body="x")
         ts_before = skill.updated_at
-        skill.record_outcome(True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            skill.record_outcome(True)
         assert skill.updated_at >= ts_before
+
+    def test_record_outcome_emits_deprecation_warning(self):
+        skill = SkillGenome(name="s", body="x")
+        with pytest.warns(DeprecationWarning, match="record_outcome\\(\\) is deprecated"):
+            skill.record_outcome(True)
 
 
 class TestProceduralMemory:
