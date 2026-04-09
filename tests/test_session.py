@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -139,3 +141,52 @@ class TestConfigPathResolution:
         monkeypatch.chdir(tmp_path)
         result = _load_env()
         assert isinstance(result, dict)
+
+
+class TestParallelDispatch:
+    @pytest.mark.asyncio
+    async def test_dispatch_parallel_uses_current_task_graph_api_and_preserves_order(self):
+        from loom.core.session import LoomSession
+        from loom.core.harness.middleware import ToolResult
+
+        session = object.__new__(LoomSession)
+
+        async def fake_dispatch(name, args, call_id):
+            await asyncio.sleep(0.01 if name == "slow" else 0.0)
+            return ToolResult(
+                call_id=call_id,
+                tool_name=name,
+                success=True,
+                output=f"{name}:{args['value']}",
+            )
+
+        session._dispatch = fake_dispatch
+        tool_uses = [
+            SimpleNamespace(name="slow", args={"value": 1}, id="call-1"),
+            SimpleNamespace(name="fast", args={"value": 2}, id="call-2"),
+        ]
+
+        dispatched = await LoomSession._dispatch_parallel(session, tool_uses)
+
+        assert [tu.id for tu, _, _ in dispatched] == ["call-1", "call-2"]
+        assert [result.output for _, result, _ in dispatched] == ["slow:1", "fast:2"]
+        assert all(duration_ms >= 0 for _, _, duration_ms in dispatched)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_parallel_wraps_dispatch_exceptions_as_tool_results(self):
+        from loom.core.session import LoomSession
+
+        session = object.__new__(LoomSession)
+
+        async def fake_dispatch(name, args, call_id):
+            raise RuntimeError("boom")
+
+        session._dispatch = fake_dispatch
+        tool_uses = [SimpleNamespace(name="mcp_tool", args={}, id="call-1")]
+
+        dispatched = await LoomSession._dispatch_parallel(session, tool_uses)
+        _, result, _ = dispatched[0]
+
+        assert result.success is False
+        assert result.failure_type == "execution_error"
+        assert "Internal dispatch error: boom" in (result.error or "")

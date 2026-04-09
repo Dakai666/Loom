@@ -1687,44 +1687,47 @@ class LoomSession:
         graph = TaskGraph()
         node_ids: list[str] = []
         for tu in tool_uses:
-            node = graph.add_node(
-                task_id=tu.id,
-                name=tu.name,
-                payload={"name": tu.name, "args": tu.args, "id": tu.id},
+            node = graph.add(
+                tu.name,
+                metadata={"tool_use": tu},
             )
             node_ids.append(node.id)
 
-        scheduler = TaskScheduler(graph)
-
         async def _run_node(node) -> tuple:
-            payload = node.payload
+            tu = node.metadata["tool_use"]
             ts = time.monotonic()
-            result = await self._dispatch(payload["name"], payload["args"], payload["id"])
+            try:
+                result = await self._dispatch(tu.name, tu.args, tu.id)
+            except Exception as exc:
+                result = ToolResult(
+                    call_id=tu.id,
+                    tool_name=tu.name,
+                    success=False,
+                    error=f"Internal dispatch error: {exc}",
+                    failure_type="execution_error",
+                )
             duration_ms = (time.monotonic() - ts) * 1000
             return result, duration_ms
 
-        results_map: dict[str, tuple] = {}
-        async for batch in scheduler.iter_batches():
-            batch_tasks = [_run_node(node) for node in batch]
-            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-            for node, res in zip(batch, batch_results):
-                if isinstance(res, Exception):
-                    results_map[node.id] = (
-                        ToolResult(
-                            call_id=node.payload["id"],
-                            tool_name=node.payload["name"],
-                            success=False,
-                            error=str(res),
-                            failure_type="execution_error",
-                        ),
-                        0.0,
-                    )
-                else:
-                    results_map[node.id] = res
+        plan = graph.compile()
+        await TaskScheduler(executor=_run_node).run(plan)
 
-        timings = {nid: results_map.get(nid, (None, 0.0)) for nid in node_ids}
-        pairs = [(tu, graph.get_node(nid)) for tu, nid in zip(tool_uses, node_ids)]
-        return [(tu, timings[node.id][0], timings[node.id][1]) for tu, node in pairs]
+        ordered: list[tuple] = []
+        for tu, node_id in zip(tool_uses, node_ids):
+            node = graph.get(node_id)
+            if node is None or node.result is None:
+                result = ToolResult(
+                    call_id=tu.id,
+                    tool_name=tu.name,
+                    success=False,
+                    error="Internal dispatch error: parallel scheduler returned no result",
+                    failure_type="execution_error",
+                )
+                ordered.append((tu, result, 0.0))
+                continue
+            result, duration_ms = node.result
+            ordered.append((tu, result, duration_ms))
+        return ordered
 
     async def _refresh_memory_index(self) -> None:
         """
