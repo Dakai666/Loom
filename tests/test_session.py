@@ -31,9 +31,9 @@ class TestCoreSessionImport:
 class TestLoomSessionStartup:
     @pytest_asyncio.fixture
     async def session_module(self):
-        from loom.platform.cli import main as cli_main
+        from loom.core import session as core_session
 
-        return cli_main
+        return core_session
 
     async def test_start_wires_core_runtime_components(
         self,
@@ -50,7 +50,8 @@ class TestLoomSessionStartup:
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
-        monkeypatch.setattr(session_module.Confirm, "ask", lambda *args, **kwargs: True)
+        from rich.prompt import Confirm
+        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
 
         (workspace / "loom_tools.py").write_text(
             """

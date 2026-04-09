@@ -26,7 +26,7 @@ class TestParseSkillFrontmatter:
     """Test YAML frontmatter extraction from SKILL.md files."""
 
     def test_valid_frontmatter(self):
-        from loom.platform.cli.main import _parse_skill_frontmatter
+        from loom.core.session import _parse_skill_frontmatter
 
         raw = """---
 name: loom-engineer
@@ -43,7 +43,7 @@ Some body content here.
         assert isinstance(tags, list)
 
     def test_frontmatter_with_tags(self):
-        from loom.platform.cli.main import _parse_skill_frontmatter
+        from loom.core.session import _parse_skill_frontmatter
 
         raw = """---
 name: test-skill
@@ -59,14 +59,14 @@ Body.
         assert tags == ["coding", "testing"]
 
     def test_no_frontmatter(self):
-        from loom.platform.cli.main import _parse_skill_frontmatter
+        from loom.core.session import _parse_skill_frontmatter
 
         name, desc, tags = _parse_skill_frontmatter("# Just a markdown file")
         assert name == ""
         assert desc == ""
 
     def test_malformed_yaml(self):
-        from loom.platform.cli.main import _parse_skill_frontmatter
+        from loom.core.session import _parse_skill_frontmatter
 
         raw = """---
 name: broken
@@ -81,7 +81,7 @@ Body.
         assert isinstance(desc, str)
 
     def test_missing_description(self):
-        from loom.platform.cli.main import _parse_skill_frontmatter
+        from loom.core.session import _parse_skill_frontmatter
 
         raw = """---
 name: no-desc

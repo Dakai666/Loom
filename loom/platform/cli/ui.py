@@ -3,12 +3,8 @@ CLI UI components — Rich Live streaming + prompt_toolkit input.
 
 Event model
 -----------
-``stream_turn()`` yields a sequence of typed events:
-
-    TextChunk   — partial text from the LLM (stream in progress)
-    ToolBegin   — a tool call is about to execute
-    ToolEnd     — a tool call finished
-    TurnDone    — the full agent turn is complete (all tool loops resolved)
+``stream_turn()`` yields a sequence of typed events defined in
+``loom.core.events``.  They are re-exported here for backwards compatibility.
 
 Display strategy
 ----------------
@@ -23,7 +19,6 @@ Display strategy
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 from rich.markdown import Markdown
@@ -36,125 +31,22 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
-
 # ---------------------------------------------------------------------------
-# Chat event types
+# Chat event types — defined in loom.core.events, re-exported for compat
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class TextChunk:
-    """A fragment of streaming LLM text."""
-
-    text: str
-
-
-@dataclass
-class ToolBegin:
-    """The agent is about to call a tool."""
-
-    name: str
-    args: dict[str, Any]
-    call_id: str
-
-
-@dataclass
-class ToolEnd:
-    """A tool call finished."""
-
-    name: str
-    success: bool
-    output: str
-    duration_ms: float
-    call_id: str
-
-
-@dataclass
-class TurnPaused:
-    """
-    The agent turn has been paused — all current tool calls are done but the
-    loop is suspended, waiting for human input before continuing.
-
-    The consumer should prompt the user and then call either:
-        session.resume()         — continue the turn as-is
-        session.resume_with(msg) — inject a message and continue
-        session.cancel()         — abandon the rest of this turn
-    """
-    tool_count_so_far: int = 0
-
-
-@dataclass
-class CompressDone:
-    """Episodic memory was compressed to semantic facts mid-session."""
-    fact_count: int
-
-
-@dataclass
-class TurnDone:
-    """The complete agent turn (including all tool loops) is done."""
-
-    tool_count: int
-    input_tokens: int
-    output_tokens: int
-    elapsed_ms: float
-
-
-@dataclass
-class TurnDropped:
-    """The agent turn was dropped mid-stream due to an unexpected stop.
-
-    This happens when:
-    - The LLM API returns ``stop_reason`` that is neither ``end_turn`` nor
-      ``tool_use`` (e.g. ``max_tokens``, provider-specific error codes).
-    - The streaming response object is ``None`` (connection dropped before
-      any final message arrived).
-
-    ``stop_reason`` — the raw stop_reason string from the provider, or
-                      ``"stream_none"`` when response was None.
-    ``retry_count``  — how many automatic retries have already been attempted.
-    ``tool_count``   — number of tools called before the drop.
-    """
-
-    stop_reason: str
-    retry_count: int = 0
-    tool_count: int = 0
-    exhausted: bool = False
-
-
-@dataclass
-class ActionStateChange:
-    """An action transitioned to a new lifecycle state (Issue #42)."""
-    action_id: str
-    tool_name: str
-    call_id: str
-    old_state: str
-    new_state: str
-    reason: str | None = None
-
-
-@dataclass
-class ActionRolledBack:
-    """An action was rolled back after post-validation failure (Issue #42)."""
-    action_id: str
-    tool_name: str
-    call_id: str
-    rollback_success: bool
-    message: str = ""
-
-
-@dataclass
-class ThinkCollapsed:
-    """A <think>…</think> block closed during streaming.
-
-    Replaces the old ``TextChunk("▸ thinking…\\n")`` placeholder so each
-    platform can render reasoning content in its own style.
-
-    ``summary`` — first ~120 chars of the reasoning block, single line.
-    ``full``    — complete think content for the detail view.
-    """
-
-    summary: str
-    full: str
+from loom.core.events import (  # noqa: E402, F401
+    ActionRolledBack,
+    ActionStateChange,
+    CompressDone,
+    TextChunk,
+    ThinkCollapsed,
+    ToolBegin,
+    ToolEnd,
+    TurnDone,
+    TurnDropped,
+    TurnPaused,
+)
 
 
 # ---------------------------------------------------------------------------
