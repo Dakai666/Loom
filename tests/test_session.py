@@ -92,6 +92,52 @@ async def session_plugin_tool(call):
         await session.stop()
         assert session._db is None
 
+    async def test_start_loads_mcp_servers_into_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        session_module,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {"mcp": {"servers": [{"name": "minimax"}]}})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+        from rich.prompt import Confirm
+        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
+
+        fake_client = SimpleNamespace(_cfg=SimpleNamespace(name="minimax"))
+
+        async def fake_load_mcp_servers_into_session(config, session):
+            assert config["mcp"]["servers"][0]["name"] == "minimax"
+            assert session is not None
+            return [fake_client]
+
+        import loom.extensibility.mcp_client as mcp_client_module
+
+        monkeypatch.setattr(
+            mcp_client_module,
+            "load_mcp_servers_into_session",
+            fake_load_mcp_servers_into_session,
+        )
+
+        from loom.core.session import LoomSession
+
+        session = LoomSession(
+            model="gpt-test",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+        await session.start()
+
+        assert session._mcp_clients == [fake_client]
+
+        await session.stop()
+
 
 class TestConfigPathResolution:
     """Regression tests for parents[] index after moving to loom.core.session."""

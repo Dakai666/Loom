@@ -617,6 +617,21 @@ class LoomSession:
         # RelationalMemory; previously approved files load silently.
         await self._load_plugins()
 
+        # Issue #9: MCP client — import tools from external MCP servers
+        try:
+            from loom.extensibility.mcp_client import load_mcp_servers_into_session
+
+            self._mcp_clients = await load_mcp_servers_into_session(
+                _load_loom_config(), self,
+            )
+            if self._mcp_clients:
+                names = ", ".join(c._cfg.name for c in self._mcp_clients)
+                console.print(
+                    f"[dim]  MCP: {len(self._mcp_clients)} server(s) connected ({names})[/dim]"
+                )
+        except Exception as exc:
+            logger.warning("MCP servers failed to load: %s", exc)
+
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
         # Wire escape detector only when strict_sandbox is on — that's the
@@ -755,6 +770,13 @@ class LoomSession:
                         "%d skill evaluation(s) unfinished on shutdown",
                         len(still_pending),
                     )
+
+            for client in self._mcp_clients:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            self._mcp_clients = []
 
             try:
                 if db_ctx is not None:
