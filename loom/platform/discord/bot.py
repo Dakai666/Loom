@@ -74,7 +74,7 @@ from loom.platform.cli.ui import (
 from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
 
 if TYPE_CHECKING:
-    from loom.platform.cli.main import LoomSession
+    from loom.core.session import LoomSession
     from loom.core.harness.middleware import ToolCall
 
 
@@ -332,7 +332,7 @@ class LoomDiscordBot:
             pass  # never block on a save failure
 
     async def _start_session(self, thread_id: int) -> "LoomSession":
-        from loom.platform.cli.main import LoomSession
+        from loom.core.session import LoomSession
         from loom.core.harness.middleware import BlastRadiusMiddleware
 
         # Resume the previous session for this thread if one was recorded.

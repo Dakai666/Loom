@@ -481,6 +481,7 @@ class LoomSession:
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
         # Issue #56: Skill outcome tracking
         self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
+        self._mcp_clients: list[Any] = []
 
         # HITL pause/resume — stream_turn() checks _pause_requested at each
         # tool-batch boundary.  The consumer calls pause() / resume() / cancel().
