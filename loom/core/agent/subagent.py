@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
 
+from loom.core.harness.registry import ToolDefinition, ToolRegistry
+
 if TYPE_CHECKING:
-    from loom.core.harness.registry import ToolDefinition
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.procedural import ProceduralMemory
@@ -82,7 +83,6 @@ async def run_subagent(
     session_id = f"{parent_session_id}:{agent_id}"
 
     # ── Build filtered tool registry ─────────────────────────────────────────
-    from loom.core.harness.registry import ToolRegistry
     child_registry = ToolRegistry()
 
     for tool in tool_registry._tools.values():
@@ -103,18 +103,16 @@ async def run_subagent(
         _orig_executor = _orig_memorize.executor
 
         async def _tagged_memorize(call: ToolCall) -> ToolResult:
-            # Inject agent source into the call args context via a wrapped SemanticEntry
             result = await _orig_executor(call)
             # Re-tag: update the written entry's source to agent:<agent_id>
             key = call.args.get("key", "").strip()
             if key and result.success:
                 entry = await semantic.get(key)
-                if entry and entry.source == "agent":
+                if entry and entry.source == "memorize":
                     entry.source = f"agent:{agent_id}"
                     await semantic.upsert(entry)
             return result
 
-        from loom.core.harness.registry import ToolDefinition
         child_registry.register(ToolDefinition(
             name="memorize",
             description=_orig_memorize.description,
