@@ -1,6 +1,10 @@
 ---
 name: meta-skill-engineer
 description: "元技能工程師：系統化建立、評估、迭代改進 Loom 技能的技能。當使用者要求「建立一個新技能」、「改善現有技能」、「評估技能表現」、「跑技能對比測試」、「系統化迭代技能」時使用。本技能為 Skill Genome 提供評估閉環——Grader 的 pass/fail 分數直接寫入 SkillGenome.confidence，形成測試→記憶→演化的完整循環。"
+precondition_checks:
+  - ref: checks.require_skills_dir_target
+    applies_to: [write_file]
+    description: "只能寫入 skills/ 目錄，不可修改框架或使用者程式碼"
 ---
 
 # Meta Skill Engineer
@@ -52,7 +56,7 @@ description: "元技能工程師：系統化建立、評估、迭代改進 Loom 
 4. **能力邊界**：什麼情況下技能不應該被使用？
 5. **既有假設**：這個技能依賴 Loom 哪些現有工具？
 
-**產出：** 一段「技能意圖說明書」（不超過 200 字）
+**產出：** 一段「技能意圖說明書」（不超過 200 字），包含：風險面初步識別（這個技能可能造成什麼損害？）
 
 ---
 
@@ -68,6 +72,14 @@ description: "元技能工程師：系統化建立、評估、迭代改進 Loom 
 ---
 name: [skill-name]
 description: "[觸發描述]。當使用者要求[場景]時使用。"
+tags: [tag1, tag2, ...]
+precondition_checks:                          # ← 安全護欄（見下方說明）
+  - ref: checks.[function_name]
+    applies_to: [run_bash]                    # 目標工具名
+    description: "這個檢查做什麼"
+  - ref: checks.[another_function]
+    applies_to: [write_file]
+    description: "這個檢查做什麼"
 ---
 
 # [技能名稱]
@@ -121,7 +133,100 @@ description: "[觸發描述]。當使用者要求[場景]時使用。"
 - [這個技能的常見錯誤]
 ```
 
-**產出：** `skills/[skill-name]/SKILL.md`
+**產出：**
+- `skills/[skill-name]/SKILL.md`
+- `skills/[skill-name]/checks.py`（若有 precondition_checks）
+
+---
+
+## 階段 2.5：Precondition Checks 設計
+
+**目標：為技能建立框架層級的安全護欄**
+
+每個技能在執行工具時可能帶有風險。Precondition checks 是在工具真正執行前（PREPARED gate）由框架自動評估的 async 函式，全部通過才放行，任一失敗則 ABORT——不依賴 SKILL.md 文字紀律，而是用程式碼強制執行。
+
+### 設計流程
+
+1. **識別風險面** — 這個技能會用哪些工具？每個工具最壞情況能造成什麼？
+
+   | 風險模式 | 常見場景 | 典型護欄 |
+   |---------|---------|---------|
+   | 破壞性指令 | `run_bash` 執行 `rm -rf`、`DROP TABLE` | `reject_destructive_commands` |
+   | 環境錯誤 | 在生產環境跑測試工具 | `reject_production_env` |
+   | 越界寫入 | 技能修改了不該碰的檔案 | `require_skills_dir_target` |
+   | 資料遺失 | 清理操作前無備份 | `require_memory_backup` |
+   | 唯讀違反 | 分析型技能不應寫檔 | `reject_write_operations` |
+
+2. **定義檢查函式** — 在 `skills/[name]/checks.py` 中實作：
+
+   ```python
+   # skills/my-skill/checks.py
+   async def my_precondition(call) -> bool:
+       """Return True to allow, False to block."""
+       cmd = call.args.get("command", "")
+       # 你的檢查邏輯
+       return True
+   ```
+
+   **函式簽名規則：**
+   - 參數：`call`（ToolCall mock，通過 `call.args` 取得工具參數）
+   - 回傳：`bool`（True = 放行，False = 阻擋）
+   - 必須是 `async def`
+   - 不可有副作用（不寫檔、不改狀態）
+
+3. **宣告到 frontmatter** — 在 SKILL.md 的 YAML 區塊中引用：
+
+   ```yaml
+   precondition_checks:
+     - ref: checks.my_precondition
+       applies_to: [run_bash]
+       description: "說明這個檢查在做什麼"
+   ```
+
+   - `ref`：`checks.` 前綴 + 函式名（對應 `checks.py` 中的函式）
+   - `applies_to`：要掛載到哪些工具（`run_bash`、`write_file` 等）
+   - `description`：給使用者看的說明（首次載入時會顯示）
+
+4. **寫測試** — 在 `tests/test_skill_preconditions.py` 中驗證：
+
+   ```python
+   async def test_my_check_blocks_dangerous():
+       from skills.my_skill.checks import my_precondition
+       call = _make_call(command="dangerous command")
+       assert await my_precondition(call) is False
+
+   async def test_my_check_allows_safe():
+       from skills.my_skill.checks import my_precondition
+       call = _make_call(command="safe command")
+       assert await my_precondition(call) is True
+   ```
+
+### 判斷是否需要 Precondition Checks
+
+- **需要**：技能使用 `run_bash`（幾乎所有技能都應該有）、技能修改檔案但有邊界限制、技能操作敏感資源
+- **不需要**：純對話型技能（不使用任何工具）、只用 `read_file` + `recall` 的純查詢技能
+
+### 現有技能的 Checks 參考
+
+| 技能 | Checks | 對應工具 | 設計理由 |
+|------|--------|---------|---------|
+| `loom_engineer` | `require_git_repo`, `reject_force_push` | `run_bash`, `write_file` | 工程技能必須在 git repo 中操作，禁止 force push |
+| `systematic_code_analyst` | `reject_write_operations` | `write_file` | 分析技能是唯讀的，絕不寫檔 |
+| `meta-skill-engineer` | `require_skills_dir_target` | `write_file` | 只能修改 skills/ 目錄，不碰框架程式碼 |
+| `security_assessment` | `reject_destructive_commands`, `reject_production_env` | `run_bash` | 資安掃描不可破壞、不可在生產環境 |
+| `memory_hygiene` | `require_memory_backup`, `reject_direct_db_mutation` | `run_bash` | 清理前必須有備份、禁止直接 SQL 修改 |
+
+### 執行時機（框架行為）
+
+```
+load_skill("my-skill")
+  → 讀取 SkillGenome.precondition_check_refs
+  → 首次載入：顯示確認面板，列出所有 checks → 使用者批准
+  → 批准後：resolve checks.py → mount 到目標 ToolDefinition
+  → 卸載時機：load 另一個 skill 時自動卸載（除非 keep_existing=true）
+```
+
+**產出：** `skills/[skill-name]/checks.py` + SKILL.md frontmatter 更新
 
 ---
 
@@ -366,7 +471,8 @@ context: {output_a_path, output_b_path, eval_prompt, expectations}
 Loom（使用本技能）：
   → 階段 1：意圖確認（5 個問題）
   → 階段 2：生成 SKILL.md
-  → 階段 3：建立 5 個測試案例
+  → 階段 2.5：設計 precondition checks（識別風險面 → 寫 checks.py → 宣告 frontmatter）
+  → 階段 3：建立 5 個測試案例（含 checks 單元測試）
   → 階段 4：Grader 評估
   → 階段 7：SkillGenome 寫入 + 重寫 → 完成
 ```
@@ -427,3 +533,5 @@ loom review {skill-name}
 - **Comparator 永遠不能知道誰是 A/B** — 揭盲之前的偏見是最難發現的
 - **Grader 要批判測試本身** — 通過了弱 assertion 比失敗更危險
 - **每次 Grader 後必須寫 SkillGenome** — 否則數據就散了，閉環就斷了
+- **用 `run_bash` 的技能必須有 checks** — SKILL.md 的文字紀律是給 LLM 看的，precondition_checks 是給框架執行的；兩者缺一不可
+- **checks 不可有副作用** — 純判斷、純回傳 bool，不寫檔、不改狀態、不發請求

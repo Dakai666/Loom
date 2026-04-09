@@ -360,6 +360,8 @@ class LoomDiscordBot:
             if isinstance(mw, BlastRadiusMiddleware):
                 mw._confirm = confirm_fn
                 break
+        # Also patch skill check approval so it uses Discord confirm buttons
+        session._confirm_fn = confirm_fn
 
         self._sessions[thread_id] = session
         return session
