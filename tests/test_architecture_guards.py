@@ -37,8 +37,11 @@ FORBIDDEN_PATTERNS: list[tuple[str, str]] = [
 # Deliberate exceptions: (source_file_stem_or_module, imported_module_prefix)
 # Add entries here when a cross-boundary import is intentional and reviewed.
 ALLOWED_EXCEPTIONS: list[tuple[str, str]] = [
-    # Example:
-    # ("loom.core.some_module", "loom.platform.cli"),
+    # loom.core.session registers default tools from loom.platform.cli.tools via
+    # lazy imports inside __init__ and start().  This is a known transitional
+    # coupling: those tool factories belong in loom.core.tools and will be
+    # migrated in a follow-up (issue #69).
+    ("loom.core.session", "loom.platform.cli.tools"),
 ]
 
 
