@@ -30,6 +30,8 @@ packages = ["loom"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+norecursedirs = ["tmp", ".git", ".venv", "venv", "build", "dist"]
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-asyncio>=1.0"]

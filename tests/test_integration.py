@@ -15,6 +15,7 @@ These tests do NOT call the real Anthropic API.  They exercise:
 
 import asyncio
 import os
+import sys
 import pytest
 import pytest_asyncio
 import tempfile
@@ -230,8 +231,8 @@ class TestBuiltinTools:
 
     @pytest.mark.asyncio
     async def test_run_bash_timeout(self):
-        # Use python -c so the sleep command works on Windows (cmd.exe has no sleep)
-        call = make_call("run_bash", args={"command": 'python -c "import time; time.sleep(10)"', "timeout": 1})
+        command = f'"{sys.executable}" -c "import time; time.sleep(10)"'
+        call = make_call("run_bash", args={"command": command, "timeout": 1})
         result = await _run_bash(call)
         assert result.success is False
         assert "timed out" in result.error.lower()

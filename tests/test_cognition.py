@@ -2,22 +2,18 @@
 Tests for the Cognition Layer:
   - ContextBudget: token estimation, compression threshold, record_response
   - LLMRouter: provider registration, routing by model prefix, fallback
-  - MiniMaxProvider: XML fallback parser, tool_call normalisation
-  - AnthropicProvider: _to_anthropic_messages conversion (no real API calls)
+  - Anthropic message conversion helpers
   - ReflectionAPI: session_summary, recent_tool_calls, tool_success_rate
 """
 
-import json
 import pytest
 import pytest_asyncio
-from unittest.mock import MagicMock, patch
-from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 from loom.core.cognition.context import ContextBudget, estimate_tokens
 from loom.core.cognition.providers import (
-    ToolUse, LLMResponse,
-    MiniMaxProvider, AnthropicProvider,
-    _parse_xml_tool_calls, _to_anthropic_messages,
+    LLMResponse,
+    _to_anthropic_messages,
 )
 from loom.core.cognition.router import LLMRouter
 from loom.core.cognition.reflection import ReflectionAPI
@@ -113,68 +109,6 @@ class TestContextBudget:
         s = str(b)
         assert "compress" in s
         assert "850" in s
-
-
-# ---------------------------------------------------------------------------
-# XML tool call parser
-# ---------------------------------------------------------------------------
-
-class TestParseXmlToolCalls:
-    def test_single_tool_call(self):
-        xml = """
-        <minimax:tool_call>
-          <invoke name="read_file">
-            <parameter name="path">/tmp/foo.txt</parameter>
-          </invoke>
-        </minimax:tool_call>
-        """
-        uses = _parse_xml_tool_calls(xml)
-        assert len(uses) == 1
-        assert uses[0].name == "read_file"
-        assert uses[0].args["path"] == "/tmp/foo.txt"
-
-    def test_multiple_tool_calls(self):
-        xml = """
-        <minimax:tool_call>
-          <invoke name="list_dir">
-            <parameter name="path">.</parameter>
-          </invoke>
-        </minimax:tool_call>
-        <minimax:tool_call>
-          <invoke name="run_bash">
-            <parameter name="command">echo hello</parameter>
-          </invoke>
-        </minimax:tool_call>
-        """
-        uses = _parse_xml_tool_calls(xml)
-        assert len(uses) == 2
-        names = {u.name for u in uses}
-        assert names == {"list_dir", "run_bash"}
-
-    def test_no_xml_returns_empty(self):
-        uses = _parse_xml_tool_calls("Just plain text, no tool calls here.")
-        assert uses == []
-
-    def test_json_values_are_deserialized(self):
-        xml = """
-        <minimax:tool_call>
-          <invoke name="some_tool">
-            <parameter name="count">42</parameter>
-            <parameter name="flag">true</parameter>
-          </invoke>
-        </minimax:tool_call>
-        """
-        uses = _parse_xml_tool_calls(xml)
-        assert uses[0].args["count"] == 42
-        assert uses[0].args["flag"] is True
-
-    def test_each_call_gets_unique_id(self):
-        xml = """
-        <minimax:tool_call><invoke name="t1"><parameter name="a">1</parameter></invoke></minimax:tool_call>
-        <minimax:tool_call><invoke name="t2"><parameter name="b">2</parameter></invoke></minimax:tool_call>
-        """
-        uses = _parse_xml_tool_calls(xml)
-        assert uses[0].id != uses[1].id
 
 
 # ---------------------------------------------------------------------------

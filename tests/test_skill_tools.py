@@ -373,17 +373,23 @@ class TestMaybeEvaluateTrigger:
         tracker.record_activation("test-skill", 1)
         tracker.record_tool_usage()
 
-        # Mock router to verify LLM call is scheduled
-        mock_router = MagicMock()
-        mock_router.chat = AsyncMock()
+        scheduled = asyncio.Event()
+
+        async def fake_evaluate(*args, **kwargs):
+            scheduled.set()
+            return None
+
+        tracker._evaluate_skill = AsyncMock(side_effect=fake_evaluate)
 
         # maybe_evaluate should schedule a task (not raise)
         tracker.maybe_evaluate(
-            router=mock_router,
+            router=MagicMock(),
             model="test-model",
             turn_index=1,
             turn_summary="Completed the test task.",
         )
+        await asyncio.wait_for(scheduled.wait(), timeout=1)
+        tracker._evaluate_skill.assert_awaited_once()
         # After evaluation, the skill should be removed from activated
         assert "test-skill" not in tracker._activated
 
@@ -565,16 +571,24 @@ class TestRecordActivationTurnIndex:
         tracker.record_activation("skill-a", 3)
         tracker.record_activation("skill-b", 5)
 
-        # maybe_evaluate at turn 4 should only pick up skill-a
-        mock_router = MagicMock()
-        mock_router.chat = AsyncMock()
+        scheduled = asyncio.Event()
 
+        async def fake_evaluate(*args, **kwargs):
+            scheduled.set()
+            return None
+
+        tracker._evaluate_skill = AsyncMock(side_effect=fake_evaluate)
+
+        # maybe_evaluate at turn 4 should only pick up skill-a
         tracker.maybe_evaluate(
-            router=mock_router,
+            router=MagicMock(),
             model="test",
             turn_index=4,
             turn_summary="Turn 4 summary.",
         )
+        await asyncio.wait_for(scheduled.wait(), timeout=1)
+        tracker._evaluate_skill.assert_awaited_once()
+        assert tracker._evaluate_skill.await_args.args[2] == "skill-a"
         # skill-a should be consumed, skill-b still pending
         assert "skill-a" not in tracker._activated
         assert "skill-b" in tracker._activated
@@ -614,4 +628,3 @@ class TestCheckAllSkillsSequential:
         assert count == 1
         # Verify semantic.upsert was called (evolution hint written)
         assert mock_semantic.upsert.called
-
