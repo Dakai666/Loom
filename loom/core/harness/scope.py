@@ -171,21 +171,37 @@ class ScopeMatcher(Protocol):
     def covers(self, grant: _HasScopeFields, requirement: _HasScopeFields) -> bool: ...
 
 
+def _normalize_path(selector: str) -> PurePosixPath:
+    """
+    Collapse ``..`` and ``.`` segments from a path selector.
+
+    ``PurePosixPath`` preserves ``..`` literally, so
+    ``/workspace/doc/../../etc/passwd`` would incorrectly appear to be
+    under ``/workspace/doc/``.  We use ``os.path.normpath`` (which
+    resolves ``..`` lexically without hitting the filesystem) and then
+    wrap the result back in ``PurePosixPath``.
+    """
+    import os.path
+    return PurePosixPath(os.path.normpath(selector))
+
+
 class PathMatcher:
     """
     Path-prefix containment matcher.
 
     A grant with selector="/workspace/doc/" covers any requirement
-    whose selector starts with that prefix (using PurePosixPath
-    is_relative_to for correctness).
+    whose selector starts with that prefix.
+
+    Security: both paths are normalized via ``_normalize_path`` before
+    comparison so that ``..`` traversal cannot escape the grant prefix.
     """
     def covers(self, grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
         if grant.action != requirement.action:
             return False
         try:
-            return PurePosixPath(requirement.selector).is_relative_to(
-                PurePosixPath(grant.selector)
-            )
+            req_path = _normalize_path(requirement.selector)
+            grant_path = _normalize_path(grant.selector)
+            return req_path.is_relative_to(grant_path)
         except (TypeError, ValueError):
             return False
 
@@ -276,12 +292,38 @@ def get_matcher(resource: str) -> ScopeMatcher:
     return _MATCHERS.get(resource, NetworkMatcher())  # NetworkMatcher does exact match
 
 
+def _check_consumable_constraints(grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
+    """
+    Verify consumable constraints on the grant are not exhausted.
+
+    Returns True if the grant still has sufficient budget/calls.
+    Called *after* the resource-type matcher confirms structural coverage.
+
+    Checked keys:
+    - ``remaining_budget``: must be >= requirement's ``spawn_count`` (default 1).
+    - ``max_calls``: must be >= 1 (each call consumes exactly 1).
+    """
+    for key in ("remaining_budget", "max_calls"):
+        limit = grant.constraints.get(key)
+        if limit is None or not isinstance(limit, (int, float)):
+            continue
+        if key == "remaining_budget":
+            needed = requirement.constraints.get("spawn_count", 1)
+        else:
+            needed = 1
+        if limit < needed:
+            return False
+    return True
+
+
 def covers(grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
     """Top-level convenience: does this grant cover this requirement?"""
     if grant.resource != requirement.resource:
         return False
     matcher = get_matcher(grant.resource)
-    return matcher.covers(grant, requirement)
+    if not matcher.covers(grant, requirement):
+        return False
+    return _check_consumable_constraints(grant, requirement)
 
 
 # ---------------------------------------------------------------------------

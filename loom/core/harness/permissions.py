@@ -203,16 +203,39 @@ class PermissionContext:
         return effective
 
     def _consume_budgets(self, request: ScopeRequest) -> None:
-        """Decrement consumable budgets for covered requirements."""
+        """
+        Decrement consumable budgets for covered requirements.
+
+        Must only be called after ``evaluate()`` has confirmed full
+        coverage — this method matches against *effective* grants
+        (with already-consumed budgets subtracted) so that a depleted
+        grant is never double-matched.
+
+        Consumption units per constraint key:
+        - ``remaining_budget``: consumes ``req.constraints["spawn_count"]``
+          (defaults to 1) — tracks agent spawn permits.
+        - ``max_calls``: always consumes 1 per matched requirement —
+          tracks call-count limits (network, exec, etc.).
+        """
         from .scope import covers as scope_covers
 
+        effective = self._effective_grants()
+
         for req in request.requirements:
-            for i, g in enumerate(self.grants):
-                if not scope_covers(g, req):
+            for i, eff_g in enumerate(effective):
+                if not scope_covers(eff_g, req):
                     continue
-                # Find consumable constraints to decrement
+                # Determine consumption amount per constraint key
                 for key in ("remaining_budget", "max_calls"):
-                    if key in g.constraints and isinstance(g.constraints[key], (int, float)):
-                        usage = self._usage.setdefault(i, {})
-                        usage[key] = usage.get(key, 0) + req.constraints.get("spawn_count", 1)
+                    if key not in self.grants[i].constraints:
+                        continue
+                    if not isinstance(self.grants[i].constraints[key], (int, float)):
+                        continue
+                    if key == "remaining_budget":
+                        amount = req.constraints.get("spawn_count", 1)
+                    else:
+                        # max_calls: each matched requirement consumes 1
+                        amount = 1
+                    usage = self._usage.setdefault(i, {})
+                    usage[key] = usage.get(key, 0) + amount
                 break  # Only consume from the first matching grant

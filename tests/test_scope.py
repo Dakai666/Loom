@@ -523,3 +523,106 @@ class TestToolDefinitionScopeFields:
         )
         assert td.scope_descriptions == ["writes under workspace path"]
         assert td.scope_resolver is my_resolver
+
+
+# =====================================================================
+# 15. PathMatcher — traversal defence (Review #3)
+# =====================================================================
+
+class TestPathMatcherTraversal:
+    matcher = PathMatcher()
+
+    def test_dotdot_escape_rejected(self):
+        """../.. should not escape the grant prefix."""
+        g = _grant("path", "write", "/workspace/doc/")
+        r = _req("path", "write", "/workspace/doc/../../etc/passwd")
+        assert not self.matcher.covers(g, r)
+
+    def test_single_dotdot_escape_rejected(self):
+        g = _grant("path", "write", "/workspace/doc/")
+        r = _req("path", "write", "/workspace/doc/../secrets/key")
+        assert not self.matcher.covers(g, r)
+
+    def test_dotdot_that_stays_inside_grant(self):
+        """../sub resolving back under the grant should still be covered."""
+        g = _grant("path", "write", "/workspace/doc/")
+        r = _req("path", "write", "/workspace/doc/sub/../sub/file.md")
+        assert self.matcher.covers(g, r)
+
+    def test_grant_with_trailing_dotdot_normalized(self):
+        """Grant selector with .. is normalized too."""
+        g = _grant("path", "write", "/workspace/doc/../doc/")
+        r = _req("path", "write", "/workspace/doc/file.md")
+        assert self.matcher.covers(g, r)
+
+    def test_dot_segments_ignored(self):
+        g = _grant("path", "write", "/workspace/doc/")
+        r = _req("path", "write", "/workspace/doc/./file.md")
+        assert self.matcher.covers(g, r)
+
+
+# =====================================================================
+# 16. _consume_budgets — effective grants & per-key amounts (Review #1, #2)
+# =====================================================================
+
+class TestConsumeBudgetsEffective:
+    """Verify _consume_budgets uses effective (budget-adjusted) grants."""
+
+    def test_depleted_budget_not_double_matched(self):
+        """
+        If grant has budget=2 and we consume 2, the 3rd evaluate must
+        return EXPAND_SCOPE (not ALLOW).  Prior to the fix, _consume_budgets
+        matched against raw grants (budget=2 forever) instead of effective.
+        """
+        ctx = _ctx_with_grants(
+            _grant("agent", "spawn", "default", remaining_budget=2),
+        )
+        req = _scope_request([
+            _req("agent", "spawn", "default", spawn_count=1),
+        ])
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.EXPAND_SCOPE
+
+    def test_spawn_count_two_consumes_two(self):
+        """spawn_count=2 should consume 2 from remaining_budget, not 1."""
+        ctx = _ctx_with_grants(
+            _grant("agent", "spawn", "default", remaining_budget=3),
+        )
+        req = _scope_request([
+            _req("agent", "spawn", "default", spawn_count=2),
+        ])
+        # First call: budget 3, consume 2 → remaining 1 → ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        # Second call: budget effective 1, need 2 → EXPAND_SCOPE
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.EXPAND_SCOPE
+
+
+class TestConsumeBudgetsMaxCalls:
+    """Verify max_calls consumes 1 per requirement, not spawn_count."""
+
+    def test_max_calls_consumes_one_per_call(self):
+        ctx = _ctx_with_grants(
+            _grant("network", "connect", "api.openai.com", max_calls=2),
+        )
+        req = _scope_request([
+            _req("network", "connect", "api.openai.com"),
+        ])
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.EXPAND_SCOPE
+
+    def test_max_calls_ignores_spawn_count(self):
+        """Even if req has spawn_count, max_calls should consume 1."""
+        ctx = _ctx_with_grants(
+            _grant("network", "connect", "api.openai.com", max_calls=3),
+        )
+        # Requirement with spawn_count=5 (unusual but possible via malformed input)
+        req = _scope_request([
+            _req("network", "connect", "api.openai.com", spawn_count=5),
+        ])
+        # max_calls should consume 1, not 5
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.EXPAND_SCOPE
