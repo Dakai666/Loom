@@ -459,6 +459,7 @@ class LoomSession:
         self._session_log: SessionLog | None = None
         self._governor: MemoryGovernor | None = None  # Issue #43
         self._turn_index: int = 0  # increments once per completed stream_turn()
+        self._current_origin: str = "interactive"  # set per-turn by stream_turn()
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
         # Platform-swappable confirmation callback.  Defaults to CLI prompt.
@@ -834,6 +835,7 @@ class LoomSession:
         user_input: str,
         *,
         abort_signal: "asyncio.Event | None" = None,
+        origin: str = "interactive",
     ) -> AsyncIterator[
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ActionStateChange | ActionRolledBack
@@ -848,6 +850,8 @@ class LoomSession:
         ToolEnd     — just after a tool call finishes
         TurnDone    — once all tool loops are resolved
         """
+        self._current_origin = origin
+
         # Prepend current datetime so the LLM always has temporal context.
         # The UI shows the original user_input; the history gets the annotated version.
         now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
@@ -1568,6 +1572,7 @@ class LoomSession:
             capabilities=tool_def.capabilities,
             session_id=self.session_id,
             abort_signal=self._abort.signal,
+            origin=self._current_origin,
         )
         return await self._pipeline.execute(call, tool_def.executor)
 

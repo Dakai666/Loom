@@ -21,8 +21,6 @@ from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
-from loom.core.harness.middleware import BlastRadiusMiddleware
-from loom.core.harness.permissions import TrustLevel
 from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
@@ -100,27 +98,15 @@ class AutonomyDaemon:
 
         logger.info("[autonomy] trigger=%s — starting agent run", plan.trigger_name)
 
-        # For SAFE triggers, temporarily auto-approve GUARDED tool calls so the
-        # unattended agent can write files / run bash without an interactive prompt.
-        _blast_mw = None
-        _original_confirm = None
-        if plan.trust_level == TrustLevel.SAFE:
-            for mw in getattr(getattr(self._session, "_pipeline", None), "_middlewares", []):
-                if isinstance(mw, BlastRadiusMiddleware):
-                    _blast_mw = mw
-                    _original_confirm = mw._confirm
-                    async def _auto_approve(call):
-                        logger.info("[autonomy] auto-approving %s (safe trigger)", call.tool_name)
-                        return True
-                    mw._confirm = _auto_approve
-                    break
-
-        # Collect text output from stream_turn (the session's interactive loop).
-        # We run it as an async generator and pull TurnDone to confirm completion.
+        # Collect text output from stream_turn with origin="autonomy".
+        # BlastRadiusMiddleware will auto-deny any tool call that isn't
+        # covered by existing scope grants (no human to prompt).
         try:
             output_chunks: list[str] = []
             async for event in self._session.stream_turn(
-                plan.prompt, abort_signal=self._abort.signal
+                plan.prompt,
+                abort_signal=self._abort.signal,
+                origin="autonomy",
             ):
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
@@ -148,9 +134,6 @@ class AutonomyDaemon:
                 trigger_name=plan.trigger_name,
                 thread_id=plan.context.get("notify_thread_id", 0),
             ))
-        finally:
-            if _blast_mw is not None:
-                _blast_mw._confirm = _original_confirm
 
     # ------------------------------------------------------------------
     # Config loading

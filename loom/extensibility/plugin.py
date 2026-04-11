@@ -126,7 +126,7 @@ class PluginRegistry:
             # Middleware → prepend to pipeline (before TraceMiddleware)
             for mw in plugin.middleware():
                 if session._pipeline is not None:  # type: ignore[attr-defined]
-                    session._pipeline._chain.insert(0, mw)  # type: ignore[attr-defined]
+                    session._pipeline._middlewares.insert(0, mw)  # type: ignore[attr-defined]
 
             # Lenses → global LensRegistry (no per-session state needed)
             # (LensRegistry is stateless; plugins just add more lenses)
