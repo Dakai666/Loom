@@ -1708,10 +1708,19 @@ class LoomSession:
         scope_req: ScopeRequest | None = call.metadata.get("scope_request")
 
         if verdict is None or scope_req is None:
-            # Legacy path — no scope metadata available
+            # Legacy path — no scope metadata available.
+            # Format args with smart truncation so long paths remain readable.
+            arg_lines: list[str] = []
+            for k, v in call.args.items():
+                if isinstance(v, str):
+                    display = v if len(v) <= 120 else v[:40] + "…" + v[-40:]
+                    arg_lines.append(f"  [cyan]{k}[/cyan]: {display}")
+                else:
+                    arg_lines.append(f"  [cyan]{k}[/cyan]: {v!r}")
+            args_display = "\n".join(arg_lines) if arg_lines else "  (no args)"
             return (
                 f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
-                f"[dim]args: {call.args}[/dim]"
+                f"{args_display}"
             )
 
         # --- Verdict-aware header ---
@@ -1770,10 +1779,12 @@ class LoomSession:
 
         # Stop any running spinner before printing the confirm panel so the
         # spinner animation doesn't overwrite the prompt input line.
-        _CLEAR_LINE = "\r\033[K"  # ANSI: carriage-return + erase to end of line
+        # Write \r\033[K directly to stdout — Rich Console.print strips \r.
+        import sys
         if self._cancel_spinner_fn is not None:
             self._cancel_spinner_fn()
-            console.print(_CLEAR_LINE, end="")  # clear spinner line
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
         console.print()
 
         # Determine panel styling from verdict

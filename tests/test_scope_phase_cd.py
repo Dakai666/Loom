@@ -107,7 +107,8 @@ class TestFormatScopePanel:
         # No scope metadata → legacy format
         result = fmt(call)
         assert "write_file" in result
-        assert "args:" in result
+        assert "path" in result
+        assert "doc/test.md" in result
 
     def test_confirm_first_time(self):
         fmt = self._import_format()
