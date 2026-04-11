@@ -32,7 +32,7 @@ class ToolDefinition:
     `preconditions` — human-readable descriptions of required preconditions.
     `rollback_fn`   — async function to undo the tool's effect on failure.
     `post_validator` — async function to verify the tool's effect after execution.
-    `scope`         — impact scope classification for the tool.
+    `impact_scope`  — impact scope classification for the tool.
     """
     name: str
     description: str
@@ -58,7 +58,14 @@ class ToolDefinition:
     """
     rollback_fn: Callable[[ToolCall, ToolResult], Awaitable[ToolResult]] | None = None
     post_validator: Callable[[ToolCall, ToolResult], Awaitable[bool]] | None = None
-    scope: str = "general"
+    impact_scope: str = "general"
+    """
+    Impact scope classification for lifecycle audit (Issue #42).
+
+    Renamed from ``scope`` in Phase D (Issue #45) to avoid confusion with
+    the scope-aware permission fields (``scope_resolver``, ``scope_descriptions``).
+    Values: "filesystem", "shell", "network", "memory", "agent", "general".
+    """
 
     # --- Scope-aware permission (Issue #45 Phase A) ---
     scope_descriptions: list[str] = field(default_factory=list)

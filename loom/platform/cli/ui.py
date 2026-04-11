@@ -175,8 +175,8 @@ def response_panel(
     )
 
 
-# ASCII spinner frames (cp950 safe)
-_SPINNER_FRAMES = ["-", "\\", "|", "/"]
+# ASCII spinner frames (cp950 safe, Rich-markup safe — no backslash)
+_SPINNER_FRAMES = ["-", "~", "|", "+"]
 
 def tool_spinner_line(name: str, args: dict[str, Any], frame_index: int = 0) -> Text:
     """
@@ -241,6 +241,19 @@ def clear_line_escape() -> str:
     return "\r\033[K"
 
 
+def clear_line() -> None:
+    """
+    Write \\r\\033[K directly to stdout, bypassing Rich Console.
+
+    Rich's ``Console.print`` strips the \\r (carriage return), which
+    prevents the cursor from returning to column 0.  Writing directly
+    to ``sys.stdout`` preserves the full escape sequence.
+    """
+    import sys
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+
+
 def render_cursor() -> Text:
     """Return Rich Text with just the cursor."""
     return Text.from_markup(f"[bold yellow]{streaming_cursor()}[/bold yellow]")
@@ -275,15 +288,34 @@ def status_bar(
     )
 
 
-def _format_args(args: dict[str, Any]) -> str:
+def _smart_truncate(value: str, max_len: int = 80) -> str:
+    """
+    Truncate a string, preserving start and end for readability.
+
+    For path-like values (containing /), keeps the first component and
+    last components visible: ``/Users/…/cli/tools.py``.
+    For other strings, keeps the first ``max_len`` characters.
+    """
+    if len(value) <= max_len:
+        return value
+    # Path-like: keep leading prefix + trailing meaningful portion
+    if "/" in value or "\\" in value:
+        # Reserve space for "…" connector
+        head_budget = max_len // 3
+        tail_budget = max_len - head_budget - 1  # -1 for "…"
+        return value[:head_budget] + "…" + value[-tail_budget:]
+    return value[:max_len] + "…"
+
+
+def _format_args(args: dict[str, Any], max_value_len: int = 80) -> str:
     """Compact one-line preview of tool arguments."""
     if not args:
         return ""
     parts: list[str] = []
     for k, v in args.items():
         if isinstance(v, str):
-            snippet = v[:40].replace("\n", "↵")
-            parts.append(f'{k}="{snippet}{"…" if len(v) > 40 else ""}"')
+            snippet = _smart_truncate(v.replace("\n", "↵"), max_value_len)
+            parts.append(f'{k}="{snippet}"')
         elif isinstance(v, (dict, list)):
             parts.append(f"{k}={{…}}")
         else:

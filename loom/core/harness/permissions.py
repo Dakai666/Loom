@@ -92,9 +92,23 @@ class PermissionContext:
 
     def enable_exec_auto(self) -> None:
         self.exec_auto = True
+        # Phase D (Issue #45): inject a scope grant so scope-aware tools
+        # can auto-approve workspace-confined exec without the legacy path.
+        from .scope import ScopeGrant
+        import time as _time
+        self.grant(ScopeGrant(
+            resource="exec",
+            action="execute",
+            selector="workspace",
+            constraints={"absolute_paths": "deny"},
+            source="exec_auto",
+            granted_at=_time.time(),
+        ))
 
     def disable_exec_auto(self) -> None:
         self.exec_auto = False
+        # Phase D: revoke exec_auto grants
+        self.revoke_matching(lambda g: g.source == "exec_auto")
 
     def is_authorized(self, tool_name: str, trust_level: TrustLevel) -> bool:
         if trust_level == TrustLevel.SAFE:

@@ -1691,21 +1691,116 @@ class LoomSession:
                 )
             )
 
+    @staticmethod
+    def _format_scope_panel(call: ToolCall) -> str:
+        """
+        Build a Rich-formatted string describing scope verdict + diff.
+
+        Phase C (Issue #45): when scope metadata is available, the confirm
+        prompt shows structured information instead of raw args.
+        """
+        from loom.core.harness.scope import (
+            DiffReason, PermissionVerdict, ScopeDiff, ScopeRequest,
+        )
+
+        verdict = call.metadata.get("scope_verdict")
+        diff: ScopeDiff | None = call.metadata.get("scope_diff")
+        scope_req: ScopeRequest | None = call.metadata.get("scope_request")
+
+        if verdict is None or scope_req is None:
+            # Legacy path — no scope metadata available.
+            # Format args with smart truncation so long paths remain readable.
+            arg_lines: list[str] = []
+            for k, v in call.args.items():
+                if isinstance(v, str):
+                    display = v if len(v) <= 120 else v[:40] + "…" + v[-40:]
+                    arg_lines.append(f"  [cyan]{k}[/cyan]: {display}")
+                else:
+                    arg_lines.append(f"  [cyan]{k}[/cyan]: {v!r}")
+            args_display = "\n".join(arg_lines) if arg_lines else "  (no args)"
+            return (
+                f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
+                f"{args_display}"
+            )
+
+        # --- Verdict-aware header ---
+        _REASON_LABELS: dict[DiffReason, str] = {
+            DiffReason.FIRST_TIME: "First time accessing this resource",
+            DiffReason.SELECTOR_EXPANSION: "Expanding beyond previously approved scope",
+            DiffReason.CONSTRAINT_EXPANSION: "Exceeding previously approved limits",
+            DiffReason.RESOURCE_TYPE_NEW: "New resource type not previously authorized",
+        }
+
+        _VERDICT_TITLES: dict[PermissionVerdict, tuple[str, str]] = {
+            PermissionVerdict.CONFIRM: ("Tool requires confirmation", "yellow"),
+            PermissionVerdict.EXPAND_SCOPE: ("Scope expansion required", "red"),
+        }
+        title_text, border = _VERDICT_TITLES.get(
+            verdict, ("Tool requires confirmation", "yellow"),
+        )
+
+        lines: list[str] = [
+            f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}",
+        ]
+
+        # Scope summary: what the tool wants to access
+        for req in scope_req.requirements:
+            lines.append(
+                f"  [cyan]{req.resource}[/cyan]:{req.action} → "
+                f"[bold]{req.selector}[/bold]"
+            )
+            if req.constraints.get("scope_unknown"):
+                lines.append("  [yellow]⚠ scope could not be fully resolved[/yellow]")
+
+        # Diff reason
+        if diff is not None and not diff.is_fully_covered:
+            reason_label = _REASON_LABELS.get(diff.reason, str(diff.reason.value))
+            lines.append(f"\n[dim]{reason_label}[/dim]")
+
+            # Show what's already covered vs missing
+            if diff.covered:
+                covered_selectors = ", ".join(r.selector for r in diff.covered)
+                lines.append(f"[green]✓ covered:[/green] {covered_selectors}")
+            if diff.missing:
+                missing_selectors = ", ".join(r.selector for r in diff.missing)
+                lines.append(f"[yellow]● new:[/yellow] {missing_selectors}")
+
+        return "\n".join(lines)
+
     async def _confirm_tool_cli(self, call: ToolCall) -> bool:
-        """CLI-specific confirmation prompt (stdin / Rich panel)."""
+        """
+        CLI-specific confirmation prompt (stdin / Rich panel).
+
+        Phase C (Issue #45): when scope metadata is present in call.metadata,
+        the prompt shows verdict + diff info (resource, selector, expansion
+        reason) instead of raw args.
+        """
+        from loom.core.harness.scope import PermissionVerdict
+
         # Stop any running spinner before printing the confirm panel so the
         # spinner animation doesn't overwrite the prompt input line.
-        _CLEAR_LINE = "\r\033[K"  # ANSI: carriage-return + erase to end of line
+        # Write \r\033[K directly to stdout — Rich Console.print strips \r.
+        import sys
         if self._cancel_spinner_fn is not None:
             self._cancel_spinner_fn()
-            console.print(_CLEAR_LINE, end="")  # clear spinner line
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
         console.print()
+
+        # Determine panel styling from verdict
+        verdict = call.metadata.get("scope_verdict")
+        if verdict == PermissionVerdict.EXPAND_SCOPE:
+            title = "[red]⚠ Scope expansion required[/red]"
+            border_style = "red"
+        else:
+            title = "[yellow]  Tool requires confirmation[/yellow]"
+            border_style = "yellow"
+
         console.print(
             Panel(
-                f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
-                f"[dim]args: {call.args}[/dim]",
-                title="[yellow]  Tool requires confirmation[/yellow]",
-                border_style="yellow",
+                self._format_scope_panel(call),
+                title=title,
+                border_style=border_style,
             )
         )
         # Use prompt_toolkit so the prompt renders correctly on all terminals.
