@@ -3,11 +3,16 @@ Tool Registry — the single source of truth for what tools exist, their
 trust level, and their JSON schema in both Anthropic and OpenAI formats.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from .middleware import ToolCall, ToolResult
 from .permissions import ToolCapability, TrustLevel
+
+if TYPE_CHECKING:
+    from .scope import ScopeRequest
 
 
 @dataclass
@@ -54,6 +59,25 @@ class ToolDefinition:
     rollback_fn: Callable[[ToolCall, ToolResult], Awaitable[ToolResult]] | None = None
     post_validator: Callable[[ToolCall, ToolResult], Awaitable[bool]] | None = None
     scope: str = "general"
+
+    # --- Scope-aware permission (Issue #45 Phase A) ---
+    scope_descriptions: list[str] = field(default_factory=list)
+    """
+    Human-readable summaries of the tool's scope behavior.
+
+    Used for audit log, confirm prompt, and documentation.
+    Examples: "writes under requested workspace path",
+              "executes shell commands within workspace sandbox".
+    """
+
+    scope_resolver: Callable[[ToolCall], ScopeRequest] | None = None
+    """
+    Dynamic resolver that converts tool call arguments into a ScopeRequest.
+
+    When present, BlastRadiusMiddleware (Phase B) will use this to
+    perform scope-aware authorization instead of tool-name authorization.
+    When absent, the tool falls back to legacy tool-name authorization.
+    """
 
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Serialize to the format expected by the Anthropic messages API."""

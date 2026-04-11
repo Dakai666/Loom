@@ -23,6 +23,7 @@ import httpx
 
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
+from loom.core.harness.scope import ScopeRequirement, ScopeRequest
 
 import logging
 
@@ -108,6 +109,165 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
         # e.g. /etc/passwd → workspace/etc/passwd, C:\Windows → workspace\Windows
         parts = resolved.parts[1:]
         return (workspace / Path(*parts)).resolve()
+
+
+# ------------------------------------------------------------------
+# Scope resolvers (Issue #45 Phase B)
+#
+# Each resolver converts a ToolCall's arguments into a ScopeRequest
+# so BlastRadiusMiddleware can do resource-level authorization.
+#
+# Review note: resolvers MUST return canonical paths (no .., no .)
+# in ScopeRequirement.selector.  PathMatcher normalizes as safety net
+# but resolvers should do this at source for clean diff displays.
+# ------------------------------------------------------------------
+
+
+def _make_write_file_resolver(workspace: Path):
+    """Return a scope_resolver for write_file bound to *workspace*."""
+    import os.path
+
+    def _resolve(call: ToolCall) -> ScopeRequest:
+        raw = call.args.get("path", "")
+        p = Path(raw)
+        resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
+        # Canonical parent directory as selector
+        selector = os.path.normpath(str(resolved.parent))
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="path",
+                    action="write",
+                    selector=selector,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+        )
+    return _resolve
+
+
+def _make_run_bash_resolver(workspace: Path):
+    """
+    Return a scope_resolver for run_bash bound to *workspace*.
+
+    Limitations (documented in Phase A plan):
+    - Pipes, subshells, variable expansion → scope unknown → fallback to CONFIRM
+    - Only does token-level path extraction (aligned with exec_escape_fn)
+    """
+    import os.path
+
+    _SCOPE_UNKNOWN_PATTERNS = re.compile(r'[\|`]|\$\(|\$\{|\$[A-Za-z]|<<')
+
+    def _resolve(call: ToolCall) -> ScopeRequest:
+        command = call.args.get("command", "")
+
+        # If command contains patterns we can't analyze, mark scope unknown
+        if _SCOPE_UNKNOWN_PATTERNS.search(command):
+            return ScopeRequest(
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+                requirements=[
+                    ScopeRequirement(
+                        resource="exec",
+                        action="execute",
+                        selector="workspace",
+                        constraints={"scope_unknown": True},
+                        tool_name=call.tool_name,
+                        capabilities=call.capabilities,
+                    ),
+                ],
+                metadata={"scope_unknown": True},
+            )
+
+        # Check for absolute paths outside workspace
+        has_absolute = False
+        for token in re.findall(
+            r'(?:^|(?<=\s))[/\\][^\s;|&>\'\"]*|[A-Za-z]:[/\\][^\s;|&>\'\"]*',
+            command,
+        ):
+            try:
+                candidate = Path(token).resolve()
+                candidate.relative_to(workspace)
+            except (ValueError, Exception):
+                has_absolute = True
+                break
+
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="exec",
+                    action="execute",
+                    selector="workspace",
+                    constraints={"has_absolute_paths": has_absolute},
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+        )
+    return _resolve
+
+
+def _fetch_url_resolver(call: ToolCall) -> ScopeRequest:
+    """Scope resolver for fetch_url — extracts destination domain."""
+    from urllib.parse import urlparse
+    url = call.args.get("url", "").strip()
+    try:
+        domain = urlparse(url).netloc or url
+    except Exception:
+        domain = url
+    return ScopeRequest(
+        tool_name=call.tool_name,
+        capabilities=call.capabilities,
+        requirements=[
+            ScopeRequirement(
+                resource="network",
+                action="connect",
+                selector=domain,
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+        ],
+    )
+
+
+def _web_search_resolver(call: ToolCall) -> ScopeRequest:
+    """Scope resolver for web_search — destination is always Brave API."""
+    return ScopeRequest(
+        tool_name=call.tool_name,
+        capabilities=call.capabilities,
+        requirements=[
+            ScopeRequirement(
+                resource="network",
+                action="connect",
+                selector="api.search.brave.com",
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+        ],
+    )
+
+
+def _spawn_agent_resolver(call: ToolCall) -> ScopeRequest:
+    """Scope resolver for spawn_agent — tracks spawn budget."""
+    return ScopeRequest(
+        tool_name=call.tool_name,
+        capabilities=call.capabilities,
+        requirements=[
+            ScopeRequirement(
+                resource="agent",
+                action="spawn",
+                selector="default",
+                constraints={"spawn_count": 1},
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+        ],
+    )
 
 
 def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
@@ -234,6 +394,8 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             scope="filesystem",
             rollback_fn=_write_file_rollback,
             preconditions=["target directory must be writable"],
+            scope_descriptions=["writes under requested workspace path"],
+            scope_resolver=_make_write_file_resolver(workspace),
         ),
         ToolDefinition(
             name="list_dir",
@@ -351,6 +513,11 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
         executor=_run_bash,
         tags=["shell"],
         scope="shell",
+        scope_descriptions=[
+            "executes shell commands within workspace sandbox",
+            "scope unknown for pipes, subshells, or variable expansion",
+        ],
+        scope_resolver=_make_run_bash_resolver(workspace),
     )
 
 
@@ -1100,6 +1267,8 @@ def make_fetch_url_tool() -> ToolDefinition:
         executor=_fetch_url,
         tags=["web", "fetch"],
         scope="network",
+        scope_descriptions=["connects to the requested URL domain"],
+        scope_resolver=_fetch_url_resolver,
     )
 
 
@@ -1179,6 +1348,8 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
         executor=_web_search,
         tags=["web", "search"],
         scope="network",
+        scope_descriptions=["connects to Brave Search API"],
+        scope_resolver=_web_search_resolver,
     )
 
 
@@ -1272,6 +1443,8 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         executor=_spawn_agent,
         tags=["agent", "spawn"],
         scope="agent",
+        scope_descriptions=["spawns one sub-agent"],
+        scope_resolver=_spawn_agent_resolver,
     )
 
 
