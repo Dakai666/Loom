@@ -159,7 +159,7 @@ def _make_run_bash_resolver(workspace: Path):
     """
     import os.path
 
-    _SCOPE_UNKNOWN_PATTERNS = re.compile(r'[\|`]|\$\(|\$\{|\$[A-Za-z]|<<')
+    _SCOPE_UNKNOWN_PATTERNS = re.compile(r'[\|`]|\$\(|\$\{|\$[A-Za-z]|<<|&&|\|\|')
 
     def _resolve(call: ToolCall) -> ScopeRequest:
         command = call.args.get("command", "")
@@ -370,7 +370,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_read_file,
             tags=["filesystem", "read"],
-            scope="filesystem",
+            impact_scope="filesystem",
         ),
         ToolDefinition(
             name="write_file",
@@ -391,7 +391,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_write_file,
             tags=["filesystem", "write"],
-            scope="filesystem",
+            impact_scope="filesystem",
             rollback_fn=_write_file_rollback,
             preconditions=["target directory must be writable"],
             scope_descriptions=["writes under requested workspace path"],
@@ -414,7 +414,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             },
             executor=_list_dir,
             tags=["filesystem", "read"],
-            scope="filesystem",
+            impact_scope="filesystem",
         ),
     ]
 
@@ -512,7 +512,7 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
         },
         executor=_run_bash,
         tags=["shell"],
-        scope="shell",
+        impact_scope="shell",
         scope_descriptions=[
             "executes shell commands within workspace sandbox",
             "scope unknown for pipes, subshells, or variable expansion",
@@ -590,7 +590,7 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
         },
         executor=_recall,
         tags=["memory", "search", "recall"],
-        scope="memory",
+        impact_scope="memory",
     )
 
 
@@ -690,7 +690,7 @@ def make_memorize_tool(
         },
         executor=_memorize,
         tags=["memory", "write", "memorize"],
-        scope="memory",
+        impact_scope="memory",
         rollback_fn=_memorize_rollback,
     )
 
@@ -765,7 +765,7 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
         },
         executor=_relate,
         tags=["memory", "write", "relational"],
-        scope="memory",
+        impact_scope="memory",
         rollback_fn=_relate_rollback,
     )
 
@@ -814,7 +814,7 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
         },
         executor=_query_relations,
         tags=["memory", "search", "relational"],
-        scope="memory",
+        impact_scope="memory",
     )
 
 
@@ -1053,7 +1053,7 @@ def make_load_skill_tool(
         },
         executor=_load_skill,
         tags=["skill", "memory", "activation"],
-        scope="memory",
+        impact_scope="memory",
     )
 
 
@@ -1112,7 +1112,7 @@ def make_unload_skill_tool(
         },
         executor=_unload_skill,
         tags=["skill", "memory"],
-        scope="memory",
+        impact_scope="memory",
     )
 
 
@@ -1266,7 +1266,7 @@ def make_fetch_url_tool() -> ToolDefinition:
         },
         executor=_fetch_url,
         tags=["web", "fetch"],
-        scope="network",
+        impact_scope="network",
         scope_descriptions=["connects to the requested URL domain"],
         scope_resolver=_fetch_url_resolver,
     )
@@ -1347,7 +1347,7 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
         },
         executor=_web_search,
         tags=["web", "search"],
-        scope="network",
+        impact_scope="network",
         scope_descriptions=["connects to Brave Search API"],
         scope_resolver=_web_search_resolver,
     )
@@ -1442,7 +1442,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         },
         executor=_spawn_agent,
         tags=["agent", "spawn"],
-        scope="agent",
+        impact_scope="agent",
         scope_descriptions=["spawns one sub-agent"],
         scope_resolver=_spawn_agent_resolver,
     )

@@ -208,6 +208,12 @@ class BlastRadiusMiddleware(Middleware):
         """
         Return True if exec_auto mode can skip confirmation for this call.
 
+        .. deprecated:: Phase D (Issue #45)
+            ``enable_exec_auto()`` now injects a scope grant, so tools with
+            a ``scope_resolver`` are handled by the scope-aware path.  This
+            method only fires for legacy tools (no resolver) with EXEC
+            capability.  Remove once all EXEC tools have scope resolvers.
+
         Conditions (all must hold):
         1. User has toggled exec_auto on this session.
         2. The tool has EXEC capability (currently: run_bash).
@@ -249,17 +255,27 @@ class BlastRadiusMiddleware(Middleware):
         call.metadata["scope_diff"] = diff
         call.metadata["scope_verdict"] = verdict
 
+    # Informational constraint keys that should NOT be copied to grants.
+    # These describe the *request* but are not actionable authorization limits.
+    _INFORMATIONAL_CONSTRAINTS = frozenset({"scope_unknown", "has_absolute_paths"})
+
     def _request_to_grants(self, scope_request: Any, source: str = "manual_confirm") -> None:
         """Convert a scope request's requirements into grants on the PermissionContext."""
         from .scope import ScopeGrant
         import time
         now = time.time()
         for req in scope_request.requirements:
+            # Filter out informational constraints — only preserve actionable
+            # ones (remaining_budget, max_calls, etc.)
+            grant_constraints = {
+                k: v for k, v in req.constraints.items()
+                if k not in self._INFORMATIONAL_CONSTRAINTS
+            }
             self._perm.grant(ScopeGrant(
                 resource=req.resource,
                 action=req.action,
                 selector=req.selector,
-                constraints=req.constraints,
+                constraints=grant_constraints,
                 source=source,
                 granted_at=now,
             ))
@@ -665,7 +681,7 @@ class LifecycleMiddleware(Middleware):
         tool_def = self._registry.get(call.tool_name)
         intent = ActionIntent(
             intent_summary=f"{call.tool_name}({', '.join(f'{k}=...' for k in call.args)})",
-            scope=getattr(tool_def, "scope", "general") if tool_def else "general",
+            scope=getattr(tool_def, "impact_scope", "general") if tool_def else "general",
             preconditions=list(getattr(tool_def, "preconditions", [])) if tool_def else [],
         )
 
