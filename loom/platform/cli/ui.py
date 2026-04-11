@@ -175,8 +175,8 @@ def response_panel(
     )
 
 
-# ASCII spinner frames (cp950 safe)
-_SPINNER_FRAMES = ["-", "\\", "|", "/"]
+# ASCII spinner frames (cp950 safe, Rich-markup safe — no backslash)
+_SPINNER_FRAMES = ["-", "~", "|", "+"]
 
 def tool_spinner_line(name: str, args: dict[str, Any], frame_index: int = 0) -> Text:
     """
@@ -239,6 +239,19 @@ def streaming_cursor() -> str:
 def clear_line_escape() -> str:
     """Return ANSI escape to clear the current line."""
     return "\r\033[K"
+
+
+def clear_line() -> None:
+    """
+    Write \\r\\033[K directly to stdout, bypassing Rich Console.
+
+    Rich's ``Console.print`` strips the \\r (carriage return), which
+    prevents the cursor from returning to column 0.  Writing directly
+    to ``sys.stdout`` preserves the full escape sequence.
+    """
+    import sys
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
 
 
 def render_cursor() -> Text:

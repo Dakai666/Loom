@@ -66,7 +66,7 @@ from loom.platform.cli.ui import (
     TurnDone,
     TurnDropped,
     TurnPaused,
-    clear_line_escape,
+    clear_line,
     make_prompt_session,
     render_cursor,
     render_header,
@@ -854,7 +854,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
     def _print_spinner() -> None:
         nonlocal frame_index
-        console.print(clear_line_escape(), end="")
+        clear_line()
         console.print(tool_running_line(active_tool or "", frame_index), end="")
         frame_index = (frame_index + 1) % 4
 
@@ -875,7 +875,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         async for event in session.stream_turn(user_input):
             if isinstance(event, TextChunk):
                 # Clear cursor from previous position
-                console.print(clear_line_escape(), end="")
+                clear_line()
                 # Print text chunk
                 console.print(event.text, end="", markup=False, highlight=False)
                 text_buffer += event.text
@@ -885,7 +885,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
             elif isinstance(event, ThinkCollapsed):
                 # Show condensed reasoning summary inline; use /think for full content.
-                console.print(clear_line_escape(), end="")
+                clear_line()
                 if not at_line_start:
                     console.print()
                 console.print(
@@ -909,7 +909,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             elif isinstance(event, ToolEnd):
                 # Cancel spinner and clear its line
                 _cancel_spinner()
-                console.print(clear_line_escape(), end="")
+                clear_line()
                 console.print(
                     tool_end_line(event.name, event.success, event.duration_ms)
                 )
@@ -920,7 +920,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             elif isinstance(event, TurnPaused):
                 # ── HITL pause ────────────────────────────────────────────
                 _cancel_spinner()
-                console.print(clear_line_escape(), end="")
+                clear_line()
                 if not at_line_start:
                     console.print()
                 console.print(
@@ -952,7 +952,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             elif isinstance(event, TurnDone):
                 # Cancel any running spinner and clear cursor
                 _cancel_spinner()
-                console.print(clear_line_escape(), end="")
+                clear_line()
                 if not at_line_start:
                     console.print()
                 elapsed = time.monotonic() - t0
@@ -968,7 +968,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
     except Exception as exc:
         _cancel_spinner()
-        console.print(clear_line_escape(), end="")
+        clear_line()
         console.print()
         console.print(f"[red]Error: {exc}[/red]")
 
