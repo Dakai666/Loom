@@ -10,6 +10,13 @@ from .lifecycle import (
     ExecutionEnvelope, StateTransition,
     LifecycleContext, LIFECYCLE_CTX_KEY,
 )
+from .scope import (
+    ScopeDescriptor, ScopeGrant, ScopeRequirement, ScopeRequest,
+    ScopeDiff, DiffReason, PermissionVerdict,
+    ScopeMatcher, PathMatcher, NetworkMatcher, ExecMatcher,
+    AgentMatcher, MutationMatcher,
+    covers, compute_diff, get_matcher,
+)
 
 __all__ = [
     "Middleware", "MiddlewarePipeline", "ToolCall", "ToolResult",
@@ -20,4 +27,10 @@ __all__ = [
     "ActionState", "ActionIntent", "ActionRecord",
     "ExecutionEnvelope", "StateTransition",
     "LifecycleContext", "LIFECYCLE_CTX_KEY",
+    # Scope-aware permission (Issue #45)
+    "ScopeDescriptor", "ScopeGrant", "ScopeRequirement", "ScopeRequest",
+    "ScopeDiff", "DiffReason", "PermissionVerdict",
+    "ScopeMatcher", "PathMatcher", "NetworkMatcher", "ExecMatcher",
+    "AgentMatcher", "MutationMatcher",
+    "covers", "compute_diff", "get_matcher",
 ]

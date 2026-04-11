@@ -1,5 +1,14 @@
+from __future__ import annotations
+
+import time
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .scope import (
+        ScopeDiff, ScopeGrant, ScopeRequest, PermissionVerdict,
+    )
 
 
 class ToolCapability(Flag):
@@ -54,15 +63,26 @@ class TrustLevel(Enum):
 
 @dataclass
 class PermissionContext:
-    """Holds runtime authorization state for a single session."""
+    """
+    Holds runtime authorization state for a single session.
+
+    Phase A (Issue #45) adds scope-aware grants alongside the legacy
+    tool-name authorization.  Tools with a scope_resolver use the
+    scope-aware path; tools without one fall back to legacy behavior.
+    """
 
     session_id: str
-    # Tools the user has explicitly authorized for this session (GUARDED level).
+
+    # --- Legacy (pre-#45) authorization ---
     session_authorized: set[str] = field(default_factory=set)
-    # When True, EXEC-capability tools (run_bash) are session-pre-authorized
-    # provided strict_sandbox is enabled and the command does not escape the
-    # workspace via absolute paths.  Toggled by /auto.
     exec_auto: bool = False
+
+    # --- Scope-aware authorization (Issue #45 Phase A) ---
+    grants: list[ScopeGrant] = field(default_factory=list)
+    _usage: dict[int, dict[str, int]] = field(default_factory=dict)
+    """Consumable constraint tracking: grant-index → constraint-key → consumed."""
+
+    # ── Legacy API (unchanged) ────────────────────────────────────
 
     def authorize(self, tool_name: str) -> None:
         self.session_authorized.add(tool_name)
@@ -83,3 +103,116 @@ class PermissionContext:
             return tool_name in self.session_authorized
         # CRITICAL always requires fresh confirmation — never pre-authorized.
         return False
+
+    # ── Scope-aware API (Issue #45 Phase A) ───────────────────────
+
+    def grant(self, scope: ScopeGrant) -> None:
+        """Add a scope grant to the session."""
+        if scope.granted_at == 0.0:
+            scope.granted_at = time.time()
+        self.grants.append(scope)
+
+    def grant_many(self, scopes: list[ScopeGrant]) -> None:
+        for s in scopes:
+            self.grant(s)
+
+    def revoke_matching(self, predicate: Callable[[ScopeGrant], bool]) -> None:
+        """Remove all grants matching the predicate."""
+        kept: list[ScopeGrant] = []
+        old_indices: dict[int, int] = {}  # old index → new index
+        for i, g in enumerate(self.grants):
+            if not predicate(g):
+                old_indices[i] = len(kept)
+                kept.append(g)
+        # Remap usage tracking
+        new_usage: dict[int, dict[str, int]] = {}
+        for old_idx, usage in self._usage.items():
+            if old_idx in old_indices:
+                new_usage[old_indices[old_idx]] = usage
+        self.grants = kept
+        self._usage = new_usage
+
+    def evaluate(
+        self, request: ScopeRequest, trust_level: TrustLevel,
+    ) -> PermissionVerdict:
+        """
+        Evaluate a scope request against current grants.
+
+        Returns a PermissionVerdict:
+            ALLOW        — all requirements covered by existing grants
+            CONFIRM      — first-time authorization needed
+            EXPAND_SCOPE — existing grants don't cover the request scope
+            DENY         — CRITICAL trust or policy block
+        """
+        from .scope import PermissionVerdict as PV, DiffReason
+
+        if trust_level == TrustLevel.CRITICAL:
+            diff = self.diff(request)
+            # CRITICAL always requires fresh confirmation, but we distinguish
+            # between first-time and expansion for the UI layer.
+            if diff.is_fully_covered:
+                return PV.CONFIRM
+            return PV.EXPAND_SCOPE if diff.reason != DiffReason.FIRST_TIME else PV.CONFIRM
+
+        if trust_level == TrustLevel.SAFE:
+            return PV.ALLOW
+
+        # GUARDED — check scope coverage
+        diff = self.diff(request)
+        if diff.is_fully_covered:
+            # Consume budgets for covered requirements
+            self._consume_budgets(request)
+            return PV.ALLOW
+
+        if diff.reason == DiffReason.FIRST_TIME or diff.reason == DiffReason.RESOURCE_TYPE_NEW:
+            return PV.CONFIRM
+
+        return PV.EXPAND_SCOPE
+
+    def diff(self, request: ScopeRequest) -> ScopeDiff:
+        """Compute the scope diff between request and current grants."""
+        from .scope import compute_diff
+        effective = self._effective_grants()
+        return compute_diff(effective, request)
+
+    def _effective_grants(self) -> list[ScopeGrant]:
+        """Return grants with consumable budgets adjusted for usage."""
+        from .scope import ScopeGrant as SG
+
+        effective: list[ScopeGrant] = []
+        for i, g in enumerate(self.grants):
+            usage = self._usage.get(i, {})
+            if not usage:
+                effective.append(g)
+                continue
+            # Adjust consumable constraints
+            adjusted_constraints = dict(g.constraints)
+            for key, consumed in usage.items():
+                original = g.constraints.get(key)
+                if original is not None and isinstance(original, (int, float)):
+                    remaining = max(0, original - consumed)
+                    adjusted_constraints[key] = remaining
+            effective.append(SG(
+                resource=g.resource,
+                action=g.action,
+                selector=g.selector,
+                constraints=adjusted_constraints,
+                source=g.source,
+                granted_at=g.granted_at,
+            ))
+        return effective
+
+    def _consume_budgets(self, request: ScopeRequest) -> None:
+        """Decrement consumable budgets for covered requirements."""
+        from .scope import covers as scope_covers
+
+        for req in request.requirements:
+            for i, g in enumerate(self.grants):
+                if not scope_covers(g, req):
+                    continue
+                # Find consumable constraints to decrement
+                for key in ("remaining_budget", "max_calls"):
+                    if key in g.constraints and isinstance(g.constraints[key], (int, float)):
+                        usage = self._usage.setdefault(i, {})
+                        usage[key] = usage.get(key, 0) + req.constraints.get("spawn_count", 1)
+                break  # Only consume from the first matching grant
