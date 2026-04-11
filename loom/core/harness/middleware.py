@@ -173,7 +173,11 @@ class TraceMiddleware(Middleware):
 class BlastRadiusMiddleware(Middleware):
     """
     Guards GUARDED and CRITICAL tools by consulting a PermissionContext.
-    If a tool is not pre-authorized, prompts the user for confirmation.
+
+    Issue #45 Phase B: when a tool has a ``scope_resolver``, this middleware
+    resolves the scope, writes it to ``call.metadata``, and uses
+    ``PermissionContext.evaluate()`` for resource-level authorization.
+    Tools without a resolver fall back to the legacy tool-name path.
 
     `confirm_fn` is injected by the platform layer so the middleware
     stays platform-agnostic (CLI prompt vs. webhook vs. Telegram).
@@ -183,6 +187,9 @@ class BlastRadiusMiddleware(Middleware):
     if the command would escape the workspace via absolute paths.  When it
     returns True, exec_auto pre-authorization is bypassed and the user is
     prompted even in auto mode.
+
+    `registry` is an optional ToolRegistry used to look up ``scope_resolver``
+    per tool.  When absent, all tools take the legacy path.
     """
 
     def __init__(
@@ -190,10 +197,12 @@ class BlastRadiusMiddleware(Middleware):
         perm_ctx: Any,
         confirm_fn: Callable[[ToolCall], Awaitable[bool]],
         exec_escape_fn: Callable[[ToolCall], bool] | None = None,
+        registry: Any | None = None,
     ) -> None:
         self._perm = perm_ctx
         self._confirm = confirm_fn
         self._exec_escape_fn = exec_escape_fn
+        self._registry = registry
 
     def _exec_auto_approved(self, call: ToolCall) -> bool:
         """
@@ -231,7 +240,117 @@ class BlastRadiusMiddleware(Middleware):
             ctx.authorization_result = result
             ctx.authorization_reason = reason
 
+    def _write_scope_metadata(
+        self, call: ToolCall, scope_request: Any,
+        diff: Any | None, verdict: Any,
+    ) -> None:
+        """Write scope resolution results to call.metadata for audit."""
+        call.metadata["scope_request"] = scope_request
+        call.metadata["scope_diff"] = diff
+        call.metadata["scope_verdict"] = verdict
+
+    def _request_to_grants(self, scope_request: Any, source: str = "manual_confirm") -> None:
+        """Convert a scope request's requirements into grants on the PermissionContext."""
+        from .scope import ScopeGrant
+        import time
+        now = time.time()
+        for req in scope_request.requirements:
+            self._perm.grant(ScopeGrant(
+                resource=req.resource,
+                action=req.action,
+                selector=req.selector,
+                constraints=req.constraints,
+                source=source,
+                granted_at=now,
+            ))
+
+    # Sentinel to signal "resolver failed, use legacy path"
+    _FALLBACK_TO_LEGACY = object()
+
+    async def _scope_aware_process(
+        self, call: ToolCall, next: ToolHandler, scope_resolver: Any,
+    ) -> ToolResult | None | object:
+        """
+        Scope-aware authorization path (Issue #45 Phase B).
+
+        Returns:
+            ToolResult  — call was denied, return this result directly
+            None        — authorization passed, caller should ``await next(call)``
+            _FALLBACK_TO_LEGACY — resolver failed, caller should use legacy path
+        """
+        from .scope import PermissionVerdict as PV
+
+        try:
+            scope_request = scope_resolver(call)
+        except Exception as exc:
+            _log.warning(
+                "scope_resolver for %r raised: %s — falling back to legacy",
+                call.tool_name, exc,
+            )
+            return self._FALLBACK_TO_LEGACY
+
+        diff = self._perm.diff(scope_request)
+        verdict = self._perm.evaluate(scope_request, call.trust_level)
+        self._write_scope_metadata(call, scope_request, diff, verdict)
+
+        if verdict == PV.ALLOW:
+            self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}")
+            return None  # proceed
+
+        if verdict == PV.DENY:
+            self._notify_lifecycle(call, False, "scope-deny")
+            call.metadata["user_decision"] = False
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="Permission denied by scope policy.",
+                failure_type="permission_denied",
+            )
+
+        # CONFIRM or EXPAND_SCOPE — prompt user
+        allowed = await self._confirm(call)
+        if not allowed:
+            self._notify_lifecycle(call, False, f"user denied ({verdict.value})")
+            call.metadata["user_decision"] = False
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=(
+                    "USER ACTION: DENIED. This tool call was explicitly rejected by the "
+                    "human user. Do not retry this action or equivalent substitutions "
+                    "in this turn. Acknowledge and proceed with other tasks or wait for input."
+                ),
+                failure_type="permission_denied",
+            )
+
+        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value})")
+        call.metadata["user_decision"] = True
+
+        # Convert request → grants so future calls in the same scope are auto-approved.
+        # EXEC and AGENT_SPAN: grant is still added (scope-level), but the legacy
+        # re-confirm behavior is preserved via the tool-name path.
+        self._request_to_grants(scope_request, source="manual_confirm")
+        return None  # proceed
+
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        # --- Scope-aware path (Issue #45 Phase B) ---
+        # If registry is available and tool has a scope_resolver, use it.
+        scope_resolver = None
+        if self._registry is not None:
+            tool_def = self._registry.get(call.tool_name)
+            if tool_def is not None:
+                scope_resolver = getattr(tool_def, "scope_resolver", None)
+
+        if scope_resolver is not None:
+            result = await self._scope_aware_process(call, next, scope_resolver)
+            if result is self._FALLBACK_TO_LEGACY:
+                pass  # fall through to legacy path below
+            elif result is not None:
+                return result  # short-circuited (denied)
+            else:
+                return await next(call)  # scope-aware ALLOW
+
+        # --- Legacy path (tools without scope_resolver) ---
         if self._perm.is_authorized(call.tool_name, call.trust_level):
             self._notify_lifecycle(call, True, "pre-authorized")
             return await next(call)

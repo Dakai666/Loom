@@ -687,6 +687,7 @@ class LoomSession:
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool_cli,
                     exec_escape_fn=_exec_escape_fn,
+                    registry=self.registry,
                 ),
                 LifecycleGateMiddleware(registry=self.registry),
             ]
