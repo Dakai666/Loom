@@ -29,7 +29,7 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 
 | Layer | What it does |
 |-------|-------------|
-| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware`, `LifecycleMiddleware` + `LifecycleGateMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); full Action Lifecycle state machine with real-time control gates |
+| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware` (scope-aware + legacy fallback), `LifecycleMiddleware` + `LifecycleGateMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); **scope-aware permission substrate** — resource-level authorization with automatic grant management; full Action Lifecycle state machine with real-time control gates |
 | **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors + trust-tier governance), procedural (versioned skills with quality-gradient EMA + self-assessment); always-on `MemoryGovernor` (contradiction detection, admission gate, decay cycle) |
 | **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
@@ -115,7 +115,7 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `/personality off` | Remove active persona |
 | `/think` | Show the full reasoning chain from the last turn |
 | `/compact` | LLM-summarize oldest turns to free context |
-| `/auto` | Toggle `run_bash` session auto-approve (requires `strict_sandbox = true`) |
+| `/auto` | Toggle `run_bash` auto-approve — injects a workspace-scoped exec grant; absolute-path commands still require confirmation |
 | `/pause` | Toggle HITL mode — agent pauses after each tool batch |
 | `/stop` | Immediately cancel the current running turn |
 | `/budget` | Show context token usage (Discord; TUI has the Budget panel) |
@@ -210,11 +210,11 @@ session.stop()
 | `memorize` | GUARDED | MUTATES | Persist a fact to long-term semantic memory |
 | `relate` | GUARDED | MUTATES | Store a relationship triple in relational memory |
 | `web_search` | GUARDED | NETWORK | Brave Search API top-N results |
-| `run_bash` | GUARDED | **EXEC** | Execute a shell command — **re-confirms every call** |
-| `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | Spawn a sub-agent — **re-confirms every call** |
+| `run_bash` | GUARDED | **EXEC** | Execute a shell command — scope-aware: auto-approves within granted workspace scope |
+| `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | Spawn a sub-agent — scope-aware: tracks spawn budget |
 | `load_skill` | SAFE | — | Load a skill's full instructions on demand (Agent Skills spec Tier 2) |
 
-> **EXEC and AGENT_SPAN** tools never receive session-level pre-authorization — each call triggers a fresh confirmation, matching CRITICAL semantics regardless of trust level.
+> **Scope-aware authorization** (v0.2.9.3): tools with a `scope_resolver` are authorized at the resource level — once you approve "write under `/workspace/doc/`", subsequent writes under that path auto-approve without re-prompting. Tools without a resolver fall back to the legacy tool-name authorization.
 
 ---
 
@@ -421,6 +421,48 @@ Tools requiring interactive confirmation (GUARDED not yet approved, CRITICAL, EX
 
 ---
 
+## Scope-Aware Authorization
+
+Since v0.2.9.3, Loom upgrades tool authorization from tool-name-based to **resource-scope-based**. Instead of "do you approve `write_file`?", the system asks "do you approve writing under `/workspace/doc/`?" — and remembers the answer.
+
+### How it works
+
+```
+Tool call: write_file(path="doc/design.md")
+  │
+  ├─ scope_resolver → ScopeRequest(resource=path, action=write, selector=/workspace/doc)
+  ├─ PermissionContext.evaluate() → check existing grants
+  │     ├─ Grant exists for /workspace/doc → ALLOW (no prompt)
+  │     ├─ No grant → CONFIRM (first-time prompt)
+  │     └─ Grant exists for /workspace/doc but request is /workspace/loom → EXPAND_SCOPE (red panel)
+  └─ On user confirm → grant stored → future calls in same scope auto-approve
+```
+
+### Scope-aware tools
+
+| Tool | Resource type | Scope logic |
+|------|--------------|-------------|
+| `write_file` | `path` | Directory prefix — grant for `/workspace/doc/` covers all files underneath |
+| `run_bash` | `exec` | Workspace containment — pipes/subshells/`&&`/`||` marked as scope-unknown, always prompt |
+| `fetch_url` | `network` | Exact domain match — grant for `api.openai.com` only covers that domain |
+| `web_search` | `network` | Fixed domain (`api.search.brave.com`) |
+| `spawn_agent` | `agent` | Budget tracking — grant with `remaining_budget=3` allows 3 spawns |
+
+### Confirm panel
+
+The confirmation panel shows structured scope information:
+
+- **Yellow border** — first-time authorization or new resource type
+- **Red border** — scope expansion beyond what was previously approved
+- Resource type, action, and target selector displayed clearly
+- Diff shows what's already covered vs. what's new
+
+### `/auto` and scope grants
+
+`/auto` now injects a scope grant (`exec:execute → workspace, absolute_paths=deny`) instead of a blanket flag. Workspace-confined commands auto-approve; commands with absolute paths outside the workspace still trigger a confirmation prompt.
+
+---
+
 ## Context Management
 
 - **Auto-compact** at 80% context usage (checked at turn start and after each tool loop)
@@ -581,7 +623,7 @@ loom import skills.json --dry-run --min-confidence 0.7
 ## Running Tests
 
 ```bash
-python -m pytest tests/          # 527+ tests
+python -m pytest tests/          # 635+ tests
 python -m pytest tests/test_harness.py -v
 python -m pytest tests/test_memory.py -v
 python -m pytest tests/test_cognition.py -v
