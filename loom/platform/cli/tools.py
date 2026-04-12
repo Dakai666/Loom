@@ -129,12 +129,19 @@ def _make_write_file_resolver(workspace: Path):
     """Return a scope_resolver for write_file bound to *workspace*."""
     import os.path
 
+    _workspace_resolved = workspace.resolve()
+
     def _resolve(call: ToolCall) -> ScopeRequest:
         raw = call.args.get("path", "")
         p = Path(raw)
         resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
-        # Canonical parent directory as selector
-        selector = os.path.normpath(str(resolved.parent))
+        # Produce a workspace-relative selector so it matches scope grants
+        # written as relative paths in loom.toml (e.g. "outputs/self_check").
+        # Fall back to the absolute parent only for paths outside the workspace.
+        try:
+            selector = str(resolved.parent.relative_to(_workspace_resolved))
+        except ValueError:
+            selector = os.path.normpath(str(resolved.parent))
         return ScopeRequest(
             tool_name=call.tool_name,
             capabilities=call.capabilities,
