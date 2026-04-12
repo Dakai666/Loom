@@ -16,6 +16,7 @@ Design:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import logging
 from dataclasses import dataclass
@@ -26,6 +27,56 @@ if TYPE_CHECKING:
     from .registry import ToolRegistry
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Issue #90: skill code integrity verification
+# ---------------------------------------------------------------------------
+
+_HASH_DIR = Path.home() / ".loom" / "skill_hashes"
+
+
+class SkillIntegrityError(RuntimeError):
+    """Raised when a skill module's hash doesn't match the recorded value."""
+
+
+def _compute_file_hash(path: Path) -> str:
+    """SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def _hash_path_for(skill_dir: Path, module_name: str) -> Path:
+    """Return the path where we store the known hash for a skill module."""
+    return _HASH_DIR / f"{skill_dir.name}_{module_name}.sha256"
+
+
+def _verify_or_record_hash(module_path: Path, skill_dir: Path, module_name: str) -> bool:
+    """
+    On first load: compute hash and store it.  Return True.
+    On subsequent loads: compare.  Return True if match, False if mismatch.
+
+    Fail-open on I/O errors (log warning, return True) so first-time
+    setup is never blocked.
+    """
+    try:
+        current_hash = _compute_file_hash(module_path)
+        hash_file = _hash_path_for(skill_dir, module_name)
+
+        if hash_file.exists():
+            stored_hash = hash_file.read_text().strip()
+            if stored_hash != current_hash:
+                return False  # MISMATCH
+            return True  # match
+
+        # First load — record the hash
+        _HASH_DIR.mkdir(parents=True, exist_ok=True)
+        hash_file.write_text(current_hash)
+        return True
+    except Exception:
+        _log.warning("Could not verify hash for %s", module_path)
+        return True  # fail-open on I/O errors
 
 
 @dataclass
@@ -215,6 +266,15 @@ class SkillCheckManager:
                 f"Check module not found: {module_path}"
             )
 
+        # Issue #90: verify code integrity before exec_module
+        if not _verify_or_record_hash(module_path, skill_dir, module_name):
+            hash_file = _hash_path_for(skill_dir, module_name)
+            raise SkillIntegrityError(
+                f"Integrity check failed for {module_path}: file hash does not "
+                f"match the recorded hash in {hash_file}. If this change is "
+                f"intentional, delete the hash file and reload the skill."
+            )
+
         spec = importlib.util.spec_from_file_location(
             f"loom_skill_check_{skill_dir.name}_{module_name}",
             module_path,
@@ -234,6 +294,20 @@ class SkillCheckManager:
             raise TypeError(f"{ref!r} resolved to a non-callable: {type(fn)}")
 
         return fn
+
+    @staticmethod
+    def refresh_hash(skill_dir: Path, module_name: str) -> None:
+        """Force-recompute and store the hash for a skill module.
+
+        Call this after the user has reviewed and approved a skill change.
+        """
+        module_path = skill_dir / f"{module_name}.py"
+        if not module_path.is_file():
+            raise FileNotFoundError(f"Module not found: {module_path}")
+        current_hash = _compute_file_hash(module_path)
+        hash_file = _hash_path_for(skill_dir, module_name)
+        _HASH_DIR.mkdir(parents=True, exist_ok=True)
+        hash_file.write_text(current_hash)
 
     @classmethod
     def resolve_all(

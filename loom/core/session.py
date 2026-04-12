@@ -1528,19 +1528,71 @@ class LoomSession:
                         if tc.get("id") and tc["id"] not in result_ids
                     ]
                     if missing:
-                        # Also check for Anthropic-style tool_use blocks in content
+                        # Issue #94 Gap 1 fix: drop the message if OpenAI-format
+                        # tool_calls are orphaned. Also check Anthropic-style
+                        # tool_use blocks in content for dual-format messages.
                         content = msg.get("content", [])
                         if isinstance(content, list):
                             use_ids = [
                                 b.get("id") for b in content
                                 if isinstance(b, dict) and b.get("type") == "tool_use"
                             ]
-                            if any(uid not in result_ids for uid in use_ids if uid):
-                                continue  # drop orphaned message
+                            if use_ids:
+                                # Dual-format: also check Anthropic-style
+                                if any(uid not in result_ids for uid in use_ids if uid):
+                                    continue  # drop orphaned message
+                            else:
+                                # Pure OpenAI format: missing tool_call results → drop
+                                continue
                         else:
                             continue  # drop orphaned message
             keep.append(msg)
         self.messages = keep
+
+        # Pass 3 (Issue #94 Gap 3): remove lone tool result messages whose
+        # tool_call_id has no matching tool_call in any assistant message.
+        # This can happen when cancel occurs during multi-tool dispatch.
+        call_ids: set[str] = set()
+        for msg in self.messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls", []):
+                    cid = tc.get("id")
+                    if cid:
+                        call_ids.add(cid)
+                # Anthropic-style tool_use blocks in content
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            uid = block.get("id")
+                            if uid:
+                                call_ids.add(uid)
+
+        keep2: list[dict] = []
+        for msg in self.messages:
+            # OpenAI-style lone tool result
+            if msg.get("role") == "tool":
+                tid = msg.get("tool_call_id")
+                if tid and tid not in call_ids:
+                    continue  # drop orphaned tool result
+            # Anthropic-style tool_result blocks inside role=user messages
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                has_tool_results = False
+                filtered_blocks = []
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        has_tool_results = True
+                        if block.get("tool_use_id") in call_ids:
+                            filtered_blocks.append(block)
+                        # else: drop orphaned tool_result block
+                    else:
+                        filtered_blocks.append(block)
+                if has_tool_results and not filtered_blocks:
+                    continue  # entire message was orphaned tool_results
+                if has_tool_results:
+                    msg = {**msg, "content": filtered_blocks}
+            keep2.append(msg)
+        self.messages = keep2
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,
@@ -1889,7 +1941,14 @@ class LoomSession:
             return result, duration_ms
 
         plan = graph.compile()
-        await TaskScheduler(executor=_run_node).run(plan)
+        # Issue #94 Gap 2: wrap scheduler to handle unexpected failures.
+        # Nodes without results get error ToolResults from the fallback below.
+        try:
+            await TaskScheduler(executor=_run_node).run(plan)
+        except Exception as sched_exc:
+            logger.error(
+                "_dispatch_parallel: scheduler failed: %s", sched_exc, exc_info=True,
+            )
 
         ordered: list[tuple] = []
         for tu, node_id in zip(tool_uses, node_ids):

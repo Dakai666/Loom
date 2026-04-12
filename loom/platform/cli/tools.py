@@ -25,11 +25,13 @@ from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
 from loom.core.security.self_termination_guard import SelfTerminationGuard
+from loom.core.security.command_scanner import CommandScanner
 
 import logging
 
 _log = logging.getLogger(__name__)
 _self_term_guard = SelfTerminationGuard()
+_cmd_scanner = CommandScanner()
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -489,6 +491,19 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
             )
         if verdict.verdict == "warn":
             _log.warning("Self-termination guard warning: %s", verdict.description)
+
+        # Issue #100: shell injection command scanner
+        scan_verdict = _cmd_scanner.check(command)
+        if scan_verdict.verdict == "block":
+            _log.warning("Command scanner blocked: %s", scan_verdict.description)
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=f"[Security] Blocked by command scanner: {scan_verdict.description}",
+                failure_type="security_block",
+            )
+        if scan_verdict.verdict == "warn":
+            _log.warning("Command scanner warning: %s", scan_verdict.description)
 
         timeout = call.args.get("timeout", 30)
         cwd = str(workspace) if strict_sandbox else None
