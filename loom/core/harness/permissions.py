@@ -146,6 +146,14 @@ class PermissionContext:
         self.grants = kept
         self._usage = new_usage
 
+    def purge_expired(self) -> int:
+        """Remove expired grants from the grant list. Returns count removed."""
+        import time as _time
+        now = _time.time()
+        before = len(self.grants)
+        self.revoke_matching(lambda g: g.valid_until > 0 and now > g.valid_until)
+        return before - len(self.grants)
+
     def evaluate(
         self, request: ScopeRequest, trust_level: TrustLevel,
     ) -> PermissionVerdict:
@@ -190,11 +198,20 @@ class PermissionContext:
         return compute_diff(effective, request)
 
     def _effective_grants(self) -> list[ScopeGrant]:
-        """Return grants with consumable budgets adjusted for usage."""
+        """Return grants with consumable budgets adjusted for usage, expired grants filtered out."""
         from .scope import ScopeGrant as SG
+        import time as _time
 
+        # Self-heal: purge expired grants so _usage stays in sync (#88 review)
+        if any(g.valid_until > 0 and _time.time() > g.valid_until for g in self.grants):
+            self.purge_expired()
+
+        now = _time.time()
         effective: list[ScopeGrant] = []
         for i, g in enumerate(self.grants):
+            # TTL expiry check (#88) — belt-and-suspenders after purge above
+            if g.valid_until > 0 and now > g.valid_until:
+                continue
             usage = self._usage.get(i, {})
             if not usage:
                 effective.append(g)
@@ -213,6 +230,7 @@ class PermissionContext:
                 constraints=adjusted_constraints,
                 source=g.source,
                 granted_at=g.granted_at,
+                valid_until=g.valid_until,
             ))
         return effective
 

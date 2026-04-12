@@ -207,7 +207,7 @@ class TestBlastRadiusScopeAware:
     async def test_allow_when_scope_covered(self):
         perm, reg = self._setup(grants=[
             ScopeGrant(resource="path", action="write",
-                       selector=str((_WORKSPACE / "doc").resolve())),
+                       selector="doc"),
         ])
         call = _call("write_file", {"path": "doc/test.md"}, caps=ToolCapability.MUTATES)
         result, confirm_fn, handler = await _run_middleware(perm, call, registry=reg)
@@ -232,7 +232,7 @@ class TestBlastRadiusScopeAware:
     async def test_expand_scope_prompted(self):
         perm, reg = self._setup(grants=[
             ScopeGrant(resource="path", action="write",
-                       selector=str((_WORKSPACE / "doc").resolve())),
+                       selector="doc"),
         ])
         # Write to loom/ → outside existing doc/ grant → EXPAND_SCOPE
         call = _call("write_file", {"path": "loom/core.py"}, caps=ToolCapability.MUTATES)
