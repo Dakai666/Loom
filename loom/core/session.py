@@ -1541,7 +1541,8 @@ class LoomSession:
                                 # Dual-format: also check Anthropic-style
                                 if any(uid not in result_ids for uid in use_ids if uid):
                                     continue  # drop orphaned message
-                            else:
+                            elif any(tc.get("id") not in result_ids
+                                     for tc in tool_calls if tc.get("id")):
                                 # Pure OpenAI format: missing tool_call results → drop
                                 continue
                         else:

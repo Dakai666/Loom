@@ -236,8 +236,12 @@ class AutonomyDaemon:
         if not autonomy_cfg.get("enabled", False):
             return 0
 
-        # Issue #91: tamper detection
-        _check_config_integrity(autonomy_cfg)
+        # Issue #91: tamper detection (fail-open by design — logs warning only)
+        if not _check_config_integrity(autonomy_cfg):
+            logger.warning(
+                "[autonomy] Proceeding despite config change. "
+                "Review loom.toml and restart to update the stored hash."
+            )
 
         count = 0
         for sched in autonomy_cfg.get("schedules", []):

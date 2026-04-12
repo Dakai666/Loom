@@ -40,6 +40,11 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
         r'["\'](?:sk-|pk-|ak-|AKIA|ghp_|gho_|ghs_|xoxb-|xoxp-|xapp-)'
         r'[A-Za-z0-9_\-]{20,}["\']'
     ), '"[REDACTED]"'),
+    # JSON-escaped quotes: \"password\": \"sk-abc123...\"
+    (re.compile(
+        r'(?i)(?:password|token|secret|api[_-]?key|credentials)'
+        r'\\?"\s*:\s*\\?"((?:sk-|pk-|AKIA|ghp_|xoxb-)[A-Za-z0-9_\-]{20,})\\?"'
+    ), r'[REDACTED]"'),
 ]
 
 
