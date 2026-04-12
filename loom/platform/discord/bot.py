@@ -44,8 +44,10 @@ Streaming strategy
 
 Confirm flow
 ------------
-BlastRadiusMiddleware.confirm_fn is patched to send an Allow / Deny button
-message in the thread and await the button interaction (60s timeout → deny).
+BlastRadiusMiddleware.confirm_fn is patched to send a four-button message
+(Allow / Lease / Auto / Deny) in the thread and await the button interaction
+(60s timeout → deny).  Lease and Auto decisions post a follow-up message
+showing the TTL or grant scope.
 """
 
 from __future__ import annotations
@@ -66,6 +68,7 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install 'loom[discord]'"
     ) from exc
 
+from loom.core.harness.scope import ConfirmDecision
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
     CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd,
@@ -79,40 +82,56 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Confirm view (Allow / Deny buttons)
+# Confirm view (y / s / a / N buttons)
 # ---------------------------------------------------------------------------
 
 class _ConfirmView(View):
-    """Discord UI view with Allow / Deny buttons for tool confirmation."""
+    """Discord UI view with Allow / Lease / Auto / Deny buttons for tool confirmation."""
 
     def __init__(self, timeout: float = 60.0) -> None:
         super().__init__(timeout=timeout)
-        self._approved: bool | None = None
+        self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
 
-    @discord.ui.button(label="Allow", style=ButtonStyle.green, emoji="✅")
+    @discord.ui.button(label="Allow (y)", style=ButtonStyle.green, emoji="✅")
     async def allow_button(self, interaction: Interaction, button: Button) -> None:
-        self._approved = True
+        self._decision = ConfirmDecision.ONCE
         self._done.set()
         await interaction.response.edit_message(
             content="✅ **Allowed** — executing tool…", view=None
         )
 
-    @discord.ui.button(label="Deny", style=ButtonStyle.red, emoji="❌")
+    @discord.ui.button(label="Lease (s)", style=ButtonStyle.blurple, emoji="⏱️")
+    async def lease_button(self, interaction: Interaction, button: Button) -> None:
+        self._decision = ConfirmDecision.SCOPE
+        self._done.set()
+        await interaction.response.edit_message(
+            content="⏱️ **Lease granted** — executing tool…", view=None
+        )
+
+    @discord.ui.button(label="Auto (a)", style=ButtonStyle.grey, emoji="⚡")
+    async def auto_button(self, interaction: Interaction, button: Button) -> None:
+        self._decision = ConfirmDecision.AUTO
+        self._done.set()
+        await interaction.response.edit_message(
+            content="⚡ **Auto-approve granted** — executing tool…", view=None
+        )
+
+    @discord.ui.button(label="Deny (N)", style=ButtonStyle.red, emoji="❌")
     async def deny_button(self, interaction: Interaction, button: Button) -> None:
-        self._approved = False
+        self._decision = ConfirmDecision.DENY
         self._done.set()
         await interaction.response.edit_message(
             content="❌ **Denied** — tool call blocked.", view=None
         )
 
     async def on_timeout(self) -> None:
-        self._approved = False
+        self._decision = ConfirmDecision.DENY
         self._done.set()
 
-    async def wait_decision(self) -> bool:
+    async def wait_decision(self) -> ConfirmDecision:
         await self._done.wait()
-        return bool(self._approved)
+        return self._decision if self._decision is not None else ConfirmDecision.DENY
 
 
 # ---------------------------------------------------------------------------
@@ -788,11 +807,12 @@ class LoomDiscordBot:
 
     def _make_confirm_fn(self, thread_id: int):
         client = self._client
+        _LEASE_TTL_MIN = 30  # matches BlastRadiusMiddleware._SCOPE_LEASE_TTL
 
-        async def _confirm(call: "ToolCall") -> bool:
+        async def _confirm(call: "ToolCall") -> ConfirmDecision:
             channel = client.get_channel(thread_id)
             if channel is None:
-                return False
+                return ConfirmDecision.DENY
 
             args_preview = "  ".join(
                 f"{k}={str(v)[:40]}" for k, v in call.args.items()
@@ -810,10 +830,22 @@ class LoomDiscordBot:
             )
             self._active_confirmations[thread_id] = msg
             try:
-                res = await view.wait_decision()
-                return res
+                decision = await view.wait_decision()
             finally:
                 self._active_confirmations.pop(thread_id, None)
+
+            if decision == ConfirmDecision.SCOPE:
+                await channel.send(
+                    f"⏱️ **Scope lease granted** for `{call.tool_name}` — "
+                    f"auto-approved for this scope for the next **{_LEASE_TTL_MIN} minutes**."
+                )
+            elif decision == ConfirmDecision.AUTO:
+                await channel.send(
+                    f"⚡ **Permanent auto-approve granted** for `{call.tool_name}` — "
+                    f"all future calls of this tool class will be approved automatically."
+                )
+
+            return decision
 
         return _confirm
 
