@@ -87,7 +87,16 @@ class ScopeGrant:
     """Origin of this grant: manual_confirm, lease, auto, exec_auto, system."""
 
     granted_at: float = 0.0
-    """time.time() when granted.  #88 needs this for TTL calculation."""
+    """time.time() when granted."""
+
+    valid_until: float = 0.0
+    """
+    Expiry timestamp (time.time()).  0 = never expires.
+
+    Used by scoped approval leases (#88) to limit grants to a turn,
+    a skill invocation, or a fixed TTL.  ``PermissionContext._effective_grants()``
+    filters out expired grants automatically.
+    """
 
 
 @dataclass(frozen=True)
@@ -149,6 +158,23 @@ class PermissionVerdict(Enum):
     CONFIRM = "confirm"
     EXPAND_SCOPE = "expand_scope"
     DENY = "deny"
+
+
+class ConfirmDecision(Enum):
+    """
+    User's response to a confirmation prompt (#88).
+
+    Replaces the previous bool return from confirm_fn.
+
+    DENY        — reject this call
+    ONCE        — approve this call only (legacy y/N behavior)
+    SCOPE       — approve and grant a session-scoped lease for this scope
+    AUTO        — approve and grant a broad auto-approval for this tool class
+    """
+    DENY = "deny"
+    ONCE = "once"
+    SCOPE = "scope"
+    AUTO = "auto"
 
 
 # ---------------------------------------------------------------------------

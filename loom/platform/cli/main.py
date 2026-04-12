@@ -179,6 +179,93 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
         console.print("\n[dim]Session ended. Goodbye.[/dim]")
 
 
+def _handle_scope_command(session: "LoomSession", args: str, console: Any) -> None:
+    """
+    Handle /scope subcommands: list, revoke, clear.
+
+    /scope          — list active grants
+    /scope revoke N — revoke grant #N
+    /scope clear    — revoke all non-system grants
+    """
+    import time as _time
+    from rich.table import Table
+
+    perm = session.perm
+    # Purge expired grants first so the display is always clean
+    purged = perm.purge_expired()
+
+    if not args or args == "list":
+        if not perm.grants:
+            console.print("[dim]  No active scope grants.[/dim]")
+            if purged:
+                console.print(f"[dim]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/dim]")
+            return
+
+        table = Table(title="Active Scope Grants", border_style="dim", show_lines=False)
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Resource", style="cyan")
+        table.add_column("Action", style="green")
+        table.add_column("Selector")
+        table.add_column("Source", style="dim")
+        table.add_column("TTL", style="yellow")
+        table.add_column("Constraints", style="dim")
+
+        now = _time.time()
+        for i, g in enumerate(perm.grants):
+            if g.valid_until > 0:
+                remaining = max(0, g.valid_until - now)
+                if remaining > 3600:
+                    ttl_str = f"{remaining / 3600:.1f}h"
+                elif remaining > 60:
+                    ttl_str = f"{remaining / 60:.0f}m"
+                else:
+                    ttl_str = f"{remaining:.0f}s"
+            else:
+                ttl_str = "session"
+            constraints_str = ", ".join(
+                f"{k}={v}" for k, v in g.constraints.items()
+            ) if g.constraints else "-"
+            table.add_row(
+                str(i), g.resource, g.action,
+                g.selector[:40], g.source, ttl_str, constraints_str,
+            )
+        console.print(table)
+        if purged:
+            console.print(f"[dim]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/dim]")
+
+    elif args.startswith("revoke"):
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            console.print("[yellow]  Usage: /scope revoke <number>[/yellow]")
+            return
+        idx = int(parts[1].strip())
+        if idx < 0 or idx >= len(perm.grants):
+            console.print(f"[yellow]  Grant #{idx} does not exist. Use /scope to list.[/yellow]")
+            return
+        g = perm.grants[idx]
+        console.print(
+            f"[dim]  Revoked grant #{idx}: "
+            f"{g.resource}/{g.action}/{g.selector} (source={g.source})[/dim]"
+        )
+        perm.revoke_matching(lambda grant, _g=g: grant is _g)
+
+    elif args == "clear":
+        before = len(perm.grants)
+        perm.revoke_matching(lambda g: g.source != "system")
+        removed = before - len(perm.grants)
+        console.print(
+            f"[dim]  Cleared {removed} grant{'s' if removed != 1 else ''}. "
+            f"{len(perm.grants)} system grant{'s' if len(perm.grants) != 1 else ''} remain.[/dim]"
+        )
+
+    else:
+        console.print(
+            "[yellow]  /scope[/yellow] [dim]— list active grants[/dim]\n"
+            "[yellow]  /scope revoke <N>[/yellow] [dim]— revoke grant #N[/dim]\n"
+            "[yellow]  /scope clear[/yellow] [dim]— revoke all non-system grants[/dim]"
+        )
+
+
 async def _handle_slash(cmd: str, session: "LoomSession") -> None:
     """Dispatch a slash command and print feedback."""
     parts = cmd.split(maxsplit=1)
@@ -270,6 +357,10 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             else:
                 console.print(f"[dim]Exec auto-approve: [yellow]{state}[/yellow] — run_bash will confirm every call.[/dim]")
 
+    elif command.startswith("/scope"):
+        _scope_args = command[len("/scope"):].strip()
+        _handle_scope_command(session, _scope_args, console)
+
     elif command == "/pause":
         # Toggle HITL mode (auto-pause after every tool batch)
         session.hitl_mode = not session.hitl_mode
@@ -306,6 +397,9 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
                 "  [yellow]/compact[/yellow]                   Compress older context\n"
                 "  [yellow]/auto[/yellow]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
+                "  [yellow]/scope[/yellow]                     List active scope grants (leases)\n"
+                "  [yellow]/scope revoke <N>[/yellow]          Revoke a specific grant\n"
+                "  [yellow]/scope clear[/yellow]               Revoke all non-system grants\n"
                 "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
                 "  [yellow]/stop[/yellow]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
                 "  [yellow]/help[/yellow]                      Show this message\n\n"
@@ -694,6 +788,40 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                 else f"Exec auto-approve: {state} — run_bash will confirm every call."
             )
             app.notify(msg, timeout=5)
+
+    elif command.startswith("/scope"):
+        import time as _time
+        _scope_args = command[len("/scope"):].strip()
+        perm = session.perm
+        perm.purge_expired()
+        if not _scope_args or _scope_args == "list":
+            if not perm.grants:
+                app.notify("No active scope grants.", timeout=3)
+            else:
+                now = _time.time()
+                lines = []
+                for i, g in enumerate(perm.grants):
+                    ttl = "session" if g.valid_until <= 0 else f"{max(0, g.valid_until - now) / 60:.0f}m"
+                    lines.append(f"#{i} {g.resource}/{g.action}/{g.selector[:30]} ({g.source}, {ttl})")
+                app.notify("\n".join(lines), timeout=8)
+        elif _scope_args.startswith("revoke"):
+            parts = _scope_args.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip().isdigit():
+                app.notify("Usage: /scope revoke <N>", severity="warning")
+            else:
+                idx = int(parts[1].strip())
+                if 0 <= idx < len(perm.grants):
+                    g = perm.grants[idx]
+                    perm.revoke_matching(lambda grant, _g=g: grant is _g)
+                    app.notify(f"Revoked #{idx}: {g.resource}/{g.action}/{g.selector}", timeout=4)
+                else:
+                    app.notify(f"Grant #{idx} does not exist.", severity="warning")
+        elif _scope_args == "clear":
+            before = len(perm.grants)
+            perm.revoke_matching(lambda g: g.source != "system")
+            app.notify(f"Cleared {before - len(perm.grants)} grants.", timeout=3)
+        else:
+            app.notify("/scope | /scope revoke <N> | /scope clear", timeout=4)
 
     elif command == "/pause":
         session.hitl_mode = not session.hitl_mode

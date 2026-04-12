@@ -116,6 +116,9 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `/think` | Show the full reasoning chain from the last turn |
 | `/compact` | LLM-summarize oldest turns to free context |
 | `/auto` | Toggle `run_bash` auto-approve — injects a workspace-scoped exec grant; absolute-path commands still require confirmation |
+| `/scope` | List active scope grants (leases) with TTL, source, and constraints |
+| `/scope revoke <N>` | Revoke a specific scope grant by its index |
+| `/scope clear` | Revoke all non-system grants |
 | `/pause` | Toggle HITL mode — agent pauses after each tool batch |
 | `/stop` | Immediately cancel the current running turn |
 | `/budget` | Show context token usage (Discord; TUI has the Budget panel) |
@@ -137,7 +140,7 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `Ctrl+L` | Clear conversation view |
 | `Ctrl+C` | Quit |
 | `Tab` | Autocomplete slash commands |
-| `Y` / `N` | Approve / deny tool confirmation dialogs |
+| `Y` / `N` / `S` / `A` | Approve (once / scope lease / auto) or deny tool confirmation dialogs |
 
 ---
 
@@ -448,14 +451,43 @@ Tool call: write_file(path="doc/design.md")
 | `web_search` | `network` | Fixed domain (`api.search.brave.com`) |
 | `spawn_agent` | `agent` | Budget tracking — grant with `remaining_budget=3` allows 3 spawns |
 
-### Confirm panel
+### Confirm panel and approval modes
 
-The confirmation panel shows structured scope information:
+When a tool needs authorization, the confirmation panel shows structured scope information with four response options:
 
+```
+┌──── Tool requires confirmation ────────────────────────┐
+│  write_file                                             │
+│  path: write → doc                                      │
+│  First time: no existing grant for this scope           │
+│                        y=once  s=scope lease  a=auto  N=deny │
+└─────────────────────────────────────────────────────────┘
+Allow? [y/s/a/N]:
+```
+
+| Response | Effect |
+|----------|--------|
+| `y` (once) | Approve this call only — grant stored with no TTL (existing behavior) |
+| `s` (scope lease) | Approve and create a **session-scoped lease** (30 min TTL) — all future calls within this scope auto-approve until the lease expires |
+| `a` (auto) | Approve and create a **permanent grant** — auto-approve all similar calls for the rest of the session |
+| `N` (deny) | Reject this call |
+
+**Panel styling:**
 - **Yellow border** — first-time authorization or new resource type
 - **Red border** — scope expansion beyond what was previously approved
-- Resource type, action, and target selector displayed clearly
-- Diff shows what's already covered vs. what's new
+
+### Scoped approval leases
+
+Leases are the recommended middle ground between per-call confirmation and full `/auto`. A typical workflow:
+
+1. Agent starts a task that involves writing files under `doc/`
+2. First `write_file` call triggers a confirmation prompt
+3. User types `s` — a lease is created for `path:write → doc/` with 30 min TTL
+4. All subsequent writes under `doc/` auto-approve without prompting
+5. A write to `loom/core.py` (outside the lease scope) triggers a new prompt
+6. Lease expires after 30 minutes; next call to `doc/` would re-prompt
+
+Use `/scope` to inspect, revoke, or clear active grants and leases at any time.
 
 ### `/auto` and scope grants
 

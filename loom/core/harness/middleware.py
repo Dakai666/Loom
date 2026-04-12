@@ -291,7 +291,21 @@ class BlastRadiusMiddleware(Middleware):
     # These describe the *request* but are not actionable authorization limits.
     _INFORMATIONAL_CONSTRAINTS = frozenset({"scope_unknown", "has_absolute_paths"})
 
-    def _request_to_grants(self, scope_request: Any, source: str = "manual_confirm") -> None:
+    @staticmethod
+    def _normalize_decision(raw: "bool | ConfirmDecision") -> "ConfirmDecision":
+        """Convert legacy bool confirm result to ConfirmDecision."""
+        from .scope import ConfirmDecision
+        if isinstance(raw, ConfirmDecision):
+            return raw
+        return ConfirmDecision.ONCE if raw else ConfirmDecision.DENY
+
+    # Default session-level lease TTL: 30 minutes.
+    _SCOPE_LEASE_TTL = 30 * 60
+
+    def _request_to_grants(
+        self, scope_request: Any, source: str = "manual_confirm",
+        valid_until: float = 0.0,
+    ) -> None:
         """Convert a scope request's requirements into grants on the PermissionContext."""
         from .scope import ScopeGrant
         import time
@@ -310,6 +324,7 @@ class BlastRadiusMiddleware(Middleware):
                 constraints=grant_constraints,
                 source=source,
                 granted_at=now,
+                valid_until=valid_until,
             ))
 
     # Sentinel to signal "resolver failed, use legacy path"
@@ -358,8 +373,12 @@ class BlastRadiusMiddleware(Middleware):
         # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended)
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value)
-        allowed = await self._confirm(call)
-        if not allowed:
+
+        raw = await self._confirm(call)
+        decision = self._normalize_decision(raw)
+
+        from .scope import ConfirmDecision
+        if decision == ConfirmDecision.DENY:
             self._notify_lifecycle(call, False, f"user denied ({verdict.value})")
             call.metadata["user_decision"] = False
             return ToolResult(
@@ -373,13 +392,25 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value})")
+        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})")
         call.metadata["user_decision"] = True
+        call.metadata["confirm_decision"] = decision.value
 
-        # Convert request → grants so future calls in the same scope are auto-approved.
-        # EXEC and AGENT_SPAN: grant is still added (scope-level), but the legacy
-        # re-confirm behavior is preserved via the tool-name path.
-        self._request_to_grants(scope_request, source="manual_confirm")
+        # Convert request → grants based on user's decision.
+        import time as _time
+        if decision == ConfirmDecision.ONCE:
+            # Single-use: grant with tight scope, no TTL (existing behavior)
+            self._request_to_grants(scope_request, source="manual_confirm")
+        elif decision == ConfirmDecision.SCOPE:
+            # Session-scoped lease: grant with TTL
+            self._request_to_grants(
+                scope_request, source="lease",
+                valid_until=_time.time() + self._SCOPE_LEASE_TTL,
+            )
+        elif decision == ConfirmDecision.AUTO:
+            # Broad auto-approval: grant with no TTL, wider scope
+            self._request_to_grants(scope_request, source="auto_approve")
+
         return None  # proceed
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
@@ -414,8 +445,11 @@ class BlastRadiusMiddleware(Middleware):
         if self._is_unattended(call):
             return self._deny_unattended(call, "legacy-not-authorized")
 
-        allowed = await self._confirm(call)
-        if not allowed:
+        raw = await self._confirm(call)
+        decision = self._normalize_decision(raw)
+
+        from .scope import ConfirmDecision
+        if decision == ConfirmDecision.DENY:
             self._notify_lifecycle(call, False, "user denied")
             return ToolResult(
                 call_id=call.id,
@@ -429,7 +463,8 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        self._notify_lifecycle(call, True, "user confirmed")
+        self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
+        call.metadata["confirm_decision"] = decision.value
 
         # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
         # Other GUARDED tools are pre-authorized for the rest of this session.

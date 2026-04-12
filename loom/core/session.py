@@ -1772,15 +1772,22 @@ class LoomSession:
 
         return "\n".join(lines)
 
-    async def _confirm_tool_cli(self, call: ToolCall) -> bool:
+    async def _confirm_tool_cli(self, call: ToolCall) -> "ConfirmDecision":
         """
         CLI-specific confirmation prompt (stdin / Rich panel).
 
-        Phase C (Issue #45): when scope metadata is present in call.metadata,
-        the prompt shows verdict + diff info (resource, selector, expansion
-        reason) instead of raw args.
+        Phase C (Issue #45): scope metadata → verdict + diff info.
+        Phase B (Issue #88): returns ConfirmDecision (y/s/a/N) instead of bool.
+
+        Returns
+        -------
+        ConfirmDecision
+            DENY  — user typed N or Enter (default)
+            ONCE  — user typed y (approve this call only)
+            SCOPE — user typed s (approve this scope for the session lease)
+            AUTO  — user typed a (auto-approve all similar calls)
         """
-        from loom.core.harness.scope import PermissionVerdict
+        from loom.core.harness.scope import ConfirmDecision, PermissionVerdict
 
         # Stop any running spinner before printing the confirm panel so the
         # spinner animation doesn't overwrite the prompt input line.
@@ -1805,6 +1812,7 @@ class LoomSession:
             Panel(
                 self._format_scope_panel(call),
                 title=title,
+                subtitle="[dim]y=once  s=scope lease  a=auto  N=deny[/dim]",
                 border_style=border_style,
             )
         )
@@ -1813,11 +1821,19 @@ class LoomSession:
 
         try:
             answer = await asyncio.get_event_loop().run_in_executor(
-                None, pt_prompt, "Allow? [y/N]: "
+                None, pt_prompt, "Allow? [y/s/a/N]: "
             )
         except (EOFError, KeyboardInterrupt):
             answer = ""
-        return answer.strip().lower() in {"y", "yes"}
+
+        choice = answer.strip().lower()
+        if choice in {"y", "yes"}:
+            return ConfirmDecision.ONCE
+        if choice in {"s", "scope"}:
+            return ConfirmDecision.SCOPE
+        if choice in {"a", "auto"}:
+            return ConfirmDecision.AUTO
+        return ConfirmDecision.DENY
 
     def _all_authorized(self, tool_uses: list) -> bool:
         """
