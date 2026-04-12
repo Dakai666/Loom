@@ -33,7 +33,7 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 | **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors + trust-tier governance), procedural (versioned skills with quality-gradient EMA + self-assessment); always-on `MemoryGovernor` (contradiction detection, admission gate, decay cycle) |
 | **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
 | **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
-| **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision |
+| **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision; unified pipeline with `origin`-aware authorization (`allowed_tools` + `scope_grants` per schedule) |
 | **Notify** | `NotificationRouter` fan-out; `CLINotifier`, `WebhookNotifier`, `TelegramNotifier`, `DiscordBotNotifier`; `ConfirmFlow` with timeout |
 | **Extensibility** | `LoomPlugin` unified plugin interface; `HermesLens` / `OpenAIToolsLens`; Skill Import Pipeline; `@loom.tool` + `loom.register_plugin()` |
 
@@ -517,17 +517,26 @@ strict_sandbox      = false   # set true to confine run_bash to workspace root
 # base_url      = "http://localhost:1234/v1"    # default
 # default_model = "phi-4"
 
-# ── Autonomy ──────────────────────────────────────────────────────────────────
+# ── Autonomy (Unified Pipeline v0.2.9.4) ─────────────────────────────────────
+# All execution paths share the same MiddlewarePipeline.
+# Autonomy schedules run with origin="autonomy" — they can only "spend"
+# pre-authorized grants, never request new permissions interactively.
+# Declare needed GUARDED tools in allowed_tools; scope-aware tools also
+# need scope_grants for resource-level authorization.
 [autonomy]
 enabled  = true
 timezone = "Asia/Taipei"
 
 [[autonomy.schedules]]
-name        = "morning_briefing"
-cron        = "0 9 * * *"
-intent      = "Generate daily news briefing and write to news/YYYY-MM-DD/briefing.md"
-trust_level = "safe"
-notify      = false
+name          = "morning_briefing"
+cron          = "0 1 * * *"          # 01:00 UTC = 09:00 Asia/Taipei
+intent        = "Generate daily news briefing and write to news/YYYY-MM-DD/briefing.md"
+trust_level   = "safe"
+notify        = false
+allowed_tools = ["write_file", "memorize"]   # GUARDED tools this schedule needs
+scope_grants  = [
+  { resource = "path", action = "write", selector = "news" },
+]
 
 # trust_level × notify interaction:
 #   safe                   → execute immediately, no confirmation
@@ -623,7 +632,7 @@ loom import skills.json --dry-run --min-confidence 0.7
 ## Running Tests
 
 ```bash
-python -m pytest tests/          # 635+ tests
+python -m pytest tests/          # 654+ tests
 python -m pytest tests/test_harness.py -v
 python -m pytest tests/test_memory.py -v
 python -m pytest tests/test_cognition.py -v

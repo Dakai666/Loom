@@ -34,6 +34,10 @@ class TriggerDefinition:
     notify: bool = True               # push notification before acting?
     enabled: bool = True
     notify_thread_id: int = 0         # Discord thread ID for result delivery (0 = default channel)
+    allowed_tools: list[str] = field(default_factory=list)
+    """GUARDED tools the daemon pre-authorizes before running the agent."""
+    scope_grants: list[dict[str, Any]] = field(default_factory=list)
+    """Scope grants (resource/action/selector dicts) injected for this trigger."""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

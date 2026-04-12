@@ -86,6 +86,8 @@ class ActionPlanner:
         context["trigger_name"] = trigger.name
         context["intent"] = trigger.intent
         context["notify_thread_id"] = getattr(trigger, "notify_thread_id", 0)
+        context["allowed_tools"] = getattr(trigger, "allowed_tools", [])
+        context["scope_grants"] = getattr(trigger, "scope_grants", [])
 
         if self._semantic is not None:
             try:
