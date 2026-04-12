@@ -69,6 +69,9 @@ def _check_config_integrity(autonomy_cfg: dict) -> bool:
                     "mismatch. Stored=%s, Current=%s. Review loom.toml for tampering.",
                     stored[:12], current_hash[:12],
                 )
+                # Update hash after warning — the log entry is the audit trail.
+                # Without this, every restart repeats the same warning forever.
+                _CONFIG_HASH_PATH.write_text(current_hash)
                 return False
         # First load or match — record/update
         _CONFIG_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
