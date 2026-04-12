@@ -29,6 +29,7 @@ from loom.core.security.self_termination_guard import SelfTerminationGuard
 import logging
 
 _log = logging.getLogger(__name__)
+_self_term_guard = SelfTerminationGuard()
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -470,7 +471,6 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
         command = call.args.get("command", "")
 
         # Issue #98: self-termination guard — before ANY other processing
-        _self_term_guard = SelfTerminationGuard()
         verdict = _self_term_guard.check(command)
         if verdict.verdict == "block":
             _log.warning("Self-termination guard blocked: %s", verdict.description)

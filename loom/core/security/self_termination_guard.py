@@ -15,7 +15,7 @@ Usage::
     guard = SelfTerminationGuard()
     verdict = guard.check("pkill -f loom")
     if verdict.is_blocked:
-        raise PermissionError(f"Blocked: {verdict.reason}")
+        raise PermissionError(f"Blocked: {verdict.description}")
 
 The guard is intentionally stateless and has no external dependencies.
 """
@@ -136,8 +136,8 @@ class SelfTerminationGuard:
 
         # --- Block patterns ---
         # 1. Bare pkill/killall targeting Loom processes
-        if _PATTERN_BARE_KILL.search(command):
-            m = _PATTERN_BARE_KILL.search(command)
+        m = _PATTERN_BARE_KILL.search(command)
+        if m:
             return GuardVerdict(
                 is_blocked=True,
                 verdict="block",
@@ -149,8 +149,8 @@ class SelfTerminationGuard:
             )
 
         # 2. kill via command substitution $(pgrep loom) / `pgrep gateway`
-        if _PATTERN_KILL_CMD_SUB.search(command):
-            m = _PATTERN_KILL_CMD_SUB.search(command)
+        m = _PATTERN_KILL_CMD_SUB.search(command)
+        if m:
             return GuardVerdict(
                 is_blocked=True,
                 verdict="block",
@@ -162,8 +162,8 @@ class SelfTerminationGuard:
             )
 
         # 3. Detach operator targeting Loom:  disown loom, nohup gateway run
-        if _PATTERN_DETACH_TARGET.search(command):
-            m = _PATTERN_DETACH_TARGET.search(command)
+        m = _PATTERN_DETACH_TARGET.search(command)
+        if m:
             return GuardVerdict(
                 is_blocked=True,
                 verdict="block",
@@ -175,8 +175,8 @@ class SelfTerminationGuard:
             )
 
         # 4. Loom process backgrounded at end of command:  gateway run &
-        if _PATTERN_LOOM_BACKGROUND.search(command):
-            m = _PATTERN_LOOM_BACKGROUND.search(command)
+        m = _PATTERN_LOOM_BACKGROUND.search(command)
+        if m:
             return GuardVerdict(
                 is_blocked=True,
                 verdict="block",
