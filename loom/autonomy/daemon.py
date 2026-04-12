@@ -21,8 +21,6 @@ from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
-from loom.core.harness.middleware import BlastRadiusMiddleware
-from loom.core.harness.permissions import TrustLevel
 from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
@@ -100,27 +98,35 @@ class AutonomyDaemon:
 
         logger.info("[autonomy] trigger=%s — starting agent run", plan.trigger_name)
 
-        # For SAFE triggers, temporarily auto-approve GUARDED tool calls so the
-        # unattended agent can write files / run bash without an interactive prompt.
-        _blast_mw = None
-        _original_confirm = None
-        if plan.trust_level == TrustLevel.SAFE:
-            for mw in getattr(getattr(self._session, "_pipeline", None), "_middlewares", []):
-                if isinstance(mw, BlastRadiusMiddleware):
-                    _blast_mw = mw
-                    _original_confirm = mw._confirm
-                    async def _auto_approve(call):
-                        logger.info("[autonomy] auto-approving %s (safe trigger)", call.tool_name)
-                        return True
-                    mw._confirm = _auto_approve
-                    break
+        # Pre-authorize tools and scope grants declared in the schedule.
+        # These are revoked after the turn completes so triggers don't
+        # accumulate cross-schedule permissions.
+        from loom.core.harness.scope import ScopeGrant
+        _added_tools: list[str] = []
+        for tool_name in plan.context.get("allowed_tools", []):
+            if tool_name not in self._session.perm.session_authorized:
+                self._session.perm.authorize(tool_name)
+                _added_tools.append(tool_name)
+        _added_grant_count = 0
+        for g in plan.context.get("scope_grants", []):
+            self._session.perm.grant(ScopeGrant(
+                resource=g["resource"],
+                action=g["action"],
+                selector=g.get("selector", "*"),
+                constraints=g.get("constraints", {}),
+                source=f"autonomy:{plan.trigger_name}",
+            ))
+            _added_grant_count += 1
 
-        # Collect text output from stream_turn (the session's interactive loop).
-        # We run it as an async generator and pull TurnDone to confirm completion.
+        # Collect text output from stream_turn with origin="autonomy".
+        # BlastRadiusMiddleware will auto-deny any tool call that isn't
+        # covered by existing scope grants (no human to prompt).
         try:
             output_chunks: list[str] = []
             async for event in self._session.stream_turn(
-                plan.prompt, abort_signal=self._abort.signal
+                plan.prompt,
+                abort_signal=self._abort.signal,
+                origin="autonomy",
             ):
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
@@ -149,8 +155,12 @@ class AutonomyDaemon:
                 thread_id=plan.context.get("notify_thread_id", 0),
             ))
         finally:
-            if _blast_mw is not None:
-                _blast_mw._confirm = _original_confirm
+            # Revoke temporary grants so schedules don't leak permissions.
+            for tool_name in _added_tools:
+                self._session.perm.revoke(tool_name)
+            if _added_grant_count:
+                _src = f"autonomy:{plan.trigger_name}"
+                self._session.perm.revoke_matching(lambda g: g.source == _src)
 
     # ------------------------------------------------------------------
     # Config loading
@@ -184,6 +194,8 @@ class AutonomyDaemon:
                 trust_level=sched.get("trust_level", "guarded"),
                 notify=sched.get("notify", True),
                 notify_thread_id=sched.get("notify_thread", 0),
+                allowed_tools=sched.get("allowed_tools", []),
+                scope_grants=sched.get("scope_grants", []),
             )
             self._evaluator.register(trigger)
             count += 1
@@ -196,6 +208,8 @@ class AutonomyDaemon:
                 trust_level=evt.get("trust_level", "guarded"),
                 notify=evt.get("notify", True),
                 notify_thread_id=evt.get("notify_thread", 0),
+                allowed_tools=evt.get("allowed_tools", []),
+                scope_grants=evt.get("scope_grants", []),
             )
             self._evaluator.register(trigger)
             count += 1

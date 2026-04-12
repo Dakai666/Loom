@@ -38,6 +38,12 @@ class ToolCall:
     metadata: dict[str, Any] = field(default_factory=dict)
     capabilities: ToolCapability = field(default_factory=lambda: ToolCapability.NONE)
     abort_signal: asyncio.Event | None = field(default=None, compare=False, repr=False)
+    origin: str = "interactive"
+    """
+    Where this call originated: "interactive" (CLI/TUI/Discord user),
+    "mcp" (MCP client), "autonomy" (daemon trigger), "subagent" (child agent).
+    BlastRadiusMiddleware uses this to decide whether to prompt or deny.
+    """
 
 
 # Structured failure categories — used for reflexive learning and failure analysis.
@@ -228,6 +234,32 @@ class BlastRadiusMiddleware(Middleware):
             return False   # escape detected — fall through to confirmation
         return True
 
+    # Origins where no human is available to answer confirmation prompts.
+    _UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent"})
+
+    def _is_unattended(self, call: ToolCall) -> bool:
+        """Return True if no human is available to answer prompts."""
+        return call.origin in self._UNATTENDED_ORIGINS
+
+    def _deny_unattended(self, call: ToolCall, verdict: str) -> ToolResult:
+        """Return a denial ToolResult for unattended calls that need confirmation."""
+        _log.info(
+            "Denying %s (origin=%s, verdict=%s) — no human to confirm",
+            call.tool_name, call.origin, verdict,
+        )
+        self._notify_lifecycle(call, False, f"unattended-deny ({call.origin}, {verdict})")
+        call.metadata["user_decision"] = False
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=False,
+            error=(
+                f"Permission denied: {call.tool_name} requires scope authorization "
+                f"not covered by existing grants. Origin '{call.origin}' cannot "
+                f"request new permissions interactively."
+            ),
+            failure_type="permission_denied",
+        )
+
     def _notify_lifecycle(self, call: ToolCall, result: bool, reason: str) -> None:
         """
         Write authorization decision to LifecycleContext (Issue #50).
@@ -323,7 +355,9 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        # CONFIRM or EXPAND_SCOPE — prompt user
+        # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended)
+        if self._is_unattended(call):
+            return self._deny_unattended(call, verdict.value)
         allowed = await self._confirm(call)
         if not allowed:
             self._notify_lifecycle(call, False, f"user denied ({verdict.value})")
@@ -375,6 +409,10 @@ class BlastRadiusMiddleware(Middleware):
         if self._exec_auto_approved(call):
             self._notify_lifecycle(call, True, "exec_auto")
             return await next(call)
+
+        # Unattended origins cannot request new permissions
+        if self._is_unattended(call):
+            return self._deny_unattended(call, "legacy-not-authorized")
 
         allowed = await self._confirm(call)
         if not allowed:

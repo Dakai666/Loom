@@ -1745,7 +1745,11 @@ def mcp_serve(db: str, model: str) -> None:
         session = LoomSession(model=model, db_path=db)
         await session.start()
         try:
-            await run_mcp_server(session.registry)
+            await run_mcp_server(
+                session.registry,
+                pipeline=session._pipeline,
+                session_id=session.session_id,
+            )
         finally:
             await session.stop()
 

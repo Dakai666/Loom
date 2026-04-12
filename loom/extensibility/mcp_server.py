@@ -54,6 +54,7 @@ except ImportError:
     _MCP_AVAILABLE = False
 
 if TYPE_CHECKING:
+    from loom.core.harness.middleware import MiddlewarePipeline
     from loom.core.harness.registry import ToolRegistry
 
 _LOOM_MCP_SERVER_NAME = "loom"
@@ -96,17 +97,29 @@ def _registry_to_mcp_tools(registry: "ToolRegistry") -> list["Tool"]:
     return tools
 
 
-async def run_mcp_server(registry: "ToolRegistry") -> None:
+async def run_mcp_server(
+    registry: "ToolRegistry",
+    pipeline: "MiddlewarePipeline | None" = None,
+    session_id: str = "mcp",
+) -> None:
     """
     Start an MCP server that exposes *registry* tools on stdio.
 
     This coroutine runs until the client disconnects or the process exits.
     Call it from ``loom mcp serve`` after the session is initialised.
+
+    When *pipeline* is provided, every tool call is routed through
+    the full middleware chain (scope checks, lifecycle, etc.) with
+    ``origin="mcp"``.  Without it, calls fall back to direct executor
+    invocation (legacy behavior) with a warning.
     """
     _check_mcp()
 
+    import logging
     from loom.core.harness.middleware import ToolCall, ToolResult
     from loom.core.harness.permissions import TrustLevel
+
+    _log = logging.getLogger(__name__)
 
     server = Server(_LOOM_MCP_SERVER_NAME)
 
@@ -126,12 +139,21 @@ async def run_mcp_server(registry: "ToolRegistry") -> None:
             return [TextContent(type="text", text=f"Error: tool '{name}' is CRITICAL and cannot be called via MCP")]
 
         call = ToolCall(
-            id=f"mcp-{name}",
             tool_name=name,
             args=arguments,
+            trust_level=tool_def.trust_level,
+            session_id=session_id,
+            capabilities=tool_def.capabilities,
+            origin="mcp",
         )
         try:
-            result: ToolResult = await tool_def.executor(call)
+            if pipeline is not None:
+                result: ToolResult = await pipeline.execute(call, tool_def.executor)
+            else:
+                _log.warning(
+                    "MCP call to '%s' bypassing pipeline (no pipeline provided)", name,
+                )
+                result = await tool_def.executor(call)
         except Exception as exc:
             return [TextContent(type="text", text=f"Error executing '{name}': {exc}")]
 

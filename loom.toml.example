@@ -120,7 +120,39 @@ strict_sandbox = false
 #   minute  hour  day-of-month  month  day-of-week
 # Day-of-week: 0=Sun, 1=Mon … 6=Sat  (same as standard cron)
 #
-# trust_level + notify interaction:
+# ── Unified Pipeline (v0.2.9.4) ──────────────────────────────────────────────
+# All execution paths (interactive, MCP, autonomy, sub-agent) flow through
+# the same MiddlewarePipeline. A `ToolCall.origin` field drives behavior:
+#
+#   origin="interactive" / "mcp"    → prompt user on unrecognized tools
+#   origin="autonomy" / "subagent"  → DENY if no pre-existing grant
+#
+# Autonomy schedules can only "spend" pre-authorized grants — they cannot
+# request new permissions interactively. You MUST declare what the schedule
+# needs via allowed_tools / scope_grants, otherwise GUARDED tool calls will
+# be denied silently.
+#
+# ── How to authorize autonomy schedules ──────────────────────────────────────
+#
+# 1. allowed_tools — pre-authorize GUARDED tools by name (legacy path).
+#    Tools listed here are temporarily authorized for the duration of the
+#    schedule's execution, then revoked.
+#
+#    allowed_tools = ["write_file", "memorize", "run_bash"]
+#
+# 2. scope_grants — inject scope-level grants for scope-aware tools.
+#    Each grant specifies resource/action/selector. These are also temporary
+#    and revoked after execution.
+#
+#    scope_grants = [
+#      { resource = "path", action = "write", selector = "news" },
+#      { resource = "exec", action = "execute", selector = "workspace" },
+#    ]
+#
+# 3. SAFE tools (read_file, list_dir, recall, load_skill, dream_cycle,
+#    memory_prune, etc.) are always pre-authorized — no need to list them.
+#
+# ── trust_level + notify interaction ─────────────────────────────────────────
 #   safe                   → execute immediately, no confirmation
 #   guarded + notify=false → execute immediately, no confirmation
 #   guarded + notify=true  → Discord Allow/Deny buttons (60 s timeout → skip)
@@ -128,6 +160,14 @@ strict_sandbox = false
 #
 # notify_thread: Discord thread ID to post results into.
 #   0 = use the --notify-channel passed to `loom discord start`
+#
+# ── Quick reference: common GUARDED tools ────────────────────────────────────
+#   write_file  — write/create files (MUTATES)
+#   memorize    — persist facts to semantic memory (MUTATES)
+#   relate      — store relationship triples (MUTATES)
+#   run_bash    — execute shell commands (EXEC) — also needs scope_grant
+#   web_search  — Brave Search API (NETWORK)
+#   spawn_agent — sub-agent (AGENT_SPAN + MUTATES)
 
 [autonomy]
 enabled  = false           # set true to activate daemon
@@ -137,77 +177,84 @@ enabled  = false           # set true to activate daemon
 
 # ── Example: daily news briefing ──────────────────────────────────────────────
 # [[autonomy.schedules]]
-# name         = "morning_briefing"
-# cron         = "0 1 * * *"        # 01:00 UTC = 09:00 Asia/Taipei
-# intent       = "Fetch today's top stories from HackerNews and GitHub trending.
-#                 Write a concise briefing to news/YYYY-MM-DD/briefing.md and
-#                 store key trends in semantic memory."
-# trust_level  = "safe"
-# notify       = false
-# notify_thread = 0                 # replace with Discord thread ID
+# name          = "morning_briefing"
+# cron          = "0 1 * * *"        # 01:00 UTC = 09:00 Asia/Taipei
+# intent        = "Fetch today's top stories from HackerNews and GitHub trending.
+#                  Write a concise briefing to news/YYYY-MM-DD/briefing.md and
+#                  store key trends in semantic memory."
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0                  # replace with Discord thread ID
+# allowed_tools = ["write_file", "memorize"]
+# scope_grants  = [
+#   { resource = "path", action = "write", selector = "news" },
+# ]
 
 # ── Example: daily journal ────────────────────────────────────────────────────
 # [[autonomy.schedules]]
-# name         = "daily_journal"
-# cron         = "30 9 * * *"       # 09:30 UTC = 17:30 Asia/Taipei
-# intent       = "Review today's work: what was done, obstacles encountered,
-#                 decisions made. Write to diary/YYYY-MM-DD.md and extract
-#                 key facts into semantic memory."
-# trust_level  = "safe"
-# notify       = false
-# notify_thread = 0                 # replace with Discord thread ID
-
-# ── Example: weekday-only task ────────────────────────────────────────────────
-# [[autonomy.schedules]]
-# name         = "weekly_review"
-# cron         = "0 10 * * 5"       # 10:00 UTC = 18:00 Asia/Taipei, Friday
-# intent       = "Summarise the week's progress and surface next week's priorities."
-# trust_level  = "guarded"
-# notify       = true               # will send Discord Allow/Deny buttons
+# name          = "daily_journal"
+# cron          = "30 9 * * *"       # 09:30 UTC = 17:30 Asia/Taipei
+# intent        = "Review today's work: what was done, obstacles encountered,
+#                  decisions made. Write to diary/YYYY-MM-DD.md and extract
+#                  key facts into semantic memory."
+# trust_level   = "safe"
+# notify        = false
 # notify_thread = 0
+# allowed_tools = ["write_file", "memorize"]
+# scope_grants  = [
+#   { resource = "path", action = "write", selector = "diary" },
+# ]
+
+# ── Example: weekday-only task (with Discord confirmation) ────────────────────
+# [[autonomy.schedules]]
+# name          = "weekly_review"
+# cron          = "0 10 * * 5"       # 10:00 UTC = 18:00 Asia/Taipei, Friday
+# intent        = "Summarise the week's progress and surface next week's priorities."
+# trust_level   = "guarded"
+# notify        = true               # will send Discord Allow/Deny buttons
+# notify_thread = 0
+# allowed_tools = ["write_file", "memorize"]
 
 # ── Example: named event trigger ──────────────────────────────────────────────
 # [[autonomy.triggers]]
-# name         = "deploy_check"
-# event        = "deployment_done"  # fired by: loom autonomy emit deployment_done
-# intent       = "Run smoke tests and post results to #deployments channel."
-# trust_level  = "guarded"
-# notify       = true
+# name          = "deploy_check"
+# event         = "deployment_done"  # fired by: loom autonomy emit deployment_done
+# intent        = "Run smoke tests and post results to #deployments channel."
+# trust_level   = "guarded"
+# notify        = true
 # notify_thread = 0
+# allowed_tools = ["run_bash"]
+# scope_grants  = [
+#   { resource = "exec", action = "execute", selector = "workspace" },
+# ]
 
 # ── Example: offline dreaming (background knowledge synthesis) ─────────────────
-# Requires the DreamingPlugin to be registered (auto-loads from ~/.loom/plugins/
-# if you place dreaming.py there, or use loom.register_plugin() in a startup
-# script).  The agent's dream_cycle tool does the actual work.
+# dream_cycle is a SAFE tool — no allowed_tools needed for it.
+# But relate (writing relational triples) is GUARDED.
 #
 # [[autonomy.schedules]]
-# name         = "offline_dreaming"
-# cron         = "0 3 * * *"        # 03:00 UTC = 11:00 Asia/Taipei
-# intent       = """Run dream_cycle to synthesise insights from semantic memory.
-#                   Call the dream_cycle tool with default settings and report
-#                   how many new relational insights were written."""
-# trust_level  = "safe"             # no confirmation needed — pure memory write
-# notify       = false
-# notify_thread = 0                 # replace with a Discord thread ID to log results
+# name          = "offline_dreaming"
+# cron          = "0 3 * * *"        # 03:00 UTC = 11:00 Asia/Taipei
+# intent        = """Run dream_cycle to synthesise insights from semantic memory.
+#                    Call the dream_cycle tool with default settings and report
+#                    how many new relational insights were written."""
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0
+# allowed_tools = ["memorize", "relate"]
 
 # ── Example: weekly memory housekeeping ──────────────────────────────────────────
-# Prunes semantic facts whose effective_confidence has decayed below threshold.
-# Effective confidence uses a 90-day half-life: a session-compressed fact
-# (confidence=0.8) drops below 0.1 after ~282 days without being refreshed.
-# Runs dry_run first as a preview, then deletes if any entries qualify.
-#
-# Requires DreamingPlugin (same as offline_dreaming above) — it registers
-# the memory_prune tool alongside dream_cycle.
+# memory_prune is a SAFE tool — no allowed_tools needed.
 #
 # [[autonomy.schedules]]
-# name         = "memory_housekeeping"
-# cron         = "0 19 * * 0"       # 19:00 UTC Sunday = 03:00 Monday Asia/Taipei
-# intent       = """Run memory housekeeping. First call memory_prune with
-#                   dry_run=true to preview decayed entries. If any qualify,
-#                   call again with dry_run=false to delete them. Report:
-#                   total examined, pruned, and retained."""
-# trust_level  = "safe"
-# notify       = false
+# name          = "memory_housekeeping"
+# cron          = "0 19 * * 0"       # 19:00 UTC Sunday = 03:00 Monday Asia/Taipei
+# intent        = """Run memory housekeeping. First call memory_prune with
+#                    dry_run=true to preview decayed entries. If any qualify,
+#                    call again with dry_run=false to delete them. Report:
+#                    total examined, pruned, and retained."""
+# trust_level   = "safe"
+# notify        = false
 # notify_thread = 0
 
 # ─────────────────────────────────────────────

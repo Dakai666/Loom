@@ -60,6 +60,7 @@ async def run_subagent(
     tool_registry: Any,          # parent's ToolRegistry — we filter from this
     parent_session_id: str,
     workspace: Any,              # pathlib.Path
+    parent_grants: "list[Any] | None" = None,
 ) -> SubAgentResult:
     """
     Run a sub-agent to completion and return a SubAgentResult.
@@ -72,6 +73,7 @@ async def run_subagent(
     """
     from loom.core.harness.middleware import (
         MiddlewarePipeline, TraceMiddleware, BlastRadiusMiddleware,
+        LifecycleMiddleware, LifecycleGateMiddleware,
         ToolCall, ToolResult,
     )
     from loom.core.harness.validation import SchemaValidationMiddleware
@@ -122,11 +124,17 @@ async def run_subagent(
             tags=_orig_memorize.tags,
         ))
 
-    # ── Permission context: pre-authorize SAFE + GUARDED (auto-confirm) ──────
+    # ── Permission context: inherit parent's scope grants ─────────────────────
+    # Sub-agents can only "spend" existing grants — they cannot request new
+    # ones interactively (origin="subagent" → unattended deny).
+    # Legacy-path tools (no scope_resolver) still need tool-name authorization,
+    # so we authorize all tools in the child registry (already filtered above).
     perm = PermissionContext(session_id=session_id)
     for tool in child_registry._tools.values():
-        # Sub-agents auto-approve SAFE and GUARDED; CRITICAL is already excluded
         perm.authorize(tool.name)
+    if parent_grants:
+        for g in parent_grants:
+            perm.grant(g)
 
     # ── Trace callback → episodic (child's own session trace) ────────────────
     async def on_trace(call: ToolCall, result: ToolResult) -> None:
@@ -150,14 +158,19 @@ async def run_subagent(
             metadata=meta,
         ))
 
-    async def auto_confirm(call: ToolCall) -> bool:
-        # Sub-agents never prompt humans; GUARDED tools are auto-allowed
-        return True
+    async def _subagent_confirm(call: ToolCall) -> bool:
+        # Should never be reached — _is_unattended catches origin="subagent"
+        # before confirm_fn is called. Deny as safety net.
+        return False
 
     pipeline = MiddlewarePipeline([
+        LifecycleMiddleware(registry=child_registry),  # outer: lifecycle bookends
         TraceMiddleware(on_trace=on_trace),
         SchemaValidationMiddleware(registry=child_registry),
-        BlastRadiusMiddleware(perm_ctx=perm, confirm_fn=auto_confirm),
+        BlastRadiusMiddleware(
+            perm_ctx=perm, confirm_fn=_subagent_confirm, registry=child_registry,
+        ),
+        LifecycleGateMiddleware(registry=child_registry),  # inner: lifecycle gating
     ])
 
     # ── Build initial messages ────────────────────────────────────────────────
@@ -228,7 +241,9 @@ async def run_subagent(
                         tool_name=tu.name,
                         args=tu.args,
                         trust_level=tool_def.trust_level,
+                        capabilities=tool_def.capabilities,
                         session_id=session_id,
+                        origin="subagent",
                     )
                     ts = time.monotonic()
                     result = await pipeline.execute(call, tool_def.executor)

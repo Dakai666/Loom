@@ -1390,6 +1390,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 tool_registry=parent_session.registry,
                 parent_session_id=parent_session.session_id,
                 workspace=parent_session.workspace,
+                parent_grants=parent_session.perm.grants,
             )
         except Exception as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,

@@ -57,7 +57,7 @@
 | [19-Autonomy-概述.md](19-Autonomy-概述.md) | 觸發器、決策管道、DreamingPlugin、SelfReflectionPlugin、Counter-factual |
 | [20-觸發器詳解.md](20-觸發器詳解.md) | CronTrigger / EventTrigger / ConditionTrigger |
 | [21-Action-Planner.md](21-Action-Planner.md) | Trust Level → Decision 映射邏輯 |
-| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、Offline Dreaming、SelfReflectionPlugin |
+| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、統一管線（origin-aware）、allowed_tools / scope_grants 授權、Offline Dreaming、SelfReflectionPlugin |
 
 ### 7. Notification Layer（通知系統）
 | 文件 | 說明 |
@@ -102,6 +102,8 @@
 | [40-新增Notifier.md](40-新增Notifier.md) | 如何實作新的通知適配器 |
 | [41-新增人格.md](41-新增人格.md) | 如何建立新 personality markdown |
 | [42-測試指南.md](42-測試指南.md) | pytest 執行方式與測試覆蓋 |
+| [43-Harness-Execution-可視化規劃.md](43-Harness-Execution-可視化規劃.md) | TUI / Discord 的 execution graph、control surface 與 phased rollout 規劃 |
+| [44-Scope-Aware-Permission-規劃.md](44-Scope-Aware-Permission-規劃.md) | Issue #45 的底層 permission substrate 規劃：scope grant、resolver、middleware verdict 與 scope expansion contract |
 
 ### 附錄
 | 文件 | 說明 |
@@ -121,12 +123,13 @@
 | v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
 | v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；handler 例外保護；移除 `/verbose` F3（Issue #63） |
 | v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE / KEEP / SUPERSEDE）；Admission Gate；Decay Cycle；`agent_memorize` tier；external source 分類 |
+| v0.2.9.4 | Unified Pipeline（Issues #83–#86）：`ToolCall.origin` 欄位；MCP / autonomy / sub-agent / plugin 全部經由同一 MiddlewarePipeline；`allowed_tools` + `scope_grants` 排程授權配置 |
 
 ---
 
 ## ✅ 文件撰寫狀態
 
-全部 45 個文件已完成！
+全部 48 個文件已完成！
 
 | 區塊 | 完成數 |
 |------|--------|
@@ -142,7 +145,7 @@
 | 9. Extensibility | 4/4 |
 | 10. Platform | 4/4 |
 | 11. 設定與配置 | 2/2 |
-| 12. 開發者指南 | 4/4 |
+| 12. 開發者指南 | 6/6 |
 | 附錄 | 1/1 |
 
 ---
