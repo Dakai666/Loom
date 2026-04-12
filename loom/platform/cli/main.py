@@ -11,6 +11,8 @@ Usage
     loom chat --model MiniMax-M2.7-highspeed
     loom chat --model claude-sonnet-4-6
     loom memory list
+    loom palace                       # Memory Palace TUI
+    loom palace --view semantic
     loom reflect --session <id>
 """
 
@@ -1259,6 +1261,38 @@ async def _memory_list(db: str, limit: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# loom palace — Memory Palace TUI
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option(
+    "--view",
+    "view_name",
+    default="semantic",
+    type=click.Choice(["semantic", "relational", "episodic", "skills", "health"]),
+    help="Open directly in a specific memory section.",
+)
+def palace(db: str, view_name: str) -> None:
+    """Launch the Memory Palace — an interactive TUI for exploring all memory stores.
+
+    Uses a purple theme to distinguish it from the chat TUI.
+    """
+    from loom.palace.app import PalaceApp
+    from loom.core.memory.store import SQLiteStore
+    import asyncio
+
+    async def _run() -> None:
+        store = SQLiteStore(db)
+        await store.initialize()
+        app = PalaceApp(db_path=db, initial_view=view_name)
+        await app.run_async()
+
+    asyncio.run(_run())
+
 
 
 @cli.command()
