@@ -658,7 +658,7 @@ class LoomSession:
             from loom.extensibility.mcp_client import load_mcp_servers_into_session
 
             self._mcp_clients = await load_mcp_servers_into_session(
-                _load_loom_config(), self,
+                _load_loom_config(), self, extra_env=_load_env(),
             )
             if self._mcp_clients:
                 names = ", ".join(c._cfg.name for c in self._mcp_clients)

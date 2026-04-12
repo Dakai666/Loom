@@ -86,24 +86,33 @@ class MCPServerConfig:
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
-def _expand_env(value: str) -> str:
+def _expand_env(value: str, extra_env: dict[str, str] | None = None) -> str:
     """
-    Expand ${VAR} placeholders in *value* with the current process environment.
-    Unset variables are replaced with the empty string.
+    Expand ${VAR} placeholders in *value*.
+
+    Lookup order: *extra_env* (e.g. values from .env) first, then
+    ``os.environ``.  Unset variables are replaced with the empty string.
     """
+    merged = {**os.environ, **(extra_env or {})}
+
     def _replace(m: re.Match) -> str:
-        return os.environ.get(m.group(1), "")
+        return merged.get(m.group(1), "")
+
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
 
-def load_mcp_server_configs(config: dict) -> list[MCPServerConfig]:
+def load_mcp_server_configs(
+    config: dict,
+    extra_env: dict[str, str] | None = None,
+) -> list[MCPServerConfig]:
     """
     Parse ``[[mcp.servers]]`` entries from the loaded loom.toml dict.
 
     Environment-variable placeholders (``${VAR}``) in ``env`` values are
-    expanded from the current process environment at load time, so secrets
-    stored in ``.env`` (and loaded into the environment before Loom starts)
-    are never written to ``loom.toml`` in plain text.
+    expanded using *extra_env* (typically the dict returned by
+    ``_load_env()``) merged over ``os.environ``, so secrets kept in
+    ``.env`` are resolved without needing them injected into the process
+    environment first.
 
     Returns an empty list if no MCP servers are configured.
     """
@@ -112,10 +121,8 @@ def load_mcp_server_configs(config: dict) -> list[MCPServerConfig]:
     for item in raw:
         try:
             raw_env: dict[str, str] = dict(item.get("env", {}))
-            # Expand ${VAR} in every env value (supports nested ${VAR} in
-            # rare cases; single-pass substitution handles the common case).
             expanded_env: dict[str, str] = {
-                k: _expand_env(v) for k, v in raw_env.items()
+                k: _expand_env(v, extra_env) for k, v in raw_env.items()
             }
             result.append(MCPServerConfig(
                 name=item.get("name", "unknown"),
@@ -307,15 +314,20 @@ def _extract_text(result: "CallToolResult") -> str:
 async def load_mcp_servers_into_session(
     config: dict,
     session: Any,
+    extra_env: dict[str, str] | None = None,
 ) -> list[LoomMCPClient]:
     """
     Read ``[[mcp.servers]]`` from *config*, connect to each, and register
     the tools into *session*.
 
+    Pass *extra_env* (the dict returned by ``_load_env()``) so that
+    ``${VAR}`` placeholders in loom.toml env values are resolved against
+    the .env file even when those variables are not in ``os.environ``.
+
     Returns the list of ``LoomMCPClient`` instances so the session can
     call ``disconnect()`` on shutdown.
     """
-    server_configs = load_mcp_server_configs(config)
+    server_configs = load_mcp_server_configs(config, extra_env)
     if not server_configs:
         return []
 
