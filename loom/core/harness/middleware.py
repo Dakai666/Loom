@@ -201,7 +201,7 @@ class BlastRadiusMiddleware(Middleware):
     def __init__(
         self,
         perm_ctx: Any,
-        confirm_fn: Callable[[ToolCall], Awaitable[bool]],
+        confirm_fn: "Callable[[ToolCall], Awaitable[bool | ConfirmDecision]]",
         exec_escape_fn: Callable[[ToolCall], bool] | None = None,
         registry: Any | None = None,
     ) -> None:
@@ -399,7 +399,7 @@ class BlastRadiusMiddleware(Middleware):
         # Convert request → grants based on user's decision.
         import time as _time
         if decision == ConfirmDecision.ONCE:
-            # Single-use: grant with tight scope, no TTL (existing behavior)
+            # Session-permanent grant with tight scope, no TTL
             self._request_to_grants(scope_request, source="manual_confirm")
         elif decision == ConfirmDecision.SCOPE:
             # Session-scoped lease: grant with TTL
@@ -408,7 +408,7 @@ class BlastRadiusMiddleware(Middleware):
                 valid_until=_time.time() + self._SCOPE_LEASE_TTL,
             )
         elif decision == ConfirmDecision.AUTO:
-            # Broad auto-approval: grant with no TTL, wider scope
+            # Permanent grant: same scope as SCOPE but no TTL (never expires)
             self._request_to_grants(scope_request, source="auto_approve")
 
         return None  # proceed
@@ -465,6 +465,17 @@ class BlastRadiusMiddleware(Middleware):
 
         self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
         call.metadata["confirm_decision"] = decision.value
+
+        # Legacy path has no scope_resolver — SCOPE/AUTO degrade to session
+        # authorization (same as ONCE). Log so the user can see the fallback.
+        from .scope import ConfirmDecision as _CD
+        if decision in (_CD.SCOPE, _CD.AUTO):
+            _log.debug(
+                "SCOPE/AUTO chosen but no scope_resolver for %r — "
+                "falling back to session authorization",
+                call.tool_name,
+            )
+            call.metadata["legacy_decision_fallback"] = True
 
         # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
         # Other GUARDED tools are pre-authorized for the rest of this session.

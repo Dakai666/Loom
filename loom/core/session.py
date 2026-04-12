@@ -1783,9 +1783,9 @@ class LoomSession:
         -------
         ConfirmDecision
             DENY  — user typed N or Enter (default)
-            ONCE  — user typed y (approve this call only)
-            SCOPE — user typed s (approve this scope for the session lease)
-            AUTO  — user typed a (auto-approve all similar calls)
+            ONCE  — user typed y (approve and grant this scope for the session)
+            SCOPE — user typed s (approve with a 30-min lease, auto-expires)
+            AUTO  — user typed a (permanent grant, same scope, no expiry)
         """
         from loom.core.harness.scope import ConfirmDecision, PermissionVerdict
 
@@ -1812,7 +1812,7 @@ class LoomSession:
             Panel(
                 self._format_scope_panel(call),
                 title=title,
-                subtitle="[dim]y=once  s=scope lease  a=auto  N=deny[/dim]",
+                subtitle="[dim]y=approve  s=lease (30m)  a=permanent  N=deny[/dim]",
                 border_style=border_style,
             )
         )
@@ -1821,7 +1821,7 @@ class LoomSession:
 
         try:
             answer = await asyncio.get_event_loop().run_in_executor(
-                None, pt_prompt, "Allow? [y/s/a/N]: "
+                None, pt_prompt, "Allow? [y=approve/s=lease/a=permanent/N]: "
             )
         except (EOFError, KeyboardInterrupt):
             answer = ""

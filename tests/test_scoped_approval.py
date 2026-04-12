@@ -158,6 +158,31 @@ class TestPurgeExpired:
         assert len(perm.grants) == 1
 
 
+class TestEffectiveGrantsSelfHeal:
+    """_effective_grants() auto-purges expired grants to prevent _usage leak."""
+
+    def test_effective_grants_purges_expired_and_usage(self):
+        perm = PermissionContext(session_id="test")
+        perm.grant(ScopeGrant(
+            resource="path", action="write", selector="/doc",
+            valid_until=time.time() - 10,
+        ))
+        perm.grant(ScopeGrant(
+            resource="path", action="read", selector="/src",
+        ))
+        # Simulate usage tracking for expired grant
+        perm._usage[0] = {"max_calls": 5}
+        perm._usage[1] = {"max_calls": 2}
+
+        # _effective_grants should auto-purge expired and remap _usage
+        effective = perm._effective_grants()
+        assert len(effective) == 1
+        assert effective[0].selector == "/src"
+        # _usage should have been remapped: old index 1 → new index 0
+        assert 0 in perm._usage
+        assert perm._usage[0] == {"max_calls": 2}
+
+
 # =====================================================================
 # 2. Phase B — ConfirmDecision
 # =====================================================================
@@ -301,6 +326,34 @@ class TestLegacyPathDecision:
         assert not result.success
         handler.assert_not_called()
 
+    async def test_scope_decision_on_legacy_sets_fallback_metadata(self):
+        """SCOPE/AUTO on legacy path records legacy_decision_fallback in metadata."""
+        perm = PermissionContext(session_id="test")
+        call = _call("write_file", {"path": "x.py"})
+        result, _, _ = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.SCOPE,
+        )
+        assert result.success
+        assert call.metadata.get("legacy_decision_fallback") is True
+
+    async def test_auto_decision_on_legacy_sets_fallback_metadata(self):
+        perm = PermissionContext(session_id="test")
+        call = _call("write_file", {"path": "x.py"})
+        result, _, _ = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.AUTO,
+        )
+        assert result.success
+        assert call.metadata.get("legacy_decision_fallback") is True
+
+    async def test_once_decision_on_legacy_no_fallback_metadata(self):
+        perm = PermissionContext(session_id="test")
+        call = _call("write_file", {"path": "x.py"})
+        result, _, _ = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.ONCE,
+        )
+        assert result.success
+        assert "legacy_decision_fallback" not in call.metadata
+
 
 # =====================================================================
 # 3. Phase C — /scope command structure
@@ -368,6 +421,19 @@ class TestScopeCommandHandler:
         _handle_scope_command(session, "clear", console)
         assert len(session.perm.grants) == 1
         assert session.perm.grants[0].source == "system"
+
+    def test_clear_preserves_exec_auto(self):
+        from loom.platform.cli.main import _handle_scope_command
+        session = self._make_session(grants=[
+            ScopeGrant(resource="path", action="write", selector="/doc", source="lease"),
+            ScopeGrant(resource="exec", action="execute", selector="workspace", source="exec_auto"),
+            ScopeGrant(resource="exec", action="execute", selector="workspace", source="system"),
+        ])
+        console = MagicMock()
+        _handle_scope_command(session, "clear", console)
+        assert len(session.perm.grants) == 2
+        sources = {g.source for g in session.perm.grants}
+        assert sources == {"system", "exec_auto"}
 
     def test_purge_expired_on_list(self):
         from loom.platform.cli.main import _handle_scope_command

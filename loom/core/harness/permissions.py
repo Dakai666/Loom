@@ -202,10 +202,14 @@ class PermissionContext:
         from .scope import ScopeGrant as SG
         import time as _time
 
+        # Self-heal: purge expired grants so _usage stays in sync (#88 review)
+        if any(g.valid_until > 0 and _time.time() > g.valid_until for g in self.grants):
+            self.purge_expired()
+
         now = _time.time()
         effective: list[ScopeGrant] = []
         for i, g in enumerate(self.grants):
-            # TTL expiry check (#88)
+            # TTL expiry check (#88) — belt-and-suspenders after purge above
             if g.valid_until > 0 and now > g.valid_until:
                 continue
             usage = self._usage.get(i, {})

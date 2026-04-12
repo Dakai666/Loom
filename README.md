@@ -140,7 +140,7 @@ Available in **CLI**, **TUI**, and **Discord** — all three frontends have full
 | `Ctrl+L` | Clear conversation view |
 | `Ctrl+C` | Quit |
 | `Tab` | Autocomplete slash commands |
-| `Y` / `N` / `S` / `A` | Approve (once / scope lease / auto) or deny tool confirmation dialogs |
+| `Y` / `N` / `S` / `A` | Approve (session grant / lease 30m / permanent) or deny tool confirmation dialogs |
 
 ---
 
@@ -460,16 +460,16 @@ When a tool needs authorization, the confirmation panel shows structured scope i
 │  write_file                                             │
 │  path: write → doc                                      │
 │  First time: no existing grant for this scope           │
-│                        y=once  s=scope lease  a=auto  N=deny │
+│                y=approve  s=lease (30m)  a=permanent  N=deny │
 └─────────────────────────────────────────────────────────┘
-Allow? [y/s/a/N]:
+Allow? [y=approve/s=lease/a=permanent/N]:
 ```
 
 | Response | Effect |
 |----------|--------|
-| `y` (once) | Approve this call only — grant stored with no TTL (existing behavior) |
-| `s` (scope lease) | Approve and create a **session-scoped lease** (30 min TTL) — all future calls within this scope auto-approve until the lease expires |
-| `a` (auto) | Approve and create a **permanent grant** — auto-approve all similar calls for the rest of the session |
+| `y` (approve) | Approve and grant this scope for the session — future calls within the same scope auto-approve (no expiry) |
+| `s` (lease) | Approve and create a **session-scoped lease** (30 min TTL) — auto-approves within this scope until the lease expires |
+| `a` (permanent) | Approve and create a **permanent grant** — same scope, no expiry (identical to `y` but with `auto_approve` source for audit) |
 | `N` (deny) | Reject this call |
 
 **Panel styling:**
