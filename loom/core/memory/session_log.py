@@ -15,10 +15,49 @@ Design principles:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, UTC
 from typing import Any
 
 import aiosqlite
+
+
+# ---------------------------------------------------------------------------
+# Issue #92: secret redaction for session log persistence
+# ---------------------------------------------------------------------------
+
+_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # key=value / JSON patterns: api_key, token, password, secret, etc.
+    (re.compile(
+        r'(?i)(["\']?(?:api[_-]?key|token|password|passwd|secret|'
+        r'authorization|bearer|credentials|private[_-]?key|access[_-]?key'
+        r')["\']?\s*[:=]\s*)(["\']?)([^\s"\',}{]{8,})\2',
+    ), r'\1\2[REDACTED]\2'),
+    # Bearer token in header value
+    (re.compile(r'(?i)(Bearer\s+)\S{8,}'), r'\1[REDACTED]'),
+    # Known token prefixes (AWS, GitHub, Slack, OpenAI, Anthropic, etc.)
+    (re.compile(
+        r'["\'](?:sk-|pk-|ak-|AKIA|ghp_|gho_|ghs_|xoxb-|xoxp-|xapp-)'
+        r'[A-Za-z0-9_\-]{20,}["\']'
+    ), '"[REDACTED]"'),
+    # JSON-escaped quotes: \"password\": \"sk-abc123...\"
+    (re.compile(
+        r'(?i)(?:password|token|secret|api[_-]?key|credentials)'
+        r'\\?"\s*:\s*\\?"((?:sk-|pk-|AKIA|ghp_|xoxb-)[A-Za-z0-9_\-]{20,})\\?"'
+    ), r'[REDACTED]"'),
+]
+
+
+def _redact_secrets(text: str | None) -> str | None:
+    """Best-effort redaction of common secret patterns.  Never raises."""
+    if not text:
+        return text
+    try:
+        for pattern, replacement in _SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+    except Exception:
+        pass  # redaction must never crash the agent
+    return text
 
 
 class SessionLog:
@@ -64,6 +103,10 @@ class SessionLog:
             ``load_messages()`` will prefer this column for assistant-message replay.
         """
         try:
+            # Issue #92: redact secrets before persisting to disk
+            content = _redact_secrets(content)
+            raw_json = _redact_secrets(raw_json)
+
             await self._db.execute(
                 """
                 INSERT INTO session_log

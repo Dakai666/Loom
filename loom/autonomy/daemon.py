@@ -12,6 +12,8 @@ Usage (from CLI):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json as _json
 import logging
 from pathlib import Path
 
@@ -25,6 +27,56 @@ from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
 from loom.notify.types import Notification, NotificationType
+
+
+# ---------------------------------------------------------------------------
+# Issue #91: autonomy config tamper detection
+# ---------------------------------------------------------------------------
+
+_VALID_TRUST_LEVELS = {"safe", "guarded", "critical"}
+_CONFIG_HASH_PATH = Path.home() / ".loom" / "autonomy_config.hash"
+
+
+def _hash_autonomy_section(autonomy_cfg: dict) -> str:
+    """Deterministic SHA-256 of the autonomy config section."""
+    canonical = _json.dumps(autonomy_cfg, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _validate_trust_level(value: str, trigger_name: str) -> str:
+    """Validate and return trust_level, defaulting to 'guarded' on invalid."""
+    if value not in _VALID_TRUST_LEVELS:
+        logger.warning(
+            "[autonomy] trigger %r has invalid trust_level=%r, defaulting to 'guarded'",
+            trigger_name, value,
+        )
+        return "guarded"
+    return value
+
+
+def _check_config_integrity(autonomy_cfg: dict) -> bool:
+    """
+    Compare current config hash against stored hash.
+    Returns True if first load or match; False if mismatch.
+    """
+    current_hash = _hash_autonomy_section(autonomy_cfg)
+    try:
+        if _CONFIG_HASH_PATH.exists():
+            stored = _CONFIG_HASH_PATH.read_text().strip()
+            if stored != current_hash:
+                logger.warning(
+                    "[autonomy] CONFIG CHANGE DETECTED — autonomy section hash "
+                    "mismatch. Stored=%s, Current=%s. Review loom.toml for tampering.",
+                    stored[:12], current_hash[:12],
+                )
+                return False
+        # First load or match — record/update
+        _CONFIG_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CONFIG_HASH_PATH.write_text(current_hash)
+        return True
+    except Exception as exc:
+        logger.warning("[autonomy] config integrity check failed: %s", exc)
+        return True  # fail-open
 
 
 class AutonomyDaemon:
@@ -184,6 +236,13 @@ class AutonomyDaemon:
         if not autonomy_cfg.get("enabled", False):
             return 0
 
+        # Issue #91: tamper detection (fail-open by design — logs warning only)
+        if not _check_config_integrity(autonomy_cfg):
+            logger.warning(
+                "[autonomy] Proceeding despite config change. "
+                "Review loom.toml and restart to update the stored hash."
+            )
+
         count = 0
         for sched in autonomy_cfg.get("schedules", []):
             trigger = CronTrigger(
@@ -191,7 +250,9 @@ class AutonomyDaemon:
                 intent=sched["intent"],
                 cron=sched.get("cron", "0 9 * * 1-5"),
                 timezone=sched.get("timezone", "UTC"),
-                trust_level=sched.get("trust_level", "guarded"),
+                trust_level=_validate_trust_level(
+                    sched.get("trust_level", "guarded"), sched["name"],
+                ),
                 notify=sched.get("notify", True),
                 notify_thread_id=sched.get("notify_thread", 0),
                 allowed_tools=sched.get("allowed_tools", []),
@@ -205,7 +266,9 @@ class AutonomyDaemon:
                 name=evt["name"],
                 intent=evt["intent"],
                 event_name=evt.get("event", evt["name"]),
-                trust_level=evt.get("trust_level", "guarded"),
+                trust_level=_validate_trust_level(
+                    evt.get("trust_level", "guarded"), evt["name"],
+                ),
                 notify=evt.get("notify", True),
                 notify_thread_id=evt.get("notify_thread", 0),
                 allowed_tools=evt.get("allowed_tools", []),
