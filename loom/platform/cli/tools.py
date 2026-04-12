@@ -24,6 +24,7 @@ import httpx
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
+from loom.core.security.self_termination_guard import SelfTerminationGuard
 
 import logging
 
@@ -467,6 +468,21 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
     """
     async def _run_bash(call: ToolCall) -> ToolResult:
         command = call.args.get("command", "")
+
+        # Issue #98: self-termination guard — before ANY other processing
+        _self_term_guard = SelfTerminationGuard()
+        verdict = _self_term_guard.check(command)
+        if verdict.verdict == "block":
+            _log.warning("Self-termination guard blocked: %s", verdict.description)
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=f"[Security] Blocked by self-termination guard: {verdict.description}",
+                failure_type="security_block",
+            )
+        if verdict.verdict == "warn":
+            _log.warning("Self-termination guard warning: %s", verdict.description)
+
         timeout = call.args.get("timeout", 30)
         cwd = str(workspace) if strict_sandbox else None
         try:
