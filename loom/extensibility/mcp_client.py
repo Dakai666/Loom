@@ -18,6 +18,8 @@ In ``loom.toml``::
     name    = "github"
     command = "uvx"
     args    = ["mcp-server-git"]
+    # env values support ${ENV_VAR} syntax for secrets kept in .env
+    env     = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
 
 Then in LoomSession.start(), ``_load_mcp_servers()`` is called
 automatically to connect and register tools from each configured server.
@@ -44,6 +46,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -79,9 +83,27 @@ class MCPServerConfig:
     trust_level: str = "safe"   # safe | guarded — maps to Loom TrustLevel
 
 
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env(value: str) -> str:
+    """
+    Expand ${VAR} placeholders in *value* with the current process environment.
+    Unset variables are replaced with the empty string.
+    """
+    def _replace(m: re.Match) -> str:
+        return os.environ.get(m.group(1), "")
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+
+
 def load_mcp_server_configs(config: dict) -> list[MCPServerConfig]:
     """
     Parse ``[[mcp.servers]]`` entries from the loaded loom.toml dict.
+
+    Environment-variable placeholders (``${VAR}``) in ``env`` values are
+    expanded from the current process environment at load time, so secrets
+    stored in ``.env`` (and loaded into the environment before Loom starts)
+    are never written to ``loom.toml`` in plain text.
 
     Returns an empty list if no MCP servers are configured.
     """
@@ -89,11 +111,17 @@ def load_mcp_server_configs(config: dict) -> list[MCPServerConfig]:
     result: list[MCPServerConfig] = []
     for item in raw:
         try:
+            raw_env: dict[str, str] = dict(item.get("env", {}))
+            # Expand ${VAR} in every env value (supports nested ${VAR} in
+            # rare cases; single-pass substitution handles the common case).
+            expanded_env: dict[str, str] = {
+                k: _expand_env(v) for k, v in raw_env.items()
+            }
             result.append(MCPServerConfig(
                 name=item.get("name", "unknown"),
                 command=item.get("command", ""),
                 args=list(item.get("args", [])),
-                env=dict(item.get("env", {})),
+                env=expanded_env,
                 trust_level=item.get("trust_level", "safe"),
             ))
         except Exception as exc:
