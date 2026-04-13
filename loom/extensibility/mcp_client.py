@@ -265,10 +265,15 @@ class LoomMCPClient:
             if self._session is not None:
                 return
 
+            # Merge override env on top of the full parent environment so the
+            # subprocess retains PATH and other inherited vars.  Without this,
+            # passing a non-None env dict to StdioServerParameters replaces the
+            # entire subprocess environment and breaks PATH lookup (e.g. uvx).
+            merged_env = {**os.environ, **self._cfg.env} if self._cfg.env else None
             params = StdioServerParameters(
                 command=self._cfg.command,
                 args=self._cfg.args,
-                env=self._cfg.env or None,
+                env=merged_env,
             )
             cm = stdio_client(params)
             read, write = await cm.__aenter__()

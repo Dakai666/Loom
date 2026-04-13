@@ -176,6 +176,55 @@ class TraceMiddleware(Middleware):
         return result
 
 
+class LegitimacyGuardMiddleware(Middleware):
+    """
+    Probe-First Heuristics (Issue #47 Phase 3).
+    
+    Blocks high-risk, mutating actions (like write_file or run_bash) if the
+    agent has not performed any context-gathering operations (read_file, list_dir, etc.)
+    in the current session. Enforces a 'look before you leap' pattern to
+    prevent hallucinatory system modifications.
+    """
+
+    def __init__(self) -> None:
+        self.has_probed: bool = False
+        self.probe_tools = frozenset({
+            "list_dir", "read_file", "search_files", "grep_search",
+            "fetch_url_tool", "web_search", "recall_memory", "query_relations"
+        })
+        self.strict_guard_tools = frozenset({
+            "write_file", "run_bash", "replace_file_content"
+        })
+
+    async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        if call.tool_name in self.probe_tools:
+            self.has_probed = True
+
+        if call.tool_name in self.strict_guard_tools and not self.has_probed:
+            error_msg = (
+                f"LEGITIMACY GUARD: Blocked `{call.tool_name}`. "
+                "You must gather context first (e.g. read_file, list_dir, search) "
+                "before performing destructive actions or running commands. "
+                "Hallucinating paths or executing blindly is forbidden."
+            )
+            
+            from .lifecycle import LIFECYCLE_CTX_KEY
+            ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+            if ctx is not None:
+                ctx.authorization_result = False
+                ctx.authorization_reason = "probe-first heuristic failed"
+            
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=error_msg,
+                failure_type="permission_denied"
+            )
+
+        return await next(call)
+
+
 class BlastRadiusMiddleware(Middleware):
     """
     Guards GUARDED and CRITICAL tools by consulting a PermissionContext.
@@ -389,6 +438,24 @@ class BlastRadiusMiddleware(Middleware):
 
         from .scope import ConfirmDecision
         if decision == ConfirmDecision.DENY:
+            self._perm.recent_denies += 1
+            if self._perm.recent_denies >= 3:
+                self._notify_lifecycle(call, False, f"user denied ({verdict.value}) - CIRCUIT BREAKER TRIPPED")
+                call.metadata["user_decision"] = False
+                call.metadata["circuit_breaker"] = True
+                if call.abort_signal is not None:
+                    call.abort_signal.set()
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=(
+                        "USER ACTION: DENIED (Penalty Box activated). You have accumulated too many "
+                        "rejections from the human. Your autonomy is paused/terminated to prevent loop pollution. "
+                        "Stop execution immediately."
+                    ),
+                    failure_type="permission_denied",
+                )
+                
             self._notify_lifecycle(call, False, f"user denied ({verdict.value})")
             call.metadata["user_decision"] = False
             return ToolResult(
@@ -402,6 +469,7 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
+        self._perm.recent_denies = 0
         self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})")
         call.metadata["user_decision"] = True
         call.metadata["confirm_decision"] = decision.value
@@ -460,6 +528,24 @@ class BlastRadiusMiddleware(Middleware):
 
         from .scope import ConfirmDecision
         if decision == ConfirmDecision.DENY:
+            self._perm.recent_denies += 1
+            if self._perm.recent_denies >= 3:
+                self._notify_lifecycle(call, False, "user denied - CIRCUIT BREAKER TRIPPED")
+                call.metadata["user_decision"] = False
+                call.metadata["circuit_breaker"] = True
+                if call.abort_signal is not None:
+                    call.abort_signal.set()
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=(
+                        "USER ACTION: DENIED (Penalty Box activated). You have accumulated too many "
+                        "rejections from the human. Your autonomy is paused/terminated to prevent loop pollution. "
+                        "Stop execution immediately."
+                    ),
+                    failure_type="permission_denied",
+                )
+
             self._notify_lifecycle(call, False, "user denied")
             return ToolResult(
                 call_id=call.id,
@@ -473,6 +559,7 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
+        self._perm.recent_denies = 0
         self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
         call.metadata["confirm_decision"] = decision.value
 

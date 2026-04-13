@@ -675,6 +675,9 @@ class LoomSession:
         _exec_escape_fn = (
             make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
         )
+        # wire up LegitimacyGuardMiddleware
+        from loom.core.harness.middleware import LegitimacyGuardMiddleware
+
         self._pipeline = MiddlewarePipeline(
             [
                 LifecycleMiddleware(
@@ -684,6 +687,7 @@ class LoomSession:
                 ),
                 TraceMiddleware(on_trace=self._on_trace),
                 SchemaValidationMiddleware(registry=self.registry),
+                LegitimacyGuardMiddleware(),
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool_cli,
