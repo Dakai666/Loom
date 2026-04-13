@@ -481,6 +481,9 @@ class LoomChatApp:
             ThinkCollapsed as TuiThinkCollapsed,
             ActionStateChange as TuiActionStateChange,
             ActionRolledBack as TuiActionRolledBack,
+            EnvelopeStarted as TuiEnvelopeStarted,
+            EnvelopeUpdated as TuiEnvelopeUpdated,
+            EnvelopeCompleted as TuiEnvelopeCompleted,
         )
         from loom.platform.cli.ui import (
             TextChunk,
@@ -491,6 +494,11 @@ class LoomChatApp:
             TurnPaused,
             ActionStateChange,
             ActionRolledBack,
+        )
+        from loom.core.events import (
+            EnvelopeStarted,
+            EnvelopeUpdated,
+            EnvelopeCompleted,
         )
 
         class _App(LoomApp):
@@ -729,6 +737,18 @@ class LoomChatApp:
                                     rollback_success=ev.rollback_success,
                                     message=ev.message,
                                 )
+                            )
+                        elif isinstance(ev, EnvelopeStarted):
+                            await self.dispatch_stream_event(
+                                TuiEnvelopeStarted(envelope=ev.envelope)
+                            )
+                        elif isinstance(ev, EnvelopeUpdated):
+                            await self.dispatch_stream_event(
+                                TuiEnvelopeUpdated(envelope=ev.envelope)
+                            )
+                        elif isinstance(ev, EnvelopeCompleted):
+                            await self.dispatch_stream_event(
+                                TuiEnvelopeCompleted(envelope=ev.envelope)
                             )
                 except asyncio.CancelledError:
                     pass

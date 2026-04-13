@@ -129,10 +129,78 @@ class ThinkCollapsed:
     full: str
 
 
+# ---------------------------------------------------------------------------
+# Issue #106: ExecutionEnvelope ViewModel & stream events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExecutionNodeView:
+    """Single action node view for UI consumption.
+
+    Maps 1:1 to an ``ActionRecord`` but carries only the fields the
+    presentation layer needs — no mutable state, no references to
+    middleware internals.
+    """
+    node_id: str           # ActionRecord.id
+    call_id: str           # ToolCall.id
+    action_id: str | None  # same as node_id (for API clarity)
+    tool_name: str
+    level: int             # parallel level (0 = all current dispatch)
+    state: str             # ActionState.value
+    trust_level: str       # SAFE / GUARDED / CRITICAL
+    capabilities: list[str] = field(default_factory=list)
+    args_preview: str = ""
+    duration_ms: float = 0.0
+    error_snippet: str = ""
+    depends_on: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ExecutionEnvelopeView:
+    """Aggregate view for one tool-use batch — the primary UI unit.
+
+    Built by ``LoomSession._build_envelope_view()`` (projection layer)
+    and yielded as part of ``EnvelopeStarted / Updated / Completed``
+    stream events.  TUI and Discord both consume this same structure.
+    """
+    envelope_id: str       # human-readable, e.g. "e1", "e2"
+    session_id: str
+    turn_index: int
+    status: str            # "running" / "completed" / "failed"
+    node_count: int
+    parallel_groups: int   # number of distinct levels
+    elapsed_ms: float = 0.0
+    levels: list[list[str]] = field(default_factory=list)
+    nodes: list[ExecutionNodeView] = field(default_factory=list)
+
+
+@dataclass
+class EnvelopeStarted:
+    """A new tool-use batch (envelope) has been created and dispatch begins."""
+    envelope: ExecutionEnvelopeView
+
+
+@dataclass
+class EnvelopeUpdated:
+    """A node inside the current envelope changed state (e.g. tool finished)."""
+    envelope: ExecutionEnvelopeView
+
+
+@dataclass
+class EnvelopeCompleted:
+    """All nodes in the envelope have reached terminal states."""
+    envelope: ExecutionEnvelopeView
+
+
 __all__ = [
     "ActionRolledBack",
     "ActionStateChange",
     "CompressDone",
+    "EnvelopeCompleted",
+    "EnvelopeStarted",
+    "EnvelopeUpdated",
+    "ExecutionEnvelopeView",
+    "ExecutionNodeView",
     "TextChunk",
     "ThinkCollapsed",
     "ToolBegin",

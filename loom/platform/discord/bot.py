@@ -69,6 +69,10 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from loom.core.harness.scope import ConfirmDecision
+from loom.core.events import (
+    EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted,
+    ExecutionEnvelopeView,
+)
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
     CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd,
@@ -140,6 +144,46 @@ class _ConfirmView(View):
 
 _MAX_CHARS     = 2000  # Discord per-message limit
 _THREAD_ARCHIVE_MINUTES = 1440  # 24h auto-archive for threads
+
+# ── Envelope display helpers (Issue #110) ────────────────────────────────
+
+_ENVELOPE_STATE_ICONS: dict[str, str] = {
+    "declared": "·", "authorized": "·", "prepared": "·",
+    "executing": "⟳", "observed": "✓", "validated": "✓",
+    "committed": "✓", "memorialized": "✓",
+    "denied": "⊘", "aborted": "⊘", "timed_out": "✗",
+    "reverting": "↩", "reverted": "↩",
+}
+
+
+def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
+    """Format an envelope view into a compact Discord status block."""
+    lines: list[str] = []
+    # Header
+    header = f"-# Envelope {view.envelope_id} · {view.node_count} actions"
+    if view.parallel_groups > 1:
+        header += f" · {view.parallel_groups} parallel groups"
+    if view.status == "failed":
+        header += " · **failed**"
+    elif view.status == "completed":
+        header += f" · completed {view.elapsed_ms / 1000:.1f}s"
+    lines.append(header)
+
+    # Level list with state icons
+    for level_idx, level_nodes in enumerate(view.levels):
+        level_parts: list[str] = []
+        for node_id in level_nodes:
+            node = next((n for n in view.nodes if n.node_id == node_id), None)
+            if node:
+                icon = _ENVELOPE_STATE_ICONS.get(node.state, "?")
+                name = node.tool_name
+                extra = ""
+                if node.error_snippet:
+                    extra = f" ({node.error_snippet[:40]})"
+                level_parts.append(f"{icon} {name}{extra}")
+        lines.append(f"-# L{level_idx}  {'  '.join(level_parts)}")
+
+    return "\n".join(lines)
 
 
 class LoomDiscordBot:
@@ -620,6 +664,10 @@ class LoomDiscordBot:
         tool_buf = ""       # accumulates tool activity lines (edited into status_msg)
         narration_buf = ""  # accumulates LLM text; flushed as send-once before each tool
         _pending_think = ""  # dim think summary, flushed into tool_buf before next tool
+        _envelope_active = False    # True once we receive envelope events (suppresses old ToolBegin/End display)
+        _last_envelope_view: ExecutionEnvelopeView | None = None
+        _last_envelope_edit: float = 0.0  # monotonic timestamp of last envelope edit (debounce)
+        _ENVELOPE_DEBOUNCE_S = 0.5
 
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
@@ -633,6 +681,44 @@ class LoomDiscordBot:
                         # so reasoning context is visible inline in the activity log.
                         _pending_think = f"-# 💭 {event.summary}"
 
+                    elif isinstance(event, EnvelopeStarted):
+                        _envelope_active = True
+                        _last_envelope_view = event.envelope
+                        # Flush narration before envelope
+                        narration = narration_buf.strip()
+                        narration_buf = ""
+                        if len(narration) >= 10:
+                            await message.channel.send(f"⬥ {narration}")
+                        # Flush pending think
+                        if _pending_think:
+                            tool_buf = _pending_think + "\n"
+                            _pending_think = ""
+                        else:
+                            tool_buf = ""
+                        tool_buf += _format_envelope_status(event.envelope)
+                        await _safe_edit(status_msg, tool_buf.lstrip())
+                        _last_envelope_edit = time.monotonic()
+
+                    elif isinstance(event, EnvelopeUpdated):
+                        _last_envelope_view = event.envelope
+                        now = time.monotonic()
+                        if now - _last_envelope_edit >= _ENVELOPE_DEBOUNCE_S:
+                            # Rebuild tool_buf from envelope status
+                            prefix = ""
+                            if _pending_think:
+                                prefix = _pending_think + "\n"
+                                _pending_think = ""
+                            tool_buf = prefix + _format_envelope_status(event.envelope)
+                            await _safe_edit(status_msg, tool_buf.lstrip())
+                            _last_envelope_edit = now
+
+                    elif isinstance(event, EnvelopeCompleted):
+                        _last_envelope_view = event.envelope
+                        _envelope_active = False
+                        tool_buf = _format_envelope_status(event.envelope)
+                        await _safe_edit(status_msg, tool_buf.lstrip())
+                        _last_envelope_edit = time.monotonic()
+
                     elif isinstance(event, ToolBegin):
                         # Flush narration before tool activity (send-once, ⬥ prefix).
                         narration = narration_buf.strip()
@@ -640,37 +726,39 @@ class LoomDiscordBot:
                         if len(narration) >= 10:
                             await message.channel.send(f"⬥ {narration}")
 
-                        # Flush pending think summary before this tool batch.
-                        if _pending_think:
-                            tool_buf += ("\n" if tool_buf else "") + _pending_think
-                            _pending_think = ""
+                        if not _envelope_active:
+                            # Flush pending think summary before this tool batch.
+                            if _pending_think:
+                                tool_buf += ("\n" if tool_buf else "") + _pending_think
+                                _pending_think = ""
 
-                        # Build tool line with kimaki-style symbol:
-                        #   ◼︎ for file writes, ┣ for everything else.
-                        if event.args:
-                            first_val = next(iter(event.args.values()), "")
-                            primary = str(first_val).replace("\n", "↵")[:120]
-                            args_str = f'"{primary}"' if primary else ""
-                        else:
-                            args_str = ""
-                        symbol = "◼︎" if event.name in ("write_file",) else "┣"
-                        tool_line = (
-                            f"\n{symbol} {event.name}"
-                            + (f" — {args_str}" if args_str else "")
-                        )
-                        tool_buf += tool_line
-                        await _safe_edit(status_msg, tool_buf.lstrip())
+                            # Build tool line with kimaki-style symbol:
+                            #   ◼︎ for file writes, ┣ for everything else.
+                            if event.args:
+                                first_val = next(iter(event.args.values()), "")
+                                primary = str(first_val).replace("\n", "↵")[:120]
+                                args_str = f'"{primary}"' if primary else ""
+                            else:
+                                args_str = ""
+                            symbol = "◼︎" if event.name in ("write_file",) else "┣"
+                            tool_line = (
+                                f"\n{symbol} {event.name}"
+                                + (f" — {args_str}" if args_str else "")
+                            )
+                            tool_buf += tool_line
+                            await _safe_edit(status_msg, tool_buf.lstrip())
 
                     elif isinstance(event, ToolEnd):
-                        if event.success:
-                            tool_buf += f" ✓ {event.duration_ms:.0f}ms"
-                        else:
-                            err = (
-                                event.output[:80].replace("\n", " ")
-                                if event.output else "failed"
-                            )
-                            tool_buf += f" ✗ {err}"
-                        await _safe_edit(status_msg, tool_buf.lstrip())
+                        if not _envelope_active:
+                            if event.success:
+                                tool_buf += f" ✓ {event.duration_ms:.0f}ms"
+                            else:
+                                err = (
+                                    event.output[:80].replace("\n", " ")
+                                    if event.output else "failed"
+                                )
+                                tool_buf += f" ✗ {err}"
+                            await _safe_edit(status_msg, tool_buf.lstrip())
 
                     elif isinstance(event, TurnPaused):
                         pause_body = (
@@ -737,8 +825,24 @@ class LoomDiscordBot:
                             tool_buf += f" — {event.message[:80]}"
                         await _safe_edit(status_msg, tool_buf.lstrip())
 
-                    elif isinstance(event, (ActionStateChange, TurnDone)):
-                        pass  # ActionStateChange: too granular for Discord display
+                    elif isinstance(event, ActionStateChange):
+                        pass  # too granular for Discord display
+
+                    elif isinstance(event, TurnDone):
+                        # Compact envelope summary after the turn
+                        if _last_envelope_view:
+                            v = _last_envelope_view
+                            fail_count = sum(
+                                1 for n in v.nodes
+                                if n.state in ("denied", "aborted", "timed_out", "reverted")
+                            )
+                            summary = (
+                                f"-# ✓ {v.node_count} actions · "
+                                f"{v.parallel_groups} parallel · "
+                                f"{fail_count} failed · "
+                                f"{v.elapsed_ms / 1000:.1f}s"
+                            )
+                            await message.channel.send(summary)
 
             except asyncio.CancelledError:
                 # Cleanup any pending confirmation buttons in this thread immediately
