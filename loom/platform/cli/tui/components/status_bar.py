@@ -18,7 +18,7 @@ class StatusBar(Widget):
     Bottom status bar showing context budget and token usage.
 
     Color-coded context bar: green < 60%, yellow 60-85%, red > 85%.
-    Shows trust mode, token counts, elapsed time, tool count.
+    Shows trust mode, token counts, elapsed time, tool count, active grants.
     """
 
     context_fraction: reactive[float] = reactive(0.0)
@@ -26,6 +26,8 @@ class StatusBar(Widget):
     output_tokens: reactive[int] = reactive(0)
     elapsed_ms: reactive[float] = reactive(0.0)
     tool_count: reactive[int] = reactive(0)
+    active_grants: reactive[int] = reactive(0)
+    next_expiry_secs: reactive[float] = reactive(0.0)  # seconds until next expiry; 0 = N/A
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-content")
@@ -47,6 +49,12 @@ class StatusBar(Widget):
         self.output_tokens = output_tokens
         self.elapsed_ms = elapsed_ms
         self.tool_count = tool_count
+        self._update_display()
+
+    def update_grants(self, active: int, next_expiry_secs: float = 0.0) -> None:
+        """Update active grants indicator (#108)."""
+        self.active_grants = active
+        self.next_expiry_secs = next_expiry_secs
         self._update_display()
 
     def watch_context_fraction(self, fraction: float) -> None:
@@ -93,5 +101,24 @@ class StatusBar(Widget):
         if self.tool_count > 0:
             label = "tool" if self.tool_count == 1 else "tools"
             parts.append(f"[dim]{self.tool_count} {label}[/dim]")
+
+        # Active grants indicator (#108)
+        if self.active_grants > 0:
+            exp = self.next_expiry_secs
+            if exp > 0:
+                mins = int(exp // 60)
+                secs = int(exp % 60)
+                if exp < 300:
+                    # < 5 min → yellow warning
+                    expiry_str = f"[yellow]{mins}m {secs:02d}s[/yellow]"
+                else:
+                    expiry_str = f"[dim]{mins}m[/dim]"
+                grants_str = (
+                    f"[dim]grants:[/dim] {self.active_grants} active"
+                    f" [dim]· next expiry[/dim] {expiry_str}"
+                )
+            else:
+                grants_str = f"[dim]grants:[/dim] {self.active_grants} active"
+            parts.append(grants_str)
 
         content.update("  [dim]|[/dim]  ".join(parts))

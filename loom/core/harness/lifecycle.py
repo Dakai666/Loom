@@ -40,6 +40,10 @@ class ActionState(Enum):
         DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED →
         VALIDATED → COMMITTED → MEMORIALIZED
 
+    Confirm path (GUARDED / CRITICAL tools):
+        DECLARED → AWAITING_CONFIRM → AUTHORIZED → PREPARED → ...
+        DECLARED → AWAITING_CONFIRM → DENIED  (user denied)
+
     Rollback path:
         VALIDATED (fail) → REVERTING → REVERTED → MEMORIALIZED
 
@@ -50,6 +54,7 @@ class ActionState(Enum):
     """
     # --- Normal lifecycle ---
     DECLARED      = "declared"       # ToolCall created from LLM output
+    AWAITING_CONFIRM = "awaiting_confirm"  # Waiting for human confirmation
     AUTHORIZED    = "authorized"     # Passed blast-radius / permission check
     PREPARED      = "prepared"       # Preconditions verified
     EXECUTING     = "executing"      # Tool executor invoked (in flight)
@@ -92,7 +97,8 @@ _FAILURE_STATES = {
 
 # Valid state transitions — key can transition to any value in the set.
 _VALID_TRANSITIONS: dict[ActionState, set[ActionState]] = {
-    ActionState.DECLARED:     {ActionState.AUTHORIZED, ActionState.DENIED},
+    ActionState.DECLARED:     {ActionState.AUTHORIZED, ActionState.AWAITING_CONFIRM, ActionState.DENIED},
+    ActionState.AWAITING_CONFIRM: {ActionState.AUTHORIZED, ActionState.DENIED},
     ActionState.AUTHORIZED:   {ActionState.PREPARED, ActionState.ABORTED},
     ActionState.PREPARED:     {ActionState.EXECUTING, ActionState.ABORTED},
     ActionState.EXECUTING:    {ActionState.OBSERVED, ActionState.TIMED_OUT, ActionState.ABORTED},

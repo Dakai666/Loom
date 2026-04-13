@@ -153,6 +153,13 @@ class ExecutionNodeView:
     duration_ms: float = 0.0
     error_snippet: str = ""
     depends_on: list[str] = field(default_factory=list)
+    # ── Detail fields (Issue #108) ──────────────────────────────────
+    full_args: dict[str, Any] = field(default_factory=dict)
+    state_history: list[dict[str, Any]] = field(default_factory=list)
+    auth_decision: str = ""      # "once" / "scope" / "auto" / "deny" / ""
+    auth_expires: float = 0.0    # time.time() expiry; 0 = permanent/N/A
+    auth_selector: str = ""      # scope selector (e.g. "/workspace/doc/")
+    output_preview: str = ""     # first ~200 chars of tool output
 
 
 @dataclass
@@ -192,6 +199,13 @@ class EnvelopeCompleted:
     envelope: ExecutionEnvelopeView
 
 
+@dataclass
+class GrantsSnapshot:
+    """Current state of active scope grants for UI display (#108)."""
+    active_count: int
+    next_expiry_secs: float = 0.0  # seconds until nearest expiry; 0 = none
+
+
 __all__ = [
     "ActionRolledBack",
     "ActionStateChange",
@@ -201,6 +215,7 @@ __all__ = [
     "EnvelopeUpdated",
     "ExecutionEnvelopeView",
     "ExecutionNodeView",
+    "GrantsSnapshot",
     "TextChunk",
     "ThinkCollapsed",
     "ToolBegin",

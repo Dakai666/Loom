@@ -44,6 +44,7 @@ class InlineConfirmWidget(Widget):
         args_preview: str,
         future: "asyncio.Future[ConfirmDecision]",
         justification: str | None = None,
+        call_id: str = "",
     ) -> None:
         super().__init__()
         self._tool_name = tool_name
@@ -51,6 +52,7 @@ class InlineConfirmWidget(Widget):
         self._args_preview = args_preview
         self._future = future
         self._justification = justification
+        self._call_id = call_id
         self._resolved = False
 
     def compose(self) -> ComposeResult:

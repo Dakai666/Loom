@@ -155,3 +155,10 @@ class EnvelopeUpdated(StreamEvent):
 class EnvelopeCompleted(StreamEvent):
     """All nodes in the envelope have reached terminal states."""
     envelope: Any  # ExecutionEnvelopeView
+
+
+@dataclass
+class GrantsUpdate(StreamEvent):
+    """Active scope grants changed (#108)."""
+    active_count: int
+    next_expiry_secs: float = 0.0
