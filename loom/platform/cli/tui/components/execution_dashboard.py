@@ -161,10 +161,10 @@ class ExecutionDashboard(VerticalScroll):
         recent_w.update(self._render_recent())
 
     def _render_header(self, view: "ExecutionEnvelopeView") -> str:
-        """Render the envelope header block."""
+        """Render the envelope header — plain text, no box drawing."""
         elapsed = self._fmt_dur(view.elapsed_ms)
 
-        # Status colour
+        # Status icon
         if view.status == "completed":
             status_icon = "[#7a9e78]✓[/#7a9e78]"
         elif view.status == "failed":
@@ -182,9 +182,9 @@ class ExecutionDashboard(VerticalScroll):
         )
 
         lines = [
-            f"╭─ {status_icon} Envelope [bold]{view.envelope_id}[/bold]"
+            f"{status_icon} Exec Env [bold]{view.envelope_id}[/bold]"
             f" · {view.node_count} node{'s' if view.node_count != 1 else ''}"
-            f" · {elapsed} ─╮",
+            f" · {elapsed}",
         ]
 
         # Status counters — only show non-zero
@@ -198,9 +198,8 @@ class ExecutionDashboard(VerticalScroll):
         if failed:
             counters.append(f"[#b87060]failed: {failed}[/#b87060]")
         if counters:
-            lines.append(f"│ {'  '.join(counters)}")
+            lines.append(f"  {'  '.join(counters)}")
 
-        lines.append(f"╰{'─' * 40}╯")
         return "\n".join(lines)
 
     def _render_levels(self, view: "ExecutionEnvelopeView") -> str:
