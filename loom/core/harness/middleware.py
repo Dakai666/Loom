@@ -207,10 +207,6 @@ class LegitimacyGuardMiddleware(Middleware):
         # Enforce re-justification for guarded actions after N steps without human interaction.
 
         is_strict = call.tool_name in self.strict_guard_tools
-        # Also include any MCP tool that was dynamically flagged by capabilities
-        from .registry import ToolCapability
-        if "mcp" in call.tool_name and call.capabilities & ToolCapability.MUTATES:
-            is_strict = True
 
         if is_strict and not self.has_probed:
             error_msg = (

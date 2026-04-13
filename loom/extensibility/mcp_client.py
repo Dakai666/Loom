@@ -183,6 +183,14 @@ class LoomMCPClient:
         result = await self._session.list_tools()
         tool_defs: list[ToolDefinition] = []
 
+        # Keywords in a tool's name or description that signal mutation.
+        # Used to assign MUTATES capability only to tools that actually write
+        # state, rather than blanket-flagging all GUARDED tools in the server.
+        _MUTATING_KEYWORDS = frozenset({
+            "write", "create", "delete", "update", "patch", "put", "insert",
+            "remove", "rename", "move", "overwrite", "append", "replace", "edit",
+        })
+
         trust_level_str = self._cfg.trust_level.upper()
         try:
             trust = TrustLevel[trust_level_str]
@@ -226,22 +234,27 @@ class LoomMCPClient:
             schema = mcp_tool.inputSchema if mcp_tool.inputSchema else {
                 "type": "object", "properties": {}
             }
-            schema_dict = schema if isinstance(schema, dict) else schema.model_dump()
+            # Shallow-copy to avoid mutating the MCP-provided schema object.
+            schema_dict = dict(schema if isinstance(schema, dict) else schema.model_dump())
 
             from loom.core.harness.registry import ToolCapability
-            caps = ToolCapability.NONE
-            if trust in (TrustLevel.GUARDED, TrustLevel.CRITICAL):
-                caps = ToolCapability.MUTATES
-                if "properties" not in schema_dict:
-                    schema_dict["properties"] = {}
-                schema_dict["properties"]["justification"] = {
+            combined = f"{tool_name} {desc}".lower()
+            is_mutating = trust == TrustLevel.CRITICAL or (
+                trust == TrustLevel.GUARDED
+                and any(kw in combined for kw in _MUTATING_KEYWORDS)
+            )
+            caps = ToolCapability.MUTATES if is_mutating else ToolCapability.NONE
+            if is_mutating:
+                props = dict(schema_dict.get("properties") or {})
+                props["justification"] = {
                     "type": "string",
-                    "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。"
+                    "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。",
                 }
-                if "required" not in schema_dict:
-                    schema_dict["required"] = []
-                if isinstance(schema_dict["required"], list) and "justification" not in schema_dict["required"]:
-                    schema_dict["required"].append("justification")
+                schema_dict["properties"] = props
+                existing_required = list(schema_dict.get("required") or [])
+                if "justification" not in existing_required:
+                    existing_required.append("justification")
+                schema_dict["required"] = existing_required
 
             tool_defs.append(
                 ToolDefinition(
