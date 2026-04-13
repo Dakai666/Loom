@@ -371,6 +371,16 @@ class BlastRadiusMiddleware(Middleware):
             )
 
         # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended)
+        #
+        # Legacy bridge: if the tool was pre-authorized by name (e.g. the
+        # autonomy daemon's allowed_tools list), honour that even though
+        # scope evaluation returned CONFIRM/EXPAND_SCOPE.  Without this,
+        # scope-resolved tools ignore session_authorized entirely, causing
+        # autonomy triggers to be denied despite explicit allowed_tools.
+        if self._perm.is_authorized(call.tool_name, call.trust_level):
+            self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized")
+            return None  # proceed
+
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value)
 
