@@ -95,12 +95,12 @@ class ExecutionDashboard(VerticalScroll):
     def on_envelope_started(self, view: "ExecutionEnvelopeView") -> None:
         """A new tool batch envelope was created."""
         self._current_view = view
-        self._render()
+        self._refresh_display()
 
     def on_envelope_updated(self, view: "ExecutionEnvelopeView") -> None:
         """A node finished inside the current envelope."""
         self._current_view = view
-        self._render()
+        self._refresh_display()
 
     def on_envelope_completed(self, view: "ExecutionEnvelopeView") -> None:
         """All nodes in the envelope reached terminal states."""
@@ -121,7 +121,7 @@ class ExecutionDashboard(VerticalScroll):
         if len(self._history) > 5:
             self._history = self._history[-5:]
 
-        self._render()
+        self._refresh_display()
         # Clear current view after rendering so the completed state is visible
         # until the next envelope starts.
 
@@ -129,11 +129,11 @@ class ExecutionDashboard(VerticalScroll):
         """Reset dashboard state."""
         self._current_view = None
         self._history = []
-        self._render()
+        self._refresh_display()
 
     # ── Internal rendering ───────────────────────────────────────────────
 
-    def _render(self) -> None:
+    def _refresh_display(self) -> None:
         from textual.css.query import NoMatches
         try:
             header_w = self.query_one("#exec-header", Static)
