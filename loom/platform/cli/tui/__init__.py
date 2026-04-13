@@ -29,6 +29,7 @@ from .components import (
     ArtifactsPanel,
     SwarmDashboard,
     ActivityEntry,
+    ExecutionDashboard,
     BudgetPanel,
     WorkspacePanel,
     WorkspaceTab,
@@ -42,6 +43,9 @@ from .events import (
     TurnDone,
     ClearScreen,
     BudgetUpdate,
+    EnvelopeStarted,
+    EnvelopeUpdated,
+    EnvelopeCompleted,
 )
 
 __all__ = [
@@ -59,6 +63,7 @@ __all__ = [
     "ArtifactsPanel",
     "SwarmDashboard",
     "ActivityEntry",
+    "ExecutionDashboard",
     "BudgetPanel",
     "WorkspacePanel",
     "WorkspaceTab",
@@ -70,4 +75,7 @@ __all__ = [
     "TurnDone",
     "ClearScreen",
     "BudgetUpdate",
+    "EnvelopeStarted",
+    "EnvelopeUpdated",
+    "EnvelopeCompleted",
 ]

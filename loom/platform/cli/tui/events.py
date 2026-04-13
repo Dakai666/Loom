@@ -133,3 +133,25 @@ class ThinkCollapsed(StreamEvent):
 
     summary: str   # first ~120 chars, one line
     full: str      # complete think content
+
+
+# ---------------------------------------------------------------------------
+# Issue #106: Envelope stream events (TUI wrappers)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EnvelopeStarted(StreamEvent):
+    """A new tool-use batch (envelope) has been created."""
+    envelope: Any  # ExecutionEnvelopeView (avoid circular import)
+
+
+@dataclass
+class EnvelopeUpdated(StreamEvent):
+    """A node inside the current envelope changed state."""
+    envelope: Any  # ExecutionEnvelopeView
+
+
+@dataclass
+class EnvelopeCompleted(StreamEvent):
+    """All nodes in the envelope have reached terminal states."""
+    envelope: Any  # ExecutionEnvelopeView

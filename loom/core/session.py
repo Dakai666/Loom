@@ -49,6 +49,11 @@ from loom.core.events import (
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    EnvelopeCompleted,
+    EnvelopeStarted,
+    EnvelopeUpdated,
+    ExecutionEnvelopeView,
+    ExecutionNodeView,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -57,7 +62,7 @@ from loom.core.events import (
     TurnDropped,
     TurnPaused,
 )
-from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope
+from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope, LIFECYCLE_CTX_KEY
 from loom.core.harness.middleware import (
     BlastRadiusMiddleware,
     LifecycleGateMiddleware,
@@ -484,6 +489,10 @@ class LoomSession:
         self._current_envelope: ExecutionEnvelope | None = None
         self._lifecycle_events: asyncio.Queue = asyncio.Queue()
 
+        # Issue #106: Envelope-centric UI — incremental counter & history
+        self._envelope_counter: int = 0
+        self._recent_envelopes: list[ExecutionEnvelopeView] = []
+
         # Issue #28: Predictive memory pre-fetcher — default off (opt-in)
         self._prefetch_enabled: bool = (
             config.get("session", {}).get("prefetch_enabled", False)
@@ -851,6 +860,7 @@ class LoomSession:
     ) -> AsyncIterator[
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ActionStateChange | ActionRolledBack
+        | EnvelopeStarted | EnvelopeUpdated | EnvelopeCompleted
     ]:
         """
         Run one complete agent turn and yield typed UI events.
@@ -1117,6 +1127,18 @@ class LoomSession:
                     response.tool_uses
                 )
 
+                # ── Issue #106: Create envelope for this tool batch ────────
+                self._envelope_counter += 1
+                envelope = ExecutionEnvelope(
+                    session_id=self.session_id,
+                    turn_index=self._turn_index,
+                )
+                self._current_envelope = envelope
+                _batch_t0 = time.monotonic()
+
+                # Yield EnvelopeStarted *before* ToolBegin events
+                yield EnvelopeStarted(envelope=self._build_envelope_view(_batch_t0))
+
                 if parallel:
                     # Announce all tools, then run concurrently
                     for tu in response.tool_uses:
@@ -1135,6 +1157,8 @@ class LoomSession:
                         # Drain lifecycle events queued during dispatch
                         while not self._lifecycle_events.empty():
                             yield self._lifecycle_events.get_nowait()
+                        # Issue #106: Yield envelope update after each tool completes
+                        yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
                         self.messages.append(
                             self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
@@ -1176,6 +1200,8 @@ class LoomSession:
                         # Drain lifecycle events queued during dispatch
                         while not self._lifecycle_events.empty():
                             yield self._lifecycle_events.get_nowait()
+                        # Issue #106: Yield envelope update after each tool completes
+                        yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
                         self.messages.append(
                             self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
@@ -1185,6 +1211,16 @@ class LoomSession:
                             "tool", tool_output[:500],
                             {"tool_call_id": tu.id, "tool_name": tu.name},
                         ))
+
+                # ── Issue #106: Envelope completed ─────────────────────────
+                if self._current_envelope is not None:
+                    self._current_envelope.complete()
+                _completed_view = self._build_envelope_view(_batch_t0)
+                yield EnvelopeCompleted(envelope=_completed_view)
+                # Keep last 10 envelopes for TUI history display
+                self._recent_envelopes.append(_completed_view)
+                if len(self._recent_envelopes) > 10:
+                    self._recent_envelopes = self._recent_envelopes[-10:]
 
                 # Check budget after tool results are appended — the next LLM
                 # call in this loop will include them and may push over the limit.
@@ -1644,7 +1680,14 @@ class LoomSession:
             abort_signal=self._abort.signal,
             origin=self._current_origin,
         )
-        return await self._pipeline.execute(call, tool_def.executor)
+        result = await self._pipeline.execute(call, tool_def.executor)
+
+        # Issue #106: link ActionRecord from LifecycleMiddleware to the envelope
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is not None and self._current_envelope is not None:
+            self._current_envelope.add(ctx.record)
+
+        return result
 
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
         summary = (
@@ -1765,6 +1808,83 @@ class LoomSession:
                     message=str(rb_msg)[:200],
                 )
             )
+
+    # ------------------------------------------------------------------
+    # Issue #106: Envelope projection — build read-only view for UI
+    # ------------------------------------------------------------------
+
+    def _build_envelope_view(self, batch_t0: float = 0.0) -> ExecutionEnvelopeView:
+        """Build a read-only ``ExecutionEnvelopeView`` from the live envelope.
+
+        This is the projection layer described in doc/43 — it only does
+        view shaping, never mutates middleware state.
+        """
+        env = self._current_envelope
+        if env is None:
+            return ExecutionEnvelopeView(
+                envelope_id=f"e{self._envelope_counter}",
+                session_id=self.session_id,
+                turn_index=self._turn_index,
+                status="running",
+                node_count=0,
+                parallel_groups=0,
+            )
+
+        nodes: list[ExecutionNodeView] = []
+        for record in env.records:
+            call = record.call
+            tdef = None
+            if record.tool_name != "(unknown)":
+                tdef = self.registry.get(record.tool_name)
+
+            # Build args preview from first string argument
+            args_preview = ""
+            if call and call.args:
+                first_val = next(iter(call.args.values()), "")
+                if isinstance(first_val, str):
+                    args_preview = first_val.replace("\n", "↵")[:60]
+
+            nodes.append(ExecutionNodeView(
+                node_id=record.id,
+                call_id=call.id if call else "",
+                action_id=record.id,
+                tool_name=record.tool_name,
+                level=0,  # all current parallel dispatch = single level
+                state=record.state.value,
+                trust_level=tdef.trust_level.plain if tdef else "SAFE",
+                capabilities=[c.name for c in tdef.capabilities] if tdef else [],
+                args_preview=args_preview,
+                duration_ms=record.elapsed_ms,
+                error_snippet=(
+                    (record.result.error or "")[:80]
+                    if record.result and not record.result.success
+                    else ""
+                ),
+            ))
+
+        # Compute aggregate status
+        all_done = env.all_terminal
+        has_failure = any(r.is_failure for r in env.records)
+        if all_done and has_failure:
+            status = "failed"
+        elif all_done:
+            status = "completed"
+        else:
+            status = "running"
+
+        elapsed_ms = (time.monotonic() - batch_t0) * 1000 if batch_t0 else 0.0
+
+        return ExecutionEnvelopeView(
+            envelope_id=f"e{self._envelope_counter}",
+            session_id=self.session_id,
+            turn_index=self._turn_index,
+            status=status,
+            node_count=len(env.records),
+            parallel_groups=1,
+            elapsed_ms=elapsed_ms,
+            levels=[[n.node_id for n in nodes]],
+            nodes=nodes,
+        )
 
     @staticmethod
     def _format_scope_panel(call: ToolCall) -> str:

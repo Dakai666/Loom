@@ -78,6 +78,7 @@ skills/news-aggregator/
 skills/systematic_code_analyst/
 skills/security_assessment/
 doc/silky_draw_reference.md
+skills/silky_minimax_draw
 
 # Personal config (use loom.toml.example as template)
 loom.toml

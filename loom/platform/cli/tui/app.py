@@ -52,6 +52,9 @@ from .events import (
     BudgetUpdate,
     ActionStateChange,
     ActionRolledBack,
+    EnvelopeStarted,
+    EnvelopeUpdated,
+    EnvelopeCompleted,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +68,7 @@ class LoomCommandProvider(Provider):
         commands = [
             ("Toggle Workspace Sidebar", app.action_toggle_sidebar, "Hide/show the right sidebar"),
             ("Switch to Artifacts Tab", lambda: self._focus_tab(WorkspaceTab.ARTIFACTS), "View created artifacts"),
-            ("Switch to Swarm Dashboard", lambda: self._focus_tab(WorkspaceTab.SWARM), "View active agents and history"),
+            ("Switch to Execution Dashboard", lambda: self._focus_tab(WorkspaceTab.EXECUTION), "View envelope execution status"),
             ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
             ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
 
@@ -315,7 +318,7 @@ class LoomApp(App):
         workspace.toggle_tab()
         labels = {
             WorkspaceTab.ARTIFACTS: "Artifacts",
-            WorkspaceTab.SWARM:     "Swarm",
+            WorkspaceTab.EXECUTION: "Execution",
             WorkspaceTab.BUDGET:    "Budget",
         }
         self.notify(f"Workspace: {labels[workspace.active_tab]}", timeout=1)
@@ -344,6 +347,12 @@ class LoomApp(App):
             self._on_action_state_change(event)
         elif isinstance(event, ActionRolledBack):
             self._on_action_rolled_back(event)
+        elif isinstance(event, EnvelopeStarted):
+            self._on_envelope_started(event)
+        elif isinstance(event, EnvelopeUpdated):
+            self._on_envelope_updated(event)
+        elif isinstance(event, EnvelopeCompleted):
+            self._on_envelope_completed(event)
 
     async def _on_turn_start(self, event: TurnStart) -> None:
         msg_list = self.query_one("#message-list", MessageList)
@@ -424,6 +433,20 @@ class LoomApp(App):
             f"\n  ↩ {icon} {event.tool_name} rolled back"
             + (f" — {event.message}" if event.message else "")
         )
+
+    # ── Envelope event handlers (Issue #106/#107) ────────────────────────────
+
+    def _on_envelope_started(self, event: EnvelopeStarted) -> None:
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.on_envelope_started(event.envelope)
+
+    def _on_envelope_updated(self, event: EnvelopeUpdated) -> None:
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.on_envelope_updated(event.envelope)
+
+    def _on_envelope_completed(self, event: EnvelopeCompleted) -> None:
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.on_envelope_completed(event.envelope)
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
         from .components.interactive_widgets import InlinePauseWidget

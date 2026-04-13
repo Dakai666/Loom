@@ -13,6 +13,7 @@ from .observability_panel import ObservabilityPanel
 from .artifact_card import Artifact, ArtifactCard, ArtifactState
 from .artifacts_panel import ArtifactsPanel
 from .swarm_dashboard import SwarmDashboard, ActivityEntry
+from .execution_dashboard import ExecutionDashboard
 from .budget_panel import BudgetPanel
 from .workspace_panel import WorkspacePanel, WorkspaceTab
 from .interactive_widgets import InlineConfirmWidget, InlinePauseWidget
@@ -34,6 +35,7 @@ __all__ = [
     "ArtifactsPanel",
     "SwarmDashboard",
     "ActivityEntry",
+    "ExecutionDashboard",
     "BudgetPanel",
     "WorkspacePanel",
     "WorkspaceTab",
