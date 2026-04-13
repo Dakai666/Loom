@@ -34,7 +34,7 @@ from typing import Any
 # Retry helper
 # ---------------------------------------------------------------------------
 
-_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504, 529}
 
 
 async def _retry_async(

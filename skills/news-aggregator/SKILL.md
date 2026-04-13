@@ -1,166 +1,218 @@
----
-name: news-aggregator-skill
-description: "全網科技/金融/AI 新聞聚合技能。支援 28+ 個資訊源，可抓取並分析即時內容。當使用者要求「每日快報」、「科技新聞」、「財經更新」、「AI 簡報」、「深度分析」時使用。"
----
-
 # 新聞聚合技能（News Aggregator Skill）
 
-從 28 個資訊源抓取即時熱門新聞，並以繁體中文生成深度分析報告。
+從 28+ 個資訊源抓取即時熱門新聞，並以繁體中文生成深度分析報告。
 
 ---
 
 ## 📁 檔案結構
 
 ```
-Project_Next/
+Loom/
 ├── news/                         ← 新聞報告存放目錄
 │   └── YYYY-MM-DD/              ← 依日期分組
-│       ├── hackernews.md
-│       ├── github.md
-│       └── briefing.md           ← 綜合簡報
+│       ├── tech_briefing.md        → 科技晨報（Hacker News + GitHub）
+│       ├── international_briefing.md → 國際晨報
+│       ├── medical_briefing.md     → 醫學晨報
+│       ├── astronomy_briefing.md    → 天文晨報
+│       └── daily_briefing.md       → 四合一總摘要（含跨領域關聯分析）
 └── skills/news-aggregator/
     ├── SKILL.md                  ← 本技能定義
     └── scripts/
-        ├── fetch_news.py         ← 新聞抓取腳本
+        ├── fetch_news.py         ← 新聞抓取主腳本
         └── rss_parser.py         ← RSS 解析（依賴）
 ```
 
 ---
 
-## 🔄 通用工作流程（3 步驟）
+## 🔄 兩步驟工作流程
 
-**所有新聞請求都遵循相同流程，無論來源或組合：**
+本技能分兩步驟執行，這是刻意設計——目的是讓 LLM 有完整的資料在手，才能做出有價值的深度整合。
 
-### 步驟 1：抓取資料
+### 步驟 1：抓取（fetch）
 ```bash
-# 請在 Project_Next 根目錄執行
 cd skills/news-aggregator/scripts
 
+# 四軌一次抓（晨報用）
+python fetch_news.py --all-tracks --limit 8
+
+# 單一軌
+python fetch_news.py --source tech --limit 8 --no-save
+
 # 單一來源
-python fetch_news.py --source <source_key> --no-save
-
-# 多個來源（逗號分隔）
-python fetch_news.py --source hackernews,github,wallstreetcn --no-save
-
-# 全源掃描（廣泛）
-python fetch_news.py --source all --limit 15 --no-save
-
-# 關鍵字過濾（自動擴展：「AI」→「AI,LLM,GPT,Claude,Agent,RAG」）
-python fetch_news.py --source hackernews --keyword "AI,LLM,GPT" --no-save
+python fetch_news.py --source hackernews --no-save
 ```
 
-### 步驟 2：生成報告
-讀取輸出的 JSON，並使用**統一報告模板**格式化**每一則**項目。所有內容翻譯為**繁體中文**。
-
-### 步驟 3：儲存與呈現
-將報告儲存至 `news/YYYY-MM-DD/<source>_report.md`，然後將完整內容展示給使用者。
+### 步驟 2：深度整合（integrate）
+讀取 JSON 資料後，以下的格式要求是強制性的——
+**絲絲的整合想法比原始新聞更有價值**，因此每則新聞都必須包含絲絲自己的深度分析，而非只是轉述。
 
 ---
 
-## 📰 統一報告模板
-
-**所有來源使用同一模板。**根據資料可用性顯示/隱藏可選欄位。
+## 📰 分軌 briefing 格式（每則新聞）
 
 ```markdown
-#### N. [標題（英文原文）](https://original-url.com)
-- **來源**: 來源名 | **時間**: 時間 | **熱度**: 🔥 熱度值
-- **連結**: [討論區](hn_url) | [GitHub](gh_url)     ← 仅在資料存在時顯示
-- **摘要**: 一句話繁體中文摘要。
-- **深度分析**: 💡 **洞察**：背景分析、影響範圍、技術價值。
+#### N. [標題（原文）](https://url)
+
+- **來源**: 來源名 | **熱度**: 🔥 XXX points/stars | **時間**: 時間
+- **摘要**: 一句話繁體中文摘要（獨立成段）
+- **深度分析**: 💡 背景分析 + 影響範圍 + 趨勢判讀，三者缺一不可
 ```
 
-### 各來源適配差異
+---
 
-| 來源 | 適配調整 |
-|------|---------|
-| **Hacker News** | **必須**包含 `[討論區](hn_url)` 連結 |
-| **GitHub** | **必須**包含 `[[GitHub]](url)` 連結 |
-| **WallStreetCN** | 標註為「付費牆」如適用 |
-| **微博熱搜** | **必須**翻譯為繁體中文標題 |
-| **HuggingFace Papers** | **必須**包含 `[[論文]](url)` 和 `[[程式碼]](github_url)` |
-| **Newsletter** | **必須**標註作者與發佈日期 |
-| **Podcast** | **必須**標註節目名稱與來賓（如有）|
+## 📋 總摘要（daily_briefing）格式
+
+```markdown
+## 📰 絲絲晨報 — YYYY-MM-DD
+
+> 四軌並行 · 科技 · 國際 · 醫學 · 天文
+
+---
+
+## 🚀 科技
+
+### 今日最大亮點
+一句話描述本軌最重要的新聞及其意義。
+
+### 主要新聞（3-5則）
+每則格式同分軌 briefing。
+
+---
+
+## 🌐 國際
+
+[同上]
+
+## 🏥 醫學
+
+[同上]
+
+## 🔭 天文
+
+[同上]
+
+---
+
+## 🔗 跨領域關聯分析
+
+分析四個軌道之間的相互影響，例如：
+- 地緣政治 → 科技供應鏈
+- 能源政策 → 醫療研究方向
+- 天文發現 → 產業技術轉移
+
+---
+
+## 💡 今日金句
+
+> 「引述內容」——從當日新聞提炼出的核心洞察
+
+---
+
+## ⚠️ 來源健康狀態
+
+| 來源 | 狀態 |
+|------|------|
+| Hacker News | ✅ 正常 |
+| GitHub Trending | ✅ 正常 |
+| Reuters World | ⚠️ 需確認 |
+| BBC World | ✅ 正常 |
+| NHK World | ✅ 正常 |
+| NEJM Alerts | ✅ 正常 |
+| WHO News | ✅ 正常 |
+| Medscape Medical | ✅ 正常 |
+| NASA News | ✅ 正常 |
+| ESA News | ✅ 正常 |
+| Astronomy.com | ✅ 正常 |
+
+---
+
+*本報告由 絲絲・Loom 自動生成，學習並記憶新知識中。*
+```
 
 ---
 
 ## 🗂️ 可用來源對照表
 
-### 核心新聞源
+### 科技新聞
 
-| 金鑰 | 名稱 | 說明 |
-|------|------|------|
-| `hackernews` | 🦄 矽谷熱點 | Hacker News 首頁 |
-| `github` | 🐙 開源趨勢 | GitHub Trending |
-| `36kr` | 🚀 創投快訊 | 36Kr 新聞快報 |
-| `producthunt` | 🐱 產品獵人 | Product Hunt |
-| `v2ex` | 🤓 極客社區 | V2EX 熱門 |
-| `tencent` | 🐧 騰訊科技 | 騰訊新聞 |
-| `wallstreetcn` | 📈 華爾街見聞 | Wall Street CN |
-| `weibo` | 🔴 微博熱搜 | 微博即時熱搜 |
-| `huggingface` | 🤗 HuggingFace Papers | 每日論文（需 Playwright）|
+| 金鑰 | 名稱 |
+|------|------|
+| `hackernews` | 🦄 矽谷熱點 |
+| `github` | 🐙 開源趨勢 |
+| `36kr` | 🚀 創投快訊 |
+| `producthunt` | 🐱 產品獵人 |
+| `v2ex` | 🤓 極客社區 |
+| `tencent` | 🐧 騰訊科技 |
+| `wallstreetcn` | 📈 華爾街見聞 |
+| `weibo` | 🔴 微博熱搜 |
+| `huggingface` | 🤗 HuggingFace Papers |
+| `latentspace_ainews` | 🧪 Latent Space AINews |
+
+### 🌍 國際新聞
+
+| 金鑰 | 名稱 |
+|------|------|
+| `international` | 🌍 國際聚合（Reuters + BBC + NHK 三合一） |
+| `reuters_world` | Reuters World RSS |
+| `bbc_world` | BBC World RSS |
+| `nhk_world` | NHK World RSS |
+
+### 🏥 醫學新聞
+
+| 金鑰 | 名稱 |
+|------|------|
+| `medical` | 🏥 醫學聚合（NEJM + WHO + Medscape 三合一） |
+| `nejm_alerts` | NEJM Alerts RSS |
+| `who_news` | WHO News RSS |
+| `medscape_medical` | Medscape Medical RSS |
+
+### 🔭 天文新聞
+
+| 金鑰 | 名稱 |
+|------|------|
+| `astronomy` | 🔭 天文聚合（NASA + ESA + Astronomy.com 三合一） |
+| `nasa_news` | NASA News RSS |
+| `esa_news` | ESA News RSS |
+| `astronomy.com` | Astronomy.com RSS |
 
 ### AI 行業內參
 
 | 金鑰 | 名稱 |
 |------|------|
-| `latentspace_ainews` | 🧪 Latent Space AINews (swyx) |
-| `chinai` | ChinAI (Jeffrey Ding) |
-| `memia` | Memia (Ben Reid) |
+| `ai_newsletters` | 🧠 全部 AI 內參聚合 |
+| `chinai` | ChinAI |
+| `memia` | Memia |
 | `bensbites` | Ben's Bites |
-| `oneusefulthing` | One Useful Thing (Ethan Mollick) |
-| `interconnects` | Interconnects (Nathan Lambert) |
-| `ai_newsletters` | 🧠 全部 AI 內參聚合（取前 3 篇）|
+| `oneusefulthing` | One Useful Thing |
+| `interconnects` | Interconnects |
+| `kdnuggets` | KDnuggets |
 
-### 深度思考與 Podcast
+### Podcast 與 Essays
 
 | 金鑰 | 名稱 |
 |------|------|
+| `lexfridman` | Lex Fridman Podcast |
+| `80000hours` | 80,000 Hours Podcast |
+| `latentspace` | Latent Space Podcast |
 | `paulgraham` | Paul Graham Essays |
 | `waitbutwhy` | Wait But Why |
-| `jamesclear` | James Clear |
-| `farnamstreet` | Farnam Street |
-| `scottyoung` | Scott Young |
-| `dankoe` | Dan Koe |
-| `essays` | 📚 全部文章聚合（取前 3 篇）|
-| `lexfridman` | Lex Fridman Podcast |
-| `latentspace` | Latent Space (swyx) |
-| `80000hours` | 80,000 Hours Podcast |
-| `podcasts` | 🎧 全部 Podcast 聚合（取前 3 篇）|
-
----
-
-## 📋 常見使用情境
-
-### 科技早報
-```bash
-python fetch_news.py --source hackernews,github,producthunt --limit 10 --no-save
-# 輸出至 news/YYYY-MM-DD/hackernews_report.md
-```
-
-### 財經快報
-```bash
-python fetch_news.py --source wallstreetcn,weibo --limit 10 --keyword "經濟,股市,比特幣" --no-save
-```
-
-### AI 深度日報
-```bash
-python fetch_news.py --source hackernews,latentspace_ainews,huggingface --limit 8 --keyword "AI,LLM,Agent,GPT,Claude" --no-save
-```
+| `essays` | 📚 全部文章聚合 |
 
 ---
 
 ## ⚠️ 已知限制
 
-1. **HuggingFace Papers** 需要 Playwright（`pip install playwright && playwright install`）
+1. **HuggingFace Papers** 需要 Playwright
 2. **Ben's Bites** 受 Cloudflare 保護，需要 Playwright
-3. `--deep` 模式會增加抓取時間（每篇文章額外請求）
-4. 部分來源可能因網站 Anti-bot 機制而失敗，這是正常現象
+3. Reuters RSS 在部分網路環境可能 DNS 解析失敗，標記 ⚠️ 並以 BBC/NHK 為主
+4. `--deep` 模式會增加抓取時間
 
 ---
 
-## 💡 Loom 整合提示
+## 💡 核心理念
 
-- 此技能由 Loom 的 **ProceduralMemory** 管理
-- 觸發時，Loom 會呼叫 `run_bash` 執行 `fetch_news.py`
-- JSON 結果由 LLM 處理並轉換為繁體中文報告
-- 產出建議儲存至 `news/YYYY-MM-DD/` 目錄
+> **「絲絲的整合想法比原始新聞更有價值。」**
+
+每次晨報都是絲絲的學習機會——
+新知識在整合的過程中被消化、被記憶、被連結到既有的認知架構中。
+因此格式設計刻意保留了「深度分析」與「跨領域關聯」這兩個讓價值真正增值的環節。

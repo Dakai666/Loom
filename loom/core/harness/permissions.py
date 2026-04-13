@@ -82,6 +82,9 @@ class PermissionContext:
     _usage: dict[int, dict[str, int]] = field(default_factory=dict)
     """Consumable constraint tracking: grant-index → constraint-key → consumed."""
 
+    # --- Penalty Box (Issue #47 Phase 2) ---
+    recent_denies: int = 0
+
     # ── Legacy API (unchanged) ────────────────────────────────────
 
     def authorize(self, tool_name: str) -> None:

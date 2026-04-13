@@ -43,12 +43,14 @@ class InlineConfirmWidget(Widget):
         trust_label: str,
         args_preview: str,
         future: "asyncio.Future[ConfirmDecision]",
+        justification: str | None = None,
     ) -> None:
         super().__init__()
         self._tool_name = tool_name
         self._trust_label = trust_label
         self._args_preview = args_preview
         self._future = future
+        self._justification = justification
         self._resolved = False
 
     def compose(self) -> ComposeResult:
@@ -57,10 +59,11 @@ class InlineConfirmWidget(Widget):
         colour = "#b87060" if self._trust_label == "CRITICAL" else "#c8924a"
         if self._trust_label == "SAFE":
             colour = "#7a9e78"
+        just_text = f"\n[bold italic #e0d8c0]Justification:[/] [italic #d0c8b0]{escape(self._justification)}[/]" if self._justification else ""
 
         yield Static(
             f"[bold {colour}]Action Required ({self._trust_label})[/]\n"
-            f"[bold]{escape(self._tool_name)}[/] [dim]{escape(self._args_preview)}[/dim]\n"
+            f"[bold]{escape(self._tool_name)}[/] [dim]{escape(self._args_preview)}[/dim]{just_text}\n"
             f"[dim]y=approve once  s=scope lease (30 min)  a=auto-approve  N=deny[/dim]",
             classes="confirm-content",
         )

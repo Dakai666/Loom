@@ -911,8 +911,11 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
         import asyncio
 
         async def _tui_confirm(call: "ToolCall") -> "ConfirmDecision":
+            args_copy = dict(call.args)
+            justification = args_copy.pop("justification", None)
+
             args_preview = "  ".join(
-                f"{k}={str(v)[:40]}" for k, v in call.args.items()
+                f"{k}={str(v)[:40]}" for k, v in args_copy.items()
             )[:120]
 
             msg_list = app.query_one("#message-list")
@@ -922,6 +925,7 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
                 trust_label=call.trust_level.plain,
                 args_preview=args_preview,
                 future=future,
+                justification=str(justification) if justification else None,
             )
             msg_list.mount(widget)
             msg_list.scroll_end(animate=False)

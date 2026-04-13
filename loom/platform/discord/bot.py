@@ -814,17 +814,23 @@ class LoomDiscordBot:
             if channel is None:
                 return ConfirmDecision.DENY
 
+            args_copy = dict(call.args)
+            justification = args_copy.pop("justification", None)
+
             args_preview = "  ".join(
-                f"{k}={str(v)[:40]}" for k, v in call.args.items()
+                f"{k}={str(v)[:40]}" for k, v in args_copy.items()
             )[:120]
             trust = call.trust_level.plain
             color = "🟡" if trust == "GUARDED" else "🔴"
             view = _ConfirmView(timeout=60.0)
 
+            just_text = f"**Justification:** *{justification}*\n" if justification else ""
+
             msg = await channel.send(
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
+                f"{just_text}"
                 f"*Timeout 60s → auto-deny*",
                 view=view,
             )

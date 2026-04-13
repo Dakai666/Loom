@@ -46,7 +46,7 @@ def make_send_discord_file_tool(client: discord.Client, thread_id: int, workspac
         input_schema={
             "type": "object",
             "properties": {
-                "filepath": {"type": "string", "description": "The relative path to the file in the workspace."}
+                "filepath": {"type": "string", "description": "The relative path to the file in the workspace."},
             },
             "required": ["filepath"]
         },

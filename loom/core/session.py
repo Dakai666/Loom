@@ -668,6 +668,16 @@ class LoomSession:
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
 
+        # Wire up LegitimacyGuardMiddleware before the rest of the pipeline
+        from loom.core.harness.middleware import LegitimacyGuardMiddleware
+        self._legitimacy_guard = LegitimacyGuardMiddleware()
+        
+        # Dynamically append MCP mutating tools to strict guard
+        from loom.core.harness.registry import ToolCapability
+        for tdef in self.registry._tools.values():
+            if "mcp" in tdef.tags and (tdef.capabilities & ToolCapability.MUTATES):
+                self._legitimacy_guard.strict_guard_tools.add(tdef.name)
+
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
         # Wire escape detector only when strict_sandbox is on — that's the
@@ -675,6 +685,7 @@ class LoomSession:
         _exec_escape_fn = (
             make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
         )
+
         self._pipeline = MiddlewarePipeline(
             [
                 LifecycleMiddleware(
@@ -684,6 +695,7 @@ class LoomSession:
                 ),
                 TraceMiddleware(on_trace=self._on_trace),
                 SchemaValidationMiddleware(registry=self.registry),
+                self._legitimacy_guard,
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool_cli,
@@ -852,6 +864,9 @@ class LoomSession:
         """
         self._current_origin = origin
 
+        if hasattr(self, "_legitimacy_guard"):
+            self._legitimacy_guard.reset_probe()
+
         # Prepend current datetime so the LLM always has temporal context.
         # The UI shows the original user_input; the history gets the annotated version.
         now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
@@ -867,6 +882,11 @@ class LoomSession:
             )
         )
 
+        # Sanitize first so _smart_compact never sees orphaned tool_call sequences.
+        # (Restart or mid-turn cancel can leave the assistant message in DB without
+        # a matching tool result — sanitize drops it before compaction reads history.)
+        self._sanitize_history()
+
         # Compress before the first LLM call if already over threshold.
         # (budget.used_tokens reflects the last response's actual token count,
         # so this check is accurate from turn 2 onward.)
@@ -876,9 +896,6 @@ class LoomSession:
                 f"compressing…[/yellow]"
             )
             await self._smart_compact()
-
-        # Guard against corrupted history before sending to the API.
-        self._sanitize_history()
 
         tools = self.registry.to_openai_schema()
         tool_count = 0

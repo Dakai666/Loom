@@ -183,6 +183,14 @@ class LoomMCPClient:
         result = await self._session.list_tools()
         tool_defs: list[ToolDefinition] = []
 
+        # Keywords in a tool's name or description that signal mutation.
+        # Used to assign MUTATES capability only to tools that actually write
+        # state, rather than blanket-flagging all GUARDED tools in the server.
+        _MUTATING_KEYWORDS = frozenset({
+            "write", "create", "delete", "update", "patch", "put", "insert",
+            "remove", "rename", "move", "overwrite", "append", "replace", "edit",
+        })
+
         trust_level_str = self._cfg.trust_level.upper()
         try:
             trust = TrustLevel[trust_level_str]
@@ -226,13 +234,35 @@ class LoomMCPClient:
             schema = mcp_tool.inputSchema if mcp_tool.inputSchema else {
                 "type": "object", "properties": {}
             }
+            # Shallow-copy to avoid mutating the MCP-provided schema object.
+            schema_dict = dict(schema if isinstance(schema, dict) else schema.model_dump())
+
+            from loom.core.harness.registry import ToolCapability
+            combined = f"{tool_name} {desc}".lower()
+            is_mutating = trust == TrustLevel.CRITICAL or (
+                trust == TrustLevel.GUARDED
+                and any(kw in combined for kw in _MUTATING_KEYWORDS)
+            )
+            caps = ToolCapability.MUTATES if is_mutating else ToolCapability.NONE
+            if is_mutating:
+                props = dict(schema_dict.get("properties") or {})
+                props["justification"] = {
+                    "type": "string",
+                    "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。",
+                }
+                schema_dict["properties"] = props
+                existing_required = list(schema_dict.get("required") or [])
+                if "justification" not in existing_required:
+                    existing_required.append("justification")
+                schema_dict["required"] = existing_required
 
             tool_defs.append(
                 ToolDefinition(
                     name=prefixed_name,
                     description=f"[MCP/{self._cfg.name}] {desc}",
                     trust_level=trust,
-                    input_schema=schema if isinstance(schema, dict) else schema.model_dump(),
+                    capabilities=caps,
+                    input_schema=schema_dict,
                     executor=_executor,
                     tags=["mcp", self._cfg.name],
                 )
@@ -265,10 +295,15 @@ class LoomMCPClient:
             if self._session is not None:
                 return
 
+            # Merge override env on top of the full parent environment so the
+            # subprocess retains PATH and other inherited vars.  Without this,
+            # passing a non-None env dict to StdioServerParameters replaces the
+            # entire subprocess environment and breaks PATH lookup (e.g. uvx).
+            merged_env = {**os.environ, **self._cfg.env} if self._cfg.env else None
             params = StdioServerParameters(
                 command=self._cfg.command,
                 args=self._cfg.args,
-                env=self._cfg.env or None,
+                env=merged_env,
             )
             cm = stdio_client(params)
             read, write = await cm.__aenter__()
