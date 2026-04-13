@@ -870,6 +870,32 @@ class LifecycleMiddleware(Middleware):
         self._LifecycleContext = LifecycleContext
         self._CTX_KEY = LIFECYCLE_CTX_KEY
 
+    @staticmethod
+    async def _advance_to(
+        ctx: "LifecycleContext",
+        target: "ActionState",
+        auth_reason: str = "passed blast radius",
+    ) -> None:
+        """Advance record through pre-execution states up to *target*.
+
+        Handles DECLARED, AWAITING_CONFIRM, AUTHORIZED, PREPARED, EXECUTING
+        in order, stopping when *target* is reached or surpassed.
+        Extracted to avoid DRY violations across fallback paths (#108 review).
+        """
+        from .lifecycle import ActionState as AS
+        _chain = [
+            (AS.DECLARED,          AS.AUTHORIZED, auth_reason),
+            (AS.AWAITING_CONFIRM,  AS.AUTHORIZED, auth_reason),
+            (AS.AUTHORIZED,        AS.PREPARED,   None),
+            (AS.PREPARED,          AS.EXECUTING,  None),
+            (AS.EXECUTING,         AS.OBSERVED,   None),
+        ]
+        for from_state, to_state, reason in _chain:
+            if ctx.record.state == from_state:
+                await ctx.transition(to_state, reason=reason)
+            if ctx.record.state == target:
+                break
+
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         ActionRecord = self._ActionRecord
         ActionIntent = self._ActionIntent
@@ -930,10 +956,7 @@ class LifecycleMiddleware(Middleware):
         if not result.success and result.failure_type == "validation_error":
             # Schema validation failed AFTER authorization passed
             auth_reason = ctx.authorization_reason or "passed blast radius"
-            if record.state == ActionState.AWAITING_CONFIRM:
-                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
-            elif record.state == ActionState.DECLARED:
-                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            await self._advance_to(ctx, ActionState.AUTHORIZED, auth_reason)
             await ctx.transition(ActionState.ABORTED, reason=result.error)
             record.result = result
             await ctx.memorialize("validation_error")
@@ -950,14 +973,7 @@ class LifecycleMiddleware(Middleware):
                 return result
             # Fallback: force through remaining states
             if not record.state.is_terminal:
-                if record.state == ActionState.DECLARED:
-                    await ctx.transition(ActionState.AUTHORIZED, reason="passed blast radius")
-                if record.state == ActionState.AWAITING_CONFIRM:
-                    await ctx.transition(ActionState.AUTHORIZED, reason="passed blast radius")
-                if record.state == ActionState.AUTHORIZED:
-                    await ctx.transition(ActionState.PREPARED)
-                if record.state == ActionState.PREPARED:
-                    await ctx.transition(ActionState.EXECUTING)
+                await self._advance_to(ctx, ActionState.EXECUTING)
                 await ctx.transition(ActionState.TIMED_OUT, reason=result.error)
                 record.result = result
                 await ctx.memorialize("timed_out")
@@ -973,18 +989,8 @@ class LifecycleMiddleware(Middleware):
                 "pipeline may be misconfigured; stamping states retroactively",
                 call.tool_name, record.state.value,
             )
-            if record.state == ActionState.DECLARED:
-                auth_reason = ctx.authorization_reason or "passed blast radius"
-                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
-            if record.state == ActionState.AWAITING_CONFIRM:
-                auth_reason = ctx.authorization_reason or "passed blast radius"
-                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
-            if record.state == ActionState.AUTHORIZED:
-                await ctx.transition(ActionState.PREPARED)
-            if record.state == ActionState.PREPARED:
-                await ctx.transition(ActionState.EXECUTING)
-            if record.state == ActionState.EXECUTING:
-                await ctx.transition(ActionState.OBSERVED)
+            auth_reason = ctx.authorization_reason or "passed blast radius"
+            await self._advance_to(ctx, ActionState.OBSERVED, auth_reason)
             record.result = result
 
         # ── Post-validation (if post_validator defined) ───────────────

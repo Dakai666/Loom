@@ -1199,12 +1199,15 @@ class LoomSession:
                             while not self._lifecycle_events.empty():
                                 yield self._lifecycle_events.get_nowait()
                                 drained = True
-                            # Yield an envelope update if state changed
-                            if drained:
+                            # Yield envelope update if state changed, or as a
+                            # periodic fallback every ~1s so the TUI stays fresh
+                            # even if no lifecycle events fired (#108 review).
+                            now_mono = time.monotonic()
+                            if drained or (now_mono - _last_envelope_yield) > 1.0:
                                 yield EnvelopeUpdated(
                                     envelope=self._build_envelope_view(_batch_t0)
                                 )
-                                _last_envelope_yield = time.monotonic()
+                                _last_envelope_yield = now_mono
 
                         # Collect the result
                         try:
