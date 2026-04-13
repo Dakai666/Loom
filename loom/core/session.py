@@ -882,6 +882,11 @@ class LoomSession:
             )
         )
 
+        # Sanitize first so _smart_compact never sees orphaned tool_call sequences.
+        # (Restart or mid-turn cancel can leave the assistant message in DB without
+        # a matching tool result — sanitize drops it before compaction reads history.)
+        self._sanitize_history()
+
         # Compress before the first LLM call if already over threshold.
         # (budget.used_tokens reflects the last response's actual token count,
         # so this check is accurate from turn 2 onward.)
@@ -891,9 +896,6 @@ class LoomSession:
                 f"compressing…[/yellow]"
             )
             await self._smart_compact()
-
-        # Guard against corrupted history before sending to the API.
-        self._sanitize_history()
 
         tools = self.registry.to_openai_schema()
         tool_count = 0
