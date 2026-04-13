@@ -62,7 +62,7 @@ from loom.core.events import (
     TurnDropped,
     TurnPaused,
 )
-from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope
+from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope, LIFECYCLE_CTX_KEY
 from loom.core.harness.middleware import (
     BlastRadiusMiddleware,
     LifecycleGateMiddleware,
@@ -1680,7 +1680,14 @@ class LoomSession:
             abort_signal=self._abort.signal,
             origin=self._current_origin,
         )
-        return await self._pipeline.execute(call, tool_def.executor)
+        result = await self._pipeline.execute(call, tool_def.executor)
+
+        # Issue #106: link ActionRecord from LifecycleMiddleware to the envelope
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is not None and self._current_envelope is not None:
+            self._current_envelope.add(ctx.record)
+
+        return result
 
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
         summary = (
