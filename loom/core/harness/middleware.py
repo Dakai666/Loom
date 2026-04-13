@@ -335,6 +335,13 @@ class BlastRadiusMiddleware(Middleware):
             ctx.authorization_result = result
             ctx.authorization_reason = reason
 
+    async def _enter_awaiting_confirm(self, call: ToolCall) -> None:
+        """Transition ActionRecord to AWAITING_CONFIRM before prompting user (#109)."""
+        from .lifecycle import LIFECYCLE_CTX_KEY, ActionState
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is not None and ctx.record.state == ActionState.DECLARED:
+            await ctx.transition(ActionState.AWAITING_CONFIRM, reason="awaiting user confirmation")
+
     def _write_scope_metadata(
         self, call: ToolCall, scope_request: Any,
         diff: Any | None, verdict: Any,
@@ -441,6 +448,7 @@ class BlastRadiusMiddleware(Middleware):
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value)
 
+        await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
         decision = self._normalize_decision(raw)
 
@@ -531,6 +539,7 @@ class BlastRadiusMiddleware(Middleware):
         if self._is_unattended(call):
             return self._deny_unattended(call, "legacy-not-authorized")
 
+        await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
         decision = self._normalize_decision(raw)
 
@@ -905,14 +914,14 @@ class LifecycleMiddleware(Middleware):
         # LifecycleGateMiddleware ever ran.
 
         if not result.success and result.failure_type == "permission_denied":
-            if record.state == ActionState.DECLARED:
+            if record.state in (ActionState.DECLARED, ActionState.AWAITING_CONFIRM):
                 await ctx.transition(ActionState.DENIED, reason=result.error)
                 record.result = result
                 await ctx.memorialize("denied")
                 return result
 
         if not result.success and result.failure_type == "tool_not_found":
-            if record.state == ActionState.DECLARED:
+            if record.state in (ActionState.DECLARED, ActionState.AWAITING_CONFIRM):
                 record.result = result
                 await ctx.transition(ActionState.DENIED, reason="tool not found")
                 await ctx.memorialize("tool_not_found")
@@ -921,7 +930,10 @@ class LifecycleMiddleware(Middleware):
         if not result.success and result.failure_type == "validation_error":
             # Schema validation failed AFTER authorization passed
             auth_reason = ctx.authorization_reason or "passed blast radius"
-            await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            if record.state == ActionState.AWAITING_CONFIRM:
+                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            elif record.state == ActionState.DECLARED:
+                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
             await ctx.transition(ActionState.ABORTED, reason=result.error)
             record.result = result
             await ctx.memorialize("validation_error")
@@ -939,6 +951,8 @@ class LifecycleMiddleware(Middleware):
             # Fallback: force through remaining states
             if not record.state.is_terminal:
                 if record.state == ActionState.DECLARED:
+                    await ctx.transition(ActionState.AUTHORIZED, reason="passed blast radius")
+                if record.state == ActionState.AWAITING_CONFIRM:
                     await ctx.transition(ActionState.AUTHORIZED, reason="passed blast radius")
                 if record.state == ActionState.AUTHORIZED:
                     await ctx.transition(ActionState.PREPARED)
@@ -960,6 +974,9 @@ class LifecycleMiddleware(Middleware):
                 call.tool_name, record.state.value,
             )
             if record.state == ActionState.DECLARED:
+                auth_reason = ctx.authorization_reason or "passed blast radius"
+                await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
+            if record.state == ActionState.AWAITING_CONFIRM:
                 auth_reason = ctx.authorization_reason or "passed blast radius"
                 await ctx.transition(ActionState.AUTHORIZED, reason=auth_reason)
             if record.state == ActionState.AUTHORIZED:

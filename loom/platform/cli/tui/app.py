@@ -38,6 +38,7 @@ from .components import (
     WorkspaceTab,
     ArtifactState,
     ActivityEntry,
+    ExecutionDashboard,
 )
 from .components.message_list import Role
 from .events import (
@@ -55,6 +56,7 @@ from .events import (
     EnvelopeStarted,
     EnvelopeUpdated,
     EnvelopeCompleted,
+    GrantsUpdate,
 )
 
 if TYPE_CHECKING:
@@ -353,6 +355,8 @@ class LoomApp(App):
             self._on_envelope_updated(event)
         elif isinstance(event, EnvelopeCompleted):
             self._on_envelope_completed(event)
+        elif isinstance(event, GrantsUpdate):
+            self._on_grants_update(event)
 
     async def _on_turn_start(self, event: TurnStart) -> None:
         msg_list = self.query_one("#message-list", MessageList)
@@ -447,6 +451,10 @@ class LoomApp(App):
     def _on_envelope_completed(self, event: EnvelopeCompleted) -> None:
         workspace = self.query_one("#workspace-panel", WorkspacePanel)
         workspace.on_envelope_completed(event.envelope)
+
+    def _on_grants_update(self, event: GrantsUpdate) -> None:
+        status_bar = self.query_one("#status-bar", StatusBar)
+        status_bar.update_grants(event.active_count, event.next_expiry_secs)
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
         from .components.interactive_widgets import InlinePauseWidget
@@ -570,3 +578,17 @@ class LoomApp(App):
 
     def on_input_area_submit(self, event: InputArea.Submit) -> None:
         self.post_message(self.UserMessage(event.text))
+
+    def on_execution_dashboard_scroll_to_confirm(
+        self, event: ExecutionDashboard.ScrollToConfirm,
+    ) -> None:
+        """When ⏳ node is activated, scroll MessageList to the matching confirm widget (#109)."""
+        from .components.interactive_widgets import InlineConfirmWidget
+        try:
+            msg_list = self.query_one("#message-list", MessageList)
+        except Exception:
+            return
+        for widget in msg_list.query(InlineConfirmWidget):
+            if getattr(widget, "_call_id", "") == event.call_id:
+                widget.scroll_visible(animate=True)
+                return

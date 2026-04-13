@@ -484,6 +484,7 @@ class LoomChatApp:
             EnvelopeStarted as TuiEnvelopeStarted,
             EnvelopeUpdated as TuiEnvelopeUpdated,
             EnvelopeCompleted as TuiEnvelopeCompleted,
+            GrantsUpdate as TuiGrantsUpdate,
         )
         from loom.platform.cli.ui import (
             TextChunk,
@@ -499,6 +500,7 @@ class LoomChatApp:
             EnvelopeStarted,
             EnvelopeUpdated,
             EnvelopeCompleted,
+            GrantsSnapshot,
         )
 
         class _App(LoomApp):
@@ -750,6 +752,13 @@ class LoomChatApp:
                             await self.dispatch_stream_event(
                                 TuiEnvelopeCompleted(envelope=ev.envelope)
                             )
+                        elif isinstance(ev, GrantsSnapshot):
+                            await self.dispatch_stream_event(
+                                TuiGrantsUpdate(
+                                    active_count=ev.active_count,
+                                    next_expiry_secs=ev.next_expiry_secs,
+                                )
+                            )
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
@@ -946,6 +955,7 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
                 args_preview=args_preview,
                 future=future,
                 justification=str(justification) if justification else None,
+                call_id=call.id,
             )
             msg_list.mount(widget)
             msg_list.scroll_end(animate=False)

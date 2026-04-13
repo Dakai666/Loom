@@ -54,6 +54,7 @@ from loom.core.events import (
     EnvelopeUpdated,
     ExecutionEnvelopeView,
     ExecutionNodeView,
+    GrantsSnapshot,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -861,6 +862,7 @@ class LoomSession:
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ActionStateChange | ActionRolledBack
         | EnvelopeStarted | EnvelopeUpdated | EnvelopeCompleted
+        | GrantsSnapshot
     ]:
         """
         Run one complete agent turn and yield typed UI events.
@@ -1169,17 +1171,45 @@ class LoomSession:
                             {"tool_call_id": tu.id, "tool_name": tu.name},
                         ))
                 else:
-                    # Sequential: single tool, or needs interactive confirmation
+                    # Sequential: single tool, or needs interactive confirmation.
+                    # Dispatched as a task so we can drain lifecycle events
+                    # (e.g. AWAITING_CONFIRM) while the confirm widget blocks.
                     for tu in response.tool_uses:
                         yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
                         ts = time.monotonic()
+
+                        dispatch_task = asyncio.create_task(
+                            self._dispatch(tu.name, tu.args, tu.id)
+                        )
+                        # Drain lifecycle events while dispatch is in flight.
+                        # This makes ⏳ awaiting_confirm visible in the TUI
+                        # before the user responds to the confirm prompt (#109).
+                        _last_envelope_yield = time.monotonic()
+                        while not dispatch_task.done():
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(dispatch_task), timeout=0.15,
+                                )
+                            except asyncio.TimeoutError:
+                                pass
+                            except Exception:
+                                break
+                            # Drain any lifecycle events queued during this tick
+                            drained = False
+                            while not self._lifecycle_events.empty():
+                                yield self._lifecycle_events.get_nowait()
+                                drained = True
+                            # Yield an envelope update if state changed
+                            if drained:
+                                yield EnvelopeUpdated(
+                                    envelope=self._build_envelope_view(_batch_t0)
+                                )
+                                _last_envelope_yield = time.monotonic()
+
+                        # Collect the result
                         try:
-                            result = await self._dispatch(tu.name, tu.args, tu.id)
+                            result = dispatch_task.result()
                         except Exception as _dispatch_exc:
-                            # An unexpected exception in dispatch (e.g. TUI confirm crash)
-                            # must still produce a tool result message — otherwise the
-                            # assistant's tool_calls entry becomes orphaned and the next
-                            # API call gets a 2013 "tool id not found" error.
                             result = ToolResult(
                                 call_id=tu.id,
                                 tool_name=tu.name,
@@ -1187,6 +1217,7 @@ class LoomSession:
                                 error=f"Internal dispatch error: {_dispatch_exc}",
                                 failure_type="execution_error",
                             )
+
                         duration_ms = (time.monotonic() - ts) * 1000
                         tool_count += 1
                         tool_output = str(result.output) if result.success else (result.error or "")
@@ -1197,7 +1228,7 @@ class LoomSession:
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
-                        # Drain lifecycle events queued during dispatch
+                        # Final drain of lifecycle events after dispatch
                         while not self._lifecycle_events.empty():
                             yield self._lifecycle_events.get_nowait()
                         # Issue #106: Yield envelope update after each tool completes
@@ -1221,6 +1252,9 @@ class LoomSession:
                 self._recent_envelopes.append(_completed_view)
                 if len(self._recent_envelopes) > 10:
                     self._recent_envelopes = self._recent_envelopes[-10:]
+
+                # ── Issue #108: Grants snapshot after each batch ──────────
+                yield self._build_grants_snapshot()
 
                 # Check budget after tool results are appended — the next LLM
                 # call in this loop will include them and may push over the limit.
@@ -1682,10 +1716,12 @@ class LoomSession:
         )
         result = await self._pipeline.execute(call, tool_def.executor)
 
-        # Issue #106: link ActionRecord from LifecycleMiddleware to the envelope
+        # Issue #106: link ActionRecord to the envelope (if not already linked
+        # by _on_state_change during execution — see #109 early-add logic).
         ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
         if ctx is not None and self._current_envelope is not None:
-            self._current_envelope.add(ctx.record)
+            if ctx.record not in self._current_envelope.records:
+                self._current_envelope.add(ctx.record)
 
         return result
 
@@ -1781,7 +1817,16 @@ class LoomSession:
 
         Called by LifecycleMiddleware on each state transition.
         Also enqueues ActionRolledBack when transitioning to 'reverted'.
+
+        Issue #109: early-add the record to the envelope on first state
+        change so _build_envelope_view() can see ⏳ awaiting_confirm
+        while the confirm widget is blocking.
         """
+        # Early-add record to envelope (#109)
+        if self._current_envelope is not None:
+            if record not in self._current_envelope.records:
+                self._current_envelope.add(record)
+
         call_id = record.call.id if record.call else ""
         self._lifecycle_events.put_nowait(
             ActionStateChange(
@@ -1844,6 +1889,33 @@ class LoomSession:
                 if isinstance(first_val, str):
                     args_preview = first_val.replace("\n", "↵")[:60]
 
+            # Detail fields (Issue #108)
+            full_args = dict(call.args) if call and call.args else {}
+            state_history = record.history_dicts()
+            auth_decision = ""
+            auth_expires = 0.0
+            auth_selector = ""
+            if call:
+                auth_decision = call.metadata.get("confirm_decision", "")
+                # Extract scope grant info if available
+                scope_req = call.metadata.get("scope_request")
+                if scope_req is not None:
+                    reqs = getattr(scope_req, "requirements", [])
+                    if reqs:
+                        auth_selector = reqs[0].selector
+                # Check for lease TTL from grants
+                if auth_decision == "scope":
+                    for g in self.perm._effective_grants():
+                        if (hasattr(g, "source") and g.source == "lease"
+                                and g.valid_until > 0):
+                            auth_expires = g.valid_until
+                            break
+
+            output_preview = ""
+            if record.result:
+                raw = record.result.output if record.result.success else (record.result.error or "")
+                output_preview = str(raw)[:200]
+
             nodes.append(ExecutionNodeView(
                 node_id=record.id,
                 call_id=call.id if call else "",
@@ -1860,6 +1932,12 @@ class LoomSession:
                     if record.result and not record.result.success
                     else ""
                 ),
+                full_args=full_args,
+                state_history=state_history,
+                auth_decision=auth_decision,
+                auth_expires=auth_expires,
+                auth_selector=auth_selector,
+                output_preview=output_preview,
             ))
 
         # Compute aggregate status
@@ -1885,6 +1963,22 @@ class LoomSession:
             levels=[[n.node_id for n in nodes]],
             nodes=nodes,
         )
+
+    def _build_grants_snapshot(self) -> GrantsSnapshot:
+        """Build a GrantsSnapshot from current PermissionContext (#108)."""
+        import time as _time
+        grants = self.perm._effective_grants()
+        now = _time.time()
+        active = len(grants)
+        # Find nearest expiry
+        next_expiry_secs = 0.0
+        for g in grants:
+            if g.valid_until > 0:
+                remaining = g.valid_until - now
+                if remaining > 0:
+                    if next_expiry_secs == 0.0 or remaining < next_expiry_secs:
+                        next_expiry_secs = remaining
+        return GrantsSnapshot(active_count=active, next_expiry_secs=next_expiry_secs)
 
     @staticmethod
     def _format_scope_panel(call: ToolCall) -> str:
