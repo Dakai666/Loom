@@ -226,13 +226,30 @@ class LoomMCPClient:
             schema = mcp_tool.inputSchema if mcp_tool.inputSchema else {
                 "type": "object", "properties": {}
             }
+            schema_dict = schema if isinstance(schema, dict) else schema.model_dump()
+
+            from loom.core.harness.registry import ToolCapability
+            caps = ToolCapability.NONE
+            if trust in (TrustLevel.GUARDED, TrustLevel.CRITICAL):
+                caps = ToolCapability.MUTATES
+                if "properties" not in schema_dict:
+                    schema_dict["properties"] = {}
+                schema_dict["properties"]["justification"] = {
+                    "type": "string",
+                    "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。"
+                }
+                if "required" not in schema_dict:
+                    schema_dict["required"] = []
+                if isinstance(schema_dict["required"], list) and "justification" not in schema_dict["required"]:
+                    schema_dict["required"].append("justification")
 
             tool_defs.append(
                 ToolDefinition(
                     name=prefixed_name,
                     description=f"[MCP/{self._cfg.name}] {desc}",
                     trust_level=trust,
-                    input_schema=schema if isinstance(schema, dict) else schema.model_dump(),
+                    capabilities=caps,
+                    input_schema=schema_dict,
                     executor=_executor,
                     tags=["mcp", self._cfg.name],
                 )

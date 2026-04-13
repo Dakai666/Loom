@@ -47,9 +47,8 @@ def make_send_discord_file_tool(client: discord.Client, thread_id: int, workspac
             "type": "object",
             "properties": {
                 "filepath": {"type": "string", "description": "The relative path to the file in the workspace."},
-                "justification": {"type": "string", "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。"}
             },
-            "required": ["filepath", "justification"]
+            "required": ["filepath"]
         },
         executor=executor
     )

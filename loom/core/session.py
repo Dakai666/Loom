@@ -668,6 +668,16 @@ class LoomSession:
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
 
+        # Wire up LegitimacyGuardMiddleware before the rest of the pipeline
+        from loom.core.harness.middleware import LegitimacyGuardMiddleware
+        self._legitimacy_guard = LegitimacyGuardMiddleware()
+        
+        # Dynamically append MCP mutating tools to strict guard
+        from loom.core.harness.registry import ToolCapability
+        for tdef in self.registry._tools.values():
+            if "mcp" in tdef.tags and (tdef.capabilities & ToolCapability.MUTATES):
+                self._legitimacy_guard.strict_guard_tools.add(tdef.name)
+
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
         # Wire escape detector only when strict_sandbox is on — that's the
@@ -675,8 +685,6 @@ class LoomSession:
         _exec_escape_fn = (
             make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
         )
-        # wire up LegitimacyGuardMiddleware
-        from loom.core.harness.middleware import LegitimacyGuardMiddleware
 
         self._pipeline = MiddlewarePipeline(
             [
@@ -687,7 +695,7 @@ class LoomSession:
                 ),
                 TraceMiddleware(on_trace=self._on_trace),
                 SchemaValidationMiddleware(registry=self.registry),
-                LegitimacyGuardMiddleware(),
+                self._legitimacy_guard,
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool_cli,
@@ -855,6 +863,9 @@ class LoomSession:
         TurnDone    — once all tool loops are resolved
         """
         self._current_origin = origin
+
+        if hasattr(self, "_legitimacy_guard"):
+            self._legitimacy_guard.reset_probe()
 
         # Prepend current datetime so the LLM always has temporal context.
         # The UI shows the original user_input; the history gets the annotated version.

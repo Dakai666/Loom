@@ -192,15 +192,27 @@ class LegitimacyGuardMiddleware(Middleware):
             "list_dir", "read_file", "search_files", "grep_search",
             "fetch_url_tool", "web_search", "recall_memory", "query_relations"
         })
-        self.strict_guard_tools = frozenset({
-            "write_file", "run_bash", "replace_file_content"
-        })
+        self.strict_guard_tools = {
+            "write_file", "run_bash", 
+        }
+
+    def reset_probe(self) -> None:
+        self.has_probed = False
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         if call.tool_name in self.probe_tools:
             self.has_probed = True
 
-        if call.tool_name in self.strict_guard_tools and not self.has_probed:
+        # TODO(#xx): Phase 4 - Goal Drift / Re-justification budget.
+        # Enforce re-justification for guarded actions after N steps without human interaction.
+
+        is_strict = call.tool_name in self.strict_guard_tools
+        # Also include any MCP tool that was dynamically flagged by capabilities
+        from .registry import ToolCapability
+        if "mcp" in call.tool_name and call.capabilities & ToolCapability.MUTATES:
+            is_strict = True
+
+        if is_strict and not self.has_probed:
             error_msg = (
                 f"LEGITIMACY GUARD: Blocked `{call.tool_name}`. "
                 "You must gather context first (e.g. read_file, list_dir, search) "
