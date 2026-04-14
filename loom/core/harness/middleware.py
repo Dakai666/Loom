@@ -580,16 +580,42 @@ class BlastRadiusMiddleware(Middleware):
         self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
         call.metadata["confirm_decision"] = decision.value
 
-        # Legacy path has no scope_resolver — SCOPE/AUTO degrade to session
-        # authorization (same as ONCE). Log so the user can see the fallback.
-        from .scope import ConfirmDecision as _CD
-        if decision in (_CD.SCOPE, _CD.AUTO):
-            _log.debug(
-                "SCOPE/AUTO chosen but no scope_resolver for %r — "
-                "falling back to session authorization",
-                call.tool_name,
-            )
-            call.metadata["legacy_decision_fallback"] = True
+        # Legacy path: create a ScopeGrant so the UI can display grant info
+        # (#112). Without a scope_resolver the grant is tool-name-based.
+        from .scope import ConfirmDecision as _CD, ScopeGrant
+        import time as _time
+        _now = _time.time()
+
+        if decision == _CD.SCOPE:
+            self._perm.grant(ScopeGrant(
+                resource="tool",
+                action=call.tool_name,
+                selector="*",
+                constraints={"tool_name": call.tool_name},
+                source="lease",
+                granted_at=_now,
+                valid_until=_now + self._SCOPE_LEASE_TTL,
+            ))
+        elif decision == _CD.AUTO:
+            self._perm.grant(ScopeGrant(
+                resource="tool",
+                action=call.tool_name,
+                selector="*",
+                constraints={"tool_name": call.tool_name},
+                source="auto_approve",
+                granted_at=_now,
+                valid_until=0.0,  # permanent
+            ))
+        elif decision == _CD.ONCE:
+            self._perm.grant(ScopeGrant(
+                resource="tool",
+                action=call.tool_name,
+                selector="*",
+                constraints={"tool_name": call.tool_name},
+                source="manual_confirm",
+                granted_at=_now,
+                valid_until=0.0,
+            ))
 
         # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
         # Other GUARDED tools are pre-authorized for the rest of this session.

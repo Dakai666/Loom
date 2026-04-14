@@ -158,7 +158,18 @@ class EnvelopeCompleted(StreamEvent):
 
 
 @dataclass
+class GrantInfo:
+    """Single grant summary for TUI tracking (#112)."""
+    grant_id: str
+    tool_name: str
+    selector: str
+    source: str           # "lease" / "auto" / "manual_confirm"
+    expires_at: float     # absolute time.time(); 0 = permanent
+
+
+@dataclass
 class GrantsUpdate(StreamEvent):
-    """Active scope grants changed (#108)."""
+    """Active scope grants changed (#108, #112)."""
     active_count: int
     next_expiry_secs: float = 0.0
+    grants: list[GrantInfo] = field(default_factory=list)

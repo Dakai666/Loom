@@ -200,10 +200,21 @@ class EnvelopeCompleted:
 
 
 @dataclass
+class GrantSummary:
+    """One active scope grant — lightweight UI projection (#112)."""
+    grant_id: str          # unique identifier for tracking expiry transitions
+    tool_name: str         # e.g. "write_file"
+    selector: str          # e.g. "/workspace/doc/"
+    source: str            # "lease" / "auto" / "manual_confirm"
+    expires_at: float      # absolute time.time(); 0 = permanent
+
+
+@dataclass
 class GrantsSnapshot:
-    """Current state of active scope grants for UI display (#108)."""
+    """Current state of active scope grants for UI display (#108, #112)."""
     active_count: int
     next_expiry_secs: float = 0.0  # seconds until nearest expiry; 0 = none
+    grants: list[GrantSummary] = field(default_factory=list)
 
 
 __all__ = [
@@ -215,6 +226,7 @@ __all__ = [
     "EnvelopeUpdated",
     "ExecutionEnvelopeView",
     "ExecutionNodeView",
+    "GrantSummary",
     "GrantsSnapshot",
     "TextChunk",
     "ThinkCollapsed",

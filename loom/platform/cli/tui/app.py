@@ -454,7 +454,11 @@ class LoomApp(App):
 
     def _on_grants_update(self, event: GrantsUpdate) -> None:
         status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.update_grants(event.active_count, event.next_expiry_secs)
+        status_bar.update_grants(
+            event.active_count,
+            event.next_expiry_secs,
+            grants=event.grants,
+        )
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
         from .components.interactive_widgets import InlinePauseWidget

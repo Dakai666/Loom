@@ -100,9 +100,12 @@ class WorkspacePanel(Widget):
         self._update_visibility()
         self._render_header()
 
-    def watch_active_tab(self, _: WorkspaceTab) -> None:
+    def watch_active_tab(self, tab: WorkspaceTab) -> None:
         self._update_visibility()
         self._render_header()
+        # Auto-focus ExecutionDashboard so key_* handlers work (#113)
+        if tab == WorkspaceTab.EXECUTION and self._execution_panel is not None:
+            self._execution_panel.focus()
 
     # ── Tab switching ─────────────────────────────────────────────────────────
 

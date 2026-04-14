@@ -46,6 +46,7 @@ from .events import (
     EnvelopeStarted,
     EnvelopeUpdated,
     EnvelopeCompleted,
+    GrantInfo,
     GrantsUpdate,
 )
 
@@ -79,5 +80,6 @@ __all__ = [
     "EnvelopeStarted",
     "EnvelopeUpdated",
     "EnvelopeCompleted",
+    "GrantInfo",
     "GrantsUpdate",
 ]
