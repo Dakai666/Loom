@@ -170,6 +170,8 @@ def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
     lines.append(header)
 
     # Level list with state icons
+    # Only show L{n} prefix when there are multiple levels (actual parallelism tiers)
+    show_level_prefix = len(view.levels) > 1
     for level_idx, level_nodes in enumerate(view.levels):
         level_parts: list[str] = []
         for node_id in level_nodes:
@@ -181,7 +183,8 @@ def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
                 if node.error_snippet:
                     extra = f" ({node.error_snippet[:40]})"
                 level_parts.append(f"{icon} {name}{extra}")
-        lines.append(f"-# L{level_idx}  {'  '.join(level_parts)}")
+        prefix = f"L{level_idx}  " if show_level_prefix else ""
+        lines.append(f"-# {prefix}{'  '.join(level_parts)}")
 
     return "\n".join(lines)
 
@@ -221,7 +224,7 @@ class LoomDiscordBot:
         # thread_id → currently active confirmation message (Allow/Deny prompt)
         self._active_confirmations: dict[int, discord.Message] = {}
         # Turn summary display mode: "off" | "on" | "detail"
-        self._summary_mode: str = "off"
+        self._summary_mode: str = "on"
 
         # Persistent thread → session_id mapping so existing threads resume
         # their context after a bot restart.
