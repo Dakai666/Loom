@@ -1411,7 +1411,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         elif isinstance(raw_tools, str) and raw_tools.strip():
             allowed_tools = [t.strip() for t in raw_tools.split(",") if t.strip()]
 
-        max_turns = min(max(int(call.args.get("max_turns", 10)), 1), 20)
+        max_turns = min(max(int(call.args.get("max_turns", 10)), 1), 50)
 
         config = SubAgentConfig(
             task=task,
@@ -1476,7 +1476,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 },
                 "max_turns": {
                     "type": "integer",
-                    "description": "Maximum turns before the sub-agent is stopped (1–20, default 10)",
+                    "description": "Maximum turns before the sub-agent is stopped (1–50, default 10). This is a cap, not a fixed run count — the sub-agent exits early on end_turn. Use 20–30 for multi-step research or implementation tasks; reserve 40–50 for long data-heavy searches.",
                 },
                 "justification": {
                     "type": "string",

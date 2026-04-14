@@ -35,7 +35,7 @@ class SubAgentConfig:
     task: str                              # The task description / prompt
     model: str                             # Model to use (inherits from parent)
     allowed_tools: list[str] | None = None # None = SAFE tools only; list = whitelist
-    max_turns: int = 10                    # Hard cap to prevent runaway loops
+    max_turns: int = 10                    # Cap to prevent runaway loops (ceiling 50); sub-agent may exit early via end_turn
     agent_id: str = field(default_factory=lambda: f"sub-{str(uuid.uuid4())[:6]}")
 
 
