@@ -220,6 +220,8 @@ class LoomDiscordBot:
         self._running_turns: dict[int, asyncio.Task] = {}
         # thread_id → currently active confirmation message (Allow/Deny prompt)
         self._active_confirmations: dict[int, discord.Message] = {}
+        # Turn summary display mode: "off" | "on" | "detail"
+        self._summary_mode: str = "off"
 
         # Persistent thread → session_id mapping so existing threads resume
         # their context after a bot restart.
@@ -453,7 +455,7 @@ class LoomDiscordBot:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         # Commands that require being in a thread
-        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto"}
+        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto", "/scope", "/summary"}
         if command in _needs_session and not is_thread:
             await message.channel.send(
                 f"`{command}` must be used inside a session thread.  "
@@ -622,10 +624,85 @@ class LoomDiscordBot:
                 "`/pause` — Toggle HITL auto-pause after each tool batch\n"
                 "`/stop` — Immediately cancel the current running turn\n"
                 "`/budget` — Show context token usage\n"
+                "`/scope` — Manage scope grants: `list` · `revoke <id>` · `clear`\n"
+                "`/summary` — Turn summary mode: `off` · `on` · `detail`\n"
                 "`/help` — Show this message\n\n"
                 "Personalities: `adversarial` · `minimalist` · `architect` · `researcher` · `operator`\n\n"
                 "*Send any message in the main channel to start a new session thread.*"
             )
+
+        elif command == "/summary":
+            valid_modes = ("off", "on", "detail")
+            if not arg:
+                await message.channel.send(
+                    f"Turn summary mode: **{self._summary_mode}**\n"
+                    f"Usage: `/summary off` · `/summary on` · `/summary detail`"
+                )
+            elif arg.lower() in valid_modes:
+                self._summary_mode = arg.lower()
+                await message.channel.send(f"Turn summary mode → **{self._summary_mode}**")
+            else:
+                await message.channel.send(
+                    f"Unknown mode `{arg}`. Use: `off` · `on` · `detail`"
+                )
+
+        elif command == "/scope":
+            assert session is not None
+            sub = arg.split(maxsplit=1)
+            subcmd = sub[0].lower() if sub else "list"
+            subarg = sub[1].strip() if len(sub) > 1 else ""
+
+            if subcmd == "list":
+                now = time.time()
+                active = [
+                    (i, g) for i, g in enumerate(session.perm.grants)
+                    if g.valid_until <= 0 or g.valid_until > now
+                ]
+                if not active:
+                    await message.channel.send("*(no active scope grants)*")
+                else:
+                    lines = [f"**Active Scope Grants ({len(active)})**\n```"]
+                    lines.append(f"{'ID':>3}  {'Tool':<16} {'Selector':<20} {'TTL':<10}")
+                    lines.append(f"{'─'*3}  {'─'*16} {'─'*20} {'─'*10}")
+                    for idx, g in active:
+                        if g.valid_until <= 0:
+                            ttl = "∞ (auto)" if g.source == "auto_approve" else "∞ (perm)"
+                        else:
+                            remaining = int(g.valid_until - now)
+                            m, s = divmod(remaining, 60)
+                            ttl = f"{m}m {s:02d}s"
+                        tool = g.action if g.action != "*" else g.resource
+                        lines.append(f"{idx:>3}  {tool:<16} {g.selector:<20} {ttl:<10}")
+                    lines.append("```")
+                    await message.channel.send("\n".join(lines))
+
+            elif subcmd == "revoke":
+                if not subarg.isdigit():
+                    await message.channel.send("Usage: `/scope revoke <id>`")
+                else:
+                    grant_id = int(subarg)
+                    if 0 <= grant_id < len(session.perm.grants):
+                        g = session.perm.grants[grant_id]
+                        tool = g.action if g.action != "*" else g.resource
+                        session.perm.revoke_matching(lambda x, _g=g: x is _g)
+                        await message.channel.send(
+                            f"✅ Revoked grant #{grant_id}: `{tool}` · {g.selector}"
+                        )
+                    else:
+                        await message.channel.send(
+                            f"❌ Invalid grant ID `{grant_id}`. Use `/scope list` to see valid IDs."
+                        )
+
+            elif subcmd == "clear":
+                count = len(session.perm.grants)
+                session.perm.grants.clear()
+                session.perm._usage.clear()
+                await message.channel.send(f"🧹 Cleared {count} scope grant(s).")
+
+            else:
+                await message.channel.send(
+                    "Usage: `/scope list` · `/scope revoke <id>` · `/scope clear`"
+                )
 
         else:
             await message.channel.send(
@@ -663,11 +740,17 @@ class LoomDiscordBot:
 
         tool_buf = ""       # accumulates tool activity lines (edited into status_msg)
         narration_buf = ""  # accumulates LLM text; flushed as send-once before each tool
-        _pending_think = ""  # dim think summary, flushed into tool_buf before next tool
         _envelope_active = False    # True once we receive envelope events (suppresses old ToolBegin/End display)
         _last_envelope_view: ExecutionEnvelopeView | None = None
         _last_envelope_edit: float = 0.0  # monotonic timestamp of last envelope edit (debounce)
         _ENVELOPE_DEBOUNCE_S = 0.5
+        # Turn-level stats for summary line
+        _envelope_count = 0
+        _total_actions = 0
+        _total_failures = 0
+        _total_elapsed_ms = 0.0
+        _had_pause = False
+        _had_rollback = False
 
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
@@ -677,9 +760,9 @@ class LoomDiscordBot:
                         narration_buf += event.text
 
                     elif isinstance(event, ThinkCollapsed):
-                        # Store summary; it will be prepended before the next tool batch
-                        # so reasoning context is visible inline in the activity log.
-                        _pending_think = f"-# 💭 {event.summary}"
+                        # Send as a persistent message so it isn't overwritten
+                        # by subsequent envelope edits.
+                        await message.channel.send(f"-# 💭 {event.summary}")
 
                     elif isinstance(event, EnvelopeStarted):
                         _envelope_active = True
@@ -689,13 +772,7 @@ class LoomDiscordBot:
                         narration_buf = ""
                         if len(narration) >= 10:
                             await message.channel.send(f"⬥ {narration}")
-                        # Flush pending think
-                        if _pending_think:
-                            tool_buf = _pending_think + "\n"
-                            _pending_think = ""
-                        else:
-                            tool_buf = ""
-                        tool_buf += _format_envelope_status(event.envelope)
+                        tool_buf = _format_envelope_status(event.envelope)
                         await _safe_edit(status_msg, tool_buf.lstrip())
                         _last_envelope_edit = time.monotonic()
 
@@ -703,20 +780,28 @@ class LoomDiscordBot:
                         _last_envelope_view = event.envelope
                         now = time.monotonic()
                         if now - _last_envelope_edit >= _ENVELOPE_DEBOUNCE_S:
-                            # Rebuild tool_buf from envelope status
-                            prefix = ""
-                            if _pending_think:
-                                prefix = _pending_think + "\n"
-                                _pending_think = ""
-                            tool_buf = prefix + _format_envelope_status(event.envelope)
+                            tool_buf = _format_envelope_status(event.envelope)
                             await _safe_edit(status_msg, tool_buf.lstrip())
                             _last_envelope_edit = now
 
                     elif isinstance(event, EnvelopeCompleted):
                         _last_envelope_view = event.envelope
                         _envelope_active = False
-                        tool_buf = _format_envelope_status(event.envelope)
-                        await _safe_edit(status_msg, tool_buf.lstrip())
+                        # Accumulate turn-level stats
+                        _envelope_count += 1
+                        v = event.envelope
+                        _total_actions += v.node_count
+                        _total_elapsed_ms += v.elapsed_ms
+                        _total_failures += sum(
+                            1 for n in v.nodes
+                            if n.state in ("denied", "aborted", "timed_out", "reverted")
+                        )
+                        # Freeze completed envelope as a permanent message
+                        frozen = _format_envelope_status(event.envelope)
+                        await _safe_edit(status_msg, frozen.lstrip())
+                        # Create a fresh status_msg for the next envelope
+                        status_msg = await message.channel.send("-# ◌ working…")
+                        tool_buf = ""
                         _last_envelope_edit = time.monotonic()
 
                     elif isinstance(event, ToolBegin):
@@ -727,11 +812,6 @@ class LoomDiscordBot:
                             await message.channel.send(f"⬥ {narration}")
 
                         if not _envelope_active:
-                            # Flush pending think summary before this tool batch.
-                            if _pending_think:
-                                tool_buf += ("\n" if tool_buf else "") + _pending_think
-                                _pending_think = ""
-
                             # Build tool line with kimaki-style symbol:
                             #   ◼︎ for file writes, ┣ for everything else.
                             if event.args:
@@ -761,6 +841,7 @@ class LoomDiscordBot:
                             await _safe_edit(status_msg, tool_buf.lstrip())
 
                     elif isinstance(event, TurnPaused):
+                        _had_pause = True
                         pause_body = (
                             (tool_buf.lstrip() + "\n\n" if tool_buf else "")
                             + f"⏸ **Paused** after {event.tool_count_so_far} tool call(s).\n"
@@ -819,6 +900,7 @@ class LoomDiscordBot:
                         await message.channel.send(drop_msg)
 
                     elif isinstance(event, ActionRolledBack):
+                        _had_rollback = True
                         icon = "✓" if event.rollback_success else "✗"
                         tool_buf += f"\n↩ {icon} {event.tool_name} rolled back"
                         if event.message:
@@ -829,20 +911,7 @@ class LoomDiscordBot:
                         pass  # too granular for Discord display
 
                     elif isinstance(event, TurnDone):
-                        # Compact envelope summary after the turn
-                        if _last_envelope_view:
-                            v = _last_envelope_view
-                            fail_count = sum(
-                                1 for n in v.nodes
-                                if n.state in ("denied", "aborted", "timed_out", "reverted")
-                            )
-                            summary = (
-                                f"-# ✓ {v.node_count} actions · "
-                                f"{v.parallel_groups} parallel · "
-                                f"{fail_count} failed · "
-                                f"{v.elapsed_ms / 1000:.1f}s"
-                            )
-                            await message.channel.send(summary)
+                        pass  # summary handled after the loop
 
             except asyncio.CancelledError:
                 # Cleanup any pending confirmation buttons in this thread immediately
@@ -890,13 +959,50 @@ class LoomDiscordBot:
                 chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
                 await message.channel.send(chunk)
 
+        # ── Turn summary (if enabled) ─────────────────────────────────────
+        if self._summary_mode != "off" and _envelope_count > 0:
+            # Grants info
+            active_grants = [
+                g for g in session.perm.grants
+                if g.valid_until <= 0 or g.valid_until > time.time()
+            ]
+            grants_str = f"grants {len(active_grants)} active" if active_grants else "grants 0"
+
+            if self._summary_mode == "detail":
+                # Embed-based detailed summary
+                embed = discord.Embed(
+                    title="Turn Summary",
+                    color=0x2ecc71 if _total_failures == 0 else 0xe74c3c,
+                )
+                embed.add_field(name="Envelopes", value=str(_envelope_count), inline=True)
+                embed.add_field(name="Actions", value=str(_total_actions), inline=True)
+                embed.add_field(name="Failures", value=str(_total_failures), inline=True)
+                embed.add_field(name="Elapsed", value=f"{_total_elapsed_ms / 1000:.1f}s", inline=True)
+                if _had_pause:
+                    embed.add_field(name="Paused", value="Yes", inline=True)
+                if _had_rollback:
+                    embed.add_field(name="Rollbacks", value="Yes", inline=True)
+                embed.add_field(name="Grants", value=grants_str, inline=True)
+                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.0f}%  ·  {session.model}")
+                await message.channel.send(embed=embed)
+            else:
+                # Compact one-liner
+                parts = [f"✓ {_envelope_count} envelopes", f"{_total_actions} actions"]
+                if _total_failures:
+                    parts.append(f"{_total_failures} failed")
+                parts.append(f"{_total_elapsed_ms / 1000:.1f}s")
+                parts.append(grants_str)
+                await message.channel.send(f"-# {' · '.join(parts)}")
+
         # ── Footer: persona / context / model ────────────────────────────
         persona = session.current_personality or "default"
         pct = session.budget.usage_fraction * 100
         model = session.model
-        await message.channel.send(
-            f"-# {persona}  ·  context {pct:.0f}%  ·  {model}"
-        )
+        # Skip footer if detail summary already includes it
+        if not (self._summary_mode == "detail" and _envelope_count > 0):
+            await message.channel.send(
+                f"-# {persona}  ·  context {pct:.0f}%  ·  {model}"
+            )
 
         # ── Mark done ─────────────────────────────────────────────────────
         try:
