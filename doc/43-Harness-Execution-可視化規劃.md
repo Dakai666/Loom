@@ -234,33 +234,25 @@ SCOPE / AUTO 決策後，bot 自動發送 follow-up 訊息說明授權範圍與 
    for the next 30 minutes.
 ```
 
-### 待規劃的 UI 工作
+### 已完成的 UI 工作
 
-#### 1. Scope Grant 可視化面板
+#### 1. Scope Grant 可視化面板 ✅
 
-目前 `/scope list` 只在 CLI 輸出 Rich table，TUI 與 Discord 尚未有持續可見的 grant 狀態面板。
+- **TUI**：`BudgetPanel` 整合 grants 指示器，顯示 active lease 數與最近到期時間，依 TTL 變色（green → yellow → red → dim）(#125)
+- **TUI**：Execution Dashboard selected node detail 顯示 scope grant 狀態（auth_decision / TTL / selector）(#125)
+- **Discord**：`/scope list` / `/scope revoke <id>` / `/scope clear` 指令已實作 (#127)
 
-建議：
-- **TUI**：在 `WorkspacePanel` 或 Status Bar 增加 `Grants` 指示，顯示當前 active lease 數與最近到期時間
-- **TUI**：Lease grant 可在 Execution Dashboard 的 selected node detail 顯示剩餘 TTL
-- **Discord**：考慮 `/scope` 等效 slash command，讓 Discord 使用者也能查詢與撤銷 grants
+#### 2. Grant 到期可視化 ✅ (TUI) / 不做 (Discord)
 
-#### 2. Grant 到期可視化
+- **TUI**：BudgetPanel grants 指示器依 TTL 變色（> 10m green / 5–10m yellow / < 5m red / expired dim），30 秒更新一次 (#125)
+- **TUI**：lease 到期瞬間以 `app.notify()` 發出 toast 通知，不中斷操作 (#125)
+- **Discord**：30 分鐘 lease 已足夠長，到期前提醒噪音大於價值，有意不做
 
-當 scope lease 即將到期（例如剩餘 < 5 分鐘），Control Surface 應主動提示。
+#### 3. Confirm Widget 與 Execution Graph 的整合 ✅
 
-設計選項：
-- TUI status bar 以顏色警示（green → yellow → expired dim）
-- Discord 可在 lease 到期前發一則 ephemeral 提醒訊息
-
-#### 3. Confirm Widget 與 Execution Graph 的整合
-
-目前 `InlineConfirmWidget` 獨立嵌入 MessageList，與 Execution Dashboard 的 node state 視圖沒有連結。
-
-長遠設計方向：
-- 確認等待中的 node 在 Execution Graph 中標記為 `⏳ awaiting_confirm`
-- 使用者在 graph view 中點選 blocked node，直接展開確認選項
-- 確認後 node state 在 graph 中即時更新
+- 等待確認的 node 在 Execution Dashboard 標記為 `⏳ awaiting confirm`（橙色）(#125)
+- `LifecycleGateMiddleware` 注入 `AWAITING_CONFIRM` 狀態，session 層在 dispatch 等待期間持續 drain lifecycle events 並 yield `EnvelopeUpdated`，使 TUI 即時反映確認狀態 (#125)
+- 確認後 node state 在 dashboard 中即時更新
 
 ---
 
@@ -268,54 +260,56 @@ SCOPE / AUTO 決策後，bot 自動發送 follow-up 訊息說明授權範圍與 
 
 ### 已具備能力
 
+**基礎設施：**
 - `TaskGraph` 與 `ExecutionPlan` 已能表示 level-based DAG
 - `TaskScheduler` 已能執行同層並行
 - `ActionState` 已能表示完整 control-first lifecycle
-- TUI 已有 `WorkspacePanel` / `SwarmDashboard`
-- Discord 已有單一 `status_msg` 的 edit-based 顯示策略
-- **（v0.2.9.5 新增）** `ConfirmDecision` enum（ONCE / SCOPE / AUTO / DENY）取代 bool 確認流程；`_normalize_decision()` 維持向下相容
-- **（v0.2.9.5 新增）** TUI `InlineConfirmWidget` 支援 `y/s/a/N` 四選項 inline 確認，含 hint 文字與各 ConfirmDecision 對應按鈕
-- **（v0.2.9.5 新增）** Discord `_ConfirmView` 支援四按鈕（Allow / Lease / Auto / Deny）；SCOPE / AUTO 決定後自動發送 follow-up TTL / grant 說明訊息
-- **（v0.2.9.5 新增）** `ScopeGrant.valid_until` 欄位與自動過期過濾；`PermissionContext.purge_expired()` 清理
-- **（v0.2.9.5 新增）** `/scope list / revoke / clear` CLI 指令，可查詢與撤銷當前 session 的 scope grants
-- **（v0.2.9.5 新增）** Self-termination guard：`loom/core/security/self_termination_guard.py` 封鎖以工具呼叫方式終止 Loom 自身行程的嘗試
+- `ExecutionEnvelope` / `ExecutionEnvelopeView` 已成為 stream event 與 UI 的第一級實體
+
+**授權系統（v0.2.9.5+）：**
+- `ConfirmDecision` enum（ONCE / SCOPE / AUTO / DENY）取代 bool 確認流程
+- `ScopeGrant.valid_until` 欄位與自動過期過濾；`PermissionContext.purge_expired()` 清理
+- `/scope list / revoke / clear` CLI + Discord 指令
+- Self-termination guard
+
+**TUI（#119, #125）：**
+- `ExecutionDashboard` 取代舊 `SwarmDashboard`，envelope-aware execution surface
+- Node 選取 + detail pane（trust / capabilities / state history / auth info）
+- `BudgetPanel` 整合 grants 指示器（TTL 變色 + 到期 toast）
+- Confirm graph：`⏳ awaiting_confirm` 即時顯示
+- 歷史 envelope 左右瀏覽
+- StatusBar 已移除，內容整合至 BudgetPanel
+
+**Discord（#119, #127）：**
+- `_ConfirmView` 四按鈕 + SCOPE/AUTO follow-up 訊息
+- Envelope snapshot 顯示（level list + state icons）
+- Completed envelope 凍結為永久訊息（連續性軌跡保留）
+- Think summary 持久化為獨立訊息
+- `/scope` + `/summary` slash commands
+- Turn summary 精簡一行（預設 on）+ detail Embed 模式
 
 ### 現況限制
 
-#### 1. 前端收到的是平面事件，不是 graph event
+#### 1. ~~前端收到的是平面事件，不是 graph event~~ ✅ 已解決
 
-目前 UI 主要消費：
-
-- `ToolBegin`
-- `ToolEnd`
-- `ActionStateChange`
-
-缺少：
-
-- `EnvelopeStarted`
-- `GraphPlanned`
-- `NodeLinked`
-- `EnvelopeCompleted`
+`EnvelopeStarted` / `EnvelopeUpdated` / `EnvelopeCompleted` 已實作為 stream events（#106）。TUI 和 Discord 均以 envelope events 為主要消費來源，`ToolBegin / ToolEnd` 在 envelope 模式下降級為 fallback。
 
 #### 2. `_dispatch_parallel()` 只把工具當成同層獨立節點
 
-目前 parallel dispatch 雖使用 `TaskGraph`，但所有工具都被視為同一層無依賴節點。
+目前 parallel dispatch 將所有 tool calls 視為同一層無依賴節點（`level=0`, `parallel_groups=1`）。
 
-因此現在 UI 最誠實的說法是：
+因此現在 UI 最誠實的說法是「parallel dispatch graph」，而不是「full agent planning graph」。
 
-- 「parallel dispatch graph」
+未來方向：#128 (TaskGraph Agent-Driven Construction) 規劃讓 agent 主動建立帶依賴的 TaskGraph，使 envelope 支持多層執行（L0→L1→L2）。
 
-而不是：
+#### 3. ~~`ExecutionEnvelope` 尚未成為前端第一公民~~ ✅ 已解決
 
-- 「full agent planning graph」
+`ExecutionEnvelopeView` 與 `ExecutionNodeView` 已定義於 `loom/core/events.py`，envelope 已成為：
 
-#### 3. `ExecutionEnvelope` 尚未成為前端第一公民
-
-概念已存在，但尚未完整成為：
-
-- stream event 主體
-- UI 顯示單位
-- DB / replay / REST 查詢的一級實體
+- stream event 主體（`EnvelopeStarted` / `Updated` / `Completed`）
+- TUI `ExecutionDashboard` 的顯示單位
+- Discord `status_msg` 的顯示單位
+- Session 層保留最近 10 個 envelope 供歷史瀏覽
 
 ---
 
@@ -470,77 +464,86 @@ Rollback: 0
 
 ### Message Model
 
-每個 turn 維持兩種訊息：
+每個 turn 的訊息策略：
 
 - `status_msg`
-  - 只做 edit
-  - 用於 envelope / execution 狀態
-- `response_msg`
-  - send-once
+  - 動態 edit，只追蹤**當前執行中**的 envelope
+  - Envelope 完成時凍結為永久訊息，建立新 `status_msg` 給下一個 envelope
+  - 保留完整執行軌跡於 thread 中
+- Think summary（`ThinkCollapsed`）
+  - send-once，`-# 💭` 小字
+  - 不再被 tool_buf 編輯覆蓋
+- narration / response
+  - send-once，`⬥` prefix
   - 保留 LLM 文本與 Markdown 顯示品質
 
 ## Status Message 結構
 
-### 執行中
+### 執行中（單層，典型情況）
 
 ```text
--# Envelope e42 · 3 actions · 1 parallel group
+-# Envelope e9 · 2 actions
+-# ⟳ recall  · run_bash
+```
+
+### 執行中（多層，未來 #128 完成後）
+
+```text
+-# Envelope e42 · 3 actions · 2 parallel groups
 -# L0  ✓ recall
 -# L1  ⟳ read_file   ✓ list_dir
--# L2  · write_file
+```
+
+### 完成時（凍結為永久訊息）
+
+```text
+-# Envelope e9 · 2 actions · completed 1.8s
+-# ✓ recall  ✓ run_bash
 ```
 
 ### 失敗時
 
 ```text
--# Envelope e42 · failed
--# L0  ✓ recall
--# L1  ✗ read_file (permission denied)
--# rollback 0 · blocked 1
+-# Envelope e42 · 3 actions · failed
+-# ✓ recall  ✗ read_file (permission denied)
 ```
 
-### 完成時
+## Discord Turn Summary ✅
 
-```text
--# Envelope e42 · completed
--# 4 actions · 1 failed · 1 reverted · 2.4s
-```
+由 `/summary` 指令控制，三段式模式：
 
-## Discord Embed Summary
-
-建議欄位：
-
-- `Envelope`
-- `Actions`
-- `Parallelism`
-- `Failures`
-- `Rollbacks`
-- `Longest Action`
-- `Paused / Redirected`
+- `off` — 不顯示
+- `on`（預設）— 精簡一行：`-# ✓ N envelopes · M actions · X.Xs · grants N active`
+- `detail` — Discord Embed，欄位包含 Envelopes / Actions / Failures / Elapsed / Paused / Rollbacks / Grants，footer 整合 persona / context / model
 
 ---
 
 ## 資料模型設計
 
-### 新增 UI 專用 ViewModel
+### UI 專用 ViewModel ✅
 
-建議在 `loom/core/events.py` 或相鄰模組定義可序列化 view model。
+已定義於 `loom/core/events.py`：
 
 ```python
 @dataclass
 class ExecutionNodeView:
     node_id: str
     call_id: str
-    action_id: str | None
+    action_id: str
     tool_name: str
     level: int
-    state: str
-    trust_level: str
-    capabilities: list[str]
+    state: str                    # ActionState.value
+    trust_level: str              # SAFE / GUARDED / CRITICAL
+    capabilities: list[str]       # ToolCapability flag names
     args_preview: str = ""
     duration_ms: float = 0.0
     error_snippet: str = ""
-    depends_on: list[str] = field(default_factory=list)
+    full_args: dict = field(default_factory=dict)       # Phase B (#108)
+    state_history: list[dict] = field(default_factory=list)  # Phase B (#108)
+    auth_decision: str = ""       # once / scope / auto / deny
+    auth_expires: float = 0.0     # lease TTL timestamp
+    auth_selector: str = ""       # scope selector
+    output_preview: str = ""
 
 
 @dataclass
@@ -548,27 +551,24 @@ class ExecutionEnvelopeView:
     envelope_id: str
     session_id: str
     turn_index: int
-    status: str
+    status: str                   # running / completed / failed
     node_count: int
     parallel_groups: int
-    levels: list[list[str]]
-    nodes: list[ExecutionNodeView]
+    elapsed_ms: float = 0.0
+    levels: list[list[str]] = field(default_factory=list)
+    nodes: list[ExecutionNodeView] = field(default_factory=list)
 ```
 
-### 新增 stream events
-
-建議新增：
+### Stream Events ✅
 
 ```python
 @dataclass
 class EnvelopeStarted:
     envelope: ExecutionEnvelopeView
 
-
 @dataclass
 class EnvelopeUpdated:
     envelope: ExecutionEnvelopeView
-
 
 @dataclass
 class EnvelopeCompleted:
@@ -578,110 +578,86 @@ class EnvelopeCompleted:
 ### 設計原則
 
 - `ToolBegin / ToolEnd` 保留向下相容
-- 新 UI 優先使用 envelope events
-- 舊 UI 可暫時維持不變
+- TUI / Discord 優先使用 envelope events，`ToolBegin / ToolEnd` 在 envelope 模式下降級為 fallback
+- `_build_envelope_view()` 在 Session 層做 projection，不污染 middleware
 
 ---
 
 ## 後端整合設計
 
-### Phase 1：讓 `ExecutionEnvelope` 成為真實執行單位
+### Phase 1：讓 `ExecutionEnvelope` 成為真實執行單位 ✅ (#106, #119)
 
-必做事項：
-
-- 在每個 `tool_use` 批次建立 `ExecutionEnvelope`
+- 每個 `tool_use` 批次建立 `ExecutionEnvelope`
 - 每個 action node 與 `call_id`、`action_id` 對齊
-- batch 完成時標記 envelope complete
-- 將 envelope 與 `ActionRecord` 綁定
+- batch 完成時標記 `envelope.complete()`
+- envelope 與 `ActionRecord` 綁定（`LifecycleContext` 注入 `call.metadata`）
+- UI 以 envelope 為單位呈現
 
-### 成果
+### Phase 2：建立 graph-aware projection ✅ (#106, #108)
 
-- DB 中 `action_records.envelope_id` 不再為空洞概念
-- UI 能用 envelope 為單位呈現
+`LoomSession._build_envelope_view()` 在 Session 層建立 projection，整合：
 
-### Phase 2：建立 graph-aware projection
+- tool uses → `ExecutionNodeView`
+- action lifecycle updates → `state` / `state_history` / `duration_ms`
+- scope grant info → `auth_decision` / `auth_expires` / `auth_selector`
 
-在 Session 層建立 projection，把：
+Projection 層只做視圖整形，不污染 middleware 核心邏輯。
 
-- tool uses
-- action lifecycle updates
-- task levels
+### Phase 3：歷史與 replay（部分完成）
 
-整合成可直接丟給 TUI / Discord 的 `ExecutionEnvelopeView`
-
-### 注意
-
-Projection 層只做視圖整形，不應污染 middleware 核心邏輯。
-
-### Phase 3：歷史與 replay
-
-完成後可延伸支援：
-
-- session replay 時重建 envelope timeline
-- API 查詢最近 N 個 envelope
-- 後續 Web UI 或 observability API
+- ✅ Session 層保留最近 10 個 envelope view 供歷史瀏覽（`_recent_envelopes`）
+- ✅ TUI 左右鍵瀏覽歷史 envelope (#125)
+- 待做：session replay 時重建 envelope timeline
+- 待做：API 查詢最近 N 個 envelope
+- 待做：Web UI 或 observability API
 
 ---
 
 ## TUI 實作分期
 
-### TUI Phase A：最小可用版本
+### TUI Phase A：最小可用版本 ✅ (#119)
 
-目標：
-
-- 不改整體版面結構
-- 只替換 `SwarmDashboard` 內容模型
-
-功能：
-
-- 顯示當前 envelope header
-- 顯示 levels 與 node state
+- `SwarmDashboard` → `ExecutionDashboard`
+- 顯示當前 envelope header（id / node count / parallel groups / elapsed）
+- 顯示 levels 與 node state（icon + colour）
 - 顯示最近完成 envelope 摘要
 
-### TUI Phase B：節點詳情 + Grant 可視化
+### TUI Phase B：節點詳情 + Grant 可視化 ✅ (#125)
 
-功能：
+- 上下選取 node，展開 detail pane（trust / capabilities / state history / auth info）
+- Node 對應的 scope grant 狀態（ONCE / SCOPE TTL 剩餘 / AUTO）顯示於 detail
+- `BudgetPanel` 整合 active grants 指示器（格式：`grants: 2 active · next expiry 18m`），依 TTL 變色
+- 等待確認的 node 標記為 `⏳ awaiting confirm`（橙色），confirm graph 由 lifecycle events 驅動即時更新
+- Lease 到期 toast 通知（`app.notify()`，5 秒自動消失）
+- StatusBar 已移除，原有內容整合至 BudgetPanel
 
-- 選取 node
-- 展開 detail pane / modal
-- 顯示完整 lifecycle state history
-- **（新增）** 顯示 node 對應的 scope grant 狀態（ONCE / SCOPE TTL 剩餘 / AUTO）
-- **（新增）** Status Bar 或 WorkspacePanel 加入 active grants 指示器
-  - 格式範例：`grants: 2 active · next expiry 18m`
-- **（新增）** 等待確認的 node 在 Execution Graph 標記為 `⏳`，點選直接展開 InlineConfirmWidget
+### TUI Phase C：歷史檢視 ✅ (#125) / replay 待做
 
-### TUI Phase C：歷史檢視與 replay
-
-功能：
-
-- 瀏覽最近 N 個 envelope
-- 可按 turn / envelope 切換
+- 左右鍵瀏覽最近 N 個 envelope（session 層保留最近 10 個）
+- 按 turn / envelope 切換
 - 未來可銜接 time-travel / session replay
 
 ---
 
 ## Discord 實作分期
 
-### Discord Phase A：batch snapshot
+### Discord Phase A：batch snapshot ✅ (#119)
 
-功能：
-
-- `status_msg` 改為 envelope snapshot
-- 同步顯示 level 與狀態
-- turn 完成後輸出 compact summary
-
-**（v0.2.9.5 已完成）確認 UX 升級：**
+- `status_msg` 改為 envelope snapshot（level list + state icons）
+- 同步顯示 level 與狀態，debounce 0.5s
 - `_ConfirmView` 支援四按鈕（Allow / Lease / Auto / Deny）
 - SCOPE / AUTO 決策後發送 follow-up TTL / grant 說明訊息
 
-### Discord Phase B：summary embed + grant 管理
+### Discord Phase B：envelope trail + grant 管理 + summary ✅ (#127)
 
-功能：
-
-- 補 `Embed` 顯示 envelope 指標
-- 顯示最慢節點、回滾、暫停、redirect
-- **（新增）** Embed 加入 `Active Grants` 欄位，顯示本 session 的 scope lease 數與最近到期時間
-- **（新增）** 考慮 `/scope` Discord slash command（parity with CLI `/scope list / revoke / clear`）
+- Completed envelope 凍結為永久訊息，不再被後續 envelope 覆蓋，thread 保留完整執行軌跡
+- Think summary（`ThinkCollapsed`）發送為獨立持久訊息，不再被 tool_buf 編輯覆蓋
+- `/scope list` / `/scope revoke <id>` / `/scope clear` 指令
+- `/summary` 指令：三段式切換（`off` / `on` 精簡一行 / `detail` Embed），預設 `on`
+- Turn summary 精簡一行格式：`✓ N envelopes · M actions · X.Xs · grants N active`
+- Detail 模式使用 Discord Embed 顯示完整欄位（envelopes / actions / failures / elapsed / grants）
+- 單層 envelope 不再顯示冗餘 `L0` 前綴，僅多層時顯示 `L0` / `L1`
+- Discord 到期前提醒有意不做（30 分鐘 lease 噪音大於價值）
 
 ### Discord Phase C：thread history query
 
@@ -734,12 +710,12 @@ Projection 層只做視圖整形，不應污染 middleware 核心邏輯。
 
 ### 功能面
 
-- TUI 可看到以 envelope 為單位的 execution 視圖
-- Discord 可看到 batch snapshot，而非單純 tool timeline
-- 平行節點可被辨識為同層
-- 失敗、回滾、denied、paused 狀態可明確辨識
-- **（v0.2.9.5 已達標）** 確認提示支援 y/s/a/N 四選項，TUI inline 呈現，Discord 四按鈕呈現
-- **（待達標）** active scope grant 可在 TUI / Discord 持續可見，不只有 `/scope list` 查詢
+- ✅ TUI 可看到以 envelope 為單位的 execution 視圖
+- ✅ Discord 可看到 batch snapshot，而非單純 tool timeline
+- ✅ 平行節點可被辨識為同層
+- ✅ 失敗、回滾、denied、paused 狀態可明確辨識
+- ✅ 確認提示支援 y/s/a/N 四選項，TUI inline 呈現，Discord 四按鈕呈現
+- ✅ active scope grant 可在 TUI（BudgetPanel）/ Discord（`/scope list`）持續可見
 
 ### 認知面
 
@@ -791,26 +767,30 @@ Projection 層只做視圖整形，不應污染 middleware 核心邏輯。
 
 ## 後續延伸
 
-本規劃完成後，可進一步支援：
+本規劃的 TUI / Discord 可視化已大致完成。下一階段方向：
 
+- **TaskGraph Agent-Driven Construction (#128)**：讓 agent 主動建立帶依賴的 TaskGraph，解鎖多層 envelope 執行與長任務能力
+- **Task Graph Governance (#44)**：node metadata / auditing / rollback，依賴 #128
 - REST / MCP 暴露 execution history
 - Web dashboard
 - autonomy daemon 的 execution stream
 - sub-agent / multi-agent swarm envelope 視圖
 - time-travel 與 envelope replay
-- **Scope Grant 儀表板**：將 active grants 以結構化方式呈現（到期時間、resource/action/selector、來源決策），讓使用者隨時掌握當前授權狀態
+- ~~Scope Grant 儀表板~~ → ✅ 已由 BudgetPanel + `/scope` 指令實現
 - **Grant Audit Trail**：每次 SCOPE / AUTO grant 的建立、使用與到期紀錄寫入 memory.db，支援事後 audit
 
 ---
 
-## 建議實作順序
+## 實作進度
 
-1. 補齊 `ExecutionEnvelope` 的真實建立與關聯
-2. 定義 `ExecutionEnvelopeView` 與新 stream events
-3. TUI `SwarmDashboard -> ExecutionDashboard`
-4. Discord `status_msg` 升級為 envelope snapshot
-5. 補 summary embed
-6. 補 replay / history query / API
+1. ✅ 補齊 `ExecutionEnvelope` 的真實建立與關聯 (#106)
+2. ✅ 定義 `ExecutionEnvelopeView` 與新 stream events (#106)
+3. ✅ TUI `SwarmDashboard` → `ExecutionDashboard` (#119)
+4. ✅ Discord `status_msg` 升級為 envelope snapshot (#119)
+5. ✅ TUI Phase B：節點詳情 + Grant 可視化 + Confirm Graph (#125)
+6. ✅ Discord Phase B：envelope trail + `/scope` + `/summary` (#127)
+7. 🔲 多層 envelope 執行（依賴 #128 TaskGraph Agent-Driven Construction）
+8. 🔲 replay / history query / API
 
 ---
 
