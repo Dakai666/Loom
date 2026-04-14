@@ -178,50 +178,86 @@ class TraceMiddleware(Middleware):
 
 class LegitimacyGuardMiddleware(Middleware):
     """
-    Probe-First Heuristics (Issue #47 Phase 3).
-    
-    Blocks high-risk, mutating actions (like write_file or run_bash) if the
-    agent has not performed any context-gathering operations (read_file, list_dir, etc.)
-    in the current session. Enforces a 'look before you leap' pattern to
-    prevent hallucinatory system modifications.
+    Read-before-Write guard (Issue #47 Phase 3, refined Issue #118).
+
+    Scope: ``write_file`` only.  The rule mirrors Claude Code's Read-before-Edit
+    contract — the agent must call ``read_file`` (or a directory probe) on the
+    target path before writing to it.  This prevents hallucinated overwrites.
+
+    ``run_bash`` and MCP tools are intentionally excluded: exec authorization
+    belongs to ``BlastRadiusMiddleware`` (EXEC capability + exec_auto grants),
+    and MCP generative tools (text_to_image, text_to_audio, …) have no local
+    file path to pre-read.
+
+    Per-path tracking (Issue #118):
+        ``_read_paths`` records every ``read_file`` path argument this turn.
+        ``write_file(path=X)`` passes if X was read this turn, OR if any probe
+        tool ran (``has_probed`` — covers list_dir, web_search, etc. for new-file
+        creation where there is nothing to pre-read).
+
+    Session-trust (Issue #118):
+        Once a strict-guard tool executes successfully, it is added to
+        ``_session_trusted``.  Future turns skip the probe requirement for that
+        tool — the human already reviewed and approved it in this session.
+
+    ``reset_probe()`` resets per-turn state (``has_probed``, ``_read_paths``)
+    but intentionally leaves ``_session_trusted`` intact.
     """
 
     def __init__(self) -> None:
         self.has_probed: bool = False
+        self._read_paths: set[str] = set()
         self.probe_tools = frozenset({
             "list_dir", "read_file", "search_files", "grep_search",
             "fetch_url_tool", "web_search", "recall_memory", "query_relations"
         })
-        self.strict_guard_tools = {
-            "write_file", "run_bash", 
+        # Only file-writing tools belong here.  exec tools (run_bash) and MCP
+        # generative tools are handled by BlastRadiusMiddleware.
+        self.strict_guard_tools: set[str] = {
+            "write_file",
         }
+        # Tools that have successfully executed once this session; probe
+        # requirement is waived for these on subsequent turns (Issue #118).
+        self._session_trusted: set[str] = set()
 
     def reset_probe(self) -> None:
+        """Reset per-turn probe state. Does NOT clear session-level trust."""
         self.has_probed = False
+        self._read_paths.clear()
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         if call.tool_name in self.probe_tools:
             self.has_probed = True
+            if call.tool_name == "read_file":
+                path = call.args.get("path", "")
+                if path:
+                    self._read_paths.add(path)
 
         # TODO(#xx): Phase 4 - Goal Drift / Re-justification budget.
         # Enforce re-justification for guarded actions after N steps without human interaction.
 
         is_strict = call.tool_name in self.strict_guard_tools
 
+        # Session-trusted tools skip per-turn probe requirement (Issue #118).
+        if is_strict and call.tool_name in self._session_trusted:
+            return await next(call)
+
         if is_strict and not self.has_probed:
+            target = call.args.get("path", "")
             error_msg = (
-                f"LEGITIMACY GUARD: Blocked `{call.tool_name}`. "
-                "You must gather context first (e.g. read_file, list_dir, search) "
-                "before performing destructive actions or running commands. "
-                "Hallucinating paths or executing blindly is forbidden."
+                f"LEGITIMACY GUARD: Blocked `write_file`"
+                + (f" → '{target}'" if target else "")
+                + ". You must read the target file (or list its directory) before "
+                "writing. Call read_file or list_dir first to establish context — "
+                "writing to a path you haven't read risks overwriting unknown content."
             )
-            
+
             from .lifecycle import LIFECYCLE_CTX_KEY
             ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
             if ctx is not None:
                 ctx.authorization_result = False
                 ctx.authorization_reason = "probe-first heuristic failed"
-            
+
             return ToolResult(
                 call_id=call.id,
                 tool_name=call.tool_name,
@@ -230,7 +266,14 @@ class LegitimacyGuardMiddleware(Middleware):
                 failure_type="permission_denied"
             )
 
-        return await next(call)
+        result = await next(call)
+
+        # On successful execution, promote to session-trusted so future turns
+        # don't require a new probe for the same tool (Issue #118).
+        if is_strict and result.success:
+            self._session_trusted.add(call.tool_name)
+
+        return result
 
 
 class BlastRadiusMiddleware(Middleware):

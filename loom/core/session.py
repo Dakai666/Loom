@@ -679,15 +679,12 @@ class LoomSession:
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
 
-        # Wire up LegitimacyGuardMiddleware before the rest of the pipeline
+        # Wire up LegitimacyGuardMiddleware before the rest of the pipeline.
+        # Scope: write_file only (read-before-write contract, Issue #118).
+        # run_bash and MCP tools are NOT added here — exec authorization belongs
+        # to BlastRadiusMiddleware (EXEC capability / scope grants).
         from loom.core.harness.middleware import LegitimacyGuardMiddleware
         self._legitimacy_guard = LegitimacyGuardMiddleware()
-        
-        # Dynamically append MCP mutating tools to strict guard
-        from loom.core.harness.registry import ToolCapability
-        for tdef in self.registry._tools.values():
-            if "mcp" in tdef.tags and (tdef.capabilities & ToolCapability.MUTATES):
-                self._legitimacy_guard.strict_guard_tools.add(tdef.name)
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
