@@ -2,9 +2,9 @@
 name: github_cli
 description: "GitHub CLI 工具技能。當使用者要求「建立 issue」、「建立 PR」、「用 gh」、「gh api」、「查 GitHub」、「發 issue 到 GitHub」時使用。"
 tags: [github, cli, issues, pr, api, devtools, github-actions]
-confidence: 0.85
+confidence: 0.90
 first_applied: 2026-04-07
-version: 1
+version: 2
 ---
 
 # GitHub CLI 工具技能
@@ -16,7 +16,7 @@ version: 1
 ## 核心原則
 
 1. **Scope 確認再執行** — GitHub 操作影響共享狀態，複雜操作（建立 PR、審查、多行 body）先說計畫再執行
-2. **用 `--body-file` 代替 heredoc** — 複雜內容（多行、特殊字元、JSON）一律用 `--body-file`，避免 shell 展開造成格式破壞
+2. **所有 body 一律用 `--body-file`** — ❗ 禁止使用 `--body "文字"` 選項。Loom 環境中 `bash -lc gh ...` 在命令成功時仍可能回 exit code 127，導致 retry 迴圈重複發送內容。永遠先 `write_file` 寫入 tmp/ 再用 `--body-file` 讀取，成功後立即停止，不要依賴 exit code 判斷是否成功
 3. **先讀再寫** — 建立 issue/PR 前先查現有狀態，避免重複
 4. **Scope 內最小改動** — 只操作指定 repo/issue/PR，不擴大範圍
 5. **失敗要透傳** — `gh` 命令失敗時，error message 完整保留給使用者，不截斷
@@ -40,19 +40,45 @@ version: 1
 
 ### 建立 Issue
 
-```bash
-# 基本語法
-gh issue create --repo OWNER/REPO --title "標題" --body "內容"
+❗ **永遠用 `--body-file`，禁止 `--body`**：
 
-# 複雜內容 → 用 --body-file（絕對首選）
-echo "## 描述\n\n詳細內容..." > /tmp/issue_body.md
+```bash
+# Step 1: 將 body 寫入檔案
+# Step 2: 用 --body-file 發送（不要直接 --body）
 gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md
 
 # 加入 label
-gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/body.md --label bug,help-wanted
+gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md --label bug,help-wanted
 
 # 加入 assignee
-gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/body.md --assignee @me
+gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md --assignee @me
+```
+
+### PR Comment / 回覆
+
+❗ **同樣使用 `--body-file`**：
+
+```bash
+# PR 留言
+gh pr comment 123 --repo OWNER/REPO --body-file /tmp/pr_comment.md
+
+# PR 審查（comment / approve / request-changes）
+gh pr review 123 --repo OWNER/REPO --comment --body-file /tmp/review.md
+gh pr review 123 --repo OWNER/REPO --approve
+gh pr review 123 --repo OWNER/REPO --request-changes --body-file /tmp/review.md
+```
+
+### 建立 PR
+
+```bash
+# 永遠用 --body-file
+gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --base main
+
+# 指定 reviewer
+gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --reviewer username1,username2
+
+# Draft PR
+gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --draft
 ```
 
 ### 查 Issue
@@ -66,36 +92,6 @@ gh issue view 123 --repo OWNER/REPO
 
 # 搜尋
 gh issue list --repo OWNER/REPO --search "keyword in:title" --state open
-```
-
-### 建立 PR
-
-```bash
-# 基本語法
-gh pr create --repo OWNER/REPO --title "標題" --body "描述"
-
-# 複雜內容 → --body-file
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --base main
-
-# 指定 reviewer
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --reviewer username1,username2
-
-# Draft PR
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --draft
-```
-
-### Review PR
-
-```bash
-# 審查 PR
-gh pr review 123 --repo OWNER/REPO --comment --body "審查意見"
-
-# Approve / Request changes / Comment
-gh pr review 123 --repo OWNER/REPO --approve
-gh pr review 123 --repo OWNER/REPO --request-changes --body "需要修改的原因"
-
-# 列出已審查的 PR
-gh pr list --repo OWNER/REPO --state open --review=required
 ```
 
 ### gh api（直接呼叫 GitHub API）
@@ -129,13 +125,12 @@ gh repo fork OWNER/REPO --clone
 
 ## 輸出格式約束
 
-### Issue 建立成功時
+### Issue / PR Comment 建立成功時
 
 回報格式：
 ```
-✅ Issue 已建立
+✅ 已發送
 URL: https://github.com/OWNER/REPO/issues/編號
-標題: <title>
 ```
 
 ### PR 建立成功時
@@ -187,3 +182,19 @@ URL: https://github.com/OWNER/REPO/pull/編號
 2. **不繞過付費牆** — GitHub API 有 rate limit，超過時誠實告知使用者
 3. **不修改他人的 repo** — 除非 `--repo` 明確指定或已是 fork
 4. **PR body 不做 markdown 截斷** — GitHub PR body 沒有長度限制
+
+---
+
+## 環境已知問題
+
+### Exit Code 127 啞巴成功（Loom 特定）
+
+Loom 環境中 `bash -lc 'gh ...'` 在命令**成功執行**時仍可能回 exit code 127，
+導致 retry 迴圈重複發送相同內容（如連續多條 duplicate PR comment）。
+
+**緩解措施**（已固化為本技能的核心原則 #2）：
+
+1. 所有 body 內容一律寫入 `tmp/` 檔案後用 `--body-file` 發送
+2. 不要用 heredoc 或 `--body` 內嵌多行文字
+3. 命令成功後**立即停止重試**，不要依賴 exit code 做判斷
+4. 若需要確認是否成功，用 `gh pr view` 或 `gh issue view` 查詢目標物件的現有 comment 數量

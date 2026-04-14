@@ -1,41 +1,280 @@
-# Loom
+# Loom — Agent Framework
+
+<p align="center">
+  <img src="loom_ai_logo_1775371242275.png" alt="Loom AI" width="320"/>
+</p>
 
 > *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
 
-**Loom** is a harness-first, memory-native, self-directing agent framework. It wraps any LLM with a structured middleware pipeline, a four-type memory system (with vector search), a DAG task engine for parallel tool execution, and an autonomy layer that can trigger, plan, and act without human input.
+**Loom** is a harness-first, memory-native, self-directing agent framework for anyone who cares not just about what an agent *can* do — but about what it *did*, who approved it, and what happens when it goes wrong.
 
 ---
 
-## Core Design Principles
+## Why Loom?
 
-| Principle | Meaning |
-|-----------|---------|
-| **Harness-first** | Every tool call flows through a middleware pipeline — logging, tracing, and blast-radius control are built in, not bolted on |
-| **Memory-native** | Memory is a substrate, not a plugin. Four types (episodic, semantic, procedural, relational) share one SQLite store with vector search |
-| **Reflexive** | The agent observes its own execution history, self-assesses skill quality after each turn, and evolves low-performing skills automatically |
-| **Self-directing** | Cron, event, and condition triggers fire autonomously without human prompting |
-| **Model-agnostic** | Routes between cloud and local providers by model name prefix; switch mid-session with `/model` |
+Most agent frameworks treat tools as functions: define → call → done. That works in demos. It falls apart the moment you need audit trails, real authorization logic, long-term memory, or reliable autonomous operation.
+
+Loom was built from a different premise: **every tool call is a first-class citizen with a lifecycle.**
+
+Before a tool executes, it passes through a middleware pipeline that handles trust classification, schema validation, scope-aware authorization, and precondition gating. During execution, it races against abort signals. After execution, a post-validator can roll it back. Every state transition — success, failure, timeout, rollback — is recorded in memory and available for reflection.
+
+This is what *harness engineering* means: the execution machinery around your tools is as important as the tools themselves.
+
+---
+
+## Core Values
+
+| Principle | What it means |
+|-----------|---------------|
+| **Harness-first** | Every tool call flows through a structured middleware pipeline. Logging, tracing, trust control, and abort handling are built-in, not bolted on. |
+| **Memory-native** | Memory is a substrate, not a plugin. Four types — episodic, semantic, procedural, relational — are core architecture, not an afterthought. |
+| **Reflexive** | The agent observes its own execution history, self-assesses skill quality after each turn, and evolves low-performing skills automatically. |
+| **Self-directing** | Cron, event, and condition triggers fire autonomously without human prompting. The autonomy engine shares the same middleware pipeline as interactive sessions. |
+| **Model-agnostic** | Routes between cloud and local providers by model name prefix. Switch mid-session without losing context. |
 
 ---
 
 ## Architecture
 
+Loom is organized into seven layers. Every tool call — whether from a human prompt, an autonomy schedule, or a sub-agent — passes through all of them.
+
 ```
-Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
-                                             ↘  Autonomy  →  Notify
-                                             ↘  Tasks (parallel dispatch)
-                                             ↘  Extensibility (Lens / Plugin system)
+┌─────────────────────────────────────────────────────────────┐
+│                      Platform Layer                          │
+│               CLI · TUI · Discord Bot                        │
+├─────────────────────────────────────────────────────────────┤
+│                     Cognition Layer                          │
+│         LLM Router · Context Budget · Reflection API        │
+├─────────────────────────────────────────────────────────────┤
+│                   Harness Layer          ← the backbone      │
+│   Middleware Pipeline · Trust Hierarchy · Action Lifecycle   │
+│          Scope-Aware Authorization · Audit Trail             │
+├─────────────────────────────────────────────────────────────┤
+│                      Memory Layer                            │
+│    Episodic · Semantic · Procedural (Skills) · Relational    │
+├─────────────────────────────────────────────────────────────┤
+│                      Task Engine                             │
+│        DAG Scheduler · Parallel Dispatch · Sub-agents        │
+├─────────────────────────────────────────────────────────────┤
+│                     Autonomy Engine                          │
+│       Cron Triggers · Event Triggers · Action Planner        │
+├─────────────────────────────────────────────────────────────┤
+│                   Extensibility Layer                         │
+│         Lens System · Plugin Interface · Skill Import        │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | What it does |
-|-------|-------------|
-| **Harness** | `MiddlewarePipeline` with `TraceMiddleware`, `BlastRadiusMiddleware` (scope-aware + legacy fallback), `LifecycleMiddleware` + `LifecycleGateMiddleware`; three-tier trust (SAFE / GUARDED / CRITICAL) + `ToolCapability` flags (EXEC / NETWORK / AGENT_SPAN / MUTATES); **scope-aware permission substrate** — resource-level authorization with automatic grant management; full Action Lifecycle state machine with real-time control gates |
-| **Memory** | SQLite WAL + sqlite-vec; episodic (auto-compressed), semantic (key→value + embedding vectors + trust-tier governance), procedural (versioned skills with quality-gradient EMA + self-assessment); always-on `MemoryGovernor` (contradiction detection, admission gate, decay cycle) |
-| **Cognition** | `LLMRouter` (prefix routing, runtime switching), `ContextBudget` (LLM compaction at 80%), `ReflectionAPI`, three-layer `PromptStack` |
-| **Tasks** | `TaskGraph` (Kahn's topological sort) + `TaskScheduler` — drives **parallel tool dispatch** in `LoomSession` |
-| **Autonomy** | `CronTrigger` (5-field cron), `EventTrigger`, `ConditionTrigger`; `ActionPlanner` maps trust level → decision; unified pipeline with `origin`-aware authorization (`allowed_tools` + `scope_grants` per schedule) |
-| **Notify** | `NotificationRouter` fan-out; `CLINotifier`, `WebhookNotifier`, `TelegramNotifier`, `DiscordBotNotifier`; `ConfirmFlow` with timeout |
-| **Extensibility** | `LoomPlugin` unified plugin interface; `HermesLens` / `OpenAIToolsLens`; Skill Import Pipeline; `@loom.tool` + `loom.register_plugin()` |
+---
+
+## Harness Engineering
+
+This is the core of what makes Loom different. Everything else — memory, autonomy, skills — sits on top of it.
+
+### Three-Tier Trust
+
+Every tool registered in Loom carries a trust level that determines how much human approval it requires:
+
+| Level | Meaning | Behavior |
+|-------|---------|----------|
+| **SAFE** | Read-only, local, reversible | Pre-authorized at session start. Runs without prompting. |
+| **GUARDED** | Writes, network access, side effects | Requires first-time confirmation; session-scoped approval persists. |
+| **CRITICAL** | Destructive, irreversible, cross-system | Must confirm on every call. Cannot be session-authorized. |
+
+Beyond trust levels, tools carry **capability flags** — `EXEC`, `NETWORK`, `AGENT_SPAN`, `MUTATES` — that give the middleware pipeline finer-grained control over what categories of action are permitted in any given context.
+
+### Middleware Pipeline
+
+All tool calls — regardless of origin — flow through the same ordered middleware chain:
+
+```
+harness.execute(name, args, session_state)
+         │
+         ▼
+┌─────────────────────────┐
+│  LifecycleMiddleware    │  ← outermost: DECLARED + post-OBSERVED + MEMORIALIZED
+└─────────────────────────┘
+         │
+┌─────────────────────────┐
+│  LogMiddleware          │  ← rich-formatted terminal output
+│  TraceMiddleware        │  ← timing + episodic memory write
+└─────────────────────────┘
+         │
+┌─────────────────────────┐
+│  SchemaValidation       │  ← JSON schema validation; hallucinates-parameter guard
+└─────────────────────────┘
+         │
+┌─────────────────────────┐
+│  BlastRadiusMiddleware  │  ← trust classification + user confirmation
+│                         │    writes authorization result to LifecycleContext
+└─────────────────────────┘
+         │
+┌─────────────────────────┐
+│  LifecycleGateMiddleware│  ← innermost: real-time control gates
+│                         │    AUTHORIZED → PREPARED → EXECUTING → OBSERVED
+└─────────────────────────┘
+         │
+         ▼
+   tool handler runs
+```
+
+Middleware is stackable and pluggable — you can inject custom middleware at any position via the plugin system.
+
+### Action Lifecycle
+
+Every tool call is wrapped in an `ActionRecord` that lives inside a deterministic state machine. These states are not just labels — they are **real-time control gates**: each transition must complete before execution proceeds.
+
+```
+DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED → VALIDATED → COMMITTED → MEMORIALIZED
+                                       │                      │
+                                    ABORTED               REVERTING → REVERTED → MEMORIALIZED
+```
+
+Terminal failure paths: `DENIED` / `ABORTED` / `TIMED_OUT` → always end in `MEMORIALIZED`.
+
+This design means:
+- **`AUTHORIZED`** — the pass/deny decision from `BlastRadiusMiddleware` is captured *before* dispatch, not inferred afterward
+- **`PREPARED`** — skill-level precondition checks run here; failure aborts cleanly with zero side effects
+- **`EXECUTING`** — fired at the *exact* moment the handler is called; races against an abort signal
+- **`REVERTING → REVERTED`** — if a post-validator rejects the result, a registered rollback function can undo the effect
+- **`MEMORIALIZED`** — every action, regardless of outcome, is written to memory and available for reflection
+
+The two-layer design (`LifecycleMiddleware` outermost, `LifecycleGateMiddleware` innermost) exists for a precise reason: a single middleware cannot observe both *before* and *at* the exact moment the handler fires. Splitting into two cooperating layers solves this cleanly.
+
+### Scope-Aware Authorization
+
+Authorization in Loom operates at the **resource level**, not the tool level.
+
+Instead of asking "do you approve `write_file`?", the system asks "do you approve writing under `doc/`?" — and remembers that answer.
+
+```
+write_file(path="doc/design.md")
+    │
+    ├─ scope_resolver → ScopeRequest(resource=path, action=write, selector=doc/)
+    ├─ PermissionContext.evaluate()
+    │     ├─ grant exists for doc/ → ALLOW (no prompt)
+    │     ├─ no grant → CONFIRM (first-time prompt)
+    │     └─ request is outside existing grant → EXPAND_SCOPE (red panel)
+    └─ on confirmation → grant stored → future calls within scope auto-approve
+```
+
+Four response modes are available at every confirmation prompt: **approve once**, **scope lease (30-minute TTL)**, **permanent grant**, or **deny**. Active grants and their remaining TTL are always visible in the TUI budget panel or via `/scope` in any frontend.
+
+---
+
+## Memory System
+
+Loom's memory is not a key-value store bolted onto a chat loop. It is a four-type system with its own governance layer, all backed by a single SQLite WAL database with vector search via `sqlite-vec`.
+
+### Four Memory Types
+
+| Type | Role |
+|------|------|
+| **Episodic** | Timestamped log of what happened — every tool call, every turn, with full lifecycle metadata. Auto-compressed after a configurable threshold. |
+| **Semantic** | Long-term factual beliefs with confidence scores. Supports BM25 full-text search and embedding-based cosine similarity retrieval. |
+| **Procedural** | Versioned skill instructions (`SkillGenome`). Quality tracked via EMA self-assessment; low-quality skills evolve or deprecate automatically. |
+| **Relational** | Triple-store of entity relationships (`subject → predicate → object`). Powers cross-session reasoning and `dreaming` synthesis. |
+
+### Multi-Fallback Recall
+
+Memory retrieval is language-agnostic and always returns something:
+
+```
+recall(query)
+  ├─ Tier 1: Embedding similarity (sqlite-vec)   — language-agnostic, semantic
+  ├─ Tier 2: BM25 keyword ranking (SQLite FTS5)  — fast same-language path
+  └─ Tier 3: Recency fallback                    — always returns a result
+```
+
+### Memory Governance
+
+Every write to semantic memory passes through the `MemoryGovernor`:
+
+```
+write request
+  ├─ classify_source()      → trust tier (user_explicit 1.0 → external 0.5)
+  ├─ confidence floor       = max(entry.confidence, tier_floor)
+  ├─ ContradictionDetector  → REPLACE / KEEP / SUPERSEDE based on trust comparison
+  └─ upsert or reject
+
+session end
+  └─ Decay Cycle: episodic TTL prune · semantic low-confidence prune · relational dreaming decay
+```
+
+Trust tiers (highest → lowest): `user_explicit` → `tool_verified` → `agent_memorize` → `session_compress` → `counter_factual` → `agent_inferred` → `skill_evolution` → `dreaming` → `external`
+
+Semantic confidence has a 90-day half-life. Memories that are never reinforced fade. Contradictions from lower-trust sources are suppressed. The system gradually builds a coherent, stable belief state across sessions.
+
+---
+
+## Skills — Procedural Memory with Self-Assessment
+
+Skills are versioned instruction sets stored in `SkillGenome` that follow a three-tier progressive disclosure model:
+
+| Tier | When loaded | What it contains |
+|------|-------------|-----------------|
+| **Tier 1** | Session startup | Name + description injected into system prompt — minimal context cost |
+| **Tier 2** | On demand via `load_skill()` | Full instruction body, evolution hints, resource list |
+| **Tier 3** | As needed | Agent reads bundled scripts, references, and assets directly |
+
+Drop a `SKILL.md` into your `skills/` directory — Loom auto-imports it at session start.
+
+### Self-Assessment Feedback Loop
+
+After each turn where a skill was used, Loom triggers a background LLM self-assessment (scored 1–5). The result feeds into the skill's `confidence` via exponential moving average (α = 0.15). Skills that consistently underperform surface improvement suggestions in their next `load_skill()` call as `<evolution_hints>`. Skills whose confidence drops below a configurable threshold are automatically deprecated and removed from the Tier 1 catalog.
+
+### Precondition Checks — Framework-Enforced Safety Rails
+
+Skill instructions tell the LLM what it *should* do. But a strongly-worded "never run `rm -rf`" in a SKILL.md is still just a suggestion — probabilistic compliance from a probabilistic system.
+
+Precondition checks close this gap by moving safety rules from text into code that the harness executes at the `PREPARED` gate — before the tool handler ever sees the call:
+
+| Without checks | With checks |
+|---------------|-------------|
+| "Don't run destructive commands" — LLM *might* comply | `reject_destructive_commands()` — framework **blocks** it |
+| "This skill is read-only" — LLM *usually* respects it | `reject_write_operations()` — `write_file` is **impossible** while skill is active |
+| "Only modify files in skills/" — LLM *tries* to follow | `require_skills_dir_target()` — paths outside `skills/` are **rejected** |
+
+Each check is a lightweight async function defined in the skill's `checks.py`. Functions are mounted onto specific `ToolDefinition` objects when the skill loads, and unmounted when the skill is replaced. No cross-skill contamination. No global state mutation.
+
+---
+
+## Autonomy Engine
+
+Loom can operate without a human in the loop. The autonomy engine supports three trigger types:
+
+- **`CronTrigger`** — standard 5-field cron expressions with timezone support
+- **`EventTrigger`** — fires on named events emitted anywhere in the system
+- **`ConditionTrigger`** — evaluates a Python predicate against session state
+
+The critical design point: autonomous sessions use the **same `MiddlewarePipeline`** as interactive sessions. There is no separate "auto mode" with relaxed permissions. Schedules declare which GUARDED tools they need in `allowed_tools`, and which resource scopes they pre-authorize in `scope_grants`. Anything not declared is denied — autonomy runs on a budget, not on trust.
+
+An `ActionPlanner` maps the current trust level and context to a decision path. The agent never silently escalates its own permissions, and autonomous actions are always written to memory for post-hoc inspection.
+
+---
+
+## Platforms
+
+### CLI & TUI
+
+The classic `loom chat` CLI gives you a full-featured interactive session in your terminal. The TUI (`loom chat --tui`) adds a dual-pane Textual interface with:
+
+- A live **Execution Dashboard** that visualizes the current `ExecutionEnvelope` — which actions are running, which are awaiting authorization, which completed or rolled back, organized by parallel level
+- A **Budget Panel** showing context token usage and all active scope grants with remaining TTL
+- A **Command Palette** (F1) for fuzzy-searching all actions
+- Inline confirmation widgets so authorization decisions never interrupt your flow with modal dialogs
+- History browsing across recent envelopes for post-turn inspection
+
+### Discord Bot
+
+The Discord bot (`loom discord start`) turns any channel thread into a persistent Loom session — useful for mobile access and 24/7 autonomous operation:
+
+- Each thread is a persistent session restored automatically after bot restart
+- Per-turn **Envelope Trail**: completed envelopes freeze as permanent messages, building an audit trail in the thread history
+- Four-button confirmation flow (Allow / Lease / Auto / Deny) with automatic follow-up messages explaining grant scope and TTL
+- `/scope`, `/summary`, `/model`, `/think`, `/compact` and all other slash commands
+- Configurable turn summaries (one-line compact or full Discord Embed)
+
+All three frontends — CLI, TUI, Discord — share full command parity.
 
 ---
 
@@ -45,632 +284,48 @@ Platform (CLI / TUI / Discord)  →  Cognition  →  Harness  →  Memory
 # Requires Python 3.11+
 git clone https://github.com/Dakai666/Loom.git
 cd Loom
-
 pip install -e ".[dev]"
 ```
 
-Create a `.env` file in the project root with at least one provider credential:
+Create a `.env` in the project root with at least one provider:
 
 ```env
-# Cloud providers (at least one required, unless using a local provider)
-MINIMAX_API_KEY=your_minimax_key_here
-ANTHROPIC_API_KEY=your_anthropic_key_here
-api_key_env=your_embeddings_key_here
+ANTHROPIC_API_KEY=your_key_here
 
-# Local providers — set base URL to enable (or use loom.toml, see below)
+# Local providers (no API key needed)
 OLLAMA_BASE_URL=http://localhost:11434/v1
 LMSTUDIO_BASE_URL=http://localhost:1234/v1
 ```
 
----
-
-## Quick Start
-
 ```bash
-# Classic CLI mode
-loom chat
-
-# TUI mode (Textual dual-pane interface)
-loom chat --tui
-
-# Start with a specific model
-loom chat --model claude-sonnet-4-6
-loom chat --model ollama/llama3.2
-
-# Session management
-loom chat --resume                   # resume most recent session
-loom chat --session <id>             # resume specific session
-loom sessions list
-loom sessions show <id>
-loom sessions rm <id>
-
-# Discord bot — requires: pip install loom[discord]
-loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
-
-# Discord bot + autonomy daemon in one process (recommended)
-loom discord start --autonomy --channel <channel_id>
-loom discord start --autonomy --channel <channel_id> --notify-channel <notify_id>
-
-# Autonomy daemon (standalone)
+loom chat                          # interactive CLI
+loom chat --tui                    # TUI mode
+loom chat --model ollama/llama3.2  # local model
+loom discord start --autonomy --channel <id>
 loom autonomy start
-loom autonomy status
-loom autonomy emit <event_name>
-
-# Memory and reflection
-loom memory list
-loom reflect --session <session_id>
 ```
 
-### In-session slash commands
-
-Available in **CLI**, **TUI**, and **Discord** — all three frontends have full command parity.
-
-| Command | Effect |
-|---------|--------|
-| `/model` | Show current model and registered providers |
-| `/model <name>` | Switch LLM provider/model mid-session (see [Model Switching](#model-switching)) |
-| `/new` | Start a fresh session |
-| `/sessions` | Browse and switch sessions |
-| `/personality <name>` | Switch cognitive persona |
-| `/personality off` | Remove active persona |
-| `/think` | Show the full reasoning chain from the last turn |
-| `/compact` | LLM-summarize oldest turns to free context |
-| `/auto` | Toggle `run_bash` auto-approve — injects a workspace-scoped exec grant; absolute-path commands still require confirmation |
-| `/scope` | List active scope grants (leases) with TTL, source, and constraints |
-| `/scope revoke <N>` | Revoke a specific scope grant by its index |
-| `/scope clear` | Revoke all non-system grants |
-| `/pause` | Toggle HITL mode — agent pauses after each tool batch |
-| `/stop` | Immediately cancel the current running turn |
-| `/budget` | Show context token usage (Discord; TUI has the Budget panel) |
-| `/help` | Show all commands |
-
-**HITL pause flow** — when `/pause` is on, after every tool batch the agent suspends and prompts:
-- `r` / Enter — resume as-is
-- `c` — cancel the rest of this turn
-- any text — inject as a redirect message and resume
-
-### TUI keyboard shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Escape` | Interrupt current generation (`/stop`) |
-| `F1` / `Ctrl+K` | Command Palette — fuzzy search all actions |
-| `F2` | Cycle Workspace tab (Artifacts → Activity → Budget) |
-| `F4` / `Ctrl+B` | Toggle right sidebar |
-| `Ctrl+L` | Clear conversation view |
-| `Ctrl+C` | Quit |
-| `Tab` | Autocomplete slash commands |
-| `Y` / `N` / `S` / `A` | Approve (session grant / lease 30m / permanent) or deny tool confirmation dialogs |
+Model routing works by prefix — `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
 
 ---
 
-## Model Switching
-
-Loom routes by model name prefix. All providers registered at startup; switch any time with `/model`.
-
-| Prefix | Provider | Credential |
-|--------|----------|------------|
-| `MiniMax-*` | MiniMax (minimax.io) | `MINIMAX_API_KEY` in `.env` |
-| `claude-*` | Anthropic | `ANTHROPIC_API_KEY` in `.env` |
-| `ollama/<name>` | Local Ollama server | `[providers.ollama]` in `loom.toml` or `OLLAMA_BASE_URL` |
-| `lmstudio/<name>` | Local LM Studio | `[providers.lmstudio]` in `loom.toml` or `LMSTUDIO_BASE_URL` |
-
-```
-/model                        # show current model + all registered providers
-/model claude-sonnet-4-6      # switch to Anthropic mid-session
-/model ollama/qwen2.5-coder:7b
-/model lmstudio/phi-4
-/model MiniMax-M2.7-highspeed
-```
-
-Set the session default in `loom.toml`:
-
-```toml
-[cognition]
-default_model = "ollama/llama3.2"   # used when no --model flag is given
-```
-
----
-
-## Memory System
-
-Loom uses a **multi-fallback recall chain** for language-agnostic retrieval:
-
-```
-recall(query)
-  ├─ Tier 1: Embedding (cosine similarity via sqlite-vec) — language-agnostic
-  ├─ Tier 2: BM25 keyword ranking (SQLite FTS5)          — same-language fast path
-  └─ Tier 3: Recency fallback                            — always returns something
-```
-
-Embeddings are computed at write-time (`upsert`) and stored in SQLite. Failures fall through silently to BM25.
-
-**Semantic memory** entries carry a confidence score that decays over time (90-day half-life). All writes pass through the **Memory Governance** layer:
-
-```
-write request
-  ├─ classify_source()  → trust tier (user_explicit 1.0 → external 0.5)
-  ├─ confidence floor   = max(entry.confidence, tier_confidence)
-  ├─ ContradictionDetector — REPLACE / KEEP / SUPERSEDE by trust tier
-  └─ SemanticMemory.upsert() or skip
-
-session.stop()
-  └─ Decay Cycle — episodic TTL prune + semantic low-confidence prune + relational dreaming decay
-```
-
-**Trust tiers** (highest → lowest): `user_explicit` (1.0) → `tool_verified` (0.9) → `agent_memorize` (0.85) → `session_compress` (0.8) → `counter_factual` (0.75) → `agent_inferred` (0.7) → `skill_evolution` (0.65) → `dreaming` (0.6) → `external/unknown` (0.5)
-
-### Built-in tools
-
-| Tool | Trust | Capabilities | Description |
-|------|-------|-------------|-------------|
-| `read_file` | SAFE | — | Read a file inside the workspace |
-| `list_dir` | SAFE | — | List directory contents |
-| `recall` | SAFE | — | BM25 + embedding search across semantic facts and skills |
-| `query_relations` | SAFE | — | Query relational memory triples |
-| `fetch_url` | SAFE | NETWORK | Fetch a URL; output wrapped in `<untrusted_external_content>` |
-| `write_file` | GUARDED | MUTATES | Write a file (path confined to workspace) |
-| `memorize` | GUARDED | MUTATES | Persist a fact to long-term semantic memory |
-| `relate` | GUARDED | MUTATES | Store a relationship triple in relational memory |
-| `web_search` | GUARDED | NETWORK | Brave Search API top-N results |
-| `run_bash` | GUARDED | **EXEC** | Execute a shell command — scope-aware: auto-approves within granted workspace scope |
-| `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | Spawn a sub-agent — scope-aware: tracks spawn budget |
-| `load_skill` | SAFE | — | Load a skill's full instructions on demand (Agent Skills spec Tier 2) |
-
-> **Scope-aware authorization** (v0.2.9.3): tools with a `scope_resolver` are authorized at the resource level — once you approve "write under `/workspace/doc/`", subsequent writes under that path auto-approve without re-prompting. Tools without a resolver fall back to the legacy tool-name authorization.
-
----
-
-## Skills — Procedural Memory with Self-Assessment
-
-Skills are versioned, self-evaluating instruction sets stored in `SkillGenome`. They follow the [Agent Skills spec](https://agentskills.io/specification) three-tier progressive disclosure model:
-
-| Tier | When | Content |
-|------|------|---------|
-| **Tier 1** | Session startup | `<available_skills>` XML injected into system prompt — name + description only |
-| **Tier 2** | On demand | `load_skill(name)` → full SKILL.md body + evolution hints + resource list |
-| **Tier 3** | As needed | Agent reads bundled `scripts/` / `references/` / `assets/` files directly |
-
-### Auto-import
-
-Drop a `SKILL.md` into the `skills/` directory — Loom auto-imports it at session start:
-
-```
-<workspace>/skills/<skill-name>/SKILL.md   ← project-level (priority)
-~/.loom/skills/<skill-name>/SKILL.md       ← user-level
-```
-
-```markdown
----
-name: loom-engineer
-description: Full implementation cycle from issue to PR.
-tags: [git, python, engineering]
-precondition_checks:
-  - ref: checks.require_git_repo
-    applies_to: [run_bash, write_file]
-    description: "Must be inside a git repository"
-  - ref: checks.reject_force_push
-    applies_to: [run_bash]
-    description: "Block git push --force"
----
-
-# Loom Engineer
-Skill body here...
-```
-
-### Self-Assessment Feedback Loop
-
-After each turn where a skill was used, Loom triggers a background LLM self-assessment (1–5 score). The result feeds into the skill's `confidence` via EMA (α=0.15):
-
-```
-load_skill() → Agent executes task → TurnDone
-    → LLM self-rates quality (1–5)
-    → EMA update: confidence = 0.85 × old + 0.15 × (score/5)
-    → outcome persisted to SemanticMemory
-```
-
-At session end, `SkillEvolutionHook` analyses low-confidence skills (confidence < 0.6, usage ≥ 3) and writes improvement suggestions. Next `load_skill()` surfaces these as `<evolution_hints>`.
-
-Skills whose `confidence` drops below `skill_deprecation_threshold` (default 0.3) are automatically deprecated and removed from the Tier 1 catalog.
-
-### Skill Precondition Checks — Framework-Enforced Safety Rails
-
-SKILL.md tells the LLM what it *should* do. But LLMs are probabilistic — a strongly worded "never run `rm -rf`" in a skill document is a suggestion, not a guarantee. **Precondition checks** close this gap by moving safety rules from text into code that the framework executes before every tool call.
-
-**Why this matters:**
-
-| Without precondition checks | With precondition checks |
-|----------------------------|--------------------------|
-| "Don't run destructive commands" — LLM *might* comply | `reject_destructive_commands()` — framework **blocks** `rm -rf` before shell sees it |
-| "This skill is read-only" — LLM *usually* respects it | `reject_write_operations()` — `write_file` is **impossible** while skill is loaded |
-| "Only modify files in skills/" — LLM *tries* to follow | `require_skills_dir_target()` — paths outside `skills/` are **rejected** at PREPARED gate |
-
-**How it works:**
-
-Skills declare checks in their SKILL.md frontmatter. Each check is an async Python function in the skill's `checks.py` that returns `True` (allow) or `False` (block):
-
-```yaml
-# skills/security_assessment/SKILL.md
----
-name: security_assessment
-precondition_checks:
-  - ref: checks.reject_destructive_commands
-    applies_to: [run_bash]
-    description: "Block rm -rf, DROP TABLE, dd, etc."
-  - ref: checks.reject_production_env
-    applies_to: [run_bash]
-    description: "Block execution in production environments"
----
-```
-
-```python
-# skills/security_assessment/checks.py
-async def reject_destructive_commands(call) -> bool:
-    cmd = call.args.get("command", "")
-    destructive = ["rm -rf", "DROP TABLE", "dd if="]
-    return not any(p in cmd.lower() for p in destructive)
-```
-
-**Lifecycle integration:**
-
-```
-load_skill("security_assessment")
-  → First load: user sees confirmation panel listing all checks → approves
-  → Approval stored in RelationalMemory (one-time)
-  → checks.py functions mounted onto target ToolDefinitions
-  → Every run_bash call now passes through PREPARED gate checks
-
-load_skill("loom_engineer")
-  → Previous skill's checks auto-unmounted (no cross-skill contamination)
-  → loom_engineer's own checks mounted instead
-```
-
-Checks are evaluated at the `PREPARED` stage of the [Action Lifecycle](#action-lifecycle) — after authorization but before execution. All checks must pass; any failure aborts the tool call with zero side effects.
-
-**Built-in skill checks:**
-
-| Skill | Check | Protects against |
-|-------|-------|-----------------|
-| `loom_engineer` | `require_git_repo` | Running git commands outside a repository |
-| `loom_engineer` | `reject_force_push` | Accidental `git push --force` |
-| `systematic_code_analyst` | `reject_write_operations` | Analysis skill writing files |
-| `meta-skill-engineer` | `require_skills_dir_target` | Skill engineer modifying framework code |
-| `security_assessment` | `reject_destructive_commands` | Destructive commands during security scans |
-| `security_assessment` | `reject_production_env` | Running scans in production |
-| `memory_hygiene` | `require_memory_backup` | Cleanup without backup |
-| `memory_hygiene` | `reject_direct_db_mutation` | Bypassing framework APIs with raw SQL |
-
----
-
-## Action Lifecycle
-
-Every tool call in Loom is wrapped in an `ActionRecord` that tracks its complete lifecycle through a deterministic state machine. Unlike logging frameworks that annotate events after the fact, Loom's lifecycle states are **real-time control gates** — each transition must complete before execution proceeds to the next stage.
-
-```
-DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED → VALIDATED → COMMITTED → MEMORIALIZED
-                                       ↓                       ↓
-                                    ABORTED               REVERTING → REVERTED → MEMORIALIZED
-```
-
-Terminal failure paths: `DENIED`, `ABORTED`, `TIMED_OUT` → `MEMORIALIZED`
-
-### Two-layer middleware architecture
-
-The lifecycle is implemented as two cooperating middleware layers that share state through `LifecycleContext`:
-
-| Layer | Position | Responsibilities |
-|-------|----------|-----------------|
-| `LifecycleMiddleware` | Outermost | `DECLARED` — creates `ActionRecord` + injects `LifecycleContext`; post-`OBSERVED` states (`VALIDATED`, `COMMITTED`, `REVERTING`, `REVERTED`, `MEMORIALIZED`); failure paths (`DENIED`, `ABORTED` from schema/auth) |
-| `LifecycleGateMiddleware` | Innermost (just before handler) | `AUTHORIZED` ← reads from `BlastRadiusMiddleware`; `PREPARED` ← evaluates `precondition_checks[]`; `EXECUTING` ← fires at exact dispatch moment + races abort signal; `OBSERVED` ← fires when executor returns |
-
-**Why two layers?** A single middleware cannot intercept both *before* and *at* the moment the tool executor runs. `next(call)` fires the entire remaining chain as one opaque call — the outermost layer has no way to inject logic immediately before the handler. Splitting into two layers solves this cleanly.
-
-### Precondition gates
-
-`ToolDefinition.precondition_checks` is a list of async callables evaluated before dispatch. All must pass for the tool to proceed to `EXECUTING`. Failure aborts with no side effects.
-
-```python
-async def require_write_lock(call: ToolCall) -> bool:
-    return await lock_manager.is_held(call.session_id)
-
-tool = ToolDefinition(
-    name="write_critical_file",
-    preconditions=["Requires active write lock"],        # human-readable audit trail
-    precondition_checks=[require_write_lock],            # callable gate
-    trust_level=TrustLevel.GUARDED,
-)
-```
-
-Tools with no `precondition_checks` follow the same happy path as before — zero migration cost.
-
-### Abort signal racing
-
-When a tool call carries an `abort_signal` (`asyncio.Event`), `LifecycleGateMiddleware` races the executor against it using `asyncio.wait()`. If the signal fires during execution, the tool is cancelled, the record transitions to `ABORTED`, and `MEMORIALIZED` fires — the lifecycle always completes cleanly regardless of how execution ends.
-
-### Post-validation and rollback
-
-Attach `post_validator` and `rollback_fn` to any `ToolDefinition` to enable transactional semantics:
-
-```python
-tool = ToolDefinition(
-    name="deploy",
-    post_validator=verify_deployment_health,   # async (call, result) -> bool
-    rollback_fn=rollback_deployment,           # async (call, result) -> ToolResult
-)
-```
-
-If `post_validator` returns `False`, the lifecycle transitions `OBSERVED → VALIDATED → REVERTING → REVERTED → MEMORIALIZED`. The result returned to the LLM reflects the rollback, with `metadata["rolled_back"] = True`.
-
-### Audit trail
-
-Every tool call — success, failure, abort, timeout, or rollback — ends in `MEMORIALIZED`, firing the `on_lifecycle` callback. `TraceMiddleware` wires this to episodic memory: the complete lifecycle of every action is recorded, queryable, and available to reflection.
-
----
-
-## Parallel Tool Execution
-
-When the LLM requests multiple tools simultaneously, Loom runs them concurrently via `TaskGraph`:
-
-```
-LLM response: [read_file, list_dir, recall]  ← all SAFE / pre-authorized
-  │
-  └─ TaskGraph: one level, asyncio.gather
-       ├─ read_file   → result A
-       ├─ list_dir    → result B
-       └─ recall      → result C
-```
-
-Tools requiring interactive confirmation (GUARDED not yet approved, CRITICAL, EXEC, or AGENT_SPAN) always run sequentially to avoid interleaved prompts.
-
----
-
-## Scope-Aware Authorization
-
-Since v0.2.9.3, Loom upgrades tool authorization from tool-name-based to **resource-scope-based**. Instead of "do you approve `write_file`?", the system asks "do you approve writing under `/workspace/doc/`?" — and remembers the answer.
-
-### How it works
-
-```
-Tool call: write_file(path="doc/design.md")
-  │
-  ├─ scope_resolver → ScopeRequest(resource=path, action=write, selector=/workspace/doc)
-  ├─ PermissionContext.evaluate() → check existing grants
-  │     ├─ Grant exists for /workspace/doc → ALLOW (no prompt)
-  │     ├─ No grant → CONFIRM (first-time prompt)
-  │     └─ Grant exists for /workspace/doc but request is /workspace/loom → EXPAND_SCOPE (red panel)
-  └─ On user confirm → grant stored → future calls in same scope auto-approve
-```
-
-### Scope-aware tools
-
-| Tool | Resource type | Scope logic |
-|------|--------------|-------------|
-| `write_file` | `path` | Directory prefix — grant for `/workspace/doc/` covers all files underneath |
-| `run_bash` | `exec` | Workspace containment — pipes/subshells/`&&`/`||` marked as scope-unknown, always prompt |
-| `fetch_url` | `network` | Exact domain match — grant for `api.openai.com` only covers that domain |
-| `web_search` | `network` | Fixed domain (`api.search.brave.com`) |
-| `spawn_agent` | `agent` | Budget tracking — grant with `remaining_budget=3` allows 3 spawns |
-
-### Confirm panel and approval modes
-
-When a tool needs authorization, the confirmation panel shows structured scope information with four response options:
-
-```
-┌──── Tool requires confirmation ────────────────────────┐
-│  write_file                                             │
-│  path: write → doc                                      │
-│  First time: no existing grant for this scope           │
-│                y=approve  s=lease (30m)  a=permanent  N=deny │
-└─────────────────────────────────────────────────────────┘
-Allow? [y=approve/s=lease/a=permanent/N]:
-```
-
-| Response | Effect |
-|----------|--------|
-| `y` (approve) | Approve and grant this scope for the session — future calls within the same scope auto-approve (no expiry) |
-| `s` (lease) | Approve and create a **session-scoped lease** (30 min TTL) — auto-approves within this scope until the lease expires |
-| `a` (permanent) | Approve and create a **permanent grant** — same scope, no expiry (identical to `y` but with `auto_approve` source for audit) |
-| `N` (deny) | Reject this call |
-
-**Panel styling:**
-- **Yellow border** — first-time authorization or new resource type
-- **Red border** — scope expansion beyond what was previously approved
-
-### Scoped approval leases
-
-Leases are the recommended middle ground between per-call confirmation and full `/auto`. A typical workflow:
-
-1. Agent starts a task that involves writing files under `doc/`
-2. First `write_file` call triggers a confirmation prompt
-3. User types `s` — a lease is created for `path:write → doc/` with 30 min TTL
-4. All subsequent writes under `doc/` auto-approve without prompting
-5. A write to `loom/core.py` (outside the lease scope) triggers a new prompt
-6. Lease expires after 30 minutes; next call to `doc/` would re-prompt
-
-Use `/scope` to inspect, revoke, or clear active grants and leases at any time.
-
-### `/auto` and scope grants
-
-`/auto` now injects a scope grant (`exec:execute → workspace, absolute_paths=deny`) instead of a blanket flag. Workspace-confined commands auto-approve; commands with absolute paths outside the workspace still trigger a confirmation prompt.
-
----
-
-## Context Management
-
-- **Auto-compact** at 80% context usage (checked at turn start and after each tool loop)
-- **Smart compact**: LLM summarizes oldest ½ of conversation into a summary pair — preserves semantic content, does not just truncate
-- **Fallback**: turn-boundary drop if LLM summary fails or < 3 user turns exist
-- **Manual**: `/compact` slash command
-
----
-
-## Configuration (`loom.toml`)
-
-```toml
-[loom]
-name    = "loom"
-version = "0.1.0"
-
-[identity]
-soul        = "SOUL.md"
-agent       = "Agent.md"
-personality = ""   # optional: "personalities/adversarial.md"
-
-[cognition]
-default_model = "claude-sonnet-4-6"   # supports all routing prefixes
-max_tokens    = 8096
-
-[memory]
-backend                     = "sqlite"
-db_path                     = "~/.loom/memory.db"
-episodic_retention_days     = 7
-skill_deprecation_threshold = 0.3
-episodic_compress_threshold = 10
-
-[memory.governance]
-admission_threshold      = 0.5    # filter low-quality facts before promotion
-episodic_ttl_days        = 30     # delete episodic entries older than N days
-semantic_decay_threshold = 0.1    # prune semantic entries below this confidence
-relational_decay_factor  = 1.5    # accelerate dreaming triple decay (half-life = 90/factor)
-
-[harness]
-default_trust_level = "guarded"
-require_audit_log   = true
-strict_sandbox      = false   # set true to confine run_bash to workspace root
-
-# ── Local providers (no API key required) ─────────────────────────────────────
-# [providers.ollama]
-# enabled       = true
-# base_url      = "http://localhost:11434/v1"   # default
-# default_model = "llama3.2"
-
-# [providers.lmstudio]
-# enabled       = true
-# base_url      = "http://localhost:1234/v1"    # default
-# default_model = "phi-4"
-
-# ── Autonomy (Unified Pipeline v0.2.9.4) ─────────────────────────────────────
-# All execution paths share the same MiddlewarePipeline.
-# Autonomy schedules run with origin="autonomy" — they can only "spend"
-# pre-authorized grants, never request new permissions interactively.
-# Declare needed GUARDED tools in allowed_tools; scope-aware tools also
-# need scope_grants for resource-level authorization.
-[autonomy]
-enabled  = true
-timezone = "Asia/Taipei"
-
-[[autonomy.schedules]]
-name          = "morning_briefing"
-cron          = "0 1 * * *"          # 01:00 UTC = 09:00 Asia/Taipei
-intent        = "Generate daily news briefing and write to news/YYYY-MM-DD/briefing.md"
-trust_level   = "safe"
-notify        = false
-allowed_tools = ["write_file", "memorize"]   # GUARDED tools this schedule needs
-scope_grants  = [
-  { resource = "path", action = "write", selector = "news" },
-]
-
-# trust_level × notify interaction:
-#   safe                   → execute immediately, no confirmation
-#   guarded + notify=false → execute immediately, no confirmation
-#   guarded + notify=true  → Discord Allow/Deny buttons (60s timeout → deny)
-#   critical               → must confirm every time
-
-[notify]
-default_channel = "cli"
-```
-
----
-
-## Discord Bot
-
-The Discord bot turns any channel into a full Loom frontend — useful for mobile access and 24/7 availability.
-
-```bash
-pip install 'loom[discord]'
-```
-
-1. Create a Discord application at [discord.com/developers](https://discord.com/developers/applications)
-2. Enable **Message Content Intent** under Bot → Privileged Gateway Intents
-3. Add to `.env`: `DISCORD_BOT_TOKEN=your-bot-token-here`
-
-```bash
-# Bot only
-loom discord start --token $DISCORD_BOT_TOKEN --channel <channel_id>
-
-# Bot + autonomy daemon (recommended — one process)
-loom discord start --autonomy --channel <channel_id>
-```
-
-Each channel thread is a persistent session — context is restored automatically after a bot restart.
-
-**Turn flow:** `⚙️` reaction (acknowledged) → typing indicator → tool activity log → response message → `✅`
-
-All slash commands work in Discord: `/new` `/sessions` `/model` `/think` `/compact` `/personality` `/pause` `/stop` `/budget` `/help`
-
----
-
-## Extensibility
-
-### Plugin System
-
-Plugins live in `~/.loom/plugins/` and are loaded automatically on session start. The first load of a new file triggers a GUARDED confirmation; approval is stored in relational memory.
-
-```python
-# ~/.loom/plugins/my_tools.py
-import loom
-
-@loom.tool(trust_level="safe", description="Query internal API")
-async def query_internal_api(call):
-    ...
-```
-
-**Full plugin class** — tools + middleware + lenses:
-
-```python
-from loom.extensibility import LoomPlugin
-import loom
-
-class GitPlugin(LoomPlugin):
-    name = "git"
-    version = "1.0"
-
-    def tools(self):      return [git_status_tool, git_diff_tool]
-    def middleware(self): return [GitSafetyMiddleware()]
-
-loom.register_plugin(GitPlugin())
-```
-
-| Extension point | Method |
-|----------------|--------|
-| Tools | `tools() -> list[ToolDefinition]` |
-| Middleware | `middleware() -> list[Middleware]` |
-| Lenses | `lenses() -> list[BaseLens]` |
-| Notifiers | `notifiers() -> list[BaseNotifier]` |
-| Lifecycle hooks | `on_session_start(session)` / `on_session_stop(session)` |
-
-### Importing external skills
-
-Skills in the `skills/` directory are auto-imported at session start. For external formats:
-
-```bash
-loom import skills.json                          # Hermes format
-loom import tools.json --lens openai_tools
-loom import skills.json --dry-run --min-confidence 0.7
-```
-
----
-
-## Running Tests
-
-```bash
-python -m pytest tests/          # 654+ tests
-python -m pytest tests/test_harness.py -v
-python -m pytest tests/test_memory.py -v
-python -m pytest tests/test_cognition.py -v
-python -m pytest tests/test_autonomy.py -v
-python -m pytest tests/test_integration.py -v
-```
+## Further Reading
+
+The `doc/` directory contains full technical documentation for every subsystem:
+
+| Topic | File |
+|-------|------|
+| System overview & glossary | `doc/00-總覽.md`, `doc/01-名詞解釋.md` |
+| Harness & middleware deep-dive | `doc/04-Harness-概述.md`, `doc/06-Middleware-詳解.md` |
+| Action Lifecycle state machine | `doc/06b-Action-Lifecycle.md` |
+| Trust levels & blast radius | `doc/05-Trust-Level.md` |
+| Scope-aware authorization design | `doc/44-Scope-Aware-Permission-規劃.md` |
+| Memory system & governance | `doc/08-Memory-概述.md`, `doc/08b-Memory-Governance.md` |
+| Skill Genome & self-assessment | `doc/10-Skill-Genome.md` |
+| Execution visualization | `doc/43-Harness-Execution-可視化規劃.md` |
+| Autonomy engine | `doc/19-Autonomy-概述.md`, `doc/21-Action-Planner.md` |
+| Extensibility & plugins | `doc/29-Extensibility-概述.md`, `doc/31-Plugin-系統.md` |
+| Full config reference | `doc/37-loom-toml-參考.md` |
 
 ---
 
