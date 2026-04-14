@@ -21,6 +21,9 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
+import time
+from loom.platform.cli.tui.events import GrantInfo
+
 
 _COMPACT_THRESHOLD = 0.80
 _CRITICAL_THRESHOLD = 0.95
@@ -65,12 +68,20 @@ class BudgetPanel(Widget):
     max_tokens: reactive[int] = reactive(100_000)
     input_tokens: reactive[int] = reactive(0)
     output_tokens: reactive[int] = reactive(0)
+    active_grants: reactive[int] = reactive(0)
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._grants: list[GrantInfo] = []
+        self._known_grant_ids: set[str] = set()
+        self._refresh_timer = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="budget-content")
 
     def on_mount(self) -> None:
         self._update_display()
+        self._refresh_timer = self.set_interval(30, self._tick_grants)
 
     def update_budget(
         self,
@@ -86,6 +97,52 @@ class BudgetPanel(Widget):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self._update_display()
+
+    def update_grants(
+        self,
+        active: int,
+        next_expiry_secs: float = 0.0,
+        grants: list[GrantInfo] | None = None,
+    ) -> None:
+        self.active_grants = active
+        if grants is not None:
+            old_ids = self._known_grant_ids
+            new_ids = {g.grant_id for g in grants}
+            expired_ids = old_ids - new_ids
+            if expired_ids and old_ids:
+                self._notify_expired(expired_ids)
+            self._grants = list(grants)
+            self._known_grant_ids = new_ids
+        self._update_display()
+
+    def _tick_grants(self) -> None:
+        if not self._grants:
+            return
+        now = time.time()
+        still_active: list[GrantInfo] = []
+        expired_ids: set[str] = set()
+        for g in self._grants:
+            if g.expires_at > 0 and g.expires_at <= now:
+                expired_ids.add(g.grant_id)
+            else:
+                still_active.append(g)
+        if expired_ids:
+            self._notify_expired(expired_ids)
+            self._grants = still_active
+            self._known_grant_ids -= expired_ids
+            self.active_grants = len(still_active)
+        self._update_display()
+
+    def _notify_expired(self, expired_ids: set[str]) -> None:
+        for g in self._grants:
+            if g.grant_id in expired_ids:
+                selector_hint = f" / {g.selector}" if g.selector else ""
+                self.app.notify(
+                    f"Scope lease expired: {g.tool_name}{selector_hint}",
+                    title="Lease Expired",
+                    severity="warning",
+                    timeout=5,
+                )
 
     def watch_fraction(self, _: float) -> None:
         self._update_display()
@@ -173,8 +230,48 @@ class BudgetPanel(Widget):
             lines.append(
                 f"   [dim]Out   {_fmt_tokens(self.output_tokens)} tokens[/dim]"
             )
+            lines.append("")
+            lines.append("[dim]" + "─" * 28 + "[/dim]")
+
+        lines.append("[dim]Active Grants[/dim]")
+        lines.append(self._render_grants())
 
         content.update("\n".join(lines))
+
+    def _render_grants(self) -> str:
+        if self.active_grants <= 0 and not self._grants:
+            return "   [dim]none[/dim]"
+
+        now = time.time()
+        active_grants = [
+            g for g in self._grants
+            if g.expires_at == 0 or g.expires_at > now
+        ]
+
+        if not active_grants:
+            return "   [dim]none[/dim]"
+
+        nearest_secs = 0.0
+        for g in active_grants:
+            if g.expires_at > 0:
+                remaining = g.expires_at - now
+                if remaining > 0:
+                    if nearest_secs == 0.0 or remaining < nearest_secs:
+                        nearest_secs = remaining
+
+        count = len(active_grants)
+        if nearest_secs > 0:
+            mins = int(nearest_secs // 60)
+            secs = int(nearest_secs % 60)
+            if nearest_secs < 300:
+                expiry_str = f"[#b87060]{mins}m {secs:02d}s[/#b87060]"
+            elif nearest_secs < 600:
+                expiry_str = f"[#c8924a]{mins}m {secs:02d}s[/#c8924a]"
+            else:
+                expiry_str = f"[#7a9e78]{mins}m[/#7a9e78]"
+            return f"   [bold]{count}[/bold] active\n   [dim]expiry in[/dim] {expiry_str}"
+        else:
+            return f"   [bold]{count}[/bold] active [dim](permanent)[/dim]"
 
     def _estimate_turn_count(self) -> int:
         """Rough estimate of how many turns have elapsed, for turns-remaining calc."""

@@ -21,7 +21,6 @@ from .components import (
     MessageBubble,
     ToolBlock,
     AgentState,
-    StatusBar,
     InputArea,
     ObservabilityPanel,
     ArtifactState,
@@ -46,6 +45,7 @@ from .events import (
     EnvelopeStarted,
     EnvelopeUpdated,
     EnvelopeCompleted,
+    GrantInfo,
     GrantsUpdate,
 )
 
@@ -56,7 +56,6 @@ __all__ = [
     "MessageBubble",
     "ToolBlock",
     "AgentState",
-    "StatusBar",
     "InputArea",
     "ObservabilityPanel",
     "ArtifactState",
@@ -79,5 +78,6 @@ __all__ = [
     "EnvelopeStarted",
     "EnvelopeUpdated",
     "EnvelopeCompleted",
+    "GrantInfo",
     "GrantsUpdate",
 ]

@@ -54,6 +54,7 @@ from loom.core.events import (
     EnvelopeUpdated,
     ExecutionEnvelopeView,
     ExecutionNodeView,
+    GrantSummary,
     GrantsSnapshot,
     TextChunk,
     ThinkCollapsed,
@@ -1968,20 +1969,38 @@ class LoomSession:
         )
 
     def _build_grants_snapshot(self) -> GrantsSnapshot:
-        """Build a GrantsSnapshot from current PermissionContext (#108)."""
+        """Build a GrantsSnapshot from current PermissionContext (#108, #112)."""
+        import hashlib
         import time as _time
         grants = self.perm._effective_grants()
         now = _time.time()
         active = len(grants)
         # Find nearest expiry
         next_expiry_secs = 0.0
+        summaries: list[GrantSummary] = []
         for g in grants:
+            # Stable ID from grant fields for UI tracking
+            id_src = f"{g.resource}:{g.action}:{g.selector}:{g.granted_at}"
+            gid = hashlib.md5(id_src.encode()).hexdigest()[:8]
+            # Determine tool_name from metadata if available, else action
+            tool_name = g.constraints.get("tool_name", g.action)
+            summaries.append(GrantSummary(
+                grant_id=gid,
+                tool_name=tool_name,
+                selector=g.selector,
+                source=g.source,
+                expires_at=g.valid_until,
+            ))
             if g.valid_until > 0:
                 remaining = g.valid_until - now
                 if remaining > 0:
                     if next_expiry_secs == 0.0 or remaining < next_expiry_secs:
                         next_expiry_secs = remaining
-        return GrantsSnapshot(active_count=active, next_expiry_secs=next_expiry_secs)
+        return GrantsSnapshot(
+            active_count=active,
+            next_expiry_secs=next_expiry_secs,
+            grants=summaries,
+        )
 
     @staticmethod
     def _format_scope_panel(call: ToolCall) -> str:

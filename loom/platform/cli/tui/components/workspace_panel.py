@@ -15,6 +15,7 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
+from loom.platform.cli.tui.events import GrantInfo
 from .artifact_card import ArtifactState
 from .artifacts_panel import ArtifactsPanel
 from .swarm_dashboard import SwarmDashboard, ActivityEntry  # backward compat
@@ -100,9 +101,12 @@ class WorkspacePanel(Widget):
         self._update_visibility()
         self._render_header()
 
-    def watch_active_tab(self, _: WorkspaceTab) -> None:
+    def watch_active_tab(self, tab: WorkspaceTab) -> None:
         self._update_visibility()
         self._render_header()
+        # Auto-focus ExecutionDashboard so key_* handlers work (#113)
+        if tab == WorkspaceTab.EXECUTION and self._execution_panel is not None:
+            self._execution_panel.focus()
 
     # ── Tab switching ─────────────────────────────────────────────────────────
 
@@ -178,6 +182,12 @@ class WorkspacePanel(Widget):
             self._budget_panel.update_budget(
                 fraction, used_tokens, max_tokens, input_tokens, output_tokens
             )
+
+    def update_grants(
+        self, active: int, next_expiry_secs: float, grants: list[GrantInfo] | None
+    ) -> None:
+        if self._budget_panel:
+            self._budget_panel.update_grants(active, next_expiry_secs, grants)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

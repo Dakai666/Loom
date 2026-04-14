@@ -485,6 +485,7 @@ class LoomChatApp:
             EnvelopeUpdated as TuiEnvelopeUpdated,
             EnvelopeCompleted as TuiEnvelopeCompleted,
             GrantsUpdate as TuiGrantsUpdate,
+            GrantInfo as TuiGrantInfo,
         )
         from loom.platform.cli.ui import (
             TextChunk,
@@ -753,10 +754,21 @@ class LoomChatApp:
                                 TuiEnvelopeCompleted(envelope=ev.envelope)
                             )
                         elif isinstance(ev, GrantsSnapshot):
+                            tui_grants = [
+                                TuiGrantInfo(
+                                    grant_id=g.grant_id,
+                                    tool_name=g.tool_name,
+                                    selector=g.selector,
+                                    source=g.source,
+                                    expires_at=g.expires_at,
+                                )
+                                for g in ev.grants
+                            ]
                             await self.dispatch_stream_event(
                                 TuiGrantsUpdate(
                                     active_count=ev.active_count,
                                     next_expiry_secs=ev.next_expiry_secs,
+                                    grants=tui_grants,
                                 )
                             )
                 except asyncio.CancelledError:
