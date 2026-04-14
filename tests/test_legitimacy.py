@@ -2,8 +2,9 @@ import asyncio
 import pytest
 
 from loom.core.harness.middleware import (
-    ToolCall, ToolResult, MiddlewarePipeline, BlastRadiusMiddleware, LegitimacyGuardMiddleware, ToolHandler
+    ToolCall, ToolResult, MiddlewarePipeline, BlastRadiusMiddleware, LegitimacyGuardMiddleware, ToolHandler,
 )
+from loom.core.harness.permissions import ToolCapability
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.scope import ConfirmDecision
 from loom.core.harness.registry import ToolRegistry, ToolDefinition
@@ -27,16 +28,17 @@ def handler():
         return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True)
     return mock_handler
 
-def make_call(name: str, trust: TrustLevel) -> ToolCall:
-    call = ToolCall(tool_name=name, args={}, trust_level=trust, session_id="test")
-    # minimal lifecycle ctx
-    record = ActionRecord(call=call, intent=ActionIntent(intent_summary=name))
-    ctx = LifecycleContext(record=record)
-    call.metadata[LIFECYCLE_CTX_KEY] = ctx
-    return call
-
-def make_call_with_args(name: str, trust: TrustLevel, args: dict) -> ToolCall:
-    call = ToolCall(tool_name=name, args=args, trust_level=trust, session_id="test")
+def make_call(
+    name: str,
+    trust: TrustLevel,
+    args: dict | None = None,
+    *,
+    capabilities: ToolCapability = ToolCapability.NONE,
+) -> ToolCall:
+    call = ToolCall(
+        tool_name=name, args=args or {}, trust_level=trust,
+        session_id="test", capabilities=capabilities,
+    )
     record = ActionRecord(call=call, intent=ActionIntent(intent_summary=name))
     ctx = LifecycleContext(record=record)
     call.metadata[LIFECYCLE_CTX_KEY] = ctx
@@ -47,7 +49,7 @@ def make_call_with_args(name: str, trust: TrustLevel, args: dict) -> ToolCall:
 async def test_write_file_blocked_without_probe(handler):
     """write_file is blocked when no read_file / list_dir has been called this turn."""
     guard = LegitimacyGuardMiddleware()
-    call_write = make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": ""})
+    call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": ""})
     res = await guard.process(call_write, handler)
     assert not res.success
     assert res.failure_type == "permission_denied"
@@ -59,12 +61,11 @@ async def test_write_file_blocked_without_probe(handler):
 async def test_write_file_allowed_after_read(handler):
     """write_file passes after any probe tool runs (has_probed=True)."""
     guard = LegitimacyGuardMiddleware()
-    call_read = make_call_with_args("read_file", TrustLevel.SAFE, {"path": "foo.py"})
+    call_read = make_call("read_file", TrustLevel.SAFE, {"path": "foo.py"})
     await guard.process(call_read, handler)
     assert guard.has_probed
-    assert "foo.py" in guard._read_paths
 
-    call_write = make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": ""})
+    call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": ""})
     res = await guard.process(call_write, handler)
     assert res.success
 
@@ -80,20 +81,19 @@ async def test_run_bash_not_guarded_by_probe(handler):
 
 
 @pytest.mark.asyncio
-async def test_read_paths_cleared_on_reset(handler):
-    """reset_probe() clears _read_paths and has_probed; session trust survives."""
+async def test_reset_clears_probe_preserves_trust(handler):
+    """reset_probe() clears has_probed; session trust survives."""
     guard = LegitimacyGuardMiddleware()
-    await guard.process(make_call_with_args("read_file", TrustLevel.SAFE, {"path": "a.py"}), handler)
+    await guard.process(make_call("read_file", TrustLevel.SAFE, {"path": "a.py"}), handler)
     # First write succeeds → session-trusted
-    await guard.process(make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "a.py", "content": ""}), handler)
+    await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "a.py", "content": ""}), handler)
     assert "write_file" in guard._session_trusted
 
     guard.reset_probe()
     assert not guard.has_probed
-    assert not guard._read_paths  # per-turn paths cleared
 
     # write_file session-trusted → still passes without re-probe
-    res = await guard.process(make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "b.py", "content": ""}), handler)
+    res = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "b.py", "content": ""}), handler)
     assert res.success, "session-trusted write_file must not require re-probe"
 
 
@@ -103,8 +103,8 @@ async def test_session_trust_skips_probe_on_subsequent_turns(handler):
     guard = LegitimacyGuardMiddleware()
 
     # Turn 1: probe + write → session-trusted
-    await guard.process(make_call_with_args("read_file", TrustLevel.SAFE, {"path": "x.md"}), handler)
-    res = await guard.process(make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "x.md", "content": ""}), handler)
+    await guard.process(make_call("read_file", TrustLevel.SAFE, {"path": "x.md"}), handler)
+    res = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "x.md", "content": ""}), handler)
     assert res.success
     assert "write_file" in guard._session_trusted
 
@@ -113,8 +113,40 @@ async def test_session_trust_skips_probe_on_subsequent_turns(handler):
     assert not guard.has_probed
 
     # Turn 2: no probe, but session-trusted → passes
-    res2 = await guard.process(make_call_with_args("write_file", TrustLevel.GUARDED, {"path": "y.md", "content": ""}), handler)
+    res2 = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "y.md", "content": ""}), handler)
     assert res2.success, "session-trusted write_file must not require re-probe on new turn"
+
+
+@pytest.mark.asyncio
+async def test_trajectory_anomaly_flagged_for_exec_without_probe(handler):
+    """Layer 2: EXEC tool without prior probe gets trajectory_anomaly flag."""
+    guard = LegitimacyGuardMiddleware()
+    call_bash = make_call(
+        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
+        capabilities=ToolCapability.EXEC,
+    )
+    res = await guard.process(call_bash, handler)
+    assert res.success, "run_bash must not be hard-blocked"
+    assert call_bash.metadata.get("trajectory_anomaly") is True
+
+
+@pytest.mark.asyncio
+async def test_trajectory_anomaly_not_set_after_probe(handler):
+    """Layer 2: EXEC tool after probe should NOT get trajectory_anomaly flag."""
+    guard = LegitimacyGuardMiddleware()
+
+    # Probe first
+    await guard.process(make_call("list_dir", TrustLevel.SAFE, {"path": "."}), handler)
+    assert guard.has_probed
+
+    # Now run_bash — should pass without anomaly flag
+    call_bash = make_call(
+        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
+        capabilities=ToolCapability.EXEC,
+    )
+    res = await guard.process(call_bash, handler)
+    assert res.success
+    assert "trajectory_anomaly" not in call_bash.metadata
 
 
 @pytest.mark.asyncio

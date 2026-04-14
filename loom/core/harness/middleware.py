@@ -178,35 +178,39 @@ class TraceMiddleware(Middleware):
 
 class LegitimacyGuardMiddleware(Middleware):
     """
-    Read-before-Write guard (Issue #47 Phase 3, refined Issue #118).
+    Read-before-Write guard + Trajectory Anomaly detection
+    (Issue #47 Phase 3, refined Issue #118).
 
-    Scope: ``write_file`` only.  The rule mirrors Claude Code's Read-before-Edit
-    contract — the agent must call ``read_file`` (or a directory probe) on the
-    target path before writing to it.  This prevents hallucinated overwrites.
+    **Layer 1 — Hard guard (strict_guard_tools, currently write_file only)**
 
-    ``run_bash`` and MCP tools are intentionally excluded: exec authorization
-    belongs to ``BlastRadiusMiddleware`` (EXEC capability + exec_auto grants),
-    and MCP generative tools (text_to_image, text_to_audio, …) have no local
-    file path to pre-read.
+    Mirrors Claude Code's Read-before-Edit contract: the agent must call a
+    probe tool (``read_file``, ``list_dir``, etc.) before writing.  This
+    prevents hallucinated overwrites of files the agent has never seen.
 
-    Per-path tracking (Issue #118):
-        ``_read_paths`` records every ``read_file`` path argument this turn.
-        ``write_file(path=X)`` passes if X was read this turn, OR if any probe
-        tool ran (``has_probed`` — covers list_dir, web_search, etc. for new-file
-        creation where there is nothing to pre-read).
+    ``run_bash`` and MCP tools are intentionally excluded from hard-guard:
+    exec authorization belongs to ``BlastRadiusMiddleware``.
 
-    Session-trust (Issue #118):
-        Once a strict-guard tool executes successfully, it is added to
-        ``_session_trusted``.  Future turns skip the probe requirement for that
-        tool — the human already reviewed and approved it in this session.
+    **Layer 2 — Soft guard (Trajectory Anomaly, Issue #118)**
 
-    ``reset_probe()`` resets per-turn state (``has_probed``, ``_read_paths``)
-    but intentionally leaves ``_session_trusted`` intact.
+    When the agent calls a tool with ``EXEC`` capability (e.g. ``run_bash``)
+    and has *not* probed this turn, ``call.metadata["trajectory_anomaly"]``
+    is set to ``True``.  ``BlastRadiusMiddleware._exec_auto_approved()``
+    reads this flag and **downgrades** exec_auto pre-authorization to
+    require human confirmation.  This is a *soft* guard: the call is not
+    blocked, just stripped of its fast-pass.
+
+    **Session-trust (Issue #118)**
+
+    Once a strict-guard tool executes successfully, it is added to
+    ``_session_trusted``.  Future turns skip the probe requirement for
+    that tool — the human already reviewed and approved it.
+
+    ``reset_probe()`` resets per-turn state (``has_probed``) but
+    intentionally leaves ``_session_trusted`` intact.
     """
 
     def __init__(self) -> None:
         self.has_probed: bool = False
-        self._read_paths: set[str] = set()
         self.probe_tools = frozenset({
             "list_dir", "read_file", "search_files", "grep_search",
             "fetch_url_tool", "web_search", "recall_memory", "query_relations"
@@ -223,15 +227,10 @@ class LegitimacyGuardMiddleware(Middleware):
     def reset_probe(self) -> None:
         """Reset per-turn probe state. Does NOT clear session-level trust."""
         self.has_probed = False
-        self._read_paths.clear()
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         if call.tool_name in self.probe_tools:
             self.has_probed = True
-            if call.tool_name == "read_file":
-                path = call.args.get("path", "")
-                if path:
-                    self._read_paths.add(path)
 
         # TODO(#xx): Phase 4 - Goal Drift / Re-justification budget.
         # Enforce re-justification for guarded actions after N steps without human interaction.
@@ -242,10 +241,11 @@ class LegitimacyGuardMiddleware(Middleware):
         if is_strict and call.tool_name in self._session_trusted:
             return await next(call)
 
+        # --- Layer 1: Hard guard (write_file) ---
         if is_strict and not self.has_probed:
             target = call.args.get("path", "")
             error_msg = (
-                f"LEGITIMACY GUARD: Blocked `write_file`"
+                f"LEGITIMACY GUARD: Blocked `{call.tool_name}`"
                 + (f" → '{target}'" if target else "")
                 + ". You must read the target file (or list its directory) before "
                 "writing. Call read_file or list_dir first to establish context — "
@@ -265,6 +265,13 @@ class LegitimacyGuardMiddleware(Middleware):
                 error=error_msg,
                 failure_type="permission_denied"
             )
+
+        # --- Layer 2: Trajectory Anomaly (soft guard for EXEC tools) ---
+        # When EXEC tools run without any prior probe this turn, flag the call
+        # so BlastRadiusMiddleware can downgrade exec_auto to require confirm.
+        if not is_strict and not self.has_probed:
+            if call.capabilities & ToolCapability.EXEC:
+                call.metadata["trajectory_anomaly"] = True
 
         result = await next(call)
 
@@ -325,6 +332,8 @@ class BlastRadiusMiddleware(Middleware):
         2. The tool has EXEC capability (currently: run_bash).
         3. Either no escape-detector is wired, OR the command does not escape
            the workspace via absolute paths.
+        4. No trajectory anomaly flagged by LegitimacyGuardMiddleware
+           (Issue #118 Layer 2 — agent must have probed this turn).
         """
         if not self._perm.exec_auto:
             return False
@@ -332,6 +341,8 @@ class BlastRadiusMiddleware(Middleware):
             return False
         if self._exec_escape_fn is not None and self._exec_escape_fn(call):
             return False   # escape detected — fall through to confirmation
+        if call.metadata.get("trajectory_anomaly"):
+            return False   # no probe this turn — downgrade to confirmation
         return True
 
     # Origins where no human is available to answer confirmation prompts.
