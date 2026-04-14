@@ -300,7 +300,7 @@ class ExecutionDashboard(VerticalScroll):
         else:
             # ↓ = move towards older = decrease index in original list.
             if self._history_selected > 0:
-                self._history_selected += 1
+                self._history_selected -= 1
 
     def _history_enter(self) -> None:
         if self._history_detail_view is not None:

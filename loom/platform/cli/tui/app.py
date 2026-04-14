@@ -31,7 +31,6 @@ from .components import (
     MessageList,
     ToolBlock,
     AgentState,
-    StatusBar,
     InputArea,
     ObservabilityPanel,
     WorkspacePanel,
@@ -101,7 +100,7 @@ class LoomApp(App):
             InputArea        (4 rows)
           WorkspacePanel     (25%)
         ObservabilityPanel   (dock bottom, hidden by default)
-        StatusBar            (dock bottom, 1 row)
+        ObservabilityPanel   (dock bottom, hidden by default)
 
     Bindings:
         Escape:  interrupt current generation
@@ -190,12 +189,7 @@ class LoomApp(App):
         height: 2;
     }
 
-    #status-bar {
-        dock: bottom;
-        height: 1;
-        background: #1c1814;
-        border-top: solid #4a4038;
-    }
+
 
     /* MessageBubble spacing */
     MessageBubble {
@@ -287,7 +281,6 @@ class LoomApp(App):
                 yield InputArea(id="input-area")
             yield WorkspacePanel(id="workspace-panel")
         yield ObservabilityPanel(id="obs-panel")
-        yield StatusBar(id="status-bar")
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -363,10 +356,8 @@ class LoomApp(App):
         msg_list.add_message(Role.USER, event.user_input)
 
         tool_block = self.query_one("#tool-block", ToolBlock)
+        tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.start_turn()
-
-        status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.update(fraction=event.context_pct)
 
     def _on_text_chunk(self, event: TextChunk) -> None:
         msg_list = self.query_one("#message-list", MessageList)
@@ -453,11 +444,11 @@ class LoomApp(App):
         workspace.on_envelope_completed(event.envelope)
 
     def _on_grants_update(self, event: GrantsUpdate) -> None:
-        status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.update_grants(
+        workspace = self.query_one("#workspace-panel", WorkspacePanel)
+        workspace.update_grants(
             event.active_count,
             event.next_expiry_secs,
-            grants=event.grants,
+            event.grants,
         )
 
     async def _on_turn_paused(self, event: TurnPaused) -> None:
@@ -491,18 +482,7 @@ class LoomApp(App):
         if event.think_text:
             msg_list.set_last_think(event.think_text)
 
-        tool_block = self.query_one("#tool-block", ToolBlock)
-        status_bar = self.query_one("#status-bar", StatusBar)
-
         tool_block.end_turn()
-
-        status_bar.update(
-            fraction=event.context_pct,
-            input_tokens=event.input_tokens,
-            output_tokens=event.output_tokens,
-            elapsed_ms=event.elapsed_ms,
-            tool_count=event.tool_count,
-        )
 
         # Update Budget panel
         if event.max_tokens > 0:
@@ -531,10 +511,6 @@ class LoomApp(App):
         tool_block.clear()
 
     def _on_budget_update(self, event: BudgetUpdate) -> None:
-        status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.context_fraction = event.fraction
-        status_bar.input_tokens = event.input_tokens
-        status_bar.output_tokens = event.output_tokens
 
         if event.max_tokens > 0:
             workspace = self.query_one("#workspace-panel", WorkspacePanel)

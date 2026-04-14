@@ -15,6 +15,7 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
+from loom.platform.cli.tui.events import GrantInfo
 from .artifact_card import ArtifactState
 from .artifacts_panel import ArtifactsPanel
 from .swarm_dashboard import SwarmDashboard, ActivityEntry  # backward compat
@@ -181,6 +182,12 @@ class WorkspacePanel(Widget):
             self._budget_panel.update_budget(
                 fraction, used_tokens, max_tokens, input_tokens, output_tokens
             )
+
+    def update_grants(
+        self, active: int, next_expiry_secs: float, grants: list[GrantInfo] | None
+    ) -> None:
+        if self._budget_panel:
+            self._budget_panel.update_grants(active, next_expiry_secs, grants)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
