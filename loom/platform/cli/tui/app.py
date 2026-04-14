@@ -482,6 +482,7 @@ class LoomApp(App):
         if event.think_text:
             msg_list.set_last_think(event.think_text)
 
+        tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.end_turn()
 
         # Update Budget panel
