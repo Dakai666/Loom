@@ -1,10 +1,10 @@
 # Loom — Agent Framework
 
 <p align="center">
-  <img src="loom_ai_logo_1775371242275.png" alt="Loom AI" width="320"/>
+  <img src="loom_ai_logo.png" alt="Loom AI" width="320"/>
 </p>
 
-> *The loom is what the harness belongs to. Claude is one thread; Loom is the machine that weaves any thread into the same quality fabric.*
+> *A single thread may seem insignificant, but when many threads are precisely interwoven, they can be woven into any shape.*
 
 **Loom** is a harness-first, memory-native, self-directing agent framework for anyone who cares not just about what an agent *can* do — but about what it *did*, who approved it, and what happens when it goes wrong.
 
