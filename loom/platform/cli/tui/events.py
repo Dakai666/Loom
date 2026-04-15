@@ -72,6 +72,7 @@ class TurnDone(StreamEvent):
     used_tokens: int = 0    # absolute tokens used this turn
     max_tokens: int = 0     # model context window size
     think_text: str = ""    # full <think>…</think> content, if any
+    stop_reason: str = "complete"  # "complete" | "cancelled" | "circuit_breaker"
 
 
 @dataclass

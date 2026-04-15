@@ -874,6 +874,15 @@ class LoomSession:
         """
         self._current_origin = origin
 
+        # Issue #131: Reset abort signal from previous turn so the session
+        # is not permanently stuck after a circuit-breaker trip.
+        self._abort.reset()
+        self._cancel_requested = False
+
+        # Issue #131: Reset per-turn deny counter so timeouts from a previous
+        # turn don't carry over and immediately trip the circuit breaker.
+        self.perm.recent_denies = 0
+
         if hasattr(self, "_legitimacy_guard"):
             self._legitimacy_guard.reset_probe()
 
@@ -923,12 +932,14 @@ class LoomSession:
 
         _stream_retry = 0         # counts back-to-back stream_none retries
         _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
+        _stop_reason = "complete"  # tracks why the loop exits
         while True:
             # Check abort signal at top of each LLM call iteration.
             # abort_signal is external (e.g. from AutonomyDaemon);
             # self._abort.signal is internal (from cancel()).
             sig = abort_signal if abort_signal is not None else self._abort.signal
             if sig.is_set():
+                _stop_reason = "cancelled"
                 break
             response: Any = None
             _think_shown = False  # reset per streaming call (each tool round can think again)
@@ -1315,6 +1326,7 @@ class LoomSession:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             elapsed_ms=(time.monotonic() - t0) * 1000,
+            stop_reason=_stop_reason,
         )
 
     # ------------------------------------------------------------------

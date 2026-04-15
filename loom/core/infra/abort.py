@@ -67,6 +67,10 @@ class AbortController:
         """Signal cancellation to all waiting tasks."""
         self._cancelled.set()
 
+    def reset(self) -> None:
+        """Clear the abort signal so the controller can be reused for a new turn."""
+        self._cancelled.clear()
+
     @property
     def aborted(self) -> bool:
         """Return True if abort() has been called."""
