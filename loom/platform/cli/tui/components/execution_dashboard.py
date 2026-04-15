@@ -32,8 +32,13 @@ def markup_escape(text: str) -> str:
     ``rich.markup.escape`` skips brackets whose content doesn't look like
     a tag name (e.g. ``[2026-04-14]``).  Textual 8.x's ``visualize()``
     is stricter and may mis-parse these as tags, causing MarkupError.
+
+    Also strips newlines — Textual 8.x's ``expect_markup_expression`` state
+    (entered after a ``key=`` token) does not allow bare ``/`` or newlines,
+    so any ``\n`` embedded inside a markup span can trigger
+    ``MarkupError: Expected markup value (found '/dim]\n')``.
     """
-    return text.replace("[", "\\[")
+    return text.replace("[", "\\[").replace("\n", " ").replace("\r", " ")
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.message import Message
@@ -329,13 +334,20 @@ class ExecutionDashboard(VerticalScroll):
 
     @staticmethod
     def _safe_update(widget: "Static", content: str) -> None:
-        """Update a Static widget; on MarkupError strip all tags and retry."""
+        """Update a Static widget, eagerly validating markup before the call.
+
+        Textual lazily computes ``Content.from_markup`` during layout rather
+        than inside ``Static.update()``, so a try/except around ``update()``
+        never fires.  We pre-validate here so bad markup falls back to plain
+        text *before* the content is stored on the widget.
+        """
+        import re
+        from textual.content import Content
         try:
-            widget.update(content)
+            Content.from_markup(content)
         except Exception:
-            import re
-            plain = re.sub(r"\[/?[^\]]*\]", "", content)
-            widget.update(plain)
+            content = re.sub(r"\[/?[^\]]*\]", "", content)
+        widget.update(content)
 
     def _refresh_display(self) -> None:
         from textual.css.query import NoMatches
