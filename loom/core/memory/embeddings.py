@@ -10,8 +10,8 @@ Usage
     vectors = await provider.embed(["Loom is a harness-first framework"])
     # → [[0.023, -0.14, ...]]   (1536-dim float list per text)
 
-The MiniMax embedding endpoint is OpenAI-compatible, so we reuse
-AsyncOpenAI from the existing provider dependency.
+The MiniMax embedding endpoint uses a non-OpenAI format (``texts``/``vectors``
+instead of ``input``/``data``), so we use httpx directly.
 """
 
 from __future__ import annotations
@@ -41,32 +41,65 @@ class EmbeddingProvider(ABC):
 
 class MiniMaxEmbeddingProvider(EmbeddingProvider):
     """
-    MiniMax embedding API via the OpenAI-compatible endpoint.
+    MiniMax embedding API via direct HTTP calls.
 
     Model ``embo-01`` produces 1536-dimensional vectors.
-    The same API key and base URL used for chat completions works here.
 
-    Note: Each call to ``embed()`` issues one API request.  For batch
-    writes (e.g. compressing 7 facts at session end) the caller should
-    pass all texts in a single call rather than looping.
+    Note: The MiniMax embedding endpoint is NOT OpenAI-compatible — it uses
+    ``texts`` (not ``input``) in the request and returns ``vectors`` (not
+    ``data[i].embedding``) in the response.  We use httpx directly instead
+    of the OpenAI SDK to avoid the "No embedding data received" ValueError.
+
+    Each call to ``embed()`` issues one API request.  For batch writes
+    (e.g. compressing 7 facts at session end) pass all texts in a single
+    call rather than looping.
     """
 
     EMBEDDING_MODEL = "embo-01"
     BASE_URL = "https://api.minimax.io/v1"
 
-    def __init__(self, api_key: str) -> None:
-        from openai import AsyncOpenAI
-        self._client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL)
+    def __init__(self, api_key: str, base_url: str | None = None) -> None:
+        import httpx
+        self._api_key = api_key
+        self._base_url = (base_url or self.BASE_URL).rstrip("/")
+        self._client = httpx.AsyncClient(
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        response = await self._client.embeddings.create(
-            model=self.EMBEDDING_MODEL,
-            input=texts,
+        response = await self._client.post(
+            f"{self._base_url}/embeddings",
+            json={
+                "model": self.EMBEDDING_MODEL,
+                "texts": texts,
+                "type": "query",
+            },
         )
-        # Response data is ordered by index, same order as input
-        return [item.embedding for item in response.data]
+        response.raise_for_status()
+        body = response.json()
+
+        base = body.get("base_resp", {})
+        status_code = base.get("status_code", 0)
+        if status_code and status_code != 0:
+            raise RuntimeError(
+                f"MiniMax embedding API error {status_code}: "
+                f"{base.get('status_msg', 'unknown error')}"
+            )
+
+        vectors = body.get("vectors")
+        if not vectors:
+            raise RuntimeError(
+                f"MiniMax embedding API returned no vectors "
+                f"(base_resp={base})"
+            )
+        # Response: {"vectors": [[float, ...], [float, ...]], ...}
+        return [v if isinstance(v, list) else v["embedding"] for v in vectors]
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -115,4 +148,12 @@ def build_embedding_provider(
             or env.get("MINIMAX_API_KEY")
             or ""
         )
-    return MiniMaxEmbeddingProvider(api_key=key) if key else None
+
+    if not key:
+        return None
+
+    # Allow overriding the base URL via [embeddings] base_url in loom.toml.
+    # MINIMAX_API_HOST / minimax.api_host are chat-endpoint aliases that lack
+    # the /v1 suffix, so we do NOT use them here — the class constant is correct.
+    base_url: str = embeddings_cfg.get("base_url") or MiniMaxEmbeddingProvider.BASE_URL
+    return MiniMaxEmbeddingProvider(api_key=key, base_url=base_url)
