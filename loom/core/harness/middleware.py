@@ -634,6 +634,12 @@ class BlastRadiusMiddleware(Middleware):
         self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
         call.metadata["confirm_decision"] = decision.value
 
+        # Legacy path: SCOPE/AUTO degrade to session-level grant (no scope_resolver).
+        # Set a flag so callers can detect this fallback without inspecting grant source.
+        from .scope import ConfirmDecision as _CD
+        if decision in (_CD.SCOPE, _CD.AUTO):
+            call.metadata["legacy_decision_fallback"] = True
+
         # Legacy path: create a ScopeGrant so the UI can display grant info
         # (#112). Without a scope_resolver the grant is tool-name-based.
         from .scope import ConfirmDecision as _CD, ScopeGrant

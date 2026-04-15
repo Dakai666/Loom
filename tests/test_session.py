@@ -112,7 +112,7 @@ async def session_plugin_tool(call):
 
         fake_client = SimpleNamespace(_cfg=SimpleNamespace(name="minimax"))
 
-        async def fake_load_mcp_servers_into_session(config, session):
+        async def fake_load_mcp_servers_into_session(config, session, extra_env=None):
             assert config["mcp"]["servers"][0]["name"] == "minimax"
             assert session is not None
             return [fake_client]
