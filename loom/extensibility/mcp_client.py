@@ -295,6 +295,8 @@ class LoomMCPClient:
                 # in a stale event-loop context; swallow the error silently.
                 pass
             self._session = None
+            self._read = None
+            self._write = None
 
     # ------------------------------------------------------------------
     # Internal

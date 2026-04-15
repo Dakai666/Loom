@@ -71,7 +71,16 @@ class ThinkIndicator(Static):
 
     def __init__(self, think_text: str, *, summary: str = "") -> None:
         if summary:
-            label = f"[dim]💭 {summary[:100]}{'…' if len(summary) > 100 else ''}[/dim]  [dim italic](click to expand)[/dim italic]"
+            # Strip newlines and escape brackets before embedding in Textual markup.
+            # Textual 8.x's markup parser fails on \n inside [dim]…[/dim] spans
+            # (MarkupError: Expected markup value (found '/dim]\n')).
+            safe = (
+                summary[:100]
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("[", "\\[")
+            )
+            label = f"[dim]💭 {safe}{'…' if len(summary) > 100 else ''}[/dim]  [dim italic](click to expand)[/dim italic]"
         else:
             label = "[dim]▸ thinking[/dim]  [dim italic](click to expand)[/dim italic]"
         super().__init__(label)

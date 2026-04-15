@@ -92,6 +92,21 @@ prefetch_enabled = false
 prefetch_top_n   = 3       # number of memory hits to inject (keep small)
 
 # ─────────────────────────────────────────────
+# Timezone  (Issue #124)
+# ─────────────────────────────────────────────
+
+[timezone]
+# user     — IANA timezone name for all timestamps injected into LLM prompts
+#            and user-facing messages (stream_turn, resume_with, sub-agent).
+#            Any IANA name is accepted, e.g. "Asia/Taipei", "America/New_York",
+#            "Europe/Berlin", "UTC".  Falls back to UTC if this key is absent.
+user     = "Asia/Taipei"
+
+# internal — timezone for system-level timestamps: cron scheduling, DB writes,
+#            and log entries.  Recommended to keep at "UTC" for portability.
+internal = "UTC"
+
+# ─────────────────────────────────────────────
 # Harness
 # ─────────────────────────────────────────────
 

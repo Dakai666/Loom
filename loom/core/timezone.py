@@ -12,8 +12,11 @@ Two clocks:
                       used for ALL timestamps that appear in LLM prompts
 
 The [timezone] section in loom.toml:
-  user = "Asia/Taipei"   # user-facing display / LLM context
+  user = "Asia/Taipei"   # user-facing display / LLM context (any IANA tz name)
   internal = "UTC"        # system timestamps (logging, DB, cron)
+
+If ``[timezone].user`` is absent, the framework falls back to UTC — never to
+a hardcoded regional timezone.
 
 All code that injects timestamps into messages going to the LLM MUST use
 ``local_now()`` — never ``datetime.now(UTC)`` directly.
@@ -33,6 +36,19 @@ from typing import Literal
 # Cache the resolved zoneinfos so repeated calls are cheap.
 _USER_ZONE: zoneinfo.ZoneInfo | None = None
 _INTERNAL_ZONE: zoneinfo.ZoneInfo = zoneinfo.ZoneInfo("UTC")
+
+
+def _ensure_user_zone() -> zoneinfo.ZoneInfo:
+    """Lazily resolve and cache the user timezone from loom.toml.
+
+    Falls back to UTC if ``[timezone].user`` is absent or unreadable —
+    never to a hardcoded regional timezone.
+    """
+    global _USER_ZONE
+    if _USER_ZONE is None:
+        cfg = _load_timezone_config()
+        _USER_ZONE = _zone(cfg.get("user", "UTC"))
+    return _USER_ZONE
 
 
 def _load_timezone_config() -> dict[str, str]:
@@ -91,27 +107,19 @@ def local_now() -> datetime:
 
     Falls back to UTC if ``[timezone].user`` is not configured.
     """
-    global _USER_ZONE
-    if _USER_ZONE is None:
-        cfg = _load_timezone_config()
-        _USER_ZONE = _zone(cfg.get("user", "Asia/Taipei"))
-    return datetime.now(_USER_ZONE)
+    return datetime.now(_ensure_user_zone())
 
 
 def local_zone_name() -> str:
     """Return the configured user timezone name (e.g. 'Asia/Taipei')."""
-    global _USER_ZONE
-    if _USER_ZONE is None:
-        cfg = _load_timezone_config()
-        _USER_ZONE = _zone(cfg.get("user", "Asia/Taipei"))
-    return str(_USER_ZONE.key)
+    return str(_ensure_user_zone().key)
 
 
 def user_timestamp() -> str:
     """
     Returns a formatted timestamp string for LLM prompts.
 
-    Format: ``[YYYY-MM-DD HH:MM Asia/Taipei]``
+    Format: ``[YYYY-MM-DD HH:MM <timezone>]``  (timezone from loom.toml)
 
     This is what gets prepended to user messages in ``stream_turn()``
     and to autonomy trigger notifications.
