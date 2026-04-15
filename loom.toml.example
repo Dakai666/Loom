@@ -281,12 +281,24 @@ enabled  = false           # set true to activate daemon
 # ─────────────────────────────────────────────
 # Embeddings
 # ─────────────────────────────────────────────
-# MiniMax embo-01 is the default embedding model.
-# By default MINIMAX_API_KEY is used for both chat and embeddings.
-# Set api_key_env to use a separate dedicated key for embeddings only.
-
-[embeddings]
-# api_key_env = "EMBEDDING_API_KEY"   # optional; falls back to MINIMAX_API_KEY
+# Embeddings
+# ─────────────────────────────────────────────
+# Two backends selected by the ``provider`` field:
+#   "ollama"   — local Ollama server (no API key required)
+#   "minimax"  — MiniMax cloud API (requires API key)
+#
+# OLLAMA example (recommended for local development):
+#   [embeddings]
+#   provider = "ollama"
+#   base_url = "http://localhost:11434"
+#   model    = "qwen3-embedding:0.6b"
+#
+# MINIMAX example:
+#   [embeddings]
+#   provider    = "minimax"
+#   api_key_env = "MINIMAX_API_KEY"
+#   base_url    = "https://api.minimax.io/v1"
+#   model       = "embo-01"
 
 [notify]
 default_channel = "cli"

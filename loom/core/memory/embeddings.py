@@ -4,20 +4,41 @@ Embedding Provider — vector representations for semantic memory search.
 Provides language-agnostic similarity search as the primary tier of the
 multi-fallback recall chain: embedding > BM25 > recency.
 
+Supports two backends controlled by loom.toml [embeddings] provider:
+  - "ollama"    → local Ollama server (no API key required)
+  - "minimax"   → MiniMax embedding API (API key required)
+
 Usage
 -----
-    provider = MiniMaxEmbeddingProvider(api_key="...")
-    vectors = await provider.embed(["Loom is a harness-first framework"])
-    # → [[0.023, -0.14, ...]]   (1536-dim float list per text)
+    from loom.core.memory.embeddings import build_embedding_provider
+    provider = build_embedding_provider(env, cfg)
+    if provider:
+        vectors = await provider.embed(["Loom is a harness-first framework"])
+        # → [[0.023, -0.14, ...]]
 
-The MiniMax embedding endpoint uses a non-OpenAI format (``texts``/``vectors``
-instead of ``input``/``data``), so we use httpx directly.
+loom.toml example:
+    [embeddings]
+    provider = "ollama"           # "ollama" or "minimax"
+    base_url = "http://localhost:11434"   # Ollama server
+    model    = "qwen3-embedding:0.6b"    # Ollama embedding model
+
+    # For MiniMax (requires API key):
+    # provider     = "minimax"
+    # api_key_env  = "MINIMAX_API_KEY"
+    # model       = "embo-01"
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingProvider(ABC):
@@ -39,6 +60,63 @@ class EmbeddingProvider(ABC):
         ...
 
 
+# ---------------------------------------------------------------------------
+# Ollama
+# ---------------------------------------------------------------------------
+
+class OllamaEmbeddingProvider(EmbeddingProvider):
+    """
+    Local Ollama server embedding API via ``POST /api/embed``.
+
+    Model ``qwen3-embedding:0.6b`` produces 512-dimensional vectors.
+
+    The Ollama ``/api/embed`` endpoint accepts:
+      - ``input``: a single string  OR
+      - ``input``: a list of strings (batch)
+      - ``model``: model name
+
+    Response:
+      ``{"model": "...", "embeddings": [[float, ...], ...], ...}``
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model: str = "qwen3-embedding:0.6b",
+    ) -> None:
+        import httpx
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._client = httpx.AsyncClient(timeout=60.0)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = await self._client.post(
+            f"{self._base_url}/api/embed",
+            json={
+                "model": self._model,
+                "input": texts,          # Ollama handles list batching natively
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        embeddings = body.get("embeddings")
+        if embeddings is None:
+            raise RuntimeError(
+                f"Ollama embedding API returned no embeddings "
+                f"(response={body})"
+            )
+        return embeddings
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# MiniMax
+# ---------------------------------------------------------------------------
+
 class MiniMaxEmbeddingProvider(EmbeddingProvider):
     """
     MiniMax embedding API via direct HTTP calls.
@@ -49,10 +127,6 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
     ``texts`` (not ``input``) in the request and returns ``vectors`` (not
     ``data[i].embedding``) in the response.  We use httpx directly instead
     of the OpenAI SDK to avoid the "No embedding data received" ValueError.
-
-    Each call to ``embed()`` issues one API request.  For batch writes
-    (e.g. compressing 7 facts at session end) pass all texts in a single
-    call rather than looping.
     """
 
     EMBEDDING_MODEL = "embo-01"
@@ -102,6 +176,10 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
         return [v if isinstance(v, list) else v["embedding"] for v in vectors]
 
 
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """
     Cosine similarity between two vectors (pure Python, no numpy).
@@ -117,43 +195,76 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
 def build_embedding_provider(
     env: dict[str, Any],
     cfg: dict[str, Any] | None = None,
-) -> MiniMaxEmbeddingProvider | None:
+) -> EmbeddingProvider | None:
     """
-    Construct a MiniMaxEmbeddingProvider from the loaded .env dict.
-    Returns None if no API key is found — callers must handle the None case
-    and fall through to BM25 search.
+    Construct an embedding provider from loom.toml [embeddings] configuration.
 
-    Configuration priority:
-    1. loom.toml [embeddings] api_key_env — name of the env var holding the key
-       (allows a dedicated embedding key separate from the chat API key)
-    2. MINIMAX_API_KEY / minimax.io_key  — shared fallback (default)
+    Provider selection (loom.toml [embeddings] provider field):
+        "ollama"   → OllamaEmbeddingProvider (no API key needed)
+                     Requires: base_url, model
+        "minimax"  → MiniMaxEmbeddingProvider (API key required)
+                     Requires: api_key_env (or MINIMAX_API_KEY env var)
 
-    Example loom.toml:
+    Returns None when:
+        - ``provider`` is not set in loom.toml
+        - "minimax" is selected but no API key is found
+        - the configured provider is unknown
+
+    Callers must handle the None case and fall through to BM25 search.
+
+    loom.toml example:
+
         [embeddings]
-        api_key_env = "EMBEDDING_API_KEY"   # optional dedicated key
+        provider  = "ollama"
+        base_url  = "http://localhost:11434"
+        model     = "qwen3-embedding:0.6b"
+
+        # For MiniMax instead:
+        # provider    = "minimax"
+        # api_key_env = "EMBEDDING_API_KEY"
+        # model       = "embo-01"
+        # base_url    = "https://api.minimax.io/v1"
     """
     cfg = cfg or {}
     embeddings_cfg = cfg.get("embeddings", {})
-    key_env_name: str = embeddings_cfg.get("api_key_env", "")
+    provider_name: str = embeddings_cfg.get("provider", "").lower()
 
-    if key_env_name:
-        import os
-        key = env.get(key_env_name) or os.environ.get(key_env_name, "")
-    else:
-        key = (
-            env.get("minimax.io_key")
-            or env.get("MINIMAX_API_KEY")
-            or ""
-        )
-
-    if not key:
+    if not provider_name:
         return None
 
-    # Allow overriding the base URL via [embeddings] base_url in loom.toml.
-    # MINIMAX_API_HOST / minimax.api_host are chat-endpoint aliases that lack
-    # the /v1 suffix, so we do NOT use them here — the class constant is correct.
-    base_url: str = embeddings_cfg.get("base_url") or MiniMaxEmbeddingProvider.BASE_URL
-    return MiniMaxEmbeddingProvider(api_key=key, base_url=base_url)
+    if provider_name == "ollama":
+        base_url = embeddings_cfg.get("base_url", "http://localhost:11434")
+        model = embeddings_cfg.get("model", "qwen3-embedding:0.6b")
+        return OllamaEmbeddingProvider(base_url=base_url, model=model)
+
+    if provider_name == "minimax":
+        import os
+        key_env_name = embeddings_cfg.get("api_key_env", "")
+        if key_env_name:
+            key = env.get(key_env_name) or os.environ.get(key_env_name, "")
+        else:
+            key = env.get("minimax.io_key") or env.get("MINIMAX_API_KEY") or ""
+
+        if not key:
+            logger.warning(
+                "[embeddings] provider='minimax' but no API key found; "
+                "embedding disabled."
+            )
+            return None
+
+        base_url = embeddings_cfg.get("base_url") or MiniMaxEmbeddingProvider.BASE_URL
+        return MiniMaxEmbeddingProvider(api_key=key, base_url=base_url)
+
+    logger.warning(
+        "[embeddings] unknown provider %r — embedding disabled. "
+        "Valid values: 'ollama', 'minimax'.",
+        provider_name,
+    )
+    return None
