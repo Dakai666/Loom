@@ -45,6 +45,7 @@ from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
+from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
     ActionRolledBack,
     ActionStateChange,
@@ -755,7 +756,7 @@ class LoomSession:
         The message is appended to self.messages as a user turn so the next
         LLM call will see it as context / a redirect.
         """
-        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        now_str = user_timestamp()
         self.messages.append({"role": "user", "content": f"[{now_str}]\n{message}"})
         asyncio.ensure_future(self._log_message("user", message))
         self.resume()
@@ -892,7 +893,10 @@ class LoomSession:
             for client in self._mcp_clients:
                 try:
                     await client.disconnect()
-                except Exception as exc:
+                except BaseException as exc:
+                    # BaseException: catch GeneratorExit + CancelledError too.
+                    # MCP stdio_client cleanup may race with event-loop shutdown;
+                    # these errors are safe to swallow at this stage.
                     logger.debug("MCP client disconnect error: %s", exc)
             self._mcp_clients = []
 
@@ -946,7 +950,7 @@ class LoomSession:
 
         # Prepend current datetime so the LLM always has temporal context.
         # The UI shows the original user_input; the history gets the annotated version.
-        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        now_str = user_timestamp()
         annotated = f"[{now_str}]\n{user_input}"
         self.messages.append({"role": "user", "content": annotated})
         asyncio.ensure_future(self._log_message("user", annotated))

@@ -91,6 +91,12 @@ async def run_subagent(
         # CRITICAL tools are always blocked in sub-agents
         if tool.trust_level == TrustLevel.CRITICAL:
             continue
+        # MCP tools (stdio_client subprocess) must be excluded — they are
+        # not safe to run in a sub-agent's event-loop context (Issue #124+,
+        # async generator cleanup race with stdio_client).
+        # See: "an error occurred during closing of async generator stdio_client"
+        if "mcp" in (tool.tags or []):
+            continue
         # If a whitelist is given, only include tools on it
         if config.allowed_tools is not None and tool.name not in config.allowed_tools:
             continue
@@ -174,7 +180,7 @@ async def run_subagent(
     ])
 
     # ── Build initial messages ────────────────────────────────────────────────
-    now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    now_str = user_timestamp()
     system_prompt = (
         f"You are a sub-agent (id: {agent_id}) spawned by a parent agent.\n"
         f"Your workspace is: {workspace}\n"
