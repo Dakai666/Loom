@@ -718,6 +718,7 @@ class LoomChatApp:
                                     used_tokens=budget.used_tokens,
                                     max_tokens=budget.total_tokens,
                                     think_text=self._session._last_think,
+                                    stop_reason=ev.stop_reason,
                                 )
                             )
                         elif isinstance(ev, ActionStateChange):

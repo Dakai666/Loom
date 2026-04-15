@@ -46,7 +46,7 @@ Confirm flow
 ------------
 BlastRadiusMiddleware.confirm_fn is patched to send a four-button message
 (Allow / Lease / Auto / Deny) in the thread and await the button interaction
-(60s timeout → deny).  Lease and Auto decisions post a follow-up message
+(180s timeout → deny).  Lease and Auto decisions post a follow-up message
 showing the TTL or grant scope.
 """
 
@@ -92,7 +92,7 @@ if TYPE_CHECKING:
 class _ConfirmView(View):
     """Discord UI view with Allow / Lease / Auto / Deny buttons for tool confirmation."""
 
-    def __init__(self, timeout: float = 60.0) -> None:
+    def __init__(self, timeout: float = 180.0) -> None:
         super().__init__(timeout=timeout)
         self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
@@ -914,7 +914,12 @@ class LoomDiscordBot:
                         pass  # too granular for Discord display
 
                     elif isinstance(event, TurnDone):
-                        pass  # summary handled after the loop
+                        if event.stop_reason == "cancelled":
+                            await message.channel.send(
+                                "⚠️ **Turn aborted** — too many denied authorizations. "
+                                "Your session is still active; send a new message to continue."
+                            )
+                        # summary handled after the loop
 
             except asyncio.CancelledError:
                 # Cleanup any pending confirmation buttons in this thread immediately
@@ -1035,7 +1040,7 @@ class LoomDiscordBot:
             )[:120]
             trust = call.trust_level.plain
             color = "🟡" if trust == "GUARDED" else "🔴"
-            view = _ConfirmView(timeout=60.0)
+            view = _ConfirmView(timeout=180.0)
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
 
@@ -1044,7 +1049,7 @@ class LoomDiscordBot:
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"{just_text}"
-                f"*Timeout 60s → auto-deny*",
+                f"*Timeout 3min → auto-deny*",
                 view=view,
             )
             self._active_confirmations[thread_id] = msg
