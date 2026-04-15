@@ -1049,7 +1049,7 @@ class LoomDiscordBot:
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"{just_text}"
-                f"*Timeout 60s → auto-deny*",
+                f"*Timeout 3min → auto-deny*",
                 view=view,
             )
             self._active_confirmations[thread_id] = msg

@@ -69,7 +69,7 @@ class TurnDone:
     input_tokens: int
     output_tokens: int
     elapsed_ms: float
-    stop_reason: str = "complete"  # "complete" | "cancelled" | "circuit_breaker"
+    stop_reason: str = "complete"  # "complete" | "cancelled"
 
 
 @dataclass
