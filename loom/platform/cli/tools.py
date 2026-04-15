@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
+    from loom.core.memory.governance import MemoryGovernor
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
@@ -732,6 +733,43 @@ def make_memorize_tool(
         tags=["memory", "write", "memorize"],
         impact_scope="memory",
         rollback_fn=_memorize_rollback,
+    )
+
+
+def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
+    """
+    Create a SAFE ``memory_health`` tool for agent self-diagnosis.
+
+    Returns the current and recent-historical health status of all
+    memory subsystems so the agent can detect and report issues.
+    """
+    async def _memory_health(call: ToolCall) -> ToolResult:
+        report = governor.health.report()
+        summary = report.render_summary()
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.tool_name,
+            success=True,
+            output=summary,
+        )
+
+    return ToolDefinition(
+        name="memory_health",
+        description=(
+            "Check the health of your memory subsystems. Shows success/failure "
+            "rates for embedding writes, semantic search, session compression, "
+            "and other memory operations. Use this to self-diagnose when you "
+            "suspect memory issues, or periodically to ensure memories are "
+            "being saved correctly."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        executor=_memory_health,
+        tags=["memory", "health", "diagnostic"],
+        impact_scope="memory",
     )
 
 

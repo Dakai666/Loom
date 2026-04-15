@@ -28,6 +28,7 @@ from loom.core.memory.contradiction import (
     ContradictionDetector,
     Resolution,
 )
+from loom.core.memory.health import MemoryHealthTracker
 from loom.core.memory.semantic import SemanticEntry, classify_source
 
 if TYPE_CHECKING:
@@ -112,6 +113,7 @@ class MemoryGovernor:
         episodic: EpisodicMemory,
         db: aiosqlite.Connection,
         config: dict | None = None,
+        session_id: str = "unknown",
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
@@ -126,6 +128,9 @@ class MemoryGovernor:
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
         self._relational_decay_factor: float = cfg.get("relational_decay_factor", 1.5)
         self._governance_log_write_warning_emitted = False
+
+        # Issue #133: memory health tracking for agent self-observability
+        self.health = MemoryHealthTracker(db, session_id=session_id)
 
     # ------------------------------------------------------------------
     # 1. Governed upsert
@@ -402,7 +407,11 @@ class MemoryGovernor:
                 decayed = confidence * math.pow(2.0, -days / effective_half_life)
                 if decayed < self._semantic_decay_threshold:
                     to_prune.append(row_id)
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Relational decay: skipping row %s (parse error): %s",
+                    row_id, exc,
+                )
                 continue
 
         if to_prune:

@@ -8,11 +8,14 @@ Each fact has a confidence score and can be updated or queried by key.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 import aiosqlite
 
@@ -122,6 +125,7 @@ class SemanticMemory:
     ) -> None:
         self._db = db
         self._embeddings = embedding_provider
+        self._health: Any = None  # Optional MemoryHealthTracker, set post-init
 
     @property
     def has_embeddings(self) -> bool:
@@ -138,7 +142,8 @@ class SemanticMemory:
 
         If an embedding provider is configured, computes and persists the
         vector for this entry after the upsert.  Embedding failures are
-        silently swallowed so a network error never blocks a memory write.
+        logged and the entry's metadata is marked with
+        ``embedding_status: "failed"`` so orphaned entries are auditable.
         """
         now = datetime.now(UTC).isoformat()
 
@@ -193,8 +198,31 @@ class SemanticMemory:
                         (json.dumps(vectors[0]), entry.key),
                     )
                     await self._db.commit()
-            except Exception:
-                pass  # Embedding failure must never block the memory write
+            except Exception as exc:
+                logger.warning(
+                    "Embedding write failed for key=%r — memory saved "
+                    "but semantic search will miss it: %s",
+                    entry.key, exc,
+                )
+                if self._health:
+                    self._health.record_failure("embedding_write", str(exc))
+                # Mark the entry so we can audit orphaned embeddings later
+                try:
+                    meta = dict(entry.metadata)
+                    meta["embedding_status"] = "failed"
+                    await self._db.execute(
+                        "UPDATE semantic_entries SET metadata = ? WHERE key = ?",
+                        (json.dumps(meta, ensure_ascii=False), entry.key),
+                    )
+                    await self._db.commit()
+                except Exception as ann_exc:
+                    logger.debug(
+                        "Failed to annotate embedding_status for key=%r: %s",
+                        entry.key, ann_exc,
+                    )
+            else:
+                if self._health:
+                    self._health.record_success("embedding_write")
 
         return conflicted
 

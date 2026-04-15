@@ -15,9 +15,12 @@ Design principles:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, UTC
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import aiosqlite
 
@@ -55,8 +58,8 @@ def _redact_secrets(text: str | None) -> str | None:
     try:
         for pattern, replacement in _SECRET_PATTERNS:
             text = pattern.sub(replacement, text)
-    except Exception:
-        pass  # redaction must never crash the agent
+    except Exception as exc:
+        logger.debug("Secret redaction regex failed: %s", exc)
     return text
 
 
@@ -65,6 +68,7 @@ class SessionLog:
 
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
+        self._health: Any = None  # Optional MemoryHealthTracker, set post-init
 
     # ------------------------------------------------------------------
     # Write path
@@ -124,8 +128,10 @@ class SessionLog:
                 ),
             )
             await self._db.commit()
-        except Exception:
-            pass  # logging must never crash the agent
+        except Exception as exc:
+            logger.warning("Session log write failed (turn=%d): %s", turn_index, exc)
+            if self._health:
+                self._health.record_failure("session_log_write", str(exc))
 
     async def update_session(
         self,
@@ -263,8 +269,8 @@ class SessionLog:
                 try:
                     result.append(json.loads(raw_json))
                     continue
-                except Exception:
-                    pass  # fall through to legacy / plain-text path
+                except Exception as parse_exc:
+                    logger.debug("raw_json parse failed, falling back: %s", parse_exc)
 
             # Priority 2: legacy raw_message stored in content column
             if role == "assistant" and meta.get("format") == "raw_message":
@@ -272,8 +278,8 @@ class SessionLog:
                     msg = json.loads(content)
                     result.append(msg)
                     continue
-                except Exception:
-                    pass  # fall through to plain text reconstruction
+                except Exception as legacy_exc:
+                    logger.debug("Legacy raw_message parse failed, falling back: %s", legacy_exc)
 
             # Priority 3: plain text
             msg: dict[str, Any] = {"role": role, "content": content}
