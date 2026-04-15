@@ -561,7 +561,14 @@ class LoomSession:
             episodic=self._episodic,
             db=self._db,
             config=_gov_cfg,
+            session_id=self.session_id,
         )
+        # Issue #133: initialize health tracking and load prior session issues
+        await self._governor.health.ensure_table()
+        await self._governor.health.load_prior()
+        # Inject health tracker into subsystems that record events
+        self._semantic._health = self._governor.health
+        self._session_log._health = self._governor.health
 
         # Build MemoryIndex and inject into system prompt
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
@@ -577,6 +584,15 @@ class LoomSession:
                 self.messages[0]["content"] += f"\n\n{index_text}"
             else:
                 self.messages.insert(0, {"role": "system", "content": index_text})
+
+        # Issue #133: inject memory health alert into system context
+        # so the agent is aware of prior session failures.
+        health_ctx = self._governor.health.report().render_agent_context()
+        if health_ctx:
+            if self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] += f"\n\n{health_ctx}"
+            else:
+                self.messages.insert(0, {"role": "system", "content": health_ctx})
 
         if not self._resume:
             await self._session_log.create_session(self.session_id, self.model)
@@ -599,6 +615,7 @@ class LoomSession:
             make_fetch_url_tool,
             make_load_skill_tool,
             make_memorize_tool,
+            make_memory_health_tool,
             make_query_relations_tool,
             make_recall_tool,
             make_relate_tool,
@@ -606,10 +623,12 @@ class LoomSession:
             make_web_search_tool,
         )
         search = MemorySearch(self._semantic, self._procedural)
+        search._health = self._governor.health
         self.registry.register(make_recall_tool(search))
         self.registry.register(make_memorize_tool(self._semantic, governor=self._governor))
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
+        self.registry.register(make_memory_health_tool(self._governor))
 
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
@@ -758,20 +777,38 @@ class LoomSession:
         # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
         db, self._db = self._db, None
         db_ctx, self._db_ctx = self._db_ctx, None
-        try:
-            console.print(Rule("[dim]Compressing session to memory…[/dim]"))
-            count = await compress_session(
-                self.session_id,
-                self._episodic,
-                self._semantic,
-                self.router,
-                self.model,
-                governor=self._governor,
-            )
-            if count:
-                console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+        # ── Session shutdown: each step is independently guarded ──────
+        # Issue #133: the previous monolithic try/except silently swallowed
+        # all errors — a failure in compress_session would also prevent
+        # session log update, evolution analysis, and decay from running.
+        # Alias for concise health recording
+        _health = self._governor.health if self._governor else None
 
-            # Issue #58: trigger evolution analysis for low-confidence skills
+        try:
+            # Step 1: Compress session into semantic memory
+            try:
+                console.print(Rule("[dim]Compressing session to memory…[/dim]"))
+                count = await compress_session(
+                    self.session_id,
+                    self._episodic,
+                    self._semantic,
+                    self.router,
+                    self.model,
+                    governor=self._governor,
+                )
+                if count:
+                    console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+                if _health:
+                    _health.record_success("session_compress")
+            except Exception as exc:
+                logger.error(
+                    "Session compress failed — episodic→semantic transfer lost: %s",
+                    exc, exc_info=True,
+                )
+                if _health:
+                    _health.record_failure("session_compress", str(exc))
+
+            # Step 2: Skill evolution analysis (Issue #58)
             if self._procedural is not None and self._semantic is not None:
                 try:
                     from loom.core.cognition.counter_factual import SkillEvolutionHook
@@ -784,10 +821,14 @@ class LoomSession:
                         console.print(
                             f"[dim]  Queued evolution analysis for {evolved} skill(s).[/dim]"
                         )
-                except Exception:
-                    pass  # evolution failure must never block shutdown
+                    if _health:
+                        _health.record_success("skill_evolution")
+                except Exception as exc:
+                    logger.warning("Skill evolution analysis failed: %s", exc)
+                    if _health:
+                        _health.record_failure("skill_evolution", str(exc))
 
-            # Issue #43: run memory decay cycle
+            # Step 3: Memory decay cycle (Issue #43)
             if self._governor is not None:
                 try:
                     decay = await self._governor.run_decay_cycle()
@@ -798,24 +839,41 @@ class LoomSession:
                             f"episodic={decay.episodic_pruned}, "
                             f"relational={decay.relational_pruned}).[/dim]"
                         )
-                except Exception:
-                    pass  # decay failure must never block shutdown
+                    if _health:
+                        _health.record_success("decay_cycle")
+                except Exception as exc:
+                    logger.warning("Memory decay cycle failed: %s", exc)
+                    if _health:
+                        _health.record_failure("decay_cycle", str(exc))
 
+            # Step 4: Update session log metadata
             if self._session_log is not None:
-                first_user = next(
-                    (m["content"] for m in self.messages if m["role"] == "user"), None
-                )
-                title = first_user[:60] if isinstance(first_user, str) else None
-                await self._session_log.update_session(
-                    self.session_id,
-                    turn_count=self._turn_index,
-                    last_active=datetime.now(UTC).isoformat(),
-                    title=title,
-                )
-        except Exception:
-            # DB connection may already be invalid when Textual cancels workers
-            # during shutdown — swallow the error so the process exits cleanly.
-            pass
+                try:
+                    first_user = next(
+                        (m["content"] for m in self.messages if m["role"] == "user"), None
+                    )
+                    title = first_user[:60] if isinstance(first_user, str) else None
+                    await self._session_log.update_session(
+                        self.session_id,
+                        turn_count=self._turn_index,
+                        last_active=datetime.now(UTC).isoformat(),
+                        title=title,
+                    )
+                except Exception as exc:
+                    logger.warning("Session log update failed: %s", exc)
+
+            # Step 5: Flush health state and show summary
+            if _health:
+                try:
+                    await _health.flush()
+                    report = _health.report()
+                    if report.has_issues:
+                        console.print(
+                            f"[yellow dim]  ⚠ Memory health issues detected "
+                            f"this session — check logs for details.[/yellow dim]"
+                        )
+                except Exception as exc:
+                    logger.debug("Health tracker flush failed: %s", exc)
         finally:
             # Issue #61 Bug 2: wait for pending skill_eval background tasks
             # before closing the DB so their upsert writes can complete.
@@ -834,8 +892,8 @@ class LoomSession:
             for client in self._mcp_clients:
                 try:
                     await client.disconnect()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("MCP client disconnect error: %s", exc)
             self._mcp_clients = []
 
             try:
@@ -843,8 +901,8 @@ class LoomSession:
                     await db_ctx.__aexit__(None, None, None)
                 elif db is not None:
                     await db.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("DB close error during shutdown: %s", exc)
 
     # ------------------------------------------------------------------
     # Streaming agent loop

@@ -19,12 +19,15 @@ Usage
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from collections import Counter
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 from loom.core.memory.embeddings import cosine_similarity
 from loom.core.memory.procedural import ProceduralMemory
@@ -85,6 +88,7 @@ class MemorySearch:
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
+        self._health: Any = None  # Optional MemoryHealthTracker, set post-init
 
     async def recall(
         self,
@@ -123,8 +127,12 @@ class MemorySearch:
                         combined.sort(key=lambda r: r.score, reverse=True)
                         return combined[:limit]
                     return emb_results
-            except Exception:
-                pass  # Fall through to BM25
+            except Exception as exc:
+                logger.warning(
+                    "Embedding search failed, degrading to BM25: %s", exc,
+                )
+                if self._health:
+                    self._health.record_failure("embedding_search", str(exc))
 
         # ── Tier 2: BM25 keyword search ───────────────────────────────────────
         results: list[MemorySearchResult] = []
