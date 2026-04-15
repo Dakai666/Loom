@@ -269,8 +269,8 @@ class SessionLog:
                 try:
                     result.append(json.loads(raw_json))
                     continue
-                except Exception as exc:
-                    logger.debug("raw_json parse failed, falling back: %s", exc)
+                except Exception as parse_exc:
+                    logger.debug("raw_json parse failed, falling back: %s", parse_exc)
 
             # Priority 2: legacy raw_message stored in content column
             if role == "assistant" and meta.get("format") == "raw_message":
@@ -278,8 +278,8 @@ class SessionLog:
                     msg = json.loads(content)
                     result.append(msg)
                     continue
-                except Exception as exc:
-                    logger.debug("Legacy raw_message parse failed, falling back: %s", exc)
+                except Exception as legacy_exc:
+                    logger.debug("Legacy raw_message parse failed, falling back: %s", legacy_exc)
 
             # Priority 3: plain text
             msg: dict[str, Any] = {"role": role, "content": content}

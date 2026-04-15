@@ -215,8 +215,11 @@ class SemanticMemory:
                         (json.dumps(meta, ensure_ascii=False), entry.key),
                     )
                     await self._db.commit()
-                except Exception:
-                    pass  # best-effort metadata annotation
+                except Exception as ann_exc:
+                    logger.debug(
+                        "Failed to annotate embedding_status for key=%r: %s",
+                        entry.key, ann_exc,
+                    )
             else:
                 if self._health:
                     self._health.record_success("embedding_write")
