@@ -277,14 +277,26 @@ class LoomMCPClient:
         return tool_defs
 
     async def disconnect(self) -> None:
-        """Close the connection to the MCP server subprocess."""
+        """Close the connection to the MCP server subprocess.
+
+        Suppresses all exceptions during __aexit__ so that:
+        - stdio_client async-generator GC finalizer errors (which can fire
+          in unrelated async contexts) do not propagate
+        - Session shutdown is never derailed by a failing MCP cleanup
+        See: "an error occurred during closing of async generator stdio_client"
+        """
         if self._cm is not None:
+            cm, self._cm = self._cm, None
             try:
-                await self._cm.__aexit__(None, None, None)
-            except Exception:
+                await cm.__aexit__(None, None, None)
+            except BaseException:
+                # Catch everything: Exception + GeneratorExit + CancelledError.
+                # The anyio task group inside stdio_client may attempt cleanup
+                # in a stale event-loop context; swallow the error silently.
                 pass
-            self._cm = None
             self._session = None
+            self._read = None
+            self._write = None
 
     # ------------------------------------------------------------------
     # Internal
