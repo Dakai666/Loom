@@ -158,6 +158,21 @@ class TaskGraphManager:
         self._require_graph()
         return self._graph.ready()
 
+    def mark_in_progress(self, node_id: str) -> TaskNode:
+        """Mark a node as in-progress (agent is working on it)."""
+        self._require_graph()
+        node = self._graph.get(node_id)
+        if node is None:
+            raise ValueError(f"Node '{node_id}' not found")
+        if node.status != TaskStatus.PENDING:
+            raise ValueError(
+                f"Cannot start node '{node_id}' with status {node.status.value} "
+                f"— only PENDING nodes can be started"
+            )
+        node.status = TaskStatus.IN_PROGRESS
+        self._persist()
+        return node
+
     def mark_completed(self, node_id: str, result: str) -> TaskNode:
         """Mark a node as completed, store result and generate summary.
 
@@ -340,7 +355,11 @@ class TaskGraphManager:
             "Use `task_status` to inspect details, `task_modify` to adjust the plan, "
             "or `task_done` to continue execution. To discard, inform the user."
         )
-        return "\n".join(parts)
+        text = "\n".join(parts)
+        # Cap length to avoid bloating the system prompt
+        if len(text) > 2000:
+            text = text[:1950] + "\n... (truncated — use task_status for full details)"
+        return text
 
     @staticmethod
     def cleanup_stale_graphs(persist_dir: Path | None = None,
@@ -454,25 +473,28 @@ class TaskGraphManager:
         - "N-M": line range (1-indexed, e.g. "10-50")
         - anything else: grep-like keyword filter
         """
-        lines = text.splitlines(keepends=True)
-        if section == "head":
-            return "".join(lines[:200])
-        if section == "tail":
-            return "".join(lines[-200:])
-        # Try line range "N-M"
-        if "-" in section:
-            parts = section.split("-", 1)
-            try:
-                start = max(1, int(parts[0])) - 1  # 1-indexed to 0-indexed
-                end = int(parts[1])
-                return "".join(lines[start:end])
-            except (ValueError, IndexError):
-                pass
-        # Keyword filter
-        matched = [ln for ln in lines if section.lower() in ln.lower()]
-        if matched:
-            return "".join(matched)
-        return f"(no lines matching '{section}')"
+        try:
+            lines = text.splitlines(keepends=True)
+            if section == "head":
+                return "".join(lines[:200])
+            if section == "tail":
+                return "".join(lines[-200:])
+            # Try line range "N-M"
+            if "-" in section:
+                parts = section.split("-", 1)
+                try:
+                    start = max(1, int(parts[0])) - 1  # 1-indexed to 0-indexed
+                    end = int(parts[1])
+                    return "".join(lines[start:end])
+                except (ValueError, IndexError):
+                    pass  # fall through to keyword filter
+            # Keyword filter
+            matched = [ln for ln in lines if section.lower() in ln.lower()]
+            if matched:
+                return "".join(matched)
+            return f"(no lines matching '{section}')"
+        except Exception as exc:
+            return f"(section filter error: {exc})"
 
     # ── Internal ───────────────────────────────────────────────────────
 
@@ -481,7 +503,12 @@ class TaskGraphManager:
             raise ValueError("No active task graph. Use task_plan to create one.")
 
     def _check_graph_completion(self) -> None:
-        """Check if all nodes are done; update graph state accordingly."""
+        """Check if all nodes are done; update graph state accordingly.
+
+        Note: artifacts are NOT cleaned up on completion/failure because
+        the agent may still call task_read after the graph finishes.
+        Artifacts are cleaned on abandon() and TTL cleanup only.
+        """
         if self._graph is None:
             return
         all_done = all(n.is_done for n in self._graph.nodes)

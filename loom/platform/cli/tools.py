@@ -1542,7 +1542,6 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 
 def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_plan tool for building a TaskGraph from agent specs."""
-    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
 
     async def _task_plan(call: ToolCall) -> ToolResult:
         tasks = call.args.get("tasks", [])
@@ -1627,7 +1626,6 @@ def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
 
 def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_status tool for querying the current graph state."""
-    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
 
     async def _task_status(call: ToolCall) -> ToolResult:
         if not manager.has_graph:
@@ -1666,7 +1664,6 @@ def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
 
 def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_modify tool for mutating the active graph."""
-    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
 
     async def _task_modify(call: ToolCall) -> ToolResult:
         if not manager.has_graph:
@@ -1683,7 +1680,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
             try:
                 added = manager.add_nodes(add_specs)
                 changes.append(f"Added {len(added)} node(s): {[n.id for n in added]}")
-            except ValueError as exc:
+            except Exception as exc:
                 errors.append(f"add: {exc}")
 
         # Remove nodes
@@ -1692,7 +1689,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
             try:
                 manager.remove_nodes(remove_ids)
                 changes.append(f"Removed {len(remove_ids)} node(s): {remove_ids}")
-            except ValueError as exc:
+            except Exception as exc:
                 errors.append(f"remove: {exc}")
 
         # Update nodes
@@ -1701,7 +1698,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
             try:
                 updated = manager.update_nodes(update_specs)
                 changes.append(f"Updated {len(updated)} node(s): {[n.id for n in updated]}")
-            except ValueError as exc:
+            except Exception as exc:
                 errors.append(f"update: {exc}")
 
         if errors and not changes:
@@ -1783,7 +1780,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
 
 def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_done tool for marking nodes completed or failed."""
-    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+    from loom.core.tasks.graph import TaskStatus
 
     async def _task_done(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
@@ -1797,6 +1794,11 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
         failed = bool(error_text)
 
         try:
+            # Ensure node transitions through IN_PROGRESS before terminal state
+            node_obj = manager.graph.get(node_id) if manager.graph else None
+            if node_obj and node_obj.status == TaskStatus.PENDING:
+                manager.mark_in_progress(node_id)
+
             if failed:
                 node = manager.mark_failed(node_id, error_text)
                 # Return status so agent can decide next steps
@@ -1888,7 +1890,6 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
 
 def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_read tool for pulling full node results."""
-    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
 
     async def _task_read(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
