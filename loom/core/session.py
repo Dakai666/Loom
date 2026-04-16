@@ -681,6 +681,33 @@ class LoomSession:
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
 
+        # Issue #128: Agent-driven TaskGraph tools
+        from loom.core.tasks.manager import TaskGraphManager
+        from loom.platform.cli.tools import (
+            make_task_plan_tool,
+            make_task_status_tool,
+            make_task_modify_tool,
+            make_task_done_tool,
+            make_task_read_tool,
+        )
+        self._task_graph_manager = TaskGraphManager(
+            session_id=self.session_id,
+        )
+        # Phase 2: clean up stale graphs from prior sessions (TTL 24h)
+        TaskGraphManager.cleanup_stale_graphs()
+        # Attempt to load a persisted graph from a prior session
+        if self._task_graph_manager.load_persisted():
+            # Phase 2: auto-resume suspended graphs
+            self._task_graph_manager.resume()
+            resume_ctx = self._task_graph_manager.build_resume_context()
+            if resume_ctx and self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] += f"\n\n{resume_ctx}"
+        self.registry.register(make_task_plan_tool(self._task_graph_manager))
+        self.registry.register(make_task_status_tool(self._task_graph_manager))
+        self.registry.register(make_task_modify_tool(self._task_graph_manager))
+        self.registry.register(make_task_done_tool(self._task_graph_manager))
+        self.registry.register(make_task_read_tool(self._task_graph_manager))
+
         # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
         # New plugin files require one-time GUARDED approval stored in
         # RelationalMemory; previously approved files load silently.
@@ -788,6 +815,10 @@ class LoomSession:
         _health = self._governor.health if self._governor else None
 
         try:
+            # Step 0 (Issue #128 Phase 2): Suspend active task graph
+            if hasattr(self, "_task_graph_manager"):
+                self._task_graph_manager.suspend()
+
             # Step 1: Compress session into semantic memory
             try:
                 console.print(Rule("[dim]Compressing session to memory…[/dim]"))

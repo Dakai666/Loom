@@ -44,6 +44,7 @@ class TaskNode:
     status: TaskStatus = TaskStatus.PENDING
     depends_on: list[str] = field(default_factory=list)  # list of node IDs
     result: Any = None
+    result_summary: str | None = None
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -62,6 +63,32 @@ class TaskNode:
 
     def skip(self) -> None:
         self.status = TaskStatus.SKIPPED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "status": self.status.value,
+            "depends_on": self.depends_on,
+            "result": self.result,
+            "result_summary": self.result_summary,
+            "error": self.error,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskNode:
+        node = cls(
+            content=data["content"],
+            id=data["id"],
+            status=TaskStatus(data["status"]),
+            depends_on=data.get("depends_on", []),
+            result=data.get("result"),
+            result_summary=data.get("result_summary"),
+            error=data.get("error"),
+            metadata=data.get("metadata", {}),
+        )
+        return node
 
 
 @dataclass
@@ -118,6 +145,60 @@ class TaskGraph:
         self._nodes[node.id] = node
         return node
 
+    def add_with_id(
+        self,
+        node_id: str,
+        content: str,
+        depends_on: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TaskNode:
+        """Add a node with an explicit user-chosen ID (for agent-driven construction)."""
+        if node_id in self._nodes:
+            raise ValueError(f"Node ID '{node_id}' already exists in the graph")
+        node = TaskNode(
+            content=content,
+            id=node_id,
+            depends_on=depends_on or [],
+            metadata=metadata or {},
+        )
+        self._nodes[node.id] = node
+        return node
+
+    def remove(self, node_id: str) -> None:
+        """Remove a PENDING node and clean up references to it."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node '{node_id}' not found")
+        if node.status != TaskStatus.PENDING:
+            raise ValueError(
+                f"Cannot remove node '{node_id}' with status {node.status.value} "
+                f"— only PENDING nodes can be removed"
+            )
+        del self._nodes[node_id]
+        for n in self._nodes.values():
+            if node_id in n.depends_on:
+                n.depends_on.remove(node_id)
+
+    def update_node(self, node_id: str, content: str | None = None,
+                    depends_on: list[str] | None = None) -> TaskNode:
+        """Update content or dependencies of a PENDING node."""
+        node = self._nodes.get(node_id)
+        if node is None:
+            raise ValueError(f"Node '{node_id}' not found")
+        if node.status != TaskStatus.PENDING:
+            raise ValueError(
+                f"Cannot update node '{node_id}' with status {node.status.value} "
+                f"— only PENDING nodes can be updated"
+            )
+        if content is not None:
+            node.content = content
+        if depends_on is not None:
+            for dep_id in depends_on:
+                if dep_id not in self._nodes:
+                    raise ValueError(f"Dependency '{dep_id}' not found in graph")
+            node.depends_on = depends_on
+        return node
+
     def get(self, node_id: str) -> TaskNode | None:
         return self._nodes.get(node_id)
 
@@ -127,6 +208,21 @@ class TaskGraph:
 
     def pending(self) -> list[TaskNode]:
         return [n for n in self._nodes.values() if n.status == TaskStatus.PENDING]
+
+    def ready(self) -> list[TaskNode]:
+        """Return PENDING nodes whose dependencies are all COMPLETED."""
+        ready = []
+        for node in self._nodes.values():
+            if node.status != TaskStatus.PENDING:
+                continue
+            deps_met = all(
+                self._nodes.get(dep_id) is not None
+                and self._nodes[dep_id].status == TaskStatus.COMPLETED
+                for dep_id in node.depends_on
+            )
+            if deps_met:
+                ready.append(node)
+        return ready
 
     def compile(self) -> ExecutionPlan:
         """
@@ -180,4 +276,44 @@ class TaskGraph:
         for node in self._nodes.values():
             node.status = TaskStatus.PENDING
             node.result = None
+            node.result_summary = None
             node.error = None
+
+    # ── Serialization ──────────────────────────────────────────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "nodes": [node.to_dict() for node in self._nodes.values()],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskGraph:
+        graph = cls()
+        for node_data in data["nodes"]:
+            node = TaskNode.from_dict(node_data)
+            graph._nodes[node.id] = node
+        return graph
+
+    def status_summary(self) -> dict[str, Any]:
+        """Return a compact summary of graph state for the agent."""
+        by_status: dict[str, list[str]] = {}
+        for node in self._nodes.values():
+            by_status.setdefault(node.status.value, []).append(node.id)
+
+        plan = self.compile()
+        return {
+            "total_nodes": len(self._nodes),
+            "levels": len(plan.levels),
+            "by_status": by_status,
+            "nodes": [
+                {
+                    "id": n.id,
+                    "content": n.content[:80],
+                    "status": n.status.value,
+                    "depends_on": n.depends_on,
+                    **({"result_summary": n.result_summary} if n.result_summary else {}),
+                    **({"error": n.error} if n.error else {}),
+                }
+                for n in self._nodes.values()
+            ],
+        }
