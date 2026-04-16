@@ -679,6 +679,26 @@ class LoomSession:
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
 
+        # Issue #128: Agent-driven TaskGraph tools
+        from loom.core.tasks.manager import TaskGraphManager
+        from loom.platform.cli.tools import (
+            make_task_plan_tool,
+            make_task_status_tool,
+            make_task_modify_tool,
+            make_task_done_tool,
+            make_task_read_tool,
+        )
+        self._task_graph_manager = TaskGraphManager(
+            session_id=self.session_id,
+        )
+        # Attempt to load a persisted graph from a prior session
+        self._task_graph_manager.load_persisted()
+        self.registry.register(make_task_plan_tool(self._task_graph_manager))
+        self.registry.register(make_task_status_tool(self._task_graph_manager))
+        self.registry.register(make_task_modify_tool(self._task_graph_manager))
+        self.registry.register(make_task_done_tool(self._task_graph_manager))
+        self.registry.register(make_task_read_tool(self._task_graph_manager))
+
         # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
         # New plugin files require one-time GUARDED approval stored in
         # RelationalMemory; previously approved files load silently.

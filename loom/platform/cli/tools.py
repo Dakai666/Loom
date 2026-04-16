@@ -14,6 +14,7 @@ The actual registration happens in main.py via ToolRegistry.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.governance import MemoryGovernor
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
+    from loom.core.tasks.manager import TaskGraphManager
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
@@ -1534,3 +1536,407 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # run_bash is registered via make_run_bash_tool(workspace, strict_sandbox) in
 # LoomSession.start() so the sandbox setting can be wired in from loom.toml.
 # read_file / write_file / list_dir are registered via make_filesystem_tools(workspace).
+
+
+# ── Issue #128: Agent-driven TaskGraph tools ───────────────────────────────
+
+def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
+    """Create the task_plan tool for building a TaskGraph from agent specs."""
+    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+
+    async def _task_plan(call: ToolCall) -> ToolResult:
+        tasks = call.args.get("tasks", [])
+        if not tasks:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'tasks' list is required and must not be empty",
+            )
+        # Validate each task spec
+        for i, t in enumerate(tasks):
+            if not t.get("id") or not t.get("content"):
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=f"Task at index {i} missing required 'id' or 'content'",
+                )
+        try:
+            graph = manager.create_graph(tasks)
+            summary = graph.status_summary()
+            plan = graph.compile()
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=json.dumps({
+                    "status": "graph_created",
+                    "total_nodes": summary["total_nodes"],
+                    "levels": summary["levels"],
+                    "plan": str(plan),
+                    "ready_nodes": [n.id for n in manager.get_ready_nodes()],
+                }, ensure_ascii=False),
+            )
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+
+    return ToolDefinition(
+        name="task_plan",
+        description=(
+            "Build a task execution graph (DAG) for complex multi-step work. "
+            "Each task becomes a node; dependencies determine execution order. "
+            "Independent tasks at the same level run in parallel. "
+            "Use this when the current goal requires multiple coordinated steps."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "List of tasks with dependencies",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Short unique ID for this task (e.g. 'a', 'analyze', 'step1')",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Clear description of what this task should accomplish (becomes the turn prompt)",
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "IDs of tasks that must complete before this one starts",
+                            },
+                        },
+                        "required": ["id", "content"],
+                    },
+                },
+            },
+            "required": ["tasks"],
+        },
+        executor=_task_plan,
+        tags=["task", "planning"],
+        impact_scope="agent",
+    )
+
+
+def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
+    """Create the task_status tool for querying the current graph state."""
+    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+
+    async def _task_status(call: ToolCall) -> ToolResult:
+        if not manager.has_graph:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True, output="No active task graph.",
+            )
+        try:
+            summary = manager.status()
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=json.dumps(summary, ensure_ascii=False),
+            )
+        except Exception as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+
+    return ToolDefinition(
+        name="task_status",
+        description=(
+            "Check the current state of the active task graph. "
+            "Shows each node's status (pending/in_progress/completed/failed), "
+            "dependencies, and result summaries for completed nodes."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={"type": "object", "properties": {}},
+        executor=_task_status,
+        tags=["task", "status"],
+        impact_scope="agent",
+    )
+
+
+def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
+    """Create the task_modify tool for mutating the active graph."""
+    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+
+    async def _task_modify(call: ToolCall) -> ToolResult:
+        if not manager.has_graph:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="No active task graph. Use task_plan first.",
+            )
+        errors: list[str] = []
+        changes: list[str] = []
+
+        # Add new nodes
+        add_specs = call.args.get("add", [])
+        if add_specs:
+            try:
+                added = manager.add_nodes(add_specs)
+                changes.append(f"Added {len(added)} node(s): {[n.id for n in added]}")
+            except ValueError as exc:
+                errors.append(f"add: {exc}")
+
+        # Remove nodes
+        remove_ids = call.args.get("remove", [])
+        if remove_ids:
+            try:
+                manager.remove_nodes(remove_ids)
+                changes.append(f"Removed {len(remove_ids)} node(s): {remove_ids}")
+            except ValueError as exc:
+                errors.append(f"remove: {exc}")
+
+        # Update nodes
+        update_specs = call.args.get("update", [])
+        if update_specs:
+            try:
+                updated = manager.update_nodes(update_specs)
+                changes.append(f"Updated {len(updated)} node(s): {[n.id for n in updated]}")
+            except ValueError as exc:
+                errors.append(f"update: {exc}")
+
+        if errors and not changes:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="; ".join(errors),
+            )
+
+        summary = manager.status()
+        output = {
+            "changes": changes,
+            "ready_nodes": [n.id for n in manager.get_ready_nodes()],
+            "graph": summary,
+        }
+        if errors:
+            output["partial_errors"] = errors
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=json.dumps(output, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name="task_modify",
+        description=(
+            "Modify the active task graph: add new nodes, remove pending nodes, "
+            "or update content/dependencies of pending nodes. "
+            "Only PENDING nodes can be removed or updated."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.MUTATES,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "add": {
+                    "type": "array",
+                    "description": "New tasks to add (same format as task_plan)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "content": {"type": "string"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["id", "content"],
+                    },
+                },
+                "remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs of pending nodes to remove",
+                },
+                "update": {
+                    "type": "array",
+                    "description": "Pending nodes to update",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "content": {"type": "string"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["id"],
+                    },
+                },
+            },
+        },
+        executor=_task_modify,
+        tags=["task", "modify"],
+        impact_scope="agent",
+    )
+
+
+def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
+    """Create the task_done tool for marking nodes completed or failed."""
+    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+
+    async def _task_done(call: ToolCall) -> ToolResult:
+        node_id = call.args.get("node_id", "").strip()
+        if not node_id:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'node_id' is required",
+            )
+        result_text = call.args.get("result", "").strip()
+        error_text = call.args.get("error")
+        failed = bool(error_text)
+
+        try:
+            if failed:
+                node = manager.mark_failed(node_id, error_text)
+                # Return status so agent can decide next steps
+                status = manager.status()
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=True,
+                    output=json.dumps({
+                        "action": "node_failed",
+                        "node_id": node.id,
+                        "error": error_text,
+                        "graph": status,
+                        "hint": "Decide: retry (task_modify to update node), skip downstream, or abandon the graph.",
+                    }, ensure_ascii=False),
+                )
+            else:
+                if not result_text:
+                    return ToolResult(
+                        call_id=call.id, tool_name=call.tool_name,
+                        success=False,
+                        error="'result' is required when completing a node (summarize what you accomplished)",
+                    )
+                node = manager.mark_completed(node_id, result_text)
+                # Auto-advance: check what's ready next
+                ready = manager.get_ready_nodes()
+                status = manager.status()
+
+                # Build context for each ready node (Pull Model injection)
+                ready_with_context = []
+                for rn in ready:
+                    ctx = manager.build_node_context(rn)
+                    ready_with_context.append({
+                        "node_id": rn.id,
+                        "content": rn.content,
+                        "context": ctx,
+                    })
+
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=True,
+                    output=json.dumps({
+                        "action": "node_completed",
+                        "node_id": node.id,
+                        "result_summary": node.result_summary,
+                        "graph_state": status["graph_state"],
+                        "ready_nodes": ready_with_context,
+                        "graph": status,
+                    }, ensure_ascii=False),
+                )
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+
+    return ToolDefinition(
+        name="task_done",
+        description=(
+            "Mark a task node as completed (with result) or failed (with error). "
+            "On completion, automatically checks which downstream nodes are now "
+            "ready and returns their context including upstream result summaries. "
+            "On failure, returns the graph state so you can decide how to proceed."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.MUTATES,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "ID of the node to mark",
+                },
+                "result": {
+                    "type": "string",
+                    "description": "Summary of what was accomplished (required for completion)",
+                },
+                "error": {
+                    "type": "string",
+                    "description": "Error description (provide this instead of result to mark as failed)",
+                },
+            },
+            "required": ["node_id"],
+        },
+        executor=_task_done,
+        tags=["task", "done"],
+        impact_scope="agent",
+    )
+
+
+def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
+    """Create the task_read tool for pulling full node results."""
+    from loom.core.tasks.manager import TaskGraphManager  # noqa: F811
+
+    async def _task_read(call: ToolCall) -> ToolResult:
+        node_id = call.args.get("node_id", "").strip()
+        if not node_id:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'node_id' is required",
+            )
+        try:
+            result = manager.get_node_result(node_id)
+            if result is None:
+                node = manager.graph.get(node_id) if manager.graph else None
+                status = node.status.value if node else "not found"
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=f"Node '{node_id}' has no result (status: {status})",
+                )
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True, output=result,
+            )
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+
+    return ToolDefinition(
+        name="task_read",
+        description=(
+            "Read the full result of a completed task node. "
+            "Use this when the result summary (shown in task_status) "
+            "is insufficient and you need the complete output."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "ID of the completed node to read",
+                },
+            },
+            "required": ["node_id"],
+        },
+        executor=_task_read,
+        tags=["task", "read"],
+        impact_scope="agent",
+    )
