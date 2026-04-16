@@ -392,6 +392,7 @@ class LoomSession:
         db_path: str,
         resume_session_id: str | None = None,
         workspace: Path | None = None,
+        provisional_title: str | None = None,
     ) -> None:
         if model is None:
             from loom.core.cognition.router import get_default_model
@@ -399,6 +400,7 @@ class LoomSession:
         self._model = model
         self.session_id = resume_session_id or str(uuid.uuid4())[:8]
         self._resume = resume_session_id is not None
+        self._provisional_title = provisional_title
         # Workspace root — all relative file paths resolve here; defaults to CWD
         self.workspace: Path = (workspace or Path.cwd()).resolve()
         self.router = build_router()
@@ -596,7 +598,7 @@ class LoomSession:
                 self.messages.insert(0, {"role": "system", "content": health_ctx})
 
         if not self._resume:
-            await self._session_log.create_session(self.session_id, self.model)
+            await self._session_log.create_session(self.session_id, self.model, self._provisional_title)
         else:
             # Load persisted history. System message is always rebuilt fresh
             # (PromptStack + MemoryIndex) — never re-loaded from session_log.

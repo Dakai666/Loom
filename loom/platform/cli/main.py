@@ -899,9 +899,15 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
         from loom.core.memory.session_log import SessionLog as _SL
         from loom.platform.cli.tui.components.session_picker import SessionPickerModal
 
+        async def _update_title(sid: str, title: str) -> None:
+            async with session._store.connect() as conn:
+                await _SL(conn).update_title(sid, title)
+
         async with session._store.connect() as conn:
             rows = await _SL(conn).list_sessions(limit=20)
-        selected = await app.push_screen_wait(SessionPickerModal(rows))
+        selected = await app.push_screen_wait(
+            SessionPickerModal(rows, update_title_fn=_update_title)
+        )
         if selected and selected != session.session_id:
             app.exit(selected)  # _chat_tui restart loop picks this up
         elif selected == session.session_id:

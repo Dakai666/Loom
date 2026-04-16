@@ -236,3 +236,218 @@ class TestParallelDispatch:
         assert result.success is False
         assert result.failure_type == "execution_error"
         assert "Internal dispatch error: boom" in (result.error or "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #126 — session title tests (L1 provisional + L2 editable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSessionLogTitle:
+    """Unit tests for SessionLog.create_session(title=) and update_title()."""
+
+    @pytest_asyncio.fixture
+    async def sl_conn(self, tmp_path):
+        """Fresh in-memory DB with sessions table, shared across tests."""
+        import aiosqlite
+        from loom.core.memory.session_log import SessionLog
+
+        db = tmp_path / "sessions.db"
+        conn = await aiosqlite.connect(str(db))
+        await conn.execute(
+            """
+            CREATE TABLE sessions (
+                session_id TEXT,
+                model TEXT,
+                title TEXT,
+                started_at TEXT,
+                last_active TEXT,
+                turn_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        await conn.commit()
+        yield conn
+        await conn.close()
+
+    async def test_create_session_stores_title(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        await sl.create_session("s1", "MiniMax-M2.7", title="My First Chat")
+        meta = await sl.get_session("s1")
+        assert meta is not None
+        assert meta["title"] == "My First Chat"
+
+    async def test_create_session_defaults_title_to_none(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        await sl.create_session("s2", "claude-sonnet-4-6")
+        meta = await sl.get_session("s2")
+        assert meta is not None
+        assert meta["title"] is None
+
+    async def test_create_session_insert_or_ignore_safe_for_resume(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        # Same session_id twice — second call must not raise (INSERT OR IGNORE)
+        await sl.create_session("s3", "MiniMax-M2.7", title="First")
+        await sl.create_session("s3", "MiniMax-M2.7", title="Second")
+        meta = await sl.get_session("s3")
+        assert meta["title"] == "First"  # first write preserved
+
+    async def test_update_title_overwrites_existing_title(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        await sl.create_session("s4", "MiniMax-M2.7", title="Original")
+        await sl.update_title("s4", "Renamed Session")
+        meta = await sl.get_session("s4")
+        assert meta["title"] == "Renamed Session"
+
+    async def test_update_title_idempotent_when_title_unchanged(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        await sl.create_session("s5", "MiniMax-M2.7", title="Same")
+        await sl.update_title("s5", "Same")
+        meta = await sl.get_session("s5")
+        assert meta["title"] == "Same"
+
+    async def test_update_title_nonexistent_session_is_silent(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        # Must not raise — UPDATE on non-existent row is valid SQL
+        await sl.update_title("does-not-exist", "Any Title")
+        # No row added
+        rows = await sl.list_sessions()
+        assert all(r["session_id"] != "does-not-exist" for r in rows)
+
+
+class TestProvisionalTitle:
+    """Tests that LoomSession accepts and forwards provisional_title to create_session."""
+
+    @pytest_asyncio.fixture
+    async def session_module(self):
+        from loom.core import session as core_session
+        return core_session
+
+    async def test_provisional_title_stored_on_session_object(
+        self, tmp_path, monkeypatch, session_module,
+    ):
+        from loom.core.session import LoomSession
+
+        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=tmp_path,
+            provisional_title="Hello from first message",
+        )
+        assert session._provisional_title == "Hello from first message"
+
+    async def test_provisional_title_none_by_default(
+        self, tmp_path, monkeypatch, session_module,
+    ):
+        from loom.core.session import LoomSession
+
+        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=tmp_path,
+        )
+        assert session._provisional_title is None
+
+    async def test_provisional_title_inserted_at_session_start(
+        self, tmp_path, monkeypatch, session_module,
+    ):
+        from loom.core.session import LoomSession
+        from loom.core.memory.session_log import SessionLog
+        from rich.prompt import Confirm
+
+        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
+
+        db_path = str(tmp_path / "loom.db")
+        session = LoomSession(
+            model="test-model",
+            db_path=db_path,
+            workspace=tmp_path,
+            provisional_title="Provisional Title Here",
+        )
+        await session.start()
+        await session.stop()
+
+        import aiosqlite
+        conn = await aiosqlite.connect(db_path)
+        cursor = await conn.execute(
+            "SELECT title FROM sessions WHERE session_id = ?",
+            (session.session_id,),
+        )
+        row = await cursor.fetchone()
+        await conn.close()
+
+        assert row is not None
+        assert row[0] == "Provisional Title Here"
+
+    async def test_resume_session_does_not_overwrite_persisted_title(
+        self, tmp_path, monkeypatch, session_module,
+    ):
+        from loom.core.session import LoomSession
+        from rich.prompt import Confirm
+
+        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
+
+        db_path = str(tmp_path / "loom.db")
+
+        # First session with a provisional title
+        session1 = LoomSession(
+            model="test-model",
+            db_path=db_path,
+            workspace=tmp_path,
+            provisional_title="First Title",
+        )
+        await session1.start()
+        sid = session1.session_id
+        await session1.stop()
+
+        # Resume the same session — provisional_title must NOT overwrite DB title
+        session2 = LoomSession(
+            model="test-model",
+            db_path=db_path,
+            resume_session_id=sid,
+            workspace=tmp_path,
+            provisional_title="Should Not Overwrite",
+        )
+        await session2.start()
+        await session2.stop()
+
+        import aiosqlite
+        conn = await aiosqlite.connect(db_path)
+        cursor = await conn.execute(
+            "SELECT title FROM sessions WHERE session_id = ?", (sid,)
+        )
+        row = await cursor.fetchone()
+        await conn.close()
+
+        # Title from first session must be preserved after resume
+        assert row[0] == "First Title"
