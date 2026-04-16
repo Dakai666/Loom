@@ -64,6 +64,10 @@ loom/_commit_msg.txt
 .參考
 
 
+# Graphify
+graphify-out/
+loom/graphify-out
+
 #Loom 自用
 diary/
 news/
@@ -78,8 +82,12 @@ skills/systematic_code_analyst/
 skills/security_assessment/
 doc/silky_draw_reference.md
 skills/silky_minimax_draw
+skills/deep_researcher
+skills/github_cli
+skills/silky_tts
 
 # Personal config (use loom.toml.example as template)
 loom.toml
 Agent.md
 SOUL.md
+

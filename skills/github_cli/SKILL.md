@@ -2,9 +2,9 @@
 name: github_cli
 description: "GitHub CLI 工具技能。當使用者要求「建立 issue」、「建立 PR」、「用 gh」、「gh api」、「查 GitHub」、「發 issue 到 GitHub」時使用。"
 tags: [github, cli, issues, pr, api, devtools, github-actions]
-confidence: 0.90
+confidence: 0.95
 first_applied: 2026-04-07
-version: 2
+version: 3
 ---
 
 # GitHub CLI 工具技能
@@ -15,80 +15,107 @@ version: 2
 
 ## 核心原則
 
-1. **Scope 確認再執行** — GitHub 操作影響共享狀態，複雜操作（建立 PR、審查、多行 body）先說計畫再執行
-2. **所有 body 一律用 `--body-file`** — ❗ 禁止使用 `--body "文字"` 選項。Loom 環境中 `bash -lc gh ...` 在命令成功時仍可能回 exit code 127，導致 retry 迴圈重複發送內容。永遠先 `write_file` 寫入 tmp/ 再用 `--body-file` 讀取，成功後立即停止，不要依賴 exit code 判斷是否成功
-3. **先讀再寫** — 建立 issue/PR 前先查現有狀態，避免重複
-4. **Scope 內最小改動** — 只操作指定 repo/issue/PR，不擴大範圍
-5. **失敗要透傳** — `gh` 命令失敗時，error message 完整保留給使用者，不截斷
+1. **Scope 確認再執行** — 複雜操作先說計畫再執行，不邊做邊改
+2. **所有 body 一律用 `--body-file`** — 先 write_file 寫入 `outputs/doc/`（workspace 內路径，觸發 LegitimacyGuard），再用 `--body-file` 讀取。禁止 heredoc 或 `--body "文字"` 內嵌
+3. **查 Label 再建 Issue** — 未知 label 先用 `gh api` 確認存在；不存在時先 `gh api POST` 建立，再建 Issue
+4. **成功後必然 Verify** — `gh issue create` / `gh pr create` 成功後，立即執行 `gh issue view` / `gh pr view` 確認資源確實建立
+5. **失敗要透傳** — error message 完整保留給使用者，不截斷
+6. **`--jq` 不進 chain** — `gh api --jq` 在無匹配時 exit 5 會中斷 pipe chain；單獨執行不用 chain，或用 `|| true` 包裹
 
 ---
 
-## 觸發時機
+## 觾發時機
 
-使用以下關鍵句時主動載入：
-- 「發 issue」
-- 「建立 issue 到 GitHub」
-- 「用 gh create pr」
-- 「gh api 查一下」
-- 「幫我 review 這個 PR」
-- 「列出這個 repo 的 open issues」
-- 「用 GitHub CLI」
+- 「發 issue」「建立 issue 到 GitHub」
+- 「用 gh create pr」「gh api 查一下」
+- 「幫我 review 這個 PR」「列出這個 repo 的 open issues」
 
 ---
 
 ## 常用操作指南
 
-### 建立 Issue
+### 建立 Issue（含 Label）
 
-❗ **永遠用 `--body-file`，禁止 `--body`**：
-
+**Step 1 — 確認 Label 存在（必要）**
 ```bash
-# Step 1: 將 body 寫入檔案
-# Step 2: 用 --body-file 發送（不要直接 --body）
-gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md
+# 查現有 labels，取出所有名稱
+gh api repos/OWNER/REPO/labels --jq '.[].name' 2>/dev/null | grep -Fx "bug" || true
+```
+若不存在則建立（单独一条，不 chain）：
+```bash
+gh api repos/OWNER/REPO/labels --method POST \
+  --field name="session" \
+  --field color="fc2929" \
+  --field description="Session-related issues" 2>&1
+```
+> **注意**：Label 颜色必须为 6 位 hex（不含 `#`）。不确定时用 `fc2929`（红色）即可。
 
-# 加入 label
-gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md --label bug,help-wanted
-
-# 加入 assignee
-gh issue create --repo OWNER/REPO --title "標題" --body-file /tmp/issue_body.md --assignee @me
+**Step 2 — 寫 body 檔案**
+```bash
+# write_file 寫到 outputs/doc/（非 tmp/，避免 LegitimacyGuard 阻擋）
+# 內容寫入後執行：
+gh issue create --repo OWNER/REPO \
+  --title "標題" \
+  --body-file outputs/doc/issue_body.md \
+  --label bug
 ```
 
-### PR Comment / 回覆
+**Step 3 — Verify（必要）**
+```bash
+# 從建立命令的輸出 URL 中取出編號，執行 view 確認
+gh issue view 131 --repo OWNER/REPO --json number,title,labels 2>&1
+```
 
-❗ **同樣使用 `--body-file`**：
+### Label 建立與查詢
 
 ```bash
-# PR 留言
-gh pr comment 123 --repo OWNER/REPO --body-file /tmp/pr_comment.md
+# 查所有 label（含 description，輸出乾淨）
+gh api repos/OWNER/REPO/labels --jq '.[] | "\(.name)\t\(.description)"'
 
-# PR 審查（comment / approve / request-changes）
-gh pr review 123 --repo OWNER/REPO --comment --body-file /tmp/review.md
+# 批量檢查多個 label（逐條，fail 不阻斷）
+for label in bug session authorization circuit-breaker; do
+  gh api repos/OWNER/REPO/labels --jq ".[] | select(.name == \"$label\") | .name" 2>/dev/null
+done
+
+# 建立單個 label
+gh api repos/OWNER/REPO/labels --method POST \
+  --field name="session" \
+  --field color="0070c0" \
+  --field description="Session-related issues"
+```
+
+### PR Comment / 審查
+
+```bash
+# PR 留言（body 用 --body-file）
+gh pr comment 123 --repo OWNER/REPO --body-file outputs/doc/pr_comment.md
+
+# 審查（comment / approve / request-changes）
 gh pr review 123 --repo OWNER/REPO --approve
-gh pr review 123 --repo OWNER/REPO --request-changes --body-file /tmp/review.md
+gh pr review 123 --repo OWNER/REPO --request-changes --body-file outputs/doc/review.md
 ```
 
 ### 建立 PR
 
 ```bash
-# 永遠用 --body-file
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --base main
+# body 同樣用 --body-file
+gh pr create --repo OWNER/REPO \
+  --title "標題" \
+  --body-file outputs/doc/pr_body.md \
+  --base main
 
-# 指定 reviewer
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --reviewer username1,username2
-
-# Draft PR
-gh pr create --repo OWNER/REPO --title "標題" --body-file /tmp/pr_body.md --draft
+# Verify
+gh pr view 456 --repo OWNER/REPO --json number,title,state
 ```
 
 ### 查 Issue
 
 ```bash
-# 列出 open issues
+# 列出 open issues（不用 --jq pipe，單獨執行即可）
 gh issue list --repo OWNER/REPO --state open --limit 20
 
 # 查看特定 issue
-gh issue view 123 --repo OWNER/REPO
+gh issue view 131 --repo OWNER/REPO
 
 # 搜尋
 gh issue list --repo OWNER/REPO --search "keyword in:title" --state open
@@ -97,61 +124,69 @@ gh issue list --repo OWNER/REPO --search "keyword in:title" --state open
 ### gh api（直接呼叫 GitHub API）
 
 ```bash
-# GET 查詢
-gh api repos/OWNER/REPO
-gh api repos/OWNER/REPO/issues --jq '.[] | "\(.number) \(.title)"'
+# GET — --jq 单独执行，不 pipe（避免 exit 5 中斷链）
+gh api repos/OWNER/REPO/labels
 
-# 分頁處理
-gh api repos/OWNER/REPO/issues?state=open&per_page=100
+# GET + jq 过滤（单条执行，不用 pipe chain）
+gh api repos/OWNER/REPO/issues --jq '.[] | "\(.number) \(.title)"' 2>&1 || true
 
-# POST 建立資源
-gh api repos/OWNER/REPO/issues --method POST --field title="標題" --field body="內容"
+# 分頁
+gh api repos/OWNER/REPO/issues?state=open\&per_page=100
+
+# POST 建立资源
+gh api repos/OWNER/REPO/issues --method POST \
+  --field title="標題" \
+  --field body="內容"
 ```
 
 ### Repo 操作
 
 ```bash
-# 查 repo 資訊
+# 查 repo
 gh repo view OWNER/REPO
 
-# 列出所有 branches
-gh api repos/OWNER/REPO/branches --jq '.[].name'
+# 列出 branches
+gh api repos/OWNER/REPO/branches --jq '.[].name' 2>&1 || true
 
 # Fork
-gh repo fork OWNER/REPO --clone
+gh api repos/OWNER/REPO/forks --method POST 2>&1
 ```
 
 ---
 
 ## 輸出格式約束
 
-### Issue / PR Comment 建立成功時
+### Issue / PR 建立成功後（Verify 前先口報）
 
-回報格式：
 ```
-✅ 已發送
-URL: https://github.com/OWNER/REPO/issues/編號
+✅ 正在建立…
+URL: https://github.com/OWNER/REPO/issues/131
 ```
 
-### PR 建立成功時
+### Verify 完成後
+
+```
+✅ 已確認建立
+#131 標題
+標籤: bug, session
+```
+
+### PR 建立成功
 
 ```
 ✅ PR 已建立
-URL: https://github.com/OWNER/REPO/pull/編號
+URL: https://github.com/OWNER/REPO/pull/456
 標題: <title>
 狀態: <open|draft>
 ```
 
 ### 查詢類操作
 
-以 Markdown 表格呈現，欄位：
-- `編號` / `狀態` / `標題` / `標籤` / `負責人`
+Markdown 表格：編號 / 狀態 / 標題 / 標籤 / 負責人
 
 ### 失敗時
 
-直接輸出完整 `gh` 的 error message，不截斷，並說明：
-- 失敗原因（若從 error 可推斷）
-- 使用者可以怎麼處理
+完整輸出 `gh` 的 error message，說明原因與處理方式。
 
 ---
 
@@ -159,8 +194,8 @@ URL: https://github.com/OWNER/REPO/pull/編號
 
 | 環境變數 | 用途 | 必要 |
 |----------|------|------|
-| `GH_TOKEN` 或 `GITHUB_TOKEN` | 認證 | 是 |
-| `GH_REPO` | 預設 repo（`owner/repo` 格式） | 建議設定 |
+| `GH_TOKEN` / `GITHUB_TOKEN` | 認證 | 是 |
+| `GH_REPO` | 預設 repo | 建議 |
 
 ---
 
@@ -168,33 +203,38 @@ URL: https://github.com/OWNER/REPO/pull/編號
 
 | 錯誤訊息 | 原因 | 處理方式 |
 |----------|------|---------|
-| `Authentication failed` | token 無效或未設定 | 提示使用者檢查 `gh auth status` |
-| `Resource not found` | repo/issue 不存在 | 確認 repo 名稱或 issue 編號是否正確 |
-| `Validation Failed` | 欄位格式錯誤 | 檢查 `--title` 長度或 `--label` 格式 |
-| `conflict` | PR 目標 branch 有衝突 | 建議先 fetch 並 rebase |
+| `Authentication failed` | token 無效 | 檢查 `gh auth status` |
+| `'xxx' not found`（label） | label 尚未建立 | 先 `gh api POST /labels` 建立 |
+| `Validation Failed` | 欄位格式錯誤 | 檢查 `--title` 長度、label 格式 |
+| `conflict` | PR branch 衝突 | fetch + rebase |
 | `network` | 網路問題 | 重試一次 |
+| `gh: API cannot be queried` | 未授權 | `gh auth refresh` |
 
 ---
 
 ## 限制與禁区
 
-1. **不自動刪除任何資源** — 刪除 issue/PR/branch 需使用者明確授權
-2. **不繞過付費牆** — GitHub API 有 rate limit，超過時誠實告知使用者
-3. **不修改他人的 repo** — 除非 `--repo` 明確指定或已是 fork
-4. **PR body 不做 markdown 截斷** — GitHub PR body 沒有長度限制
+1. **不自動刪除資源** — 刪除需使用者明確授權
+2. **不繞過付費牆** — rate limit 超出時誠實告知
+3. **PR body 不截斷** — GitHub PR body 無長度限制
 
 ---
 
-## 環境已知問題
+## 環境已知問題（v3 新增）
 
 ### Exit Code 127 啞巴成功（Loom 特定）
 
-Loom 環境中 `bash -lc 'gh ...'` 在命令**成功執行**時仍可能回 exit code 127，
-導致 retry 迴圈重複發送相同內容（如連續多條 duplicate PR comment）。
+`bash -lc gh ...` 在成功時可能仍回 exit code 127，造成 retry 迴圈重複發送。
 
-**緩解措施**（已固化為本技能的核心原則 #2）：
+緩解：
+- `--body-file` 写文件后立即执行一次，成功即停
+- 不依賴 exit code 判斷，用 `gh issue view` / `gh pr view` 驗證
 
-1. 所有 body 內容一律寫入 `tmp/` 檔案後用 `--body-file` 發送
-2. 不要用 heredoc 或 `--body` 內嵌多行文字
-3. 命令成功後**立即停止重試**，不要依賴 exit code 做判斷
-4. 若需要確認是否成功，用 `gh pr view` 或 `gh issue view` 查詢目標物件的現有 comment 數量
+### `--jq` 無匹配時 Exit 5 中斷 Chain
+
+`gh api --jq '...'` 在無匹配輸出時回 exit 5，無 error message，直接中斷 pipe chain。
+
+緩解：
+- `gh api --jq` 单独执行，不用 pipe chain
+- 或加 `|| true` 包裹，但这样会掩盖真实错误
+- 查列表類用 `gh api repos/.../labels` + Python/手動掃描，不用 `--jq` pipe
