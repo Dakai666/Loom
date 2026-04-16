@@ -290,14 +290,16 @@ class TestTaskGraphManager:
 
     def test_summary_medium(self, mgr):
         text = "x" * 2000
-        summary = mgr._generate_summary(text)
-        assert "truncated" in summary
+        summary = mgr._generate_summary(text, node_id="test_node")
+        assert "task_read" in summary
+        assert "test_node" in summary
         assert len(summary) < len(text)
 
     def test_summary_long(self, mgr):
         text = "H" * 3000 + "MIDDLE" + "T" * 3000
-        summary = mgr._generate_summary(text)
+        summary = mgr._generate_summary(text, node_id="big_node")
         assert "..." in summary
+        assert "task_read" in summary
         assert len(summary) < len(text)
 
 

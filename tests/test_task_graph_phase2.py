@@ -309,6 +309,49 @@ class TestTTLCleanup:
         assert not artifact_session_dir.exists()
 
 
+# ── Completed graph reset (Issue #150 bug) ───────────────────────────
+
+class TestCompletedGraphReset:
+    def test_create_after_completed_succeeds(self, mgr):
+        """After a graph completes, task_plan should create a new graph."""
+        mgr.create_graph([{"id": "a", "content": "A"}])
+        mgr.mark_completed("a", "done")
+        assert mgr.state == GraphState.COMPLETED
+
+        # Second create should succeed, not raise
+        g2 = mgr.create_graph([{"id": "b", "content": "B"}])
+        assert mgr.state == GraphState.ACTIVE
+        assert g2.get("b") is not None
+
+    def test_create_after_failed_succeeds(self, mgr):
+        """After a graph fails, task_plan should create a new graph."""
+        mgr.create_graph([{"id": "a", "content": "A"}])
+        mgr.mark_failed("a", "boom")
+        assert mgr.state == GraphState.FAILED
+
+        g2 = mgr.create_graph([{"id": "c", "content": "C"}])
+        assert mgr.state == GraphState.ACTIVE
+        assert g2.get("c") is not None
+
+    def test_create_while_active_still_raises(self, mgr):
+        """Active graph must be completed/abandoned before creating new one."""
+        mgr.create_graph([{"id": "a", "content": "A"}])
+        with pytest.raises(ValueError, match="already exists"):
+            mgr.create_graph([{"id": "b", "content": "B"}])
+
+    def test_create_after_completed_cleans_artifacts(self, mgr, tmp_dirs):
+        _, artifact = tmp_dirs
+        mgr.create_graph([{"id": "a", "content": "A"}])
+        large = "x" * (_OVERFLOW_THRESHOLD + 100)
+        mgr.mark_completed("a", large)
+        artifact_dir = artifact / "test-session"
+        assert artifact_dir.exists()
+
+        # New graph after completion should clean old artifacts
+        mgr.create_graph([{"id": "b", "content": "B"}])
+        assert not artifact_dir.exists()
+
+
 # ── Abandon with artifact cleanup ─────────────────────────────────────
 
 class TestAbandonCleanup:

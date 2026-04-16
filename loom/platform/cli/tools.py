@@ -1781,6 +1781,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
 def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
     """Create the task_done tool for marking nodes completed or failed."""
     from loom.core.tasks.graph import TaskStatus
+    from loom.core.tasks.manager import _SHORT_THRESHOLD
 
     async def _task_done(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
@@ -1836,17 +1837,27 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
                         "context": ctx,
                     })
 
+                result_info: dict[str, Any] = {
+                    "action": "node_completed",
+                    "node_id": node.id,
+                    "result_summary": node.result_summary,
+                    "graph_state": status["graph_state"],
+                    "ready_nodes": ready_with_context,
+                    "graph": status,
+                }
+                # Signal large results so the agent knows task_read is worthwhile
+                result_len = len(result_text)
+                if result_len > _SHORT_THRESHOLD:
+                    result_info["full_result_chars"] = result_len
+                    result_info["retrieval_hint"] = (
+                        f"task_read(node_id='{node_id}') for full {result_len}-char result "
+                        f"(supports section='head'/'tail'/'N-M'/keyword)"
+                    )
+
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
                     success=True,
-                    output=json.dumps({
-                        "action": "node_completed",
-                        "node_id": node.id,
-                        "result_summary": node.result_summary,
-                        "graph_state": status["graph_state"],
-                        "ready_nodes": ready_with_context,
-                        "graph": status,
-                    }, ensure_ascii=False),
+                    output=json.dumps(result_info, ensure_ascii=False),
                 )
         except ValueError as exc:
             return ToolResult(

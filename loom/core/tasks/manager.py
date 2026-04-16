@@ -80,10 +80,16 @@ class TaskGraphManager:
         Each task dict has: id, content, depends_on? (list of IDs).
         """
         if self._graph is not None:
-            raise ValueError(
-                "A task graph already exists for this session. "
-                "Use task_modify to change it, or complete/abandon it first."
-            )
+            if self._state in (GraphState.COMPLETED, GraphState.FAILED):
+                # Exhausted graph — auto-reset so a new graph can start
+                self._cleanup_artifacts()
+                self._graph = None
+                self._delete_persisted()
+            else:
+                raise ValueError(
+                    "A task graph already exists for this session. "
+                    "Use task_modify to change it, or complete/abandon it first."
+                )
 
         graph = TaskGraph()
         # First pass: validate no duplicate IDs
@@ -193,7 +199,7 @@ class TaskGraphManager:
         else:
             node.complete(result)
 
-        node.result_summary = self._generate_summary(result)
+        node.result_summary = self._generate_summary(result, node_id=node_id)
         self._check_graph_completion()
         self._persist()
         return node
@@ -520,19 +526,24 @@ class TaskGraphManager:
         self._state = GraphState.FAILED if has_failure else GraphState.COMPLETED
 
     @staticmethod
-    def _generate_summary(result: str) -> str:
+    def _generate_summary(result: str, node_id: str = "") -> str:
         """Generate a compact summary of a node result.
 
-        Short results are used verbatim. Medium results get truncated.
-        Long results get head + tail extraction.
+        Short results are used verbatim. Medium/long results get truncated
+        with a task_read hint so the agent knows full data is available.
         """
         if not result:
             return "(empty result)"
         length = len(result)
         if length <= _SHORT_THRESHOLD:
             return result
+        read_hint = (
+            f"\n⚠ Full result ({length} chars) available — "
+            f"use task_read(node_id='{node_id}') to retrieve, "
+            f"supports section='head'/'tail'/'10-50'/keyword"
+        ) if node_id else f"\n... ({length} chars total, use task_read for full result)"
         if length <= _MEDIUM_THRESHOLD:
-            return result[:400] + f"\n... ({length} chars total, truncated)"
+            return result[:400] + read_hint
         # Long result: head + tail
         head = result[:300]
         tail = result[-200:]
@@ -540,4 +551,5 @@ class TaskGraphManager:
             f"{head}\n"
             f"... ({length} chars total) ...\n"
             f"{tail}"
+            f"{read_hint}"
         )
