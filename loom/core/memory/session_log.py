@@ -74,16 +74,16 @@ class SessionLog:
     # Write path
     # ------------------------------------------------------------------
 
-    async def create_session(self, session_id: str, model: str) -> None:
+    async def create_session(self, session_id: str, model: str, title: str | None = None) -> None:
         """Insert a new session row.  INSERT OR IGNORE is safe for resume."""
         now = datetime.now(UTC).isoformat()
         await self._db.execute(
             """
             INSERT OR IGNORE INTO sessions
                 (session_id, model, title, started_at, last_active, turn_count)
-            VALUES (?, ?, NULL, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, 0)
             """,
-            (session_id, model, now, now),
+            (session_id, model, title, now, now),
         )
         await self._db.commit()
 
@@ -160,6 +160,16 @@ class SessionLog:
         await self._db.execute(
             "DELETE FROM sessions WHERE session_id = ?", (session_id,)
         )
+        await self._db.commit()
+
+    async def update_title(self, session_id: str, title: str) -> None:
+        """Overwrite the title of an existing session."""
+        await self._db.execute(
+            "UPDATE sessions SET title = ? WHERE session_id = ?",
+            (title, session_id),
+        )
+        await self._db.commit()
+
         await self._db.commit()
 
     async def fork_session(self, old_session_id: str, new_session_id: str, target_turn_index: int) -> None:

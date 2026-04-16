@@ -327,7 +327,7 @@ class LoomDiscordBot:
         else:
             # Message in main channel → create a new thread and start there
             thread = await self._create_session_thread(message, content)
-            session = await self._start_session(thread.id)
+            session = await self._start_session(thread.id, provisional_title=thread.name)
 
         # Process attachments
         if getattr(message, "attachments", None):
@@ -380,7 +380,8 @@ class LoomDiscordBot:
             await self._start_session(thread.id)
         return self._sessions[thread.id]
 
-    def _load_thread_map(self) -> dict[str, str]:
+    # ── (internal helper only — callers use _get_thread_session / _start_session directly)
+    # ------------------------------------------------------------------(self) -> dict[str, str]:
         """Load persisted thread_id → session_id mapping from disk."""
         try:
             if self._thread_map_path.exists():
@@ -399,7 +400,9 @@ class LoomDiscordBot:
         except Exception:
             pass  # never block on a save failure
 
-    async def _start_session(self, thread_id: int) -> "LoomSession":
+    async def _start_session(
+        self, thread_id: int, provisional_title: str | None = None
+    ) -> "LoomSession":
         from loom.core.session import LoomSession
         from loom.core.harness.middleware import BlastRadiusMiddleware
 
@@ -409,6 +412,7 @@ class LoomDiscordBot:
             model=self._model,
             db_path=self._db_path,
             resume_session_id=resume_id,
+            provisional_title=provisional_title,
         )
         await session.start()
 
@@ -458,7 +462,7 @@ class LoomDiscordBot:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         # Commands that require being in a thread
-        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto", "/scope", "/summary"}
+        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto", "/scope", "/summary", "/title"}
         if command in _needs_session and not is_thread:
             await message.channel.send(
                 f"`{command}` must be used inside a session thread.  "
@@ -612,27 +616,48 @@ class LoomDiscordBot:
                 f"`{used:,}` / `{total:,}` tokens"
             )
 
+        elif command == "/title":
+            assert session is not None
+            if not arg:
+                # Show current title
+                from loom.core.memory.session_log import SessionLog as _SL
+                async with session._store.connect() as conn:
+                    meta = await _SL(conn).get_session(session.session_id)
+                current = (meta or {}).get("title")
+                await message.channel.send(
+                    f"Current title: **{current or '(untitled)'}**\n"
+                    "Usage: `/title <new title>`"
+                )
+            else:
+                # Update title
+                from loom.core.memory.session_log import SessionLog as _SL
+                async with session._store.connect() as conn:
+                    await _SL(conn).update_title(session.session_id, arg)
+                await message.channel.send(f"✅ Session title → **{arg}**")
+
         elif command == "/help":
             await message.channel.send(
                 "**Loom commands**\n\n"
-                "`/new` — Open a new session thread\n"
-                "`/sessions` — List recent sessions\n"
-                "`/model` — Show current model + registered providers\n"
-                "`/model <name>` — Switch model  e.g. `ollama/llama3.2`  `claude-sonnet-4-6`\n"
-                "`/personality [name]` — Switch cognitive persona\n"
-                "`/personality off` — Remove active persona\n"
-                "`/think` — View last turn's reasoning chain\n"
-                "`/compact` — Compress older context\n"
-                "`/auto` — Toggle run_bash auto-approve (requires strict_sandbox)\n"
-                "`/pause` — Toggle HITL auto-pause after each tool batch\n"
-                "`/stop` — Immediately cancel the current running turn\n"
-                "`/budget` — Show context token usage\n"
-                "`/scope` — Manage scope grants: `list` · `revoke <id>` · `clear`\n"
-                "`/summary` — Turn summary mode: `off` · `on` · `detail`\n"
-                "`/help` — Show this message\n\n"
-                "Personalities: `adversarial` · `minimalist` · `architect` · `researcher` · `operator`\n\n"
+                "`/new` \u2014 Open a new session thread\n"
+                "`/sessions` \u2014 List recent sessions\n"
+                "`/title <name>` \u2014 Set or show the session title\n"
+                "`/model` \u2014 Show current model + registered providers\n"
+                "`/model <name>` \u2014 Switch model  e.g. `ollama/llama3.2`  `claude-sonnet-4-6`\n"
+                "`/personality [name]` \u2014 Switch cognitive persona\n"
+                "`/personality off` \u2014 Remove active persona\n"
+                "`/think` \u2014 View last turn's reasoning chain\n"
+                "`/compact` \u2014 Compress older context\n"
+                "`/auto` \u2014 Toggle run_bash auto-approve (requires strict_sandbox)\n"
+                "`/pause` \u2014 Toggle HITL auto-pause after each tool batch\n"
+                "`/stop` \u2014 Immediately cancel the current running turn\n"
+                "`/budget` \u2014 Show context token usage\n"
+                "`/scope` \u2014 Manage scope grants: `list` \xb7 `revoke <id>` \xb7 `clear`\n"
+                "`/summary` \u2014 Turn summary mode: `off` \xb7 `on` \xb7 `detail`\n"
+                "`/help` \u2014 Show this message\n\n"
+                "Personalities: `adversarial` \xb7 `minimalist` \xb7 `architect` \xb7 `researcher` \xb7 `operator`\n\n"
                 "*Send any message in the main channel to start a new session thread.*"
             )
+
 
         elif command == "/summary":
             valid_modes = ("off", "on", "detail")
