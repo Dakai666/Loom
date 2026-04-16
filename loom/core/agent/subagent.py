@@ -21,6 +21,7 @@ from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
 
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
+from loom.core.timezone import user_timestamp
 
 if TYPE_CHECKING:
     from loom.core.memory.episodic import EpisodicMemory
