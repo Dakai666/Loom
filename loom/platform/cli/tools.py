@@ -1897,8 +1897,9 @@ def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error="'node_id' is required",
             )
+        section = call.args.get("section")
         try:
-            result = manager.get_node_result(node_id)
+            result = manager.get_node_result(node_id, section=section)
             if result is None:
                 node = manager.graph.get(node_id) if manager.graph else None
                 status = node.status.value if node else "not found"
@@ -1922,7 +1923,8 @@ def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
         description=(
             "Read the full result of a completed task node. "
             "Use this when the result summary (shown in task_status) "
-            "is insufficient and you need the complete output."
+            "is insufficient and you need the complete output. "
+            "For large results, use section to read specific parts."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
@@ -1932,6 +1934,13 @@ def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
                 "node_id": {
                     "type": "string",
                     "description": "ID of the completed node to read",
+                },
+                "section": {
+                    "type": "string",
+                    "description": (
+                        "Optional filter: 'head' (first 200 lines), 'tail' (last 200 lines), "
+                        "'10-50' (line range), or a keyword to grep for matching lines"
+                    ),
                 },
             },
             "required": ["node_id"],

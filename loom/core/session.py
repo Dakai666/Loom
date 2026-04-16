@@ -691,8 +691,15 @@ class LoomSession:
         self._task_graph_manager = TaskGraphManager(
             session_id=self.session_id,
         )
+        # Phase 2: clean up stale graphs from prior sessions (TTL 24h)
+        TaskGraphManager.cleanup_stale_graphs()
         # Attempt to load a persisted graph from a prior session
-        self._task_graph_manager.load_persisted()
+        if self._task_graph_manager.load_persisted():
+            # Phase 2: auto-resume suspended graphs
+            self._task_graph_manager.resume()
+            resume_ctx = self._task_graph_manager.build_resume_context()
+            if resume_ctx and self.messages and self.messages[0]["role"] == "system":
+                self.messages[0]["content"] += f"\n\n{resume_ctx}"
         self.registry.register(make_task_plan_tool(self._task_graph_manager))
         self.registry.register(make_task_status_tool(self._task_graph_manager))
         self.registry.register(make_task_modify_tool(self._task_graph_manager))
@@ -806,6 +813,10 @@ class LoomSession:
         _health = self._governor.health if self._governor else None
 
         try:
+            # Step 0 (Issue #128 Phase 2): Suspend active task graph
+            if hasattr(self, "_task_graph_manager"):
+                self._task_graph_manager.suspend()
+
             # Step 1: Compress session into semantic memory
             try:
                 console.print(Rule("[dim]Compressing session to memory…[/dim]"))
