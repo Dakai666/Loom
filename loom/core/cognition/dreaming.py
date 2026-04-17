@@ -18,9 +18,10 @@ Design decisions
   daemon without blocking the Discord event loop.
 * **JSON parsing is defensive** — if the LLM returns malformed JSON the cycle
   logs a warning and stores whatever well-formed triples it could decode.
-* **Age-aware prompts** (Issue #130) — facts are presented with their creation
-  timestamps and topic tags so the LLM can reason about cross-temporal patterns
-  (e.g. "a fact from April 2 + a new insight from April 15 spans 12 days").
+* **Age-aware prompts** — facts are presented with their creation timestamps and
+  topic tags so the LLM can reason about cross-temporal patterns and cross-domain
+  connections (e.g. a weeks-old infrastructure fact connecting with a recent skill
+  insight enables "cross-version archaeology").
 
 The LoomPlugin wrapper (``DreamingPlugin``) lives in
 ``loom.extensibility.dreaming_plugin`` to keep the layer dependency clean.
@@ -48,9 +49,6 @@ def _extract_topic(key: str) -> str:
 
     Keys follow the pattern ``topic:subtopic:...`` (e.g. ``skill:github_cli:eval``).
     Returns the first segment, or ``"general"`` if no colon is present.
-
-    Issue #130: topic tags are included in the dreaming prompt so the LLM can
-    surface cross-domain connections (middleware + skill evolution, etc.).
     """
     return key.split(":")[0] if ":" in key else "general"
 
@@ -60,8 +58,6 @@ def _extract_topic(key: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Template for the inner prompt fed to the LLM
-# Issue #130: each fact now carries its creation timestamp and topic tag,
-# enabling the LLM to reason about temporal distance and cross-domain patterns.
 _DREAM_SYSTEM = """\
 You are Loom's reflective cognition layer, running an offline dreaming cycle.
 
@@ -77,8 +73,9 @@ Your task is to identify NON-OBVIOUS connections, especially:
   - CROSS-TEMPORAL: connecting old facts (weeks ago) with recent ones
   - EMERGENT PATTERNS: connections only visible when many isolated facts align
 
-When you notice facts spanning very different time periods (e.g. April 2 + April 15),
-note that this long-range mixing is valuable — it enables "cross-version archaeology."
+When you notice facts spanning very different time periods (e.g. a fact from three
+weeks ago connecting with a recent one), note that this long-range mixing is valuable —
+it enables "cross-version archaeology."
 
 Return ONLY a JSON array of relationship triples, each with exactly these keys:
   "subject"   — the first concept (string)
@@ -144,21 +141,23 @@ async def dream_cycle(
         logger.info("[dreaming] No semantic facts found — skipping cycle.")
         return {"facts_sampled": 0, "triples_found": 0, "triples_written": 0, "errors": []}
 
-    # ── 1b. Enrich facts with topic + timestamp (Issue #130) ───────────
-    enriched_facts: list[tuple[str, str, str]] = []  # (topic, fact_time, line)
+    # ── 1b. Enrich facts with topic + timestamp ────────────────────────
+    fact_lines: list[str] = []
     sampled_facts_metadata: list[dict] = []
     for f in facts:
         topic = _extract_topic(f.key)
         fact_time = f.created_at.strftime("%Y-%m-%d") if f.created_at else "unknown"
-        line = f'- [{len(enriched_facts)+1}] key="{f.key}"  topic="{topic}"  fact_time="{fact_time}"  value="{f.value}"'
-        enriched_facts.append((topic, fact_time, line))
+        fact_lines.append(
+            f'- [{len(fact_lines)+1}] key="{f.key}"  topic="{topic}"'
+            f'  fact_time="{fact_time}"  value="{f.value}"'
+        )
         sampled_facts_metadata.append({
             "fact_time": fact_time,
             "key": f.key,
             "topic": topic,
         })
 
-    facts_block = "\n".join(line for _, _, line in enriched_facts)
+    facts_block = "\n".join(fact_lines)
 
     # ── 2. Call LLM ────────────────────────────────────────────────────
     messages = [
@@ -195,8 +194,6 @@ async def dream_cycle(
                     metadata={
                         "insight": triple.get("insight", ""),
                         "dream_ts": datetime.now(UTC).isoformat(),
-                        # Issue #130: preserve the full sampled_facts context
-                        # so future consumers can compute cross-temporal distance
                         "sampled_facts": sampled_facts_metadata,
                     },
                 )

@@ -68,8 +68,8 @@ class JobStore:
         """reason 不可為空——trace 會留在 Job.cancel_reason"""
 
     async def cancel_all(self, reason: str) -> None: ...
-    async def await_jobs(self, ids: list[str], timeout: float)
-        -> tuple[list[Job], list[Job]]:
+    async def await_jobs(self, ids: list[str], timeout: float
+        ) -> tuple[list[Job], list[Job]]:
         """不會 raise timeout——呼叫方檢查 running list 自己決定要不要 cancel。"""
 ```
 
