@@ -53,6 +53,23 @@
 
 ---
 
+## 背景任務（Async Jobs）
+
+> Issue #154：IO 類工具（`fetch_url`、`run_bash`）可用 `async_mode=True` 派到背景執行，結果落入 session-scoped Scratchpad。
+
+**何時用**：多個獨立 IO（抓 N 個 URL、同時跑長時間 shell），不想串列等待。
+**何時不用**：單一操作、結果立刻要用的操作——直接同步最簡單。
+
+**Autonomy 預設同步**。穩定與可預期優先於壁鐘時間；除非明確有並行意義且你會 `jobs_await`，否則 autonomy path 都走 `async_mode=False`。
+
+**工具鏈**：`jobs_list` / `jobs_status` / `jobs_await(ids, timeout)` / `jobs_cancel(id, reason)` / `scratchpad_read(ref)`。
+
+**Cancel 必帶 reason**——軌跡留在 `jobs_list()`，未來回頭可追。Session 結束 harness 自動 `cancel_all(reason="session_ended")`，Scratchpad 清空。
+
+**Turn 邊界自動通知**：若有新完成或仍在 running 的背景 job，在你送出最終回應前 harness 會注入 `[Jobs update]` 提醒——不用自己 polling。
+
+---
+
 ## 工具分類（信任層級）
 
 | 層級 | 行為 | 觸發時機 |
