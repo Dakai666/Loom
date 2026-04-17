@@ -131,16 +131,18 @@ async def compress_session(
     *,
     governor: "MemoryGovernor | None" = None,
 ) -> int:
-    """Compress unprocessed episodic entries to semantic facts, then delete them.
+    """Compress unprocessed episodic entries to semantic facts.
 
     Uses a timestamp in the semantic key so repeated compressions (mid-session
-    and on close) never overwrite each other.  Episodic entries are deleted
-    after a successful compression to prevent redundant re-processing.
+    and on close) never overwrite each other. Processed entries are **soft-
+    deleted** via ``mark_compressed`` rather than removed, so the original
+    trace remains available for audit and recovery until TTL prune aged
+    them out (``MemoryGovernor._prune_episodic_ttl``).
 
     When a MemoryGovernor is provided, candidate facts are filtered through
     the admission gate before being written to semantic memory (Issue #43).
     """
-    entries = await episodic.read_session(session_id)
+    entries = await episodic.read_session(session_id, uncompressed_only=True)
     if not entries:
         return 0
 
@@ -184,9 +186,12 @@ async def compress_session(
         else:
             await semantic.upsert(entry)
 
-    # Delete processed episodic entries so they aren't re-compressed on next stop()
+    # Soft-delete: mark the rows we read as compressed so they aren't
+    # re-processed on the next trigger, but keep the content on disk for
+    # audit and potential backfill (the admission gate or the LLM may drop
+    # something that later turns out to matter).
     if facts:
-        await episodic.delete_session(session_id)
+        await episodic.mark_compressed([e.id for e in entries])
 
     return len(facts)
 
@@ -1308,8 +1313,13 @@ class LoomSession:
 
                 # Mid-session episodic compression: configurable via loom.toml
                 # [memory] episodic_compress_threshold (default 30).
+                # Count only *uncompressed* rows so soft-deleted entries from
+                # prior compressions don't keep the threshold permanently
+                # satisfied (would re-trigger the LLM every turn).
                 try:
-                    ep_count = await self._episodic.count_session(self.session_id)
+                    ep_count = await self._episodic.count_session(
+                        self.session_id, uncompressed_only=True,
+                    )
                     if ep_count >= self._episodic_compress_threshold:
                         fact_count = await compress_session(
                             self.session_id, self._episodic, self._semantic,

@@ -17,12 +17,13 @@ SCHEMA = """
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS episodic_entries (
-    id          TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL,
-    event_type  TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    metadata    TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL,
+    compressed_at TEXT  -- NULL = uncompressed; ISO timestamp once folded into semantic memory
 );
 
 CREATE TABLE IF NOT EXISTS semantic_entries (
@@ -79,6 +80,9 @@ CREATE TABLE IF NOT EXISTS relational_entries (
 
 CREATE INDEX IF NOT EXISTS idx_episodic_session   ON episodic_entries(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodic_created   ON episodic_entries(created_at);
+-- Issue #142 soft-delete: fast filter for uncompressed rows (hot path on every turn).
+CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed
+    ON episodic_entries(session_id) WHERE compressed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_semantic_key        ON semantic_entries(key);
 CREATE INDEX IF NOT EXISTS idx_audit_session       ON audit_log(session_id);
 CREATE TABLE IF NOT EXISTS trigger_history (
@@ -198,6 +202,9 @@ class SQLiteStore:
                 "ALTER TABLE audit_log ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
                 # Issue #64: skill-declared precondition check references
                 "ALTER TABLE skill_genomes ADD COLUMN precondition_check_refs TEXT NOT NULL DEFAULT '[]'",
+                # Issue #142 soft-delete: mark compressed entries instead of deleting
+                # them so compression losses can be audited and recovered.
+                "ALTER TABLE episodic_entries ADD COLUMN compressed_at TEXT",
             ]:
                 try:
                     await db.execute(_migration)
@@ -207,6 +214,8 @@ class SQLiteStore:
             # Ensure new indexes exist even on pre-existing databases.
             for _index_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_session_log_role ON session_log(session_id, role)",
+                "CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed "
+                "ON episodic_entries(session_id) WHERE compressed_at IS NULL",
             ]:
                 try:
                     await db.execute(_index_sql)
