@@ -380,8 +380,7 @@ class LoomDiscordBot:
             await self._start_session(thread.id)
         return self._sessions[thread.id]
 
-    # ── (internal helper only — callers use _get_thread_session / _start_session directly)
-    # ------------------------------------------------------------------(self) -> dict[str, str]:
+    def _load_thread_map(self) -> dict[str, str]:
         """Load persisted thread_id → session_id mapping from disk."""
         try:
             if self._thread_map_path.exists():
