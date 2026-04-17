@@ -81,6 +81,29 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Telemetry (Issue #142) — Agent self-observability
+# ─────────────────────────────────────────────
+# The agent tracks three dimensions of its own behavior:
+#   tool_call          — per-tool success rate + latency
+#   context_layout     — token share across SOUL / Agent / messages layers
+#   memory_compression — episodic → semantic fact-yield ratio
+#
+# Counters live in-memory; snapshots persist to the ``agent_telemetry``
+# table every ``persist_interval`` tool calls AND at session stop.
+# Anomaly alerts are injected at turn boundaries only when a dimension
+# actually reports trouble — the agent is not flooded with normal status.
+# The ``agent_health`` tool lets the agent pull state on demand.
+
+[telemetry]
+enabled          = true
+persist_interval = 100            # flush every N hot-path events
+retention_days   = 30             # reserved for future decay — not yet active
+
+# Subset the default dimension set if you want a lighter-weight install.
+# Leave unset to enable all three.
+# dimensions = ["tool_call", "context_layout", "memory_compression"]
+
+# ─────────────────────────────────────────────
 # Session
 # ─────────────────────────────────────────────
 

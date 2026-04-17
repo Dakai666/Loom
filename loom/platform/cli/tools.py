@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.governance import MemoryGovernor
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
+    from loom.core.infra.telemetry import AgentTelemetryTracker
     from loom.core.tasks.manager import TaskListManager
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
@@ -832,6 +833,72 @@ def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
         executor=_memory_health,
         tags=["memory", "health", "diagnostic"],
         impact_scope="memory",
+    )
+
+
+def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
+    """
+    Create a SAFE ``agent_health`` tool (Issue #142).
+
+    Wraps ``AgentTelemetryTracker`` so the agent can pull its own
+    observability state on demand. Keep it pull-only: anomalies are already
+    pushed at turn boundaries — this tool is for the cases where the agent
+    wants to look without being prompted.
+
+    Args:
+        dimension: optional — one of ``tool_call``, ``context_layout``,
+                   ``memory_compression``. Returns that dimension's detail.
+        minimal:   optional bool — if true, returns the one-line summary
+                   (cheap check before drilling into a specific dimension).
+    """
+    async def _agent_health(call: ToolCall) -> ToolResult:
+        dimension = call.args.get("dimension")
+        minimal = bool(call.args.get("minimal", False))
+        if minimal:
+            output = tracker.report_minimal() or "(no telemetry data yet)"
+        else:
+            output = tracker.report_detail(dimension) or "(no telemetry data yet)"
+        # Surface current anomalies inline so the agent doesn't need two calls
+        # to decide whether to act.
+        alert = tracker.anomaly_report()
+        if alert:
+            output = f"{output}\n\n{alert}"
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.tool_name,
+            success=True,
+            output=output,
+        )
+
+    return ToolDefinition(
+        name="agent_health",
+        description=(
+            "Inspect your own observability telemetry: tool call success/latency, "
+            "context token layout, and memory-compression yield. Call with "
+            "`dimension=<tool_call|context_layout|memory_compression>` to drill "
+            "down, or `minimal=true` for a one-line composite summary. Use when "
+            "you want to self-check before a risky action, or when investigating "
+            "suspected behavioral drift."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": ["tool_call", "context_layout", "memory_compression"],
+                    "description": "Specific dimension to inspect. Omit for full report.",
+                },
+                "minimal": {
+                    "type": "boolean",
+                    "description": "One-line summary across all dimensions.",
+                    "default": False,
+                },
+            },
+        },
+        executor=_agent_health,
+        tags=["telemetry", "health", "diagnostic"],
+        impact_scope="observability",
     )
 
 

@@ -70,6 +70,25 @@
 
 ---
 
+## 自我觀測（Agent Telemetry）
+
+> Issue #142：你可以看見自己。三個維度由 harness 自動追蹤：
+
+- **tool_call** — 每個工具的成功率與延遲
+- **context_layout** — 上下文層（SOUL / Agent / messages）的 token 佔比
+- **memory_compression** — episodic → semantic 的 fact-yield 比率
+
+**什麼時候會浮出來**：只有當某個維度越出正常界時，harness 會在 turn 邊界注入一行警示，避免變成噪音。其餘時間你不會感覺到它。
+
+**主動查詢**：呼叫 `agent_health` 工具即可：
+- `agent_health()` — 完整報告（三個維度）
+- `agent_health(minimal=true)` — 一行摘要
+- `agent_health(dimension="tool_call")` — 單一維度深度報告
+
+**使用時機**：做重大決策前想自檢、懷疑自己行為漂移時、或被警示打擾後想理解全貌。不需要每 turn 都呼叫——有問題 harness 會告訴你。
+
+---
+
 ## 工具分類（信任層級）
 
 | 層級 | 行為 | 觸發時機 |
