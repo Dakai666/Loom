@@ -48,8 +48,8 @@
 ### 5. Task Engine（任務引擎）
 | 文件 | 說明 |
 |------|------|
-| [17-Task-Engine.md](17-Task-Engine.md) | DAG 圖與 Kahn's Topological Sort |
-| [18-Task-Scheduler.md](18-Task-Scheduler.md) | asyncio.gather 並行執行與 stop_on_failure |
+| [17-Task-Engine.md](17-Task-Engine.md) | TaskList 認知外骨骼（平坦清單 + 自驅動 + pre-final-response self-check） |
+| [18-Task-Scheduler.md](18-Task-Scheduler.md) | Async Jobs：JobStore + Scratchpad，IO 層並行與 turn-boundary 事件注入 |
 
 ### 6. Autonomy Engine（自主行動）
 | 文件 | 說明 |
