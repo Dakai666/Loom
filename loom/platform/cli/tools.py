@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import subprocess
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -470,7 +471,12 @@ def make_exec_escape_fn(workspace: Path):
     return _would_escape
 
 
-def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDefinition:
+def make_run_bash_tool(
+    workspace: Path,
+    strict_sandbox: bool = False,
+    jobstore: Any = None,
+    scratchpad: Any = None,
+) -> ToolDefinition:
     """
     Return the ``run_bash`` tool definition.
 
@@ -479,9 +485,15 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
     relative paths and shell builtins stay inside the project folder.  This
     does not prevent absolute-path escapes at the OS level — for full
     confinement use an OS sandbox (e.g. Docker).
+
+    Issue #154: when ``async_mode=True`` is passed in call.args and a jobstore
+    is available, the shell invocation is submitted as a background Job and
+    the tool returns immediately with ``{"job_id": "..."}``.  Results land in
+    the Scratchpad; harness injects status updates at turn boundaries.
     """
     async def _run_bash(call: ToolCall) -> ToolResult:
         command = call.args.get("command", "")
+        async_mode = bool(call.args.get("async_mode", False))
 
         # Issue #98: self-termination guard — before ANY other processing
         verdict = _self_term_guard.check(command)
@@ -511,6 +523,20 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
 
         timeout = call.args.get("timeout", 30)
         cwd = str(workspace) if strict_sandbox else None
+
+        if async_mode and jobstore is not None and scratchpad is not None:
+            job_id = jobstore.submit(
+                "run_bash",
+                {"command": command, "timeout": timeout},
+                lambda: _run_bash_job(command, cwd, timeout, scratchpad),
+            )
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=f"Submitted as {job_id}. Poll with jobs_status or jobs_await.",
+                metadata={"job_id": job_id, "async": True},
+            )
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -539,9 +565,13 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
                               success=False, error=str(exc))
 
     sandbox_note = " Shell is confined to the workspace directory." if strict_sandbox else ""
+    async_note = (
+        " Pass async_mode=True to run in the background and receive a job_id; "
+        "poll via jobs_status / jobs_await; read output with scratchpad_read."
+    ) if jobstore is not None else ""
     return ToolDefinition(
         name="run_bash",
-        description=f"Execute a shell command and return stdout/stderr.{sandbox_note}",
+        description=f"Execute a shell command and return stdout/stderr.{sandbox_note}{async_note}",
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.EXEC,
         input_schema={
@@ -549,6 +579,7 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
             "properties": {
                 "command": {"type": "string", "description": "Shell command to run"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
+                "async_mode": {"type": "boolean", "description": "Run in background; return job_id immediately (default false)."},
                 "justification": {"type": "string", "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。"},
             },
             "required": ["command", "justification"],
@@ -562,6 +593,35 @@ def make_run_bash_tool(workspace: Path, strict_sandbox: bool = False) -> ToolDef
         ],
         scope_resolver=_make_run_bash_resolver(workspace),
     )
+
+
+async def _run_bash_job(
+    command: str,
+    cwd: str | None,
+    timeout: int,
+    scratchpad: Any,
+) -> tuple[str | None, str | None, str | None]:
+    """Execute run_bash in background; write stdout to Scratchpad."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return None, None, f"Command timed out after {timeout}s"
+        output = stdout.decode("utf-8", errors="replace")
+        ref = f"bash_{uuid.uuid4().hex[:8]}"
+        scratchpad.write(ref, output)
+        if proc.returncode != 0:
+            return ref, f"exit {proc.returncode}, {len(output)} chars", None
+        return ref, f"exit 0, {len(output)} chars", None
+    except Exception as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
 
 
 # ------------------------------------------------------------------
@@ -1288,15 +1348,37 @@ def sanitize_untrusted_text(text: str) -> str:
     return f"<untrusted_external_content>\n{safe_text}\n</untrusted_external_content>"
 
 
-def make_fetch_url_tool() -> ToolDefinition:
-    """Return a SAFE tool that fetches a URL and returns cleaned text."""
+def make_fetch_url_tool(
+    jobstore: Any = None,
+    scratchpad: Any = None,
+) -> ToolDefinition:
+    """Return a SAFE tool that fetches a URL and returns cleaned text.
+
+    Issue #154: when ``async_mode=True`` is passed and a jobstore is
+    available, the fetch is submitted as a background Job; the tool
+    returns a job_id immediately and the body lands in Scratchpad.
+    """
 
     async def _fetch_url(call: ToolCall) -> ToolResult:
         url = call.args.get("url", "").strip()
+        async_mode = bool(call.args.get("async_mode", False))
         abort = call.abort_signal
         if not url:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'url' argument is required")
+
+        if async_mode and jobstore is not None and scratchpad is not None:
+            job_id = jobstore.submit(
+                "fetch_url",
+                {"url": url},
+                lambda: _fetch_url_job(url, scratchpad),
+            )
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=f"Submitted as {job_id}. Poll with jobs_status or jobs_await.",
+                metadata={"job_id": job_id, "async": True},
+            )
 
         async def _get():
             async with httpx.AsyncClient(follow_redirects=True,
@@ -1328,12 +1410,16 @@ def make_fetch_url_tool() -> ToolDefinition:
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=output)
 
+    async_note = (
+        " Pass async_mode=True to fetch in the background and receive a job_id; "
+        "the full body lands in Scratchpad."
+    ) if jobstore is not None else ""
     return ToolDefinition(
         name="fetch_url",
         description=(
             "Fetch a URL and return the page title and cleaned body text (scripts/styles removed). "
             "Use this to read web pages, documentation, or articles. "
-            "Output is truncated to 2000 chars."
+            f"Synchronous output is truncated to 2000 chars.{async_note}"
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NETWORK,
@@ -1341,6 +1427,7 @@ def make_fetch_url_tool() -> ToolDefinition:
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "Full URL to fetch (http/https)"},
+                "async_mode": {"type": "boolean", "description": "Fetch in background; return job_id (default false)."},
             },
             "required": ["url"],
         },
@@ -1350,6 +1437,32 @@ def make_fetch_url_tool() -> ToolDefinition:
         scope_descriptions=["connects to the requested URL domain"],
         scope_resolver=_fetch_url_resolver,
     )
+
+
+async def _fetch_url_job(
+    url: str,
+    scratchpad: Any,
+) -> tuple[str | None, str | None, str | None]:
+    """Fetch a URL in the background; write the body to Scratchpad."""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True,
+                                     timeout=_WEB_TIMEOUT) as client:
+            r = await client.get(url, headers={"User-Agent": "Loom/0.3"})
+            r.raise_for_status()
+        content_type = r.headers.get("content-type", "")
+        if "html" in content_type:
+            title, body = _html_to_text(r.text)
+            raw = f"Title: {title}\n\n{body}" if title else body
+        else:
+            raw = r.text
+        clean = sanitize_untrusted_text(raw)
+        ref = f"fetch_{uuid.uuid4().hex[:8]}"
+        scratchpad.write(ref, clean)
+        return ref, f"{len(clean)} chars from {url}", None
+    except httpx.HTTPStatusError as exc:
+        return None, None, f"HTTP {exc.response.status_code}: {url}"
+    except Exception as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
 
 
 def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
@@ -1951,5 +2064,247 @@ def make_task_read_tool(manager: "TaskListManager") -> ToolDefinition:
         },
         executor=_task_read,
         tags=["task", "read"],
+        impact_scope="agent",
+    )
+
+
+# ------------------------------------------------------------------
+# Issue #154: Job inspection & Scratchpad tools
+# ------------------------------------------------------------------
+
+
+def _fmt_job(job: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": job.id,
+        "fn": job.fn_name,
+        "state": job.state.value,
+        "submitted_at": job.submitted_at,
+    }
+    if job.started_at is not None:
+        out["started_at"] = job.started_at
+    if job.finished_at is not None:
+        out["finished_at"] = job.finished_at
+    if job.elapsed_seconds is not None:
+        out["elapsed_seconds"] = round(job.elapsed_seconds, 2)
+    if job.result_ref:
+        out["result_ref"] = f"scratchpad://{job.result_ref}"
+    if job.result_summary:
+        out["summary"] = job.result_summary
+    if job.error:
+        out["error"] = job.error
+    if job.cancel_reason:
+        out["cancel_reason"] = job.cancel_reason
+    return out
+
+
+def make_jobs_list_tool(jobstore: Any) -> ToolDefinition:
+    """List all jobs in the current session (active + terminal)."""
+
+    async def _jobs_list(call: ToolCall) -> ToolResult:
+        filter_state = (call.args.get("state") or "").strip().lower()
+        jobs = jobstore.list_all()
+        if filter_state == "active":
+            jobs = [j for j in jobs if not j.is_terminal]
+        elif filter_state:
+            jobs = [j for j in jobs if j.state.value == filter_state]
+        payload = {
+            "count": len(jobs),
+            "jobs": [_fmt_job(j) for j in jobs],
+        }
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=json.dumps(payload, indent=2),
+        )
+
+    return ToolDefinition(
+        name="jobs_list",
+        description=(
+            "List background jobs in the current session. "
+            "Optional 'state' filter: 'active' (running+pending), or a specific "
+            "state like 'done'/'failed'/'cancelled'."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "description": "Optional filter"},
+            },
+        },
+        executor=_jobs_list,
+        tags=["jobs"],
+        impact_scope="agent",
+    )
+
+
+def make_jobs_status_tool(jobstore: Any) -> ToolDefinition:
+    """Look up a single job by id."""
+
+    async def _jobs_status(call: ToolCall) -> ToolResult:
+        job_id = (call.args.get("job_id") or "").strip()
+        if not job_id:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'job_id' is required")
+        job = jobstore.get(job_id)
+        if job is None:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"Unknown job_id: {job_id}")
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=json.dumps(_fmt_job(job), indent=2),
+        )
+
+    return ToolDefinition(
+        name="jobs_status",
+        description="Get the detailed status of a single background job.",
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+        executor=_jobs_status,
+        tags=["jobs"],
+        impact_scope="agent",
+    )
+
+
+def make_jobs_await_tool(jobstore: Any) -> ToolDefinition:
+    """Block until given jobs terminate or timeout expires."""
+
+    async def _jobs_await(call: ToolCall) -> ToolResult:
+        ids = call.args.get("job_ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        if not ids:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'job_ids' is required (list of job IDs)")
+        timeout = call.args.get("timeout")
+        try:
+            timeout_f = float(timeout) if timeout is not None else None
+        except (TypeError, ValueError):
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'timeout' must be a number (seconds)")
+
+        finished, running = await jobstore.await_jobs(ids, timeout=timeout_f)
+        payload = {
+            "finished": [_fmt_job(j) for j in finished],
+            "still_running": [_fmt_job(j) for j in running],
+            "timeout_hit": len(running) > 0,
+        }
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=json.dumps(payload, indent=2),
+        )
+
+    return ToolDefinition(
+        name="jobs_await",
+        description=(
+            "Wait for one or more jobs to terminate, up to a timeout. "
+            "Returns finished and still_running lists; unfinished jobs keep running."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_ids": {"type": "array", "items": {"type": "string"}},
+                "timeout": {"type": "number", "description": "Seconds; omit to wait indefinitely (not recommended)."},
+            },
+            "required": ["job_ids"],
+        },
+        executor=_jobs_await,
+        tags=["jobs"],
+        impact_scope="agent",
+    )
+
+
+def make_jobs_cancel_tool(jobstore: Any) -> ToolDefinition:
+    """Cancel a running or pending job. Reason is mandatory for traceability."""
+
+    async def _jobs_cancel(call: ToolCall) -> ToolResult:
+        job_id = (call.args.get("job_id") or "").strip()
+        reason = (call.args.get("reason") or "").strip()
+        if not job_id:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'job_id' is required")
+        if not reason:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'reason' is required — cancellation trace must be preserved")
+        try:
+            jobstore.cancel(job_id, reason=reason)
+        except KeyError:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"Unknown job_id: {job_id}")
+        job = jobstore.get(job_id)
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=json.dumps(_fmt_job(job), indent=2),
+        )
+
+    return ToolDefinition(
+        name="jobs_cancel",
+        description=(
+            "Cancel a running/pending job. Requires 'reason' — the trace is "
+            "preserved so you (and future turns) can see why it was stopped."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "reason": {"type": "string", "description": "Why the job is being cancelled."},
+            },
+            "required": ["job_id", "reason"],
+        },
+        executor=_jobs_cancel,
+        tags=["jobs"],
+        impact_scope="agent",
+    )
+
+
+def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
+    """Read content from the session's Scratchpad."""
+
+    async def _scratchpad_read(call: ToolCall) -> ToolResult:
+        ref = (call.args.get("ref") or "").strip()
+        if not ref:
+            refs = scratchpad.list_refs()
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=json.dumps({"available_refs": refs}, indent=2),
+            )
+        section = call.args.get("section")
+        try:
+            content = scratchpad.read(ref, section=section)
+        except KeyError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=content,
+        )
+
+    return ToolDefinition(
+        name="scratchpad_read",
+        description=(
+            "Read content from the session Scratchpad. Omit 'ref' to list "
+            "available refs. Supports section filter: 'head', 'tail', 'N-M' "
+            "for line range, or any string to grep matching lines."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Scratchpad ref (with or without scratchpad:// prefix). Omit to list all refs."},
+                "section": {"type": "string", "description": "Optional filter: head/tail/N-M/keyword."},
+            },
+        },
+        executor=_scratchpad_read,
+        tags=["jobs", "scratchpad"],
         impact_scope="agent",
     )

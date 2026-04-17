@@ -286,6 +286,40 @@ def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str], list[dict]]
     return name, description, tags, valid_refs
 
 
+def _build_jobs_inject_message(jobstore: Any) -> str | None:
+    """Issue #154: render a pre-final-response reminder about background jobs.
+
+    Returns None when there is nothing to report — no new completions and no
+    still-running jobs. Only items finished since the last call are listed
+    under 'Completed since last turn' (JobStore.reap_since_last is idempotent).
+    """
+    new_finished, running = jobstore.reap_since_last()
+    if not new_finished and not running:
+        return None
+
+    lines = ["[Jobs update]"]
+    if new_finished:
+        lines.append("Completed since last turn:")
+        for j in new_finished:
+            if j.state.value == "done":
+                ref = f"scratchpad://{j.result_ref}" if j.result_ref else "(no output)"
+                size = f" ({j.result_summary})" if j.result_summary else ""
+                lines.append(f"  - {j.id} ({j.fn_name}): done → {ref}{size}")
+            elif j.state.value == "failed":
+                lines.append(f"  - {j.id} ({j.fn_name}): failed — {j.error}")
+            elif j.state.value == "cancelled":
+                lines.append(f"  - {j.id} ({j.fn_name}): cancelled — {j.cancel_reason}")
+    if running:
+        if new_finished:
+            lines.append("")
+        lines.append("Still running:")
+        for j in running:
+            elapsed = j.elapsed_seconds
+            elapsed_str = f" ({elapsed:.0f}s elapsed)" if elapsed else ""
+            lines.append(f"  - {j.id} ({j.fn_name}): {j.state.value}{elapsed_str}")
+    return "\n".join(lines)
+
+
 def build_router() -> LLMRouter:
     """
     Build the LLM router with all available providers registered.
@@ -437,8 +471,20 @@ class LoomSession:
         _strict_sandbox: bool = config.get("harness", {}).get("strict_sandbox", False)
         self._strict_sandbox = _strict_sandbox
         self.registry = ToolRegistry()
+        # Issue #154: JobStore + Scratchpad must exist before tools that may
+        # submit to them (run_bash, fetch_url). Session-scoped, in-memory,
+        # cleared on stop(). Final products go through memory system.
+        from loom.core.jobs import JobStore, Scratchpad
+        self._jobstore = JobStore()
+        self._scratchpad = Scratchpad()
+
         from loom.platform.cli.tools import make_run_bash_tool, make_filesystem_tools
-        _run_bash_tool = make_run_bash_tool(self.workspace, strict_sandbox=_strict_sandbox)
+        _run_bash_tool = make_run_bash_tool(
+            self.workspace,
+            strict_sandbox=_strict_sandbox,
+            jobstore=self._jobstore,
+            scratchpad=self._scratchpad,
+        )
         self.registry.register(_run_bash_tool)
         _fs_tools = make_filesystem_tools(self.workspace)
         for tool in _fs_tools:
@@ -672,7 +718,10 @@ class LoomSession:
         ))
 
         # Register web tools (Phase 5D)
-        self.registry.register(make_fetch_url_tool())
+        self.registry.register(make_fetch_url_tool(
+            jobstore=self._jobstore,
+            scratchpad=self._scratchpad,
+        ))
         env = _load_env()
         brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
         if brave_key:
@@ -698,6 +747,22 @@ class LoomSession:
         self.registry.register(make_task_modify_tool(self._tasklist_manager))
         self.registry.register(make_task_done_tool(self._tasklist_manager))
         self.registry.register(make_task_read_tool(self._tasklist_manager))
+
+        # Issue #154: async job inspection tools. The JobStore + Scratchpad
+        # themselves are created in __init__ so run_bash/fetch_url can close
+        # over them; only the inspection tools are registered here.
+        from loom.platform.cli.tools import (
+            make_jobs_list_tool,
+            make_jobs_status_tool,
+            make_jobs_await_tool,
+            make_jobs_cancel_tool,
+            make_scratchpad_read_tool,
+        )
+        self.registry.register(make_jobs_list_tool(self._jobstore))
+        self.registry.register(make_jobs_status_tool(self._jobstore))
+        self.registry.register(make_jobs_await_tool(self._jobstore))
+        self.registry.register(make_jobs_cancel_tool(self._jobstore))
+        self.registry.register(make_scratchpad_read_tool(self._scratchpad))
 
         # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
         # New plugin files require one-time GUARDED approval stored in
@@ -791,6 +856,16 @@ class LoomSession:
     async def stop(self) -> None:
         if self._db is None:
             return
+        # Issue #154: cancel any in-flight background jobs with trace.
+        # Must run BEFORE clearing self._db so any tool_end emissions still
+        # have a live state to write to. Scratchpad is then cleared.
+        if hasattr(self, "_jobstore"):
+            try:
+                await self._jobstore.cancel_all(reason="session_ended")
+            except Exception as exc:
+                logger.error("JobStore.cancel_all failed: %s", exc, exc_info=True)
+        if hasattr(self, "_scratchpad"):
+            self._scratchpad.clear()
         # Issue #64: unmount all skill-declared checks before closing
         if hasattr(self, "_skill_check_manager"):
             self._skill_check_manager.unmount_all()
@@ -1020,6 +1095,10 @@ class LoomSession:
         # at most once per stream_turn if the list still has active nodes,
         # nudging the agent to either continue executing or mark abandonment.
         _tasklist_selfcheck_done = False
+        # Issue #154: Jobs status injection, also at most once per stream_turn.
+        # Reports newly-finished and still-running background jobs so the
+        # agent can absorb progress without polling.
+        _jobs_inject_done = False
 
         while True:
             # Check abort signal at top of each LLM call iteration.
@@ -1203,6 +1282,23 @@ class LoomSession:
                             "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
                         })
                         _tasklist_selfcheck_done = True
+                        continue
+
+                # Issue #154: after TaskList self-check, report background
+                # jobs status if there's something new to say. Order matters:
+                # TaskList comes first so the agent sees planning context
+                # before absorbing IO updates.
+                if (
+                    not _jobs_inject_done
+                    and hasattr(self, "_jobstore")
+                ):
+                    jobs_msg = _build_jobs_inject_message(self._jobstore)
+                    if jobs_msg:
+                        self.messages.append({
+                            "role": "user",
+                            "content": f"<system-reminder>\n{jobs_msg}\n</system-reminder>",
+                        })
+                        _jobs_inject_done = True
                         continue
 
                 self._turn_index += 1
