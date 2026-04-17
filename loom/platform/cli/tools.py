@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.governance import MemoryGovernor
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
-    from loom.core.tasks.manager import TaskGraphManager
+    from loom.core.tasks.manager import TaskListManager
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
@@ -1538,10 +1538,10 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # read_file / write_file / list_dir are registered via make_filesystem_tools(workspace).
 
 
-# ── Issue #128: Agent-driven TaskGraph tools ───────────────────────────────
+# ── Issue #153: Agent-driven TaskList tools ────────────────────────────────
 
-def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
-    """Create the task_plan tool for building a TaskGraph from agent specs."""
+def make_task_plan_tool(manager: "TaskListManager") -> ToolDefinition:
+    """Create the task_plan tool for building a TaskList from agent specs."""
 
     async def _task_plan(call: ToolCall) -> ToolResult:
         tasks = call.args.get("tasks", [])
@@ -1550,7 +1550,6 @@ def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error="'tasks' list is required and must not be empty",
             )
-        # Validate each task spec
         for i, t in enumerate(tasks):
             if not t.get("id") or not t.get("content"):
                 return ToolResult(
@@ -1559,17 +1558,14 @@ def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
                     error=f"Task at index {i} missing required 'id' or 'content'",
                 )
         try:
-            graph = manager.create_graph(tasks)
-            summary = graph.status_summary()
-            plan = graph.compile()
+            tasklist = manager.create_list(tasks)
+            summary = tasklist.status_summary()
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,
                 output=json.dumps({
-                    "status": "graph_created",
+                    "status": "tasklist_created",
                     "total_nodes": summary["total_nodes"],
-                    "levels": summary["levels"],
-                    "plan": str(plan),
                     "ready_nodes": [n.id for n in manager.get_ready_nodes()],
                 }, ensure_ascii=False),
             )
@@ -1582,10 +1578,12 @@ def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
     return ToolDefinition(
         name="task_plan",
         description=(
-            "Build a task execution graph (DAG) for complex multi-step work. "
-            "Each task becomes a node; dependencies determine execution order. "
-            "Independent tasks at the same level run in parallel. "
-            "Use this when the current goal requires multiple coordinated steps."
+            "Build a TaskList for complex multi-step work — a checklist the "
+            "main agent maintains for itself to plan, track, and self-check "
+            "progress. Each task becomes a node with optional `depends_on` "
+            "references (dependencies are documentation only; you execute "
+            "the nodes yourself one at a time). Use this when the current "
+            "goal requires multiple coordinated steps."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
@@ -1624,14 +1622,14 @@ def make_task_plan_tool(manager: "TaskGraphManager") -> ToolDefinition:
     )
 
 
-def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
-    """Create the task_status tool for querying the current graph state."""
+def make_task_status_tool(manager: "TaskListManager") -> ToolDefinition:
+    """Create the task_status tool for querying the current TaskList state."""
 
     async def _task_status(call: ToolCall) -> ToolResult:
-        if not manager.has_graph:
+        if not manager.has_list:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
-                success=True, output="No active task graph.",
+                success=True, output="No active task list.",
             )
         try:
             summary = manager.status()
@@ -1649,7 +1647,7 @@ def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
     return ToolDefinition(
         name="task_status",
         description=(
-            "Check the current state of the active task graph. "
+            "Check the current state of the active TaskList. "
             "Shows each node's status (pending/in_progress/completed/failed), "
             "dependencies, and result summaries for completed nodes."
         ),
@@ -1662,14 +1660,14 @@ def make_task_status_tool(manager: "TaskGraphManager") -> ToolDefinition:
     )
 
 
-def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
-    """Create the task_modify tool for mutating the active graph."""
+def make_task_modify_tool(manager: "TaskListManager") -> ToolDefinition:
+    """Create the task_modify tool for mutating the active TaskList."""
 
     async def _task_modify(call: ToolCall) -> ToolResult:
-        if not manager.has_graph:
+        if not manager.has_list:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
-                success=False, error="No active task graph. Use task_plan first.",
+                success=False, error="No active task list. Use task_plan first.",
             )
         errors: list[str] = []
         changes: list[str] = []
@@ -1724,7 +1722,7 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
     return ToolDefinition(
         name="task_modify",
         description=(
-            "Modify the active task graph: add new nodes, remove pending nodes, "
+            "Modify the active TaskList: add new nodes, remove pending nodes, "
             "or update content/dependencies of pending nodes. "
             "Only PENDING nodes can be removed or updated."
         ),
@@ -1778,10 +1776,10 @@ def make_task_modify_tool(manager: "TaskGraphManager") -> ToolDefinition:
     )
 
 
-def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
+def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
     """Create the task_done tool for marking nodes completed or failed."""
-    from loom.core.tasks.graph import TaskStatus
-    from loom.core.tasks.manager import _SHORT_THRESHOLD
+    from loom.core.tasks.tasklist import TaskStatus
+    from loom.core.tasks.manager import SHORT_THRESHOLD
 
     async def _task_done(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
@@ -1795,14 +1793,12 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
         failed = bool(error_text)
 
         try:
-            # Ensure node transitions through IN_PROGRESS before terminal state
-            node_obj = manager.graph.get(node_id) if manager.graph else None
+            node_obj = manager.tasklist.get(node_id) if manager.tasklist else None
             if node_obj and node_obj.status == TaskStatus.PENDING:
                 manager.mark_in_progress(node_id)
 
             if failed:
                 node = manager.mark_failed(node_id, error_text)
-                # Return status so agent can decide next steps
                 status = manager.status()
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
@@ -1811,54 +1807,49 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
                         "action": "node_failed",
                         "node_id": node.id,
                         "error": error_text,
-                        "graph": status,
-                        "hint": "Decide: retry (task_modify to update node), skip downstream, or abandon the graph.",
+                        "tasklist": status,
+                        "hint": "Decide: retry (task_modify to update node), skip downstream, or abandon the list.",
                     }, ensure_ascii=False),
                 )
-            else:
-                if not result_text:
-                    return ToolResult(
-                        call_id=call.id, tool_name=call.tool_name,
-                        success=False,
-                        error="'result' is required when completing a node (summarize what you accomplished)",
-                    )
-                node = manager.mark_completed(node_id, result_text)
-                # Auto-advance: check what's ready next
-                ready = manager.get_ready_nodes()
-                status = manager.status()
-
-                # Build context for each ready node (Pull Model injection)
-                ready_with_context = []
-                for rn in ready:
-                    ctx = manager.build_node_context(rn)
-                    ready_with_context.append({
-                        "node_id": rn.id,
-                        "content": rn.content,
-                        "context": ctx,
-                    })
-
-                result_info: dict[str, Any] = {
-                    "action": "node_completed",
-                    "node_id": node.id,
-                    "result_summary": node.result_summary,
-                    "graph_state": status["graph_state"],
-                    "ready_nodes": ready_with_context,
-                    "graph": status,
-                }
-                # Signal large results so the agent knows task_read is worthwhile
-                result_len = len(result_text)
-                if result_len > _SHORT_THRESHOLD:
-                    result_info["full_result_chars"] = result_len
-                    result_info["retrieval_hint"] = (
-                        f"task_read(node_id='{node_id}') for full {result_len}-char result "
-                        f"(supports section='head'/'tail'/'N-M'/keyword)"
-                    )
-
+            if not result_text:
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
-                    success=True,
-                    output=json.dumps(result_info, ensure_ascii=False),
+                    success=False,
+                    error="'result' is required when completing a node (summarize what you accomplished)",
                 )
+            node = manager.mark_completed(node_id, result_text)
+            ready = manager.get_ready_nodes()
+            status = manager.status()
+
+            ready_with_context = []
+            for rn in ready:
+                ctx = manager.build_node_context(rn)
+                ready_with_context.append({
+                    "node_id": rn.id,
+                    "content": rn.content,
+                    "context": ctx,
+                })
+
+            result_info: dict[str, Any] = {
+                "action": "node_completed",
+                "node_id": node.id,
+                "result_summary": node.result_summary,
+                "ready_nodes": ready_with_context,
+                "tasklist": status,
+            }
+            result_len = len(result_text)
+            if result_len > SHORT_THRESHOLD:
+                result_info["full_result_chars"] = result_len
+                result_info["retrieval_hint"] = (
+                    f"task_read(node_id='{node_id}') for full {result_len}-char result "
+                    f"(supports section='head'/'tail'/'N-M'/keyword)"
+                )
+
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output=json.dumps(result_info, ensure_ascii=False),
+            )
         except ValueError as exc:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -1869,9 +1860,10 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
         name="task_done",
         description=(
             "Mark a task node as completed (with result) or failed (with error). "
-            "On completion, automatically checks which downstream nodes are now "
-            "ready and returns their context including upstream result summaries. "
-            "On failure, returns the graph state so you can decide how to proceed."
+            "On completion, returns which nodes are now ready plus their upstream "
+            "context (pull-model summaries). On failure, returns the TaskList "
+            "state so you can decide how to proceed. Always call this after "
+            "finishing a node so the TaskList stays accurate for self-check."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.MUTATES,
@@ -1899,7 +1891,7 @@ def make_task_done_tool(manager: "TaskGraphManager") -> ToolDefinition:
     )
 
 
-def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
+def make_task_read_tool(manager: "TaskListManager") -> ToolDefinition:
     """Create the task_read tool for pulling full node results."""
 
     async def _task_read(call: ToolCall) -> ToolResult:
@@ -1913,7 +1905,7 @@ def make_task_read_tool(manager: "TaskGraphManager") -> ToolDefinition:
         try:
             result = manager.get_node_result(node_id, section=section)
             if result is None:
-                node = manager.graph.get(node_id) if manager.graph else None
+                node = manager.tasklist.get(node_id) if manager.tasklist else None
                 status = node.status.value if node else "not found"
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
