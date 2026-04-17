@@ -54,7 +54,7 @@ Loom is organized into seven layers. Every tool call — whether from a human pr
 │    Episodic · Semantic · Procedural (Skills) · Relational    │
 ├─────────────────────────────────────────────────────────────┤
 │                      Task Engine                             │
-│        DAG Scheduler · Parallel Dispatch · Sub-agents        │
+│    TaskList · Async Jobs (JobStore + Scratchpad) · Spawn     │
 ├─────────────────────────────────────────────────────────────┤
 │                     Autonomy Engine                          │
 │       Cron Triggers · Event Triggers · Action Planner        │

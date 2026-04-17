@@ -459,15 +459,23 @@ class TestCosineSimilarity:
 
 class TestBuildEmbeddingProvider:
     def test_returns_provider_when_key_present(self):
-        provider = build_embedding_provider({"minimax.io_key": "sk-test"})
+        # Pass cfg so build_embedding_provider knows to use the "minimax" provider
+        provider = build_embedding_provider(
+            env={"minimax.io_key": "sk-test"},
+            cfg={"embeddings": {"provider": "minimax", "api_key_env": "minimax.io_key"}},
+        )
         assert isinstance(provider, MiniMaxEmbeddingProvider)
 
     def test_returns_none_when_no_key(self):
-        assert build_embedding_provider({}) is None
-        assert build_embedding_provider({"OTHER_KEY": "x"}) is None
+        assert build_embedding_provider({}, {}) is None
+        assert build_embedding_provider({"OTHER_KEY": "x"}, {}) is None
 
     def test_uses_minimax_api_key_env(self):
-        provider = build_embedding_provider({"MINIMAX_API_KEY": "sk-test2"})
+        # Pass cfg so provider is recognized as "minimax" and api_key_env fallback kicks in
+        provider = build_embedding_provider(
+            env={"MINIMAX_API_KEY": "sk-test2"},
+            cfg={"embeddings": {"provider": "minimax"}},
+        )
         assert provider is not None
 
 

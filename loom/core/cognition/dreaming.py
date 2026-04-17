@@ -18,6 +18,10 @@ Design decisions
   daemon without blocking the Discord event loop.
 * **JSON parsing is defensive** — if the LLM returns malformed JSON the cycle
   logs a warning and stores whatever well-formed triples it could decode.
+* **Age-aware prompts** — facts are presented with their creation timestamps and
+  topic tags so the LLM can reason about cross-temporal patterns and cross-domain
+  connections (e.g. a weeks-old infrastructure fact connecting with a recent skill
+  insight enables "cross-version archaeology").
 
 The LoomPlugin wrapper (``DreamingPlugin``) lives in
 ``loom.extensibility.dreaming_plugin`` to keep the layer dependency clean.
@@ -34,13 +38,44 @@ from typing import Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _extract_topic(key: str) -> str:
+    """
+    Extract the topic tag from a semantic memory key.
+
+    Keys follow the pattern ``topic:subtopic:...`` (e.g. ``skill:github_cli:eval``).
+    Returns the first segment, or ``"general"`` if no colon is present.
+    """
+    return key.split(":")[0] if ":" in key else "general"
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
 # Template for the inner prompt fed to the LLM
 _DREAM_SYSTEM = """\
 You are Loom's reflective cognition layer, running an offline dreaming cycle.
 
 You will receive a collection of isolated facts from long-term semantic memory.
-Your task is to identify non-obvious connections, abstract patterns, or emergent
-insights that no single fact surfaces on its own.
+Each fact includes:
+  - ``key``:     its memory key (reveals the topic/subject area)
+  - ``topic``:   the high-level topic category
+  - ``fact_time``: when the fact was first stored (YYYY-MM-DD)
+  - ``value``:   the actual fact content
+
+Your task is to identify NON-OBVIOUS connections, especially:
+  - CROSS-DOMAIN: connecting facts from different topic areas
+  - CROSS-TEMPORAL: connecting old facts (weeks ago) with recent ones
+  - EMERGENT PATTERNS: connections only visible when many isolated facts align
+
+When you notice facts spanning very different time periods (e.g. a fact from three
+weeks ago connecting with a recent one), note that this long-range mixing is valuable —
+it enables "cross-version archaeology."
 
 Return ONLY a JSON array of relationship triples, each with exactly these keys:
   "subject"   — the first concept (string)
@@ -51,7 +86,7 @@ Return ONLY a JSON array of relationship triples, each with exactly these keys:
 
 Rules:
   - Return 3–8 triples maximum.
-  - Focus on CROSS-DOMAIN insights rather than paraphrasing existing facts.
+  - Focus on CROSS-DOMAIN and CROSS-TEMPORAL insights rather than paraphrasing.
   - Do not hallucinate facts not present in the input.
   - If there are fewer than 3 meaningful connections, return fewer triples.
   - Return ONLY the JSON array — no preamble, no explanation, no markdown fences.
@@ -106,10 +141,23 @@ async def dream_cycle(
         logger.info("[dreaming] No semantic facts found — skipping cycle.")
         return {"facts_sampled": 0, "triples_found": 0, "triples_written": 0, "errors": []}
 
-    facts_block = "\n".join(
-        f'- [{i+1}] key="{f.key}"  value="{f.value}"'
-        for i, f in enumerate(facts)
-    )
+    # ── 1b. Enrich facts with topic + timestamp ────────────────────────
+    fact_lines: list[str] = []
+    sampled_facts_metadata: list[dict] = []
+    for f in facts:
+        topic = _extract_topic(f.key)
+        fact_time = f.created_at.strftime("%Y-%m-%d") if f.created_at else "unknown"
+        fact_lines.append(
+            f'- [{len(fact_lines)+1}] key="{f.key}"  topic="{topic}"'
+            f'  fact_time="{fact_time}"  value="{f.value}"'
+        )
+        sampled_facts_metadata.append({
+            "fact_time": fact_time,
+            "key": f.key,
+            "topic": topic,
+        })
+
+    facts_block = "\n".join(fact_lines)
 
     # ── 2. Call LLM ────────────────────────────────────────────────────
     messages = [
@@ -131,7 +179,7 @@ async def dream_cycle(
     # ── 3. Parse JSON triples ──────────────────────────────────────────
     triples = _parse_triples(raw, errors)
 
-    # ── 4. Write to RelationalMemory ───────────────────────────────────
+    # ── 4. Write to RelationalMemory ──────────────────────────────────
     written = 0
     if not dry_run:
         from loom.core.memory.relational import RelationalEntry
@@ -146,6 +194,7 @@ async def dream_cycle(
                     metadata={
                         "insight": triple.get("insight", ""),
                         "dream_ts": datetime.now(UTC).isoformat(),
+                        "sampled_facts": sampled_facts_metadata,
                     },
                 )
                 await relational.upsert(entry)
