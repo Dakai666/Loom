@@ -137,6 +137,13 @@ class JobStore:
 
         Idempotent: jobs that were already reported as finished in a prior
         call are excluded from ``newly_finished``.
+
+        First-call semantics: any job already in a terminal state at the
+        time of the first call **will** appear in ``newly_finished``. In
+        the current lifecycle this is impossible — ``submit()`` is the
+        only entry point and the first reap happens at the earliest
+        ``end_turn`` boundary — but remember this when debugging unusual
+        first-turn injection messages.
         """
         new_finished: list[Job] = []
         for job in self._jobs.values():
@@ -149,6 +156,14 @@ class JobStore:
     # -- cancellation --------------------------------------------------
 
     def cancel(self, job_id: str, reason: str) -> None:
+        """Cancel a running/pending job.
+
+        - Empty ``reason`` → ``ValueError`` (trace must be preserved).
+        - Unknown ``job_id`` → ``KeyError`` (fail loudly; bogus id is a
+          caller bug, not a silent no-op we want to hide).
+        - Already-terminal job → silent no-op (race-free idempotency for
+          ``cancel_all`` and for tools that catch up after completion).
+        """
         if not reason:
             raise ValueError("cancel() requires a non-empty reason")
         job = self._jobs.get(job_id)

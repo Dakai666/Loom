@@ -31,14 +31,32 @@ class Scratchpad:
         self._data[ref] = payload
         return f"{URI_PREFIX}{ref}"
 
-    def read(self, ref: str, section: str | None = None) -> str:
+    def read(
+        self,
+        ref: str,
+        section: str | None = None,
+        max_bytes: int | None = None,
+    ) -> str:
+        """Read a scratchpad entry as text.
+
+        ``max_bytes`` caps the decoded payload before section filtering — a
+        safety net for tools that may return multi-megabyte bodies. When the
+        cap trims content, a truncation notice is appended.
+        """
         ref = self._strip_uri(ref)
         if ref not in self._data:
             raise KeyError(f"Scratchpad ref not found: {ref}")
-        text = self._data[ref].decode("utf-8", errors="replace")
-        if section is None:
-            return text
-        return _apply_section(text, section)
+        raw = self._data[ref]
+        truncated = False
+        if max_bytes is not None and len(raw) > max_bytes:
+            raw = raw[:max_bytes]
+            truncated = True
+        text = raw.decode("utf-8", errors="replace")
+        if section is not None:
+            text = _apply_section(text, section)
+        if truncated:
+            text = text + f"\n\n[scratchpad_read: output truncated at {max_bytes} bytes]"
+        return text
 
     def size(self, ref: str) -> int:
         ref = self._strip_uri(ref)

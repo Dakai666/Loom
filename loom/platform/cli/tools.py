@@ -2202,7 +2202,8 @@ def make_jobs_await_tool(jobstore: Any) -> ToolDefinition:
         name="jobs_await",
         description=(
             "Wait for one or more jobs to terminate, up to a timeout. "
-            "Returns finished and still_running lists; unfinished jobs keep running."
+            "Returns finished and still_running lists; unfinished jobs keep running. "
+            "Does NOT raise on timeout — check 'timeout_hit' in the result."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
@@ -2265,6 +2266,9 @@ def make_jobs_cancel_tool(jobstore: Any) -> ToolDefinition:
     )
 
 
+_SCRATCHPAD_DEFAULT_MAX_BYTES = 200_000
+
+
 def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
     """Read content from the session's Scratchpad."""
 
@@ -2278,8 +2282,21 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
                 output=json.dumps({"available_refs": refs}, indent=2),
             )
         section = call.args.get("section")
+        raw_max = call.args.get("max_bytes")
+        if raw_max is None:
+            max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
+        else:
+            try:
+                max_bytes = int(raw_max)
+                if max_bytes <= 0:
+                    max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
+            except (TypeError, ValueError):
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False, error="'max_bytes' must be a positive integer",
+                )
         try:
-            content = scratchpad.read(ref, section=section)
+            content = scratchpad.read(ref, section=section, max_bytes=max_bytes)
         except KeyError as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
@@ -2293,7 +2310,9 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         description=(
             "Read content from the session Scratchpad. Omit 'ref' to list "
             "available refs. Supports section filter: 'head', 'tail', 'N-M' "
-            "for line range, or any string to grep matching lines."
+            f"for line range, or any string to grep matching lines. Output is "
+            f"capped at {_SCRATCHPAD_DEFAULT_MAX_BYTES} bytes by default — "
+            "raise 'max_bytes' for larger payloads."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
@@ -2302,6 +2321,7 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
             "properties": {
                 "ref": {"type": "string", "description": "Scratchpad ref (with or without scratchpad:// prefix). Omit to list all refs."},
                 "section": {"type": "string", "description": "Optional filter: head/tail/N-M/keyword."},
+                "max_bytes": {"type": "integer", "description": f"Byte cap on raw payload before section filter (default {_SCRATCHPAD_DEFAULT_MAX_BYTES})."},
             },
         },
         executor=_scratchpad_read,

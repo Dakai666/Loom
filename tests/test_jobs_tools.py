@@ -230,6 +230,32 @@ class TestScratchpadTool:
         r = await tool.executor(_call("scratchpad_read", {"ref": "nope"}))
         assert not r.success
 
+    async def test_default_max_bytes_caps_output(self):
+        pad = Scratchpad()
+        pad.write("big", "y" * 1_000_000)
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "big"}))
+        assert r.success
+        # Default cap is 200_000; trailing truncation notice adds a few bytes
+        assert len(r.output) < 210_000
+        assert "truncated" in r.output
+
+    async def test_explicit_max_bytes_override(self):
+        pad = Scratchpad()
+        pad.write("med", "z" * 5_000)
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "med", "max_bytes": 1000}))
+        assert r.success
+        assert "truncated at 1000 bytes" in r.output
+
+    async def test_max_bytes_rejects_non_int(self):
+        pad = Scratchpad()
+        pad.write("x", "hi")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "x", "max_bytes": "many"}))
+        assert not r.success
+        assert "max_bytes" in r.error
+
 
 # --- event injection helper ----------------------------------------
 

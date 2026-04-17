@@ -97,6 +97,26 @@ class TestScratchpad:
         pad.write("log", "apple\nbanana\napricot\ncarrot")
         assert pad.read("log", section="ap") == "apple\napricot"
 
+    def test_max_bytes_truncates_with_notice(self):
+        pad = Scratchpad()
+        pad.write("big", "x" * 1000)
+        result = pad.read("big", max_bytes=100)
+        assert result.startswith("x" * 100)
+        assert "truncated at 100 bytes" in result
+
+    def test_max_bytes_not_applied_when_under(self):
+        pad = Scratchpad()
+        pad.write("small", "tiny")
+        assert pad.read("small", max_bytes=1000) == "tiny"
+
+    def test_max_bytes_with_section(self):
+        """max_bytes trims raw bytes first, section filter runs on the trim."""
+        pad = Scratchpad()
+        pad.write("log", "aaa\nbbb\nccc\nddd")
+        result = pad.read("log", section="head", max_bytes=7)
+        assert "aaa\nbbb" in result
+        assert "truncated at 7 bytes" in result
+
 
 # --- JobStore: submission + completion -------------------------------
 

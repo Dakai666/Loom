@@ -31,7 +31,7 @@ at turn boundaries — you never need to poll blindly.
 | `run_bash(command, async_mode=True)` | Submit shell command; returns `{job_id}` |
 | `jobs_list(state=?)` | List all jobs; optionally filter by `active`/`done`/`failed`/`cancelled` |
 | `jobs_status(job_id)` | Full state for one job |
-| `jobs_await(job_ids, timeout)` | Block until all complete or timeout (returns finished + still_running) |
+| `jobs_await(job_ids, timeout)` | Block until all complete or timeout. Does not raise on timeout — check `timeout_hit` in the result and decide (cancel vs. keep waiting) |
 | `jobs_cancel(job_id, reason)` | Cancel in-flight job — `reason` is mandatory |
 | `scratchpad_read(ref, section?)` | Read the body; omit `ref` to list available refs |
 
