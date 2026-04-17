@@ -74,6 +74,61 @@ class TestSQLiteStore:
                     "skill_genomes", "audit_log"}
         assert expected.issubset(tables)
 
+    @pytest.mark.asyncio
+    async def test_initialize_migrates_pre_compressed_at_schema(self, tmp_db):
+        """Regression: initialize() must not explode on databases that
+        predate the compressed_at column. The partial index that references
+        that column has to be built *after* the ALTER TABLE migration adds
+        it — never as part of the main SCHEMA script.
+        """
+        import aiosqlite
+        import sqlite_vec
+
+        async with aiosqlite.connect(tmp_db) as db:
+            await db.enable_load_extension(True)
+            await db.load_extension(sqlite_vec.loadable_path())
+            # Pre-soft-delete table shape — no compressed_at column.
+            await db.execute(
+                """
+                CREATE TABLE episodic_entries (
+                    id         TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    metadata   TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                "INSERT INTO episodic_entries VALUES (?, ?, ?, ?, ?, ?)",
+                ("e1", "s1", "msg", "legacy", "{}", "2026-01-01T00:00:00+00:00"),
+            )
+            await db.commit()
+
+        # Should migrate cleanly, not raise.
+        s = SQLiteStore(tmp_db)
+        await s.initialize()
+
+        async with s.connect() as db:
+            cur = await db.execute("PRAGMA table_info(episodic_entries)")
+            cols = {r[1] for r in await cur.fetchall()}
+            assert "compressed_at" in cols
+
+            cur = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='episodic_entries'"
+            )
+            indexes = {r[0] for r in await cur.fetchall()}
+            assert "idx_episodic_session_uncompressed" in indexes
+
+            # Pre-existing row survives migration with NULL compressed_at
+            em = EpisodicMemory(db)
+            rows = await em.read_session("s1")
+            assert len(rows) == 1
+            assert rows[0].compressed_at is None
+            assert await em.count_session("s1", uncompressed_only=True) == 1
+
 
 # ---------------------------------------------------------------------------
 # EpisodicMemory
@@ -138,6 +193,72 @@ class TestEpisodicMemory:
         ))
         entries = await em.read_session("s5")
         assert entries[0].metadata == meta
+
+    # Issue #142 — soft-delete behaviour
+    @pytest.mark.asyncio
+    async def test_mark_compressed_stamps_and_is_queryable(self, db_conn):
+        em = EpisodicMemory(db_conn)
+        ids: list[str] = []
+        for i in range(3):
+            entry = EpisodicEntry(
+                session_id="soft", event_type="tool_result", content=f"step {i}",
+            )
+            ids.append(entry.id)
+            await em.write(entry)
+
+        # Mark the first two
+        marked = await em.mark_compressed(ids[:2])
+        assert marked == 2
+
+        all_rows = await em.read_session("soft")
+        assert len(all_rows) == 3  # read_session default includes compressed rows
+        stamped = [r for r in all_rows if r.compressed_at is not None]
+        assert {r.id for r in stamped} == set(ids[:2])
+
+        uncompressed = await em.read_session("soft", uncompressed_only=True)
+        assert [r.id for r in uncompressed] == [ids[2]]
+
+    @pytest.mark.asyncio
+    async def test_count_session_uncompressed_only(self, db_conn):
+        em = EpisodicMemory(db_conn)
+        ids: list[str] = []
+        for _ in range(4):
+            entry = EpisodicEntry(
+                session_id="count", event_type="message", content="x",
+            )
+            ids.append(entry.id)
+            await em.write(entry)
+
+        # Before marking: both counts agree
+        assert await em.count_session("count") == 4
+        assert await em.count_session("count", uncompressed_only=True) == 4
+
+        await em.mark_compressed(ids[:3])
+
+        # After marking: total unchanged, uncompressed drops
+        assert await em.count_session("count") == 4
+        assert await em.count_session("count", uncompressed_only=True) == 1
+
+    @pytest.mark.asyncio
+    async def test_mark_compressed_is_idempotent(self, db_conn):
+        em = EpisodicMemory(db_conn)
+        e = EpisodicEntry(session_id="idem", event_type="system", content="x")
+        await em.write(e)
+
+        first = await em.mark_compressed([e.id])
+        second = await em.mark_compressed([e.id])
+        assert first == 1
+        # Second call skips already-compressed rows (WHERE compressed_at IS NULL)
+        assert second == 0
+
+        # Stamp is preserved, not overwritten
+        rows = await em.read_session("idem")
+        assert rows[0].compressed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_mark_compressed_empty_list_is_noop(self, db_conn):
+        em = EpisodicMemory(db_conn)
+        assert await em.mark_compressed([]) == 0
 
 
 # ---------------------------------------------------------------------------

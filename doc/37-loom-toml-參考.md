@@ -105,24 +105,30 @@ episodic_compress_threshold = 30
 | `db_path` | string | `"~/.loom/memory.db"` | SQLite 檔案路徑（支援 `~` 展開） |
 | `episodic_retention_days` | integer | `7` | Episodic entries 保留天數 |
 | `skill_deprecation_threshold` | float | `0.3` | Skill EMA confidence 低於此值標記為 deprecated |
-| `episodic_compress_threshold` | integer | `30` | 每 session 累積多少條 episodic entries 就壓縮成 semantic facts；Discord 長跑 session 建議調低至 `10` |
+| `episodic_compress_threshold` | integer | `30` | 每 session 累積多少條**未壓縮** episodic entries 就壓縮成 semantic facts；Discord 長跑 session 建議調低至 `10`。單批上限 60 條（超過的最舊部分會被截斷）。 |
 
 ### 記憶壓縮流程
 
 ```
 每次 tool call → EpisodicMemory.write()
     ↓
-每個 turn 結束，若 episodic count ≥ episodic_compress_threshold
+每個 turn 結束，若未壓縮 episodic count ≥ episodic_compress_threshold
     → compress_session()
     → Admission Gate（MemoryGovernor）過濾低品質事實
     → 轉換為 FACT → MemoryGovernor.governed_upsert()
     → 矛盾偵測 → SemanticMemory.upsert() 或跳過
-    → 舊 episodic entries 刪除
+    → 舊 episodic entries soft-delete（compressed_at 標記）
     ↓
 Bot 關機 / session.stop()
     → 最終一次 compress_session()
-    → MemoryGovernor.run_decay_cycle()（清除 TTL 過期 + 衰減條目）
+    → MemoryGovernor.run_decay_cycle()（TTL 硬刪 compressed_at 過期行 + 衰減條目）
 ```
+
+**Soft-delete 設計**：壓縮後的 episodic rows 不立即刪除，只在 `compressed_at` 寫入時間戳；
+- `count_session()` / `compress_session()` 預設只看未壓縮 rows，避免重複處理
+- `read_session()` 預設讀全部（包含已壓縮），reflection / session_summary 仍能取得完整軌跡
+- TTL 到期由 `MemoryGovernor._prune_episodic_ttl` 統一硬刪，依 `episodic_retention_days`
+- 若 LLM 抽 FACT 時漏掉關鍵資訊，原始 episodic 仍在磁碟上,可在保留期內 audit / 重抽
 
 ---
 

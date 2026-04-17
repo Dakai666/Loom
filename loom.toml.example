@@ -70,9 +70,14 @@ episodic_retention_days = 7
 # Skills whose EMA confidence drops below this are marked deprecated.
 skill_deprecation_threshold = 0.3
 
-# Compress episodic → semantic after this many entries accumulate per session.
-# Lower values keep semantic memory fresher; 10 is recommended for long-running
-# Discord sessions, 30 is fine for short CLI sessions.
+# Compress episodic → semantic after this many **uncompressed** entries
+# accumulate per session. Already-compressed rows are excluded from the count
+# and kept on disk (soft-delete) for audit and recovery — TTL prune eventually
+# clears them per ``episodic_retention_days``. The LLM compression pass caps
+# at 60 entries per batch, so values above ~55 will silently drop the oldest.
+# Lower values keep semantic memory fresher but shrink each batch, which can
+# hurt fact-extraction quality. 10 is fine for long-running Discord sessions,
+# 30 for short CLI sessions.
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────

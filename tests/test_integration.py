@@ -412,6 +412,46 @@ class TestSessionCompression:
         assert chat_called == []   # router never called for empty session
 
     @pytest.mark.asyncio
+    async def test_compress_soft_deletes_entries(self, db_conn):
+        """Issue #142: compress_session must mark entries compressed, not delete."""
+        em = EpisodicMemory(db_conn)
+        sm = SemanticMemory(db_conn)
+
+        ids: list[str] = []
+        for i in range(3):
+            entry = EpisodicEntry(
+                session_id="soft-comp", event_type="tool_result",
+                content=f"tool call {i}",
+            )
+            ids.append(entry.id)
+            await em.write(entry)
+
+        mock_router = _make_mock_router("FACT: Something happened\n")
+
+        count = await compress_session(
+            session_id="soft-comp",
+            episodic=em, semantic=sm,
+            router=mock_router, model="MiniMax-M2.7",
+        )
+        assert count == 1
+
+        # Entries still exist — but all flagged compressed_at
+        all_rows = await em.read_session("soft-comp")
+        assert len(all_rows) == 3
+        assert all(r.compressed_at is not None for r in all_rows)
+
+        # Uncompressed view is empty — so the threshold won't re-trigger
+        assert await em.count_session("soft-comp", uncompressed_only=True) == 0
+
+        # A subsequent compress_session does nothing (no fresh input)
+        count2 = await compress_session(
+            session_id="soft-comp",
+            episodic=em, semantic=sm,
+            router=mock_router, model="MiniMax-M2.7",
+        )
+        assert count2 == 0
+
+    @pytest.mark.asyncio
     async def test_compress_facts_have_correct_source(self, db_conn):
         em = EpisodicMemory(db_conn)
         sm = SemanticMemory(db_conn)
