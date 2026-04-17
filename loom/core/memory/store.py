@@ -80,9 +80,12 @@ CREATE TABLE IF NOT EXISTS relational_entries (
 
 CREATE INDEX IF NOT EXISTS idx_episodic_session   ON episodic_entries(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodic_created   ON episodic_entries(created_at);
--- Issue #142 soft-delete: fast filter for uncompressed rows (hot path on every turn).
-CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed
-    ON episodic_entries(session_id) WHERE compressed_at IS NULL;
+-- Note: idx_episodic_session_uncompressed (partial index on WHERE compressed_at
+-- IS NULL) is built in the runtime migration block below, **after** the ALTER
+-- TABLE that adds the column. Defining it here would break upgrades from
+-- pre-compressed_at databases — the executescript would fail on the first
+-- initialize() call because the partial predicate references a column that
+-- doesn't exist yet.
 CREATE INDEX IF NOT EXISTS idx_semantic_key        ON semantic_entries(key);
 CREATE INDEX IF NOT EXISTS idx_audit_session       ON audit_log(session_id);
 CREATE TABLE IF NOT EXISTS trigger_history (

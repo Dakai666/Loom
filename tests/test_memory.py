@@ -74,6 +74,61 @@ class TestSQLiteStore:
                     "skill_genomes", "audit_log"}
         assert expected.issubset(tables)
 
+    @pytest.mark.asyncio
+    async def test_initialize_migrates_pre_compressed_at_schema(self, tmp_db):
+        """Regression: initialize() must not explode on databases that
+        predate the compressed_at column. The partial index that references
+        that column has to be built *after* the ALTER TABLE migration adds
+        it — never as part of the main SCHEMA script.
+        """
+        import aiosqlite
+        import sqlite_vec
+
+        async with aiosqlite.connect(tmp_db) as db:
+            await db.enable_load_extension(True)
+            await db.load_extension(sqlite_vec.loadable_path())
+            # Pre-soft-delete table shape — no compressed_at column.
+            await db.execute(
+                """
+                CREATE TABLE episodic_entries (
+                    id         TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    metadata   TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                "INSERT INTO episodic_entries VALUES (?, ?, ?, ?, ?, ?)",
+                ("e1", "s1", "msg", "legacy", "{}", "2026-01-01T00:00:00+00:00"),
+            )
+            await db.commit()
+
+        # Should migrate cleanly, not raise.
+        s = SQLiteStore(tmp_db)
+        await s.initialize()
+
+        async with s.connect() as db:
+            cur = await db.execute("PRAGMA table_info(episodic_entries)")
+            cols = {r[1] for r in await cur.fetchall()}
+            assert "compressed_at" in cols
+
+            cur = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='episodic_entries'"
+            )
+            indexes = {r[0] for r in await cur.fetchall()}
+            assert "idx_episodic_session_uncompressed" in indexes
+
+            # Pre-existing row survives migration with NULL compressed_at
+            em = EpisodicMemory(db)
+            rows = await em.read_session("s1")
+            assert len(rows) == 1
+            assert rows[0].compressed_at is None
+            assert await em.count_session("s1", uncompressed_only=True) == 1
+
 
 # ---------------------------------------------------------------------------
 # EpisodicMemory
