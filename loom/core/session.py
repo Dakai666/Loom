@@ -681,8 +681,10 @@ class LoomSession:
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
 
-        # Issue #128: Agent-driven TaskGraph tools
-        from loom.core.tasks.manager import TaskGraphManager
+        # Issue #153: Agent-driven TaskList tools (cognitive checklist for the
+        # main agent). Cross-session continuity is handled by the memory system,
+        # not the TaskList itself — each session starts with a clean list.
+        from loom.core.tasks.manager import TaskListManager
         from loom.platform.cli.tools import (
             make_task_plan_tool,
             make_task_status_tool,
@@ -690,23 +692,12 @@ class LoomSession:
             make_task_done_tool,
             make_task_read_tool,
         )
-        self._task_graph_manager = TaskGraphManager(
-            session_id=self.session_id,
-        )
-        # Phase 2: clean up stale graphs from prior sessions (TTL 24h)
-        TaskGraphManager.cleanup_stale_graphs()
-        # Attempt to load a persisted graph from a prior session
-        if self._task_graph_manager.load_persisted():
-            # Phase 2: auto-resume suspended graphs
-            self._task_graph_manager.resume()
-            resume_ctx = self._task_graph_manager.build_resume_context()
-            if resume_ctx and self.messages and self.messages[0]["role"] == "system":
-                self.messages[0]["content"] += f"\n\n{resume_ctx}"
-        self.registry.register(make_task_plan_tool(self._task_graph_manager))
-        self.registry.register(make_task_status_tool(self._task_graph_manager))
-        self.registry.register(make_task_modify_tool(self._task_graph_manager))
-        self.registry.register(make_task_done_tool(self._task_graph_manager))
-        self.registry.register(make_task_read_tool(self._task_graph_manager))
+        self._tasklist_manager = TaskListManager(session_id=self.session_id)
+        self.registry.register(make_task_plan_tool(self._tasklist_manager))
+        self.registry.register(make_task_status_tool(self._tasklist_manager))
+        self.registry.register(make_task_modify_tool(self._tasklist_manager))
+        self.registry.register(make_task_done_tool(self._tasklist_manager))
+        self.registry.register(make_task_read_tool(self._tasklist_manager))
 
         # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
         # New plugin files require one-time GUARDED approval stored in
@@ -815,10 +806,6 @@ class LoomSession:
         _health = self._governor.health if self._governor else None
 
         try:
-            # Step 0 (Issue #128 Phase 2): Suspend active task graph
-            if hasattr(self, "_task_graph_manager"):
-                self._task_graph_manager.suspend()
-
             # Step 1: Compress session into semantic memory
             try:
                 console.print(Rule("[dim]Compressing session to memory…[/dim]"))
@@ -1028,6 +1015,12 @@ class LoomSession:
         _stream_retry = 0         # counts back-to-back stream_none retries
         _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
         _stop_reason = "complete"  # tracks why the loop exits
+
+        # Issue #153: TaskList self-check. On end_turn we inject a reminder
+        # at most once per stream_turn if the list still has active nodes,
+        # nudging the agent to either continue executing or mark abandonment.
+        _tasklist_selfcheck_done = False
+
         while True:
             # Check abort signal at top of each LLM call iteration.
             # abort_signal is external (e.g. from AutonomyDaemon);
@@ -1192,6 +1185,26 @@ class LoomSession:
             ))
 
             if response.stop_reason == "end_turn":
+                # Issue #153: Pre-final-response self-check. If the TaskList
+                # has pending/in-progress nodes and we haven't already nudged
+                # this turn, inject a reminder and loop back into the model.
+                # This catches the autonomy stall mode where an agent creates
+                # a plan, does some prep work, then ends silently without
+                # executing the planned nodes (cf. graph 66859851, 2026-04-17).
+                if (
+                    not _tasklist_selfcheck_done
+                    and hasattr(self, "_tasklist_manager")
+                    and self._tasklist_manager.has_active_nodes()
+                ):
+                    reminder = self._tasklist_manager.build_self_check_message()
+                    if reminder:
+                        self.messages.append({
+                            "role": "user",
+                            "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
+                        })
+                        _tasklist_selfcheck_done = True
+                        continue
+
                 self._turn_index += 1
 
                 # Issue #58: trigger skill self-assessment before TurnDone
@@ -2264,26 +2277,14 @@ class LoomSession:
 
     async def _dispatch_parallel(self, tool_uses: list) -> list[tuple]:
         """
-        Dispatch multiple independent tool calls concurrently via TaskGraph.
+        Dispatch multiple independent tool calls concurrently via asyncio.gather.
 
-        All tool_uses are treated as independent nodes (one DAG level), so they
-        execute via asyncio.gather under the TaskScheduler.  Results are returned
-        in the original tool_uses order.
+        Results are returned in the original tool_uses order. Any exception
+        raised by a single tool is converted into an error ToolResult rather
+        than surfaced to the caller — one tool failing must not cancel the
+        rest of the batch.
         """
-        from loom.core.tasks.graph import TaskGraph
-        from loom.core.tasks.scheduler import TaskScheduler
-
-        graph = TaskGraph()
-        node_ids: list[str] = []
-        for tu in tool_uses:
-            node = graph.add(
-                tu.name,
-                metadata={"tool_use": tu},
-            )
-            node_ids.append(node.id)
-
-        async def _run_node(node) -> tuple:
-            tu = node.metadata["tool_use"]
+        async def _run(tu) -> tuple:
             ts = time.monotonic()
             try:
                 result = await self._dispatch(tu.name, tu.args, tu.id)
@@ -2296,34 +2297,31 @@ class LoomSession:
                     failure_type="execution_error",
                 )
             duration_ms = (time.monotonic() - ts) * 1000
-            return result, duration_ms
+            return tu, result, duration_ms
 
-        plan = graph.compile()
-        # Issue #94 Gap 2: wrap scheduler to handle unexpected failures.
-        # Nodes without results get error ToolResults from the fallback below.
         try:
-            await TaskScheduler(executor=_run_node).run(plan)
-        except Exception as sched_exc:
+            return list(await asyncio.gather(*[_run(tu) for tu in tool_uses]))
+        except Exception as exc:
+            # asyncio.gather itself should not raise here (each _run catches its
+            # own exceptions); this is a belt-and-braces fallback mirroring the
+            # prior TaskScheduler wrapper (Issue #94 Gap 2).
             logger.error(
-                "_dispatch_parallel: scheduler failed: %s", sched_exc, exc_info=True,
+                "_dispatch_parallel: unexpected gather failure: %s", exc, exc_info=True,
             )
-
-        ordered: list[tuple] = []
-        for tu, node_id in zip(tool_uses, node_ids):
-            node = graph.get(node_id)
-            if node is None or node.result is None:
-                result = ToolResult(
-                    call_id=tu.id,
-                    tool_name=tu.name,
-                    success=False,
-                    error="Internal dispatch error: parallel scheduler returned no result",
-                    failure_type="execution_error",
+            return [
+                (
+                    tu,
+                    ToolResult(
+                        call_id=tu.id,
+                        tool_name=tu.name,
+                        success=False,
+                        error=f"Internal dispatch error: {exc}",
+                        failure_type="execution_error",
+                    ),
+                    0.0,
                 )
-                ordered.append((tu, result, 0.0))
-                continue
-            result, duration_ms = node.result
-            ordered.append((tu, result, duration_ms))
-        return ordered
+                for tu in tool_uses
+            ]
 
     async def _refresh_memory_index(self) -> None:
         """
