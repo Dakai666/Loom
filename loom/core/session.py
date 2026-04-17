@@ -79,6 +79,7 @@ from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolRegistry
 from loom.core.harness.validation import SchemaValidationMiddleware
 from loom.core.infra import AbortController, wait_aborted
+from loom.core.infra.telemetry import AgentTelemetryTracker, DEFAULT_DIMENSIONS
 from loom.core.memory.embeddings import build_embedding_provider
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.governance import MemoryGovernor
@@ -130,6 +131,7 @@ async def compress_session(
     model: str,
     *,
     governor: "MemoryGovernor | None" = None,
+    telemetry: "AgentTelemetryTracker | None" = None,
 ) -> int:
     """Compress unprocessed episodic entries to semantic facts.
 
@@ -192,6 +194,14 @@ async def compress_session(
     # something that later turns out to matter).
     if facts:
         await episodic.mark_compressed([e.id for e in entries])
+
+    # Issue #142: record the yield ratio so a silently degrading extractor
+    # (facts << entries) surfaces as an anomaly on the next turn boundary.
+    if telemetry is not None:
+        dim = telemetry.get("memory_compression")
+        if dim is not None:
+            dim.record(entries=len(entries), facts=len(facts))
+            telemetry.mark_dirty()
 
     return len(facts)
 
@@ -557,6 +567,19 @@ class LoomSession:
             config.get("session", {}).get("prefetch_top_n", 3)
         )
 
+        # Issue #142: Agent self-observability
+        _tele_cfg = config.get("telemetry", {})
+        self._telemetry_enabled: bool = _tele_cfg.get("enabled", True)
+        self._telemetry_persist_interval: int = int(
+            _tele_cfg.get("persist_interval", 100)
+        )
+        _tele_dims = _tele_cfg.get("dimensions")
+        self._telemetry_dimensions: tuple[str, ...] = (
+            tuple(_tele_dims) if _tele_dims else DEFAULT_DIMENSIONS
+        )
+        self._telemetry: "AgentTelemetryTracker | None" = None
+        self._telemetry_alerted_turns: set[int] = set()
+
     # ------------------------------------------------------------------
     # Personality management
     # ------------------------------------------------------------------
@@ -624,6 +647,22 @@ class LoomSession:
         self._semantic._health = self._governor.health
         self._session_log._health = self._governor.health
 
+        # Issue #142: agent self-observability. Noise-proportional-to-signal —
+        # counters live on the hot path; DB flush is batched by persist_interval
+        # and at stop(). Anomaly summaries inject only when a dimension reports
+        # an issue.
+        if self._telemetry_enabled:
+            self._telemetry = AgentTelemetryTracker(
+                self._db,
+                self.session_id,
+                dimensions=self._telemetry_dimensions,
+                persist_interval=self._telemetry_persist_interval,
+                stack=self._stack,
+                messages_ref=self.messages,
+                max_window=self.budget.total_tokens,
+            )
+            await self._telemetry.ensure_table()
+
         # Build MemoryIndex and inject into system prompt
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
         skill_catalog = await self._auto_import_skills()
@@ -665,6 +704,7 @@ class LoomSession:
 
         # Register memory tools with injected stores
         from loom.platform.cli.tools import (
+            make_agent_health_tool,
             make_exec_escape_fn,
             make_fetch_url_tool,
             make_load_skill_tool,
@@ -683,6 +723,8 @@ class LoomSession:
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
         self.registry.register(make_memory_health_tool(self._governor))
+        if self._telemetry is not None:
+            self.registry.register(make_agent_health_tool(self._telemetry))
 
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
@@ -896,6 +938,7 @@ class LoomSession:
                     self.router,
                     self.model,
                     governor=self._governor,
+                    telemetry=self._telemetry,
                 )
                 if count:
                     console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
@@ -975,6 +1018,16 @@ class LoomSession:
                         )
                 except Exception as exc:
                     logger.debug("Health tracker flush failed: %s", exc)
+
+            # Step 6: Flush agent telemetry (Issue #142). Always dirty-flushes
+            # so cross-session queries see the final-state snapshot even if no
+            # opportunistic flush fired.
+            if self._telemetry is not None:
+                try:
+                    self._telemetry.mark_dirty()
+                    await self._telemetry.flush()
+                except Exception as exc:
+                    logger.debug("Telemetry flush failed: %s", exc)
         finally:
             # Issue #61 Bug 2: wait for pending skill_eval background tasks
             # before closing the DB so their upsert writes can complete.
@@ -1248,6 +1301,13 @@ class LoomSession:
 
             # Replace (not accumulate) — input_tokens is the total context this call.
             self.budget.record_response(response.input_tokens, response.output_tokens)
+            # Issue #142: feed the authoritative total into the context_layout
+            # dimension so layer attribution reflects real usage, not estimates.
+            if self._telemetry is not None:
+                ctx_dim = self._telemetry.get("context_layout")
+                if ctx_dim is not None:
+                    ctx_dim.update_total(response.input_tokens)
+                    self._telemetry.mark_dirty()
             self.messages.append(response.raw_message)
             input_tokens = response.input_tokens  # report latest actual value
             output_tokens += response.output_tokens
@@ -1306,6 +1366,23 @@ class LoomSession:
                         _jobs_inject_done = True
                         continue
 
+                # Issue #142: nudge the agent with a self-observability alert
+                # iff a dimension is outside bounds. Fires at most once per
+                # turn (tracked via _telemetry_alerted_turns) so repeat
+                # anomalies don't flood the context.
+                if (
+                    self._telemetry is not None
+                    and self._turn_index not in self._telemetry_alerted_turns
+                ):
+                    alert = self._telemetry.anomaly_report()
+                    if alert:
+                        self.messages.append({
+                            "role": "user",
+                            "content": f"<system-reminder>\n{alert}\n</system-reminder>",
+                        })
+                        self._telemetry_alerted_turns.add(self._turn_index)
+                        continue
+
                 self._turn_index += 1
 
                 # Issue #58: trigger skill self-assessment before TurnDone
@@ -1325,6 +1402,7 @@ class LoomSession:
                             self.session_id, self._episodic, self._semantic,
                             self.router, self.model,
                             governor=self._governor,
+                            telemetry=self._telemetry,
                         )
                         if fact_count:
                             yield CompressDone(fact_count=fact_count)
@@ -1378,6 +1456,9 @@ class LoomSession:
                             output=tool_output[:200],
                             duration_ms=duration_ms,
                             call_id=tu.id,
+                        )
+                        self._telemetry_record_tool(
+                            tu.name, result=result, duration_ms=duration_ms,
                         )
                         # Drain lifecycle events queued during dispatch
                         while not self._lifecycle_events.empty():
@@ -1454,6 +1535,9 @@ class LoomSession:
                             duration_ms=duration_ms,
                             call_id=tu.id,
                         )
+                        self._telemetry_record_tool(
+                            tu.name, result=result, duration_ms=duration_ms,
+                        )
                         # Final drain of lifecycle events after dispatch
                         while not self._lifecycle_events.empty():
                             yield self._lifecycle_events.get_nowait()
@@ -1481,6 +1565,15 @@ class LoomSession:
 
                 # ── Issue #108: Grants snapshot after each batch ──────────
                 yield self._build_grants_snapshot()
+
+                # Issue #142: opportunistic flush — keeps DB state fresh
+                # for any out-of-band `agent_health` query without adding
+                # per-tool I/O. No-op when below persist_interval.
+                if self._telemetry is not None:
+                    try:
+                        await self._telemetry.maybe_flush()
+                    except Exception as exc:
+                        logger.debug("Telemetry flush deferred: %s", exc)
 
                 # Check budget after tool results are appended — the next LLM
                 # call in this loop will include them and may push over the limit.
@@ -1908,6 +2001,29 @@ class LoomSession:
                     msg = {**msg, "content": filtered_blocks}
             keep2.append(msg)
         self.messages = keep2
+
+    def _telemetry_record_tool(
+        self,
+        tool_name: str,
+        *,
+        result: "ToolResult",
+        duration_ms: float,
+    ) -> None:
+        """Hot-path tool_call recorder. Kept as a small helper so the parallel
+        and sequential dispatch loops both go through the same code path.
+        """
+        if self._telemetry is None:
+            return
+        dim = self._telemetry.get("tool_call")
+        if dim is None:
+            return
+        dim.record(
+            tool_name,
+            success=result.success,
+            duration_ms=duration_ms,
+            error_msg=result.error if not result.success else None,
+        )
+        self._telemetry.mark_dirty()
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,

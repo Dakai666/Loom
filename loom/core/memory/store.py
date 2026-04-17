@@ -142,6 +142,17 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
+-- Issue #142: Agent self-observability snapshots (one row per dimension per session)
+CREATE TABLE IF NOT EXISTS agent_telemetry (
+    dimension   TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (dimension, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_telemetry_updated ON agent_telemetry(updated_at DESC);
+
 -- FTS5 Virtual Tables & Sync Triggers
 
 CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts

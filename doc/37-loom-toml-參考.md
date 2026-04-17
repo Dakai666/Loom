@@ -172,6 +172,29 @@ prefetch_top_n   = 3        # 每次批次前預取的記憶條數
 
 ---
 
+## [telemetry]（v0.3.3 / Issue #142）
+
+Agent 自我觀測開關。預設啟用，可針對低資源環境關閉或削減維度。
+
+```toml
+[telemetry]
+enabled          = true
+persist_interval = 100
+retention_days   = 30
+# dimensions = ["tool_call", "context_layout", "memory_compression"]
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `enabled` | boolean | `true` | 停用後不建立 tracker、不註冊 `agent_health` 工具、不注入異常警示 |
+| `persist_interval` | integer | `100` | hot-path 每累積 N 個事件檢查一次 flush；`stop()` 一定會寫 |
+| `retention_days` | integer | `30` | 保留給未來 decay cycle 使用（目前無作用）|
+| `dimensions` | string[] | `["tool_call","context_layout","memory_compression"]` | 子集化維度，未知名稱會降級跳過 |
+
+完整說明見 [`48-Agent-Telemetry.md`](./48-Agent-Telemetry.md)。
+
+---
+
 ## [harness]
 
 ```toml
