@@ -237,9 +237,20 @@ class TaskReflector:
     def subscribe_mutation(self, callback: MutationSubscriber) -> None:
         """Register a coroutine that receives each generated ``MutationProposal``.
 
-        Only fired when a ``SkillMutator`` is configured and its quality gate
-        allows the candidate through.  Subscribers should treat it as a
-        "candidate generated" audit hook, not a UI-blocking event.
+        Firing conditions (all must hold):
+          1. A ``SkillMutator`` was passed to the reflector constructor.
+          2. ``SkillMutator.should_propose(diagnostic)`` returned ``True``
+             (enabled, quality_score ≤ ceiling, enough mutation_suggestions).
+          3. The rewrite produced a body that passed ``_looks_like_skill_md``
+             and was successfully inserted into ``skill_candidates``.
+          4. ``visibility != "off"``.
+
+        Subscribers run **after** ``ProceduralMemory.insert_candidate`` so the
+        candidate is already persisted when they fire.  Treat this as a
+        "candidate generated" audit hook, not a UI-blocking event — the
+        diagnostic subscriber chain (``subscribe``) is the primary live
+        notification path; mutation subscribers are fired only on the rare
+        turns that actually produce a candidate.
         """
         self._mutation_subscribers.append(callback)
 

@@ -1081,14 +1081,15 @@ class LoomSession:
                 except Exception as exc:
                     logger.debug("Telemetry flush failed: %s", exc)
         finally:
-            # Issue #61 Bug 2 + #120 PR1: wait for pending skill reflection
-            # background tasks before closing the DB so their upsert writes
-            # can complete.  Matches both legacy (skill_eval) and new
-            # (task_reflect / behavioural_triples) task name prefixes.
+            # Issue #61 Bug 2 + #120 PR1/PR2: wait for pending skill reflection
+            # background tasks before closing the DB so their upsert writes can
+            # complete.  Covers TaskReflector (task_reflect), its behavioural
+            # post-hook (behavioural_triples) and the PR 2 mutation proposer
+            # (mutation_proposal).
             pending_evals = [
                 t for t in asyncio.all_tasks()
                 if t.get_name().startswith((
-                    "skill_eval:", "task_reflect:", "behavioural_triples:",
+                    "task_reflect:", "behavioural_triples:", "mutation_proposal:",
                 ))
             ]
             if pending_evals:
