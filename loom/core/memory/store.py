@@ -142,6 +142,25 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
+-- Issue #120 PR 2: Skill candidate pool (pre-promotion revisions)
+CREATE TABLE IF NOT EXISTS skill_candidates (
+    id                 TEXT PRIMARY KEY,
+    parent_skill_name  TEXT NOT NULL,
+    parent_version     INTEGER NOT NULL,
+    candidate_body     TEXT NOT NULL,
+    mutation_strategy  TEXT NOT NULL,
+    diagnostic_keys    TEXT NOT NULL DEFAULT '[]',  -- JSON list of SemanticEntry keys
+    origin_session_id  TEXT,
+    status             TEXT NOT NULL DEFAULT 'generated',
+    pareto_scores      TEXT NOT NULL DEFAULT '{}',  -- JSON dict (task_type → score)
+    notes              TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_candidates_parent ON skill_candidates(parent_skill_name);
+CREATE INDEX IF NOT EXISTS idx_skill_candidates_status ON skill_candidates(status);
+
 -- Issue #142: Agent self-observability snapshots (one row per dimension per session)
 CREATE TABLE IF NOT EXISTS agent_telemetry (
     dimension   TEXT NOT NULL,

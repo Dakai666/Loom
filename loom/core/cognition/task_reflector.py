@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
+    from loom.core.cognition.skill_mutator import MutationProposal, SkillMutator
     from loom.core.events import ExecutionEnvelopeView
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.procedural import ProceduralMemory
@@ -162,6 +163,7 @@ Rules:
 # ---------------------------------------------------------------------------
 
 DiagnosticSubscriber = Callable[[TaskDiagnostic], Awaitable[None]]
+MutationSubscriber = Callable[["MutationProposal"], Awaitable[None]]
 
 
 class TaskReflector:
@@ -209,6 +211,7 @@ class TaskReflector:
         episodic: "EpisodicMemory | None" = None,
         enabled: bool = True,
         visibility: str = "summary",
+        mutator: "SkillMutator | None" = None,
     ) -> None:
         self._router = router
         self._model = model
@@ -219,7 +222,9 @@ class TaskReflector:
         self._session_id = session_id
         self._enabled = enabled
         self._visibility = visibility if visibility in ("off", "summary", "verbose") else "summary"
+        self._mutator = mutator
         self._subscribers: list[DiagnosticSubscriber] = []
+        self._mutation_subscribers: list[MutationSubscriber] = []
 
     # ------------------------------------------------------------------
     # Subscriber API
@@ -228,6 +233,15 @@ class TaskReflector:
     def subscribe(self, callback: DiagnosticSubscriber) -> None:
         """Register a coroutine that receives each completed diagnostic."""
         self._subscribers.append(callback)
+
+    def subscribe_mutation(self, callback: MutationSubscriber) -> None:
+        """Register a coroutine that receives each generated ``MutationProposal``.
+
+        Only fired when a ``SkillMutator`` is configured and its quality gate
+        allows the candidate through.  Subscribers should treat it as a
+        "candidate generated" audit hook, not a UI-blocking event.
+        """
+        self._mutation_subscribers.append(callback)
 
     @property
     def enabled(self) -> bool:
@@ -342,6 +356,12 @@ class TaskReflector:
         if self._relational is not None and self._episodic is not None:
             self._schedule_behavioural_triples()
 
+        # Post-hook: skill mutation proposal (Issue #120 PR 2).  Fire-and-forget
+        # so the candidate rewrite doesn't block the turn.  The scheduled task
+        # re-fetches the parent skill so it picks up the EMA-updated version/row.
+        if self._mutator is not None and self._mutator.should_propose(diagnostic):
+            self._schedule_mutation_proposal(diagnostic)
+
         # Notify subscribers (TUI / Discord / CLI).
         await self._notify_subscribers(diagnostic)
 
@@ -420,6 +440,47 @@ class TaskReflector:
         task.add_done_callback(_on_reflect_done)
 
     # ------------------------------------------------------------------
+    # Mutation post-hook (Issue #120 PR 2)
+    # ------------------------------------------------------------------
+
+    def _schedule_mutation_proposal(self, diagnostic: TaskDiagnostic) -> None:
+        """Schedule ``SkillMutator.propose_candidate`` + persist the candidate.
+
+        The scheduled task re-reads the parent skill so its ``version``
+        (and body) reflect the post-EMA row, then asks the mutator for a
+        rewrite and calls ``ProceduralMemory.insert_candidate`` on success.
+        Failures are swallowed to keep reflection non-fatal.
+        """
+        async def _run() -> None:
+            try:
+                parent = await self._procedural.get(diagnostic.skill_name)
+                if parent is None:
+                    return
+                proposal = await self._mutator.propose_candidate(  # type: ignore[union-attr]
+                    parent=parent,
+                    diagnostic=diagnostic,
+                    session_id=self._session_id,
+                )
+                if proposal is None:
+                    return
+                await self._procedural.insert_candidate(proposal.candidate)
+                logger.debug(
+                    "SkillMutator candidate generated: skill=%s parent_version=%d id=%s",
+                    proposal.candidate.parent_skill_name,
+                    proposal.candidate.parent_version,
+                    proposal.candidate.id,
+                )
+                await self._notify_mutation_subscribers(proposal)
+            except Exception as exc:
+                logger.debug("Mutation post-hook failed: %s", exc)
+
+        task = asyncio.create_task(
+            _run(),
+            name=f"mutation_proposal:{diagnostic.skill_name}:{diagnostic.turn_index}",
+        )
+        task.add_done_callback(_on_reflect_done)
+
+    # ------------------------------------------------------------------
     # Subscriber dispatch
     # ------------------------------------------------------------------
 
@@ -431,6 +492,15 @@ class TaskReflector:
                 await cb(diagnostic)
             except Exception as exc:
                 logger.debug("Diagnostic subscriber failed: %s", exc)
+
+    async def _notify_mutation_subscribers(self, proposal: "MutationProposal") -> None:
+        if self._visibility == "off" or not self._mutation_subscribers:
+            return
+        for cb in list(self._mutation_subscribers):
+            try:
+                await cb(proposal)
+            except Exception as exc:
+                logger.debug("Mutation subscriber failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Envelope formatting

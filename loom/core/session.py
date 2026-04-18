@@ -45,6 +45,7 @@ from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
+from loom.core.cognition.skill_mutator import SkillMutator
 from loom.core.cognition.task_reflector import TaskDiagnostic, TaskReflector
 from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
@@ -548,6 +549,21 @@ class LoomSession:
         if visibility_raw not in ("off", "summary", "verbose"):
             visibility_raw = "summary"
         self._reflection_visibility: str = visibility_raw
+
+        # Issue #120 PR 2: skill mutation (candidate SKILL.md revisions).
+        _mut_cfg = config.get("mutation", {})
+        self._mutation_enabled: bool = bool(_mut_cfg.get("enabled", False))
+        self._mutation_quality_ceiling: float = float(
+            _mut_cfg.get("quality_ceiling", 3.5)
+        )
+        self._mutation_min_suggestions: int = int(
+            _mut_cfg.get("min_suggestions", 1)
+        )
+        self._mutation_max_body_chars: int = int(
+            _mut_cfg.get("max_body_chars", 6000)
+        )
+        self._skill_mutator: SkillMutator | None = None
+
         self._mcp_clients: list[Any] = []
 
         # HITL pause/resume — stream_turn() checks _pause_requested at each
@@ -743,6 +759,18 @@ class LoomSession:
             session_id=self.session_id,
         )
 
+        # Issue #120 PR 2: SkillMutator proposes candidate SKILL.md revisions
+        # from diagnostic feedback.  Defaults to disabled — candidates accumulate
+        # only when ``[mutation].enabled = true`` in loom.toml.
+        self._skill_mutator = SkillMutator(
+            router=self.router,
+            model=self.model,
+            enabled=self._mutation_enabled,
+            quality_ceiling=self._mutation_quality_ceiling,
+            min_suggestions=self._mutation_min_suggestions,
+            max_body_chars=self._mutation_max_body_chars,
+        )
+
         # Issue #120 PR1: TaskReflector produces structured diagnostics at
         # each TurnDone, replacing the scalar self-assessment path.
         self._task_reflector = TaskReflector(
@@ -755,6 +783,7 @@ class LoomSession:
             episodic=self._episodic,
             enabled=self._reflection_enabled,
             visibility=self._reflection_visibility,
+            mutator=self._skill_mutator if self._skill_mutator.enabled else None,
         )
         skills_dirs = [
             self.workspace / "skills",

@@ -1455,6 +1455,105 @@ async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# loom skill commands (Issue #120 PR 2)
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def skill() -> None:
+    """Inspect skill genomes and candidate revisions."""
+
+
+@skill.command("candidates")
+@click.option("--skill", "skill_name", default=None, metavar="NAME",
+              help="Filter by parent skill name.")
+@click.option("--status", default=None,
+              type=click.Choice(
+                  ["generated", "shadow", "promoted", "deprecated", "rolled_back"],
+                  case_sensitive=False,
+              ),
+              help="Filter by candidate status.")
+@click.option("--limit", default=20, show_default=True, type=int)
+@click.option("--show-body", is_flag=True, default=False,
+              help="Also print the full candidate body.")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_candidates(
+    skill_name: str | None,
+    status: str | None,
+    limit: int,
+    show_body: bool,
+    db: str,
+) -> None:
+    """List proposed SKILL.md revisions from the candidate pool."""
+    asyncio.run(_skill_candidates(skill_name, status, limit, show_body, db))
+
+
+async def _skill_candidates(
+    skill_name: str | None,
+    status: str | None,
+    limit: int,
+    show_body: bool,
+    db: str,
+) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        candidates = await proc.list_candidates(
+            parent_skill_name=skill_name,
+            status=status.lower() if status else None,
+            limit=limit,
+        )
+
+    if not candidates:
+        where: list[str] = []
+        if skill_name:
+            where.append(f"skill='{skill_name}'")
+        if status:
+            where.append(f"status='{status.lower()}'")
+        suffix = f" ({', '.join(where)})" if where else ""
+        console.print(f"[dim]No skill candidates found{suffix}.[/dim]")
+        return
+
+    console.print(Rule("[cyan]Skill candidates[/cyan]"))
+    status_color = {
+        "generated": "yellow",
+        "shadow": "cyan",
+        "promoted": "green",
+        "deprecated": "red",
+        "rolled_back": "magenta",
+    }
+    for c in candidates:
+        ts = c.created_at.strftime("%Y-%m-%d %H:%M")
+        colour = status_color.get(c.status, "white")
+        score_bits = ", ".join(
+            f"{k}={v:.1f}" for k, v in c.pareto_scores.items()
+        ) or "—"
+        console.print(
+            f"[dim]{ts}[/dim]  "
+            f"[bold cyan]{c.parent_skill_name}[/bold cyan] v{c.parent_version}  "
+            f"[{colour}]{c.status}[/{colour}]  "
+            f"[dim]{c.mutation_strategy}[/dim]  "
+            f"[dim]scores={score_bits}[/dim]  "
+            f"[dim]id={c.id[:8]}[/dim]"
+        )
+        if c.notes:
+            console.print(f"   [dim]note:[/dim] {c.notes}")
+        if c.diagnostic_keys:
+            console.print(
+                f"   [dim]from:[/dim] {', '.join(c.diagnostic_keys[:2])}"
+                + (" …" if len(c.diagnostic_keys) > 2 else "")
+            )
+        if show_body:
+            console.print(Rule(style="dim"))
+            console.print(c.candidate_body)
+            console.print(Rule(style="dim"))
+        console.print()
+
+
+# ---------------------------------------------------------------------------
 # loom import command
 # ---------------------------------------------------------------------------
 
