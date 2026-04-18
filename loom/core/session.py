@@ -32,7 +32,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from dotenv import dotenv_values
 from rich.console import Console
@@ -45,6 +45,8 @@ from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
+from loom.core.cognition.skill_mutator import SkillMutator
+from loom.core.cognition.task_reflector import TaskDiagnostic, TaskReflector
 from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
     ActionRolledBack,
@@ -539,6 +541,29 @@ class LoomSession:
         self._confirm_fn: "Callable[[ToolCall], Any] | None" = None  # set in start()
         # Issue #56: Skill outcome tracking
         self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
+        # Issue #120 PR1: structured post-turn diagnostics (replaces maybe_evaluate).
+        self._task_reflector: TaskReflector | None = None
+        _refl_cfg = config.get("reflection", {})
+        self._reflection_enabled: bool = bool(_refl_cfg.get("auto_reflect", True))
+        visibility_raw = str(_refl_cfg.get("visibility", "summary")).lower()
+        if visibility_raw not in ("off", "summary", "verbose"):
+            visibility_raw = "summary"
+        self._reflection_visibility: str = visibility_raw
+
+        # Issue #120 PR 2: skill mutation (candidate SKILL.md revisions).
+        _mut_cfg = config.get("mutation", {})
+        self._mutation_enabled: bool = bool(_mut_cfg.get("enabled", False))
+        self._mutation_quality_ceiling: float = float(
+            _mut_cfg.get("quality_ceiling", 3.5)
+        )
+        self._mutation_min_suggestions: int = int(
+            _mut_cfg.get("min_suggestions", 1)
+        )
+        self._mutation_max_body_chars: int = int(
+            _mut_cfg.get("max_body_chars", 6000)
+        )
+        self._skill_mutator: SkillMutator | None = None
+
         self._mcp_clients: list[Any] = []
 
         # HITL pause/resume — stream_turn() checks _pause_requested at each
@@ -732,6 +757,33 @@ class LoomSession:
             procedural=self._procedural,
             semantic=self._semantic,
             session_id=self.session_id,
+        )
+
+        # Issue #120 PR 2: SkillMutator proposes candidate SKILL.md revisions
+        # from diagnostic feedback.  Defaults to disabled — candidates accumulate
+        # only when ``[mutation].enabled = true`` in loom.toml.
+        self._skill_mutator = SkillMutator(
+            router=self.router,
+            model=self.model,
+            enabled=self._mutation_enabled,
+            quality_ceiling=self._mutation_quality_ceiling,
+            min_suggestions=self._mutation_min_suggestions,
+            max_body_chars=self._mutation_max_body_chars,
+        )
+
+        # Issue #120 PR1: TaskReflector produces structured diagnostics at
+        # each TurnDone, replacing the scalar self-assessment path.
+        self._task_reflector = TaskReflector(
+            router=self.router,
+            model=self.model,
+            procedural=self._procedural,
+            semantic=self._semantic,
+            session_id=self.session_id,
+            relational=self._relational,
+            episodic=self._episodic,
+            enabled=self._reflection_enabled,
+            visibility=self._reflection_visibility,
+            mutator=self._skill_mutator if self._skill_mutator.enabled else None,
         )
         skills_dirs = [
             self.workspace / "skills",
@@ -1029,17 +1081,22 @@ class LoomSession:
                 except Exception as exc:
                     logger.debug("Telemetry flush failed: %s", exc)
         finally:
-            # Issue #61 Bug 2: wait for pending skill_eval background tasks
-            # before closing the DB so their upsert writes can complete.
+            # Issue #61 Bug 2 + #120 PR1/PR2: wait for pending skill reflection
+            # background tasks before closing the DB so their upsert writes can
+            # complete.  Covers TaskReflector (task_reflect), its behavioural
+            # post-hook (behavioural_triples) and the PR 2 mutation proposer
+            # (mutation_proposal).
             pending_evals = [
                 t for t in asyncio.all_tasks()
-                if t.get_name().startswith("skill_eval:")
+                if t.get_name().startswith((
+                    "task_reflect:", "behavioural_triples:", "mutation_proposal:",
+                ))
             ]
             if pending_evals:
                 done, still_pending = await asyncio.wait(pending_evals, timeout=5.0)
                 if still_pending:
                     logger.warning(
-                        "%d skill evaluation(s) unfinished on shutdown",
+                        "%d skill reflection(s) unfinished on shutdown",
                         len(still_pending),
                     )
 
@@ -1640,16 +1697,34 @@ class LoomSession:
     # Issue #58: Skill self-assessment trigger
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Issue #120 PR1: Diagnostic subscriber plumbing
+    # ------------------------------------------------------------------
+
+    def subscribe_diagnostic(
+        self, callback: "Callable[[TaskDiagnostic], Awaitable[None]]",
+    ) -> None:
+        """Register a platform callback for each completed ``TaskDiagnostic``.
+
+        CLI, TUI, and Discord each call this once after ``start()`` to
+        render their own view of the diagnostic (status bar, side panel,
+        Discord summary message).  Subscribers run after the diagnostic
+        is already persisted — they are purely for display.
+        """
+        if self._task_reflector is not None:
+            self._task_reflector.subscribe(callback)
+
     def _trigger_skill_assessment(self) -> None:
         """
-        Fire-and-forget: schedule skill self-assessment if a skill was
-        activated during this session.
+        Fire-and-forget: schedule structured skill diagnostic if a skill was
+        activated during this session (Issue #120 PR1).
 
-        Called at each TurnDone point in stream_turn(). The LLM self-assessment
+        Called at each TurnDone point in stream_turn(). The LLM diagnostic
         runs as a background task and never blocks the conversation.
         """
         if (
             self._skill_outcome_tracker is None
+            or self._task_reflector is None
             or not self._skill_outcome_tracker.has_active_skills()
         ):
             return
@@ -1664,13 +1739,17 @@ class LoomSession:
                 break
 
         if not turn_summary:
+            # Still drain the tracker so stale activations don't leak
+            # across turns even when there was nothing to reflect on.
+            self._skill_outcome_tracker.drain_for_reflection(self._turn_index)
+            self._skill_outcome_tracker.pop_turn_tool_count()
             return
 
-        self._skill_outcome_tracker.maybe_evaluate(
-            router=self.router,
-            model=self.model,
+        self._task_reflector.maybe_reflect(
+            tracker=self._skill_outcome_tracker,
             turn_index=self._turn_index,
             turn_summary=turn_summary,
+            envelopes=list(self._recent_envelopes),
         )
 
     # ------------------------------------------------------------------

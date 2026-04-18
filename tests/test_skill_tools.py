@@ -5,7 +5,7 @@ Covers:
 - Frontmatter parsing
 - SkillCatalogEntry and MemoryIndex rendering
 - load_skill tool structured output
-- SkillOutcomeTracker assessment parsing
+- SkillOutcomeTracker activation tracking
 - Auto-import from skills/ directory
 """
 
@@ -239,36 +239,11 @@ class TestFindSkillResources:
 
 
 class TestSkillOutcomeTracker:
-    """Test the outcome tracker's assessment parsing."""
+    """Per-session activation + tool-usage bookkeeping (Issue #120 PR 1).
 
-    def test_parse_valid_json(self):
-        from loom.core.memory.skill_outcome import _parse_assessment
-
-        score, summary = _parse_assessment(
-            '{"score": 4, "summary": "Good execution with minor issues."}'
-        )
-        assert score == 4
-        assert "Good execution" in summary
-
-    def test_parse_markdown_wrapped(self):
-        from loom.core.memory.skill_outcome import _parse_assessment
-
-        score, summary = _parse_assessment(
-            '```json\n{"score": 5, "summary": "Excellent."}\n```'
-        )
-        assert score == 5
-
-    def test_parse_invalid_score(self):
-        from loom.core.memory.skill_outcome import _parse_assessment
-
-        score, summary = _parse_assessment('{"score": 7, "summary": "Too high."}')
-        assert score is None
-
-    def test_parse_garbage(self):
-        from loom.core.memory.skill_outcome import _parse_assessment
-
-        score, summary = _parse_assessment("I did a great job!")
-        assert score is None
+    Structured diagnostics live in ``TaskReflector`` now; see
+    ``tests/test_task_reflector.py`` for that layer.
+    """
 
     def test_record_activation(self):
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
@@ -293,6 +268,37 @@ class TestSkillOutcomeTracker:
         tracker.record_tool_usage()
         tracker.record_tool_usage()
         assert tracker._turn_tool_count == 2
+
+    def test_drain_for_reflection_respects_turn_index(self):
+        from loom.core.memory.skill_outcome import SkillOutcomeTracker
+
+        tracker = SkillOutcomeTracker(
+            procedural=MagicMock(),
+            semantic=MagicMock(),
+            session_id="test-session",
+        )
+        tracker.record_activation("skill-a", 3)
+        tracker.record_activation("skill-b", 5)
+
+        # Drain at turn 4 should only pick up skill-a
+        drained = tracker.drain_for_reflection(turn_index=4)
+        assert drained == ["skill-a"]
+        assert "skill-a" not in tracker._activated
+        assert "skill-b" in tracker._activated
+
+    def test_pop_turn_tool_count_resets(self):
+        from loom.core.memory.skill_outcome import SkillOutcomeTracker
+
+        tracker = SkillOutcomeTracker(
+            procedural=MagicMock(),
+            semantic=MagicMock(),
+            session_id="test-session",
+        )
+        tracker.record_tool_usage()
+        tracker.record_tool_usage()
+        tracker.record_tool_usage()
+        assert tracker.pop_turn_tool_count() == 3
+        assert tracker.pop_turn_tool_count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -356,61 +362,6 @@ class TestSkillEvolutionHook:
 # ---------------------------------------------------------------------------
 # Issue #58: Gap-specific tests
 # ---------------------------------------------------------------------------
-
-
-class TestMaybeEvaluateTrigger:
-    """Test that maybe_evaluate fires only when skills are active."""
-
-    @pytest.mark.asyncio
-    async def test_fires_on_active_skills(self):
-        from loom.core.memory.skill_outcome import SkillOutcomeTracker
-
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
-        tracker.record_activation("test-skill", 1)
-        tracker.record_tool_usage()
-
-        scheduled = asyncio.Event()
-
-        async def fake_evaluate(*args, **kwargs):
-            scheduled.set()
-            return None
-
-        tracker._evaluate_skill = AsyncMock(side_effect=fake_evaluate)
-
-        # maybe_evaluate should schedule a task (not raise)
-        tracker.maybe_evaluate(
-            router=MagicMock(),
-            model="test-model",
-            turn_index=1,
-            turn_summary="Completed the test task.",
-        )
-        await asyncio.wait_for(scheduled.wait(), timeout=1)
-        tracker._evaluate_skill.assert_awaited_once()
-        # After evaluation, the skill should be removed from activated
-        assert "test-skill" not in tracker._activated
-
-    def test_skips_when_no_skills(self):
-        from loom.core.memory.skill_outcome import SkillOutcomeTracker
-
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
-        # No skills activated — should be a no-op
-        mock_router = MagicMock()
-        tracker.maybe_evaluate(
-            router=mock_router,
-            model="test-model",
-            turn_index=1,
-            turn_summary="Some text.",
-        )
-        # No tasks should have been created
-        assert not tracker.has_active_skills()
 
 
 class TestEvolutionHintsFromSemantic:
@@ -557,42 +508,6 @@ class TestRecordActivationTurnIndex:
         tracker.record_activation("my-skill", turn_index)
 
         assert tracker._activated["my-skill"] == 7
-
-    @pytest.mark.asyncio
-    async def test_activated_at_correct_turn(self):
-        from loom.core.memory.skill_outcome import SkillOutcomeTracker
-
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
-
-        tracker.record_activation("skill-a", 3)
-        tracker.record_activation("skill-b", 5)
-
-        scheduled = asyncio.Event()
-
-        async def fake_evaluate(*args, **kwargs):
-            scheduled.set()
-            return None
-
-        tracker._evaluate_skill = AsyncMock(side_effect=fake_evaluate)
-
-        # maybe_evaluate at turn 4 should only pick up skill-a
-        tracker.maybe_evaluate(
-            router=MagicMock(),
-            model="test",
-            turn_index=4,
-            turn_summary="Turn 4 summary.",
-        )
-        await asyncio.wait_for(scheduled.wait(), timeout=1)
-        tracker._evaluate_skill.assert_awaited_once()
-        assert tracker._evaluate_skill.await_args.args[2] == "skill-a"
-        # skill-a should be consumed, skill-b still pending
-        assert "skill-a" not in tracker._activated
-        assert "skill-b" in tracker._activated
-
 
 class TestCheckAllSkillsSequential:
     """Test that check_all_skills runs sequentially (not fire-and-forget)."""

@@ -81,6 +81,57 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Reflection (Issue #120 PR1) — Skill diagnostic layer
+# ─────────────────────────────────────────────
+# When a skill is activated via ``load_skill`` and the turn completes,
+# TaskReflector runs a structured LLM diagnostic over the execution
+# trajectory.  The diagnostic produces a ``TaskDiagnostic`` with:
+#   - instructions_followed / instructions_violated
+#   - failure_patterns / success_patterns
+#   - mutation_suggestions      (concrete SKILL.md edit proposals)
+#   - task_type                 (closed label set, see task_reflector.py)
+#   - quality_score             (1.0-5.0, also drives the confidence EMA)
+#
+# Diagnostics are written to SemanticMemory under
+# ``skill:{name}:diagnostic:{timestamp}`` and can be inspected via
+# ``loom diagnostic recent``.  Each platform (CLI / TUI / Discord) also
+# renders a lightweight live notification at the ``visibility`` level
+# chosen below.
+
+[reflection]
+auto_reflect = true
+# "off"     — disables diagnostics entirely (no LLM call, no writes)
+# "summary" — one-line live notification per diagnostic (default)
+# "verbose" — full diagnostic summary + top mutation suggestion
+visibility = "summary"
+
+# ─────────────────────────────────────────────
+# Skill Mutation (Issue #120 PR 2) — candidate revisions of SKILL.md
+# ─────────────────────────────────────────────
+# After TaskReflector emits a diagnostic, SkillMutator can ask the LLM to
+# rewrite the SKILL.md body incorporating the ``mutation_suggestions``.
+# The result is stored in the ``skill_candidates`` pool (status=generated)
+# alongside the parent — it is NOT auto-promoted.  PR 3 will add shadow
+# mode and lifecycle management; meanwhile candidates can be listed with
+# ``loom skill candidates``.
+#
+# Defaults keep this OFF so enabling reflection alone does not start
+# writing candidate bodies.  Turn it on once you want the candidate pool
+# to accumulate.
+
+[mutation]
+enabled          = false
+# Only propose when the diagnostic quality_score is at or below this ceiling.
+# High-quality turns don't need a mutation.  Valid range: 1.0 – 5.0.
+quality_ceiling  = 3.5
+# Require at least this many mutation_suggestions in the diagnostic before
+# firing the rewrite.
+min_suggestions  = 1
+# Truncate the parent SKILL.md body in the rewrite prompt at this many
+# characters to keep the request cheap.
+max_body_chars   = 6000
+
+# ─────────────────────────────────────────────
 # Telemetry (Issue #142) — Agent self-observability
 # ─────────────────────────────────────────────
 # The agent tracks three dimensions of its own behavior:

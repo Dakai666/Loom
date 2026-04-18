@@ -54,10 +54,10 @@
 ### 6. Autonomy Engine（自主行動）
 | 文件 | 說明 |
 |------|------|
-| [19-Autonomy-概述.md](19-Autonomy-概述.md) | 觸發器、決策管道、DreamingPlugin、SelfReflectionPlugin、Counter-factual |
+| [19-Autonomy-概述.md](19-Autonomy-概述.md) | 觸發器、決策管道、DreamingPlugin、TaskReflector 行為反思、Counter-factual |
 | [20-觸發器詳解.md](20-觸發器詳解.md) | CronTrigger / EventTrigger / ConditionTrigger |
 | [21-Action-Planner.md](21-Action-Planner.md) | Trust Level → Decision 映射邏輯 |
-| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、統一管線（origin-aware）、allowed_tools / scope_grants 授權、Offline Dreaming、SelfReflectionPlugin |
+| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、統一管線（origin-aware）、allowed_tools / scope_grants 授權、Offline Dreaming、TaskReflector 行為反思 |
 
 ### 7. Notification Layer（通知系統）
 | 文件 | 說明 |
@@ -118,7 +118,7 @@
 |------|-----------|
 | v0.2.5.1 | AbortController、Counter-factual Reflection |
 | v0.2.5.2 | SchemaValidationMiddleware、SQLite FTS5、Discord 多媒體 |
-| v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin、Session Log 結構化 |
+| v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin（Issue #120 PR 1 合併入 TaskReflector）、Session Log 結構化 |
 | v0.2.6.0 | MCP 整合（Server + Client）、Predictive Memory Pre-fetcher |
 | v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
 | v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；handler 例外保護；移除 `/verbose` F3（Issue #63） |

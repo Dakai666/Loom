@@ -434,6 +434,34 @@ class LoomDiscordBot:
         # Also patch skill check approval so it uses Discord confirm buttons
         session._confirm_fn = confirm_fn
 
+        # Issue #120 PR1: deliver skill diagnostics as collapsed messages
+        # so reflections are visible without dominating the thread.
+        thread_ref = self._client.get_channel(thread_id)
+
+        async def _discord_diagnostic(diagnostic):
+            vis = session._reflection_visibility
+            if vis == "off" or thread_ref is None:
+                return
+            try:
+                head = f"**Skill diagnostic:** {diagnostic.one_line_summary()}"
+                lines = [head]
+                if vis == "verbose":
+                    if diagnostic.instructions_violated:
+                        lines.append("violated:")
+                        for v in diagnostic.instructions_violated[:2]:
+                            lines.append(f"• {v[:180]}")
+                    if diagnostic.mutation_suggestions:
+                        lines.append("suggest:")
+                        for s in diagnostic.mutation_suggestions[:2]:
+                            lines.append(f"• {s[:180]}")
+                elif diagnostic.mutation_suggestions:
+                    lines.append(f"› {diagnostic.mutation_suggestions[0][:180]}")
+                await thread_ref.send("\n".join(lines))
+            except Exception:
+                pass
+
+        session.subscribe_diagnostic(_discord_diagnostic)
+
         self._sessions[thread_id] = session
         return session
 

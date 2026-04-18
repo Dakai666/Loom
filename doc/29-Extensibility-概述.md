@@ -66,12 +66,11 @@ Plugin 是功能的「插件」。它允許新增全新的模組：
 
 ## 內建模 Plugin（v0.2.5.3 / v0.2.6.1）
 
-Loom 框架自帶兩個 Plugin，放在 `loom/extensibility/` 下：
+Loom 框架目前自帶一個內建 Plugin，放在 `loom/extensibility/` 下：
 
 | Plugin | 檔案 | 觸發時機 |
 |--------|------|----------|
 | `DreamingPlugin` | `dreaming_plugin.py` | 由 AutonomyDaemon cron 或手動呼叫 `dream_cycle` |
-| `SelfReflectionPlugin` | `self_reflection_plugin.py` | 每次 `session.stop()` 後自動（背景非同步）|
 
 ### DreamingPlugin
 
@@ -90,28 +89,29 @@ class DreamingPlugin(LoomPlugin):
 2. LLM 分析：這些事實之間有什麼非顯而易見的關聯？
 3. 寫入 RelationalMemory 三元組（`source="dreaming"`）
 
-### SelfReflectionPlugin
+### Self-Reflection（Issue #120 PR 1 重構）
+
+`SelfReflectionPlugin` / `reflect_self` 工具已移除。產生 `loom-self` 三元組的 `run_self_reflection` 保留在 `loom/autonomy/self_reflection.py`，由 `TaskReflector`（`loom/core/cognition/task_reflector.py`）作為 post-hook 在每次結構化診斷完成後 fire-and-forget 呼叫。
 
 ```python
-# loom/extensibility/self_reflection_plugin.py
-class SelfReflectionPlugin(LoomPlugin):
-    name = "self_reflection"
-    version = "1.0"
-
-    def tools(self) -> list[ToolDefinition]:
-        return [reflect_self_tool]  # SAFE tool
-
-    def on_session_stop(self, session: object) -> None:
-        # 背景非同步執行
-        asyncio.create_task(run_self_reflection(session))
+# loom/core/cognition/task_reflector.py（簡化）
+class TaskReflector:
+    def _schedule_behavioural_triples(self) -> None:
+        if self._episodic is None or self._relational is None:
+            return
+        asyncio.create_task(run_self_reflection(
+            episodic=self._episodic,
+            relational=self._relational,
+            llm_fn=self._llm_fn,
+        ))
 ```
 
-`run_self_reflection` 分析情節模式，寫入三種 `loom-self` 三元組：
+三種三元組樣式維持不變：
 - `should_avoid:<行為>` — 應避免的重複錯誤
 - `tends_to:<行為>` — 持續的傾向性
 - `discovered:<觀察>` — 新發現
 
-> **v0.2.6.1 架構修復**：DreamingPlugin（cognition/）和 SelfReflectionPlugin（autonomy/）之前違反了「下層不能依賴上層」的架構約束。兩者現在都放在 `loom/extensibility/`（正確的擴充層），各自的核心邏輯（`dream_cycle`、`run_self_reflection`）留在原來的 cognition/autonomy 模組。
+> **v0.2.6.1 → Issue #120 PR 1**：v0.2.6.1 將 DreamingPlugin / SelfReflectionPlugin 搬到 `loom/extensibility/` 解決架構倒置；Issue #120 PR 1 再把「反思」合併進 TaskReflector，讓結構化診斷與行為三元組共用同一條非同步 pipeline。
 
 ---
 
@@ -350,7 +350,7 @@ Loom 的擴充系統提供多層次的客製化能力：
 |------|------|------|
 | 配置層 | loom.toml | 工具定義、通知設定、觸發器、MCP servers |
 | Lens 層 | Lens 包裝器 | 為工具添加功能 |
-| Plugin 層 | Plugin 系統 | 新增功能模組（含內建 DreamingPlugin / SelfReflectionPlugin）|
+| Plugin 層 | Plugin 系統 | 新增功能模組（內建 DreamingPlugin）|
 | MCP 層 | MCP 整合 | 雙向整合外部 MCP 工具生態 |
 | 核心層 | Fork | 修改核心行為 |
 
