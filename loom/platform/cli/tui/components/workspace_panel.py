@@ -7,6 +7,8 @@ Width is 25% of the screen (set in App.CSS).
 
 from __future__ import annotations
 
+import datetime
+from dataclasses import dataclass, field
 from enum import Enum
 
 from textual.app import ComposeResult
@@ -18,9 +20,20 @@ from textual.widgets import Static
 from loom.platform.cli.tui.events import GrantInfo
 from .artifact_card import ArtifactState
 from .artifacts_panel import ArtifactsPanel
-from .swarm_dashboard import SwarmDashboard, ActivityEntry  # backward compat
 from .execution_dashboard import ExecutionDashboard
 from .budget_panel import BudgetPanel
+
+
+@dataclass
+class ActivityEntry:
+    name: str
+    args_preview: str
+    success: bool
+    duration_ms: float
+    running: bool = False
+    error_snippet: str = ""
+    expanded: bool = False
+    timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
 
 
 class WorkspaceTab(Enum):

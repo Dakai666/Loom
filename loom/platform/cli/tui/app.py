@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.command import Provider, Hit
+from textual.command import Provider, Hit, DiscoveryHit
 from textual.containers import Horizontal, Vertical
 from textual.widget import Widget
 
@@ -63,28 +63,40 @@ if TYPE_CHECKING:
 
 
 class LoomCommandProvider(Provider):
-    async def search(self, query: str):
-        matcher = self.matcher(query)
-        app = self.app
-        commands = [
-            ("Toggle Workspace Sidebar", app.action_toggle_sidebar, "Hide/show the right sidebar"),
-            ("Switch to Artifacts Tab", lambda: self._focus_tab(WorkspaceTab.ARTIFACTS), "View created artifacts"),
-            ("Switch to Execution Dashboard", lambda: self._focus_tab(WorkspaceTab.EXECUTION), "View envelope execution status"),
-            ("Switch to Budget Tab", lambda: self._focus_tab(WorkspaceTab.BUDGET), "View context token usage"),
-            ("Clear Conversation", app.action_clear_screen, "Clear the chat history"),
+    """
+    F1 command palette — **IDE-conflict-prone ops only**.
 
-            ("Quit Loom", app.action_quit, "Exit the application"),
+    Everyday actions (Clear, Switch Tab, Quit, etc.) already have direct key
+    bindings or slash commands; duplicating them adds noise.  Theme switching
+    is already provided by Textual's built-in SystemCommands.  The palette is
+    reserved for features whose natural shortcut collides with the host IDE
+    (e.g. Ctrl+F for in-conversation search) and therefore can't get a global
+    keybinding.
+    """
+
+    # (display label, help, callback factory)
+    def _entries(self):
+        app = self.app
+        return [
+            ("Search messages",
+             "Find text in conversation history (Ctrl+F-safe)",
+             app.action_search_messages),
+            ("Copy last reply",
+             "Copy the most recent assistant reply to clipboard",
+             app.action_copy_last_reply),
         ]
 
-        for name, callback, help_text in commands:
+    async def discover(self):
+        """Items shown when the palette opens with no query typed."""
+        for name, help_text, callback in self._entries():
+            yield DiscoveryHit(name, callback, help=help_text)
+
+    async def search(self, query: str):
+        matcher = self.matcher(query)
+        for name, help_text, callback in self._entries():
             score = matcher.match(name)
             if score > 0:
                 yield Hit(score, matcher.highlight(name), callback, help=help_text)
-
-    def _focus_tab(self, tab: WorkspaceTab):
-        workspace = self.app.query_one("#workspace-panel", WorkspacePanel)
-        workspace.active_tab = tab  # triggers watch_active_tab → _render_header + _update_visibility
-        self.app.notify(f"Switched to {tab.name.title()} tab", timeout=1)
 
 
 class LoomApp(App):
@@ -99,7 +111,6 @@ class LoomApp(App):
             ToolBlock        (auto, max 6)
             InputArea        (4 rows)
           WorkspacePanel     (25%)
-        ObservabilityPanel   (dock bottom, hidden by default)
         ObservabilityPanel   (dock bottom, hidden by default)
 
     Bindings:
@@ -159,10 +170,14 @@ class LoomApp(App):
     }
 
     #input-text {
+        height: auto;
+        max-height: 10;
+        min-height: 3;
         border: solid #4a4038;
-        background: #1c1814;
+        background: #242018;
+        color: #e0cfa0;
     }
-    
+
     #input-text:focus {
         border: solid #c8a464;
     }
@@ -196,15 +211,6 @@ class LoomApp(App):
         padding: 0 1;
     }
 
-    /* Input widget warm colours */
-    Input {
-        background: #242018;
-        color: #e0cfa0;
-        border: solid #4a4038;
-    }
-    Input:focus {
-        border: solid #c8a464;
-    }
 
     /* ── Scrollbar — parchment palette ──────────────────────────────────────
        In Textual 8, scrollbar colours are CSS properties set on the scrollable
@@ -239,6 +245,9 @@ class LoomApp(App):
         Binding("f2", "toggle_space", "Workspace", show=True),
         Binding("f4", "toggle_sidebar", "Sidebar", show=True),
         Binding("f5", "time_travel", "Time-Travel", show=True),
+        # Ctrl+C is priority-bound to quit, so Textual's default ctrl+c copy
+        # can't reach us — use ctrl+shift+c instead.  Mouse-drag still selects.
+        Binding("ctrl+shift+c", "copy_selection", "Copy", show=False),
         # Fallback VS Code style hotkeys (might be intercepted by IDEs)
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
         Binding("ctrl+k", "command_palette", "Commands", show=False),
@@ -318,6 +327,55 @@ class LoomApp(App):
         }
         self.notify(f"Workspace: {labels[workspace.active_tab]}", timeout=1)
 
+    def action_copy_selection(self) -> None:
+        """Copy mouse-selected text to clipboard (Ctrl+Shift+C).
+
+        Ctrl+C is reserved for quit, so Textual's default copy binding is
+        shadowed.  Drag the mouse across message text to select, then press
+        Ctrl+Shift+C.
+        """
+        text = self.screen.get_selected_text()
+        if text:
+            from loom.platform.cli.tui.clipboard import copy_text
+            copy_text(self, text)
+            self.notify(f"Copied {len(text)} chars", timeout=1)
+        else:
+            self.notify(
+                "No selection — drag to highlight, then Ctrl+Shift+C",
+                timeout=2,
+            )
+
+    def action_copy_last_reply(self) -> None:
+        """Copy the most recent assistant reply — F1 palette only."""
+        msg_list = self.query_one("#message-list", MessageList)
+        for bubble in reversed(msg_list._bubbles):
+            if bubble._role.value == "assistant":
+                from loom.platform.cli.tui.clipboard import copy_text
+                text = bubble._content
+                copy_text(self, text)
+                self.notify(f"Copied last reply ({len(text)} chars)", timeout=1)
+                return
+        self.notify("No assistant reply to copy yet.", timeout=2)
+
+    def action_search_messages(self) -> None:
+        """Open message search modal — reached via F1 palette, no global hotkey
+        so Ctrl+F stays free for the host IDE.
+
+        Uses callback-style push_screen because palette actions run outside a
+        Textual worker, and push_screen_wait requires a worker context.
+        """
+        from .components.search_modal import MessageSearchModal
+        msg_list = self.query_one("#message-list", MessageList)
+        if not msg_list._bubbles:
+            self.notify("No messages yet.", timeout=2)
+            return
+
+        def _on_selected(bubble) -> None:
+            if bubble is not None:
+                bubble.scroll_visible(animate=True)
+
+        self.push_screen(MessageSearchModal(msg_list), _on_selected)
+
     # ── Stream event dispatch ─────────────────────────────────────────────────
 
     async def dispatch_stream_event(self, event: StreamEvent) -> None:
@@ -355,7 +413,6 @@ class LoomApp(App):
         msg_list = self.query_one("#message-list", MessageList)
         msg_list.add_message(Role.USER, event.user_input)
 
-        tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block = self.query_one("#tool-block", ToolBlock)
         tool_block.start_turn()
 
@@ -534,12 +591,6 @@ class LoomApp(App):
     ) -> None:
         workspace = self.query_one("#workspace-panel", WorkspacePanel)
         workspace.add_artifact(path, state, diff_lines, preview)
-
-    # ── Kept for backward compat (called from main.py on_mount) ──────────────
-
-    def load_knowledge_graph(self, **_kwargs) -> None:
-        """No-op — KnowledgeGraph has been replaced by ActivityLog + BudgetPanel."""
-        pass
 
     # ── Input relay ───────────────────────────────────────────────────────────
 

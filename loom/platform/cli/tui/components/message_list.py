@@ -6,8 +6,8 @@ Architecture: each message is a MessageBubble widget mounted dynamically.
   - finish_streaming(): replace body with rich.markdown.Markdown (syntax-highlighted,
                         white prose text — visually distinct from streaming cream text)
   - Think content:      if the assistant turn contained a <think> block, a clickable
-                        "▸ thinking" indicator is mounted inside the bubble; click opens
-                        ThinkModal via a bubbled OpenThinkModal message.
+                        "▸ thinking" indicator is mounted inside the bubble; click
+                        toggles an inline panel with the full reasoning text.
 """
 
 from __future__ import annotations
@@ -44,13 +44,14 @@ _ROLE_COLOR = {
 
 class ThinkIndicator(Static):
     """
-    A small clickable line that represents a <think> reasoning block.
-    Clicking anywhere on it posts OpenThinkModal.
+    Clickable one-line header representing a <think> reasoning block.
+    Click toggles an inline sibling panel showing the full reasoning text.
 
-    When ``summary`` is provided (inline think blocks during streaming):
-        💭 <summary>…  (click to expand)
-    When no summary (legacy post-turn mount via set_think_text):
-        ▸ thinking  (click to expand)
+    Collapsed label:
+        ▸ 💭 <summary>…  (click to expand)
+        ▸ thinking         ← when no summary (post-turn)
+    Expanded label:
+        ▾ 💭 <summary>…  (click to collapse)
     """
 
     DEFAULT_CSS = """
@@ -61,33 +62,100 @@ class ThinkIndicator(Static):
     ThinkIndicator:hover {
         color: #c8a464;
     }
+    .think-panel {
+        color: #8a7a5e;
+        background: #1c1814;
+        border-left: solid #4a4038;
+        padding: 0 2;
+        margin: 0 0 1 2;
+        height: auto;
+    }
     """
 
-    class OpenThinkModal(Message, bubble=True):
-        """Posted up to the App to open ThinkModal with the reasoning text."""
-        def __init__(self, think_text: str) -> None:
-            super().__init__()
-            self.think_text = think_text
-
     def __init__(self, think_text: str, *, summary: str = "") -> None:
-        if summary:
+        self._think_text = think_text
+        self._summary = summary
+        self._expanded = False
+        self._panel: Static | None = None
+        super().__init__(self._render_label())
+
+    def _render_label(self) -> str:
+        arrow = "▾" if self._expanded else "▸"
+        hint = "click to collapse" if self._expanded else "click to expand"
+        if self._summary:
             # Strip newlines and escape brackets before embedding in Textual markup.
-            # Textual 8.x's markup parser fails on \n inside [dim]…[/dim] spans
-            # (MarkupError: Expected markup value (found '/dim]\n')).
+            # Textual 8.x's markup parser fails on \n inside [dim]…[/dim] spans.
             safe = (
-                summary[:100]
+                self._summary[:100]
                 .replace("\n", " ")
                 .replace("\r", " ")
                 .replace("[", "\\[")
             )
-            label = f"[dim]💭 {safe}{'…' if len(summary) > 100 else ''}[/dim]  [dim italic](click to expand)[/dim italic]"
-        else:
-            label = "[dim]▸ thinking[/dim]  [dim italic](click to expand)[/dim italic]"
-        super().__init__(label)
-        self._think_text = think_text
+            ellipsis = "…" if len(self._summary) > 100 else ""
+            return (
+                f"[dim]{arrow} 💭 {safe}{ellipsis}[/dim]  "
+                f"[dim italic]({hint})[/dim italic]"
+            )
+        return (
+            f"[dim]{arrow} thinking[/dim]  "
+            f"[dim italic]({hint})[/dim italic]"
+        )
 
     def on_click(self, _event) -> None:
-        self.post_message(self.OpenThinkModal(self._think_text))
+        self._expanded = not self._expanded
+        self.update(self._render_label())
+        parent = self.parent
+        if self._expanded:
+            if parent is not None and self._panel is None:
+                panel = Static(self._think_text, classes="think-panel", markup=False)
+                try:
+                    parent.mount(panel, after=self)
+                    self._panel = panel
+                except Exception:
+                    pass
+        else:
+            if self._panel is not None:
+                try:
+                    self._panel.remove()
+                except Exception:
+                    pass
+                self._panel = None
+
+
+# ---------------------------------------------------------------------------
+# Copy indicator
+# ---------------------------------------------------------------------------
+
+class CopyIndicator(Static):
+    """
+    Unobtrusive 📋 icon at the end of long MessageBubbles.
+    Clicking posts a Copy message carrying the bubble's full text.
+    """
+
+    DEFAULT_CSS = """
+    CopyIndicator {
+        height: 1;
+        width: 2;
+        color: #4a4038;
+    }
+    CopyIndicator:hover {
+        color: #c8a464;
+    }
+    """
+
+    class Copy(Message, bubble=True):
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+    def __init__(self, get_text) -> None:
+        super().__init__("📋")
+        self._get_text = get_text
+
+    def on_click(self, _event) -> None:
+        text = self._get_text() or ""
+        if text:
+            self.post_message(self.Copy(text))
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +229,7 @@ class MessageBubble(Widget):
                 self._render_body_text()
             # Must run after mounting self or at the end of mount
             self.set_timer(0.01, self._scan_and_mount_images)
+            self._mount_copy_indicator()
         else:
             self._render_body_text()
 
@@ -214,6 +283,7 @@ class MessageBubble(Widget):
             else:
                 self._render_body_text()
         self._scan_and_mount_images()
+        self._mount_copy_indicator()
 
     def _scan_and_mount_images(self) -> None:
         import re
@@ -243,6 +313,23 @@ class MessageBubble(Widget):
                         self.mount(ImageWidget(p))
             except Exception:
                 pass
+
+    _COPY_MIN_CHARS = 80  # skip short bubbles; reserve indicator for substantial content
+
+    def _mount_copy_indicator(self) -> None:
+        """Append a click-to-copy indicator once per bubble, only when worthwhile."""
+        if self._role == Role.SYSTEM:
+            return
+        content = self._content.strip()
+        if len(content) < self._COPY_MIN_CHARS:
+            return
+        if getattr(self, "_copy_mounted", False):
+            return
+        try:
+            self.mount(CopyIndicator(lambda: self._content))
+            self._copy_mounted = True
+        except Exception:
+            pass
 
     def set_think_text(self, think_text: str) -> None:
         """
@@ -317,7 +404,7 @@ class MessageBubble(Widget):
 class MessageList(Widget):
     """
     Scrollable conversation history.  Each message is a dynamically mounted
-    MessageBubble.  Handles OpenThinkModal messages by pushing ThinkModal.
+    MessageBubble.  Relays CopyIndicator.Copy messages to the system clipboard.
     """
 
     DEFAULT_CSS = """
@@ -393,11 +480,11 @@ class MessageList(Widget):
         self._msg_counter = 0
         self.remove_children()
 
-    # ── Think modal relay ─────────────────────────────────────────────────────
-
-    def on_think_indicator_open_think_modal(
-        self, event: ThinkIndicator.OpenThinkModal
-    ) -> None:
-        """Relay ThinkIndicator clicks to the App to open ThinkModal."""
-        from loom.platform.cli.tui.components.think_modal import ThinkModal
-        self.app.push_screen(ThinkModal(event.think_text))
+    def on_copy_indicator_copy(self, event: "CopyIndicator.Copy") -> None:
+        """Relay copy clicks to the system clipboard."""
+        from loom.platform.cli.tui.clipboard import copy_text
+        try:
+            copy_text(self.app, event.text)
+            self.app.notify(f"Copied {len(event.text)} chars", timeout=1.5)
+        except Exception:
+            self.app.notify("Copy failed", severity="warning", timeout=1.5)
