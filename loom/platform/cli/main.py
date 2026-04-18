@@ -835,14 +835,6 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                     severity="error",
                 )
 
-    elif command == "/think":
-        think = session._last_think
-        if think:
-            from loom.platform.cli.tui.components.think_modal import ThinkModal
-            await app.push_screen_wait(ThinkModal(think))
-        else:
-            app.notify("No reasoning chain captured for the last turn.", severity="information")
-
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
         app.notify(f"Compacting context ({pct:.1f}% used)…")
