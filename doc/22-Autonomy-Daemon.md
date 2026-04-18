@@ -302,24 +302,22 @@ DreamingPlugin 程式碼位於 `loom/extensibility/dreaming_plugin.py`，由 `Pl
 
 ---
 
-## SelfReflectionPlugin（v0.2.5.3）
+## Behavioural Self-Reflection（v0.2.5.3 → Issue #120 PR 1）
 
-`SelfReflectionPlugin`（`loom/extensibility/self_reflection_plugin.py`）在 session 結束時自動觸發：
+`SelfReflectionPlugin` 與 `reflect_self` 工具已於 Issue #120 PR 1 移除。`run_self_reflection` 核心邏輯保留於 `loom/autonomy/self_reflection.py`，改由 `TaskReflector`（`loom/core/cognition/task_reflector.py`）在每次結構化診斷完成後以 fire-and-forget 的 post-hook 執行：
 
 ```python
-class SelfReflectionPlugin(LoomPlugin):
-    name = "self_reflection"
-    version = "1.0"
-
-    def tools(self) -> list[ToolDefinition]:
-        return [reflect_self_tool]  # reflect_self tool (SAFE)
-
-    def on_session_stop(self, session: object) -> None:
-        """Session 結束時自動呼叫（背景非同步）"""
-        asyncio.create_task(run_self_reflection(session))
+# loom/core/cognition/task_reflector.py（簡化）
+class TaskReflector:
+    def _schedule_behavioural_triples(self) -> None:
+        asyncio.create_task(run_self_reflection(
+            episodic=self._episodic,
+            relational=self._relational,
+            llm_fn=self._llm_fn,
+        ))
 ```
 
-每次 session 結束後，分析情節模式並寫入 RelationalMemory：
+產出的 RelationalMemory 三元組維持不變：
 - `(loom-self, tends_to, <observation>)`
 - `(loom-self, should_avoid, <observation>)`
 - `(loom-self, discovered, <observation>)`
@@ -423,4 +421,4 @@ AutonomyDaemon **不直接持有** `TaskScheduler`。\
 | 任務執行 | 透過 Session streaming，**非** TaskScheduler |
 | 結果通知 | `NotificationRouter` 發送 REPORT / ALERT |
 | DreamingPlugin | Cron 排程 dream_cycle，探索隱藏關聯 |
-| SelfReflectionPlugin | 每次 session 結束後分析模式寫入 loom-self 三元組 |
+| TaskReflector | 每輪技能使用後產生 TaskDiagnostic，並在 post-hook 寫入 loom-self 三元組（Issue #120 PR 1）|

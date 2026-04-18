@@ -278,20 +278,22 @@ notify = false
 
 ---
 
-## SelfReflectionPlugin（v0.2.5.3）
+## Behavioural Self-Reflection（v0.2.5.3 → Issue #120 PR 1）
 
-`SelfReflectionPlugin` 在每次 session 結束時自動執行自我反思，分析情節模式並寫入 RelationalMemory：
+原本由 `SelfReflectionPlugin.on_session_stop` 觸發的自我反思，Issue #120 PR 1 起合併進 `TaskReflector`。每次 `TaskReflector` 完成一份結構化 `TaskDiagnostic` 之後，以 fire-and-forget 的方式呼叫 `run_self_reflection` 產生 RelationalMemory 三元組：
 
 ```python
-# loom/extensibility/self_reflection_plugin.py
-class SelfReflectionPlugin(LoomPlugin):
-    def on_session_stop(self, session: object) -> None:
-        """Session 結束時自動呼叫"""
-        # loom/autonomy/self_reflection.py
-        asyncio.create_task(run_self_reflection(session))
+# loom/core/cognition/task_reflector.py（簡化）
+class TaskReflector:
+    def _schedule_behavioural_triples(self) -> None:
+        asyncio.create_task(run_self_reflection(
+            episodic=self._episodic,
+            relational=self._relational,
+            llm_fn=self._llm_fn,
+        ))
 ```
 
-產出的三元組（`loom-self` 主詞）包括：
+產出的三元組（`loom-self` 主詞）維持不變：
 - `should_avoid:<行為>` — 應避免的重複錯誤
 - `tends_to:<行為>` — 持續的傾向性
 - `discovered:<觀察>` — 新發現
@@ -393,8 +395,8 @@ enabled = false
 │                                     │ (通知結果)  │          │
 │                                     └────────────┘          │
 │                                                             │
-│   SelfReflectionPlugin ──▶ RelationalMemory（loom-self 三元組）│
-│   DreamingPlugin        ──▶ RelationalMemory（dreaming 三元組）│
+│   TaskReflector        ──▶ RelationalMemory（loom-self 三元組）│
+│   DreamingPlugin       ──▶ RelationalMemory（dreaming 三元組）│
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -431,7 +433,7 @@ Autonomy Engine 預設是保守的：
 | Decision Pipeline | 決定是否/如何行動 |
 | Action Planner | 將決策轉換為具體行動 |
 | Autonomy Daemon | 常駐監控觸發器狀態 |
-| SelfReflectionPlugin | 每次 session 結束後分析情節模式寫入 loom-self 三元組 |
+| TaskReflector | 每輪技能使用後產生結構化 TaskDiagnostic，並在 post-hook 寫入 loom-self 三元組（Issue #120 PR 1）|
 | DreamingPlugin | 離線探索記憶中的隱藏關聯 |
 | Counter-factual Reflection | 工具失敗後分析 Anti-pattern，寫入 Semantic + Relational Memory |
 

@@ -135,6 +135,18 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     session = LoomSession(model=model, db_path=db, resume_session_id=resume_session_id)
     await session.start()
 
+    # Issue #120 PR1: show diagnostic summaries inline in the CLI.
+    async def _cli_diagnostic(diagnostic):
+        vis = session._reflection_visibility
+        if vis == "off":
+            return
+        console.print(f"[dim]  ⇢ diagnosed {diagnostic.one_line_summary()}[/dim]")
+        if vis == "verbose" and diagnostic.mutation_suggestions:
+            for hint in diagnostic.mutation_suggestions[:2]:
+                console.print(f"[dim]      · {hint}[/dim]")
+
+    session.subscribe_diagnostic(_cli_diagnostic)
+
     console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
@@ -980,6 +992,30 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
         # Also patch skill check approval so it uses TUI confirm widgets
         session._confirm_fn = _tui_confirm
 
+        # Issue #120 PR1: surface TaskDiagnostic as a TUI notification so
+        # skill reflections aren't buried in background tasks.
+        async def _tui_diagnostic(diagnostic):
+            vis = session._reflection_visibility
+            if vis == "off":
+                return
+            try:
+                if vis == "verbose" and diagnostic.mutation_suggestions:
+                    body = (
+                        f"{diagnostic.one_line_summary()}\n"
+                        f"→ {diagnostic.mutation_suggestions[0][:100]}"
+                    )
+                    app.notify(body, title="Skill diagnostic", timeout=6)
+                else:
+                    app.notify(
+                        diagnostic.one_line_summary(),
+                        title="Skill diagnostic",
+                        timeout=4,
+                    )
+            except Exception:
+                pass
+
+        session.subscribe_diagnostic(_tui_diagnostic)
+
         result = await app.run_async()
         # /sessions exits with a session_id string → resume that session.
         # /new exits with "__new__" sentinel → start a fresh session (no resume).
@@ -1345,6 +1381,77 @@ async def _reflect(session_id: str | None, db: str) -> None:
                     f"[dim]used {s['usage_count']}×  "
                     f"tags: {s['tags']}[/dim]"
                 )
+
+
+# ---------------------------------------------------------------------------
+# loom diagnostic commands (Issue #120 PR 1)
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def diagnostic() -> None:
+    """Inspect structured skill diagnostics (TaskReflector output)."""
+
+
+@diagnostic.command("recent")
+@click.option("--skill", default=None, metavar="NAME", help="Filter by skill name.")
+@click.option("--limit", default=10, show_default=True, type=int)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
+    """Show recent TaskDiagnostic entries from semantic memory."""
+    asyncio.run(_diagnostic_recent(skill, limit, db))
+
+
+async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
+    from loom.core.cognition.task_reflector import TaskDiagnostic
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        sem = SemanticMemory(conn)
+        # Two key shapes:
+        #   skill:<name>:diagnostic:<ts>     when --skill is given
+        #   skill:                           otherwise (we filter :diagnostic: in-memory)
+        if skill is not None:
+            prefix = f"skill:{skill}:diagnostic:"
+            entries = await sem.list_by_prefix(prefix, limit=limit)
+        else:
+            raw = await sem.list_by_prefix("skill:", limit=limit * 5)
+            entries = [e for e in raw if ":diagnostic:" in e.key][:limit]
+
+    if not entries:
+        where = f" for skill '{skill}'" if skill else ""
+        console.print(f"[dim]No diagnostics found{where}.[/dim]")
+        return
+
+    console.print(Rule("[cyan]Recent skill diagnostics[/cyan]"))
+    for e in entries:
+        try:
+            diag = TaskDiagnostic.from_json(e.value)
+        except Exception:
+            console.print(f"  [red]![/red] [dim]{e.key}[/dim]  (unparseable)")
+            continue
+
+        score_color = (
+            "green" if diag.quality_score >= 4.0
+            else "yellow" if diag.quality_score >= 2.5
+            else "red"
+        )
+        ts = diag.timestamp.strftime("%Y-%m-%d %H:%M")
+        console.print(
+            f"[dim]{ts}[/dim]  "
+            f"[bold cyan]{diag.skill_name}[/bold cyan]  "
+            f"[dim]{diag.task_type}[/dim]  "
+            f"[{score_color}]{diag.quality_score:.1f}[/{score_color}]"
+        )
+        if diag.instructions_violated:
+            for v in diag.instructions_violated[:3]:
+                console.print(f"   [red]✗[/red] {v}")
+        if diag.mutation_suggestions:
+            console.print("   [bold]→ suggestions:[/bold]")
+            for s in diag.mutation_suggestions[:3]:
+                console.print(f"     • {s}")
+        console.print()
 
 
 # ---------------------------------------------------------------------------

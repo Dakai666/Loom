@@ -4,8 +4,10 @@ Self-reflection core logic — Relational Memory as Mirror (Issue #26).
 ``run_self_reflection()`` analyses recent episodic entries and writes
 behavioural observations as RelationalMemory triples (subject="loom-self").
 
-The LoomPlugin wrapper (``SelfReflectionPlugin``) lives in
-``loom.extensibility.self_reflection_plugin`` to keep the layer dependency clean.
+As of Issue #120 PR 1, this function is invoked as a post-hook from
+``TaskReflector._schedule_behavioural_triples`` after each structured
+``TaskDiagnostic`` is produced — the old ``SelfReflectionPlugin`` wrapper
+and ``reflect_self`` tool have been removed.
 
 Usage::
 

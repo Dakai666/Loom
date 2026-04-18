@@ -81,14 +81,15 @@ class PluginRegistry:
 
 ## 內建 Plugin
 
-Loom 框架自帶兩個 Plugin，位於 `loom/extensibility/`：
+Loom 框架目前自帶一個內建 Plugin，位於 `loom/extensibility/`：
 
 | Plugin | 檔案 | 說明 |
 |--------|------|------|
 | `DreamingPlugin` | `dreaming_plugin.py` | `dream_cycle` 離線夢境（v0.2.5.3）|
-| `SelfReflectionPlugin` | `self_reflection_plugin.py` | 每次 session 結束後自我反思（v0.2.5.3）|
 
-> **v0.2.6.1 架構修復**：兩者之前定義在 `cognition/dreaming.py` 和 `autonomy/self_reflection.py`，違反「下層不能依賴上層」的架構約束。現在已移至 `loom/extensibility/`。
+> **v0.2.6.1 架構修復**：DreamingPlugin 之前定義在 `cognition/dreaming.py`，違反「下層不能依賴上層」的架構約束，v0.2.6.1 移至 `loom/extensibility/`。
+>
+> **Issue #120 PR 1**：原 `SelfReflectionPlugin` 已移除；`run_self_reflection` 保留於 `loom/autonomy/self_reflection.py`，改由 `TaskReflector` 作為結構化診斷的 post-hook 呼叫。
 
 ### DreamingPlugin
 
@@ -100,22 +101,6 @@ class DreamingPlugin(LoomPlugin):
 
     def tools(self) -> list[ToolDefinition]:
         return [dream_cycle_tool]  # dream_cycle: SAFE tool
-```
-
-### SelfReflectionPlugin
-
-```python
-# loom/extensibility/self_reflection_plugin.py
-class SelfReflectionPlugin(LoomPlugin):
-    name = "self_reflection"
-    version = "1.0"
-
-    def tools(self) -> list[ToolDefinition]:
-        return [reflect_self_tool]  # reflect_self: SAFE tool
-
-    def on_session_stop(self, session: object) -> None:
-        # 背景非同步執行，不阻斷 session.stop()
-        asyncio.create_task(run_self_reflection(session))
 ```
 
 ---
@@ -239,7 +224,7 @@ Approve? [y/N]:
 |------|----------|------|
 | `~/.loom/plugins/<name>/` | 每次 session | 用戶全域 plugins |
 | `./loom/plugins/<name>/` | 每次 session | 專案 plugins |
-| `loom/extensibility/` | 框架啟動時 | 內建模組（DreamingPlugin、SelfReflectionPlugin、MCP）|
+| `loom/extensibility/` | 框架啟動時 | 內建模組（DreamingPlugin、MCP）|
 
 > **不建議**將 Plugin 放入 `loom/extensibility/`——那是框架內建擴充的範圍。自訂 Plugin 應放在 `~/.loom/plugins/` 或專案 `loom/plugins/`。
 
@@ -252,7 +237,7 @@ Approve? [y/N]:
 | 多類型貢獻 | tools / middleware / lenses / notifiers |
 | 無縫整合 | `install_into(session)` 自動合併進 live session |
 | 匿名工具 | `@loom.tool` decorator 支援簡單擴展 |
-| 內建 Plugin | DreamingPlugin、SelfReflectionPlugin、MCP server/client |
+| 內建 Plugin | DreamingPlugin、MCP server/client |
 | 首次確認 | 新 plugin 首次被發現時詢問用戶 |
 | 同名替換 | 同一 session 內後註冊的同名 Plugin 覆蓋先前的 |
 | 生命週期 | `on_session_start` / `on_session_stop` 鉤子 |

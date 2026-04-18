@@ -81,6 +81,31 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Reflection (Issue #120 PR1) — Skill diagnostic layer
+# ─────────────────────────────────────────────
+# When a skill is activated via ``load_skill`` and the turn completes,
+# TaskReflector runs a structured LLM diagnostic over the execution
+# trajectory.  The diagnostic produces a ``TaskDiagnostic`` with:
+#   - instructions_followed / instructions_violated
+#   - failure_patterns / success_patterns
+#   - mutation_suggestions      (concrete SKILL.md edit proposals)
+#   - task_type                 (closed label set, see task_reflector.py)
+#   - quality_score             (1.0-5.0, also drives the confidence EMA)
+#
+# Diagnostics are written to SemanticMemory under
+# ``skill:{name}:diagnostic:{timestamp}`` and can be inspected via
+# ``loom diagnostic recent``.  Each platform (CLI / TUI / Discord) also
+# renders a lightweight live notification at the ``visibility`` level
+# chosen below.
+
+[reflection]
+auto_reflect = true
+# "off"     — disables diagnostics entirely (no LLM call, no writes)
+# "summary" — one-line live notification per diagnostic (default)
+# "verbose" — full diagnostic summary + top mutation suggestion
+visibility = "summary"
+
+# ─────────────────────────────────────────────
 # Telemetry (Issue #142) — Agent self-observability
 # ─────────────────────────────────────────────
 # The agent tracks three dimensions of its own behavior:
