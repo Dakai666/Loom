@@ -147,6 +147,20 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     session.subscribe_diagnostic(_cli_diagnostic)
 
+    # Issue #120 PR3: surface skill lifecycle transitions inline.
+    async def _cli_promotion(event) -> None:
+        colour = {
+            "promote": "green",
+            "rollback": "yellow",
+            "auto_shadow": "cyan",
+            "deprecate": "red",
+        }.get(event.kind, "white")
+        console.print(
+            f"[dim]  ⇢ [/dim][{colour}]{event.one_line_summary()}[/{colour}]"
+        )
+
+    session.subscribe_promotion(_cli_promotion)
+
     console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
@@ -1016,6 +1030,24 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
 
         session.subscribe_diagnostic(_tui_diagnostic)
 
+        # Issue #120 PR3: notify on skill lifecycle transitions.
+        async def _tui_promotion(event) -> None:
+            try:
+                severity = {
+                    "rollback": "warning",
+                    "deprecate": "warning",
+                }.get(event.kind, "information")
+                app.notify(
+                    event.one_line_summary(),
+                    title="Skill lifecycle",
+                    severity=severity,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        session.subscribe_promotion(_tui_promotion)
+
         result = await app.run_async()
         # /sessions exits with a session_id string → resume that session.
         # /new exits with "__new__" sentinel → start a fresh session (no resume).
@@ -1551,6 +1583,135 @@ async def _skill_candidates(
             console.print(c.candidate_body)
             console.print(Rule(style="dim"))
         console.print()
+
+
+@skill.command("promote")
+@click.argument("candidate_id")
+@click.option("--reason", default=None, help="Audit note attached to the transition.")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_promote(candidate_id: str, reason: str | None, db: str) -> None:
+    """Swap the parent SKILL.md for the given candidate body."""
+    asyncio.run(_skill_promote(candidate_id, reason, db))
+
+
+async def _skill_promote(candidate_id: str, reason: str | None, db: str) -> None:
+    from loom.core.cognition.skill_promoter import SkillPromoter
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        # Resolve short (8-char) prefixes for operator ergonomics.
+        resolved = await _resolve_candidate_id(proc, candidate_id)
+        if resolved is None:
+            console.print(f"[red]No candidate matches id prefix {candidate_id!r}.[/red]")
+            return
+        promoter = SkillPromoter(procedural=proc)
+        try:
+            parent = await promoter.promote(resolved, reason=reason)
+        except ValueError as exc:
+            console.print(f"[red]Refused:[/red] {exc}")
+            return
+    if parent is None:
+        console.print(f"[red]Promotion failed — candidate or parent missing.[/red]")
+        return
+    console.print(
+        f"[green]Promoted[/green] [bold cyan]{parent.name}[/bold cyan] "
+        f"→ v{parent.version}"
+    )
+
+
+@skill.command("rollback")
+@click.argument("skill_name")
+@click.option("--to-version", type=int, default=None,
+              help="Target version. Defaults to the most recently archived body.")
+@click.option("--reason", default=None, help="Audit note attached to the transition.")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_rollback(
+    skill_name: str, to_version: int | None, reason: str | None, db: str,
+) -> None:
+    """Restore a previous SKILL.md body from history."""
+    asyncio.run(_skill_rollback(skill_name, to_version, reason, db))
+
+
+async def _skill_rollback(
+    skill_name: str, to_version: int | None, reason: str | None, db: str,
+) -> None:
+    from loom.core.cognition.skill_promoter import SkillPromoter
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        promoter = SkillPromoter(procedural=proc)
+        parent = await promoter.rollback(skill_name, to_version=to_version, reason=reason)
+    if parent is None:
+        suffix = f" v{to_version}" if to_version else ""
+        console.print(
+            f"[red]Rollback failed — no history entry for {skill_name}{suffix}.[/red]"
+        )
+        return
+    console.print(
+        f"[yellow]Rolled back[/yellow] [bold cyan]{parent.name}[/bold cyan] "
+        f"→ v{parent.version}"
+    )
+
+
+@skill.command("history")
+@click.argument("skill_name")
+@click.option("--limit", default=20, show_default=True, type=int)
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_history(skill_name: str, limit: int, db: str) -> None:
+    """Show archived SKILL.md versions for a skill."""
+    asyncio.run(_skill_history(skill_name, limit, db))
+
+
+async def _skill_history(skill_name: str, limit: int, db: str) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        records = await proc.list_history(skill_name, limit=limit)
+
+    if not records:
+        console.print(f"[dim]No archived versions for {skill_name}.[/dim]")
+        return
+
+    console.print(Rule(f"[cyan]{skill_name} — version history[/cyan]"))
+    reason_color = {"promote": "green", "rollback": "yellow", "manual": "dim"}
+    for r in records:
+        ts = r.archived_at.strftime("%Y-%m-%d %H:%M")
+        colour = reason_color.get(r.reason, "white")
+        src = (
+            f"  [dim]from candidate {r.source_candidate_id[:8]}[/dim]"
+            if r.source_candidate_id else ""
+        )
+        console.print(
+            f"[dim]{ts}[/dim]  v{r.version}  "
+            f"[{colour}]{r.reason}[/{colour}]{src}"
+        )
+
+
+async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | None:
+    """Accept either a full uuid or a short prefix (≥4 chars).
+
+    If the prefix matches exactly one candidate, return its full id.  Longer
+    matches or non-matches return ``None`` so the caller can surface a clean
+    error.
+    """
+    if len(prefix) >= 32:
+        return prefix
+    if len(prefix) < 4:
+        return None
+    rows = await proc.list_candidates(limit=500)
+    matches = [c.id for c in rows if c.id.startswith(prefix)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 # ---------------------------------------------------------------------------

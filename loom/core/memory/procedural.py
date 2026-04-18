@@ -105,6 +105,42 @@ class SkillGenome:
         self.updated_at = datetime.now(UTC)
 
 
+# ---------------------------------------------------------------------------
+# Skill version history reasons (Issue #120 PR 3)
+# ---------------------------------------------------------------------------
+
+HISTORY_REASONS: tuple[str, ...] = (
+    "promote",   # archived because a candidate was promoted over it
+    "rollback",  # archived as part of a rollback operation
+    "manual",    # explicit archive call
+)
+
+
+@dataclass
+class SkillVersionRecord:
+    """Snapshot of a SKILL.md body captured before a lifecycle transition.
+
+    Written whenever ``SkillPromoter`` replaces the active body — either by
+    promoting a candidate or by rolling back to an earlier version.  The
+    archive survives the swap so rollback can restore any prior revision.
+    """
+
+    skill_name: str
+    version: int
+    body: str
+    reason: str = "promote"
+    source_candidate_id: str | None = None
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    archived_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if self.reason not in HISTORY_REASONS:
+            raise ValueError(
+                f"Invalid history reason {self.reason!r}; "
+                f"expected one of {HISTORY_REASONS}"
+            )
+
+
 @dataclass
 class SkillCandidate:
     """A proposed revision of a parent ``SkillGenome`` (Issue #120 PR 2).
@@ -323,6 +359,94 @@ class ProceduralMemory:
             )
         await self._db.commit()
         return cursor.rowcount > 0
+
+
+    # ------------------------------------------------------------------
+    # Skill version history (Issue #120 PR 3)
+    # ------------------------------------------------------------------
+
+    async def archive_version(self, record: SkillVersionRecord) -> None:
+        """Persist a pre-swap snapshot of a SKILL.md body."""
+        await self._db.execute(
+            """
+            INSERT INTO skill_version_history
+                (id, skill_name, version, body, reason,
+                 source_candidate_id, archived_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.id,
+                record.skill_name,
+                record.version,
+                record.body,
+                record.reason,
+                record.source_candidate_id,
+                record.archived_at.isoformat(),
+            ),
+        )
+        await self._db.commit()
+
+    async def list_history(
+        self,
+        skill_name: str,
+        limit: int = 50,
+    ) -> list[SkillVersionRecord]:
+        """Return archived versions of a skill, newest first."""
+        cursor = await self._db.execute(
+            "SELECT id, skill_name, version, body, reason, "
+            "source_candidate_id, archived_at "
+            "FROM skill_version_history "
+            "WHERE skill_name = ? "
+            "ORDER BY archived_at DESC LIMIT ?",
+            (skill_name, limit),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_history(r) for r in rows]
+
+    async def get_history_version(
+        self,
+        skill_name: str,
+        version: int,
+    ) -> SkillVersionRecord | None:
+        """Fetch the most recent archive of a specific version."""
+        cursor = await self._db.execute(
+            "SELECT id, skill_name, version, body, reason, "
+            "source_candidate_id, archived_at "
+            "FROM skill_version_history "
+            "WHERE skill_name = ? AND version = ? "
+            "ORDER BY archived_at DESC LIMIT 1",
+            (skill_name, version),
+        )
+        row = await cursor.fetchone()
+        return _row_to_history(row) if row else None
+
+    async def latest_history(
+        self,
+        skill_name: str,
+    ) -> SkillVersionRecord | None:
+        """Most recently archived version — used as the default rollback target."""
+        cursor = await self._db.execute(
+            "SELECT id, skill_name, version, body, reason, "
+            "source_candidate_id, archived_at "
+            "FROM skill_version_history "
+            "WHERE skill_name = ? "
+            "ORDER BY archived_at DESC LIMIT 1",
+            (skill_name,),
+        )
+        row = await cursor.fetchone()
+        return _row_to_history(row) if row else None
+
+
+def _row_to_history(row: tuple) -> SkillVersionRecord:
+    return SkillVersionRecord(
+        id=row[0],
+        skill_name=row[1],
+        version=row[2],
+        body=row[3],
+        reason=row[4],
+        source_candidate_id=row[5],
+        archived_at=datetime.fromisoformat(row[6]),
+    )
 
 
 def _row_to_candidate(row: tuple) -> SkillCandidate:

@@ -85,6 +85,8 @@ skills/silky_minimax_draw
 skills/deep_researcher
 skills/github_cli
 skills/silky_tts
+personalities/personality_sisi_tarot_mood.md
+skills/sisi_mood_tarot
 
 # Personal config (use loom.toml.example as template)
 loom.toml
