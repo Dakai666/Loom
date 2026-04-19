@@ -71,6 +71,54 @@ async def test_write_file_allowed_after_read(handler):
 
 
 @pytest.mark.asyncio
+async def test_safe_tool_counts_as_probe(handler):
+    """Issue #167: any SAFE-trust tool should satisfy the probe-first heuristic
+    without an explicit READ_PROBE flag — SAFE means read-only and reversible."""
+    guard = LegitimacyGuardMiddleware()
+    # A SAFE tool the old hardcoded set never knew about
+    call_safe = make_call("introspect_self", TrustLevel.SAFE, {})
+    await guard.process(call_safe, handler)
+    assert guard.has_probed
+
+    call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "x", "content": ""})
+    res = await guard.process(call_write, handler)
+    assert res.success
+
+
+@pytest.mark.asyncio
+async def test_explicit_read_probe_capability_counts_as_probe(handler):
+    """Issue #167: GUARDED tools (e.g. web_search, MCP read tools) opt in via
+    ToolCapability.READ_PROBE. Trust stays GUARDED but the probe heuristic
+    recognizes the call."""
+    guard = LegitimacyGuardMiddleware()
+    call_search = make_call(
+        "github:search_repos", TrustLevel.GUARDED, {"q": "loom"},
+        capabilities=ToolCapability.NETWORK | ToolCapability.READ_PROBE,
+    )
+    await guard.process(call_search, handler)
+    assert guard.has_probed
+
+
+@pytest.mark.asyncio
+async def test_guarded_tool_without_read_probe_does_not_count(handler):
+    """Issue #167: a GUARDED tool with no READ_PROBE flag must NOT satisfy
+    the heuristic, otherwise write_file could waltz through after any
+    network/exec call."""
+    guard = LegitimacyGuardMiddleware()
+    call_unrelated = make_call(
+        "some_mcp:do_thing", TrustLevel.GUARDED, {},
+        capabilities=ToolCapability.NETWORK,
+    )
+    await guard.process(call_unrelated, handler)
+    assert not guard.has_probed
+
+    call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "x", "content": ""})
+    res = await guard.process(call_write, handler)
+    assert not res.success
+    assert res.failure_type == "permission_denied"
+
+
+@pytest.mark.asyncio
 async def test_run_bash_not_guarded_by_probe(handler):
     """run_bash is NOT in strict_guard_tools — BlastRadius owns exec authorization."""
     guard = LegitimacyGuardMiddleware()
