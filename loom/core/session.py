@@ -668,14 +668,10 @@ class LoomSession:
         self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         self._procedural = ProceduralMemory(self._db)
         self._relational = RelationalMemory(self._db)
-        self._reflection = ReflectionAPI(self._episodic, self._procedural)
-        self._reflector = CounterFactualReflector(
-            router=self.router,
-            model=self.model,
-            procedural=self._procedural,
-            semantic=self._semantic,
-            relational=self._relational,
-        )
+        # Issue #147 Phase C.1: ReflectionAPI / CounterFactualReflector
+        # now take the MemoryFacade. They are constructed below, after
+        # ``self._memory`` is built (search "Phase C.1: facade-aware
+        # cognition wiring" in this file).
         self._session_log = SessionLog(self._db)
 
         # Issue #43: Memory Governance — always-on
@@ -794,6 +790,18 @@ class LoomSession:
         self.registry.register(make_query_relations_tool(self._memory))
         self.registry.register(make_memory_health_tool(self._governor))
 
+        # Issue #147 Phase C.1: facade-aware cognition wiring.
+        # ReflectionAPI / CounterFactualReflector previously took
+        # discrete subsystems; they now take the facade so the
+        # construction site no longer reaches into ``self._semantic``
+        # etc.  TaskReflector follows the same pattern further below.
+        self._reflection = ReflectionAPI(self._memory)
+        self._reflector = CounterFactualReflector(
+            router=self.router,
+            model=self.model,
+            memory=self._memory,
+        )
+
         # Issue #149: dream_cycle / memory_prune are now first-class memory
         # tools (formerly DreamingPlugin). Wired with dependency injection
         # so the factories stay session-agnostic.
@@ -871,11 +879,8 @@ class LoomSession:
         self._task_reflector = TaskReflector(
             router=self.router,
             model=self.model,
-            procedural=self._procedural,
-            semantic=self._semantic,
+            memory=self._memory,
             session_id=self.session_id,
-            relational=self._relational,
-            episodic=self._episodic,
             enabled=self._reflection_enabled,
             visibility=self._reflection_visibility,
             mutator=self._skill_mutator if self._skill_mutator.enabled else None,
@@ -1116,12 +1121,12 @@ class LoomSession:
                     _health.record_failure("session_compress", str(exc))
 
             # Step 2: Skill evolution analysis (Issue #58)
-            if self._procedural is not None and self._semantic is not None:
+            if self._memory is not None:
                 try:
                     from loom.core.cognition.counter_factual import SkillEvolutionHook
                     evolution_hook = SkillEvolutionHook(
                         router=self.router, model=self.model,
-                        procedural=self._procedural, semantic=self._semantic,
+                        memory=self._memory,
                     )
                     evolved = await evolution_hook.check_all_skills()
                     if evolved:

@@ -18,8 +18,24 @@ from loom.core.cognition.providers import (
 from loom.core.cognition.router import LLMRouter
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
+from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.procedural import SkillGenome, ProceduralMemory
+from loom.core.memory.relational import RelationalMemory
+from loom.core.memory.search import MemorySearch
+from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
+
+
+def _facade(conn) -> MemoryFacade:
+    sem = SemanticMemory(conn)
+    pr = ProceduralMemory(conn)
+    return MemoryFacade(
+        semantic=sem,
+        procedural=pr,
+        relational=RelationalMemory(conn),
+        episodic=EpisodicMemory(conn),
+        search=MemorySearch(sem, pr),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -267,17 +283,15 @@ async def reflection_db(tmp_path):
 class TestReflectionAPI:
     @pytest.mark.asyncio
     async def test_session_summary_no_entries(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        api = ReflectionAPI(_facade(reflection_db))
         summary = await api.session_summary("empty")
         assert "No activity" in summary
 
     @pytest.mark.asyncio
     async def test_session_summary_with_entries(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        facade = _facade(reflection_db)
+        ep = facade.episodic
+        api = ReflectionAPI(facade)
 
         await ep.write(EpisodicEntry(
             session_id="s1", event_type="message", content="User: hello"
@@ -295,9 +309,9 @@ class TestReflectionAPI:
 
     @pytest.mark.asyncio
     async def test_recent_tool_calls_order(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        facade = _facade(reflection_db)
+        ep = facade.episodic
+        api = ReflectionAPI(facade)
 
         for i in range(5):
             await ep.write(EpisodicEntry(
@@ -313,9 +327,9 @@ class TestReflectionAPI:
 
     @pytest.mark.asyncio
     async def test_tool_success_rate(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        facade = _facade(reflection_db)
+        ep = facade.episodic
+        api = ReflectionAPI(facade)
 
         for ok in [True, True, False]:
             await ep.write(EpisodicEntry(
@@ -330,17 +344,15 @@ class TestReflectionAPI:
 
     @pytest.mark.asyncio
     async def test_skill_health_report_empty(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        api = ReflectionAPI(_facade(reflection_db))
         report = await api.skill_health_report()
         assert report == []
 
     @pytest.mark.asyncio
     async def test_skill_health_report_with_skills(self, reflection_db):
-        ep = EpisodicMemory(reflection_db)
-        pr = ProceduralMemory(reflection_db)
-        api = ReflectionAPI(ep, pr)
+        facade = _facade(reflection_db)
+        pr = facade.procedural
+        api = ReflectionAPI(facade)
 
         await pr.upsert(SkillGenome(
             name="refactor", body="extract functions", confidence=0.85,

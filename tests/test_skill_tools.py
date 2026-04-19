@@ -315,8 +315,7 @@ class TestSkillEvolutionHook:
         hook = SkillEvolutionHook(
             router=MagicMock(),
             model="test",
-            procedural=MagicMock(),
-            semantic=MagicMock(),
+            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
         )
 
         # Mock skill with low confidence
@@ -332,8 +331,7 @@ class TestSkillEvolutionHook:
         hook = SkillEvolutionHook(
             router=MagicMock(),
             model="test",
-            procedural=MagicMock(),
-            semantic=MagicMock(),
+            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
         )
 
         skill = MagicMock()
@@ -348,8 +346,7 @@ class TestSkillEvolutionHook:
         hook = SkillEvolutionHook(
             router=MagicMock(),
             model="test",
-            procedural=MagicMock(),
-            semantic=MagicMock(),
+            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
         )
 
         skill = MagicMock()
@@ -535,8 +532,7 @@ class TestCheckAllSkillsSequential:
         hook = SkillEvolutionHook(
             router=mock_router,
             model="test",
-            procedural=mock_procedural,
-            semantic=mock_semantic,
+            memory=MagicMock(procedural=mock_procedural, semantic=mock_semantic),
         )
 
         count = await hook.check_all_skills()

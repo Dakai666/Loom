@@ -44,13 +44,13 @@ import logging
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
-from loom.core.memory.semantic import SemanticEntry, SemanticMemory
+from loom.core.memory.relational import RelationalEntry
+from loom.core.memory.semantic import SemanticEntry
 
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
     from loom.core.harness.middleware import ToolCall, ToolResult
-    from loom.core.memory.procedural import ProceduralMemory
+    from loom.core.memory.facade import MemoryFacade
 
 logger = logging.getLogger(__name__)
 
@@ -83,28 +83,25 @@ class CounterFactualReflector:
         The session LLMRouter — used to fire the reflection prompt.
     model:
         Model identifier passed to the router.
-    procedural:
-        ProceduralMemory — checked to confirm the failing tool has a
-        SkillGenome entry (only named skills are reflected on).
-    semantic:
-        SemanticMemory — destination for the anti-pattern text.
-    relational:
-        RelationalMemory — destination for ``loom-self / skill`` triples.
+    memory:
+        :class:`MemoryFacade` — provides access to procedural memory
+        (gating which tools have a tracked SkillGenome), semantic
+        memory (anti-pattern text destination), and relational memory
+        (``loom-self / skill`` triples destination).
     """
 
     def __init__(
         self,
-        router: LLMRouter,
+        router: "LLMRouter",
         model: str,
-        procedural: ProceduralMemory,
-        semantic: SemanticMemory,
-        relational: RelationalMemory,
+        memory: "MemoryFacade",
     ) -> None:
         self._router = router
         self._model = model
-        self._procedural = procedural
-        self._semantic = semantic
-        self._relational = relational
+        self._memory = memory
+        self._procedural = memory.procedural
+        self._semantic = memory.semantic
+        self._relational = memory.relational
 
     # ------------------------------------------------------------------
     # Public API
@@ -292,13 +289,13 @@ class SkillEvolutionHook:
         self,
         router: "LLMRouter",
         model: str,
-        procedural: "ProceduralMemory",
-        semantic: SemanticMemory,
+        memory: "MemoryFacade",
     ) -> None:
         self._router = router
         self._model = model
-        self._procedural = procedural
-        self._semantic = semantic
+        self._memory = memory
+        self._procedural = memory.procedural
+        self._semantic = memory.semantic
 
     async def check_all_skills(self) -> int:
         """
