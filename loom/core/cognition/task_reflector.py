@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
     from loom.core.cognition.skill_mutator import MutationProposal, SkillMutator
+    from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.events import ExecutionEnvelopeView
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.procedural import ProceduralMemory
@@ -212,6 +213,7 @@ class TaskReflector:
         enabled: bool = True,
         visibility: str = "summary",
         mutator: "SkillMutator | None" = None,
+        promoter: "SkillPromoter | None" = None,
     ) -> None:
         self._router = router
         self._model = model
@@ -223,6 +225,7 @@ class TaskReflector:
         self._enabled = enabled
         self._visibility = visibility if visibility in ("off", "summary", "verbose") else "summary"
         self._mutator = mutator
+        self._promoter = promoter
         self._subscribers: list[DiagnosticSubscriber] = []
         self._mutation_subscribers: list[MutationSubscriber] = []
 
@@ -481,6 +484,18 @@ class TaskReflector:
                     proposal.candidate.parent_version,
                     proposal.candidate.id,
                 )
+                # Issue #120 PR 3: auto-shadow (mode C) — promote generated →
+                # shadow when the promoter says the parent is underperforming.
+                # No-op in modes manual_b / off, or when the confidence gate
+                # declines.
+                if self._promoter is not None:
+                    try:
+                        await self._promoter.maybe_auto_shadow(
+                            proposal.candidate.id,
+                            reason=f"auto_c:diagnostic q={diagnostic.quality_score:.1f}",
+                        )
+                    except Exception as exc:
+                        logger.debug("auto_shadow failed: %s", exc)
                 await self._notify_mutation_subscribers(proposal)
             except Exception as exc:
                 logger.debug("Mutation post-hook failed: %s", exc)

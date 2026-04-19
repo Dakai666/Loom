@@ -45,7 +45,9 @@ from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
+from loom.core.cognition.skill_gate import SkillGate
 from loom.core.cognition.skill_mutator import SkillMutator
+from loom.core.cognition.skill_promoter import PromotionEvent, SkillPromoter
 from loom.core.cognition.task_reflector import TaskDiagnostic, TaskReflector
 from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
@@ -562,7 +564,23 @@ class LoomSession:
         self._mutation_max_body_chars: int = int(
             _mut_cfg.get("max_body_chars", 6000)
         )
+        # PR 3: lifecycle routing.  These keys live under the same
+        # ``[mutation]`` section — mutation produces candidates, lifecycle
+        # decides what happens to them.
+        shadow_mode_raw = str(_mut_cfg.get("shadow_mode", "auto_c")).lower()
+        if shadow_mode_raw not in ("off", "auto_c", "manual_b"):
+            shadow_mode_raw = "auto_c"
+        self._shadow_mode: str = shadow_mode_raw
+        self._shadow_fraction: float = max(
+            0.0, min(1.0, float(_mut_cfg.get("shadow_fraction", 0.5)))
+        )
+        self._auto_shadow_confidence_ceiling: float = max(
+            0.0, min(1.0, float(_mut_cfg.get("auto_shadow_confidence_ceiling", 0.7)))
+        )
         self._skill_mutator: SkillMutator | None = None
+        self._skill_promoter: SkillPromoter | None = None
+        self._skill_gate: SkillGate | None = None
+        self._promotion_subscribers: list[Callable[[PromotionEvent], Any]] = []
 
         self._mcp_clients: list[Any] = []
 
@@ -737,6 +755,8 @@ class LoomSession:
             make_memory_health_tool,
             make_query_relations_tool,
             make_recall_tool,
+            make_skill_promote_tool,
+            make_skill_rollback_tool,
             make_relate_tool,
             make_spawn_agent_tool,
             make_web_search_tool,
@@ -771,6 +791,35 @@ class LoomSession:
             max_body_chars=self._mutation_max_body_chars,
         )
 
+        # Issue #120 PR 3: lifecycle.  The promoter owns the state-machine
+        # (generated/shadow/promoted/deprecated/rolled_back) and the gate
+        # decides which body `load_skill` serves.  Both are always
+        # instantiated — they cost nothing when the mutation feature is off,
+        # and operators can still run rollback/history against a skill even
+        # without mutation enabled.
+        self._skill_promoter = SkillPromoter(
+            procedural=self._procedural,
+            session_id=self.session_id,
+            shadow_mode=self._shadow_mode,
+            auto_shadow_confidence_ceiling=self._auto_shadow_confidence_ceiling,
+        )
+        self._skill_gate = SkillGate(
+            procedural=self._procedural,
+            shadow_mode=self._shadow_mode,
+            shadow_fraction=self._shadow_fraction,
+            session_id=self.session_id,
+        )
+
+        async def _fan_promotion(event: PromotionEvent) -> None:
+            for cb in list(self._promotion_subscribers):
+                try:
+                    result = cb(event)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:
+                    logger.debug("Promotion subscriber failed: %s", exc)
+        self._skill_promoter.subscribe(_fan_promotion)
+
         # Issue #120 PR1: TaskReflector produces structured diagnostics at
         # each TurnDone, replacing the scalar self-assessment path.
         self._task_reflector = TaskReflector(
@@ -784,6 +833,9 @@ class LoomSession:
             enabled=self._reflection_enabled,
             visibility=self._reflection_visibility,
             mutator=self._skill_mutator if self._skill_mutator.enabled else None,
+            # Pass the promoter only when the mutator is actually going to
+            # write candidates; otherwise there's nothing to auto-shadow.
+            promoter=self._skill_promoter if self._skill_mutator.enabled else None,
         )
         skills_dirs = [
             self.workspace / "skills",
@@ -808,6 +860,7 @@ class LoomSession:
             skill_check_manager=self._skill_check_manager,
             relational=self._relational,
             confirm_fn=lambda call: self._confirm_fn(call),
+            skill_gate=self._skill_gate,
         ))
 
         # Issue #64 Phase B: Register unload_skill tool
@@ -815,6 +868,10 @@ class LoomSession:
         self.registry.register(make_unload_skill_tool(
             self._skill_check_manager,
         ))
+
+        # Issue #120 PR 3: promote / rollback lifecycle tools.
+        self.registry.register(make_skill_promote_tool(self._skill_promoter))
+        self.registry.register(make_skill_rollback_tool(self._skill_promoter))
 
         # Register web tools (Phase 5D)
         self.registry.register(make_fetch_url_tool(
@@ -1713,6 +1770,18 @@ class LoomSession:
         """
         if self._task_reflector is not None:
             self._task_reflector.subscribe(callback)
+
+    def subscribe_promotion(
+        self, callback: "Callable[[PromotionEvent], Any]",
+    ) -> None:
+        """Register a platform callback for each skill lifecycle transition.
+
+        Fires on ``promote`` / ``rollback`` / ``auto_shadow`` / ``deprecate``
+        events from :class:`SkillPromoter`.  CLI / TUI / Discord use this to
+        surface lifecycle changes to the user.  Callbacks may be sync or
+        async; failures are swallowed and logged at debug by the fan-out.
+        """
+        self._promotion_subscribers.append(callback)
 
     def _trigger_skill_assessment(self) -> None:
         """

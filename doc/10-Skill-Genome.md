@@ -213,6 +213,8 @@ alpha=0.15 意味著新評分佔 15% 權重，歷史值佔 85%——穩定但仍
 
 ## Evolution Hook — 主動進化
 
+> 🔗 **想要讓 skill body 本身被改寫、shadow 試用、promote / rollback？** 進一步的三段式進化鏈請見 [10b-Skill-Evolution.md](10b-Skill-Evolution.md)。本節描述的是較早期的 hint-only 機制，候選改寫是 Issue #120 的後續擴充。
+
 `SkillEvolutionHook` 在 session 結束（`stop()`）時觸發，對 confidence 低、使用次數足夠的技能生成改進建議：
 
 **觸發條件：**

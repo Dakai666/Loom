@@ -106,16 +106,34 @@ auto_reflect = true
 visibility = "summary"
 
 # ─────────────────────────────────────────────
-# Skill Mutation (Issue #120 PR 2) — candidate revisions of SKILL.md
+# Skill Mutation + Lifecycle (Issue #120 PR 2 + PR 3)
 # ─────────────────────────────────────────────
 # After TaskReflector emits a diagnostic, SkillMutator can ask the LLM to
 # rewrite the SKILL.md body incorporating the ``mutation_suggestions``.
-# The result is stored in the ``skill_candidates`` pool (status=generated)
-# alongside the parent — it is NOT auto-promoted.  PR 3 will add shadow
-# mode and lifecycle management; meanwhile candidates can be listed with
-# ``loom skill candidates``.
+# The rewrite lands in the ``skill_candidates`` pool (status=generated).
 #
-# Defaults keep this OFF so enabling reflection alone does not start
+# PR 3 adds the lifecycle:
+#   generated ──(auto_shadow | manual)──► shadow
+#     │                                     │
+#     └──────── (deprecate) ────────►  deprecated
+#                                           │
+#                                       (promote)
+#                                           ▼
+#                                       promoted
+#                                           │
+#                                       (rollback)
+#                                           ▼
+#                                       rolled_back
+#
+# Shadow candidates are served to a deterministic slice of sessions in
+# auto_c mode, so TaskReflector can A/B-compare the two bodies.  Promote
+# archives the previous body to ``skill_version_history`` — rollback
+# restores from there.  Candidates can be inspected with
+# ``loom skill candidates`` and promoted/rolled back via
+# ``loom skill promote`` / ``loom skill rollback`` or the matching agent
+# tools (``promote_skill_candidate`` / ``rollback_skill``).
+#
+# Defaults keep mutation OFF so enabling reflection alone does not start
 # writing candidate bodies.  Turn it on once you want the candidate pool
 # to accumulate.
 
@@ -130,6 +148,22 @@ min_suggestions  = 1
 # Truncate the parent SKILL.md body in the rewrite prompt at this many
 # characters to keep the request cheap.
 max_body_chars   = 6000
+
+# PR 3 — lifecycle routing
+# "off"       — never serve a shadow candidate; lifecycle tools still work.
+# "auto_c"    — default.  ``generated`` candidates auto-transition to
+#               ``shadow`` when the parent is under-performing; shadow
+#               candidates are served to ``shadow_fraction`` of sessions.
+# "manual_b"  — candidates stay ``generated`` until an explicit promote
+#               call.  Nothing is auto-served.
+shadow_mode      = "auto_c"
+# Fraction of sessions (0.0–1.0) that see the shadow body in auto_c mode.
+# 0.5 keeps A/B evenly split; lower values ease candidates in slowly.
+shadow_fraction  = 0.5
+# Auto-shadow only fires when the parent SkillGenome.confidence is at or
+# below this ceiling (i.e. the parent is actually struggling enough to
+# warrant an A/B trial).  Range 0.0–1.0.
+auto_shadow_confidence_ceiling = 0.7
 
 # ─────────────────────────────────────────────
 # Telemetry (Issue #142) — Agent self-observability

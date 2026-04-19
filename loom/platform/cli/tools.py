@@ -37,6 +37,8 @@ _cmd_scanner = CommandScanner()
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from loom.core.cognition.skill_gate import SkillGate
+    from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.memory.procedural import ProceduralMemory, SkillGenome
     from loom.core.memory.relational import RelationalMemory
@@ -1038,6 +1040,7 @@ def make_load_skill_tool(
     skill_check_manager: "SkillCheckManager | None" = None,
     relational: "RelationalMemory | None" = None,
     confirm_fn: "Callable | None" = None,
+    skill_gate: "SkillGate | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -1092,8 +1095,15 @@ def make_load_skill_tool(
                 error=f"Skill '{name}' not found. Available: {available or '(none)'}",
             )
 
-        # Build structured <skill_content> output
-        body = skill.body or "(no instructions)"
+        # Issue #120 PR 3: resolve parent vs shadow candidate body.  Decision
+        # is deterministic per (session_id, skill_name); audit tag is carried
+        # back in the tool result metadata so diagnostics can A/B compare.
+        gate_decision = None
+        if skill_gate is not None:
+            gate_decision = await skill_gate.resolve(skill)
+            body = gate_decision.body or "(no instructions)"
+        else:
+            body = skill.body or "(no instructions)"
 
         # Strip YAML frontmatter from body (it's metadata, already parsed)
         body = _strip_frontmatter(body)
@@ -1150,10 +1160,16 @@ def make_load_skill_tool(
             _turn = turn_index_fn() if turn_index_fn else 0
             outcome_tracker.record_activation(name, _turn)
 
+        metadata: dict = {"skill_name": name, "skill_confidence": skill.confidence}
+        if gate_decision is not None:
+            metadata["skill_source"] = gate_decision.audit_tag()
+            metadata["shadow_mode"] = gate_decision.shadow_mode
+            if gate_decision.candidate_id is not None:
+                metadata["shadow_candidate_id"] = gate_decision.candidate_id
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=output,
-            metadata={"skill_name": name, "skill_confidence": skill.confidence},
+            metadata=metadata,
         )
 
     async def _mount_skill_checks(
@@ -1319,6 +1335,150 @@ def make_unload_skill_tool(
         },
         executor=_unload_skill,
         tags=["skill", "memory"],
+        impact_scope="memory",
+    )
+
+
+# ------------------------------------------------------------------
+# Skill lifecycle tools (Issue #120 PR 3)
+# ------------------------------------------------------------------
+
+
+def make_skill_promote_tool(promoter: "SkillPromoter") -> ToolDefinition:
+    """Create a GUARDED ``promote_skill_candidate`` tool.
+
+    Swaps the parent SKILL.md for the candidate body, archives the old
+    body to ``skill_version_history``, and bumps the skill version.  Used
+    primarily in mode B (manual promotion) but also available to the
+    agent in mode C when it wants to accelerate a pending shadow.
+    """
+    async def _promote(call: ToolCall) -> ToolResult:
+        candidate_id = call.args.get("candidate_id", "").strip()
+        reason = (call.args.get("reason") or "").strip() or None
+        if not candidate_id:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'candidate_id' is required",
+            )
+        try:
+            skill = await promoter.promote(candidate_id, reason=reason)
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+        if skill is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=f"Candidate {candidate_id} or its parent not found",
+            )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=f"Promoted candidate {candidate_id[:8]} → {skill.name} v{skill.version}",
+            metadata={"skill_name": skill.name, "new_version": skill.version},
+        )
+
+    return ToolDefinition(
+        name="promote_skill_candidate",
+        description=(
+            "Promote a candidate SKILL.md revision to replace the parent. "
+            "Archives the current body to version history and bumps the skill version. "
+            "Use when a shadow candidate has proven itself or when manually "
+            "accepting a generated proposal."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "candidate_id": {
+                    "type": "string",
+                    "description": "ID of the candidate to promote (see `loom skill candidates`).",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional free-text reason stored in audit notes.",
+                },
+            },
+            "required": ["candidate_id"],
+        },
+        executor=_promote,
+        tags=["skill", "memory", "lifecycle"],
+        impact_scope="memory",
+    )
+
+
+def make_skill_rollback_tool(promoter: "SkillPromoter") -> ToolDefinition:
+    """Create a GUARDED ``rollback_skill`` tool.
+
+    Restores a previous SKILL.md body from history — by default the most
+    recently archived version, i.e. undoing the latest promote.  The
+    current body is re-archived so the rollback itself is reversible.
+    """
+    async def _rollback(call: ToolCall) -> ToolResult:
+        name = call.args.get("skill_name", "").strip()
+        to_version = call.args.get("to_version")
+        reason = (call.args.get("reason") or "").strip() or None
+        if not name:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'skill_name' is required",
+            )
+        version_arg: int | None
+        if to_version is None or to_version == "":
+            version_arg = None
+        else:
+            try:
+                version_arg = int(to_version)
+            except (TypeError, ValueError):
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False, error=f"'to_version' must be an integer, got {to_version!r}",
+                )
+        skill = await promoter.rollback(name, to_version=version_arg, reason=reason)
+        if skill is None:
+            where = f" v{version_arg}" if version_arg is not None else ""
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=f"No history entry to roll back to for '{name}'{where}",
+            )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=f"Rolled back {name} → v{skill.version} (body restored from history)",
+            metadata={"skill_name": name, "new_version": skill.version},
+        )
+
+    return ToolDefinition(
+        name="rollback_skill",
+        description=(
+            "Roll a skill back to a previously-archived SKILL.md body. "
+            "Without ``to_version`` the latest archived entry is restored "
+            "(i.e. undo the most recent promote). The current body is "
+            "re-archived before the swap so rollbacks are themselves reversible."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the skill to roll back.",
+                },
+                "to_version": {
+                    "type": "integer",
+                    "description": "Specific historic version to restore. Omit for the most recent archive.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional free-text reason stored in audit notes.",
+                },
+            },
+            "required": ["skill_name"],
+        },
+        executor=_rollback,
+        tags=["skill", "memory", "lifecycle"],
         impact_scope="memory",
     )
 

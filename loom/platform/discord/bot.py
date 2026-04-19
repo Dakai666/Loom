@@ -462,6 +462,23 @@ class LoomDiscordBot:
 
         session.subscribe_diagnostic(_discord_diagnostic)
 
+        # Issue #120 PR3: echo skill lifecycle transitions into the thread.
+        async def _discord_promotion(event) -> None:
+            if thread_ref is None:
+                return
+            try:
+                icon = {
+                    "promote": "🔁",
+                    "rollback": "↩️",
+                    "auto_shadow": "🫥",
+                    "deprecate": "🗑️",
+                }.get(event.kind, "•")
+                await thread_ref.send(f"{icon} **Skill lifecycle:** {event.one_line_summary()}")
+            except Exception:
+                pass
+
+        session.subscribe_promotion(_discord_promotion)
+
         self._sessions[thread_id] = session
         return session
 

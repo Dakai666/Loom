@@ -161,6 +161,21 @@ CREATE TABLE IF NOT EXISTS skill_candidates (
 CREATE INDEX IF NOT EXISTS idx_skill_candidates_parent ON skill_candidates(parent_skill_name);
 CREATE INDEX IF NOT EXISTS idx_skill_candidates_status ON skill_candidates(status);
 
+-- Issue #120 PR 3: SKILL.md version history (snapshot before each promote/rollback)
+CREATE TABLE IF NOT EXISTS skill_version_history (
+    id                   TEXT PRIMARY KEY,
+    skill_name           TEXT NOT NULL,
+    version              INTEGER NOT NULL,
+    body                 TEXT NOT NULL,
+    reason               TEXT NOT NULL DEFAULT 'promote',  -- 'promote' | 'rollback' | 'manual'
+    source_candidate_id  TEXT,                             -- NULL for rollbacks / manual archives
+    archived_at          TEXT NOT NULL,
+    UNIQUE(skill_name, version, archived_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_history_name    ON skill_version_history(skill_name);
+CREATE INDEX IF NOT EXISTS idx_skill_history_version ON skill_version_history(skill_name, version);
+
 -- Issue #142: Agent self-observability snapshots (one row per dimension per session)
 CREATE TABLE IF NOT EXISTS agent_telemetry (
     dimension   TEXT NOT NULL,
