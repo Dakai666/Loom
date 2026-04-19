@@ -38,6 +38,7 @@ _cmd_scanner = CommandScanner()
 if TYPE_CHECKING:
     from collections.abc import Callable
     from loom.core.cognition.skill_gate import SkillGate
+    from loom.core.cognition.skill_mutator import SkillMutator
     from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.memory.procedural import ProceduralMemory, SkillGenome
@@ -1479,6 +1480,276 @@ def make_skill_rollback_tool(promoter: "SkillPromoter") -> ToolDefinition:
         },
         executor=_rollback,
         tags=["skill", "memory", "lifecycle"],
+        impact_scope="memory",
+    )
+
+
+# ------------------------------------------------------------------
+# Skill evolution tools (Issue #120 PR 4 — meta-skill-engineer surface)
+# ------------------------------------------------------------------
+
+
+_MATURITY_TAG_VALUES: tuple[str, ...] = ("mature", "needs_improvement")
+
+
+def make_generate_skill_candidate_from_batch_tool(
+    mutator: "SkillMutator",
+    procedural: "ProceduralMemory",
+    session_id: str | None = None,
+) -> ToolDefinition:
+    """Create a GUARDED ``generate_skill_candidate_from_batch`` tool.
+
+    Lets the meta-skill-engineer agent feed Grader batch results straight
+    into ``SkillMutator.from_batch_diagnostic`` without dropping to Python.
+    The agent supplies the aggregated fields (mutation_suggestions,
+    instructions_violated, failure_patterns) plus pass_rate /
+    previous_pass_rate; the tool assembles a synthetic ``BatchDiagnostic``
+    with one representative ``TaskDiagnostic`` carrying those lists,
+    persists the candidate, and returns its id + fast_track flag.
+    """
+    async def _generate(call: ToolCall) -> ToolResult:
+        from loom.core.cognition.task_reflector import BatchDiagnostic, TaskDiagnostic
+
+        args = call.args
+        skill_name = (args.get("skill_name") or "").strip()
+        if not skill_name:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'skill_name' is required",
+            )
+
+        try:
+            pass_rate = float(args.get("pass_rate"))
+        except (TypeError, ValueError):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'pass_rate' must be a float in [0.0, 1.0]",
+            )
+        pass_rate = max(0.0, min(1.0, pass_rate))
+
+        prev_raw = args.get("previous_pass_rate")
+        previous_pass_rate: float | None = None
+        if prev_raw not in (None, ""):
+            try:
+                previous_pass_rate = max(0.0, min(1.0, float(prev_raw)))
+            except (TypeError, ValueError):
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error="'previous_pass_rate' must be a float in [0.0, 1.0] or null",
+                )
+
+        def _as_str_list(v: Any) -> list[str]:
+            if not isinstance(v, list):
+                return []
+            return [str(x).strip() for x in v if str(x).strip()]
+
+        suggestions = _as_str_list(args.get("mutation_suggestions"))
+        if not suggestions:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'mutation_suggestions' must be a non-empty list of strings",
+            )
+        violations = _as_str_list(args.get("instructions_violated"))
+        failures = _as_str_list(args.get("failure_patterns"))
+
+        try:
+            avg_quality = float(args.get("avg_quality_score", 3.0))
+        except (TypeError, ValueError):
+            avg_quality = 3.0
+        avg_quality = max(1.0, min(5.0, avg_quality))
+
+        parent = await procedural.get(skill_name)
+        if parent is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=f"Skill '{skill_name}' not found",
+            )
+
+        synthetic = TaskDiagnostic(
+            skill_name=skill_name,
+            session_id=session_id or "meta-skill-engineer",
+            turn_index=0,
+            task_type="workflow_composite",
+            task_type_confidence=1.0,
+            instructions_followed=[],
+            instructions_violated=violations,
+            failure_patterns=failures,
+            success_patterns=[],
+            mutation_suggestions=suggestions,
+            quality_score=avg_quality,
+        )
+        batch = BatchDiagnostic(
+            skill_name=skill_name,
+            diagnostics=[synthetic],
+            pass_rate=pass_rate,
+            previous_pass_rate=previous_pass_rate,
+        )
+
+        proposal = await mutator.from_batch_diagnostic(
+            parent=parent, batch=batch, session_id=session_id,
+        )
+        if proposal is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=(
+                    "Mutator produced no candidate — check that "
+                    "[mutation].enabled=true, the parent body is non-empty, "
+                    "and the LLM rewrite was plausible."
+                ),
+            )
+        await procedural.insert_candidate(proposal.candidate)
+        cand = proposal.candidate
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=(
+                f"Candidate {cand.id[:8]} generated for {skill_name} "
+                f"(fast_track={cand.fast_track}, notes={cand.notes})"
+            ),
+            metadata={
+                "candidate_id": cand.id,
+                "fast_track": cand.fast_track,
+                "mutation_strategy": cand.mutation_strategy,
+                "parent_version": cand.parent_version,
+            },
+        )
+
+    return ToolDefinition(
+        name="generate_skill_candidate_from_batch",
+        description=(
+            "Generate a candidate SKILL.md revision from Grader batch results. "
+            "Used by the meta-skill-engineer skill after running a test set: "
+            "pass the aggregated mutation_suggestions / instructions_violated / "
+            "failure_patterns plus pass_rate (and optionally previous_pass_rate "
+            "to enable fast-track promotion when improvement ≥ threshold). "
+            "Returns the candidate_id and whether it was flagged for fast-track."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the parent skill being mutated.",
+                },
+                "pass_rate": {
+                    "type": "number",
+                    "description": "Fraction 0.0–1.0 of tests that passed in the current batch.",
+                },
+                "previous_pass_rate": {
+                    "type": "number",
+                    "description": (
+                        "Pass rate of the previous skill version on the same "
+                        "test set. Omit on first-ever run. When provided, "
+                        "improvement ≥ fast_track_threshold flags the candidate."
+                    ),
+                },
+                "mutation_suggestions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Aggregated, deduplicated SKILL.md edit suggestions.",
+                },
+                "instructions_violated": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Aggregated SKILL.md instructions that were ignored or misapplied.",
+                },
+                "failure_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Aggregated recurring failure modes observed during the batch.",
+                },
+                "avg_quality_score": {
+                    "type": "number",
+                    "description": "Average quality score 1.0–5.0 across the batch (defaults to 3.0).",
+                },
+            },
+            "required": ["skill_name", "pass_rate", "mutation_suggestions"],
+        },
+        executor=_generate,
+        tags=["skill", "memory", "lifecycle", "meta"],
+        impact_scope="memory",
+    )
+
+
+def make_set_skill_maturity_tool(
+    procedural: "ProceduralMemory",
+) -> ToolDefinition:
+    """Create a GUARDED ``set_skill_maturity`` tool.
+
+    Wraps ``ProceduralMemory.update_maturity_tag`` so the meta-skill-engineer
+    can label a skill ``mature`` (stop running the Grader on it) or
+    ``needs_improvement`` (keep iterating) — or clear the tag. This is the
+    Stage 7 termination signal in the meta-skill-engineer workflow.
+    """
+    async def _set_maturity(call: ToolCall) -> ToolResult:
+        skill_name = (call.args.get("skill_name") or "").strip()
+        if not skill_name:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'skill_name' is required",
+            )
+
+        tag_raw = call.args.get("tag")
+        tag: str | None
+        if tag_raw in (None, "", "none", "null", "clear"):
+            tag = None
+        else:
+            tag = str(tag_raw).strip()
+            if tag not in _MATURITY_TAG_VALUES:
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=(
+                        f"'tag' must be one of {_MATURITY_TAG_VALUES} "
+                        f"or null/'clear' to unset; got {tag_raw!r}"
+                    ),
+                )
+
+        ok = await procedural.update_maturity_tag(skill_name, tag)
+        if not ok:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=f"Skill '{skill_name}' not found",
+            )
+        display = tag if tag is not None else "(cleared)"
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=f"Skill '{skill_name}' maturity_tag set to {display}",
+            metadata={"skill_name": skill_name, "maturity_tag": tag},
+        )
+
+    return ToolDefinition(
+        name="set_skill_maturity",
+        description=(
+            "Label a skill's maturity to drive meta-skill-engineer termination. "
+            "Tag 'mature' → skill graduates, Grader stops; 'needs_improvement' → "
+            "keep iterating; null / 'clear' → unset the tag."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Name of the skill to tag.",
+                },
+                "tag": {
+                    "type": "string",
+                    "description": (
+                        "One of 'mature', 'needs_improvement', or 'clear'/null "
+                        "to remove the tag."
+                    ),
+                },
+            },
+            "required": ["skill_name"],
+        },
+        executor=_set_maturity,
+        tags=["skill", "memory", "lifecycle", "meta"],
         impact_scope="memory",
     )
 

@@ -1,6 +1,6 @@
 ---
 name: meta-skill-engineer
-description: "元技能工程師：系統化建立、評估、迭代改進 Loom 技能的技能。當使用者要求「建立一個新技能」、「改善現有技能」、「評估技能表現」、「跑技能對比測試」、「系統化迭代技能」時使用。本技能為 Skill Genome 提供評估閉環——Grader 產生 BatchDiagnostic，由 SkillMutator.from_batch_diagnostic() 轉化為候選版本，進入 shadow → promote 生命週期，形成測試→記憶→演化的完整循環。"
+description: "元技能工程師：系統化建立、評估、迭代改進 Loom 技能的技能。當使用者要求「建立一個新技能」、「改善現有技能」、「評估技能表現」、「跑技能對比測試」、「系統化迭代技能」時使用。本技能為 Skill Genome 提供評估閉環——Grader 產生 BatchDiagnostic，透過 `generate_skill_candidate_from_batch` 工具轉化為候選版本，進入 shadow → promote 生命週期，形成測試→記憶→演化的完整循環。"
 precondition_checks:
   - ref: checks.require_skills_dir_target
     applies_to: [write_file]
@@ -438,18 +438,29 @@ context: {output_a_path, output_b_path, eval_prompt, expectations}
 
 **目標：把 BatchDiagnostic 轉化為演化動力，走候選池生命週期**
 
-### 候選生成
+### 候選生成（agent 工具）
 
-呼叫 `SkillMutator.from_batch_diagnostic(parent, batch)`：
-- 以 Grader 產出的 `BatchDiagnostic`（含所有 `TaskDiagnostic` + `pass_rate`）為輸入
-- LLM 根據 `aggregated_suggestions` 重寫 SKILL.md，產出 `SkillCandidate`
-- **不直接修改 SKILL.md**——候選進入 `skill_candidates` 表，等候生命週期決策
+使用 `generate_skill_candidate_from_batch` 工具，把 Grader 匯聚的結果直接餵給 `SkillMutator`：
+
+```
+generate_skill_candidate_from_batch(
+  skill_name = "<parent>",
+  pass_rate = 0.85,
+  previous_pass_rate = 0.60,   # optional — 有舊版才填
+  mutation_suggestions = [...], # 每個 TaskDiagnostic 的建議去重彙整
+  instructions_violated = [...],# 同上
+  failure_patterns = [...],     # 同上
+  avg_quality_score = 3.8,      # 可選，預設 3.0
+)
+```
+
+工具回傳 `candidate_id` 與 `fast_track` 標記，候選進入 `skill_candidates` 表，**不直接修改 SKILL.md**——生命週期決策交給 `promote_skill_candidate` / `rollback_skill`。
 
 ### Fast-track 規則
 
 | 情境 | 候選標記 | 下一步 |
 |------|---------|--------|
-| `batch.improvement ≥ 20%`（新版 vs 舊版 pass rate） | `fast_track=True` | 直接 `loom skill promote`，跳過 shadow 階段 |
+| `batch.improvement ≥ fast_track_threshold`（預設 20%，可在 `[mutation].fast_track_threshold` 調整） | `fast_track=True` | 直接 `promote_skill_candidate` 或 `loom skill promote`，跳過 shadow 階段 |
 | 其他情況 | `fast_track=False` | 進入 shadow 模式，積累 N-wins 後 promote |
 
 Fast-track 的前提是必須有 `previous_pass_rate`（有舊版比較基線）。
@@ -460,11 +471,13 @@ Stage 7 **不再**手動調整 confidence。批次 diagnostic 的 `avg_quality_s
 
 ### Maturity Tag
 
-| 條件 | 動作 |
-|------|------|
-| 連續 3 輪 pass rate ≥ 90% | `loom skill set-maturity {name} mature` |
-| pass rate < 30% 且輪次 ≥ 5 | `loom skill set-maturity {name} needs_improvement` |
-| 清除標記 | `loom skill set-maturity {name} --clear` |
+Agent 內用 `set_skill_maturity` 工具（推薦）；CLI 用 `loom skill set-maturity`：
+
+| 條件 | Agent 工具 | CLI 等價指令 |
+|------|-----------|-------------|
+| 連續 3 輪 pass rate ≥ 90% | `set_skill_maturity(skill_name, tag="mature")` | `loom skill set-maturity {name} mature` |
+| pass rate < 30% 且輪次 ≥ 5 | `set_skill_maturity(skill_name, tag="needs_improvement")` | `loom skill set-maturity {name} needs_improvement` |
+| 清除標記 | `set_skill_maturity(skill_name, tag="clear")` | `loom skill set-maturity {name} --clear` |
 
 Maturity tag 儲存在 `SkillGenome.maturity_tag`，可在 `loom review` 中查看。
 

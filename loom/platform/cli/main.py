@@ -1696,6 +1696,46 @@ async def _skill_history(skill_name: str, limit: int, db: str) -> None:
         )
 
 
+@skill.command("set-maturity")
+@click.argument("skill_name")
+@click.argument("tag", required=False, default=None)
+@click.option("--clear", is_flag=True, help="Clear the maturity_tag (equivalent to tag='clear').")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_set_maturity(
+    skill_name: str, tag: str | None, clear: bool, db: str,
+) -> None:
+    """Label a skill 'mature' / 'needs_improvement' — the meta-skill-engineer
+    termination signal.  Use --clear (or tag='clear') to unset."""
+    if clear:
+        tag = None
+    elif tag in ("clear", "none", "null", ""):
+        tag = None
+    elif tag is not None and tag not in ("mature", "needs_improvement"):
+        console.print(
+            f"[red]Invalid tag {tag!r}.[/red] Use 'mature', 'needs_improvement', or --clear."
+        )
+        return
+    asyncio.run(_skill_set_maturity(skill_name, tag, db))
+
+
+async def _skill_set_maturity(skill_name: str, tag: str | None, db: str) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        ok = await proc.update_maturity_tag(skill_name, tag)
+    if not ok:
+        console.print(f"[red]Skill {skill_name!r} not found.[/red]")
+        return
+    display = tag if tag is not None else "(cleared)"
+    console.print(
+        f"[green]Updated[/green] [bold cyan]{skill_name}[/bold cyan] "
+        f"maturity_tag → {display}"
+    )
+
+
 async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | None:
     """Accept either a full uuid or a short prefix (≥4 chars).
 

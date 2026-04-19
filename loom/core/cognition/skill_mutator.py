@@ -139,6 +139,7 @@ class SkillMutator:
         quality_ceiling: float = 3.5,
         min_suggestions: int = 1,
         max_body_chars: int = 6000,
+        fast_track_threshold: float = 0.20,
     ) -> None:
         self._router = router
         self._model = model
@@ -146,6 +147,7 @@ class SkillMutator:
         self._quality_ceiling = quality_ceiling
         self._min_suggestions = min_suggestions
         self._max_body_chars = max_body_chars
+        self._fast_track_threshold = fast_track_threshold
 
     # ------------------------------------------------------------------
     # Public
@@ -267,8 +269,8 @@ class SkillMutator:
             skill_name=parent.name,
             skill_body=parent.body[: self._max_body_chars],
             suggestions=_bullet(suggestions, limit=10),
-            violated=_bullet([], limit=5),
-            failures=_bullet([], limit=5),
+            violated=_bullet(batch.aggregated_violations, limit=5),
+            failures=_bullet(batch.aggregated_failures, limit=5),
         )
 
         raw = ""
@@ -293,7 +295,7 @@ class SkillMutator:
 
         fast_track = (
             batch.improvement is not None
-            and batch.improvement >= _FAST_TRACK_THRESHOLD
+            and batch.improvement >= self._fast_track_threshold
         )
         diagnostic_keys = [
             _diagnostic_key(d) for d in batch.diagnostics if _diagnostic_key(d)
@@ -322,8 +324,6 @@ class SkillMutator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_FAST_TRACK_THRESHOLD: float = 0.20  # ≥20% pass-rate improvement → skip shadow phase
 
 def _bullet(items: list[str], limit: int) -> str:
     if not items:

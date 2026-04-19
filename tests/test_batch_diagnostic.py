@@ -5,7 +5,6 @@ from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 
 from loom.core.cognition.task_reflector import BatchDiagnostic, TaskDiagnostic
 from loom.core.memory.procedural import SkillCandidate, SkillGenome
@@ -20,6 +19,8 @@ def _make_diagnostic(
     skill_name: str = "test-skill",
     quality_score: float = 2.5,
     suggestions: list[str] | None = None,
+    violations: list[str] | None = None,
+    failures: list[str] | None = None,
 ) -> TaskDiagnostic:
     return TaskDiagnostic(
         skill_name=skill_name,
@@ -28,8 +29,8 @@ def _make_diagnostic(
         task_type="general",
         task_type_confidence=0.9,
         instructions_followed=["step A"],
-        instructions_violated=[],
-        failure_patterns=["skipped step B"],
+        instructions_violated=[] if violations is None else violations,
+        failure_patterns=["skipped step B"] if failures is None else failures,
         success_patterns=[],
         mutation_suggestions=["add step B after step A"] if suggestions is None else suggestions,
         quality_score=quality_score,
@@ -91,6 +92,31 @@ class TestBatchDiagnostic:
         batch = BatchDiagnostic(skill_name="s", diagnostics=[d1, d2], pass_rate=0.5)
         suggestions = batch.aggregated_suggestions
         assert suggestions == ["fix A", "fix B", "fix C"]
+
+    def test_aggregated_violations_deduplicated(self):
+        d1 = _make_diagnostic(violations=["skipped check 1", "skipped check 2"])
+        d2 = _make_diagnostic(violations=["skipped check 2", "skipped check 3"])
+        batch = BatchDiagnostic(skill_name="s", diagnostics=[d1, d2], pass_rate=0.5)
+        assert batch.aggregated_violations == [
+            "skipped check 1",
+            "skipped check 2",
+            "skipped check 3",
+        ]
+
+    def test_aggregated_failures_deduplicated(self):
+        d1 = _make_diagnostic(failures=["infinite loop", "bad cast"])
+        d2 = _make_diagnostic(failures=["bad cast", "silent swallow"])
+        batch = BatchDiagnostic(skill_name="s", diagnostics=[d1, d2], pass_rate=0.5)
+        assert batch.aggregated_failures == [
+            "infinite loop",
+            "bad cast",
+            "silent swallow",
+        ]
+
+    def test_aggregated_violations_empty_when_no_diagnostics(self):
+        batch = BatchDiagnostic(skill_name="s", diagnostics=[], pass_rate=0.0)
+        assert batch.aggregated_violations == []
+        assert batch.aggregated_failures == []
 
     def test_one_line_summary_with_improvement(self):
         batch = BatchDiagnostic(
@@ -231,12 +257,80 @@ class TestFromBatchDiagnostic:
         result = await mutator.from_batch_diagnostic(_make_genome(), batch)
         assert result is None
 
+    async def test_aggregated_violations_and_failures_appear_in_prompt(self):
+        """The batch rewrite prompt should receive violations/failures, not empty lists."""
+        from loom.core.cognition.skill_mutator import SkillMutator
+
+        router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = _LLM_BODY
+        router.chat = AsyncMock(return_value=mock_response)
+        mutator = SkillMutator(router=router, model="test-model", enabled=True)
+
+        d1 = _make_diagnostic(violations=["ignored rule 1"], failures=["loop"])
+        d2 = _make_diagnostic(violations=["ignored rule 2"], failures=["loop", "bad cast"])
+        batch = BatchDiagnostic(
+            skill_name="test-skill", diagnostics=[d1, d2], pass_rate=0.5,
+        )
+        result = await mutator.from_batch_diagnostic(_make_genome(), batch)
+        assert result is not None
+
+        call_args = router.chat.await_args
+        prompt = call_args.kwargs["messages"][0]["content"]
+        assert "ignored rule 1" in prompt
+        assert "ignored rule 2" in prompt
+        assert "bad cast" in prompt
+        assert "loop" in prompt
+
+    async def test_fast_track_threshold_configurable(self):
+        """fast_track should respect a custom threshold passed to the constructor."""
+        from loom.core.cognition.skill_mutator import SkillMutator
+
+        router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = _LLM_BODY
+        router.chat = AsyncMock(return_value=mock_response)
+        mutator = SkillMutator(
+            router=router, model="test-model", enabled=True,
+            fast_track_threshold=0.05,  # very lenient
+        )
+        batch = BatchDiagnostic(
+            skill_name="test-skill",
+            diagnostics=[_make_diagnostic()],
+            pass_rate=0.75,
+            previous_pass_rate=0.65,  # improvement = 0.10 ≥ 0.05
+        )
+        result = await mutator.from_batch_diagnostic(_make_genome(), batch)
+        assert result is not None
+        assert result.candidate.fast_track is True
+
+    async def test_fast_track_threshold_strict_rejects_small_improvement(self):
+        from loom.core.cognition.skill_mutator import SkillMutator
+
+        router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = _LLM_BODY
+        router.chat = AsyncMock(return_value=mock_response)
+        mutator = SkillMutator(
+            router=router, model="test-model", enabled=True,
+            fast_track_threshold=0.50,  # very strict
+        )
+        batch = BatchDiagnostic(
+            skill_name="test-skill",
+            diagnostics=[_make_diagnostic()],
+            pass_rate=0.75,
+            previous_pass_rate=0.50,  # improvement = 0.25 < 0.50
+        )
+        result = await mutator.from_batch_diagnostic(_make_genome(), batch)
+        assert result is not None
+        assert result.candidate.fast_track is False
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture
+@pytest.fixture
 async def db_conn(tmp_path):
     store = SQLiteStore(str(tmp_path / "test.db"))
     await store.initialize()
@@ -324,3 +418,157 @@ class TestSchemaExtensions:
         fetched = await proc.get_candidate(candidate.id)
         assert fetched is not None
         assert fetched.fast_track is False
+
+
+# ---------------------------------------------------------------------------
+# Agent tools: generate_skill_candidate_from_batch + set_skill_maturity
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_call(tool_name: str, args: dict):
+    from loom.core.harness.middleware import ToolCall
+    from loom.core.harness.permissions import TrustLevel
+
+    return ToolCall(
+        id=f"call-{tool_name}",
+        tool_name=tool_name,
+        args=args,
+        trust_level=TrustLevel.GUARDED,
+        session_id="test-sess",
+    )
+
+
+class TestGenerateSkillCandidateFromBatchTool:
+    async def _make_env(self, db_conn, enabled: bool = True):
+        from loom.core.cognition.skill_mutator import SkillMutator
+        from loom.core.memory.procedural import ProceduralMemory
+        from loom.platform.cli.tools import make_generate_skill_candidate_from_batch_tool
+
+        proc = ProceduralMemory(db_conn)
+        parent = SkillGenome(name="batch-skill", body=_GENOME_BODY)
+        await proc.upsert(parent)
+
+        router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = _LLM_BODY
+        router.chat = AsyncMock(return_value=mock_response)
+        mutator = SkillMutator(router=router, model="test-model", enabled=enabled)
+
+        tool = make_generate_skill_candidate_from_batch_tool(
+            mutator, proc, session_id="test-sess",
+        )
+        return proc, mutator, tool
+
+    async def test_generates_and_persists_candidate(self, db_conn):
+        proc, _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("generate_skill_candidate_from_batch", {
+            "skill_name": "batch-skill",
+            "pass_rate": 0.9,
+            "previous_pass_rate": 0.6,
+            "mutation_suggestions": ["add verification step"],
+            "instructions_violated": ["skipped audit"],
+            "failure_patterns": ["silent swallow"],
+        })
+        result = await tool.executor(call)
+        assert result.success is True
+        candidate_id = result.metadata["candidate_id"]
+        assert result.metadata["fast_track"] is True
+        assert result.metadata["mutation_strategy"] == "batch_meta_skill_engineer"
+
+        fetched = await proc.get_candidate(candidate_id)
+        assert fetched is not None
+        assert fetched.parent_skill_name == "batch-skill"
+        assert fetched.fast_track is True
+
+    async def test_missing_skill_name_fails(self, db_conn):
+        _, _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("generate_skill_candidate_from_batch", {
+            "pass_rate": 0.5,
+            "mutation_suggestions": ["x"],
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "skill_name" in result.error
+
+    async def test_unknown_skill_fails(self, db_conn):
+        _, _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("generate_skill_candidate_from_batch", {
+            "skill_name": "does-not-exist",
+            "pass_rate": 0.5,
+            "mutation_suggestions": ["x"],
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "not found" in result.error
+
+    async def test_empty_suggestions_fails(self, db_conn):
+        _, _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("generate_skill_candidate_from_batch", {
+            "skill_name": "batch-skill",
+            "pass_rate": 0.5,
+            "mutation_suggestions": [],
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "mutation_suggestions" in result.error
+
+    async def test_mutator_disabled_returns_error(self, db_conn):
+        _, _, tool = await self._make_env(db_conn, enabled=False)
+        call = _make_tool_call("generate_skill_candidate_from_batch", {
+            "skill_name": "batch-skill",
+            "pass_rate": 0.5,
+            "mutation_suggestions": ["x"],
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "no candidate" in result.error.lower()
+
+
+class TestSetSkillMaturityTool:
+    async def _make_env(self, db_conn):
+        from loom.core.memory.procedural import ProceduralMemory
+        from loom.platform.cli.tools import make_set_skill_maturity_tool
+
+        proc = ProceduralMemory(db_conn)
+        await proc.upsert(SkillGenome(name="mature-skill", body="# x"))
+        return proc, make_set_skill_maturity_tool(proc)
+
+    async def test_sets_mature_tag(self, db_conn):
+        proc, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "mature",
+        })
+        result = await tool.executor(call)
+        assert result.success is True
+        fetched = await proc.get("mature-skill")
+        assert fetched.maturity_tag == "mature"
+
+    async def test_clears_tag_when_tag_is_clear(self, db_conn):
+        proc, tool = await self._make_env(db_conn)
+        await proc.update_maturity_tag("mature-skill", "mature")
+
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "clear",
+        })
+        result = await tool.executor(call)
+        assert result.success is True
+        fetched = await proc.get("mature-skill")
+        assert fetched.maturity_tag is None
+
+    async def test_rejects_unknown_tag(self, db_conn):
+        _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "bogus",
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "mature" in result.error
+
+    async def test_unknown_skill_fails(self, db_conn):
+        _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "does-not-exist", "tag": "mature",
+        })
+        result = await tool.executor(call)
+        assert result.success is False
+        assert "not found" in result.error

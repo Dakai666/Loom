@@ -145,14 +145,22 @@ class BatchDiagnostic:
     @property
     def aggregated_suggestions(self) -> list[str]:
         """Deduplicated mutation suggestions across all diagnostics."""
-        seen: set[str] = set()
-        result: list[str] = []
-        for d in self.diagnostics:
-            for s in d.mutation_suggestions:
-                if s not in seen:
-                    seen.add(s)
-                    result.append(s)
-        return result
+        return _dedup_flat(d.mutation_suggestions for d in self.diagnostics)
+
+    @property
+    def aggregated_violations(self) -> list[str]:
+        """Deduplicated ``instructions_violated`` across all diagnostics.
+
+        Used by ``SkillMutator.from_batch_diagnostic`` to give the rewrite
+        prompt the same contextual fields that ``propose_candidate`` passes
+        per-turn, so batch rewrites don't lose the "why" behind suggestions.
+        """
+        return _dedup_flat(d.instructions_violated for d in self.diagnostics)
+
+    @property
+    def aggregated_failures(self) -> list[str]:
+        """Deduplicated ``failure_patterns`` across all diagnostics."""
+        return _dedup_flat(d.failure_patterns for d in self.diagnostics)
 
     def one_line_summary(self) -> str:
         n = len(self.diagnostics)
@@ -683,6 +691,18 @@ def _try_load(text: str) -> Any:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _dedup_flat(lists: "Any") -> list[str]:
+    """Flatten an iterable of string lists, preserving first-seen order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for lst in lists:
+        for item in lst:
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+    return result
 
 
 def _on_reflect_done(task: asyncio.Task) -> None:
