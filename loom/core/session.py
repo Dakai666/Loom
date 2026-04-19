@@ -39,6 +39,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider
@@ -523,10 +524,9 @@ class LoomSession:
         self._store = SQLiteStore(db_path)
         self._db = None
         self._db_ctx = None
-        self._episodic: EpisodicMemory | None = None
-        self._semantic: SemanticMemory | None = None
-        self._procedural: ProceduralMemory | None = None
-        self._relational: RelationalMemory | None = None
+        # Issue #147 Phase C.2: per-subsystem attributes were removed.
+        # All memory access now flows through ``self._memory`` (built in start()).
+        self._memory: MemoryFacade | None = None
         self._reflection: ReflectionAPI | None = None
         self._reflector: CounterFactualReflector | None = None
         self._pipeline: MiddlewarePipeline | None = None
@@ -663,11 +663,13 @@ class LoomSession:
         await self._store.initialize()
         self._db_ctx = self._store.connect()
         self._db = await self._db_ctx.__aenter__()
-        self._episodic = EpisodicMemory(self._db)
+        # Issue #147 Phase C.2: subsystems are local to start() — only the
+        # facade survives as an attribute on the session.
+        episodic = EpisodicMemory(self._db)
         emb_provider = build_embedding_provider(_load_env(), _load_loom_config())
-        self._semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
-        self._procedural = ProceduralMemory(self._db)
-        self._relational = RelationalMemory(self._db)
+        semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
+        procedural = ProceduralMemory(self._db)
+        relational = RelationalMemory(self._db)
         # Issue #147 Phase C.1: ReflectionAPI / CounterFactualReflector
         # now take the MemoryFacade. They are constructed below, after
         # ``self._memory`` is built (search "Phase C.1: facade-aware
@@ -677,10 +679,10 @@ class LoomSession:
         # Issue #43: Memory Governance — always-on
         _gov_cfg = _load_loom_config().get("memory", {}).get("governance", {})
         self._governor = MemoryGovernor(
-            semantic=self._semantic,
-            procedural=self._procedural,
-            relational=self._relational,
-            episodic=self._episodic,
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
             db=self._db,
             config=_gov_cfg,
             session_id=self.session_id,
@@ -689,7 +691,7 @@ class LoomSession:
         await self._governor.health.ensure_table()
         await self._governor.health.load_prior()
         # Inject health tracker into subsystems that record events
-        self._semantic._health = self._governor.health
+        semantic._health = self._governor.health
         self._session_log._health = self._governor.health
 
         # Issue #142: agent self-observability. Noise-proportional-to-signal —
@@ -712,7 +714,7 @@ class LoomSession:
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
         skill_catalog = await self._auto_import_skills()
         indexer = MemoryIndexer(
-            self._semantic, self._procedural, self._episodic, self._relational,
+            semantic, procedural, episodic, relational,
             skill_catalog=skill_catalog,
         )
         self._memory_index = await indexer.build()
@@ -765,21 +767,19 @@ class LoomSession:
             make_spawn_agent_tool,
             make_web_search_tool,
         )
-        search = MemorySearch(self._semantic, self._procedural)
+        search = MemorySearch(semantic, procedural)
         search._health = self._governor.health
 
-        # Issue #147 階段 B: single owner of the four memory subsystems +
-        # search index + governor. The four agent memory tools below are
-        # wired through the facade. Existing self._semantic /
-        # _procedural / _relational / _episodic attributes still point
-        # at the same instances, so wider callers keep working until
-        # 階段 C migrates them too.
-        from loom.core.memory.facade import MemoryFacade
+        # Issue #147 Phase C: ``self._memory`` is the single owner of the
+        # four memory subsystems + search index + governor. Phase C.2
+        # dropped the per-subsystem attributes — anything downstream that
+        # needs a subsystem reads it through ``self._memory.semantic``
+        # etc. (or accepts the facade outright).
         self._memory = MemoryFacade(
-            semantic=self._semantic,
-            procedural=self._procedural,
-            relational=self._relational,
-            episodic=self._episodic,
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
             search=search,
             governor=self._governor,
         )
@@ -817,9 +817,11 @@ class LoomSession:
             return response.text or ""
 
         self.registry.register(
-            make_dream_cycle_tool(self._semantic, self._relational, _dream_llm_fn)
+            make_dream_cycle_tool(
+                self._memory.semantic, self._memory.relational, _dream_llm_fn,
+            )
         )
-        self.registry.register(make_memory_prune_tool(self._semantic))
+        self.registry.register(make_memory_prune_tool(self._memory.semantic))
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
@@ -827,8 +829,8 @@ class LoomSession:
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
         self._skill_outcome_tracker = SkillOutcomeTracker(
-            procedural=self._procedural,
-            semantic=self._semantic,
+            procedural=self._memory.procedural,
+            semantic=self._memory.semantic,
             session_id=self.session_id,
         )
 
@@ -852,13 +854,13 @@ class LoomSession:
         # and operators can still run rollback/history against a skill even
         # without mutation enabled.
         self._skill_promoter = SkillPromoter(
-            procedural=self._procedural,
+            procedural=self._memory.procedural,
             session_id=self.session_id,
             shadow_mode=self._shadow_mode,
             auto_shadow_confidence_ceiling=self._auto_shadow_confidence_ceiling,
         )
         self._skill_gate = SkillGate(
-            procedural=self._procedural,
+            procedural=self._memory.procedural,
             shadow_mode=self._shadow_mode,
             shadow_fraction=self._shadow_fraction,
             session_id=self.session_id,
@@ -904,12 +906,12 @@ class LoomSession:
         self._confirm_fn = self._confirm_tool_cli
 
         self.registry.register(make_load_skill_tool(
-            self._procedural, skills_dirs,
+            self._memory.procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
-            semantic=self._semantic,
+            semantic=self._memory.semantic,
             turn_index_fn=lambda: self._turn_index,
             skill_check_manager=self._skill_check_manager,
-            relational=self._relational,
+            relational=self._memory.relational,
             confirm_fn=lambda call: self._confirm_fn(call),
             skill_gate=self._skill_gate,
         ))
@@ -928,9 +930,9 @@ class LoomSession:
         # equivalents of the Grader → candidate-pool → maturity workflow so
         # the skill can drive the whole cycle without dropping to Python.
         self.registry.register(make_generate_skill_candidate_from_batch_tool(
-            self._skill_mutator, self._procedural, session_id=self.session_id,
+            self._skill_mutator, self._memory.procedural, session_id=self.session_id,
         ))
-        self.registry.register(make_set_skill_maturity_tool(self._procedural))
+        self.registry.register(make_set_skill_maturity_tool(self._memory.procedural))
 
         # Register web tools (Phase 5D)
         self.registry.register(make_fetch_url_tool(
@@ -1101,8 +1103,8 @@ class LoomSession:
                 console.print(Rule("[dim]Compressing session to memory…[/dim]"))
                 count = await compress_session(
                     self.session_id,
-                    self._episodic,
-                    self._semantic,
+                    self._memory.episodic,
+                    self._memory.semantic,
                     self.router,
                     self.model,
                     governor=self._governor,
@@ -1281,7 +1283,7 @@ class LoomSession:
         self.messages.append({"role": "user", "content": annotated})
         asyncio.ensure_future(self._log_message("user", annotated))
 
-        await self._episodic.write(
+        await self._memory.episodic.write(
             EpisodicEntry(
                 session_id=self.session_id,
                 event_type="message",
@@ -1567,12 +1569,13 @@ class LoomSession:
                 # prior compressions don't keep the threshold permanently
                 # satisfied (would re-trigger the LLM every turn).
                 try:
-                    ep_count = await self._episodic.count_session(
+                    ep_count = await self._memory.episodic.count_session(
                         self.session_id, uncompressed_only=True,
                     )
                     if ep_count >= self._episodic_compress_threshold:
                         fact_count = await compress_session(
-                            self.session_id, self._episodic, self._semantic,
+                            self.session_id,
+                            self._memory.episodic, self._memory.semantic,
                             self.router, self.model,
                             governor=self._governor,
                             telemetry=self._telemetry,
@@ -1940,7 +1943,7 @@ class LoomSession:
                 # Upsert to ProceduralMemory if new or stale
                 from loom.core.memory.procedural import SkillGenome
 
-                existing = await self._procedural.get(name)
+                existing = await self._memory.procedural.get(name)
                 file_mtime = skill_md.stat().st_mtime
 
                 needs_update = (
@@ -1960,7 +1963,7 @@ class LoomSession:
                         tags=tags or (existing.tags if existing else []),
                         precondition_check_refs=pc_refs,
                     )
-                    await self._procedural.upsert(genome)
+                    await self._memory.procedural.upsert(genome)
                     logger.debug("Auto-imported skill '%s' from %s", name, skill_md)
 
                 # Add to catalog for Tier 1 disclosure
@@ -2018,8 +2021,8 @@ class LoomSession:
 
         for plugin_path, rel_key in candidates:
             approved = False
-            if self._relational is not None:
-                entry = await self._relational.get(rel_key, "approved")
+            if self._memory is not None:
+                entry = await self._memory.relational.get(rel_key, "approved")
                 approved = entry is not None and entry.object == "true"
 
             if not approved:
@@ -2045,9 +2048,9 @@ class LoomSession:
                     continue
 
                 # Persist approval
-                if self._relational is not None:
+                if self._memory is not None:
                     from loom.core.memory.relational import RelationalEntry
-                    await self._relational.upsert(RelationalEntry(
+                    await self._memory.relational.upsert(RelationalEntry(
                         subject=rel_key,
                         predicate="approved",
                         object="true",
@@ -2293,7 +2296,7 @@ class LoomSession:
         }
         if result.failure_type:
             meta["failure_type"] = result.failure_type
-        await self._episodic.write(
+        await self._memory.episodic.write(
             EpisodicEntry(
                 session_id=self.session_id,
                 event_type="tool_result",
@@ -2764,11 +2767,12 @@ class LoomSession:
         "Memory Index" and replaces everything from that line to the closing rule
         line. If no existing block is found, appends the new block as usual.
         """
-        if self._semantic is None or self._procedural is None:
+        if self._memory is None:
             return
         try:
             indexer = MemoryIndexer(
-                self._semantic, self._procedural, self._episodic, self._relational
+                self._memory.semantic, self._memory.procedural,
+                self._memory.episodic, self._memory.relational,
             )
             new_index = await indexer.build()
             if new_index.is_empty:

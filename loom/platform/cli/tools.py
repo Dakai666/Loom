@@ -2107,9 +2107,9 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             result = await run_subagent(
                 config,
                 router=parent_session.router,
-                episodic=parent_session._episodic,
-                semantic=parent_session._semantic,
-                procedural=parent_session._procedural,
+                episodic=parent_session._memory.episodic,
+                semantic=parent_session._memory.semantic,
+                procedural=parent_session._memory.procedural,
                 tool_registry=parent_session.registry,
                 parent_session_id=parent_session.session_id,
                 workspace=parent_session.workspace,
