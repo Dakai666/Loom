@@ -772,10 +772,12 @@ class LoomSession:
         search = MemorySearch(self._semantic, self._procedural)
         search._health = self._governor.health
 
-        # Issue #147 階段 A: single owner of the four memory subsystems +
-        # search index. Existing self._semantic / _procedural / _relational
-        # / _episodic attributes still point at the same instances, so
-        # callers that reach into them keep working until 階段 B/C.
+        # Issue #147 階段 B: single owner of the four memory subsystems +
+        # search index + governor. The four agent memory tools below are
+        # wired through the facade. Existing self._semantic /
+        # _procedural / _relational / _episodic attributes still point
+        # at the same instances, so wider callers keep working until
+        # 階段 C migrates them too.
         from loom.core.memory.facade import MemoryFacade
         self._memory = MemoryFacade(
             semantic=self._semantic,
@@ -783,12 +785,13 @@ class LoomSession:
             relational=self._relational,
             episodic=self._episodic,
             search=search,
+            governor=self._governor,
         )
 
-        self.registry.register(make_recall_tool(search))
-        self.registry.register(make_memorize_tool(self._semantic, governor=self._governor))
-        self.registry.register(make_relate_tool(self._relational))
-        self.registry.register(make_query_relations_tool(self._relational))
+        self.registry.register(make_recall_tool(self._memory))
+        self.registry.register(make_memorize_tool(self._memory))
+        self.registry.register(make_relate_tool(self._memory))
+        self.registry.register(make_query_relations_tool(self._memory))
         self.registry.register(make_memory_health_tool(self._governor))
 
         # Issue #149: dream_cycle / memory_prune are now first-class memory

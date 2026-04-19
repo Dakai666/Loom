@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from loom.core.cognition.skill_mutator import SkillMutator
     from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.harness.skill_checks import SkillCheckManager
+    from loom.core.memory.facade import MemoryFacade
     from loom.core.memory.procedural import ProceduralMemory, SkillGenome
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.search import MemorySearch
@@ -655,11 +656,12 @@ async def _run_bash_job(
 # Close over live memory store instances; call from LoomSession.start().
 # ------------------------------------------------------------------
 
-def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
+def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
-    Create a SAFE ``recall`` tool bound to the given MemorySearch instance.
+    Create a SAFE ``recall`` tool bound to the given MemoryFacade.
 
-    The tool performs BM25-ranked retrieval across semantic facts and skills.
+    The tool performs BM25-ranked retrieval across semantic facts and
+    skills via :meth:`MemoryFacade.search`.
     """
     async def _recall(call: ToolCall) -> ToolResult:
         query = call.args.get("query", "").strip()
@@ -673,7 +675,7 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
         if mem_type not in ("semantic", "skill", "all"):
             mem_type = "all"
 
-        results = await search.recall(query, type=mem_type, limit=limit)  # type: ignore[arg-type]
+        results = await memory.search(query, kind=mem_type, limit=limit)  # type: ignore[arg-type]
 
         if not results:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -723,16 +725,16 @@ def make_recall_tool(search: "MemorySearch") -> ToolDefinition:
     )
 
 
-def make_memorize_tool(
-    semantic: "SemanticMemory",
-    governor: "MemoryGovernor | None" = None,
-) -> ToolDefinition:
+def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
-    Create a GUARDED ``memorize`` tool bound to the given SemanticMemory instance.
+    Create a GUARDED ``memorize`` tool bound to the given MemoryFacade.
 
     Stores a key→value fact in semantic memory for future sessions.
-    When a MemoryGovernor is provided, writes go through the governance
-    pipeline (trust classification + contradiction detection).
+    The facade routes the write through ``MemoryGovernor`` when one is
+    wired (trust classification + contradiction detection); otherwise it
+    falls back to a direct semantic upsert.  Either way the result shape
+    (``GovernedWriteResult``) is uniform, and embedding-write failures
+    are surfaced through a structured WARN log inside the facade.
     """
     from loom.core.memory.semantic import SemanticEntry
 
@@ -746,31 +748,26 @@ def make_memorize_tool(
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="Both 'key' and 'value' are required")
 
-        # Agent-invoked memorize is treated as user_explicit trust
         entry = SemanticEntry(key=key, value=value, confidence=confidence, source="memorize")
+        gov_result = await memory.memorize(entry)
 
-        if governor is not None:
-            gov_result = await governor.governed_upsert(entry)
-            if not gov_result.written:
-                msg = (
-                    f"Memorize skipped for {key!r}: existing entry has higher trust "
-                    f"(tier={gov_result.trust_tier}, contradictions={gov_result.contradictions_found})"
-                )
-                return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                                  success=True, output=msg)
-            if gov_result.contradictions_found > 0:
-                msg = (
-                    f"Memorized: {key!r} (resolved {gov_result.contradictions_found} "
-                    f"contradiction(s) — {gov_result.resolution})"
-                )
-            else:
-                msg = f"Memorized: {key!r}"
+        if not gov_result.written:
+            msg = (
+                f"Memorize skipped for {key!r}: existing entry has higher trust "
+                f"(tier={gov_result.trust_tier}, contradictions={gov_result.contradictions_found})"
+            )
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output=msg)
+
+        if gov_result.contradictions_found > 0:
+            msg = (
+                f"Memorized: {key!r} (resolved {gov_result.contradictions_found} "
+                f"contradiction(s) — {gov_result.resolution})"
+            )
+        elif gov_result.resolution == "replaced":
+            msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
         else:
-            conflicted = await semantic.upsert(entry)
-            if conflicted:
-                msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
-            else:
-                msg = f"Memorized: {key!r}"
+            msg = f"Memorized: {key!r}"
 
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=msg,
@@ -783,7 +780,7 @@ def make_memorize_tool(
             return ToolResult(call_id=call.id, tool_name="memorize",
                               success=False, error="No key to rollback")
         try:
-            await semantic.delete(key)
+            await memory.semantic.delete(key)
             return ToolResult(call_id=call.id, tool_name="memorize",
                               success=True, output=f"Rolled back: deleted key {key!r}")
         except Exception as exc:
@@ -927,11 +924,12 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
     )
 
 
-def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
+def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
-    Create a GUARDED ``relate`` tool bound to the given RelationalMemory instance.
+    Create a GUARDED ``relate`` tool bound to the given MemoryFacade.
 
-    Stores a (subject, predicate, object) triple — e.g.
+    Stores a (subject, predicate, object) triple via
+    :meth:`MemoryFacade.relate` — e.g.
     relate(subject="user", predicate="prefers", object="concise responses").
     """
     from loom.core.memory.relational import RelationalEntry
@@ -954,7 +952,7 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
             confidence=confidence,
             source="agent",
         )
-        await relational.upsert(entry)
+        await memory.relate(entry)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}",
                           metadata={"_subject": subject, "_predicate": predicate})
@@ -967,7 +965,7 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
             return ToolResult(call_id=call.id, tool_name="relate",
                               success=False, error="No subject/predicate to rollback")
         try:
-            await relational.delete(subject, predicate)
+            await memory.relational.delete(subject, predicate)
             return ToolResult(call_id=call.id, tool_name="relate",
                               success=True,
                               output=f"Rolled back: deleted ({subject!r}, {predicate!r})")
@@ -1002,11 +1000,12 @@ def make_relate_tool(relational: "RelationalMemory") -> ToolDefinition:
     )
 
 
-def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
+def make_query_relations_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
-    Create a SAFE ``query_relations`` tool bound to the given RelationalMemory instance.
+    Create a SAFE ``query_relations`` tool bound to the given MemoryFacade.
 
-    Returns all triples matching the given subject and/or predicate filters.
+    Returns all triples matching the given subject and/or predicate
+    filters via :meth:`MemoryFacade.query_relations`.
     """
     async def _query_relations(call: ToolCall) -> ToolResult:
         subject = call.args.get("subject", "").strip() or None
@@ -1016,7 +1015,7 @@ def make_query_relations_tool(relational: "RelationalMemory") -> ToolDefinition:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="At least one of 'subject' or 'predicate' is required")
 
-        entries = await relational.query(subject=subject, predicate=predicate)
+        entries = await memory.query_relations(subject=subject, predicate=predicate)
         if not entries:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=True, output="No matching relationships found.")

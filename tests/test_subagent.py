@@ -8,7 +8,10 @@ from loom.core.agent.subagent import SubAgentConfig, run_subagent
 from loom.core.cognition.providers import LLMResponse, ToolUse
 from loom.core.harness.registry import ToolRegistry
 from loom.core.memory.episodic import EpisodicMemory
+from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.relational import RelationalMemory
+from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.platform.cli.tools import make_memorize_tool
@@ -67,7 +70,13 @@ class TestSubAgentMemorize:
         tmp_path: Path,
     ) -> None:
         registry = ToolRegistry()
-        registry.register(make_memorize_tool(semantic))
+        relational = RelationalMemory(semantic._db)
+        facade = MemoryFacade(
+            semantic=semantic, procedural=procedural,
+            relational=relational, episodic=episodic,
+            search=MemorySearch(semantic, procedural),
+        )
+        registry.register(make_memorize_tool(facade))
         router = _FakeRouter([
             LLMResponse(
                 text=None,

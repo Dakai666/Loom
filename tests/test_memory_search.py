@@ -39,6 +39,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
+from loom.core.memory.facade import MemoryFacade
+from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.procedural import SkillGenome, ProceduralMemory
 from loom.core.memory.search import MemorySearch, MemorySearchResult
@@ -46,6 +48,27 @@ from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
 from loom.platform.cli.tools import make_recall_tool, make_memorize_tool
+
+
+def _facade(
+    *,
+    semantic: SemanticMemory,
+    procedural: ProceduralMemory,
+    relational: RelationalMemory | None = None,
+    episodic: EpisodicMemory | None = None,
+    search: MemorySearch | None = None,
+) -> MemoryFacade:
+    """Phase-B helper: build a MemoryFacade from whatever subsystems
+    the caller already has. Tests that don't exercise relational /
+    episodic / governor pass ``MagicMock()`` for the unused handles."""
+    return MemoryFacade(
+        semantic=semantic,
+        procedural=procedural,
+        relational=relational or MagicMock(),
+        episodic=episodic or MagicMock(),
+        search=search or MemorySearch(semantic, procedural),
+        governor=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +306,7 @@ class TestRecallTool:
     async def test_success_returns_formatted_output(self, semantic, procedural):
         await semantic.upsert(SemanticEntry(key="loom:core", value="Loom uses middleware pipeline"))
 
-        search = MemorySearch(semantic, procedural)
-        tool = make_recall_tool(search)
+        tool = make_recall_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("recall", {"query": "middleware pipeline"})
         result = await tool.executor(call)
 
@@ -293,8 +315,7 @@ class TestRecallTool:
         assert "middleware" in result.output.lower()
 
     async def test_missing_query_returns_error(self, semantic, procedural):
-        search = MemorySearch(semantic, procedural)
-        tool = make_recall_tool(search)
+        tool = make_recall_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("recall", {})
         result = await tool.executor(call)
 
@@ -302,8 +323,7 @@ class TestRecallTool:
         assert "query" in result.error.lower()
 
     async def test_empty_results_message(self, semantic, procedural):
-        search = MemorySearch(semantic, procedural)
-        tool = make_recall_tool(search)
+        tool = make_recall_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("recall", {"query": "nonexistent topic xyz"})
         result = await tool.executor(call)
 
@@ -314,8 +334,7 @@ class TestRecallTool:
         skill = SkillGenome(name="bash_skill", body="use bash for automation", tags=["bash"])
         await procedural.upsert(skill)
 
-        search = MemorySearch(semantic, procedural)
-        tool = make_recall_tool(search)
+        tool = make_recall_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("recall", {"query": "bash automation", "type": "skill"})
         result = await tool.executor(call)
 
@@ -325,23 +344,19 @@ class TestRecallTool:
         for i in range(15):
             await semantic.upsert(SemanticEntry(key=f"k{i}", value=f"loom fact {i}"))
 
-        search = MemorySearch(semantic, procedural)
-        tool = make_recall_tool(search)
+        tool = make_recall_tool(_facade(semantic=semantic, procedural=procedural))
         # Request 50, should be capped at 10
         call = _make_call("recall", {"query": "loom", "limit": 50})
         result = await tool.executor(call)
         assert result.success is True
 
-    def test_tool_is_safe_trust_level(self, semantic=None, procedural=None):
-        # Just check the metadata without needing DB
-        from unittest.mock import MagicMock
-        mock_search = MagicMock()
-        tool = make_recall_tool(mock_search)
+    def test_tool_is_safe_trust_level(self):
+        # Metadata-only check; facade handles can be mocks.
+        tool = make_recall_tool(MagicMock())
         assert tool.trust_level == TrustLevel.SAFE
         assert "recall" in tool.tags
 
     def test_tool_has_correct_schema(self):
-        from unittest.mock import MagicMock
         tool = make_recall_tool(MagicMock())
         assert "query" in tool.input_schema["properties"]
         assert "query" in tool.input_schema["required"]
@@ -352,8 +367,8 @@ class TestRecallTool:
 # ---------------------------------------------------------------------------
 
 class TestMemorizeTool:
-    async def test_persists_entry(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_persists_entry(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "project:arch", "value": "Loom uses SQLite WAL"})
         result = await tool.executor(call)
 
@@ -363,48 +378,48 @@ class TestMemorizeTool:
         assert stored.value == "Loom uses SQLite WAL"
         assert stored.source == "memorize"
 
-    async def test_missing_key_returns_error(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_missing_key_returns_error(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"value": "some fact"})
         result = await tool.executor(call)
         assert result.success is False
 
-    async def test_missing_value_returns_error(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_missing_value_returns_error(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "some_key"})
         result = await tool.executor(call)
         assert result.success is False
 
-    async def test_confidence_default(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_confidence_default(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "k1", "value": "fact"})
         await tool.executor(call)
         stored = await semantic.get("k1")
         assert stored.confidence == 0.8
 
-    async def test_confidence_custom(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_confidence_custom(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "k2", "value": "fact", "confidence": 0.95})
         await tool.executor(call)
         stored = await semantic.get("k2")
         assert stored.confidence == pytest.approx(0.95)
 
-    async def test_confidence_clamped_above_one(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_confidence_clamped_above_one(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "k3", "value": "fact", "confidence": 5.0})
         await tool.executor(call)
         stored = await semantic.get("k3")
         assert stored.confidence <= 1.0
 
-    async def test_confidence_clamped_below_zero(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_confidence_clamped_below_zero(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call = _make_call("memorize", {"key": "k4", "value": "fact", "confidence": -1.0})
         await tool.executor(call)
         stored = await semantic.get("k4")
         assert stored.confidence >= 0.0
 
-    async def test_upsert_updates_existing(self, semantic):
-        tool = make_memorize_tool(semantic)
+    async def test_upsert_updates_existing(self, semantic, procedural):
+        tool = make_memorize_tool(_facade(semantic=semantic, procedural=procedural))
         call1 = _make_call("memorize", {"key": "shared", "value": "original"})
         call2 = _make_call("memorize", {"key": "shared", "value": "updated"})
         await tool.executor(call1)
@@ -413,9 +428,7 @@ class TestMemorizeTool:
         assert stored.value == "updated"
 
     def test_tool_is_guarded_trust_level(self):
-        from unittest.mock import MagicMock
-        mock_sem = MagicMock()
-        tool = make_memorize_tool(mock_sem)
+        tool = make_memorize_tool(MagicMock())
         assert tool.trust_level == TrustLevel.GUARDED
         assert "memorize" in tool.tags
 
