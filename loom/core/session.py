@@ -694,6 +694,20 @@ class LoomSession:
         semantic._health = self._governor.health
         self._session_log._health = self._governor.health
 
+        # Issue #147 Phase C: build the facade up-front so every later step
+        # in start() (auto-import, MemoryIndexer, tool registration, etc.)
+        # reads memory exclusively through ``self._memory``.
+        search = MemorySearch(semantic, procedural)
+        search._health = self._governor.health
+        self._memory = MemoryFacade(
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
+            search=search,
+            governor=self._governor,
+        )
+
         # Issue #142: agent self-observability. Noise-proportional-to-signal —
         # counters live on the hot path; DB flush is batched by persist_interval
         # and at stop(). Anomaly summaries inject only when a dimension reports
@@ -767,23 +781,8 @@ class LoomSession:
             make_spawn_agent_tool,
             make_web_search_tool,
         )
-        search = MemorySearch(semantic, procedural)
-        search._health = self._governor.health
-
-        # Issue #147 Phase C: ``self._memory`` is the single owner of the
-        # four memory subsystems + search index + governor. Phase C.2
-        # dropped the per-subsystem attributes — anything downstream that
-        # needs a subsystem reads it through ``self._memory.semantic``
-        # etc. (or accepts the facade outright).
-        self._memory = MemoryFacade(
-            semantic=semantic,
-            procedural=procedural,
-            relational=relational,
-            episodic=episodic,
-            search=search,
-            governor=self._governor,
-        )
-
+        # ``self._memory`` was built up-front (right after governor init).
+        # See "Issue #147 Phase C: build the facade up-front" above.
         self.registry.register(make_recall_tool(self._memory))
         self.registry.register(make_memorize_tool(self._memory))
         self.registry.register(make_relate_tool(self._memory))
