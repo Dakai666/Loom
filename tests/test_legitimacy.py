@@ -150,6 +150,47 @@ async def test_trajectory_anomaly_not_set_after_probe(handler):
 
 
 @pytest.mark.asyncio
+async def test_trajectory_anomaly_emits_warning_log(handler, caplog):
+    """Issue #168: tripping the soft guard must emit a structured warning so
+    operators can distinguish a soft-guard demotion from a generic auth deny."""
+    import logging
+    guard = LegitimacyGuardMiddleware()
+    call_bash = make_call(
+        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
+        capabilities=ToolCapability.EXEC,
+    )
+    with caplog.at_level(logging.WARNING, logger="loom.core.harness.middleware"):
+        await guard.process(call_bash, handler)
+    assert any("Trajectory anomaly" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_unattended_trajectory_anomaly_returns_specific_error(perm_ctx, registry, handler):
+    """Issue #168: unattended autonomy origin hitting trajectory_anomaly must
+    fail fast with a probe-first explanation, not the generic 'no scope' deny."""
+    async def never_called(call):
+        raise AssertionError("confirm_fn must not be called for unattended origin")
+
+    bmw = BlastRadiusMiddleware(
+        perm_ctx=perm_ctx,
+        confirm_fn=never_called,
+        registry=registry,
+    )
+    call = make_call(
+        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
+        capabilities=ToolCapability.EXEC,
+    )
+    call.origin = "autonomy"
+    call.metadata["trajectory_anomaly"] = True
+
+    res = await bmw.process(call, handler)
+    assert not res.success
+    assert res.failure_type == "permission_denied"
+    assert "probe" in res.error.lower()
+    assert "autonomy" in res.error
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_trips_after_3_denies(perm_ctx, registry, handler):
     deny_count = 0
     async def always_deny(call) -> ConfirmDecision:

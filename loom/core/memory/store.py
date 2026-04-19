@@ -236,6 +236,10 @@ class SQLiteStore:
     async def initialize(self) -> None:
         """Create tables and indexes if they do not exist."""
         async with aiosqlite.connect(self.path) as db:
+            # Issue #166: wait up to 5s on a write lock instead of failing
+            # immediately with `database is locked`. Pairs with WAL mode set in
+            # SCHEMA — WAL allows concurrent readers, but writes still serialize.
+            await db.execute("PRAGMA busy_timeout = 5000;")
             await db.executescript(SCHEMA)
             await db.commit()
             # Runtime migrations: ALTER TABLE for columns added in later versions.
@@ -290,6 +294,10 @@ class SQLiteStore:
         async with aiosqlite.connect(self.path) as db:
             await db.enable_load_extension(True)
             await db.load_extension(sqlite_vec.loadable_path())
+            # Issue #166: wait up to 5s on a write lock under concurrency
+            # (Discord daemon + CLI session + Dreaming jobs hitting WAL together)
+            # instead of immediately raising `database is locked`.
+            await db.execute("PRAGMA busy_timeout = 5000;")
             yield db
 
     @staticmethod

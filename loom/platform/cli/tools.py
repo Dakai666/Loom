@@ -512,10 +512,23 @@ def make_run_bash_tool(
         if verdict.verdict == "warn":
             _log.warning("Self-termination guard warning: %s", verdict.description)
 
-        # Issue #100: shell injection command scanner
+        # Issue #100 / #165: shell injection scanner. This is a defense-in-depth
+        # tripwire + audit signal, NOT a security boundary — see the module
+        # docstring in loom/core/security/command_scanner.py. Every hit emits a
+        # structured log line so downstream tooling (Discord notify, audit
+        # pipelines) can subscribe to "command_scanner_*" without re-parsing.
         scan_verdict = _cmd_scanner.check(command)
         if scan_verdict.verdict == "block":
-            _log.warning("Command scanner blocked: %s", scan_verdict.description)
+            _log.warning(
+                "Command scanner blocked: %s", scan_verdict.description,
+                extra={
+                    "event": "command_scanner_block",
+                    "pattern_key": scan_verdict.pattern_key,
+                    "tool_name": call.tool_name,
+                    "session_id": getattr(call, "session_id", ""),
+                    "origin": getattr(call, "origin", ""),
+                },
+            )
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=False,
@@ -523,7 +536,16 @@ def make_run_bash_tool(
                 failure_type="security_block",
             )
         if scan_verdict.verdict == "warn":
-            _log.warning("Command scanner warning: %s", scan_verdict.description)
+            _log.warning(
+                "Command scanner warning: %s", scan_verdict.description,
+                extra={
+                    "event": "command_scanner_warn",
+                    "pattern_key": scan_verdict.pattern_key,
+                    "tool_name": call.tool_name,
+                    "session_id": getattr(call, "session_id", ""),
+                    "origin": getattr(call, "origin", ""),
+                },
+            )
 
         timeout = call.args.get("timeout", 30)
         cwd = str(workspace) if strict_sandbox else None
