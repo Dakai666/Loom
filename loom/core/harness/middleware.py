@@ -199,6 +199,22 @@ class LegitimacyGuardMiddleware(Middleware):
     require human confirmation.  This is a *soft* guard: the call is not
     blocked, just stripped of its fast-pass.
 
+    **What counts as a probe (Issue #167)**
+
+    A call is treated as a probe when *either* of the following holds:
+
+    1. ``call.capabilities & ToolCapability.READ_PROBE`` — explicit opt-in
+       on the ``ToolDefinition``.  Use this for GUARDED read tools (e.g.
+       ``web_search``) and for MCP tools that need to be recognized as
+       reads but cannot be classified by trust alone.
+    2. ``call.trust_level == TrustLevel.SAFE`` — by definition SAFE means
+       read-only, local, and fully reversible, which is exactly what the
+       probe-first heuristic wants to count.
+
+    The previous implementation hardcoded a tool-name allowlist, which
+    silently broke when tools were renamed and could not recognize MCP
+    or plugin-provided read tools at all.
+
     **Session-trust (Issue #118)**
 
     Once a strict-guard tool executes successfully, it is added to
@@ -211,10 +227,6 @@ class LegitimacyGuardMiddleware(Middleware):
 
     def __init__(self) -> None:
         self.has_probed: bool = False
-        self.probe_tools = frozenset({
-            "list_dir", "read_file", "search_files", "grep_search",
-            "fetch_url_tool", "web_search", "recall_memory", "query_relations"
-        })
         # Only file-writing tools belong here.  exec tools (run_bash) and MCP
         # generative tools are handled by BlastRadiusMiddleware.
         self.strict_guard_tools: set[str] = {
@@ -224,12 +236,19 @@ class LegitimacyGuardMiddleware(Middleware):
         # requirement is waived for these on subsequent turns (Issue #118).
         self._session_trusted: set[str] = set()
 
+    @staticmethod
+    def _is_probe(call: ToolCall) -> bool:
+        """Issue #167: capability flag OR SAFE trust counts as a probe."""
+        if call.capabilities & ToolCapability.READ_PROBE:
+            return True
+        return call.trust_level == TrustLevel.SAFE
+
     def reset_probe(self) -> None:
         """Reset per-turn probe state. Does NOT clear session-level trust."""
         self.has_probed = False
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
-        if call.tool_name in self.probe_tools:
+        if self._is_probe(call):
             self.has_probed = True
 
         # TODO(#xx): Phase 4 - Goal Drift / Re-justification budget.

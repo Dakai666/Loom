@@ -29,6 +29,13 @@ class ToolCapability(Flag):
     NETWORK    = auto()      # makes outbound network calls
     AGENT_SPAN = auto()      # spawns one or more sub-agents
     MUTATES    = auto()      # modifies files, memory, or persistent state
+    READ_PROBE = auto()      # counts as a "probe" for LegitimacyGuard's
+                             # probe-first heuristic — gathers context without
+                             # mutating it. SAFE-trust tools satisfy the
+                             # heuristic implicitly (see LegitimacyGuard);
+                             # set this flag explicitly on GUARDED read tools
+                             # such as web_search, or on MCP tools that would
+                             # otherwise be unrecognized.
 
 
 class TrustLevel(Enum):

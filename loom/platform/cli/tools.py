@@ -2056,7 +2056,10 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
             "Use this to find current information, documentation, or answers that aren't in memory."
         ),
         trust_level=TrustLevel.GUARDED,
-        capabilities=ToolCapability.NETWORK,
+        # Issue #167: GUARDED trust (NETWORK side-effect) but read-only in
+        # intent — explicitly mark it as a probe so LegitimacyGuard counts it
+        # toward the probe-first heuristic. SAFE tools get this for free.
+        capabilities=ToolCapability.NETWORK | ToolCapability.READ_PROBE,
         input_schema={
             "type": "object",
             "properties": {
