@@ -47,6 +47,31 @@ class TrustLevel(Enum):
                 or explicit user confirmation.
     CRITICAL — destructive, cross-system, irreversible → always requires fresh
                 human confirmation and is written to the immutable audit log.
+
+    Display methods
+    ---------------
+    This enum provides two rendering paths.  **Always** choose the right one
+    for the output channel — mixing them will corrupt output in non-Rich
+    environments.
+
+    ``.plain`` / ``.display_plain``
+        Plain uppercase ASCII string (``"SAFE"``, ``"GUARDED"``, ``"CRITICAL"``).
+        **Use everywhere except Rich console output:**
+
+        - Discord messages / embeds
+        - TUI widget labels and inline widgets
+        - JSON / log fields
+        - ``ExecutionNodeView.trust_level``
+        - Any non-Rich ``print()`` call
+
+    ``.label`` / ``.display_rich``
+        Rich markup string (e.g. ``"[green]SAFE[/green]"``).
+        **Use ONLY with** ``console.print()`` in CLI/Terminal contexts.
+        Passing ``.label`` to Discord or a TUI widget will render the raw
+        markup as literal text (e.g. ``"[green]SAFE[/green]"``).
+
+    Issue #148: enforcement is centralised here; platforms only call
+    ``.plain`` or ``.label`` — they do not implement trust-tier logic.
     """
     SAFE = "safe"
     GUARDED = "guarded"
@@ -54,18 +79,46 @@ class TrustLevel(Enum):
 
     @property
     def plain(self) -> str:
-        """Plain uppercase name — use when the caller controls styling."""
+        """Plain uppercase name — use when the caller controls styling.
+
+        Suitable for Discord, TUI widgets, JSON, log files, and any
+        non-Rich output channel.  Equivalent to ``display_plain``.
+        """
         return self.value.upper()
 
     @property
+    def display_plain(self) -> str:
+        """Alias for ``.plain`` — plain uppercase trust tier name.
+
+        Prefer this alias over ``.plain`` when the intent is display
+        (vs. equality checks) to make the rendering path explicit.
+        """
+        return self.plain
+
+    @property
     def label(self) -> str:
-        """Rich markup label — for CLI console output only."""
+        """Rich markup label — for CLI ``console.print()`` **only**.
+
+        Do **not** pass this to Discord, TUI widgets, JSON, or any other
+        channel that does not interpret Rich markup.  Use ``.plain`` instead.
+        Equivalent to ``display_rich``.
+        """
         colours = {
             TrustLevel.SAFE: "[green]SAFE[/green]",
             TrustLevel.GUARDED: "[yellow]GUARDED[/yellow]",
             TrustLevel.CRITICAL: "[red]CRITICAL[/red]",
         }
         return colours[self]
+
+    @property
+    def display_rich(self) -> str:
+        """Alias for ``.label`` — Rich markup trust tier name.
+
+        Prefer this alias over ``.label`` when the intent is display
+        (vs. equality checks) to make the rendering path explicit.
+        Only valid for Rich ``console.print()`` in CLI/Terminal contexts.
+        """
+        return self.label
 
 
 @dataclass
