@@ -42,7 +42,7 @@ class GateDecision:
 
     body: str
     source: str                   # "parent" | "shadow"
-    served_version: int           # parent.version for "parent"; parent.version for "shadow" (candidate is parent_version + 1 once promoted)
+    served_version: int           # skill.version at decision time — always reflects the genome row, not a future projected value
     candidate_id: str | None = None
     shadow_mode: str = "off"
 

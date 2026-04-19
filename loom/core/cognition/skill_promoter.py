@@ -11,6 +11,10 @@ the live SKILL.md served by the session:
 Rollback restores a previously-promoted body from ``skill_version_history``
 and marks the candidate that had been serving as ``rolled_back``.
 
+History writes: only ``promote`` and ``rollback`` append rows to
+``skill_version_history`` (body-mutating operations).  ``deprecate`` and
+``auto_shadow`` only update candidate status and never write history.
+
 Design notes
 ------------
 - The promoter is a **pure state-machine over ProceduralMemory**; it does not
