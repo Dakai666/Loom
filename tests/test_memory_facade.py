@@ -152,11 +152,15 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
     try:
         await session.start()
 
+        # Issue #147 Phase C.2: per-subsystem session attributes were
+        # removed.  The facade is now the only access path — assert
+        # every subsystem is wired and live.
         assert hasattr(session, "_memory")
-        assert session._memory.semantic is session._semantic
-        assert session._memory.procedural is session._procedural
-        assert session._memory.relational is session._relational
-        assert session._memory.episodic is session._episodic
+        assert session._memory is not None
+        assert session._memory.semantic is not None
+        assert session._memory.procedural is not None
+        assert session._memory.relational is not None
+        assert session._memory.episodic is not None
     finally:
         await session.stop()
         registry._tools.clear()

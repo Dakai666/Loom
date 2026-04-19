@@ -688,7 +688,7 @@ notify = true
 
         session = MagicMock()
         session.stream_turn = mock_stream
-        session._semantic = None
+        session._memory = None
 
         from loom.notify.router import BaseNotifier
 
@@ -738,7 +738,7 @@ notify = true
 
         session = MagicMock()
         session.stream_turn = mock_stream
-        session._semantic = None
+        session._memory = None
 
         async def send(n): pass
         router = NotificationRouter()

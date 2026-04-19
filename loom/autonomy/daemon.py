@@ -103,8 +103,12 @@ class AutonomyDaemon:
         self._abort = AbortController()
 
         history = TriggerHistory(db) if db is not None else None
+        # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
+        # may be unset on test doubles or pre-start sessions — fall back
+        # gracefully so autonomy continues to plan without context.
+        _mem = getattr(loom_session, "_memory", None) if loom_session else None
         self._planner = ActionPlanner(
-            semantic_memory=getattr(loom_session, "_semantic", None) if loom_session else None,
+            semantic_memory=_mem.semantic if _mem is not None else None,
         )
         self._evaluator = TriggerEvaluator(on_fire=self._planner.handle, history=history)
         # Intercept planned actions
