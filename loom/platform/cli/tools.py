@@ -1695,11 +1695,19 @@ def make_set_skill_maturity_tool(
 
         tag_raw = call.args.get("tag")
         tag: str | None
-        if tag_raw in (None, "", "none", "null", "clear"):
+        # Normalise before validation so common typos (e.g. "Mature",
+        # "NEEDS_IMPROVEMENT", or Python-style "Needs Improvement") don't
+        # write dirty values into the DB. Anything else falls through to
+        # the validation error below.
+        if tag_raw is None:
             tag = None
         else:
-            tag = str(tag_raw).strip()
-            if tag not in _MATURITY_TAG_VALUES:
+            normalised = str(tag_raw).strip().lower().replace(" ", "_").replace("-", "_")
+            if normalised in ("", "none", "null", "clear"):
+                tag = None
+            elif normalised in _MATURITY_TAG_VALUES:
+                tag = normalised
+            else:
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
                     success=False,

@@ -572,3 +572,34 @@ class TestSetSkillMaturityTool:
         result = await tool.executor(call)
         assert result.success is False
         assert "not found" in result.error
+
+    async def test_normalises_uppercase_tag(self, db_conn):
+        """Case-insensitive: 'Mature' should be accepted, not silently written."""
+        proc, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "Mature",
+        })
+        result = await tool.executor(call)
+        assert result.success is True
+        fetched = await proc.get("mature-skill")
+        assert fetched.maturity_tag == "mature"
+
+    async def test_normalises_spaces_and_hyphens(self, db_conn):
+        """'Needs Improvement' and 'needs-improvement' should both normalise."""
+        proc, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "Needs Improvement",
+        })
+        result = await tool.executor(call)
+        assert result.success is True
+        fetched = await proc.get("mature-skill")
+        assert fetched.maturity_tag == "needs_improvement"
+
+    async def test_typo_still_rejected(self, db_conn):
+        """'matured' (with trailing d) must NOT pass normalisation."""
+        _, tool = await self._make_env(db_conn)
+        call = _make_tool_call("set_skill_maturity", {
+            "skill_name": "mature-skill", "tag": "matured",
+        })
+        result = await tool.executor(call)
+        assert result.success is False

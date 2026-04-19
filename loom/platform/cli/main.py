@@ -1708,13 +1708,21 @@ def skill_set_maturity(
     termination signal.  Use --clear (or tag='clear') to unset."""
     if clear:
         tag = None
-    elif tag in ("clear", "none", "null", ""):
-        tag = None
-    elif tag is not None and tag not in ("mature", "needs_improvement"):
-        console.print(
-            f"[red]Invalid tag {tag!r}.[/red] Use 'mature', 'needs_improvement', or --clear."
-        )
-        return
+    elif tag is None:
+        pass
+    else:
+        # Same normalisation as the agent tool: case-insensitive, space/-
+        # collapsed to underscores.
+        normalised = tag.strip().lower().replace(" ", "_").replace("-", "_")
+        if normalised in ("", "clear", "none", "null"):
+            tag = None
+        elif normalised in ("mature", "needs_improvement"):
+            tag = normalised
+        else:
+            console.print(
+                f"[red]Invalid tag {tag!r}.[/red] Use 'mature', 'needs_improvement', or --clear."
+            )
+            return
     asyncio.run(_skill_set_maturity(skill_name, tag, db))
 
 
@@ -1787,16 +1795,40 @@ async def _skill_review(skill_name: str, db: str) -> None:
 
     # ── Genome ──────────────────────────────────────────────────────────
     if genome is None:
-        console.print("[red]No SkillGenome found for this skill.[/red]")
-    else:
-        maturity = (
-            f"  [bold yellow]{genome.maturity_tag}[/bold yellow]"
-            if genome.maturity_tag else ""
-        )
-        console.print(
-            f"  v{genome.version}  confidence=[cyan]{genome.confidence:.2f}[/cyan]"
-            f"  usage={genome.usage_count}{maturity}"
-        )
+        # Empty state: most of the time the skill name is a typo or the
+        # skill has been generated but never loaded.  Point the operator
+        # at the next action instead of just reporting absence.
+        console.print(f"[red]No SkillGenome found for '{skill_name}'.[/red]")
+        suggestions: list[str] = []
+        if candidates:
+            suggestions.append(
+                f"  • {len(candidates)} candidate(s) exist in the pool — "
+                f"run [cyan]loom skill candidates {skill_name}[/cyan] to inspect."
+            )
+        if eval_entries or insight_entries:
+            suggestions.append(
+                f"  • Grader / Analyzer records exist for this name — "
+                f"the genome may have been deprecated. Check [cyan]loom skill list[/cyan]."
+            )
+        if not suggestions:
+            suggestions.extend([
+                "  • Check the name with [cyan]loom skill list[/cyan] "
+                "(typos are the most common cause).",
+                "  • If this is a new skill, run the meta-skill-engineer workflow: "
+                "[cyan]loom chat[/cyan] → ask Loom to create a skill.",
+                "  • Pending candidates can still be listed via "
+                "[cyan]loom skill candidates[/cyan].",
+            ])
+        console.print("\n".join(suggestions))
+        return
+    maturity = (
+        f"  [bold yellow]{genome.maturity_tag}[/bold yellow]"
+        if genome.maturity_tag else ""
+    )
+    console.print(
+        f"  v{genome.version}  confidence=[cyan]{genome.confidence:.2f}[/cyan]"
+        f"  usage={genome.usage_count}{maturity}"
+    )
 
     # ── Eval history ────────────────────────────────────────────────────
     if eval_entries:
