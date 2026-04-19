@@ -1,13 +1,27 @@
 """
-Command content scanner — Issue #100.
+Command content scanner — Issue #100, repositioned in Issue #165.
 
-Scans shell command strings for injection patterns before execution.
-Complements the SelfTerminationGuard (Issue #98) which only checks
-self-termination patterns.
+Scans shell command strings for injection / exfiltration patterns before
+execution.  Complements ``SelfTerminationGuard`` (Issue #98), which only
+checks self-termination patterns.
 
-Patterns are deliberately focused on high-confidence threats.  Low-
-confidence patterns (e.g. bare ``$()`` in any context) are excluded
-to avoid false positives in normal development workflows.
+**What this is.**  A defense-in-depth *tripwire* and *audit signal*.  The
+patterns target the shapes that prompt-injected LLMs and unsophisticated
+attackers tend to emit verbatim — `curl ... | sh`, `>/dev/tcp/`,
+`base64 -d | sh`, ``$VAR`` env-var exfiltration, etc.  When one fires,
+the call is blocked or warned and a structured log line is emitted for
+later auditing.
+
+**What this is not.**  A security boundary.  Regex sanitization of shell
+input is fundamentally bypassable via obfuscation
+(`w""g""e""t`, base64-staged scripts, here-docs writing intermediate
+files, etc.).  Do not rely on it to contain a determined adversary —
+that job belongs to OS / container isolation (Issue #29).
+
+**Layering.**  Scanner = tripwire / audit signal.  ``TrustLevel`` /
+``BlastRadiusMiddleware`` = policy.  Sandbox (Issue #29) = the actual
+wall.  Each layer is meant to fail open into the next, not to stand
+alone.
 
 Usage::
 

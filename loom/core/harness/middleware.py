@@ -272,6 +272,16 @@ class LegitimacyGuardMiddleware(Middleware):
         if not is_strict and not self.has_probed:
             if call.capabilities & ToolCapability.EXEC:
                 call.metadata["trajectory_anomaly"] = True
+                # Issue #168: surface the soft-guard trip so operators (and log
+                # readers) can see why an EXEC call lost its exec_auto fast-pass.
+                # Without this, autonomous runs that get blocked by the soft
+                # guard look indistinguishable from a generic permission denial.
+                _log.warning(
+                    "Trajectory anomaly: %s called with EXEC capability before "
+                    "any probe this turn (origin=%s); exec_auto fast-pass will "
+                    "be revoked downstream.",
+                    call.tool_name, call.origin,
+                )
 
         result = await next(call)
 
@@ -360,14 +370,29 @@ class BlastRadiusMiddleware(Middleware):
         )
         self._notify_lifecycle(call, False, f"unattended-deny ({call.origin}, {verdict})")
         call.metadata["user_decision"] = False
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=False,
-            error=(
+
+        # Issue #168: when the trajectory_anomaly soft-guard tripped, the agent
+        # called an EXEC tool without probing first this turn. Tell it that
+        # explicitly so it can self-correct (probe, then retry) instead of
+        # looping on a generic "no permission" message.
+        if call.metadata.get("trajectory_anomaly"):
+            error = (
+                f"Permission denied: {call.tool_name} requires a probe tool "
+                f"(read_file, list_dir, search_files, ...) to run earlier in "
+                f"this turn before the auto-approval path will fire. Origin "
+                f"'{call.origin}' cannot prompt a human, so the call was failed "
+                f"fast. Probe the relevant context first, then re-issue."
+            )
+        else:
+            error = (
                 f"Permission denied: {call.tool_name} requires scope authorization "
                 f"not covered by existing grants. Origin '{call.origin}' cannot "
                 f"request new permissions interactively."
-            ),
+            )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=False,
+            error=error,
             failure_type="permission_denied",
         )
 

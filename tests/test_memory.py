@@ -75,6 +75,19 @@ class TestSQLiteStore:
         assert expected.issubset(tables)
 
     @pytest.mark.asyncio
+    async def test_connect_sets_busy_timeout(self, store):
+        """Issue #166: connections opened via connect() must wait on a
+        write lock instead of failing immediately with `database is locked`.
+        WAL mode (set in SCHEMA) lets readers and writers coexist, but writes
+        still serialize — without busy_timeout, concurrent writers (Discord
+        daemon + CLI session + Dreaming jobs) hit OperationalError instantly.
+        """
+        async with store.connect() as db:
+            cur = await db.execute("PRAGMA busy_timeout")
+            (timeout_ms,) = await cur.fetchone()
+        assert timeout_ms >= 5000
+
+    @pytest.mark.asyncio
     async def test_initialize_migrates_pre_compressed_at_schema(self, tmp_db):
         """Regression: initialize() must not explode on databases that
         predate the compressed_at column. The partial index that references
