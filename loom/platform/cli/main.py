@@ -1715,6 +1715,90 @@ async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | 
 
 
 # ---------------------------------------------------------------------------
+# loom review command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("review")
+@click.argument("skill_name")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_review(skill_name: str, db: str) -> None:
+    """One-stop report: genome status, candidate pool, eval history."""
+    asyncio.run(_skill_review(skill_name, db))
+
+
+async def _skill_review(skill_name: str, db: str) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+    from loom.core.memory.semantic import SemanticMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        sem = SemanticMemory(conn)
+
+        genome = await proc.get(skill_name)
+        candidates = await proc.list_candidates(parent_skill_name=skill_name, limit=20)
+        history_records = await proc.list_history(skill_name, limit=5)
+        eval_entries = await sem.list_by_prefix(f"skill:{skill_name}:eval:", limit=20)
+        insight_entries = await sem.list_by_prefix(f"skill:{skill_name}:insight:", limit=5)
+
+    console.print(Rule(f"[bold cyan]{skill_name}[/bold cyan] — skill review"))
+
+    # ── Genome ──────────────────────────────────────────────────────────
+    if genome is None:
+        console.print("[red]No SkillGenome found for this skill.[/red]")
+    else:
+        maturity = (
+            f"  [bold yellow]{genome.maturity_tag}[/bold yellow]"
+            if genome.maturity_tag else ""
+        )
+        console.print(
+            f"  v{genome.version}  confidence=[cyan]{genome.confidence:.2f}[/cyan]"
+            f"  usage={genome.usage_count}{maturity}"
+        )
+
+    # ── Eval history ────────────────────────────────────────────────────
+    if eval_entries:
+        console.print(Rule("[dim]Grader eval history[/dim]", style="dim"))
+        for e in sorted(eval_entries, key=lambda x: x.key):
+            ts = e.created_at.strftime("%Y-%m-%d") if e.created_at else "?"
+            console.print(f"  [dim]{ts}[/dim]  [bold]{e.key.split(':')[-1]}[/bold]  {e.value[:120]}")
+    else:
+        console.print("[dim]  No Grader eval records yet.[/dim]")
+
+    # ── Insights ────────────────────────────────────────────────────────
+    if insight_entries:
+        console.print(Rule("[dim]Analyzer insights[/dim]", style="dim"))
+        for e in insight_entries:
+            console.print(f"  [dim]{e.key}[/dim]  {e.value[:120]}")
+
+    # ── Candidate pool ──────────────────────────────────────────────────
+    if candidates:
+        console.print(Rule("[dim]Candidate pool[/dim]", style="dim"))
+        status_color = {
+            "generated": "white", "shadow": "cyan", "promoted": "green",
+            "deprecated": "dim", "rolled_back": "yellow",
+        }
+        for c in candidates:
+            ts = c.created_at.strftime("%Y-%m-%d %H:%M")
+            col = status_color.get(c.status, "white")
+            ft = " [bold yellow]⚡fast-track[/bold yellow]" if c.fast_track else ""
+            console.print(
+                f"  [dim]{ts}[/dim]  [{col}]{c.status}[/{col}]"
+                f"  {c.id[:8]}  {c.mutation_strategy}{ft}"
+            )
+    else:
+        console.print("[dim]  No candidates in pool.[/dim]")
+
+    # ── Version history ─────────────────────────────────────────────────
+    if history_records:
+        console.print(Rule("[dim]Recent version history[/dim]", style="dim"))
+        for r in history_records:
+            ts = r.archived_at.strftime("%Y-%m-%d %H:%M")
+            console.print(f"  [dim]{ts}[/dim]  v{r.version}  [{r.reason}]")
+
+
 # loom import command
 # ---------------------------------------------------------------------------
 

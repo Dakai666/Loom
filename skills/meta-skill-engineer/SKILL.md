@@ -1,6 +1,6 @@
 ---
 name: meta-skill-engineer
-description: "元技能工程師：系統化建立、評估、迭代改進 Loom 技能的技能。當使用者要求「建立一個新技能」、「改善現有技能」、「評估技能表現」、「跑技能對比測試」、「系統化迭代技能」時使用。本技能為 Skill Genome 提供評估閉環——Grader 的 pass/fail 分數直接寫入 SkillGenome.confidence，形成測試→記憶→演化的完整循環。"
+description: "元技能工程師：系統化建立、評估、迭代改進 Loom 技能的技能。當使用者要求「建立一個新技能」、「改善現有技能」、「評估技能表現」、「跑技能對比測試」、「系統化迭代技能」時使用。本技能為 Skill Genome 提供評估閉環——Grader 產生 BatchDiagnostic，由 SkillMutator.from_batch_diagnostic() 轉化為候選版本，進入 shadow → promote 生命週期，形成測試→記憶→演化的完整循環。"
 precondition_checks:
   - ref: checks.require_skills_dir_target
     applies_to: [write_file]
@@ -270,9 +270,9 @@ load_skill("my-skill")
 
 ## 階段 4：Grader 評估
 
-**目標：客觀測量技能表現**
+**目標：客觀測量技能表現，產出 `BatchDiagnostic`**
 
-使用 Grader Agent 對每個測試案例進行評估。
+使用 Grader Agent 對每個測試案例進行評估，每個測試案例產出一個 `TaskDiagnostic`，全部完成後匯聚成一個 `BatchDiagnostic`。
 
 ### Grader 評估流程
 
@@ -283,6 +283,7 @@ load_skill("my-skill")
    - **FAIL**：無證據，或證據與預期矛盾
    - **WEAK PASS**：正確的檔案名但內容空/錯（假精確）
 4. **同時 critique 測試本身**：指出哪個 expectation 太弱或哪個重要結果沒被檢查
+5. **每個測試案例 → 一個 `TaskDiagnostic`**，`mutation_suggestions` 填入具體改進方向
 
 ### Grader 輸出格式
 
@@ -308,11 +309,12 @@ load_skill("my-skill")
 | Weak Passes | {N} |
 | Expectation Quality Issues | {M} |
 
-## SkillGenome 寫入
+## 結構化輸出（BatchDiagnostic）
 
-- `memorize("skill:{name}:eval:r{N}", "pass_rate={Z}%, {X}/{Y} passed. [關鍵觀察]")`
-- `relate("skill:{name}", "evaluated_at", "r{N}")`
-- `relate("skill:{name}", "pass_rate", "{Z}")`
+Grader 完成後產出：
+- **per-test `TaskDiagnostic`**：每個測試案例一個，`mutation_suggestions` 填具體 SKILL.md 改動
+- **`BatchDiagnostic`**：包含所有 `TaskDiagnostic` + 整體 `pass_rate`
+- **SemanticMemory 寫入**：`memorize("skill:{name}:eval:r{N}", "pass_rate={Z}%, {X}/{Y} passed. [關鍵觀察]")`
 ```
 
 ### Grader 呼叫方式
@@ -373,9 +375,9 @@ context: {skill_name, test_case, transcript_path, output_dir}
 ## 理由
 [A/B 取勝的具體原因]
 
-## SkillGenome 寫入
-- 如果 B 勝出：`memorize("skill:{name}:compare:v{N}vsv{M}", "v{M} 勝出。理由：{摘要}")`
-- `relate("skill:{name}", "compared_versions", "v{N}v{M}")`
+## 結構化輸出
+- Blind A/B 結果寫入 `SkillCandidate.pareto_scores`（key = task_type，value = 分數差值）
+- `memorize("skill:{name}:compare:v{N}vsv{M}", "v{M} 勝出。理由：{摘要}")`
 ```
 
 ### Comparator 呼叫方式
@@ -425,40 +427,55 @@ context: {output_a_path, output_b_path, eval_prompt, expectations}
 - **問題**：{描述}
 - **修復方向**：{具體指示}
 
-## SkillGenome 寫入
+## 結構化輸出
+- 具體改進建議直接填入每個 `TaskDiagnostic.mutation_suggestions`（這正是 Analyzer 存在的意義）
 - `memorize("skill:{name}:insight:r{N}", "{Insight 內容}")`
-- `relate("skill:{name}", "learned_from", "v{M}→v{N}")`
 ```
 
 ---
 
-## 階段 7：SkillGenome 寫入 + 重寫
+## 階段 7：SkillMutator 候選生成 + 生命週期
 
-**目標：把評估結果轉化為演化的動力**
+**目標：把 BatchDiagnostic 轉化為演化動力，走候選池生命週期**
 
-### SkillGenome 更新規則
+### 候選生成
 
-| 情境 | 更新動作 |
-|------|---------|
-| Grader pass rate ≥ 80% | confidence += 0.05（上限 1.0） |
-| Grader pass rate < 50% | confidence -= 0.1 |
-| Comparator 新版勝出 | version += 1，confidence 不變 |
-| 連續 3 次 pass rate ≥ 90% | 標記為 `mature` |
-| pass rate < 30% 且 n ≥ 5 | 標記為 `needs_improvement` |
+呼叫 `SkillMutator.from_batch_diagnostic(parent, batch)`：
+- 以 Grader 產出的 `BatchDiagnostic`（含所有 `TaskDiagnostic` + `pass_rate`）為輸入
+- LLM 根據 `aggregated_suggestions` 重寫 SKILL.md，產出 `SkillCandidate`
+- **不直接修改 SKILL.md**——候選進入 `skill_candidates` 表，等候生命週期決策
 
-### 重寫觸發條件
+### Fast-track 規則
 
-當以下任一條件成立時，觸發 SKILL.md 重寫：
-- pass rate < 70%
-- Analyzer 發現系統性缺陷
-- 使用者明確要求改善
+| 情境 | 候選標記 | 下一步 |
+|------|---------|--------|
+| `batch.improvement ≥ 20%`（新版 vs 舊版 pass rate） | `fast_track=True` | 直接 `loom skill promote`，跳過 shadow 階段 |
+| 其他情況 | `fast_track=False` | 進入 shadow 模式，積累 N-wins 後 promote |
 
-### 重寫流程
+Fast-track 的前提是必須有 `previous_pass_rate`（有舊版比較基線）。
 
-1. 根據 Analyzer 的具體改進建議修改 SKILL.md
-2. 保持 description / name / 核心原則不變
-3. 只修改「工作流程」和「紀律提醒」部分
-4. 重跑測試集，驗證改善效果
+### Confidence 統一由 EMA 驅動
+
+Stage 7 **不再**手動調整 confidence。批次 diagnostic 的 `avg_quality_score` 會在後續 turns 的 `TaskReflector` EMA 路徑中自然累積。
+
+### Maturity Tag
+
+| 條件 | 動作 |
+|------|------|
+| 連續 3 輪 pass rate ≥ 90% | `loom skill set-maturity {name} mature` |
+| pass rate < 30% 且輪次 ≥ 5 | `loom skill set-maturity {name} needs_improvement` |
+| 清除標記 | `loom skill set-maturity {name} --clear` |
+
+Maturity tag 儲存在 `SkillGenome.maturity_tag`，可在 `loom review` 中查看。
+
+### 重跑驗證
+
+候選 promote 後，重跑測試集確認改善效果。若新版 pass rate 低於舊版，執行 rollback：
+
+```bash
+loom skill rollback {name}
+loom review {name}   # 確認版本已回退
+```
 
 ---
 
@@ -502,18 +519,16 @@ Loom（使用本技能）：
 
 ## loom review 指令
 
-使用 `loom_review.py` 或直接查詢 semantic memory：
-
 ```bash
 loom review {skill-name}
 ```
 
-輸出：
-- 所有測試輪次的 pass rate
-- 最近的 Grader 報告摘要
-- SkillGenome 當前 confidence 和 version
-- 已知缺口（has_known_gap）
-- 與其他技能的應用次數對比
+一站式查看技能全貌：
+- **SkillGenome 狀態**：version、confidence、maturity_tag、usage_count
+- **Grader eval 歷史**：所有 `skill:{name}:eval:r*` 記錄（pass rate 時間線）
+- **Analyzer insights**：`skill:{name}:insight:*` 記錄
+- **候選池**：所有候選的狀態、fast_track 標記、mutation_strategy
+- **版本歷史**：最近的 promote / rollback 記錄
 
 ---
 
@@ -532,6 +547,6 @@ loom review {skill-name}
 - **不跳階段**：「先給我用再說」是不可接受的——沒有測試就沒有進化
 - **Comparator 永遠不能知道誰是 A/B** — 揭盲之前的偏見是最難發現的
 - **Grader 要批判測試本身** — 通過了弱 assertion 比失敗更危險
-- **每次 Grader 後必須寫 SkillGenome** — 否則數據就散了，閉環就斷了
+- **每次 Grader 後必須產出 BatchDiagnostic 並寫 SemanticMemory** — 否則數據就散了，閉環就斷了
 - **用 `run_bash` 的技能必須有 checks** — SKILL.md 的文字紀律是給 LLM 看的，precondition_checks 是給框架執行的；兩者缺一不可
 - **checks 不可有副作用** — 純判斷、純回傳 bool，不寫檔、不改狀態、不發請求
