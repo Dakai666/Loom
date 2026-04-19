@@ -253,6 +253,11 @@ class SQLiteStore:
                 # Issue #142 soft-delete: mark compressed entries instead of deleting
                 # them so compression losses can be audited and recovered.
                 "ALTER TABLE episodic_entries ADD COLUMN compressed_at TEXT",
+                # Issue #120 PR 4: maturity tag on skill genomes (mature / needs_improvement)
+                "ALTER TABLE skill_genomes ADD COLUMN maturity_tag TEXT",
+                # Issue #120 PR 4: fast-track flag bypasses shadow phase when Grader
+                # proves ≥20% pass-rate improvement over the previous version.
+                "ALTER TABLE skill_candidates ADD COLUMN fast_track INTEGER NOT NULL DEFAULT 0",
             ]:
                 try:
                     await db.execute(_migration)

@@ -114,6 +114,66 @@ class TaskDiagnostic:
         )
 
 
+@dataclass
+class BatchDiagnostic:
+    """Aggregate diagnostic produced by meta-skill-engineer's Grader phase.
+
+    Wraps a list of per-test ``TaskDiagnostic`` instances together with the
+    pass rate measured by the Grader.  ``previous_pass_rate`` enables
+    fast-track detection: if ``improvement >= 0.20``, ``SkillMutator``
+    will flag the resulting candidate for direct promotion without the
+    normal shadow N-wins phase.
+    """
+
+    skill_name: str
+    diagnostics: list[TaskDiagnostic]
+    pass_rate: float                     # fraction 0.0–1.0
+    previous_pass_rate: float | None = None
+
+    @property
+    def improvement(self) -> float | None:
+        if self.previous_pass_rate is None:
+            return None
+        return self.pass_rate - self.previous_pass_rate
+
+    @property
+    def avg_quality_score(self) -> float:
+        if not self.diagnostics:
+            return 0.0
+        return sum(d.quality_score for d in self.diagnostics) / len(self.diagnostics)
+
+    @property
+    def aggregated_suggestions(self) -> list[str]:
+        """Deduplicated mutation suggestions across all diagnostics."""
+        return _dedup_flat(d.mutation_suggestions for d in self.diagnostics)
+
+    @property
+    def aggregated_violations(self) -> list[str]:
+        """Deduplicated ``instructions_violated`` across all diagnostics.
+
+        Used by ``SkillMutator.from_batch_diagnostic`` to give the rewrite
+        prompt the same contextual fields that ``propose_candidate`` passes
+        per-turn, so batch rewrites don't lose the "why" behind suggestions.
+        """
+        return _dedup_flat(d.instructions_violated for d in self.diagnostics)
+
+    @property
+    def aggregated_failures(self) -> list[str]:
+        """Deduplicated ``failure_patterns`` across all diagnostics."""
+        return _dedup_flat(d.failure_patterns for d in self.diagnostics)
+
+    def one_line_summary(self) -> str:
+        n = len(self.diagnostics)
+        pct = f"{self.pass_rate * 100:.0f}%"
+        imp = ""
+        if self.improvement is not None and self.improvement > 0:
+            imp = f" (+{self.improvement * 100:.0f}%)"
+        return (
+            f"{self.skill_name} · {n} tests · pass_rate={pct}{imp}"
+            f" · avg_q={self.avg_quality_score:.1f}/5"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
@@ -631,6 +691,18 @@ def _try_load(text: str) -> Any:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _dedup_flat(lists: "Any") -> list[str]:
+    """Flatten an iterable of string lists, preserving first-seen order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for lst in lists:
+        for item in lst:
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+    return result
 
 
 def _on_reflect_done(task: asyncio.Task) -> None:

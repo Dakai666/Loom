@@ -1696,6 +1696,54 @@ async def _skill_history(skill_name: str, limit: int, db: str) -> None:
         )
 
 
+@skill.command("set-maturity")
+@click.argument("skill_name")
+@click.argument("tag", required=False, default=None)
+@click.option("--clear", is_flag=True, help="Clear the maturity_tag (equivalent to tag='clear').")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_set_maturity(
+    skill_name: str, tag: str | None, clear: bool, db: str,
+) -> None:
+    """Label a skill 'mature' / 'needs_improvement' — the meta-skill-engineer
+    termination signal.  Use --clear (or tag='clear') to unset."""
+    if clear:
+        tag = None
+    elif tag is None:
+        pass
+    else:
+        # Same normalisation as the agent tool: case-insensitive, space/-
+        # collapsed to underscores.
+        normalised = tag.strip().lower().replace(" ", "_").replace("-", "_")
+        if normalised in ("", "clear", "none", "null"):
+            tag = None
+        elif normalised in ("mature", "needs_improvement"):
+            tag = normalised
+        else:
+            console.print(
+                f"[red]Invalid tag {tag!r}.[/red] Use 'mature', 'needs_improvement', or --clear."
+            )
+            return
+    asyncio.run(_skill_set_maturity(skill_name, tag, db))
+
+
+async def _skill_set_maturity(skill_name: str, tag: str | None, db: str) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        ok = await proc.update_maturity_tag(skill_name, tag)
+    if not ok:
+        console.print(f"[red]Skill {skill_name!r} not found.[/red]")
+        return
+    display = tag if tag is not None else "(cleared)"
+    console.print(
+        f"[green]Updated[/green] [bold cyan]{skill_name}[/bold cyan] "
+        f"maturity_tag → {display}"
+    )
+
+
 async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | None:
     """Accept either a full uuid or a short prefix (≥4 chars).
 
@@ -1715,6 +1763,114 @@ async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | 
 
 
 # ---------------------------------------------------------------------------
+# loom review command
+# ---------------------------------------------------------------------------
+
+
+@cli.command("review")
+@click.argument("skill_name")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def skill_review(skill_name: str, db: str) -> None:
+    """One-stop report: genome status, candidate pool, eval history."""
+    asyncio.run(_skill_review(skill_name, db))
+
+
+async def _skill_review(skill_name: str, db: str) -> None:
+    from loom.core.memory.procedural import ProceduralMemory
+    from loom.core.memory.semantic import SemanticMemory
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        proc = ProceduralMemory(conn)
+        sem = SemanticMemory(conn)
+
+        genome = await proc.get(skill_name)
+        candidates = await proc.list_candidates(parent_skill_name=skill_name, limit=20)
+        history_records = await proc.list_history(skill_name, limit=5)
+        eval_entries = await sem.list_by_prefix(f"skill:{skill_name}:eval:", limit=20)
+        insight_entries = await sem.list_by_prefix(f"skill:{skill_name}:insight:", limit=5)
+
+    console.print(Rule(f"[bold cyan]{skill_name}[/bold cyan] — skill review"))
+
+    # ── Genome ──────────────────────────────────────────────────────────
+    if genome is None:
+        # Empty state: most of the time the skill name is a typo or the
+        # skill has been generated but never loaded.  Point the operator
+        # at the next action instead of just reporting absence.
+        console.print(f"[red]No SkillGenome found for '{skill_name}'.[/red]")
+        suggestions: list[str] = []
+        if candidates:
+            suggestions.append(
+                f"  • {len(candidates)} candidate(s) exist in the pool — "
+                f"run [cyan]loom skill candidates {skill_name}[/cyan] to inspect."
+            )
+        if eval_entries or insight_entries:
+            suggestions.append(
+                f"  • Grader / Analyzer records exist for this name — "
+                f"the genome may have been deprecated. Check [cyan]loom skill list[/cyan]."
+            )
+        if not suggestions:
+            suggestions.extend([
+                "  • Check the name with [cyan]loom skill list[/cyan] "
+                "(typos are the most common cause).",
+                "  • If this is a new skill, run the meta-skill-engineer workflow: "
+                "[cyan]loom chat[/cyan] → ask Loom to create a skill.",
+                "  • Pending candidates can still be listed via "
+                "[cyan]loom skill candidates[/cyan].",
+            ])
+        console.print("\n".join(suggestions))
+        return
+    maturity = (
+        f"  [bold yellow]{genome.maturity_tag}[/bold yellow]"
+        if genome.maturity_tag else ""
+    )
+    console.print(
+        f"  v{genome.version}  confidence=[cyan]{genome.confidence:.2f}[/cyan]"
+        f"  usage={genome.usage_count}{maturity}"
+    )
+
+    # ── Eval history ────────────────────────────────────────────────────
+    if eval_entries:
+        console.print(Rule("[dim]Grader eval history[/dim]", style="dim"))
+        for e in sorted(eval_entries, key=lambda x: x.key):
+            ts = e.created_at.strftime("%Y-%m-%d") if e.created_at else "?"
+            console.print(f"  [dim]{ts}[/dim]  [bold]{e.key.split(':')[-1]}[/bold]  {e.value[:120]}")
+    else:
+        console.print("[dim]  No Grader eval records yet.[/dim]")
+
+    # ── Insights ────────────────────────────────────────────────────────
+    if insight_entries:
+        console.print(Rule("[dim]Analyzer insights[/dim]", style="dim"))
+        for e in insight_entries:
+            console.print(f"  [dim]{e.key}[/dim]  {e.value[:120]}")
+
+    # ── Candidate pool ──────────────────────────────────────────────────
+    if candidates:
+        console.print(Rule("[dim]Candidate pool[/dim]", style="dim"))
+        status_color = {
+            "generated": "white", "shadow": "cyan", "promoted": "green",
+            "deprecated": "dim", "rolled_back": "yellow",
+        }
+        for c in candidates:
+            ts = c.created_at.strftime("%Y-%m-%d %H:%M")
+            col = status_color.get(c.status, "white")
+            ft = " [bold yellow]⚡fast-track[/bold yellow]" if c.fast_track else ""
+            console.print(
+                f"  [dim]{ts}[/dim]  [{col}]{c.status}[/{col}]"
+                f"  {c.id[:8]}  {c.mutation_strategy}{ft}"
+            )
+    else:
+        console.print("[dim]  No candidates in pool.[/dim]")
+
+    # ── Version history ─────────────────────────────────────────────────
+    if history_records:
+        console.print(Rule("[dim]Recent version history[/dim]", style="dim"))
+        for r in history_records:
+            ts = r.archived_at.strftime("%Y-%m-%d %H:%M")
+            console.print(f"  [dim]{ts}[/dim]  v{r.version}  [{r.reason}]")
+
+
 # loom import command
 # ---------------------------------------------------------------------------
 

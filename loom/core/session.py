@@ -564,6 +564,12 @@ class LoomSession:
         self._mutation_max_body_chars: int = int(
             _mut_cfg.get("max_body_chars", 6000)
         )
+        # PR 4: Grader-driven fast-track threshold for batch candidates.
+        # ``SkillMutator.from_batch_diagnostic`` sets candidate.fast_track=True
+        # when BatchDiagnostic.improvement >= this value.
+        self._mutation_fast_track_threshold: float = max(
+            0.0, min(1.0, float(_mut_cfg.get("fast_track_threshold", 0.20)))
+        )
         # PR 3: lifecycle routing.  These keys live under the same
         # ``[mutation]`` section — mutation produces candidates, lifecycle
         # decides what happens to them.
@@ -757,6 +763,8 @@ class LoomSession:
             make_recall_tool,
             make_skill_promote_tool,
             make_skill_rollback_tool,
+            make_generate_skill_candidate_from_batch_tool,
+            make_set_skill_maturity_tool,
             make_relate_tool,
             make_spawn_agent_tool,
             make_web_search_tool,
@@ -789,6 +797,7 @@ class LoomSession:
             quality_ceiling=self._mutation_quality_ceiling,
             min_suggestions=self._mutation_min_suggestions,
             max_body_chars=self._mutation_max_body_chars,
+            fast_track_threshold=self._mutation_fast_track_threshold,
         )
 
         # Issue #120 PR 3: lifecycle.  The promoter owns the state-machine
@@ -872,6 +881,14 @@ class LoomSession:
         # Issue #120 PR 3: promote / rollback lifecycle tools.
         self.registry.register(make_skill_promote_tool(self._skill_promoter))
         self.registry.register(make_skill_rollback_tool(self._skill_promoter))
+
+        # Issue #120 PR 4: meta-skill-engineer surface — agent-callable
+        # equivalents of the Grader → candidate-pool → maturity workflow so
+        # the skill can drive the whole cycle without dropping to Python.
+        self.registry.register(make_generate_skill_candidate_from_batch_tool(
+            self._skill_mutator, self._procedural, session_id=self.session_id,
+        ))
+        self.registry.register(make_set_skill_maturity_tool(self._procedural))
 
         # Register web tools (Phase 5D)
         self.registry.register(make_fetch_url_tool(

@@ -34,7 +34,7 @@ from loom.core.memory.procedural import SkillCandidate
 
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
-    from loom.core.cognition.task_reflector import TaskDiagnostic
+    from loom.core.cognition.task_reflector import BatchDiagnostic, TaskDiagnostic
     from loom.core.memory.procedural import SkillGenome
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,7 @@ class SkillMutator:
         quality_ceiling: float = 3.5,
         min_suggestions: int = 1,
         max_body_chars: int = 6000,
+        fast_track_threshold: float = 0.20,
     ) -> None:
         self._router = router
         self._model = model
@@ -146,6 +147,7 @@ class SkillMutator:
         self._quality_ceiling = quality_ceiling
         self._min_suggestions = min_suggestions
         self._max_body_chars = max_body_chars
+        self._fast_track_threshold = fast_track_threshold
 
     # ------------------------------------------------------------------
     # Public
@@ -223,6 +225,93 @@ class SkillMutator:
             notes=(
                 f"from diagnostic quality={diagnostic.quality_score:.1f} "
                 f"task_type={diagnostic.task_type}"
+            ),
+        )
+        return MutationProposal(
+            candidate=candidate,
+            prompt_preview=prompt[:200],
+            raw_response_chars=len(raw),
+        )
+
+    async def from_batch_diagnostic(
+        self,
+        parent: "SkillGenome",
+        batch: "BatchDiagnostic",
+        session_id: str | None = None,
+    ) -> "MutationProposal | None":
+        """Generate a candidate from a Grader-produced ``BatchDiagnostic``.
+
+        Differs from ``propose_candidate`` in two ways:
+
+        1. **No quality_ceiling gate** — batch path is explicitly triggered by
+           meta-skill-engineer, not background reflection.
+        2. **fast_track** — if ``batch.improvement >= 0.20`` the candidate is
+           flagged so the caller can skip shadow N-wins and promote directly,
+           because Grader already proved the improvement empirically.
+        """
+        if not self._enabled:
+            logger.debug("from_batch_diagnostic: mutation disabled in config")
+            return None
+
+        suggestions = batch.aggregated_suggestions
+        if not suggestions:
+            logger.debug(
+                "from_batch_diagnostic: no mutation_suggestions in batch (skill=%s)",
+                parent.name,
+            )
+            return None
+
+        if not parent.body.strip():
+            logger.debug("from_batch_diagnostic: parent %s has empty body", parent.name)
+            return None
+
+        prompt = _MUTATION_PROMPT.format(
+            skill_name=parent.name,
+            skill_body=parent.body[: self._max_body_chars],
+            suggestions=_bullet(suggestions, limit=10),
+            violated=_bullet(batch.aggregated_violations, limit=5),
+            failures=_bullet(batch.aggregated_failures, limit=5),
+        )
+
+        raw = ""
+        try:
+            response = await self._router.chat(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2000,
+            )
+            raw = (response.text or "").strip()
+        except Exception as exc:
+            logger.debug("from_batch_diagnostic LLM call failed: %s", exc)
+            return None
+
+        new_body = _strip_fencing(raw)
+        if not _looks_like_skill_md(new_body, parent.body):
+            logger.debug(
+                "from_batch_diagnostic rewrite rejected: implausible body "
+                "(skill=%s len=%d)", parent.name, len(new_body),
+            )
+            return None
+
+        fast_track = (
+            batch.improvement is not None
+            and batch.improvement >= self._fast_track_threshold
+        )
+        diagnostic_keys = [
+            _diagnostic_key(d) for d in batch.diagnostics if _diagnostic_key(d)
+        ]
+        candidate = SkillCandidate(
+            parent_skill_name=parent.name,
+            parent_version=parent.version,
+            candidate_body=new_body,
+            mutation_strategy="batch_meta_skill_engineer",
+            diagnostic_keys=diagnostic_keys,
+            origin_session_id=session_id,
+            pareto_scores={"pass_rate": batch.pass_rate},
+            fast_track=fast_track,
+            notes=(
+                f"batch pass_rate={batch.pass_rate:.0%}"
+                + (f" improvement={batch.improvement:+.0%}" if batch.improvement is not None else "")
             ),
         )
         return MutationProposal(

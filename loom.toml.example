@@ -165,6 +165,12 @@ shadow_fraction  = 0.5
 # warrant an A/B trial).  Range 0.0–1.0.
 auto_shadow_confidence_ceiling = 0.7
 
+# PR 4 — Grader-driven fast-track.  When ``SkillMutator.from_batch_diagnostic``
+# (used by the meta-skill-engineer skill) sees ``improvement >= this threshold``,
+# the resulting candidate is flagged ``fast_track=True`` so it can be promoted
+# directly without the shadow N-wins phase.  Range 0.0–1.0.
+fast_track_threshold = 0.20
+
 # ─────────────────────────────────────────────
 # Telemetry (Issue #142) — Agent self-observability
 # ─────────────────────────────────────────────

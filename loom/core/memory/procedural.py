@@ -60,6 +60,7 @@ class SkillGenome:
     Each dict: {"ref": "checks.fn_name", "applies_to": ["run_bash"], "description": "..."}
     Parsed from SKILL.md frontmatter, resolved to callables at load_skill() time.
     """
+    maturity_tag: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -164,6 +165,7 @@ class SkillCandidate:
     status: str = "generated"
     pareto_scores: dict[str, float] = field(default_factory=dict)
     notes: str | None = None
+    fast_track: bool = False
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -189,18 +191,19 @@ class ProceduralMemory:
             INSERT INTO skill_genomes
                 (id, name, version, confidence, usage_count, success_rate,
                  parent_skill, deprecation_threshold, tags, body,
-                 precondition_check_refs, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 precondition_check_refs, maturity_tag, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-                version                = excluded.version,
-                confidence             = excluded.confidence,
-                usage_count            = excluded.usage_count,
-                success_rate           = excluded.success_rate,
-                deprecation_threshold  = excluded.deprecation_threshold,
-                tags                   = excluded.tags,
-                body                   = excluded.body,
+                version                 = excluded.version,
+                confidence              = excluded.confidence,
+                usage_count             = excluded.usage_count,
+                success_rate            = excluded.success_rate,
+                deprecation_threshold   = excluded.deprecation_threshold,
+                tags                    = excluded.tags,
+                body                    = excluded.body,
                 precondition_check_refs = excluded.precondition_check_refs,
-                updated_at             = excluded.updated_at
+                maturity_tag            = excluded.maturity_tag,
+                updated_at              = excluded.updated_at
             """,
             (
                 skill.id, skill.name, skill.version, skill.confidence,
@@ -209,6 +212,7 @@ class ProceduralMemory:
                 json.dumps(skill.tags, ensure_ascii=False),
                 skill.body,
                 json.dumps(skill.precondition_check_refs, ensure_ascii=False),
+                skill.maturity_tag,
                 skill.created_at.isoformat(), now,
             ),
         )
@@ -218,7 +222,7 @@ class ProceduralMemory:
         cursor = await self._db.execute(
             "SELECT id, name, version, confidence, usage_count, success_rate, "
             "parent_skill, deprecation_threshold, tags, body, "
-            "precondition_check_refs, created_at, updated_at "
+            "precondition_check_refs, maturity_tag, created_at, updated_at "
             "FROM skill_genomes WHERE name = ?",
             (name,),
         )
@@ -230,8 +234,9 @@ class ProceduralMemory:
             usage_count=row[4], success_rate=row[5], parent_skill=row[6],
             deprecation_threshold=row[7], tags=json.loads(row[8]),
             body=row[9], precondition_check_refs=json.loads(row[10]),
-            created_at=datetime.fromisoformat(row[11]),
-            updated_at=datetime.fromisoformat(row[12]),
+            maturity_tag=row[11],
+            created_at=datetime.fromisoformat(row[12]),
+            updated_at=datetime.fromisoformat(row[13]),
         )
 
     async def list_active(self) -> list[SkillGenome]:
@@ -239,7 +244,7 @@ class ProceduralMemory:
         cursor = await self._db.execute(
             "SELECT id, name, version, confidence, usage_count, success_rate, "
             "parent_skill, deprecation_threshold, tags, body, "
-            "precondition_check_refs, created_at, updated_at "
+            "precondition_check_refs, maturity_tag, created_at, updated_at "
             "FROM skill_genomes "
             "WHERE confidence > deprecation_threshold "
             "   OR usage_count < ? "
@@ -253,8 +258,9 @@ class ProceduralMemory:
                 usage_count=r[4], success_rate=r[5], parent_skill=r[6],
                 deprecation_threshold=r[7], tags=json.loads(r[8]),
                 body=r[9], precondition_check_refs=json.loads(r[10]),
-                created_at=datetime.fromisoformat(r[11]),
-                updated_at=datetime.fromisoformat(r[12]),
+                maturity_tag=r[11],
+                created_at=datetime.fromisoformat(r[12]),
+                updated_at=datetime.fromisoformat(r[13]),
             )
             for r in rows
         ]
@@ -271,8 +277,8 @@ class ProceduralMemory:
             INSERT INTO skill_candidates
                 (id, parent_skill_name, parent_version, candidate_body,
                  mutation_strategy, diagnostic_keys, origin_session_id,
-                 status, pareto_scores, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, pareto_scores, notes, fast_track, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.id,
@@ -285,6 +291,7 @@ class ProceduralMemory:
                 candidate.status,
                 json.dumps(candidate.pareto_scores, ensure_ascii=False),
                 candidate.notes,
+                1 if candidate.fast_track else 0,
                 candidate.created_at.isoformat(),
                 now,
             ),
@@ -295,7 +302,7 @@ class ProceduralMemory:
         cursor = await self._db.execute(
             "SELECT id, parent_skill_name, parent_version, candidate_body, "
             "mutation_strategy, diagnostic_keys, origin_session_id, status, "
-            "pareto_scores, notes, created_at, updated_at "
+            "pareto_scores, notes, fast_track, created_at, updated_at "
             "FROM skill_candidates WHERE id = ?",
             (candidate_id,),
         )
@@ -321,7 +328,7 @@ class ProceduralMemory:
         sql = (
             "SELECT id, parent_skill_name, parent_version, candidate_body, "
             "mutation_strategy, diagnostic_keys, origin_session_id, status, "
-            "pareto_scores, notes, created_at, updated_at "
+            "pareto_scores, notes, fast_track, created_at, updated_at "
             "FROM skill_candidates"
         )
         if where:
@@ -360,6 +367,19 @@ class ProceduralMemory:
         await self._db.commit()
         return cursor.rowcount > 0
 
+    async def update_maturity_tag(
+        self,
+        skill_name: str,
+        tag: str | None,
+    ) -> bool:
+        """Set or clear the maturity_tag on a SkillGenome. Returns True if updated."""
+        now = datetime.now(UTC).isoformat()
+        cursor = await self._db.execute(
+            "UPDATE skill_genomes SET maturity_tag = ?, updated_at = ? WHERE name = ?",
+            (tag, now, skill_name),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
 
     # ------------------------------------------------------------------
     # Skill version history (Issue #120 PR 3)
@@ -461,6 +481,7 @@ def _row_to_candidate(row: tuple) -> SkillCandidate:
         status=row[7],
         pareto_scores=json.loads(row[8]),
         notes=row[9],
-        created_at=datetime.fromisoformat(row[10]),
-        updated_at=datetime.fromisoformat(row[11]),
+        fast_track=bool(row[10]),
+        created_at=datetime.fromisoformat(row[11]),
+        updated_at=datetime.fromisoformat(row[12]),
     )
