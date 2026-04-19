@@ -206,7 +206,7 @@ Semantic confidence has a 90-day half-life. Memories that are never reinforced f
 
 ---
 
-## Skills — Procedural Memory with Self-Assessment
+## Skills — Procedural Memory with Self-Evolution
 
 Skills are versioned instruction sets stored in `SkillGenome` that follow a three-tier progressive disclosure model:
 
@@ -218,9 +218,40 @@ Skills are versioned instruction sets stored in `SkillGenome` that follow a thre
 
 Drop a `SKILL.md` into your `skills/` directory — Loom auto-imports it at session start.
 
-### Self-Assessment Feedback Loop
+### Structured Diagnostic Feedback Loop
 
-After each turn where a skill was used, Loom triggers a background LLM self-assessment (scored 1–5). The result feeds into the skill's `confidence` via exponential moving average (α = 0.15). Skills that consistently underperform surface improvement suggestions in their next `load_skill()` call as `<evolution_hints>`. Skills whose confidence drops below a configurable threshold are automatically deprecated and removed from the Tier 1 catalog.
+After each turn where a skill was used, `TaskReflector` runs a background LLM self-assessment that produces a `TaskDiagnostic` — a structured record of which instructions were followed or violated, failure and success patterns, concrete `mutation_suggestions`, and a `quality_score` (1–5). The score feeds into the skill's `confidence` via EMA (α = 0.15). Skills whose confidence drops below a configurable threshold are deprecated and removed from the Tier 1 catalog.
+
+### Skill Evolution Lifecycle
+
+`TaskDiagnostic` data feeds a full candidate-pool evolution pipeline:
+
+```
+TaskReflector → TaskDiagnostic
+                      ↓
+              SkillMutator.propose_candidate()   ← single-turn background path
+              SkillMutator.from_batch_diagnostic() ← meta-skill-engineer batch path
+                      ↓
+              SkillCandidate (skill_candidates table)
+                      ↓
+         generated → shadow → promoted   (or deprecated / rolled_back)
+```
+
+**Shadow mode** — a promoted candidate serves alongside the parent. `SkillGate` A/B-routes turns to shadow or parent body, accumulating a win record before promotion is confirmed.
+
+**Fast-track** — when the `meta-skill-engineer` Grader proves ≥ 20% pass-rate improvement over the previous version, the candidate is flagged `fast_track=True` and can be promoted immediately without the shadow N-wins phase — Grader is the ground truth.
+
+**Maturity tag** — `SkillGenome.maturity_tag` (`mature` / `needs_improvement`) is set by the operator after reviewing eval history; visible in `loom review <name>`.
+
+**Version history** — every `promote` and `rollback` snapshots the previous body to `skill_version_history`. Full rollback is always available: `loom skill rollback <name>`.
+
+```bash
+loom skill candidates          # browse the candidate pool
+loom skill promote <id>        # promote a shadow candidate
+loom skill rollback <name>     # restore the previous body
+loom skill history <name>      # full version archive
+loom review <name>             # one-stop: genome · eval history · candidates · insights
+```
 
 ### Precondition Checks — Framework-Enforced Safety Rails
 
