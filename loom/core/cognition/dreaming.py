@@ -23,8 +23,9 @@ Design decisions
   connections (e.g. a weeks-old infrastructure fact connecting with a recent skill
   insight enables "cross-version archaeology").
 
-The LoomPlugin wrapper (``DreamingPlugin``) lives in
-``loom.extensibility.dreaming_plugin`` to keep the layer dependency clean.
+The ``ToolDefinition`` adapters (``dream_cycle`` / ``memory_prune``) live in
+``loom.core.memory.maintenance`` and are registered by ``LoomSession.start()``
+alongside the other memory tools (Issue #149).
 """
 
 from __future__ import annotations

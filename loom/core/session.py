@@ -776,6 +776,26 @@ class LoomSession:
         self.registry.register(make_relate_tool(self._relational))
         self.registry.register(make_query_relations_tool(self._relational))
         self.registry.register(make_memory_health_tool(self._governor))
+
+        # Issue #149: dream_cycle / memory_prune are now first-class memory
+        # tools (formerly DreamingPlugin). Wired with dependency injection
+        # so the factories stay session-agnostic.
+        from loom.core.memory.maintenance import (
+            make_dream_cycle_tool,
+            make_memory_prune_tool,
+        )
+
+        async def _dream_llm_fn(messages: list[dict]) -> str:
+            response = await self.router.chat(
+                model=self.model, messages=messages, max_tokens=2048,
+            )
+            return response.text or ""
+
+        self.registry.register(
+            make_dream_cycle_tool(self._semantic, self._relational, _dream_llm_fn)
+        )
+        self.registry.register(make_memory_prune_tool(self._semantic))
+
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
 
