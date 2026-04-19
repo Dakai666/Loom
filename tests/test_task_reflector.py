@@ -245,11 +245,13 @@ def _build_reflector(
     reflector = TaskReflector(
         router=router,
         model="test-model",
-        procedural=procedural,
-        semantic=semantic,
+        memory=MagicMock(
+            procedural=procedural,
+            semantic=semantic,
+            relational=None,
+            episodic=None,
+        ),
         session_id="session-xyz",
-        relational=None,
-        episodic=None,
         enabled=enabled,
         visibility=visibility,
     )

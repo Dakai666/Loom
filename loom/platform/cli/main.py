@@ -1383,12 +1383,24 @@ def reflect(session: str | None, db: str) -> None:
 
 
 async def _reflect(session_id: str | None, db: str) -> None:
+    from loom.core.memory.facade import MemoryFacade
+    from loom.core.memory.search import MemorySearch
+
     store = SQLiteStore(db)
     await store.initialize()
     async with store.connect() as conn:
         ep = EpisodicMemory(conn)
         pr = ProceduralMemory(conn)
-        api = ReflectionAPI(ep, pr)
+        sem = SemanticMemory(conn)
+        rel = RelationalMemory(conn)
+        facade = MemoryFacade(
+            semantic=sem,
+            procedural=pr,
+            relational=rel,
+            episodic=ep,
+            search=MemorySearch(sem, pr),
+        )
+        api = ReflectionAPI(facade)
 
         if session_id is None:
             console.print("[dim]No session ID given — showing skill health only.[/dim]")

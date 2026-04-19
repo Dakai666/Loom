@@ -9,24 +9,24 @@ Phase 2: query interface over episodic + procedural memory.
 Phase 3: the Autonomy Engine will call this to decide what to do next.
 """
 
-from loom.core.memory.episodic import EpisodicMemory
-from loom.core.memory.procedural import ProceduralMemory
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loom.core.memory.facade import MemoryFacade
 
 
 class ReflectionAPI:
     """
     Read-only window into the agent's own history and skill health.
 
-    Injected with memory instances at session start.
+    Injected with the session's :class:`MemoryFacade` at start; reads
+    episodic and procedural memory through the facade's handles.
     """
 
-    def __init__(
-        self,
-        episodic: EpisodicMemory,
-        procedural: ProceduralMemory,
-    ) -> None:
-        self._episodic = episodic
-        self._procedural = procedural
+    def __init__(self, memory: "MemoryFacade") -> None:
+        self._memory = memory
+        self._episodic = memory.episodic
+        self._procedural = memory.procedural
 
     # ------------------------------------------------------------------
     # Session trace queries

@@ -35,10 +35,7 @@ if TYPE_CHECKING:
     from loom.core.cognition.skill_mutator import MutationProposal, SkillMutator
     from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.events import ExecutionEnvelopeView
-    from loom.core.memory.episodic import EpisodicMemory
-    from loom.core.memory.procedural import ProceduralMemory
-    from loom.core.memory.relational import RelationalMemory
-    from loom.core.memory.semantic import SemanticMemory
+    from loom.core.memory.facade import MemoryFacade
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
 logger = logging.getLogger(__name__)
@@ -265,11 +262,8 @@ class TaskReflector:
         self,
         router: "LLMRouter",
         model: str,
-        procedural: "ProceduralMemory",
-        semantic: "SemanticMemory",
+        memory: "MemoryFacade",
         session_id: str,
-        relational: "RelationalMemory | None" = None,
-        episodic: "EpisodicMemory | None" = None,
         enabled: bool = True,
         visibility: str = "summary",
         mutator: "SkillMutator | None" = None,
@@ -277,10 +271,11 @@ class TaskReflector:
     ) -> None:
         self._router = router
         self._model = model
-        self._procedural = procedural
-        self._semantic = semantic
-        self._relational = relational
-        self._episodic = episodic
+        self._memory = memory
+        self._procedural = memory.procedural
+        self._semantic = memory.semantic
+        self._relational = memory.relational
+        self._episodic = memory.episodic
         self._session_id = session_id
         self._enabled = enabled
         self._visibility = visibility if visibility in ("off", "summary", "verbose") else "summary"
