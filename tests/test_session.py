@@ -189,6 +189,48 @@ class TestConfigPathResolution:
         assert isinstance(result, dict)
 
 
+class TestOutputMaxTokensResolution:
+    """Issue #181: per-model output cap resolution."""
+
+    def test_falls_back_to_hardcoded_default_on_empty_config(self):
+        from loom.core.session import _resolve_output_max_tokens
+        assert _resolve_output_max_tokens({}, "claude-sonnet-4-6") == 8192
+
+    def test_uses_cognition_default_when_no_override(self):
+        from loom.core.session import _resolve_output_max_tokens
+        cfg = {"cognition": {"output_max_tokens": 32768}}
+        assert _resolve_output_max_tokens(cfg, "MiniMax-M2.7") == 32768
+
+    def test_per_model_override_wins_over_default(self):
+        from loom.core.session import _resolve_output_max_tokens
+        cfg = {
+            "cognition": {
+                "output_max_tokens": 8192,
+                "output_max_tokens_overrides": {
+                    "MiniMax-M2.7": 65536,
+                    "claude-sonnet-4-6": 32768,
+                },
+            }
+        }
+        assert _resolve_output_max_tokens(cfg, "MiniMax-M2.7") == 65536
+        assert _resolve_output_max_tokens(cfg, "claude-sonnet-4-6") == 32768
+        # unknown model → fall through to default
+        assert _resolve_output_max_tokens(cfg, "gpt-5") == 8192
+
+    def test_invalid_values_fall_back_gracefully(self):
+        from loom.core.session import _resolve_output_max_tokens
+        cfg = {
+            "cognition": {
+                "output_max_tokens": "not-a-number",
+                "output_max_tokens_overrides": {
+                    "claude-sonnet-4-6": "also-bad",
+                },
+            }
+        }
+        # both invalid → hardcoded default
+        assert _resolve_output_max_tokens(cfg, "claude-sonnet-4-6") == 8192
+
+
 class TestParallelDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_parallel_uses_current_task_graph_api_and_preserves_order(self):
