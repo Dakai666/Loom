@@ -257,6 +257,35 @@ def _load_loom_config() -> dict:
     return {}
 
 
+# Issue #181: per-model output cap. Different providers have very different
+# output ceilings (MiniMax-M2.7 ~64K, Claude Sonnet 4.6 ~64K, smaller local
+# models often 4-8K) so a single hardcoded value was either wasteful or
+# clipping long tool-loop turns. Resolved once at session start.
+_DEFAULT_OUTPUT_MAX_TOKENS = 8192
+
+
+def _resolve_output_max_tokens(cfg: dict, model: str) -> int:
+    """Return the output-token cap for *model* from ``[cognition]``.
+
+    Precedence: ``[cognition.output_max_tokens_overrides][<model>]`` →
+    ``[cognition].output_max_tokens`` → ``_DEFAULT_OUTPUT_MAX_TOKENS``.
+    """
+    cog = cfg.get("cognition", {}) or {}
+    overrides = cog.get("output_max_tokens_overrides", {}) or {}
+    if model in overrides:
+        try:
+            return int(overrides[model])
+        except (TypeError, ValueError):
+            pass
+    default = cog.get("output_max_tokens")
+    if default is not None:
+        try:
+            return int(default)
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_OUTPUT_MAX_TOKENS
+
+
 def _load_env(project_root: Path | None = None) -> dict[str, str]:
     """Load .env from project root or current directory."""
     search = [
@@ -476,6 +505,9 @@ class LoomSession:
         self._episodic_compress_threshold: int = (
             config.get("memory", {}).get("episodic_compress_threshold", 30)
         )
+        # Issue #181: cache the whole config so ``output_max_tokens`` resolves
+        # cheaply on every LLM call, and responds live to ``set_model``.
+        self._loom_config: dict = config
         system_prompt = self._stack.load()
 
         # Inject workspace context into system prompt
@@ -1364,7 +1396,9 @@ class LoomSession:
                 model=self.model,
                 messages=self.messages,
                 tools=tools,
-                max_tokens=8096,
+                max_tokens=_resolve_output_max_tokens(
+                    self._loom_config, self.model,
+                ),
                 abort_signal=abort_signal,
             ):
                 if final is None:
@@ -2986,6 +3020,7 @@ __all__ = [
     "_load_loom_config",
     "_load_env",
     "_parse_skill_frontmatter",
+    "_resolve_output_max_tokens",
     "COMPRESS_PROMPT",
     "COMPACT_PROMPT",
 ]
