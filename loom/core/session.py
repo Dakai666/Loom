@@ -202,10 +202,21 @@ async def compress_session(
 
     # Issue #142: record the yield ratio so a silently degrading extractor
     # (facts << entries) surfaces as an anomaly on the next turn boundary.
+    # Issue #173: exclude tool_call/tool_result entries from the denominator —
+    # they describe operations, not knowledge, so their inclusion produced a
+    # permanent false-positive low-yield alert on tool-heavy sessions.
     if telemetry is not None:
         dim = telemetry.get("memory_compression")
         if dim is not None:
-            dim.record(entries=len(entries), facts=len(facts))
+            tool_events = sum(
+                1 for e in entries
+                if e.event_type in ("tool_call", "tool_result")
+            )
+            dim.record(
+                entries=len(entries),
+                facts=len(facts),
+                tool_events=tool_events,
+            )
             telemetry.mark_dirty()
 
     return len(facts)
