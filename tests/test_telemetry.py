@@ -118,6 +118,32 @@ def test_memory_compression_rolling_window_bounded():
     assert len(dim._recent_yields) == 10
 
 
+def test_memory_compression_tool_events_excluded_from_denominator():
+    """Issue #173: tool_call/tool_result entries don't count as knowledge input.
+
+    A session with 18 tool events and 2 message entries yielding 1 fact should
+    score as 1/2 = 50% yield, not 1/20 = 5%.
+    """
+    dim = MemoryCompressionDimension()
+    dim.record(entries=20, facts=1, tool_events=18)
+    snap = dim.snapshot()
+    assert snap["entries_total"] == 20
+    assert snap["tool_events_total"] == 18
+    assert snap["knowledge_entries_total"] == 2
+    assert abs(snap["overall_yield"] - 0.5) < 0.01
+
+
+def test_memory_compression_tool_only_runs_skip_anomaly_window():
+    """Tool-only runs (no knowledge entries) must not poison the yield window
+    or trip the anomaly detector — this was the #173 false positive."""
+    dim = MemoryCompressionDimension()
+    for _ in range(5):
+        dim.record(entries=15, facts=0, tool_events=15)
+    assert dim.has_anomaly() is False
+    assert dim.snapshot()["skipped_runs"] == 5
+    assert dim._recent_yields == []
+
+
 # ---------------------------------------------------------------------------
 # ContextLayoutDimension
 # ---------------------------------------------------------------------------

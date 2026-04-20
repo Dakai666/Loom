@@ -233,6 +233,11 @@ class MemoryCompressionDimension(DimensionTracker):
 
     Backed by the soft-delete landed in #158 — when yield is low, operators
     know the raw episodic trace is still on disk and can be re-mined.
+
+    Tool-event entries (``tool_call`` / ``tool_result``) are excluded from
+    the yield denominator (#173): they record operational side-effects, not
+    knowledge, so a low facts/entries ratio on a tool-heavy session is
+    semantically correct and shouldn't fire an anomaly.
     """
 
     name = "memory_compression"
@@ -244,28 +249,38 @@ class MemoryCompressionDimension(DimensionTracker):
     def __init__(self) -> None:
         self._runs: int = 0
         self._entries_total: int = 0
+        self._tool_events_total: int = 0
         self._facts_total: int = 0
         # Window of recent yield ratios for anomaly detection
         self._recent_yields: list[float] = []
         self._last_at: str | None = None
+        # Runs that had no knowledge entries after filtering — tracked for
+        # visibility but excluded from the anomaly window.
+        self._skipped_runs: int = 0
 
-    def record(self, *, entries: int, facts: int) -> None:
+    def record(self, *, entries: int, facts: int, tool_events: int = 0) -> None:
         self._runs += 1
         self._entries_total += entries
+        self._tool_events_total += tool_events
         self._facts_total += facts
-        if entries > 0:
-            self._recent_yields.append(facts / entries)
+        knowledge_entries = entries - tool_events
+        if knowledge_entries > 0:
+            self._recent_yields.append(facts / knowledge_entries)
             # Keep the window bounded — rolling average over last 10 runs
             if len(self._recent_yields) > 10:
                 self._recent_yields.pop(0)
+        else:
+            self._skipped_runs += 1
         self._last_at = datetime.now(UTC).isoformat()
 
     @property
+    def knowledge_entries_total(self) -> int:
+        return max(self._entries_total - self._tool_events_total, 0)
+
+    @property
     def overall_yield(self) -> float:
-        return (
-            self._facts_total / self._entries_total
-            if self._entries_total > 0 else 0.0
-        )
+        denom = self.knowledge_entries_total
+        return self._facts_total / denom if denom > 0 else 0.0
 
     @property
     def recent_yield(self) -> float:
@@ -278,9 +293,12 @@ class MemoryCompressionDimension(DimensionTracker):
         return {
             "runs": self._runs,
             "entries_total": self._entries_total,
+            "tool_events_total": self._tool_events_total,
+            "knowledge_entries_total": self.knowledge_entries_total,
             "facts_total": self._facts_total,
             "overall_yield": round(self.overall_yield, 3),
             "recent_yields": [round(y, 3) for y in self._recent_yields],
+            "skipped_runs": self._skipped_runs,
             "last_at": self._last_at,
         }
 
@@ -289,7 +307,7 @@ class MemoryCompressionDimension(DimensionTracker):
             return "compress: (not run)"
         return (
             f"compress:{self.overall_yield:.0%} yield "
-            f"({self._facts_total}/{self._entries_total}, n={self._runs})"
+            f"({self._facts_total}/{self.knowledge_entries_total}, n={self._runs})"
         )
 
     def render_detail(self) -> str:
@@ -299,12 +317,18 @@ class MemoryCompressionDimension(DimensionTracker):
             "## memory_compression",
             f"- runs: {self._runs}",
             f"- entries processed: {self._entries_total}",
+            f"- tool events filtered: {self._tool_events_total}",
+            f"- knowledge entries: {self.knowledge_entries_total}",
             f"- facts extracted: {self._facts_total}",
             f"- overall yield: {self.overall_yield:.2%}",
             f"- recent yield (last {len(self._recent_yields)} runs): "
             f"{self.recent_yield:.2%}",
         ]
-        if self.recent_yield < self.LOW_YIELD_THRESHOLD and self._runs >= self.MIN_RUNS_FOR_ANOMALY:
+        if self._skipped_runs:
+            lines.append(
+                f"- runs skipped (tool-only, no knowledge entries): {self._skipped_runs}"
+            )
+        if self.has_anomaly():
             lines.append(
                 "- ⚠ yield is low — LLM extractor may be missing content. "
                 "Original entries are soft-deleted (#158) and remain on disk "
@@ -314,7 +338,7 @@ class MemoryCompressionDimension(DimensionTracker):
 
     def has_anomaly(self) -> bool:
         return (
-            self._runs >= self.MIN_RUNS_FOR_ANOMALY
+            len(self._recent_yields) >= self.MIN_RUNS_FOR_ANOMALY
             and self.recent_yield < self.LOW_YIELD_THRESHOLD
         )
 
