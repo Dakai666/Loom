@@ -81,6 +81,8 @@ class WebhookNotifier(BaseNotifier):
             "timeout_seconds": n.timeout_seconds,
             "created_at":      n.created_at.isoformat(),
             "metadata":        n.metadata,
+            "attachments":     [str(p) for p in n.attachments],
+            "inline_image":    str(n.inline_image) if n.inline_image else None,
         }
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
