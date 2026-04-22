@@ -77,18 +77,26 @@ def _resolve_attachments(
 
     for pat in patterns:
         if not pat or Path(pat).is_absolute() or ".." in Path(pat).parts:
+            logger.debug("[autonomy] attach_outputs: rejected unsafe pattern %r", pat)
             continue
         try:
             matches = list(workspace.glob(pat))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            logger.debug("[autonomy] attach_outputs: glob %r failed: %s", pat, exc)
+            continue
+        if not matches:
+            logger.debug("[autonomy] attach_outputs: pattern %r matched nothing", pat)
             continue
         for p in matches:
             try:
                 if not p.is_file():
+                    logger.debug("[autonomy] attach_outputs: skipped non-file %s", p)
                     continue
                 if p.stat().st_mtime < cutoff:
+                    logger.debug("[autonomy] attach_outputs: skipped stale %s", p)
                     continue
-            except OSError:
+            except OSError as exc:
+                logger.debug("[autonomy] attach_outputs: stat failed for %s: %s", p, exc)
                 continue
             resolved = p.resolve()
             if resolved in seen:
@@ -260,10 +268,16 @@ class AutonomyDaemon:
                 )
 
             if response or attachments:
+                if response:
+                    body = response[:1000]
+                elif attachments:
+                    body = f"📎 {len(attachments)} attachment(s)"
+                else:
+                    body = ""
                 await self._notify.send(Notification(
                     type=NotificationType.REPORT,
                     title=f"Autonomy result: {plan.trigger_name}",
-                    body=response[:1000] if response else "(see attachments)",
+                    body=body,
                     trigger_name=plan.trigger_name,
                     thread_id=thread_id,
                     attachments=attachments,
