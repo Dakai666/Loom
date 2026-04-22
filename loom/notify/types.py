@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -40,6 +41,14 @@ class Notification:
     trigger_name: str = ""
     timeout_seconds: int = 60
     thread_id: int = 0                # target Discord thread (0 = default channel)
+    attachments: list[Path] = field(default_factory=list)
+    """Extra files delivered alongside the message. Channel-dependent:
+    DiscordBotNotifier uploads them via ``discord.File`` (up to 10 per message);
+    CLINotifier prints their paths; WebhookNotifier serialises them as strings.
+    """
+    inline_image: Path | None = None
+    """If set, the image is uploaded and displayed as the embed's main image
+    (Discord only). Counts toward the 10-attachment limit."""
     metadata: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

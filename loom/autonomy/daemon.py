@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json as _json
 import logging
+from datetime import datetime, UTC
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,50 @@ def _validate_trust_level(value: str, trigger_name: str) -> str:
         )
         return "guarded"
     return value
+
+
+def _resolve_attachments(
+    workspace: Path,
+    patterns: list[str],
+    since: datetime,
+) -> list[Path]:
+    """Expand ``attach_outputs`` globs relative to *workspace* and return
+    regular files whose mtime is at or after *since*.
+
+    The mtime filter is intentional: it excludes stale files from previous
+    runs that happen to sit in the matched paths.  Patterns that escape
+    the workspace (absolute paths or ``..``) are ignored so a malformed
+    config can't attach arbitrary files from disk.
+    """
+    if not patterns:
+        return []
+
+    cutoff = since.timestamp()
+    results: list[Path] = []
+    seen: set[Path] = set()
+
+    for pat in patterns:
+        if not pat or Path(pat).is_absolute() or ".." in Path(pat).parts:
+            continue
+        try:
+            matches = list(workspace.glob(pat))
+        except (OSError, ValueError):
+            continue
+        for p in matches:
+            try:
+                if not p.is_file():
+                    continue
+                if p.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            resolved = p.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            results.append(p)
+
+    return results
 
 
 def _check_config_integrity(autonomy_cfg: dict) -> bool:
@@ -177,6 +222,10 @@ class AutonomyDaemon:
             ))
             _added_grant_count += 1
 
+        # Record turn start before stream_turn so attachment resolution
+        # can filter by mtime — files written during this turn only.
+        turn_start = datetime.now(UTC)
+
         # Collect text output from stream_turn with origin="autonomy".
         # BlastRadiusMiddleware will auto-deny any tool call that isn't
         # covered by existing scope grants (no human to prompt).
@@ -196,13 +245,28 @@ class AutonomyDaemon:
             thread_id = plan.context.get("notify_thread_id", 0)
             response = "".join(output_chunks).strip()
             logger.info("[autonomy] trigger=%s — completed (%d chars)", plan.trigger_name, len(response))
-            if response:
+
+            attachments = _resolve_attachments(
+                self._session.workspace,
+                plan.context.get("attach_outputs", []),
+                turn_start,
+            )
+            if attachments:
+                logger.info(
+                    "[autonomy] trigger=%s — attaching %d file(s): %s",
+                    plan.trigger_name,
+                    len(attachments),
+                    [p.name for p in attachments],
+                )
+
+            if response or attachments:
                 await self._notify.send(Notification(
                     type=NotificationType.REPORT,
                     title=f"Autonomy result: {plan.trigger_name}",
-                    body=response[:1000],
+                    body=response[:1000] if response else "(see attachments)",
                     trigger_name=plan.trigger_name,
                     thread_id=thread_id,
+                    attachments=attachments,
                 ))
         except Exception as exc:
             logger.error("[autonomy] trigger=%s — error: %s", plan.trigger_name, exc, exc_info=True)
@@ -264,6 +328,7 @@ class AutonomyDaemon:
                 notify_thread_id=sched.get("notify_thread", 0),
                 allowed_tools=sched.get("allowed_tools", []),
                 scope_grants=sched.get("scope_grants", []),
+                attach_outputs=sched.get("attach_outputs", []),
             )
             self._evaluator.register(trigger)
             count += 1
@@ -280,6 +345,7 @@ class AutonomyDaemon:
                 notify_thread_id=evt.get("notify_thread", 0),
                 allowed_tools=evt.get("allowed_tools", []),
                 scope_grants=evt.get("scope_grants", []),
+                attach_outputs=evt.get("attach_outputs", []),
             )
             self._evaluator.register(trigger)
             count += 1

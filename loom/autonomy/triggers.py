@@ -38,6 +38,11 @@ class TriggerDefinition:
     """GUARDED tools the daemon pre-authorizes before running the agent."""
     scope_grants: list[dict[str, Any]] = field(default_factory=list)
     """Scope grants (resource/action/selector dicts) injected for this trigger."""
+    attach_outputs: list[str] = field(default_factory=list)
+    """Glob patterns (relative to the session workspace) identifying artifacts
+    the agent is expected to produce.  After the turn completes, files matching
+    these patterns whose mtime moved during the turn are attached to the result
+    notification.  Discord delivers them as real uploads via ``discord.File``."""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property

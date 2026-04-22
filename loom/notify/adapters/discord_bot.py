@@ -115,18 +115,22 @@ class DiscordBotNotifier(BaseNotifier):
             return
 
         embed = self._build_embed(notification)
+        files = self._build_files(notification, embed)
+
+        send_kwargs: dict = {"embed": embed}
+        if files:
+            send_kwargs["files"] = files
 
         if notification.type in (NotificationType.CONFIRM, NotificationType.INPUT):
             if notification.id not in self._reply_queues:
                 self._reply_queues[notification.id] = asyncio.Queue(maxsize=1)
-            view = _ReplyView(
+            send_kwargs["view"] = _ReplyView(
                 notification_id=notification.id,
                 notifier=self,
                 timeout=float(notification.timeout_seconds),
             )
-            await ch.send(embed=embed, view=view)
-        else:
-            await ch.send(embed=embed)
+
+        await ch.send(**send_kwargs)
 
     async def wait_reply(self, notification: Notification) -> ConfirmResult:
         queue = self._reply_queues.setdefault(
@@ -142,6 +146,47 @@ class DiscordBotNotifier(BaseNotifier):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # Discord caps attachments at 10 per message.
+    _MAX_FILES: int = 10
+
+    def _build_files(
+        self, n: Notification, embed: discord.Embed,
+    ) -> list[discord.File]:
+        """
+        Translate ``Notification.attachments`` + ``inline_image`` into
+        ``discord.File`` objects.  Missing paths are silently skipped so a
+        notification is never blocked by a stale path; the message still
+        arrives with whatever else is available.  When ``inline_image`` is
+        set and the file exists, the embed's main image is pointed at the
+        uploaded attachment via the ``attachment://`` URL scheme.
+        """
+        files: list[discord.File] = []
+
+        for p in n.attachments:
+            if p is None:
+                continue
+            try:
+                if p.is_file():
+                    files.append(discord.File(str(p), filename=p.name))
+            except OSError:
+                # stat() failed — treat as missing, keep going
+                continue
+
+        if n.inline_image is not None:
+            try:
+                if n.inline_image.is_file():
+                    img_name = n.inline_image.name
+                    files.append(
+                        discord.File(str(n.inline_image), filename=img_name)
+                    )
+                    embed.set_image(url=f"attachment://{img_name}")
+            except OSError:
+                pass
+
+        # Discord API rejects the whole message if we exceed the cap; trim
+        # rather than fail so the embed + some files still land.
+        return files[: self._MAX_FILES]
 
     def _build_embed(self, n: Notification) -> discord.Embed:
         color = _COLORS.get(n.type, 0x5865F2)

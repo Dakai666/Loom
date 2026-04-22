@@ -755,3 +755,264 @@ notify = true
         await daemon._execute_plan(plan)
         # SKIP means stream_turn should never be invoked
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #171 — autonomy result attachments (Solution D)
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationAttachments:
+    """Schema-level: attachments/inline_image default to empty without breaking existing callers."""
+
+    def test_notification_default_attachments_empty(self):
+        n = Notification(
+            type=NotificationType.REPORT,
+            title="t",
+            body="b",
+        )
+        assert n.attachments == []
+        assert n.inline_image is None
+
+    def test_notification_accepts_attachments_list(self, tmp_path):
+        p1 = tmp_path / "a.md"
+        p2 = tmp_path / "b.png"
+        p1.write_text("x")
+        p2.write_text("y")
+        n = Notification(
+            type=NotificationType.REPORT,
+            title="t",
+            body="b",
+            attachments=[p1, p2],
+            inline_image=p2,
+        )
+        assert n.attachments == [p1, p2]
+        assert n.inline_image == p2
+
+
+class TestResolveAttachments:
+    def test_empty_patterns_returns_empty(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+        assert _resolve_attachments(tmp_path, [], datetime.now(UTC)) == []
+
+    def test_glob_matches_files_after_cutoff(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+
+        (tmp_path / "news").mkdir()
+        cutoff = datetime.now(UTC)
+        # Ensure mtime is clearly after cutoff
+        import time
+        time.sleep(0.01)
+        fresh = tmp_path / "news" / "today.md"
+        fresh.write_text("hi")
+
+        got = _resolve_attachments(tmp_path, ["news/*.md"], cutoff)
+        assert [p.name for p in got] == ["today.md"]
+
+    def test_stale_files_are_filtered_out(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+        import os, time
+
+        stale = tmp_path / "stale.md"
+        stale.write_text("old")
+        # Backdate mtime
+        old_ts = time.time() - 3600
+        os.utime(stale, (old_ts, old_ts))
+
+        cutoff = datetime.now(UTC)
+        got = _resolve_attachments(tmp_path, ["*.md"], cutoff)
+        assert got == []
+
+    def test_absolute_and_parent_patterns_rejected(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+
+        (tmp_path / "parent.md").write_text("x")
+        cutoff = datetime.now(UTC).replace(year=2000)  # far past
+        # Absolute path — ignored
+        assert _resolve_attachments(tmp_path, ["/etc/passwd"], cutoff) == []
+        # Parent traversal — ignored
+        assert _resolve_attachments(tmp_path, ["../*.md"], cutoff) == []
+
+    def test_directories_skipped(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+        (tmp_path / "subdir").mkdir()
+        cutoff = datetime.now(UTC).replace(year=2000)
+        assert _resolve_attachments(tmp_path, ["subdir"], cutoff) == []
+
+    def test_duplicates_deduped(self, tmp_path):
+        from loom.autonomy.daemon import _resolve_attachments
+        import time
+
+        cutoff = datetime.now(UTC)
+        time.sleep(0.01)
+        f = tmp_path / "report.md"
+        f.write_text("x")
+
+        got = _resolve_attachments(tmp_path, ["*.md", "report.md"], cutoff)
+        assert len(got) == 1
+
+
+class TestLoadConfigAttachOutputs:
+    def _make_daemon(self):
+        from loom.autonomy.daemon import AutonomyDaemon
+        from loom.notify.router import NotificationRouter
+        from loom.notify.confirm import ConfirmFlow
+
+        async def send(n): pass
+        router = NotificationRouter()
+        flow = ConfirmFlow(send_fn=send)
+        return AutonomyDaemon(notify_router=router, confirm_flow=flow)
+
+    def test_schedule_attach_outputs_propagates_to_trigger(self, tmp_path):
+        toml_content = """
+[autonomy]
+enabled = true
+
+[[autonomy.schedules]]
+name = "morning_briefing"
+cron = "0 9 * * *"
+intent = "News roundup"
+attach_outputs = ["news/*.md", "reports/*.pdf"]
+"""
+        config_file = tmp_path / "loom.toml"
+        config_file.write_text(toml_content, encoding="utf-8")
+
+        daemon = self._make_daemon()
+        daemon.load_config(config_file)
+
+        trigger = daemon.evaluator.list()[0]
+        assert trigger.attach_outputs == ["news/*.md", "reports/*.pdf"]
+
+    def test_event_trigger_attach_outputs_propagates(self, tmp_path):
+        toml_content = """
+[autonomy]
+enabled = true
+
+[[autonomy.triggers]]
+name = "on_render_done"
+event = "render_complete"
+intent = "Upload renders"
+attach_outputs = ["renders/*.png"]
+"""
+        config_file = tmp_path / "loom.toml"
+        config_file.write_text(toml_content, encoding="utf-8")
+
+        daemon = self._make_daemon()
+        daemon.load_config(config_file)
+
+        trigger = daemon.evaluator.list()[0]
+        assert trigger.attach_outputs == ["renders/*.png"]
+
+
+class TestRunAgentAttachments:
+    @pytest.mark.asyncio
+    async def test_run_agent_attaches_files_produced_during_turn(self, tmp_path):
+        from loom.autonomy.daemon import AutonomyDaemon
+        from loom.autonomy.planner import PlannedAction, ActionDecision
+        from loom.core.harness.permissions import TrustLevel
+        from loom.notify.router import NotificationRouter, BaseNotifier
+        from loom.notify.confirm import ConfirmFlow
+
+        class _Text:
+            def __init__(self, t): self.text = t
+
+        # Stale file present before the turn — should NOT be attached.
+        (tmp_path / "news").mkdir()
+        stale = tmp_path / "news" / "old.md"
+        stale.write_text("old")
+        import os, time
+        old_ts = time.time() - 3600
+        os.utime(stale, (old_ts, old_ts))
+
+        async def mock_stream(prompt, **_):
+            # Simulate the agent writing a fresh file during the turn.
+            fresh = tmp_path / "news" / "today.md"
+            fresh.write_text("fresh")
+            yield _Text("Briefing complete.")
+
+        session = MagicMock()
+        session.stream_turn = mock_stream
+        session._memory = None
+        session.workspace = tmp_path
+        # perm shim — daemon authorizes/revokes tools
+        session.perm.session_authorized = set()
+        session.perm.authorize = MagicMock()
+        session.perm.revoke = MagicMock()
+        session.perm.grant = MagicMock()
+        session.perm.revoke_matching = MagicMock()
+
+        received: list = []
+
+        class _CaptureNotifier(BaseNotifier):
+            channel = "test_capture"
+            async def send(self, n): received.append(n)
+
+        router = NotificationRouter()
+        router.register(_CaptureNotifier())
+        flow = ConfirmFlow(send_fn=lambda n: None)
+        daemon = AutonomyDaemon(
+            notify_router=router, confirm_flow=flow, loom_session=session
+        )
+
+        plan = PlannedAction(
+            trigger_name="morning_briefing",
+            intent="news",
+            decision=ActionDecision.EXECUTE,
+            trust_level=TrustLevel.SAFE,
+            context={"attach_outputs": ["news/*.md"]},
+            prompt="go",
+        )
+
+        await daemon._execute_plan(plan)
+
+        reports = [n for n in received if n.type == NotificationType.REPORT]
+        assert len(reports) == 1
+        attached_names = {p.name for p in reports[0].attachments}
+        assert attached_names == {"today.md"}
+
+    @pytest.mark.asyncio
+    async def test_run_agent_no_attachments_when_pattern_empty(self, tmp_path):
+        from loom.autonomy.daemon import AutonomyDaemon
+        from loom.autonomy.planner import PlannedAction, ActionDecision
+        from loom.core.harness.permissions import TrustLevel
+        from loom.notify.router import NotificationRouter, BaseNotifier
+        from loom.notify.confirm import ConfirmFlow
+
+        class _Text:
+            def __init__(self, t): self.text = t
+
+        async def mock_stream(prompt, **_):
+            yield _Text("ok")
+
+        session = MagicMock()
+        session.stream_turn = mock_stream
+        session._memory = None
+        session.workspace = tmp_path
+        session.perm.session_authorized = set()
+
+        received: list = []
+
+        class _CaptureNotifier(BaseNotifier):
+            channel = "test_capture"
+            async def send(self, n): received.append(n)
+
+        router = NotificationRouter()
+        router.register(_CaptureNotifier())
+        flow = ConfirmFlow(send_fn=lambda n: None)
+        daemon = AutonomyDaemon(
+            notify_router=router, confirm_flow=flow, loom_session=session
+        )
+
+        plan = PlannedAction(
+            trigger_name="t",
+            intent="i",
+            decision=ActionDecision.EXECUTE,
+            trust_level=TrustLevel.SAFE,
+            prompt="go",
+        )
+
+        await daemon._execute_plan(plan)
+
+        reports = [n for n in received if n.type == NotificationType.REPORT]
+        assert len(reports) == 1
+        assert reports[0].attachments == []

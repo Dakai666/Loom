@@ -336,6 +336,11 @@ enabled  = false           # set true to activate daemon
 # scope_grants  = [
 #   { resource = "path", action = "write", selector = "news" },
 # ]
+# # attach_outputs — globs (relative to workspace) identifying artefacts the
+# # agent is expected to produce.  Files matching any pattern whose mtime
+# # advanced during the turn are uploaded with the REPORT notification.
+# # Discord delivers them natively via discord.File (max 10 per message).
+# attach_outputs = ["news/*.md"]
 
 # ── Example: daily journal ────────────────────────────────────────────────────
 # [[autonomy.schedules]]

@@ -88,6 +88,7 @@ class ActionPlanner:
         context["notify_thread_id"] = getattr(trigger, "notify_thread_id", 0)
         context["allowed_tools"] = getattr(trigger, "allowed_tools", [])
         context["scope_grants"] = getattr(trigger, "scope_grants", [])
+        context["attach_outputs"] = getattr(trigger, "attach_outputs", [])
 
         if self._semantic is not None:
             try:
