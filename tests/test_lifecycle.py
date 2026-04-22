@@ -402,6 +402,87 @@ class TestPreconditionGates:
         assert "Precondition failed" in result.error
 
     @pytest.mark.asyncio
+    async def test_precondition_failure_includes_skill_recovery_hint(self):
+        """
+        Issue #184: when a precondition is mounted by a skill, the failure
+        message must tell the agent who mounted it and how to self-recover.
+        """
+        from loom.core.harness.skill_checks import (
+            SkillCheckManager,
+            SkillPreconditionRef,
+        )
+
+        async def failing_check(call):
+            return False
+
+        tool = ToolDefinition(
+            name="run_bash", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+        )
+        reg = _make_registry(tool)
+
+        # Mount the check through a real SkillCheckManager so owner_of()
+        # can attribute the failure back to the skill.
+        manager = SkillCheckManager(reg)
+        refs = [SkillPreconditionRef(
+            ref="checks.only_pet_script",
+            applies_to=["run_bash"],
+            description="only pet.py allowed",
+        )]
+        manager.mount("pet-cat", refs, {"checks.only_pet_script": failing_check})
+
+        perm = PermissionContext(session_id="test-session")
+        pipeline = MiddlewarePipeline([
+            LifecycleMiddleware(registry=reg),
+            SchemaValidationMiddleware(registry=reg),
+            BlastRadiusMiddleware(
+                perm_ctx=perm, confirm_fn=AsyncMock(return_value=True),
+            ),
+            LifecycleGateMiddleware(
+                registry=reg, skill_check_manager=manager,
+            ),
+        ])
+        call = _make_call("run_bash")
+
+        result = await pipeline.execute(call, _echo_handler)
+
+        assert not result.success
+        assert "Precondition failed" in result.error
+        # Owner skill must be named so the agent can act on it
+        assert "pet-cat" in result.error
+        # Recovery path must be spelled out, not hinted at
+        assert "unload_skill" in result.error
+        # The failure must be marked as recoverable at the agent layer
+        assert "recoverable" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_precondition_failure_without_manager_is_plain(self):
+        """
+        Backward compat: if no skill_check_manager is wired (e.g. sub-agent
+        pipeline), the error stays the simple legacy form.
+        """
+        async def failing_check(call):
+            return False
+
+        tool = ToolDefinition(
+            name="run_bash", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+            preconditions=["some guard"],
+            precondition_checks=[failing_check],
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)  # no skill_check_manager
+        call = _make_call("run_bash")
+
+        result = await pipeline.execute(call, _echo_handler)
+        assert not result.success
+        assert "Precondition failed" in result.error
+        # No recovery hint when we can't attribute
+        assert "unload_skill" not in result.error
+
+    @pytest.mark.asyncio
     async def test_all_preconditions_pass_proceeds(self):
         """All preconditions pass → tool executes normally."""
         async def ok_check(call):

@@ -1203,7 +1203,15 @@ def make_load_skill_tool(
         keep_existing: bool = False,
     ) -> list[str]:
         """Resolve and mount precondition checks for a skill. Returns descriptions."""
-        if manager is None or not skill.precondition_check_refs:
+        if manager is None:
+            return []
+
+        # Harness invariant: every load_skill is a lifecycle event for the
+        # manager, even when the new skill declares no checks.  Without this,
+        # a skill with no checks would leave the previous skill's checks
+        # stranded on tool definitions (Issue #184).
+        if not skill.precondition_check_refs:
+            manager.activate(name, keep_existing=keep_existing)
             return []
 
         from loom.core.harness.skill_checks import SkillPreconditionRef, SkillCheckManager

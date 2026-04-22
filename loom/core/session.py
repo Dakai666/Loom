@@ -1074,7 +1074,10 @@ class LoomSession:
                     exec_escape_fn=_exec_escape_fn,
                     registry=self.registry,
                 ),
-                LifecycleGateMiddleware(registry=self.registry),
+                LifecycleGateMiddleware(
+                    registry=self.registry,
+                    skill_check_manager=self._skill_check_manager,
+                ),
             ]
         )
 
