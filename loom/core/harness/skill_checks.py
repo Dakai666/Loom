@@ -134,6 +134,34 @@ class SkillCheckManager:
     # Mount / Unmount
     # ------------------------------------------------------------------
 
+    def activate(self, skill_name: str, keep_existing: bool = False) -> None:
+        """
+        Declare *skill_name* as the active skill.
+
+        This is a pure lifecycle event — it does NOT mount any checks, but
+        it DOES auto-unmount the previous active skill's checks (unless
+        ``keep_existing=True``).  Call this on every ``load_skill`` event,
+        including skills that declare no precondition checks, so the
+        harness invariant holds: ``active_skill`` always reflects the most
+        recently loaded skill, and stale checks from a prior skill never
+        linger across a skill transition.
+
+        Idempotent: re-activating the currently active skill is a no-op.
+        """
+        if skill_name == self._active_skill:
+            return
+        if not keep_existing and self._active_skill is not None:
+            self.unmount(self._active_skill)
+        self._active_skill = skill_name
+
+    def owner_of(self, check_fn: Callable) -> str | None:
+        """Return the skill name that mounted *check_fn*, or None."""
+        for skill, checks in self._mounted.items():
+            for mc in checks:
+                if mc.check_fn is check_fn:
+                    return skill
+        return None
+
     def mount(
         self,
         skill_name: str,

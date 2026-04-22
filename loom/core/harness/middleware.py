@@ -778,8 +778,12 @@ class LifecycleGateMiddleware(Middleware):
     LifecycleMiddleware), this middleware is a transparent pass-through.
     """
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(self, registry: Any, skill_check_manager: Any = None) -> None:
         self._registry = registry
+        # Optional: used to attribute precondition failures back to the
+        # skill that mounted the check, so the error message can tell the
+        # agent how to self-recover (unload_skill / load different skill).
+        self._skill_check_manager = skill_check_manager
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         from .lifecycle import LIFECYCLE_CTX_KEY, ActionState
@@ -824,6 +828,31 @@ class LifecycleGateMiddleware(Middleware):
                     if i < len(precondition_descs)
                     else f"precondition_check[{i}]"
                 )
+
+                # Attribute the failing check back to the skill that mounted
+                # it, so the agent can self-recover without bubbling to user.
+                owner_skill = None
+                if self._skill_check_manager is not None:
+                    try:
+                        owner_skill = self._skill_check_manager.owner_of(check)
+                    except Exception:
+                        owner_skill = None
+
+                error_lines = [f"Precondition failed: {desc}"]
+                if owner_skill is not None:
+                    error_lines.append(
+                        f"This check was mounted by skill '{owner_skill}'."
+                    )
+                    error_lines.append(
+                        "Recovery: if this skill's guard is not relevant to "
+                        "your current task, call "
+                        f"unload_skill(name=\"{owner_skill}\") to lift it; "
+                        "otherwise adjust the command to satisfy the check. "
+                        "This is recoverable — do not ask the user unless "
+                        "the intent itself is ambiguous."
+                    )
+                error_text = "\n".join(error_lines)
+
                 await ctx.transition(
                     ActionState.ABORTED,
                     reason=f"Precondition failed: {desc}",
@@ -832,7 +861,7 @@ class LifecycleGateMiddleware(Middleware):
                     call_id=call.id,
                     tool_name=call.tool_name,
                     success=False,
-                    error=f"Precondition failed: {desc}",
+                    error=error_text,
                     failure_type="execution_error",
                 )
                 record.result = result

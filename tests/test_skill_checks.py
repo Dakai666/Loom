@@ -267,6 +267,127 @@ class TestSkillCheckManagerAutoUnmount:
 
 
 # ---------------------------------------------------------------------------
+# Harness invariant: activate() as pure lifecycle event  (Issue #184)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillCheckManagerActivate:
+    """
+    The harness must maintain the invariant: ``active_skill`` always
+    reflects the most recently loaded skill, even when that skill declares
+    no precondition checks.  Without this, loading a skill-with-checks
+    followed by a skill-without-checks leaves the first skill's checks
+    stranded on tool definitions.
+    """
+
+    def test_activate_without_checks_unmounts_prior(self):
+        """
+        Issue #184 core bug: load_skill(skill_a_with_checks) →
+        load_skill(skill_b_no_checks) must clear skill_a's checks.
+        """
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        refs_a = [SkillPreconditionRef(
+            ref="checks.fn_a",
+            applies_to=["run_bash"],
+            description="Check from A",
+        )]
+
+        manager.mount("skill_a", refs_a, {"checks.fn_a": _always_pass})
+        assert len(registry.get("run_bash").precondition_checks) == 1
+        assert manager.active_skill == "skill_a"
+
+        # skill_b declares no precondition_checks → activate() is the only
+        # signal the manager receives.  It must still clear skill_a.
+        manager.activate("skill_b")
+
+        assert len(registry.get("run_bash").precondition_checks) == 0
+        assert manager.active_skill == "skill_b"
+        assert manager.mounted_skills() == []
+
+    def test_activate_same_skill_is_noop(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        refs = [SkillPreconditionRef(
+            ref="checks.fn",
+            applies_to=["run_bash"],
+            description="Check",
+        )]
+        manager.mount("skill_a", refs, {"checks.fn": _always_pass})
+
+        # Re-activating the currently active skill must not clear its checks
+        manager.activate("skill_a")
+
+        assert len(registry.get("run_bash").precondition_checks) == 1
+        assert manager.active_skill == "skill_a"
+
+    def test_activate_keep_existing(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        refs_a = [SkillPreconditionRef(
+            ref="checks.fn_a",
+            applies_to=["run_bash"],
+            description="A",
+        )]
+        manager.mount("skill_a", refs_a, {"checks.fn_a": _always_pass})
+
+        manager.activate("skill_b", keep_existing=True)
+
+        # skill_a's checks remain; only active_skill pointer moves
+        assert len(registry.get("run_bash").precondition_checks) == 1
+        assert manager.active_skill == "skill_b"
+        assert "skill_a" in manager.mounted_skills()
+
+    def test_activate_from_empty(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        assert manager.active_skill is None
+        manager.activate("skill_a")
+        assert manager.active_skill == "skill_a"
+
+
+class TestSkillCheckManagerOwnerOf:
+    """Reverse lookup: which skill mounted a given check function."""
+
+    def test_owner_of_mounted_check(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        refs = [SkillPreconditionRef(
+            ref="checks.fn",
+            applies_to=["run_bash"],
+            description="Check",
+        )]
+        manager.mount("pet-cat", refs, {"checks.fn": _always_fail})
+
+        assert manager.owner_of(_always_fail) == "pet-cat"
+
+    def test_owner_of_unknown_check(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        assert manager.owner_of(_always_pass) is None
+
+    def test_owner_of_after_unmount(self):
+        registry = _make_registry_with_tools("run_bash")
+        manager = SkillCheckManager(registry)
+
+        refs = [SkillPreconditionRef(
+            ref="checks.fn",
+            applies_to=["run_bash"],
+            description="Check",
+        )]
+        manager.mount("skill_a", refs, {"checks.fn": _always_fail})
+        manager.unmount("skill_a")
+
+        assert manager.owner_of(_always_fail) is None
+
+
+# ---------------------------------------------------------------------------
 # Callable resolution
 # ---------------------------------------------------------------------------
 
