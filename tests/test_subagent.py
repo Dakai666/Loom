@@ -328,3 +328,236 @@ class TestSubAgentFailureContext:
         assert result.last_tool_error == "simulated failure for test"
         assert result.partial_output is not None
         assert "only attempt" in result.partial_output
+
+
+def _make_named_failing_tool(name: str) -> ToolDefinition:
+    """Like _make_failing_tool but with a configurable name (for tool_loop tests)."""
+
+    async def _always_fail(call: ToolCall) -> ToolResult:
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=False, error=f"{name} simulated failure",
+            failure_type="execution_error",
+        )
+
+    return ToolDefinition(
+        name=name,
+        description=f"Test tool {name} that always fails.",
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability(0),
+        input_schema={"type": "object", "properties": {}},
+        executor=_always_fail,
+        tags=["test"],
+    )
+
+
+def _tool_use_response_for(tool_name: str, call_id: str, preamble_text: str) -> LLMResponse:
+    """Variant of _tool_use_response that targets a specific tool name."""
+    return LLMResponse(
+        text=None,
+        tool_uses=[ToolUse(id=call_id, name=tool_name, args={})],
+        stop_reason="tool_use",
+        raw_message={
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": preamble_text},
+                {"type": "tool_use", "id": call_id, "name": tool_name, "input": {}},
+            ],
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+    )
+
+
+def _tool_use_response_no_text(call_id: str) -> LLMResponse:
+    """Tool call with no free-text preamble — used for no_progress classification."""
+    return LLMResponse(
+        text=None,
+        tool_uses=[ToolUse(id=call_id, name="always_fail", args={})],
+        stop_reason="tool_use",
+        raw_message={
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": call_id, "name": "always_fail", "input": {}},
+            ],
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "always_fail", "arguments": "{}"},
+                }
+            ],
+        },
+    )
+
+
+class TestSubAgentFailureCodes:
+    """Regression tests for Issue #193 P1 — failure_code / recovery_suggestion / error_context."""
+
+    async def test_tool_loop_detected_on_three_consecutive_same_tool_failures(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response("c1", "try 1"),
+            _tool_use_response("c2", "try 2"),
+            _tool_use_response("c3", "try 3"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Task.",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=3,
+                agent_id="sub-loop",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is False
+        assert result.failure_code == "tool_loop"
+        assert "always_fail" in (result.recovery_suggestion or "")
+        assert result.error_context["stuck_tool"] == "always_fail"
+        assert result.error_context["max_consecutive_failures"] == 3
+        assert result.error_context["tool_failure_counts"] == {"always_fail": 3}
+
+    async def test_max_turns_partial_when_failures_not_consecutive(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Alternating failures across two tools → no single tool stuck, partial output present."""
+        registry = ToolRegistry()
+        registry.register(_make_named_failing_tool("tool_a"))
+        registry.register(_make_named_failing_tool("tool_b"))
+        router = _FakeRouter([
+            _tool_use_response_for("tool_a", "c1", "trying A"),
+            _tool_use_response_for("tool_b", "c2", "trying B"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Task.",
+                model="gpt-test",
+                allowed_tools=["tool_a", "tool_b"],
+                max_turns=2,
+                agent_id="sub-partial",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is False
+        assert result.failure_code == "max_turns_partial"
+        assert result.partial_output is not None
+        assert "trying A" in result.partial_output
+        assert "trying B" in result.partial_output
+        assert result.error_context["stuck_tool"] is None
+        assert result.error_context["max_consecutive_failures"] == 1
+        assert result.error_context["tool_failure_counts"] == {"tool_a": 1, "tool_b": 1}
+        assert "narrower scope" in (result.recovery_suggestion or "")
+
+    async def test_max_turns_no_progress_when_no_text_captured(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Tool calls with no free-text preamble → partial_output empty → no_progress code."""
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response_no_text("c1"),
+            _tool_use_response_no_text("c2"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Task.",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=2,
+                agent_id="sub-noprogress",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is False
+        assert result.partial_output is None
+        # Two consecutive same-tool failures is < 3 → not tool_loop; empty partial → no_progress.
+        assert result.failure_code == "max_turns_no_progress"
+        assert "infeasible" in (result.recovery_suggestion or "")
+        assert result.error_context["max_consecutive_failures"] == 2
+        assert result.error_context["stuck_tool"] is None
+
+    async def test_failure_code_in_scratchpad_payload(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Scratchpad JSON must include the new P1 fields alongside P0 context."""
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response("c1", "a"),
+            _tool_use_response("c2", "b"),
+            _tool_use_response("c3", "c"),
+        ])
+        scratchpad = Scratchpad()
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Task.",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=3,
+                agent_id="sub-sp",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+            scratchpad=scratchpad,
+        )
+
+        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}"))
+        assert payload["failure_code"] == "tool_loop"
+        assert "always_fail" in payload["recovery_suggestion"]
+        assert payload["error_context"]["stuck_tool"] == "always_fail"
+        assert payload["error_context"]["max_consecutive_failures"] == 3
