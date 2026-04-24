@@ -23,8 +23,10 @@ from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.platform.cli.tools import (
     _verify_run_bash,
+    _verify_spawn_agent,
     make_filesystem_tools,
     make_memorize_tool,
+    make_task_done_tool,
 )
 
 
@@ -255,3 +257,204 @@ class TestMemorizeVerifier:
         verdict = await tool.post_validator(call, fake_result)
         assert verdict.passed is False
         assert verdict.signal == "key_not_found"
+
+
+class TestSpawnAgentVerifier:
+    """spawn_agent post_validator catches hollow successes — 0 turns or
+    near-empty output despite success=True (Issue #196, PR #198 review)."""
+
+    async def test_passes_on_healthy_subagent_result(self) -> None:
+        result = ToolResult(
+            call_id="c1", tool_name="spawn_agent",
+            success=True,
+            output="[sub-agent sub-abc] 5 turn(s), 3 tool call(s)\n\n"
+                   "The analysis found three relevant patterns in the codebase...",
+            metadata={
+                "subagent_agent_id": "sub-abc",
+                "subagent_turns_used": 5,
+                "subagent_tool_calls": 3,
+                "subagent_output_len": 250,
+            },
+        )
+        verdict = await _verify_spawn_agent(
+            _call("spawn_agent", task="analyze"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_fails_on_zero_turns_executed(self) -> None:
+        result = ToolResult(
+            call_id="c1", tool_name="spawn_agent",
+            success=True,
+            output="[sub-agent sub-abc] 0 turn(s), 0 tool call(s)\n\nok",
+            metadata={
+                "subagent_agent_id": "sub-abc",
+                "subagent_turns_used": 0,
+                "subagent_tool_calls": 0,
+                "subagent_output_len": 2,
+            },
+        )
+        verdict = await _verify_spawn_agent(
+            _call("spawn_agent", task="analyze"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "no_execution"
+
+    async def test_fails_on_suspiciously_short_output(self) -> None:
+        result = ToolResult(
+            call_id="c1", tool_name="spawn_agent",
+            success=True,
+            output="[sub-agent sub-abc] 4 turn(s), 2 tool call(s)\n\ndone",
+            metadata={
+                "subagent_agent_id": "sub-abc",
+                "subagent_turns_used": 4,
+                "subagent_tool_calls": 2,
+                "subagent_output_len": 4,
+            },
+        )
+        verdict = await _verify_spawn_agent(
+            _call("spawn_agent", task="analyze"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "empty_output"
+
+    async def test_passes_when_metadata_absent(self) -> None:
+        """Defensive: if metadata is missing for some reason, don't false-
+        positive — we'd rather miss a true failure than block legitimate ones."""
+        result = ToolResult(
+            call_id="c1", tool_name="spawn_agent",
+            success=True, output="some output",
+            metadata={},
+        )
+        verdict = await _verify_spawn_agent(
+            _call("spawn_agent", task="analyze"), result,
+        )
+        assert verdict.passed is True
+
+
+@pytest_asyncio.fixture
+async def task_manager():
+    """Build a TaskListManager with a single-node list for validator tests."""
+    from loom.core.tasks.manager import TaskListManager
+
+    manager = TaskListManager(session_id="test-session")
+    manager.create_list([{"id": "n1", "content": "primary task"}])
+    yield manager
+
+
+class TestTaskDoneVerifier:
+    """task_done post_validator catches TaskList state desync —
+    executor reported success but internal state disagrees (PR #198 review)."""
+
+    async def test_passes_on_actual_completion(self, task_manager) -> None:
+        tool = make_task_done_tool(task_manager)
+        task_manager.mark_in_progress("n1")
+
+        call = ToolCall(
+            id="c1", tool_name="task_done",
+            args={"node_id": "n1", "result": "finished successfully"},
+            trust_level=TrustLevel.SAFE, session_id="s",
+        )
+        result = await tool.executor(call)
+        assert result.success
+
+        verdict = await tool.post_validator(call, result)
+        assert verdict.passed is True
+
+    async def test_passes_on_actual_failure_marking(self, task_manager) -> None:
+        """failed path: task_done with error arg should leave node in FAILED."""
+        tool = make_task_done_tool(task_manager)
+        task_manager.mark_in_progress("n1")
+
+        call = ToolCall(
+            id="c1", tool_name="task_done",
+            args={"node_id": "n1", "error": "tool error"},
+            trust_level=TrustLevel.SAFE, session_id="s",
+        )
+        result = await tool.executor(call)
+        assert result.success  # tool succeeded even though node is FAILED
+
+        verdict = await tool.post_validator(call, result)
+        assert verdict.passed is True
+
+    async def test_fails_when_node_does_not_exist(self, task_manager) -> None:
+        """Simulate the state-desync pathology: fabricated result pointing
+        at a non-existent node_id."""
+        tool = make_task_done_tool(task_manager)
+        call = ToolCall(
+            id="c1", tool_name="task_done",
+            args={"node_id": "phantom-id", "result": "fabricated"},
+            trust_level=TrustLevel.SAFE, session_id="s",
+        )
+        fake_result = ToolResult(
+            call_id="c1", tool_name="task_done",
+            success=True, output="fake",
+        )
+        verdict = await tool.post_validator(call, fake_result)
+        assert verdict.passed is False
+        assert verdict.signal == "task_node_missing"
+
+    async def test_fails_when_node_status_disagrees(self, task_manager) -> None:
+        """Node exists but not in expected terminal state — the classic
+        state-desync case."""
+        tool = make_task_done_tool(task_manager)
+        # Deliberately DON'T mark n1 completed — leave it PENDING
+        call = ToolCall(
+            id="c1", tool_name="task_done",
+            args={"node_id": "n1", "result": "fabricated completion"},
+            trust_level=TrustLevel.SAFE, session_id="s",
+        )
+        fake_result = ToolResult(
+            call_id="c1", tool_name="task_done",
+            success=True, output="fake",
+        )
+        verdict = await tool.post_validator(call, fake_result)
+        assert verdict.passed is False
+        assert verdict.signal == "task_state_desync"
+        assert "pending" in (verdict.reason or "").lower()
+
+
+class TestMemorizeDoubleFailureEdgeCase:
+    """PR #198 review — pin the correct behavior when both post_validator
+    AND rollback_fn fire: the returned result must remain failed, regardless
+    of whether rollback itself succeeds."""
+
+    async def test_rollback_success_does_not_mask_semantic_failure(
+        self, memory_facade: MemoryFacade,
+    ) -> None:
+        """Setup: memorize claims success but readback fails (phantom key).
+        LifecycleMiddleware should run rollback_fn, which may succeed (or not),
+        but the final returned ToolResult must stay success=False."""
+        from loom.core.harness.middleware import (
+            LifecycleMiddleware, MiddlewarePipeline,
+        )
+        from loom.core.harness.registry import ToolRegistry
+
+        tool = make_memorize_tool(memory_facade)
+
+        # Wrap executor so it always produces a "phantom" success — the
+        # validator will fail, exercising the validator+rollback path.
+        async def phantom_executor(call: ToolCall) -> ToolResult:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True,
+                output="Memorized: 'nonexistent:key'",
+                metadata={"_memorized_key": "nonexistent:key"},
+            )
+
+        reg = ToolRegistry()
+        reg.register(tool)
+        pipeline = MiddlewarePipeline([LifecycleMiddleware(registry=reg)])
+
+        call = ToolCall(
+            id="c1", tool_name="memorize",
+            args={"key": "nonexistent:key", "value": "v"},
+            trust_level=TrustLevel.GUARDED, session_id="s",
+        )
+        result = await pipeline.execute(call, phantom_executor)
+
+        # Critical: validator failure → rollback → result stays failed.
+        assert result.success is False
+        assert result.failure_type == "semantic_failure"
+        assert result.metadata.get("rolled_back") is True
+        # The rollback's own success/failure must not leak into `success`.
+        assert "key_not_found" in str(result.metadata.get("verifier_signal") or "")

@@ -2259,6 +2259,38 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     )
 
 
+async def _verify_spawn_agent(call: ToolCall, result: ToolResult) -> VerifierResult:
+    """Catch hollow sub-agent successes (Issue #196 Phase 1, PR #198 review).
+
+    spawn_agent's failure path already surfaces rich context via #192/#193,
+    but its *success* path can still be pathological — zero executed turns,
+    near-empty output. This validator checks structured signals stashed in
+    metadata by the spawn_agent executor, not the output string.
+    """
+    meta = result.metadata or {}
+    turns = meta.get("subagent_turns_used", -1)
+    output_len = meta.get("subagent_output_len", -1)
+
+    if turns == 0:
+        return VerifierResult(
+            passed=False,
+            reason="Sub-agent reported success but executed 0 turns — "
+                   "the task likely wasn't attempted.",
+            signal="no_execution",
+        )
+    # 50 chars is a deliberate floor — shorter than a typical one-sentence
+    # reply. Legitimate sub-agents answering simple questions exceed this;
+    # suspiciously empty returns sit well below.
+    if 0 <= output_len < 50:
+        return VerifierResult(
+            passed=False,
+            reason=f"Sub-agent output suspiciously short ({output_len} chars) "
+                   f"despite {turns} turn(s) — likely didn't complete the task.",
+            signal="empty_output",
+        )
+    return VerifierResult(passed=True)
+
+
 def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
     """Return a GUARDED tool that spawns an ephemeral sub-agent for a bounded task."""
     from loom.core.agent.subagent import SubAgentConfig, run_subagent
@@ -2309,8 +2341,16 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 f"[sub-agent {result.agent_id}] "
                 f"{result.turns_used} turn(s), {result.tool_calls} tool call(s)\n\n"
             )
+            # Surface structured signals for _verify_spawn_agent (Issue #196).
+            metadata = {
+                "subagent_agent_id": result.agent_id,
+                "subagent_turns_used": result.turns_used,
+                "subagent_tool_calls": result.tool_calls,
+                "subagent_output_len": len(result.output or ""),
+            }
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output=header + result.output)
+                              success=True, output=header + result.output,
+                              metadata=metadata)
         else:
             # Issue #192 P0 / #193 P1: attach failure context, code, and
             # recovery hint so the parent can choose a next action without
@@ -2373,6 +2413,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         impact_scope="agent",
         scope_descriptions=["spawns one sub-agent"],
         scope_resolver=_spawn_agent_resolver,
+        post_validator=_verify_spawn_agent,
     )
 
 
@@ -2624,6 +2665,44 @@ def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
     from loom.core.tasks.tasklist import TaskStatus
     from loom.core.tasks.manager import SHORT_THRESHOLD
 
+    async def _verify_task_done(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """State-desync check (Issue #196 Phase 1, PR #198 review).
+
+        task_done is TaskList's most trusted invariant — it asserts a node
+        reached a terminal state. If the executor reports success but the
+        TaskList internal state disagrees, every downstream decision drifts.
+
+        This validator reads back the node status to confirm the claim.
+        """
+        node_id = call.args.get("node_id", "").strip()
+        if not node_id or manager.tasklist is None:
+            return VerifierResult(passed=True)
+        try:
+            node = manager.tasklist.get(node_id)
+        except Exception as exc:
+            # Don't block on validator infra failure — downgrade to pass.
+            _log.warning("task_done validator lookup failed: %s", exc)
+            return VerifierResult(passed=True)
+        if node is None:
+            return VerifierResult(
+                passed=False,
+                reason=f"task_done reported success but node {node_id!r} "
+                       f"no longer exists in the TaskList.",
+                signal="task_node_missing",
+            )
+        error_text = call.args.get("error")
+        expected_status = TaskStatus.FAILED if error_text else TaskStatus.COMPLETED
+        if node.status != expected_status:
+            return VerifierResult(
+                passed=False,
+                reason=(
+                    f"task_done reported success but node {node_id!r} status "
+                    f"is {node.status.value!r}, expected {expected_status.value!r}."
+                ),
+                signal="task_state_desync",
+            )
+        return VerifierResult(passed=True)
+
     async def _task_done(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
         if not node_id:
@@ -2731,6 +2810,7 @@ def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
         executor=_task_done,
         tags=["task", "done"],
         impact_scope="agent",
+        post_validator=_verify_task_done,
     )
 
 
