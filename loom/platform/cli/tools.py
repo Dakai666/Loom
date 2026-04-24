@@ -2122,6 +2122,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 parent_session_id=parent_session.session_id,
                 workspace=parent_session.workspace,
                 parent_grants=parent_session.perm.grants,
+                scratchpad=getattr(parent_session, "_scratchpad", None),
             )
         except Exception as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -2136,8 +2137,20 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=True, output=header + result.output)
         else:
+            # Issue #192 P0: attach failure context hint so the parent can
+            # decide whether to read the scratchpad ref for full diagnostics.
+            parts = [result.error or "Sub-agent failed"]
+            if result.last_tool_name:
+                parts.append(
+                    f"last_tool={result.last_tool_name}"
+                    + (f" error={result.last_tool_error!r}" if result.last_tool_error else "")
+                )
+            parts.append(
+                f"Full failure context at scratchpad ref: subagent_failure:{result.agent_id} "
+                f"(read via scratchpad_read)."
+            )
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=result.error or "Sub-agent failed",
+                              success=False, error=" | ".join(parts),
                               failure_type="execution_error")
 
     return ToolDefinition(

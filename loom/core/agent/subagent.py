@@ -49,6 +49,12 @@ class SubAgentResult:
     turns_used: int
     tool_calls: int
     error: str | None = None
+    # Failure context (Issue #192 P0) — populated when success=False so the
+    # parent agent can diagnose without re-running. Scratchpad ref
+    # "subagent_failure:<agent_id>" holds the full structured trace.
+    last_tool_name: str | None = None
+    last_tool_error: str | None = None
+    partial_output: str | None = None
 
 
 async def run_subagent(
@@ -62,6 +68,7 @@ async def run_subagent(
     parent_session_id: str,
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
+    scratchpad: Any = None,
 ) -> SubAgentResult:
     """
     Run a sub-agent to completion and return a SubAgentResult.
@@ -198,6 +205,9 @@ async def run_subagent(
     turns_used = 0
     total_tool_calls = 0
     final_output = ""
+    last_tool_name: str | None = None
+    last_tool_error: str | None = None
+    assistant_text_trail = ""  # Accumulated free text from assistant turns (for partial_output)
 
     # ── Agent loop ────────────────────────────────────────────────────────────
     while turns_used < config.max_turns:
@@ -218,14 +228,28 @@ async def run_subagent(
 
         messages.append(response.raw_message)
 
+        # Accumulate free text from this assistant message (even during tool_use
+        # turns it may contain a preamble). Used to populate partial_output on
+        # failure so the parent sees what the agent was thinking.
+        raw = response.raw_message
+        raw_content = raw.get("content")
+        if isinstance(raw_content, str):
+            if raw_content:
+                assistant_text_trail += raw_content + "\n"
+        elif isinstance(raw_content, list):
+            for block in raw_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text:
+                        assistant_text_trail += text + "\n"
+
         if response.stop_reason == "end_turn":
             turns_used += 1
-            raw = response.raw_message
-            if isinstance(raw.get("content"), str):
-                final_output = raw["content"]
-            elif isinstance(raw.get("content"), list):
+            if isinstance(raw_content, str):
+                final_output = raw_content
+            elif isinstance(raw_content, list):
                 final_output = " ".join(
-                    b.get("text", "") for b in raw["content"]
+                    b.get("text", "") for b in raw_content
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
             break
@@ -257,6 +281,9 @@ async def run_subagent(
                     result.duration_ms = (time.monotonic() - ts) * 1000
 
                 tool_output = str(result.output) if result.success else (result.error or "")
+                if not result.success:
+                    last_tool_name = tu.name
+                    last_tool_error = result.error or tool_output or "(no error message)"
                 messages.append(
                     router.format_tool_result(config.model, tu.id, tool_output, result.success)
                 )
@@ -264,13 +291,24 @@ async def run_subagent(
             break
 
     if turns_used >= config.max_turns and not final_output:
+        partial = assistant_text_trail.strip()
+        partial_output = partial[-2000:] if partial else None
+        error_msg = f"Sub-agent reached max_turns limit ({config.max_turns}) without completing."
+        _write_failure_scratchpad(
+            scratchpad, agent_id, turns_used, total_tool_calls,
+            config.max_turns, last_tool_name, last_tool_error,
+            partial_output, error_msg,
+        )
         return SubAgentResult(
             success=False,
             output="",
             agent_id=agent_id,
             turns_used=turns_used,
             tool_calls=total_tool_calls,
-            error=f"Sub-agent reached max_turns limit ({config.max_turns}) without completing.",
+            error=error_msg,
+            last_tool_name=last_tool_name,
+            last_tool_error=last_tool_error,
+            partial_output=partial_output,
         )
 
     return SubAgentResult(
@@ -280,3 +318,41 @@ async def run_subagent(
         turns_used=turns_used,
         tool_calls=total_tool_calls,
     )
+
+
+def _write_failure_scratchpad(
+    scratchpad: Any,
+    agent_id: str,
+    turns_used: int,
+    tool_calls: int,
+    max_turns: int,
+    last_tool_name: str | None,
+    last_tool_error: str | None,
+    partial_output: str | None,
+    error: str,
+) -> None:
+    """Write sub-agent failure context to scratchpad if available.
+
+    Ref format: ``subagent_failure:<agent_id>``. Parent agent can read via
+    scratchpad_read to recover partial context when spawn_agent returns an
+    error. Silent no-op if no scratchpad is provided.
+    """
+    if scratchpad is None:
+        return
+    import json
+    ref = f"subagent_failure:{agent_id}"
+    payload = {
+        "agent_id": agent_id,
+        "turns_used": turns_used,
+        "tool_calls": tool_calls,
+        "max_turns": max_turns,
+        "last_tool_name": last_tool_name,
+        "last_tool_error": last_tool_error,
+        "partial_output": partial_output,
+        "error": error,
+    }
+    try:
+        scratchpad.write(ref, json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        # Scratchpad write must never mask the real failure — swallow.
+        pass
