@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from loom.core.harness.middleware import ToolCall, ToolResult
+from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
 from loom.core.security.self_termination_guard import SelfTerminationGuard
@@ -333,6 +333,43 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
 
+    async def _verify_write_file(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """Re-read the written file and confirm its content matches (Issue #196).
+
+        Catches cases where the write silently produced a different result
+        than intended — truncated payloads, encoding issues, wrong path
+        resolution masked by a pre-existing file.
+        """
+        resolved = result.metadata.get("_resolved_path", "")
+        path = Path(resolved) if resolved else _resolve_workspace_path(
+            call.args.get("path", ""), workspace
+        )
+        expected = call.args.get("content", "")
+        if not path.exists():
+            return VerifierResult(
+                passed=False,
+                reason=f"write_file reported success but {path} does not exist.",
+                signal="file_missing",
+            )
+        try:
+            actual = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return VerifierResult(
+                passed=False,
+                reason=f"write_file reported success but file is unreadable: {exc}",
+                signal="file_unreadable",
+            )
+        if actual != expected:
+            return VerifierResult(
+                passed=False,
+                reason=(
+                    f"write_file roundtrip mismatch: wrote {len(expected)} chars, "
+                    f"read back {len(actual)} chars."
+                ),
+                signal="content_mismatch",
+            )
+        return VerifierResult(passed=True)
+
     async def _write_file_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
         """Restore original file content (or delete if newly created)."""
         resolved = result.metadata.get("_resolved_path", "")
@@ -414,6 +451,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             tags=["filesystem", "write"],
             impact_scope="filesystem",
             rollback_fn=_write_file_rollback,
+            post_validator=_verify_write_file,
             preconditions=["target directory must be writable"],
             scope_descriptions=["writes under requested workspace path"],
             scope_resolver=_make_write_file_resolver(workspace),
@@ -445,6 +483,113 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
 # ------------------------------------------------------------------
 
 from loom.core.harness.registry import ToolDefinition
+
+
+# ── run_bash semantic verification (Issue #196) ────────────────────────────
+# run_bash's `success=True` comes from `exit_code==0`, but many tools silently
+# exit 0 while their output screams failure. This validator catches the common
+# cases without false-positiving on benign commands that happen to mention
+# error-shaped strings (grep, cat, echo).
+
+# Patterns picked for very low false-positive rate. Each checks for markers
+# that almost exclusively appear in genuine failure output.
+
+# Python traceback — the "most recent call last" line rarely appears outside
+# actual crashes. Pattern matches the line itself, not just the word "error".
+_PY_TRACEBACK_PATTERN = re.compile(
+    r"^\s*Traceback \(most recent call last\):", re.MULTILINE
+)
+
+# pytest summary: "=== 1 failed, 3 passed in 0.12s ===" / "=== 2 failed in ..."
+_PYTEST_FAILED_PATTERN = re.compile(
+    r"^=+ .*?(\d+) failed[,\s]", re.MULTILINE
+)
+
+# jest / vitest: "Tests:       2 failed, 5 passed, 7 total"
+_JS_TEST_FAILED_PATTERN = re.compile(
+    r"^Tests:\s+(\d+) failed", re.MULTILINE
+)
+
+# go test failure marker — "--- FAIL:" precedes every failing test.
+_GO_TEST_FAIL_PATTERN = re.compile(r"^--- FAIL:", re.MULTILINE)
+
+# TypeScript compile errors — "error TS1234: ..." is the canonical tsc output
+# format; rarely appears as text outside a compile run.
+_TSC_ERROR_PATTERN = re.compile(r"\berror TS\d{3,5}:", re.MULTILINE)
+
+# Shell command-not-found / ENOENT — the colon-delimited suffix is specific
+# enough to avoid matching e.g. "grep 'command not found'" in a logfile.
+_CMD_NOT_FOUND_PATTERN = re.compile(
+    r": (?:command not found|No such file or directory)$", re.MULTILINE
+)
+
+
+async def _verify_run_bash(call: ToolCall, result: ToolResult) -> VerifierResult:
+    """Post-validator for run_bash: detect silent failures despite exit 0.
+
+    Scans combined stdout+stderr (run_bash merges them) for patterns that
+    strongly indicate the command failed to achieve its purpose even though
+    the shell returned 0 — Python tracebacks, test framework FAILED summaries,
+    tsc error lines, missing commands. Conservative by design: only flags
+    patterns with a very low false-positive rate.
+
+    Returns VerifierResult(passed=False, reason=..., signal=<tag>) on match,
+    VerifierResult(passed=True) otherwise.
+    """
+    output = str(result.output or "")
+    if not output:
+        return VerifierResult(passed=True)
+
+    if _PY_TRACEBACK_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="Command exit=0 but Python traceback detected in output — "
+                   "the interpreter likely caught the exception at top level.",
+            signal="python_traceback",
+        )
+
+    m = _PYTEST_FAILED_PATTERN.search(output)
+    if m:
+        return VerifierResult(
+            passed=False,
+            reason=f"pytest reports {m.group(1)} failing test(s) despite exit=0 "
+                   f"(check the summary line in output).",
+            signal="pytest_failed",
+        )
+
+    m = _JS_TEST_FAILED_PATTERN.search(output)
+    if m:
+        return VerifierResult(
+            passed=False,
+            reason=f"JS test runner reports {m.group(1)} failing test(s) "
+                   f"despite exit=0.",
+            signal="js_test_failed",
+        )
+
+    if _GO_TEST_FAIL_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="go test output contains '--- FAIL:' markers despite exit=0.",
+            signal="go_test_failed",
+        )
+
+    if _TSC_ERROR_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="TypeScript compiler reported errors (error TS####) "
+                   "despite exit=0.",
+            signal="tsc_error",
+        )
+
+    if _CMD_NOT_FOUND_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="Output contains shell 'command not found' / ENOENT — "
+                   "the invoked command may not be installed.",
+            signal="cmd_not_found",
+        )
+
+    return VerifierResult(passed=True)
 
 
 def make_exec_escape_fn(workspace: Path):
@@ -619,6 +764,7 @@ def make_run_bash_tool(
             "scope unknown for pipes, subshells, or variable expansion",
         ],
         scope_resolver=_make_run_bash_resolver(workspace),
+        post_validator=_verify_run_bash,
     )
 
 
@@ -773,6 +919,34 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
                           success=True, output=msg,
                           metadata={"_memorized_key": key})
 
+    async def _verify_memorize(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """Roundtrip check — confirm the memorized key is actually readable (Issue #196).
+
+        The memorize tool has a legitimate "skipped" path (governor rejects
+        lower-trust overwrites) which still returns success=True; that case
+        is not a verifier failure. Only flag when the tool reported writing
+        but the entry isn't retrievable afterward.
+        """
+        key = result.metadata.get("_memorized_key")
+        if not key:
+            # Skipped path or missing metadata — nothing to verify.
+            return VerifierResult(passed=True)
+        try:
+            entry = await memory.semantic.get(key)
+        except Exception as exc:
+            return VerifierResult(
+                passed=False,
+                reason=f"memorize succeeded but readback raised: {exc}",
+                signal="readback_error",
+            )
+        if entry is None:
+            return VerifierResult(
+                passed=False,
+                reason=f"memorize succeeded but key {key!r} is not retrievable.",
+                signal="key_not_found",
+            )
+        return VerifierResult(passed=True)
+
     async def _memorize_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
         """Delete the key that was just memorized."""
         key = result.metadata.get("_memorized_key") or call.args.get("key", "").strip()
@@ -818,6 +992,7 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
         tags=["memory", "write", "memorize"],
         impact_scope="memory",
         rollback_fn=_memorize_rollback,
+        post_validator=_verify_memorize,
     )
 
 
@@ -2084,6 +2259,38 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     )
 
 
+async def _verify_spawn_agent(call: ToolCall, result: ToolResult) -> VerifierResult:
+    """Catch hollow sub-agent successes (Issue #196 Phase 1, PR #198 review).
+
+    spawn_agent's failure path already surfaces rich context via #192/#193,
+    but its *success* path can still be pathological — zero executed turns,
+    near-empty output. This validator checks structured signals stashed in
+    metadata by the spawn_agent executor, not the output string.
+    """
+    meta = result.metadata or {}
+    turns = meta.get("subagent_turns_used", -1)
+    output_len = meta.get("subagent_output_len", -1)
+
+    if turns == 0:
+        return VerifierResult(
+            passed=False,
+            reason="Sub-agent reported success but executed 0 turns — "
+                   "the task likely wasn't attempted.",
+            signal="no_execution",
+        )
+    # 50 chars is a deliberate floor — shorter than a typical one-sentence
+    # reply. Legitimate sub-agents answering simple questions exceed this;
+    # suspiciously empty returns sit well below.
+    if 0 <= output_len < 50:
+        return VerifierResult(
+            passed=False,
+            reason=f"Sub-agent output suspiciously short ({output_len} chars) "
+                   f"despite {turns} turn(s) — likely didn't complete the task.",
+            signal="empty_output",
+        )
+    return VerifierResult(passed=True)
+
+
 def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
     """Return a GUARDED tool that spawns an ephemeral sub-agent for a bounded task."""
     from loom.core.agent.subagent import SubAgentConfig, run_subagent
@@ -2134,8 +2341,16 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 f"[sub-agent {result.agent_id}] "
                 f"{result.turns_used} turn(s), {result.tool_calls} tool call(s)\n\n"
             )
+            # Surface structured signals for _verify_spawn_agent (Issue #196).
+            metadata = {
+                "subagent_agent_id": result.agent_id,
+                "subagent_turns_used": result.turns_used,
+                "subagent_tool_calls": result.tool_calls,
+                "subagent_output_len": len(result.output or ""),
+            }
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output=header + result.output)
+                              success=True, output=header + result.output,
+                              metadata=metadata)
         else:
             # Issue #192 P0 / #193 P1: attach failure context, code, and
             # recovery hint so the parent can choose a next action without
@@ -2198,6 +2413,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         impact_scope="agent",
         scope_descriptions=["spawns one sub-agent"],
         scope_resolver=_spawn_agent_resolver,
+        post_validator=_verify_spawn_agent,
     )
 
 
@@ -2449,6 +2665,44 @@ def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
     from loom.core.tasks.tasklist import TaskStatus
     from loom.core.tasks.manager import SHORT_THRESHOLD
 
+    async def _verify_task_done(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """State-desync check (Issue #196 Phase 1, PR #198 review).
+
+        task_done is TaskList's most trusted invariant — it asserts a node
+        reached a terminal state. If the executor reports success but the
+        TaskList internal state disagrees, every downstream decision drifts.
+
+        This validator reads back the node status to confirm the claim.
+        """
+        node_id = call.args.get("node_id", "").strip()
+        if not node_id or manager.tasklist is None:
+            return VerifierResult(passed=True)
+        try:
+            node = manager.tasklist.get(node_id)
+        except Exception as exc:
+            # Don't block on validator infra failure — downgrade to pass.
+            _log.warning("task_done validator lookup failed: %s", exc)
+            return VerifierResult(passed=True)
+        if node is None:
+            return VerifierResult(
+                passed=False,
+                reason=f"task_done reported success but node {node_id!r} "
+                       f"no longer exists in the TaskList.",
+                signal="task_node_missing",
+            )
+        error_text = call.args.get("error")
+        expected_status = TaskStatus.FAILED if error_text else TaskStatus.COMPLETED
+        if node.status != expected_status:
+            return VerifierResult(
+                passed=False,
+                reason=(
+                    f"task_done reported success but node {node_id!r} status "
+                    f"is {node.status.value!r}, expected {expected_status.value!r}."
+                ),
+                signal="task_state_desync",
+            )
+        return VerifierResult(passed=True)
+
     async def _task_done(call: ToolCall) -> ToolResult:
         node_id = call.args.get("node_id", "").strip()
         if not node_id:
@@ -2556,6 +2810,7 @@ def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
         executor=_task_done,
         tags=["task", "done"],
         impact_scope="agent",
+        post_validator=_verify_task_done,
     )
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
-from .middleware import ToolCall, ToolResult
+from .middleware import ToolCall, ToolResult, VerifierResult
 from .permissions import ToolCapability, TrustLevel
 
 if TYPE_CHECKING:
@@ -57,7 +57,22 @@ class ToolDefinition:
     identically to the Phase 1 lifecycle.
     """
     rollback_fn: Callable[[ToolCall, ToolResult], Awaitable[ToolResult]] | None = None
-    post_validator: Callable[[ToolCall, ToolResult], Awaitable[bool]] | None = None
+    post_validator: Callable[
+        [ToolCall, ToolResult], Awaitable["bool | VerifierResult"]
+    ] | None = None
+    """Semantic verification hook (Issue #196).
+
+    Runs after a tool mechanically succeeds (``result.success=True``). When
+    the returned ``VerifierResult.passed`` (or plain ``bool``) is False, the
+    harness downgrades the tool result to
+    ``success=False, failure_type="semantic_failure"`` and — if
+    ``rollback_fn`` is defined — runs the rollback. The model sees a clear
+    signal that the action didn't achieve its intent and can self-correct.
+
+    Returning plain ``bool`` is supported for backward compatibility; prefer
+    ``VerifierResult(passed=..., reason=...)`` to give the model a
+    human-readable explanation of what went wrong.
+    """
     impact_scope: str = "general"
     """
     Impact scope classification for lifecycle audit (Issue #42).

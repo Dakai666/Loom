@@ -31,6 +31,7 @@ from loom.core.harness.middleware import (
     MiddlewarePipeline,
     ToolCall,
     ToolResult,
+    VerifierResult,
 )
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
@@ -725,6 +726,118 @@ class TestPostValidation:
         assert "rolled back" in result.error
         assert "reverting" in states
         assert "reverted" in states
+
+
+class TestSemanticFailureSurfacing:
+    """Issue #196: post_validator failure must surface semantic_failure to the
+    model even when no rollback_fn is defined. Previously the failure signal
+    was silently committed as success=True."""
+
+    @pytest.mark.asyncio
+    async def test_post_validator_fail_without_rollback_now_surfaces_semantic_failure(self):
+        """The regression being fixed: validator fails + no rollback → used
+        to COMMIT as success; now reports semantic_failure."""
+
+        async def validator(call, result):
+            return False
+
+        tool = ToolDefinition(
+            name="no_rollback", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+            post_validator=validator,
+            # Note: no rollback_fn
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)
+        call = _make_call("no_rollback")
+
+        result = await pipeline.execute(call, _echo_handler)
+        assert result.success is False
+        assert result.failure_type == "semantic_failure"
+        assert "post-validation failed" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_verifier_result_reason_surfaces_to_model(self):
+        """VerifierResult(passed=False, reason="X") → result.error contains X."""
+
+        async def validator(call, result):
+            return VerifierResult(
+                passed=False,
+                reason="pytest reports 3 failing tests despite exit=0",
+                signal="pytest_failed",
+            )
+
+        tool = ToolDefinition(
+            name="tested", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+            post_validator=validator,
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)
+        call = _make_call("tested")
+
+        result = await pipeline.execute(call, _echo_handler)
+        assert result.success is False
+        assert result.failure_type == "semantic_failure"
+        assert "pytest reports 3 failing tests" in (result.error or "")
+        assert result.metadata.get("verifier_signal") == "pytest_failed"
+
+    @pytest.mark.asyncio
+    async def test_verifier_result_with_rollback_also_marks_semantic_failure(self):
+        """VerifierResult+rollback path now uses semantic_failure (was execution_error)."""
+
+        async def validator(call, result):
+            return VerifierResult(
+                passed=False, reason="semantic mismatch detected", signal="mismatch"
+            )
+
+        async def rollback(call, result):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True, output="rolled back",
+            )
+
+        tool = ToolDefinition(
+            name="rollbackable", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+            post_validator=validator,
+            rollback_fn=rollback,
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)
+        call = _make_call("rollbackable")
+
+        result = await pipeline.execute(call, _echo_handler)
+        assert result.success is False
+        assert result.failure_type == "semantic_failure"
+        assert "semantic mismatch detected" in (result.error or "")
+        assert "rolled back" in (result.error or "")
+        assert result.metadata.get("rolled_back") is True
+        assert result.metadata.get("verifier_signal") == "mismatch"
+
+    @pytest.mark.asyncio
+    async def test_legacy_bool_true_still_works(self):
+        """Backward compat: returning True is coerced to VerifierResult(passed=True)."""
+
+        async def validator(call, result):
+            return True
+
+        tool = ToolDefinition(
+            name="legacy_ok", description="",
+            input_schema={}, executor=_echo_handler,
+            trust_level=TrustLevel.SAFE,
+            post_validator=validator,
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)
+        call = _make_call("legacy_ok")
+
+        result = await pipeline.execute(call, _echo_handler)
+        assert result.success is True
+        assert result.failure_type is None
 
 
 # ---------------------------------------------------------------------------
