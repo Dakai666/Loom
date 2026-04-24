@@ -55,7 +55,24 @@ FAILURE_TYPES = {
     "execution_error",   # tool raised an exception at runtime
     "validation_error",  # bad/missing arguments
     "model_error",       # LLM API error during tool-related call
+    "semantic_failure",  # tool mechanically succeeded but post_validator detected
+                         # the action didn't achieve its intent (Issue #196)
 }
+
+
+@dataclass
+class VerifierResult:
+    """Outcome of a ``post_validator`` run (Issue #196).
+
+    Returned by ``ToolDefinition.post_validator`` to signal whether a tool
+    that mechanically succeeded actually achieved its intent. For backward
+    compatibility, post_validator may still return plain ``bool`` — the
+    harness coerces ``True`` to ``VerifierResult(passed=True)`` and
+    ``False`` to ``VerifierResult(passed=False, reason="post-validation failed")``.
+    """
+    passed: bool
+    reason: str | None = None   # populated only when passed=False
+    signal: str | None = None   # optional machine-readable tag (e.g. "pytest_failed")
 
 
 @dataclass
@@ -1158,25 +1175,36 @@ class LifecycleMiddleware(Middleware):
 
         if post_validator is not None and result.success:
             try:
-                validated = await post_validator(call, result)
+                raw_verdict = await post_validator(call, result)
             except Exception as _val_exc:
                 _log.warning(
                     "post_validator for %r raised unexpectedly: %s — treating as passed",
                     call.tool_name, _val_exc,
                 )
-                validated = True
+                raw_verdict = True
 
-            if validated:
+            # Normalize legacy bool return type to VerifierResult (Issue #196).
+            if isinstance(raw_verdict, VerifierResult):
+                verdict = raw_verdict
+            elif raw_verdict is True:
+                verdict = VerifierResult(passed=True)
+            else:
+                verdict = VerifierResult(
+                    passed=False, reason="post-validation failed"
+                )
+
+            if verdict.passed:
                 # OBSERVED → VALIDATED → COMMITTED
                 await ctx.transition(ActionState.VALIDATED)
                 await ctx.transition(ActionState.COMMITTED)
             else:
                 # OBSERVED → VALIDATED (fail) → REVERTING → REVERTED
                 await ctx.transition(ActionState.VALIDATED)
+                reason = verdict.reason or "post-validation failed"
 
                 if rollback_fn is not None:
                     await ctx.transition(
-                        ActionState.REVERTING, reason="post-validation failed",
+                        ActionState.REVERTING, reason=reason,
                     )
                     try:
                         rb_result = await rollback_fn(call, result)
@@ -1189,19 +1217,40 @@ class LifecycleMiddleware(Middleware):
                             error=f"Rollback failed: {exc}",
                         )
                     await ctx.transition(ActionState.REVERTED)
-                    # Modify the result to indicate rollback
+                    # Rolled-back result — still a semantic failure at heart.
                     result = ToolResult(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
                         success=False,
-                        error="Post-validation failed; action rolled back.",
-                        failure_type="execution_error",
+                        error=f"{reason}; action rolled back.",
+                        failure_type="semantic_failure",
                         duration_ms=result.duration_ms,
-                        metadata={**result.metadata, "rolled_back": True},
+                        metadata={
+                            **result.metadata,
+                            "rolled_back": True,
+                            "verifier_signal": verdict.signal,
+                        },
                     )
                     record.result = result
                 else:
-                    # No rollback_fn: can't revert → commit anyway
+                    # Issue #196: no rollback doesn't mean ignore the signal.
+                    # Previously this branch silently committed a "success"
+                    # result — the failure signal was lost. Now we surface
+                    # semantic_failure so the model can self-correct.
+                    result = ToolResult(
+                        call_id=result.call_id,
+                        tool_name=result.tool_name,
+                        success=False,
+                        error=reason,
+                        failure_type="semantic_failure",
+                        duration_ms=result.duration_ms,
+                        metadata={
+                            **result.metadata,
+                            "verifier_signal": verdict.signal,
+                            "original_output": result.output,
+                        },
+                    )
+                    record.result = result
                     await ctx.transition(ActionState.COMMITTED)
         else:
             # No post_validator → skip VALIDATED, go directly to COMMITTED

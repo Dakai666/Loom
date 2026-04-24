@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from loom.core.harness.middleware import ToolCall, ToolResult
+from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
 from loom.core.security.self_termination_guard import SelfTerminationGuard
@@ -333,6 +333,43 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
 
+    async def _verify_write_file(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """Re-read the written file and confirm its content matches (Issue #196).
+
+        Catches cases where the write silently produced a different result
+        than intended — truncated payloads, encoding issues, wrong path
+        resolution masked by a pre-existing file.
+        """
+        resolved = result.metadata.get("_resolved_path", "")
+        path = Path(resolved) if resolved else _resolve_workspace_path(
+            call.args.get("path", ""), workspace
+        )
+        expected = call.args.get("content", "")
+        if not path.exists():
+            return VerifierResult(
+                passed=False,
+                reason=f"write_file reported success but {path} does not exist.",
+                signal="file_missing",
+            )
+        try:
+            actual = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return VerifierResult(
+                passed=False,
+                reason=f"write_file reported success but file is unreadable: {exc}",
+                signal="file_unreadable",
+            )
+        if actual != expected:
+            return VerifierResult(
+                passed=False,
+                reason=(
+                    f"write_file roundtrip mismatch: wrote {len(expected)} chars, "
+                    f"read back {len(actual)} chars."
+                ),
+                signal="content_mismatch",
+            )
+        return VerifierResult(passed=True)
+
     async def _write_file_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
         """Restore original file content (or delete if newly created)."""
         resolved = result.metadata.get("_resolved_path", "")
@@ -414,6 +451,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             tags=["filesystem", "write"],
             impact_scope="filesystem",
             rollback_fn=_write_file_rollback,
+            post_validator=_verify_write_file,
             preconditions=["target directory must be writable"],
             scope_descriptions=["writes under requested workspace path"],
             scope_resolver=_make_write_file_resolver(workspace),
@@ -445,6 +483,113 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
 # ------------------------------------------------------------------
 
 from loom.core.harness.registry import ToolDefinition
+
+
+# ── run_bash semantic verification (Issue #196) ────────────────────────────
+# run_bash's `success=True` comes from `exit_code==0`, but many tools silently
+# exit 0 while their output screams failure. This validator catches the common
+# cases without false-positiving on benign commands that happen to mention
+# error-shaped strings (grep, cat, echo).
+
+# Patterns picked for very low false-positive rate. Each checks for markers
+# that almost exclusively appear in genuine failure output.
+
+# Python traceback — the "most recent call last" line rarely appears outside
+# actual crashes. Pattern matches the line itself, not just the word "error".
+_PY_TRACEBACK_PATTERN = re.compile(
+    r"^\s*Traceback \(most recent call last\):", re.MULTILINE
+)
+
+# pytest summary: "=== 1 failed, 3 passed in 0.12s ===" / "=== 2 failed in ..."
+_PYTEST_FAILED_PATTERN = re.compile(
+    r"^=+ .*?(\d+) failed[,\s]", re.MULTILINE
+)
+
+# jest / vitest: "Tests:       2 failed, 5 passed, 7 total"
+_JS_TEST_FAILED_PATTERN = re.compile(
+    r"^Tests:\s+(\d+) failed", re.MULTILINE
+)
+
+# go test failure marker — "--- FAIL:" precedes every failing test.
+_GO_TEST_FAIL_PATTERN = re.compile(r"^--- FAIL:", re.MULTILINE)
+
+# TypeScript compile errors — "error TS1234: ..." is the canonical tsc output
+# format; rarely appears as text outside a compile run.
+_TSC_ERROR_PATTERN = re.compile(r"\berror TS\d{3,5}:", re.MULTILINE)
+
+# Shell command-not-found / ENOENT — the colon-delimited suffix is specific
+# enough to avoid matching e.g. "grep 'command not found'" in a logfile.
+_CMD_NOT_FOUND_PATTERN = re.compile(
+    r": (?:command not found|No such file or directory)$", re.MULTILINE
+)
+
+
+async def _verify_run_bash(call: ToolCall, result: ToolResult) -> VerifierResult:
+    """Post-validator for run_bash: detect silent failures despite exit 0.
+
+    Scans combined stdout+stderr (run_bash merges them) for patterns that
+    strongly indicate the command failed to achieve its purpose even though
+    the shell returned 0 — Python tracebacks, test framework FAILED summaries,
+    tsc error lines, missing commands. Conservative by design: only flags
+    patterns with a very low false-positive rate.
+
+    Returns VerifierResult(passed=False, reason=..., signal=<tag>) on match,
+    VerifierResult(passed=True) otherwise.
+    """
+    output = str(result.output or "")
+    if not output:
+        return VerifierResult(passed=True)
+
+    if _PY_TRACEBACK_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="Command exit=0 but Python traceback detected in output — "
+                   "the interpreter likely caught the exception at top level.",
+            signal="python_traceback",
+        )
+
+    m = _PYTEST_FAILED_PATTERN.search(output)
+    if m:
+        return VerifierResult(
+            passed=False,
+            reason=f"pytest reports {m.group(1)} failing test(s) despite exit=0 "
+                   f"(check the summary line in output).",
+            signal="pytest_failed",
+        )
+
+    m = _JS_TEST_FAILED_PATTERN.search(output)
+    if m:
+        return VerifierResult(
+            passed=False,
+            reason=f"JS test runner reports {m.group(1)} failing test(s) "
+                   f"despite exit=0.",
+            signal="js_test_failed",
+        )
+
+    if _GO_TEST_FAIL_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="go test output contains '--- FAIL:' markers despite exit=0.",
+            signal="go_test_failed",
+        )
+
+    if _TSC_ERROR_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="TypeScript compiler reported errors (error TS####) "
+                   "despite exit=0.",
+            signal="tsc_error",
+        )
+
+    if _CMD_NOT_FOUND_PATTERN.search(output):
+        return VerifierResult(
+            passed=False,
+            reason="Output contains shell 'command not found' / ENOENT — "
+                   "the invoked command may not be installed.",
+            signal="cmd_not_found",
+        )
+
+    return VerifierResult(passed=True)
 
 
 def make_exec_escape_fn(workspace: Path):
@@ -619,6 +764,7 @@ def make_run_bash_tool(
             "scope unknown for pipes, subshells, or variable expansion",
         ],
         scope_resolver=_make_run_bash_resolver(workspace),
+        post_validator=_verify_run_bash,
     )
 
 
@@ -773,6 +919,34 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
                           success=True, output=msg,
                           metadata={"_memorized_key": key})
 
+    async def _verify_memorize(call: ToolCall, result: ToolResult) -> VerifierResult:
+        """Roundtrip check — confirm the memorized key is actually readable (Issue #196).
+
+        The memorize tool has a legitimate "skipped" path (governor rejects
+        lower-trust overwrites) which still returns success=True; that case
+        is not a verifier failure. Only flag when the tool reported writing
+        but the entry isn't retrievable afterward.
+        """
+        key = result.metadata.get("_memorized_key")
+        if not key:
+            # Skipped path or missing metadata — nothing to verify.
+            return VerifierResult(passed=True)
+        try:
+            entry = await memory.semantic.get(key)
+        except Exception as exc:
+            return VerifierResult(
+                passed=False,
+                reason=f"memorize succeeded but readback raised: {exc}",
+                signal="readback_error",
+            )
+        if entry is None:
+            return VerifierResult(
+                passed=False,
+                reason=f"memorize succeeded but key {key!r} is not retrievable.",
+                signal="key_not_found",
+            )
+        return VerifierResult(passed=True)
+
     async def _memorize_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
         """Delete the key that was just memorized."""
         key = result.metadata.get("_memorized_key") or call.args.get("key", "").strip()
@@ -818,6 +992,7 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
         tags=["memory", "write", "memorize"],
         impact_scope="memory",
         rollback_fn=_memorize_rollback,
+        post_validator=_verify_memorize,
     )
 
 
