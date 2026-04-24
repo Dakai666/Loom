@@ -14,6 +14,7 @@ Design principles:
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -339,7 +340,6 @@ def _write_failure_scratchpad(
     """
     if scratchpad is None:
         return
-    import json
     ref = f"subagent_failure:{agent_id}"
     payload = {
         "agent_id": agent_id,
