@@ -432,11 +432,12 @@ class TestSubAgentFailureCodes:
         )
 
         assert result.success is False
+        # Verify the causal signals first, then the classification derived from them.
+        assert result.error_context["tool_failure_counts"] == {"always_fail": 3}
+        assert result.error_context["max_consecutive_failures"] == 3
+        assert result.error_context["stuck_tool"] == "always_fail"
         assert result.failure_code == "tool_loop"
         assert "always_fail" in (result.recovery_suggestion or "")
-        assert result.error_context["stuck_tool"] == "always_fail"
-        assert result.error_context["max_consecutive_failures"] == 3
-        assert result.error_context["tool_failure_counts"] == {"always_fail": 3}
 
     async def test_max_turns_partial_when_failures_not_consecutive(
         self,
@@ -472,13 +473,14 @@ class TestSubAgentFailureCodes:
         )
 
         assert result.success is False
-        assert result.failure_code == "max_turns_partial"
+        # Verify the causal signals first, then the classification derived from them.
         assert result.partial_output is not None
         assert "trying A" in result.partial_output
         assert "trying B" in result.partial_output
-        assert result.error_context["stuck_tool"] is None
-        assert result.error_context["max_consecutive_failures"] == 1
         assert result.error_context["tool_failure_counts"] == {"tool_a": 1, "tool_b": 1}
+        assert result.error_context["max_consecutive_failures"] == 1
+        assert result.error_context["stuck_tool"] is None
+        assert result.failure_code == "max_turns_partial"
         assert "narrower scope" in (result.recovery_suggestion or "")
 
     async def test_max_turns_no_progress_when_no_text_captured(
