@@ -56,6 +56,11 @@ class SubAgentResult:
     last_tool_name: str | None = None
     last_tool_error: str | None = None
     partial_output: str | None = None
+    # Structured failure classification (Issue #193 P1) — lets the parent
+    # switch on failure_code instead of parsing error strings.
+    failure_code: str | None = None
+    recovery_suggestion: str | None = None
+    error_context: dict[str, Any] = field(default_factory=dict)
 
 
 async def run_subagent(
@@ -209,6 +214,12 @@ async def run_subagent(
     last_tool_name: str | None = None
     last_tool_error: str | None = None
     assistant_text_trail = ""  # Accumulated free text from assistant turns (for partial_output)
+    # Issue #193 P1: per-tool failure stats + longest consecutive-failure streak
+    # for the same tool (resets on success or when a different tool is called).
+    tool_failure_counts: dict[str, int] = {}
+    consecutive_failure_tool: str | None = None
+    consecutive_failure_count = 0
+    max_consecutive_failures = 0
 
     # ── Agent loop ────────────────────────────────────────────────────────────
     while turns_used < config.max_turns:
@@ -285,6 +296,18 @@ async def run_subagent(
                 if not result.success:
                     last_tool_name = tu.name
                     last_tool_error = result.error or tool_output or "(no error message)"
+                    tool_failure_counts[tu.name] = tool_failure_counts.get(tu.name, 0) + 1
+                    if consecutive_failure_tool == tu.name:
+                        consecutive_failure_count += 1
+                    else:
+                        consecutive_failure_tool = tu.name
+                        consecutive_failure_count = 1
+                    if consecutive_failure_count > max_consecutive_failures:
+                        max_consecutive_failures = consecutive_failure_count
+                else:
+                    # Reset the streak on any success
+                    consecutive_failure_tool = None
+                    consecutive_failure_count = 0
                 messages.append(
                     router.format_tool_result(config.model, tu.id, tool_output, result.success)
                 )
@@ -294,11 +317,27 @@ async def run_subagent(
     if turns_used >= config.max_turns and not final_output:
         partial = assistant_text_trail.strip()
         partial_output = partial[-2000:] if partial else None
+        stuck_tool = (
+            consecutive_failure_tool if max_consecutive_failures >= 3 else None
+        )
+        failure_code, recovery_suggestion = _classify_failure(
+            partial_output=partial_output,
+            stuck_tool=stuck_tool,
+            stuck_count=max_consecutive_failures,
+        )
+        error_context = {
+            "tool_failure_counts": dict(tool_failure_counts),
+            "max_consecutive_failures": max_consecutive_failures,
+            "stuck_tool": stuck_tool,
+        }
         error_msg = f"Sub-agent reached max_turns limit ({config.max_turns}) without completing."
         _write_failure_scratchpad(
             scratchpad, agent_id, turns_used, total_tool_calls,
             config.max_turns, last_tool_name, last_tool_error,
             partial_output, error_msg,
+            failure_code=failure_code,
+            recovery_suggestion=recovery_suggestion,
+            error_context=error_context,
         )
         return SubAgentResult(
             success=False,
@@ -310,6 +349,9 @@ async def run_subagent(
             last_tool_name=last_tool_name,
             last_tool_error=last_tool_error,
             partial_output=partial_output,
+            failure_code=failure_code,
+            recovery_suggestion=recovery_suggestion,
+            error_context=error_context,
         )
 
     return SubAgentResult(
@@ -318,6 +360,38 @@ async def run_subagent(
         agent_id=agent_id,
         turns_used=turns_used,
         tool_calls=total_tool_calls,
+    )
+
+
+def _classify_failure(
+    *,
+    partial_output: str | None,
+    stuck_tool: str | None,
+    stuck_count: int,
+) -> tuple[str, str]:
+    """Classify a max_turns failure into a code + one-line recovery suggestion.
+
+    Priority: tool_loop (a clear repeating pattern) > partial (task making
+    progress but ran out of room) > no_progress (empty trail, likely
+    infeasible). The three codes are a deliberately small vocabulary so
+    parent agents can reliably switch on them (Issue #193 P1).
+    """
+    if stuck_tool is not None:
+        return (
+            "tool_loop",
+            f"Sub-agent called '{stuck_tool}' {stuck_count} times consecutively without "
+            f"success — try alternative tools or give more explicit task guidance.",
+        )
+    if partial_output:
+        return (
+            "max_turns_partial",
+            "Partial result captured in scratchpad — consider resuming with a narrower "
+            "scope or a higher max_turns.",
+        )
+    return (
+        "max_turns_no_progress",
+        "No progress detected — task may be infeasible with given tools; consider "
+        "splitting the task or expanding allowed_tools.",
     )
 
 
@@ -331,6 +405,10 @@ def _write_failure_scratchpad(
     last_tool_error: str | None,
     partial_output: str | None,
     error: str,
+    *,
+    failure_code: str | None = None,
+    recovery_suggestion: str | None = None,
+    error_context: dict[str, Any] | None = None,
 ) -> None:
     """Write sub-agent failure context to scratchpad if available.
 
@@ -350,6 +428,9 @@ def _write_failure_scratchpad(
         "last_tool_error": last_tool_error,
         "partial_output": partial_output,
         "error": error,
+        "failure_code": failure_code,
+        "recovery_suggestion": recovery_suggestion,
+        "error_context": error_context or {},
     }
     try:
         scratchpad.write(ref, json.dumps(payload, ensure_ascii=False, indent=2))

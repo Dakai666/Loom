@@ -2137,14 +2137,18 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=True, output=header + result.output)
         else:
-            # Issue #192 P0: attach failure context hint so the parent can
-            # decide whether to read the scratchpad ref for full diagnostics.
-            parts = [result.error or "Sub-agent failed"]
+            # Issue #192 P0 / #193 P1: attach failure context, code, and
+            # recovery hint so the parent can choose a next action without
+            # parsing strings. Full trace at scratchpad_read(subagent_failure:...).
+            prefix = f"[{result.failure_code}] " if result.failure_code else ""
+            parts = [prefix + (result.error or "Sub-agent failed")]
             if result.last_tool_name:
                 parts.append(
                     f"last_tool={result.last_tool_name}"
                     + (f" error={result.last_tool_error!r}" if result.last_tool_error else "")
                 )
+            if result.recovery_suggestion:
+                parts.append(f"hint: {result.recovery_suggestion}")
             parts.append(
                 f"Full failure context at scratchpad ref: subagent_failure:{result.agent_id} "
                 f"(read via scratchpad_read)."
