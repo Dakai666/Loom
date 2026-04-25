@@ -22,11 +22,13 @@ from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.platform.cli.tools import (
+    _verify_fetch_url,
     _verify_run_bash,
     _verify_spawn_agent,
     make_filesystem_tools,
     make_memorize_tool,
     make_task_done_tool,
+    sanitize_untrusted_text,
 )
 
 
@@ -411,6 +413,169 @@ class TestTaskDoneVerifier:
         assert verdict.passed is False
         assert verdict.signal == "task_state_desync"
         assert "pending" in (verdict.reason or "").lower()
+
+
+def _fetch_url_output(title: str, body: str) -> str:
+    """Build an output string shaped like fetch_url's HTML path:
+    sanitize_untrusted_text(f"Title: {title}\\n\\n{body}")."""
+    raw = f"Title: {title}\n\n{body}" if title else body
+    return sanitize_untrusted_text(raw)
+
+
+class TestFetchUrlVerifier:
+    """fetch_url post_validator catches HTTP-2xx silent failures —
+    error-page templates, CDN challenges, thin SPA responses (Issue #199)."""
+
+    async def test_passes_on_normal_article(self) -> None:
+        """Happy path: proper article with title + substantial body."""
+        output = _fetch_url_output(
+            "Introduction to Python Generators",
+            "Python generators are a powerful feature that let you iterate "
+            "over potentially large datasets without loading them all into "
+            "memory. They use the yield keyword to produce values lazily, "
+            "pausing execution between each call. This is especially useful "
+            "when processing files or streams.",
+        )
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://example.com/py"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_passes_on_json_response(self) -> None:
+        """Non-HTML responses (no 'Title:' prefix) are never flagged as
+        thin/error — a JSON API returning {\"status\":\"ok\"} is legit."""
+        output = sanitize_untrusted_text('{"status":"ok"}')
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://api.example.com/status"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_fails_on_404_error_page(self) -> None:
+        output = _fetch_url_output("404 Not Found", "The page you requested does not exist.")
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://example.com/missing"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "html_error_page"
+        assert "404 Not Found" in (verdict.reason or "")
+
+    async def test_fails_on_access_denied_title(self) -> None:
+        output = _fetch_url_output(
+            "Access Denied",
+            "You do not have permission to view this resource. " * 5,
+        )
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://example.com/secret"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "html_error_page"
+
+    async def test_fails_on_cloudflare_challenge(self) -> None:
+        output = _fetch_url_output(
+            "Just a moment...",
+            "Please wait while we verify your browser.",
+        )
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://protected.example.com"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "html_error_page"
+
+    async def test_passes_on_article_about_error_codes(self) -> None:
+        """False-positive guard: an article titled '404 Error Handling in HTTP'
+        must NOT match '404 Not Found' pattern — the regex requires a specific
+        canonical status-code phrase."""
+        output = _fetch_url_output(
+            "404 Error Handling in HTTP — Best Practices",
+            "When building web applications, handling 404 errors gracefully "
+            "is important. This article explores the different strategies "
+            "for returning useful responses when a resource is not found. "
+            "We'll cover both server-side redirects and client-side fallbacks.",
+        )
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://blog.example.com/http-404"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_passes_on_article_about_not_found_topic(self) -> None:
+        """False-positive guard: 'Not Found: How to Handle Missing Resources'
+        doesn't match because the pattern requires EXACT 'Not Found' title."""
+        output = _fetch_url_output(
+            "Not Found: How to Handle Missing Resources in REST APIs",
+            "A common pattern in REST API design is returning 404 for missing "
+            "resources. This post covers the nuances of when to use 404 vs "
+            "other status codes. We'll examine real-world examples from "
+            "several popular APIs.",
+        )
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://blog.example.com/rest"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_fails_on_thin_html_content(self) -> None:
+        """JS-heavy SPA or minimalist error page: title present but cleaned
+        body is nearly empty."""
+        output = _fetch_url_output("My SPA", "Loading...")  # 10 chars
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output=output,
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://spa.example.com"), result,
+        )
+        assert verdict.passed is False
+        assert verdict.signal == "thin_html_content"
+
+    async def test_skips_async_mode_results(self) -> None:
+        """async_mode returns a job_id — no content to verify yet."""
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True,
+            output="Submitted as job_xyz. Poll with jobs_status or jobs_await.",
+            metadata={"job_id": "job_xyz", "async": True},
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://big.example.com"), result,
+        )
+        assert verdict.passed is True
+
+    async def test_skips_empty_output(self) -> None:
+        result = ToolResult(
+            call_id="c1", tool_name="fetch_url",
+            success=True, output="",
+        )
+        verdict = await _verify_fetch_url(
+            _call("fetch_url", url="https://example.com"), result,
+        )
+        assert verdict.passed is True
 
 
 class TestMemorizeDoubleFailureEdgeCase:
