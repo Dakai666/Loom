@@ -265,7 +265,7 @@ require_audit_log   = true
 #   2000 (default) — most tool outputs stay inline; large fetches/reads spill
 #    500           — aggressive spilling for very long sessions
 #       0           — disables JIT entirely
-jit_spill_threshold_tokens = 2000
+jit_spill_threshold_tokens = 2000  # internally × 4 → 8000-char threshold
 
 # ── Observation masking (Issue #197 Phase 2 — currently a no-op) ─────────────
 #
@@ -277,9 +277,12 @@ jit_spill_threshold_tokens = 2000
 # is automatically protected because JIT already wrote it to scratchpad;
 # masking just hides the inline view, not the source of truth.
 #
-# 7 = balance between noise reduction and avoiding over-eager folding.
-# Set to 0 to disable when masking ships.
-mask_age_turns = 7
+# Tuning note: deep-research tasks (multi-step fetch_url / web_search
+# collection followed by synthesis) routinely keep tool outputs relevant
+# for 15+ turns. 20 errs on the side of preserving research context;
+# operational tasks (debug loops, file edits) tolerate lower values like
+# 7-10. Set to 0 to disable when masking ships.
+mask_age_turns = 20
 
 # When true, confines run_bash to the workspace root (cwd=workspace).
 # File I/O tools (read_file, write_file, list_dir) always enforce workspace
