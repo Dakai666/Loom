@@ -1716,7 +1716,11 @@ class LoomSession:
                         yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
                         # Issue #197 Phase 2: tag for observation masking.
                         # Underscore-prefixed keys are ignored by provider
-                        # conversion (verified for OpenAI native + Anthropic).
+                        # conversion (verified for OpenAI native + Anthropic
+                        # in providers.py — they explicitly read only role,
+                        # tool_call_id, content). If a future provider
+                        # changes that, _emit_turn / _tool_name MUST be
+                        # preserved — they're the data basis of masking.
                         _tool_msg = self.router.format_tool_result(
                             self.model, tu.id, tool_output, result.success,
                         )
@@ -2194,6 +2198,18 @@ class LoomSession:
         already in scratchpad. Masking is a token-budget optimization on
         top — it never causes data loss, only changes inline visibility.
         Scratchpad write failures gracefully degrade (keep inline).
+
+        **Scratchpad ref prefix conventions** (canonical list lives in
+        ``loom/platform/cli/tools.py:_categorize_scratchpad_refs``):
+
+        - ``auto_<tool>_<id>``          → JIT spill (Phase 1)
+        - ``masked_<tool>_<id>``        → this method (Phase 2)
+        - ``subagent_failure:<id>``     → sub-agent failure trace (#192)
+
+        Both the ``auto_`` and ``masked_`` prefixes are tool-output caches
+        an agent can read back via ``scratchpad_read``. The
+        ``scratchpad_read`` tool's listing groups refs by these prefixes so
+        the agent can scan its own folded state.
         """
         if self._mask_age_turns <= 0:
             return

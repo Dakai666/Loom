@@ -223,6 +223,30 @@ class TestScratchpadTool:
         assert r.success
         payload = json.loads(r.output)
         assert payload["available_refs"] == ["a", "b"]
+        # Issue #197 Phase 2 review: discoverability — refs categorized so
+        # agent can scan its folded state without trial-and-error reads.
+        assert payload["by_kind"]["other"] == ["a", "b"]
+        assert payload["by_kind"]["jit_spilled"] == []
+        assert payload["by_kind"]["observation_masked"] == []
+        assert payload["by_kind"]["subagent_failure"] == []
+
+    async def test_list_groups_refs_by_producer_prefix(self):
+        """Refs from JIT, masking, sub-agent failure paths each land in
+        the right bucket so agents can navigate their folded state."""
+        pad = Scratchpad()
+        pad.write("auto_fetch_url_a3f7", "JIT-spilled body")
+        pad.write("masked_run_bash_b2c9", "masked older call")
+        pad.write("subagent_failure:sub-xyz", "sub-agent trace")
+        pad.write("ad_hoc_note", "agent-written")
+        tool = make_scratchpad_read_tool(pad)
+
+        r = await tool.executor(_call("scratchpad_read", {}))
+
+        payload = json.loads(r.output)
+        assert payload["by_kind"]["jit_spilled"] == ["auto_fetch_url_a3f7"]
+        assert payload["by_kind"]["observation_masked"] == ["masked_run_bash_b2c9"]
+        assert payload["by_kind"]["subagent_failure"] == ["subagent_failure:sub-xyz"]
+        assert payload["by_kind"]["other"] == ["ad_hoc_note"]
 
     async def test_missing_ref_error(self):
         pad = Scratchpad()
