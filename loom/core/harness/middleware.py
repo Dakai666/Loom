@@ -184,7 +184,7 @@ class JITRetrievalMiddleware(Middleware):
     inspects.
 
     **Opt-out**: tools whose entire purpose is returning content the agent
-    needs inline (``task_read``, ``scratchpad_read``, ``list_dir``, etc.)
+    needs inline (``scratchpad_read``, ``list_dir``, ``task_write`` etc.)
     should set ``ToolDefinition.inline_only=True`` to bypass spill.
 
     **Async-mode passthrough**: when ``result.metadata["async"] is True``

@@ -1001,23 +1001,15 @@ class LoomSession:
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
 
-        # Issue #153: Agent-driven TaskList tools (cognitive checklist for the
-        # main agent). Cross-session continuity is handled by the memory system,
-        # not the TaskList itself — each session starts with a clean list.
+        # Issue #205: Single-tool TaskList (cognitive checklist for the main
+        # agent). Replaced the 5-tool surface (#153) with one task_write —
+        # see loom/platform/cli/tools.py for the rationale. Cross-session
+        # continuity is handled by the memory system, not the TaskList itself;
+        # each session starts with a clean list.
         from loom.core.tasks.manager import TaskListManager
-        from loom.platform.cli.tools import (
-            make_task_plan_tool,
-            make_task_status_tool,
-            make_task_modify_tool,
-            make_task_done_tool,
-            make_task_read_tool,
-        )
+        from loom.platform.cli.tools import make_task_write_tool
         self._tasklist_manager = TaskListManager(session_id=self.session_id)
-        self.registry.register(make_task_plan_tool(self._tasklist_manager))
-        self.registry.register(make_task_status_tool(self._tasklist_manager))
-        self.registry.register(make_task_modify_tool(self._tasklist_manager))
-        self.registry.register(make_task_done_tool(self._tasklist_manager))
-        self.registry.register(make_task_read_tool(self._tasklist_manager))
+        self.registry.register(make_task_write_tool(self._tasklist_manager))
 
         # Issue #154: async job inspection tools. The JobStore + Scratchpad
         # themselves are created in __init__ so run_bash/fetch_url can close
@@ -1395,9 +1387,10 @@ class LoomSession:
         _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
         _stop_reason = "complete"  # tracks why the loop exits
 
-        # Issue #153: TaskList self-check. On end_turn we inject a reminder
+        # Issue #205: TaskList self-check. On end_turn we inject a reminder
         # at most once per stream_turn if the list still has active nodes,
-        # nudging the agent to either continue executing or mark abandonment.
+        # nudging the agent to either continue executing or rewrite the list
+        # to mark abandonment.
         _tasklist_selfcheck_done = False
         # Issue #154: Jobs status injection, also at most once per stream_turn.
         # Reports newly-finished and still-running background jobs so the
@@ -1577,7 +1570,7 @@ class LoomSession:
             ))
 
             if response.stop_reason == "end_turn":
-                # Issue #153: Pre-final-response self-check. If the TaskList
+                # Issue #205: Pre-final-response self-check. If the TaskList
                 # has pending/in-progress nodes and we haven't already nudged
                 # this turn, inject a reminder and loop back into the model.
                 # This catches the autonomy stall mode where an agent creates

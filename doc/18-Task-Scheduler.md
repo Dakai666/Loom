@@ -96,7 +96,7 @@ class Scratchpad:
     def __contains__(self, ref: str) -> bool: ...
 ```
 
-`section` 支援 `"head"` / `"tail"` / `"N-M"` / 關鍵字（grep 語義）——與 `task_read` 一致，避免 agent 每次都讀完整 blob。
+`section` 支援 `"head"` / `"tail"` / `"N-M"` / 關鍵字（grep 語義），避免 agent 每次都讀完整 blob。
 
 `max_bytes` 在 section filter 之**前**截斷原始 bytes，超過時附加 `[scratchpad_read: output truncated at N bytes]`。預設 200_000 bytes。
 
@@ -132,7 +132,7 @@ run_bash(command=..., async_mode=True)
 | `jobs_status(job_id)` | 單個 job 的完整狀態（含 elapsed、args、error） |
 | `jobs_await(job_ids, timeout)` | 等到全部 terminal 或 timeout。**不 raise**——回傳 `{timeout_hit, finished, still_running}` 讓 agent 自己決定 cancel 或再等 |
 | `jobs_cancel(job_id, reason)` | `reason` 必填——schema 層就擋掉沒帶理由的呼叫 |
-| `scratchpad_read(ref?, section?, max_bytes?)` | 省略 `ref` 時列出可用 refs；`section` 與 `task_read` 同義 |
+| `scratchpad_read(ref?, section?, max_bytes?)` | 省略 `ref` 時列出可用 refs；`section` 支援 `head`/`tail`/`N-M`/keyword |
 
 所有這 5 個工具 trust level 都是 `SAFE`——純讀操作，不需要確認。
 
