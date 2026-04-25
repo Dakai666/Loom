@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+
 class TaskWriteDiscordReminderMiddleware(Middleware):
     """
     Middleware that intercepts `task_write` and, upon success, posts an embed
@@ -16,7 +17,9 @@ class TaskWriteDiscordReminderMiddleware(Middleware):
     Configured via `loom.toml`: `[task_write] discord_reminder = true`.
     """
 
-    def __init__(self, client: discord.Client, thread_id: int, session: "LoomSession") -> None:
+    def __init__(
+        self, client: discord.Client, thread_id: int, session: "LoomSession"
+    ) -> None:
         self._client = client
         self._thread_id = thread_id
         self._session = session
@@ -52,18 +55,16 @@ class TaskWriteDiscordReminderMiddleware(Middleware):
 
         for t in todos:
             status = t.get("status", "pending")
-            # Format: "✅ **id**: content" or just "✅ content" if id is not available
             content_str = t.get("content", "").strip()
             id_str = t.get("id", "").strip()
-            
-            # As discussed with the user, display id and content, e.g. "**id**: content"
+
             if id_str and content_str:
                 display_text = f"**{id_str}**: {content_str}"
             elif content_str:
                 display_text = content_str
             else:
                 display_text = id_str
-                
+
             if status == "completed":
                 completed.append(f"✅ {display_text}")
             elif status == "in_progress":
@@ -80,24 +81,29 @@ class TaskWriteDiscordReminderMiddleware(Middleware):
         if pending:
             desc_lines.extend(pending)
 
-        desc = "\\n".join(desc_lines)
+        desc = "\n".join(desc_lines)
         if len(desc) > 4096:
             desc = desc[:4093] + "..."
 
         title = "🔄 任務進度"
-        if self._session._provisional_title:
-            title = f"🔄 任務進度 — {self._session._provisional_title}"
+        provisional_title = getattr(self._session, "_provisional_title", None)
+        if provisional_title:
+            title = f"🔄 任務進度 — {provisional_title}"
 
         embed = discord.Embed(
             title=title,
             description=desc,
-            color=0x3498db
+            color=0x3498db,
         )
         embed.set_footer(text="📝 觸發：task_write 更新 · 剛剛")
 
         try:
             await channel.send(embed=embed)
         except Exception as exc:
-            _log.warning("Failed to send task_write reminder embed to Discord thread %s: %s", self._thread_id, exc)
+            _log.warning(
+                "Failed to send task_write reminder embed to Discord thread %s: %s",
+                self._thread_id,
+                exc,
+            )
 
         return result
