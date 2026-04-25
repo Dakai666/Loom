@@ -79,7 +79,7 @@ class Scratchpad:
 
 
 def _apply_section(text: str, section: str) -> str:
-    """Apply a section filter matching task_read semantics.
+    """Apply a section filter on text content.
 
     Supported:
       - "head"     → first 50 lines

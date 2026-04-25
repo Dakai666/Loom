@@ -2533,461 +2533,92 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # read_file / write_file / list_dir are registered via make_filesystem_tools(workspace).
 
 
-# ── Issue #153: Agent-driven TaskList tools ────────────────────────────────
+# ── Issue #205: Single-tool TaskList — task_write replaces 5 tools ─────────
+#
+# Replaces task_plan / task_status / task_modify / task_done / task_read.
+# Rationale: task_done was a "verb" — calling it felt like reporting progress
+# to the framework, even when no artifact existed. The cognitive substitution
+# (call → "I'm done") was the root cause of false-completion failures in long
+# multi-step tasks. task_write is an "edit" — agent rewrites the whole list,
+# changing status fields. No verb, no ceremony, no illusion of being tracked.
+#
+# All real outputs go to disk via write_file; the TaskList only tracks
+# "have I forgotten this step?".
 
-def make_task_plan_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_plan tool for building a TaskList from agent specs."""
+def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
+    """Create the task_write tool — replace-the-whole-list semantics."""
 
-    async def _task_plan(call: ToolCall) -> ToolResult:
-        tasks = call.args.get("tasks", [])
-        if not tasks:
+    async def _task_write(call: ToolCall) -> ToolResult:
+        todos = call.args.get("todos")
+        if todos is None or not isinstance(todos, list):
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
-                success=False, error="'tasks' list is required and must not be empty",
+                success=False, error="'todos' is required and must be a list",
             )
-        for i, t in enumerate(tasks):
-            if not t.get("id") or not t.get("content"):
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False,
-                    error=f"Task at index {i} missing required 'id' or 'content'",
-                )
         try:
-            tasklist = manager.create_list(tasks)
-            summary = tasklist.status_summary()
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=True,
-                output=json.dumps({
-                    "status": "tasklist_created",
-                    "total_nodes": summary["total_nodes"],
-                    "ready_nodes": [n.id for n in manager.get_ready_nodes()],
-                }, ensure_ascii=False),
-            )
+            summary = manager.write(todos)
         except ValueError as exc:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error=str(exc),
             )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=json.dumps(summary, ensure_ascii=False),
+        )
 
     return ToolDefinition(
-        name="task_plan",
+        name="task_write",
         description=(
-            "Build a TaskList for complex multi-step work — a checklist the "
-            "main agent maintains for itself to plan, track, and self-check "
-            "progress. Each task becomes a node with optional `depends_on` "
-            "references (dependencies are documentation only; you execute "
-            "the nodes yourself one at a time). Use this when the current "
-            "goal requires multiple coordinated steps."
+            "Maintain your todo list for multi-step work. Pass the FULL "
+            "intended list every time — this replaces the previous list. "
+            "Each todo is {id, content, status} where status is "
+            "'pending' | 'in_progress' | 'completed'. To 'complete' a "
+            "step, rewrite the list with that item's status changed.\n\n"
+            "This is your sticky-note board — a reminder of what's left, "
+            "not a state container. Real outputs (reports, code, data) "
+            "MUST go to files via write_file. The todo list never holds "
+            "the result itself, only the fact that the step exists.\n\n"
+            "Use it when a goal has 3+ coordinated steps and forgetting "
+            "one would be costly. Skip it for trivial single-turn work. "
+            "Pass an empty list to clear."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
         input_schema={
             "type": "object",
             "properties": {
-                "tasks": {
+                "todos": {
                     "type": "array",
-                    "description": "List of tasks with dependencies",
+                    "description": "Full intended todo list. Replaces any prior list.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "id": {
                                 "type": "string",
-                                "description": "Short unique ID for this task (e.g. 'a', 'analyze', 'step1')",
+                                "description": "Short unique id (e.g. 'research', 'draft', 'audit').",
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Clear description of what this task should accomplish (becomes the turn prompt)",
+                                "description": "One-line description of the step.",
                             },
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "IDs of tasks that must complete before this one starts",
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "Current status. Defaults to 'pending'.",
                             },
                         },
                         "required": ["id", "content"],
                     },
                 },
             },
-            "required": ["tasks"],
+            "required": ["todos"],
         },
-        executor=_task_plan,
+        executor=_task_write,
         tags=["task", "planning"],
         impact_scope="agent",
-    )
-
-
-def make_task_status_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_status tool for querying the current TaskList state."""
-
-    async def _task_status(call: ToolCall) -> ToolResult:
-        if not manager.has_list:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=True, output="No active task list.",
-            )
-        try:
-            summary = manager.status()
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=True,
-                output=json.dumps(summary, ensure_ascii=False),
-            )
-        except Exception as exc:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error=str(exc),
-            )
-
-    return ToolDefinition(
-        name="task_status",
-        description=(
-            "Check the current state of the active TaskList. "
-            "Shows each node's status (pending/in_progress/completed/failed), "
-            "dependencies, and result summaries for completed nodes."
-        ),
-        trust_level=TrustLevel.SAFE,
-        capabilities=ToolCapability.NONE,
-        input_schema={"type": "object", "properties": {}},
-        executor=_task_status,
-        tags=["task", "status"],
-        impact_scope="agent",
-    )
-
-
-def make_task_modify_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_modify tool for mutating the active TaskList."""
-
-    async def _task_modify(call: ToolCall) -> ToolResult:
-        if not manager.has_list:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error="No active task list. Use task_plan first.",
-            )
-        errors: list[str] = []
-        changes: list[str] = []
-
-        # Add new nodes
-        add_specs = call.args.get("add", [])
-        if add_specs:
-            try:
-                added = manager.add_nodes(add_specs)
-                changes.append(f"Added {len(added)} node(s): {[n.id for n in added]}")
-            except Exception as exc:
-                errors.append(f"add: {exc}")
-
-        # Remove nodes
-        remove_ids = call.args.get("remove", [])
-        if remove_ids:
-            try:
-                manager.remove_nodes(remove_ids)
-                changes.append(f"Removed {len(remove_ids)} node(s): {remove_ids}")
-            except Exception as exc:
-                errors.append(f"remove: {exc}")
-
-        # Update nodes
-        update_specs = call.args.get("update", [])
-        if update_specs:
-            try:
-                updated = manager.update_nodes(update_specs)
-                changes.append(f"Updated {len(updated)} node(s): {[n.id for n in updated]}")
-            except Exception as exc:
-                errors.append(f"update: {exc}")
-
-        if errors and not changes:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error="; ".join(errors),
-            )
-
-        summary = manager.status()
-        output = {
-            "changes": changes,
-            "ready_nodes": [n.id for n in manager.get_ready_nodes()],
-            "graph": summary,
-        }
-        if errors:
-            output["partial_errors"] = errors
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=True,
-            output=json.dumps(output, ensure_ascii=False),
-        )
-
-    return ToolDefinition(
-        name="task_modify",
-        description=(
-            "Modify the active TaskList: add new nodes, remove pending nodes, "
-            "or update content/dependencies of pending nodes. "
-            "Only PENDING nodes can be removed or updated."
-        ),
-        trust_level=TrustLevel.SAFE,
-        capabilities=ToolCapability.MUTATES,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "add": {
-                    "type": "array",
-                    "description": "New tasks to add (same format as task_plan)",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "content": {"type": "string"},
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                        },
-                        "required": ["id", "content"],
-                    },
-                },
-                "remove": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "IDs of pending nodes to remove",
-                },
-                "update": {
-                    "type": "array",
-                    "description": "Pending nodes to update",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "content": {"type": "string"},
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                        },
-                        "required": ["id"],
-                    },
-                },
-            },
-        },
-        executor=_task_modify,
-        tags=["task", "modify"],
-        impact_scope="agent",
-    )
-
-
-def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_done tool for marking nodes completed or failed."""
-    from loom.core.tasks.tasklist import TaskStatus
-    from loom.core.tasks.manager import SHORT_THRESHOLD
-
-    async def _verify_task_done(call: ToolCall, result: ToolResult) -> VerifierResult:
-        """State-desync check (Issue #196 Phase 1, PR #198 review).
-
-        task_done is TaskList's most trusted invariant — it asserts a node
-        reached a terminal state. If the executor reports success but the
-        TaskList internal state disagrees, every downstream decision drifts.
-
-        This validator reads back the node status to confirm the claim.
-        """
-        node_id = call.args.get("node_id", "").strip()
-        if not node_id or manager.tasklist is None:
-            return VerifierResult(passed=True)
-        try:
-            node = manager.tasklist.get(node_id)
-        except Exception as exc:
-            # Don't block on validator infra failure — downgrade to pass.
-            _log.warning("task_done validator lookup failed: %s", exc)
-            return VerifierResult(passed=True)
-        if node is None:
-            return VerifierResult(
-                passed=False,
-                reason=f"task_done reported success but node {node_id!r} "
-                       f"no longer exists in the TaskList.",
-                signal="task_node_missing",
-            )
-        error_text = call.args.get("error")
-        expected_status = TaskStatus.FAILED if error_text else TaskStatus.COMPLETED
-        if node.status != expected_status:
-            return VerifierResult(
-                passed=False,
-                reason=(
-                    f"task_done reported success but node {node_id!r} status "
-                    f"is {node.status.value!r}, expected {expected_status.value!r}."
-                ),
-                signal="task_state_desync",
-            )
-        return VerifierResult(passed=True)
-
-    async def _task_done(call: ToolCall) -> ToolResult:
-        node_id = call.args.get("node_id", "").strip()
-        if not node_id:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error="'node_id' is required",
-            )
-        result_text = call.args.get("result", "").strip()
-        error_text = call.args.get("error")
-        failed = bool(error_text)
-
-        try:
-            node_obj = manager.tasklist.get(node_id) if manager.tasklist else None
-            if node_obj and node_obj.status == TaskStatus.PENDING:
-                manager.mark_in_progress(node_id)
-
-            if failed:
-                node = manager.mark_failed(node_id, error_text)
-                status = manager.status()
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=True,
-                    output=json.dumps({
-                        "action": "node_failed",
-                        "node_id": node.id,
-                        "error": error_text,
-                        "tasklist": status,
-                        "hint": "Decide: retry (task_modify to update node), skip downstream, or abandon the list.",
-                    }, ensure_ascii=False),
-                )
-            if not result_text:
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False,
-                    error="'result' is required when completing a node (summarize what you accomplished)",
-                )
-            node = manager.mark_completed(node_id, result_text)
-            ready = manager.get_ready_nodes()
-            status = manager.status()
-
-            ready_with_context = []
-            for rn in ready:
-                ctx = manager.build_node_context(rn)
-                ready_with_context.append({
-                    "node_id": rn.id,
-                    "content": rn.content,
-                    "context": ctx,
-                })
-
-            result_info: dict[str, Any] = {
-                "action": "node_completed",
-                "node_id": node.id,
-                "result_summary": node.result_summary,
-                "ready_nodes": ready_with_context,
-                "tasklist": status,
-            }
-            result_len = len(result_text)
-            if result_len > SHORT_THRESHOLD:
-                result_info["full_result_chars"] = result_len
-                result_info["retrieval_hint"] = (
-                    f"task_read(node_id='{node_id}') for full {result_len}-char result "
-                    f"(supports section='head'/'tail'/'N-M'/keyword)"
-                )
-
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=True,
-                output=json.dumps(result_info, ensure_ascii=False),
-            )
-        except ValueError as exc:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error=str(exc),
-            )
-
-    return ToolDefinition(
-        name="task_done",
-        description=(
-            "Mark a task node as completed (with result) or failed (with error). "
-            "On completion, returns which nodes are now ready plus their upstream "
-            "context (pull-model summaries). On failure, returns the TaskList "
-            "state so you can decide how to proceed. Always call this after "
-            "finishing a node so the TaskList stays accurate for self-check."
-        ),
-        trust_level=TrustLevel.SAFE,
-        capabilities=ToolCapability.MUTATES,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "ID of the node to mark",
-                },
-                "result": {
-                    "type": "string",
-                    "description": "Summary of what was accomplished (required for completion)",
-                },
-                "error": {
-                    "type": "string",
-                    "description": "Error description (provide this instead of result to mark as failed)",
-                },
-            },
-            "required": ["node_id"],
-        },
-        executor=_task_done,
-        tags=["task", "done"],
-        impact_scope="agent",
-        post_validator=_verify_task_done,
         inline_only=True,  # Output is a structured status JSON; #197
-    )
-
-
-def make_task_read_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_read tool for pulling full node results."""
-
-    async def _task_read(call: ToolCall) -> ToolResult:
-        node_id = call.args.get("node_id", "").strip()
-        if not node_id:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error="'node_id' is required",
-            )
-        section = call.args.get("section")
-        try:
-            result = manager.get_node_result(node_id, section=section)
-            if result is None:
-                node = manager.tasklist.get(node_id) if manager.tasklist else None
-                status = node.status.value if node else "not found"
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False,
-                    error=f"Node '{node_id}' has no result (status: {status})",
-                )
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=True, output=result,
-            )
-        except ValueError as exc:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error=str(exc),
-            )
-
-    return ToolDefinition(
-        name="task_read",
-        description=(
-            "Read the full result of a completed task node. "
-            "Use this when the result summary (shown in task_status) "
-            "is insufficient and you need the complete output. "
-            "For large results, use section to read specific parts."
-        ),
-        trust_level=TrustLevel.SAFE,
-        capabilities=ToolCapability.NONE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "ID of the completed node to read",
-                },
-                "section": {
-                    "type": "string",
-                    "description": (
-                        "Optional filter: 'head' (first 200 lines), 'tail' (last 200 lines), "
-                        "'10-50' (line range), or a keyword to grep for matching lines"
-                    ),
-                },
-            },
-            "required": ["node_id"],
-        },
-        executor=_task_read,
-        tags=["task", "read"],
-        impact_scope="agent",
-        inline_only=True,  # Purpose IS to surface content; spilling defeats it; #197
     )
 
 

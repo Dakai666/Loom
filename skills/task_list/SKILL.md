@@ -1,44 +1,129 @@
 ---
 name: task_list
-description: Multi-step task planning and tracking for the main agent. Use task_plan when a goal needs multiple coordinated steps.
+description: Multi-step todo tracking for the main agent. Use task_write when a goal has 3+ coordinated steps and forgetting one would be costly.
 tags: [core, planning, tracking]
 ---
 
-# TaskList — Core Planning Tool
+# task_write — Your Sticky-Note Board
 
-TaskList is a **cognitive exoskeleton** for the main agent — a checklist you maintain yourself to stay on track during complex multi-step tasks. It is NOT a sub-agent scheduler.
+`task_write` is a **cognitive checklist** for the main agent — a reminder of what's left, not a state container. You rewrite the whole list every time you want to update it.
+
+## Mental Model
+
+```
+┌─────────────────────────────┐
+│ [x] research                │  ← 已完成
+│ [x] dim_a                   │
+│ [→] draft                   │  ← 正在做
+│ [ ] audit                   │  ← 還沒做
+│ [ ] commit                  │
+└─────────────────────────────┘
+```
+
+- 它**不會推著你前進**
+- 它**讓你不會忘記做到哪裡**
+- 每個 turn 開始前掃一眼，知道現在在哪
+- 完成一項就**重寫整張清單**，把那一項的 status 改成 `completed`
+
+## Single Tool
+
+```python
+task_write(todos=[
+    {"id": "research", "content": "蒐集 X 領域論文", "status": "completed"},
+    {"id": "draft",    "content": "撰寫初稿到 tmp/draft.md", "status": "in_progress"},
+    {"id": "audit",    "content": "審稿", "status": "pending"},
+    {"id": "commit",   "content": "寫入磁碟並更新記憶", "status": "pending"},
+])
+```
+
+- **Replace 整張清單**：每次呼叫都傳完整意圖狀態，會覆蓋掉上一份
+- **status enum**：`pending` / `in_progress` / `completed`（可省略，預設 `pending`）
+- **沒有 result 欄位**：所有實際產出走 `write_file` 寫到磁碟
+- **沒有 depends_on**：順序由你自己讀清單決定
+
+## 紀律：`in_progress` 要主動更新
+
+**開始做一個節點前**，先 `task_write` 把它的 status 從 `pending` 改成 `in_progress`；**做完後**再次 `task_write` 改成 `completed`。框架不會自動推進——這份「自己決定走到哪」的責任感是這個設計的核心精神。
+
+忘了更新也不會壞事，只是節點會留在 `pending`，self-check 會在 turn 結束前 nudge 你。但養成「開始前 → in_progress、做完 → completed」的習慣，看清單時才能立刻知道現在停在哪一步。
 
 ## When to use it
 
-Use `task_plan` when you face a goal that requires more than 2–3 tool calls with dependencies between steps. Examples:
-- A multi-file refactor with a known sequence
-- A research task with distinct analysis phases
-- Any task where forgetting a sub-step would be costly
+- 多步驟任務（3+ 協調步驟），忘了哪步代價很大
+- 跨 turn 追蹤進度
+- 研究 / 寫作 / 重構等需要多階段的工作
 
-**Do NOT use it** for simple one-off actions.
+## When NOT to use it
 
-## Tool Chain
+- 單次就能做完的事
+- 純對話 / 解釋
+- 太瑣碎、追蹤反而加負擔
 
-| Tool | Purpose |
-|------|---------|
-| `task_plan` | Create the list with task nodes |
-| `task_status` | Check current state (who's pending/done/failed) |
-| `task_modify` | Add/remove/update nodes mid-flight |
-| `task_done` | Mark a node completed (with result) or failed (with error) |
-| `task_read` | Pull full result of a completed node (supports section=head/tail/N-M/keyword) |
+## 為什麼沒有 task_done
 
-## Important Rules
+舊版有 `task_done(node_id, result=...)`。這個工具的「動詞」性質造成了**認知置換**：呼叫它感覺像是「向框架回報完成」，即使 result 是空的、檔案根本不存在，agent 心裡也會覺得「我推進了一步」。在長任務裡這個錯覺累積成 issue #205 觀察到的「全部 completed 但報告從未存在」。
 
-- **`depends_on` is documentation only** — harness does not schedule based on it. You read it and decide the order.
-- **Result size limit: 5000 chars** — if your output is longer, write it to a file first and put only the path/summary in the result.
-- **Pre-final-response self-check** — if you try to end your turn with pending nodes, the system will inject a reminder. You must either continue executing or call `task_done(node_id=..., error="reason")` to explicitly abandon.
-- **One agent turn ≈ one node** — do not try to finish 3 nodes in a single assistant message.
-- **If the task is no longer viable**: call `task_done(node_id=..., error="reason")` for each pending node. Do not silently leave work undone.
+`task_write` 是個編輯動作，不是回報動詞。你改的是自己桌上的便利貼，沒有對象、沒有觀眾、沒有儀式感——所以也沒有「報告了 = 做了」的幻覺。
 
-## Result Truncation
+## 真正的產出在哪
 
-When `task_done(result=...)` exceeds 5000 chars, it is hard-truncated. The system adds a notice pointing to the file path — write long outputs to disk and record only the path in the result.
+**所有產出都寫檔案**，TaskList 只記「我有沒有忘記做這步」：
 
-## Abandoning the Whole List
+```python
+# ✅ 正確流程
+write_file("tmp/draft.md", draft_content)        # 產出 → 磁碟
+task_write(todos=[                               # 更新清單
+    ...,
+    {"id": "draft", "content": "...", "status": "completed"},
+    ...,
+])
 
-Currently there is no `task_abandon` tool. To abandon: call `task_done(node_id=..., error="reason")` for each active node. Follow-up Issue #154 may add a dedicated abandon tool.
+# ❌ 錯誤
+task_write(todos=[
+    {"id": "draft", "content": "draft 內容: ...", "status": "completed"},
+    # ← 試圖把產出塞進 content，這違反設計
+])
+```
+
+跨步驟需要傳資料？用約定好的檔名：
+```python
+# step A 寫
+write_file("tmp/research_summary.md", findings)
+
+# step B 讀
+content = read_file("tmp/research_summary.md")
+```
+
+## Pre-final-response self-check
+
+Turn 結束前若你還有 `pending` / `in_progress` 的 todo，框架會注入 reminder 強迫再跑一輪。要結束的話兩條路：
+- 把剩下的事做完
+- 用 `task_write` 重寫清單，把放棄的項目 status 改成 `completed`，並在 content 註明放棄原因
+
+不要靜默結束 turn 留著未完成的事。
+
+## 範例：研究流程
+
+```python
+# 開始時
+task_write(todos=[
+    {"id": "scope",    "content": "與 user 確認研究範圍", "status": "in_progress"},
+    {"id": "dim_a",    "content": "維度 A：寫到 tmp/dim_a.md", "status": "pending"},
+    {"id": "dim_b",    "content": "維度 B：寫到 tmp/dim_b.md", "status": "pending"},
+    {"id": "synth",    "content": "綜合 dim_a + dim_b → tmp/report.md", "status": "pending"},
+    {"id": "commit",   "content": "報告寫入最終位置 + 更新記憶", "status": "pending"},
+])
+
+# scope 完成後
+task_write(todos=[
+    {"id": "scope",    "content": "...", "status": "completed"},
+    {"id": "dim_a",    "content": "...", "status": "in_progress"},
+    {"id": "dim_b",    "content": "...", "status": "pending"},
+    {"id": "synth",    "content": "...", "status": "pending"},
+    {"id": "commit",   "content": "...", "status": "pending"},
+])
+
+# ... 一直 replace 整張到全部 completed
+```
+
+清空清單：`task_write(todos=[])`。
