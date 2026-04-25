@@ -29,6 +29,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from .forensics import get_forensics
+
 
 # ---------------------------------------------------------------------------
 # Retry helper
@@ -251,7 +253,25 @@ class AnthropicProvider(LLMProvider):
                 for t in tools
             ]
 
-        response = self._client.messages.create(**kwargs)
+        forensics = get_forensics()
+        forensics.record(
+            provider="anthropic",
+            model=self.model,
+            canonical_messages=messages,
+            wire_messages=anthropic_msgs,
+            tools_count=len(tools or []),
+        )
+        try:
+            response = self._client.messages.create(**kwargs)
+        except BaseException as _exc:
+            forensics.dump_on_failure(
+                provider="anthropic",
+                model=self.model,
+                canonical_messages=messages,
+                wire_messages=anthropic_msgs,
+                error=_exc,
+            )
+            raise
 
         text: str | None = None
         tool_uses: list[ToolUse] = []
@@ -329,8 +349,18 @@ class AnthropicProvider(LLMProvider):
         output_tokens = 0
         stop_reason = "end_turn"
 
+        forensics = get_forensics()
+        forensics.record(
+            provider="anthropic",
+            model=self.model,
+            canonical_messages=messages,
+            wire_messages=anthropic_msgs,
+            tools_count=len(tools or []),
+        )
+
         aborted = False
         _base_delay = 1.0
+        _forensics_dumped = False
         for _attempt in range(self._max_retries):
             _yielded_any = False
             try:
@@ -345,6 +375,17 @@ class AnthropicProvider(LLMProvider):
                     final = None if aborted else await stream.get_final_message()
                 break  # success
             except BaseException as _exc:
+                # Dump forensics on the first failure only — retries on the
+                # same payload would just produce identical dumps.
+                if not _forensics_dumped:
+                    forensics.dump_on_failure(
+                        provider="anthropic",
+                        model=self.model,
+                        canonical_messages=messages,
+                        wire_messages=anthropic_msgs,
+                        error=_exc,
+                    )
+                    _forensics_dumped = True
                 if _yielded_any:
                     raise  # mid-stream failure — can't retry safely
                 exc_name = type(_exc).__name__.lower()
