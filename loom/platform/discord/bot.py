@@ -413,6 +413,10 @@ class LoomDiscordBot:
             resume_session_id=resume_id,
             provisional_title=provisional_title,
         )
+        # Issue #207: expose Discord client/thread_id to TaskListManager for embed posting
+        session._discord_client = self._client
+        session._discord_thread_id = thread_id
+
         await session.start()
 
         # Persist thread → session mapping immediately after start so a crash

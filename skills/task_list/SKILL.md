@@ -41,6 +41,32 @@ task_write(todos=[
 - **沒有 result 欄位**：所有實際產出走 `write_file` 寫到磁碟
 - **沒有 depends_on**：順序由你自己讀清單決定
 
+## Discord 狀態面板（Issue #207）
+
+每次 `task_write` 更新時，若 loom 運行在 Discord 模式下，會自動 post 一個 checkbox embed 到 Discord thread：
+
+```
+┌─────────────────────────────────────────────┐
+│ 🔄 任務進度 — 2/5 完成                      │
+├─────────────────────────────────────────────┤
+│ ✅ scope   ✅ dim_a                          │
+│ [→] draft   [ ] audit                       │
+│ [ ] commit                                     │
+│                                             │
+│ 📝 觸發：task_write 更新 · 17:51 UTC         │
+└─────────────────────────────────────────────┘
+```
+
+狀態映射：`completed` → ✅  / `in_progress` → [→]  / `pending` → [ ]
+
+**開關**（loom.toml.example）：
+```toml
+[task_write]
+discord_reminder = true   # true = 每次更新 post embed；false = off
+```
+
+預設開啟。在 CLI 模式（非 Discord）下，`discord_reminder` 設定不影響任何行為。
+
 ## 紀律：`in_progress` 要主動更新
 
 **開始做一個節點前**，先 `task_write` 把它的 status 從 `pending` 改成 `in_progress`；**做完後**再次 `task_write` 改成 `completed`。框架不會自動推進——這份「自己決定走到哪」的責任感是這個設計的核心精神。
@@ -126,4 +152,4 @@ task_write(todos=[
 # ... 一直 replace 整張到全部 completed
 ```
 
-清空清單：`task_write(todos=[])`。
+清空清單：`task_write(todos=[])`.

@@ -1008,8 +1008,45 @@ class LoomSession:
         # each session starts with a clean list.
         from loom.core.tasks.manager import TaskListManager
         from loom.platform.cli.tools import make_task_write_tool
-        self._tasklist_manager = TaskListManager(session_id=self.session_id)
-        self.registry.register(make_task_write_tool(self._tasklist_manager))
+        self._tasklist_manager = TaskListManager(
+            session_id=self.session_id,
+            discord_client=getattr(self, '_discord_client', None),
+            discord_thread_id=getattr(self, '_discord_thread_id', None),
+        )
+
+        async def _discord_sender(embed: dict) -> None:
+            # Issue #207: post checkbox embed to Discord thread after task_write
+            import discord as _discord
+            client = getattr(self, '_discord_client', None)
+            thread_id = getattr(self, '_discord_thread_id', None)
+            if client is None or thread_id is None:
+                return
+            channel = client.get_channel(thread_id)
+            if channel is None:
+                return
+            color_int = 0x4CAF93
+            if embed.get('color'):
+                try:
+                    color_int = int(str(embed['color']).lstrip('#'), 16)
+                except (ValueError, TypeError):
+                    pass
+            discord_embed = _discord.Embed(
+                title=embed.get('title', ''),
+                description=embed.get('description', ''),
+                color=color_int,
+            )
+            for field in embed.get('fields', []):
+                discord_embed.add_field(
+                    name=str(field.get('name', '')),
+                    value=str(field.get('value', '')),
+                    inline=bool(field.get('inline', False)),
+                )
+            try:
+                await channel.send(embed=discord_embed)
+            except Exception:
+                pass  # non-blocking, do not interrupt the tool result
+
+        self.registry.register(make_task_write_tool(self._tasklist_manager, discord_sender=_discord_sender))
 
         # Issue #154: async job inspection tools. The JobStore + Scratchpad
         # themselves are created in __init__ so run_bash/fetch_url can close

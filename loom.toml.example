@@ -93,6 +93,18 @@ skill_deprecation_threshold = 0.3
 # 30 for short CLI sessions.
 episodic_compress_threshold = 30
 
+
+# ─────────────────────────────────────────────
+# TaskWrite Discord Reminder (Issue #207)
+# ─────────────────────────────────────────────
+
+# Auto-post a checkbox embed to Discord on every task_write call.
+# The embed shows: ✅ completed / [→] in_progress / [ ] pending
+#
+# Discord tools (send_discord_*) are registered automatically when loom
+# starts in Discord mode; no additional setup needed here.
+[task_write]
+discord_reminder = true   # true = post embed on every update; false = off
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
 # ─────────────────────────────────────────────

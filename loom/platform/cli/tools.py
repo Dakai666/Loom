@@ -2545,7 +2545,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # All real outputs go to disk via write_file; the TaskList only tracks
 # "have I forgotten this step?".
 
-def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
+def make_task_write_tool(manager: "TaskListManager", discord_sender=None) -> ToolDefinition:
     """Create the task_write tool — replace-the-whole-list semantics."""
 
     async def _task_write(call: ToolCall) -> ToolResult:
@@ -2562,6 +2562,10 @@ def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error=str(exc),
             )
+        reminder = summary.get("_discord_reminder")
+        if reminder and _discord_sender is not None:
+            _discord_sender(reminder)
+
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True,
