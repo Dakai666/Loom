@@ -1065,7 +1065,7 @@ class LoomDiscordBot:
                 if _had_rollback:
                     embed.add_field(name="Rollbacks", value="Yes", inline=True)
                 embed.add_field(name="Grants", value=grants_str, inline=True)
-                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.0f}%  ·  {session.model}")
+                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {session.model}")
                 await message.channel.send(embed=embed)
             else:
                 # Compact one-liner
@@ -1083,7 +1083,7 @@ class LoomDiscordBot:
         # Skip footer if detail summary already includes it
         if not (self._summary_mode == "detail" and _envelope_count > 0):
             await message.channel.send(
-                f"-# {persona}  ·  context {pct:.0f}%  ·  {model}"
+                f"-# {persona}  ·  context {pct:.1f}%  ·  {model}"
             )
 
         # ── Mark done ─────────────────────────────────────────────────────

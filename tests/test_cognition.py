@@ -87,7 +87,7 @@ class TestContextBudget:
 
     def test_fits_when_within_budget(self):
         b = ContextBudget(total_tokens=1000)
-        b.record_response(0, 500)    # 500 remaining
+        b.record_response(500, 0)    # 500 remaining
         assert b.fits("a" * 400) is True  # ~100 tokens
 
     def test_not_fits_when_over_budget(self):
@@ -101,6 +101,25 @@ class TestContextBudget:
         b.record_messages([{"role": "user", "content": "hi"}])
         # After recount, used_tokens reflects actual messages, not accumulated
         assert b.used_tokens < 500
+
+    def test_record_response_zero_input_is_noop(self):
+        """Provider returning input_tokens=0 (aborted stream / missing usage
+        on MiniMax) must not zero out a real prior reading — otherwise
+        should_compress() silently disarms and history grows unbounded."""
+        b = ContextBudget(total_tokens=1000, compression_threshold=0.8)
+        b.record_response(900, 50)
+        assert b.used_tokens == 950
+        assert b.should_compress() is True
+
+        b.record_response(0, 0)               # phantom zero
+        assert b.used_tokens == 950           # preserved
+        assert b.should_compress() is True    # still armed
+
+        b.record_response(0, 100)             # input still 0 — also no-op
+        assert b.used_tokens == 950
+
+        b.record_response(600, 30)            # real reading lands
+        assert b.used_tokens == 630
 
     def test_add_increments(self):
         b = ContextBudget(total_tokens=1000)

@@ -1364,7 +1364,7 @@ class LoomSession:
         # so this check is accurate from turn 2 onward.)
         if self.budget.should_compress():
             console.print(
-                f"[yellow]  Context at {self.budget.usage_fraction * 100:.0f}% — "
+                f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}% — "
                 f"compressing…[/yellow]"
             )
             await self._smart_compact()
@@ -1831,7 +1831,7 @@ class LoomSession:
                 # call in this loop will include them and may push over the limit.
                 if self.budget.should_compress():
                     console.print(
-                        f"[yellow]  Context at {self.budget.usage_fraction * 100:.0f}%"
+                        f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}%"
                         f" mid-turn — compressing…[/yellow]"
                     )
                     await self._smart_compact()

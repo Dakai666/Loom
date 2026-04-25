@@ -53,7 +53,17 @@ class ContextBudget:
         REPLACE (not add) used_tokens so the budget always reflects the
         real current window size, not a cumulative sum that would grow
         exponentially across turns.
+
+        ``input_tokens == 0`` means "provider didn't report" (aborted
+        stream, or MiniMax responses that omit usage), NOT "context is
+        empty". Treat as a no-op so a stale-but-real reading isn't
+        replaced by a phantom zero — same convention as
+        :meth:`ContextLayoutDimension.update_total` in telemetry.py.
+        Without this guard, ``should_compress()`` silently disarms after
+        any zero-usage response and the history grows unbounded.
         """
+        if input_tokens <= 0:
+            return
         self.used_tokens = input_tokens + output_tokens
 
     def record_messages(self, messages: list[dict[str, Any]]) -> None:
