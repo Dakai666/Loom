@@ -267,21 +267,24 @@ require_audit_log   = true
 #       0           — disables JIT entirely
 jit_spill_threshold_tokens = 2000  # internally × 4 → 8000-char threshold
 
-# ── Observation masking (Issue #197 Phase 2 — currently a no-op) ─────────────
+# ── Observation masking (Issue #197 Phase 2) ─────────────────────────────────
 #
-# Eventually: fold tool outputs older than N turns into placeholders.
-# The mechanism uses scratchpad as the persistence layer, so masked
-# entries are never lost — only their inline visibility changes.
+# At the start of each turn, fold tool outputs older than N turns into
+# scratchpad references when the same tool has been called more recently
+# (supersession). Masked entries are never lost — full content stays in
+# scratchpad, accessible via scratchpad_read or by re-calling the tool.
 #
-# Active research data (fetched articles, search results in synthesis)
-# is automatically protected because JIT already wrote it to scratchpad;
-# masking just hides the inline view, not the source of truth.
+# Folding triggers ONLY when both conditions hold:
+#   - age >= mask_age_turns
+#   - tool was called more recently (supersession)
+# A tool called once stays inline forever. A tool's most-recent call
+# always stays inline. Active research data is naturally preserved.
 #
-# Tuning note: deep-research tasks (multi-step fetch_url / web_search
-# collection followed by synthesis) routinely keep tool outputs relevant
-# for 15+ turns. 20 errs on the side of preserving research context;
-# operational tasks (debug loops, file edits) tolerate lower values like
-# 7-10. Set to 0 to disable when masking ships.
+# Tuning:
+#   20 (default) — deep-research tasks (multi-step fetch_url / web_search
+#                   collection feeding synthesis); errs on preserving context
+#    7-10        — operational tasks (debug loops, file edits)
+#       0        — disables masking; relies entirely on JIT for token mgmt
 mask_age_turns = 20
 
 # When true, confines run_bash to the workspace root (cwd=workspace).
