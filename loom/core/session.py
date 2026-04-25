@@ -540,6 +540,11 @@ class LoomSession:
         # outputs stay inline. 0 disables spilling entirely.
         _jit_tokens: int = int(_harness_cfg.get("jit_spill_threshold_tokens", 2000))
         self._jit_threshold_chars = max(0, _jit_tokens) * 4
+        # Issue #197 Phase 2: mask tool observations older than N turns.
+        # 20 = balance for deep-research tasks (15+ turns of fetch_url
+        # collection followed by synthesis). 0 disables masking. JIT
+        # ensures the original content is in scratchpad regardless.
+        self._mask_age_turns: int = int(_harness_cfg.get("mask_age_turns", 20))
         self.registry = ToolRegistry()
         # Issue #154: JobStore + Scratchpad must exist before tools that may
         # submit to them (run_bash, fetch_url). Session-scoped, in-memory,
@@ -1356,6 +1361,11 @@ class LoomSession:
         # (Restart or mid-turn cancel can leave the assistant message in DB without
         # a matching tool result — sanitize drops it before compaction reads history.)
         self._sanitize_history()
+        # Issue #197 Phase 2: fold stale tool observations into scratchpad
+        # refs. Runs once per turn; safe because JIT (Phase 1) already
+        # guarantees the original content lives in scratchpad before this
+        # rewrite happens.
+        self._apply_observation_masking()
 
         # Compress before the first LLM call if already over threshold.
         # (budget.used_tokens reflects the last response's actual token count,
@@ -1704,11 +1714,19 @@ class LoomSession:
                             yield self._lifecycle_events.get_nowait()
                         # Issue #106: Yield envelope update after each tool completes
                         yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
-                        self.messages.append(
-                            self.router.format_tool_result(
-                                self.model, tu.id, tool_output, result.success,
-                            )
+                        # Issue #197 Phase 2: tag for observation masking.
+                        # Underscore-prefixed keys are ignored by provider
+                        # conversion (verified for OpenAI native + Anthropic
+                        # in providers.py — they explicitly read only role,
+                        # tool_call_id, content). If a future provider
+                        # changes that, _emit_turn / _tool_name MUST be
+                        # preserved — they're the data basis of masking.
+                        _tool_msg = self.router.format_tool_result(
+                            self.model, tu.id, tool_output, result.success,
                         )
+                        _tool_msg["_emit_turn"] = self._turn_index
+                        _tool_msg["_tool_name"] = tu.name
+                        self.messages.append(_tool_msg)
                         asyncio.ensure_future(self._log_message(
                             "tool", tool_output[:500],
                             {"tool_call_id": tu.id, "tool_name": tu.name},
@@ -1782,11 +1800,13 @@ class LoomSession:
                             yield self._lifecycle_events.get_nowait()
                         # Issue #106: Yield envelope update after each tool completes
                         yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
-                        self.messages.append(
-                            self.router.format_tool_result(
-                                self.model, tu.id, tool_output, result.success,
-                            )
+                        # Issue #197 Phase 2: tag for observation masking.
+                        _tool_msg = self.router.format_tool_result(
+                            self.model, tu.id, tool_output, result.success,
                         )
+                        _tool_msg["_emit_turn"] = self._turn_index
+                        _tool_msg["_tool_name"] = tu.name
+                        self.messages.append(_tool_msg)
                         asyncio.ensure_future(self._log_message(
                             "tool", tool_output[:500],
                             {"tool_call_id": tu.id, "tool_name": tu.name},
@@ -2153,6 +2173,96 @@ class LoomSession:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _apply_observation_masking(self) -> None:
+        """Fold stale tool observations into scratchpad references (Issue #197 Phase 2).
+
+        For each tool result message older than ``_mask_age_turns`` AND
+        superseded by a more recent call of the same tool, this method:
+
+        1. Writes the original content to scratchpad under a stable ref
+        2. Replaces the inline content with a placeholder pointing at the
+           ref, telling the agent it can read scratchpad if the data is
+           still relevant
+
+        Skipped:
+          - Already-JIT-spilled entries (already minimal — re-folding adds
+            no signal but costs a scratchpad ref)
+          - The most recent call of any given tool (the agent likely needs
+            this for continuity)
+          - Already-masked entries (idempotent)
+          - Untagged entries (e.g. from before this feature shipped, or
+            when the session was loaded from disk without the metadata)
+
+        JIT (Phase 1) is the data-persistence guarantee: large outputs are
+        already in scratchpad. Masking is a token-budget optimization on
+        top — it never causes data loss, only changes inline visibility.
+        Scratchpad write failures gracefully degrade (keep inline).
+
+        **Scratchpad ref prefix conventions** (canonical list lives in
+        ``loom/platform/cli/tools.py:_categorize_scratchpad_refs``):
+
+        - ``auto_<tool>_<id>``          → JIT spill (Phase 1)
+        - ``masked_<tool>_<id>``        → this method (Phase 2)
+        - ``subagent_failure:<id>``     → sub-agent failure trace (#192)
+
+        Both the ``auto_`` and ``masked_`` prefixes are tool-output caches
+        an agent can read back via ``scratchpad_read``. The
+        ``scratchpad_read`` tool's listing groups refs by these prefixes so
+        the agent can scan its own folded state.
+        """
+        if self._mask_age_turns <= 0:
+            return
+
+        # First pass: index the most-recent message slot for each tool name.
+        latest_idx_per_tool: dict[str, int] = {}
+        for i, msg in enumerate(self.messages):
+            if msg.get("role") == "tool":
+                tname = msg.get("_tool_name")
+                if tname:
+                    latest_idx_per_tool[tname] = i
+
+        # Second pass: fold eligible older entries.
+        for i, msg in enumerate(self.messages):
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("_masked"):
+                continue
+            emit_turn = msg.get("_emit_turn")
+            if emit_turn is None:
+                continue
+            age = self._turn_index - emit_turn
+            if age < self._mask_age_turns:
+                continue
+
+            tname = msg.get("_tool_name")
+            if tname and latest_idx_per_tool.get(tname) == i:
+                continue  # Most recent call — agent likely still using it.
+
+            content = msg.get("content", "") or ""
+            # JIT placeholder is already minimal — folding it again wastes
+            # a scratchpad ref without meaningful token savings.
+            if content.startswith("[tool output spilled to scratchpad"):
+                continue
+
+            ref = f"masked_{tname or 'tool'}_{uuid.uuid4().hex[:6]}"
+            try:
+                self._scratchpad.write(ref, content)
+            except Exception as exc:
+                logger.warning(
+                    "Observation masking failed for %r turn %d: %s — keeping inline.",
+                    tname, emit_turn, exc,
+                )
+                continue
+
+            msg["content"] = (
+                f"[observation folded — {tname or 'tool'} from {age} turns ago, "
+                f"superseded by a more recent call]\n"
+                f"  ref: scratchpad:{ref}\n"
+                f"  Read with scratchpad_read(ref='{ref}') if you still need "
+                f"the full output."
+            )
+            msg["_masked"] = True
 
     def _sanitize_history(self) -> None:
         """Remove incomplete tool_use sequences and fix malformed tool args.

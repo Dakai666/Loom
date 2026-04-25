@@ -3192,6 +3192,41 @@ def make_jobs_cancel_tool(jobstore: Any) -> ToolDefinition:
 _SCRATCHPAD_DEFAULT_MAX_BYTES = 200_000
 
 
+# ── Scratchpad ref naming convention (Issue #197 review) ───────────────────
+# Different harness mechanisms write into the same scratchpad; the prefix
+# tells you why each ref exists. Add a new prefix here when introducing a
+# new producer so scratchpad_read's listing keeps surfacing it correctly.
+#
+#   auto_<tool>_<6hex>          → JITRetrievalMiddleware (Phase 1, #197)
+#                                  Original tool output >threshold; cached
+#                                  here, agent saw a JIT placeholder.
+#   masked_<tool>_<6hex>        → _apply_observation_masking (Phase 2, #197)
+#                                  Older superseded tool call folded for
+#                                  token budget; agent saw a fold placeholder.
+#   subagent_failure:<agent_id> → run_subagent failure path (#192 P0)
+#                                  Diagnostic context from a max_turns or
+#                                  loop-detected sub-agent failure.
+#   <other>                     → ad-hoc agent or job-pipeline writes.
+def _categorize_scratchpad_refs(refs: list[str]) -> dict[str, list[str]]:
+    """Group scratchpad refs by their producer prefix."""
+    by_kind: dict[str, list[str]] = {
+        "jit_spilled": [],
+        "observation_masked": [],
+        "subagent_failure": [],
+        "other": [],
+    }
+    for ref in refs:
+        if ref.startswith("auto_"):
+            by_kind["jit_spilled"].append(ref)
+        elif ref.startswith("masked_"):
+            by_kind["observation_masked"].append(ref)
+        elif ref.startswith("subagent_failure:"):
+            by_kind["subagent_failure"].append(ref)
+        else:
+            by_kind["other"].append(ref)
+    return by_kind
+
+
 def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
     """Read content from the session's Scratchpad."""
 
@@ -3199,10 +3234,20 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         ref = (call.args.get("ref") or "").strip()
         if not ref:
             refs = scratchpad.list_refs()
+            # Issue #197 Phase 2 review: categorize refs so an agent doing
+            # discovery can pick the right one without trial-and-error.
+            # ``available_refs`` stays a flat list for backward compat;
+            # ``by_kind`` is the new categorized view.
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,
-                output=json.dumps({"available_refs": refs}, indent=2),
+                output=json.dumps(
+                    {
+                        "available_refs": refs,
+                        "by_kind": _categorize_scratchpad_refs(refs),
+                    },
+                    indent=2,
+                ),
             )
         section = call.args.get("section")
         raw_max = call.args.get("max_bytes")
