@@ -246,6 +246,14 @@ internal = "UTC"
 default_trust_level = "guarded"   # "safe" | "guarded" | "critical"
 require_audit_log   = true
 
+# ─────────────────────────────────────────────
+# Task Write (Issue #207)
+# ─────────────────────────────────────────────
+[task_write]
+# Enables an auto-updating Discord embed notification whenever `task_write` is called.
+# Provides real-time visual feedback of task progress in Discord threads.
+discord_reminder = false
+
 # ── Context management (Issue #197) ──────────────────────────────────────────
 #
 # Just-in-time retrieval: when a tool's output exceeds this token budget,

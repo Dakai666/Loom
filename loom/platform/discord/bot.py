@@ -433,6 +433,11 @@ class LoomDiscordBot:
                 break
         # Also patch skill check approval so it uses Discord confirm buttons
         session._confirm_fn = confirm_fn
+        
+        # Inject task_write discord reminder middleware (Issue #207)
+        from loom.platform.discord.middleware import TaskWriteDiscordReminderMiddleware
+        if session._loom_config.get("task_write", {}).get("discord_reminder", False):
+            session._pipeline.use(TaskWriteDiscordReminderMiddleware(self._client, thread_id, session))
 
         # Issue #120 PR1: deliver skill diagnostics as collapsed messages
         # so reflections are visible without dominating the thread.
