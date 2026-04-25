@@ -474,6 +474,7 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             executor=_list_dir,
             tags=["filesystem", "read"],
             impact_scope="filesystem",
+            inline_only=True,  # Output is structured + always small; #197
         ),
     ]
 
@@ -993,6 +994,7 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
         impact_scope="memory",
         rollback_fn=_memorize_rollback,
         post_validator=_verify_memorize,
+        inline_only=True,  # Returns short structured ack; #197
     )
 
 
@@ -2920,6 +2922,7 @@ def make_task_done_tool(manager: "TaskListManager") -> ToolDefinition:
         tags=["task", "done"],
         impact_scope="agent",
         post_validator=_verify_task_done,
+        inline_only=True,  # Output is a structured status JSON; #197
     )
 
 
@@ -2984,6 +2987,7 @@ def make_task_read_tool(manager: "TaskListManager") -> ToolDefinition:
         executor=_task_read,
         tags=["task", "read"],
         impact_scope="agent",
+        inline_only=True,  # Purpose IS to surface content; spilling defeats it; #197
     )
 
 
@@ -3246,4 +3250,5 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         executor=_scratchpad_read,
         tags=["jobs", "scratchpad"],
         impact_scope="agent",
+        inline_only=True,  # Re-spilling scratchpad reads is paradoxical; #197
     )

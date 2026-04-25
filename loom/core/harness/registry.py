@@ -82,6 +82,18 @@ class ToolDefinition:
     Values: "filesystem", "shell", "network", "memory", "agent", "general".
     """
 
+    inline_only: bool = False
+    """
+    If True, ``JITRetrievalMiddleware`` will not spill this tool's output
+    to scratchpad regardless of size (Issue #197).
+
+    Set this for tools whose purpose is already to return content the agent
+    needs inline — spilling defeats the point. Examples: ``task_read``
+    (already a deliberate retrieval), ``scratchpad_read`` (paradoxical to
+    re-spill), ``list_dir`` (always small), ``memorize`` / ``task_done``
+    (structured short responses).
+    """
+
     # --- Scope-aware permission (Issue #45 Phase A) ---
     scope_descriptions: list[str] = field(default_factory=list)
     """
