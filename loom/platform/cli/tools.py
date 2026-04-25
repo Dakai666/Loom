@@ -2058,6 +2058,114 @@ def sanitize_untrusted_text(text: str) -> str:
     return f"<untrusted_external_content>\n{safe_text}\n</untrusted_external_content>"
 
 
+# ── fetch_url semantic verification (Issue #199) ───────────────────────────
+# Wrapper applied by sanitize_untrusted_text() — validator peels it off
+# before inspecting content.
+_SANITIZE_OPEN = "<untrusted_external_content>\n"
+_SANITIZE_CLOSE = "\n</untrusted_external_content>"
+
+# Error-page title patterns. Calibrated to match canonical server/CDN
+# error page titles without false-positiving on legitimate articles that
+# happen to discuss error codes. Key trick: require the canonical
+# "{code} {message}" pairing or exact-match short strings — an article
+# titled "404 Error Handling in HTTP" won't match "404 Not Found".
+_ERROR_PAGE_TITLE_PATTERNS = [
+    re.compile(
+        r"^\s*[45]\d{2}\s+(Not Found|Forbidden|Unauthorized|Internal Server Error|"
+        r"Service Unavailable|Bad Gateway|Gateway Timeout|Bad Request)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*Page Not Found\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Not Found\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Access Denied", re.IGNORECASE),
+    re.compile(r"^\s*Forbidden\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Unauthorized\s*$", re.IGNORECASE),
+    # Cloudflare / bot-wall challenge pages
+    re.compile(r"^\s*Just a moment", re.IGNORECASE),
+    re.compile(r"^\s*Attention Required", re.IGNORECASE),
+    re.compile(r"^\s*Please verify you are", re.IGNORECASE),
+]
+
+
+async def _verify_fetch_url(call: ToolCall, result: ToolResult) -> VerifierResult:
+    """Detect HTTP-2xx silent failures from fetch_url (Issue #199).
+
+    fetch_url's executor already calls raise_for_status(), so non-2xx is
+    handled by the tool itself. What slips through: 200 responses that are
+    actually error-page templates, CDN challenge pages, or suspiciously
+    thin cleaned content. This validator inspects the Title-prefixed HTML
+    output format produced by _html_to_text and flags known error-page
+    shapes.
+
+    Non-HTML responses (JSON APIs, plain text) are passed through unchecked
+    — the "short body" heuristic only fires on HTML, since API responses
+    can legitimately be very short.
+
+    Signals emitted (PR #202 review):
+      - ``html_error_page``: title matches a canonical error/challenge
+        pattern. Strong signal — usually means retry the URL or accept
+        the resource is unavailable.
+      - ``thin_html_content``: HTML page has a title but cleaned body is
+        nearly empty. Often a JS-rendered SPA (use a headless browser
+        instead) or a stripped error template (escalate as html_error_page
+        if title is unhelpful).
+
+    These signal tags are stable strings — telemetry consumers and any
+    future learning loop (#200) can dispatch on them without parsing
+    ``reason``.
+    """
+    # Async mode returns a job_id header, not content; no verification.
+    if (result.metadata or {}).get("async") is True:
+        return VerifierResult(passed=True)
+
+    output = str(result.output or "")
+    if not output:
+        return VerifierResult(passed=True)
+
+    # Peel the sanitize_untrusted_text wrapper if present.
+    content = output
+    if content.startswith(_SANITIZE_OPEN) and content.endswith(_SANITIZE_CLOSE):
+        content = content[len(_SANITIZE_OPEN):-len(_SANITIZE_CLOSE)]
+
+    # Non-HTML fetches have no "Title: " prefix — skip body/title heuristics.
+    if not content.startswith("Title: "):
+        return VerifierResult(passed=True)
+
+    first_line, _, body = content.partition("\n\n")
+    title = first_line[len("Title: "):].strip()
+
+    for pattern in _ERROR_PAGE_TITLE_PATTERNS:
+        if pattern.match(title):
+            return VerifierResult(
+                passed=False,
+                reason=f"HTTP 2xx but page title indicates error: {title!r}",
+                signal="html_error_page",
+            )
+
+    # HTML page with a title but almost no cleaned body → typically an
+    # SPA serving content via JS (captured as empty after script stripping)
+    # or a minimalist error page. Either way, the agent didn't receive
+    # usable content.
+    #
+    # Threshold note: 100 chars is conservative — any real article body
+    # after script/style/nav stripping reliably exceeds this. If a future
+    # site is observed under 100 chars legitimately, either narrow by
+    # domain heuristic or expose this as a per-tool config knob; do not
+    # raise the global floor without telemetry support.
+    if len(body.strip()) < 100:
+        return VerifierResult(
+            passed=False,
+            reason=(
+                f"HTML body is only {len(body.strip())} chars after cleaning — "
+                f"likely a challenge/captcha page, JS-rendered SPA, or "
+                f"stripped error template."
+            ),
+            signal="thin_html_content",
+        )
+
+    return VerifierResult(passed=True)
+
+
 def make_fetch_url_tool(
     jobstore: Any = None,
     scratchpad: Any = None,
@@ -2146,6 +2254,7 @@ def make_fetch_url_tool(
         impact_scope="network",
         scope_descriptions=["connects to the requested URL domain"],
         scope_resolver=_fetch_url_resolver,
+        post_validator=_verify_fetch_url,
     )
 
 
