@@ -246,6 +246,44 @@ internal = "UTC"
 default_trust_level = "guarded"   # "safe" | "guarded" | "critical"
 require_audit_log   = true
 
+# ── Context management (Issue #197) ──────────────────────────────────────────
+#
+# Just-in-time retrieval: when a tool's output exceeds this token budget,
+# the harness automatically writes the full content to the session
+# scratchpad and replaces the inline output with a structured reference.
+# The agent can then either re-call the tool for fresh data or read the
+# scratchpad ref for cached content.
+#
+# Tokens are estimated as len(output) // 4 (≈ char-to-token ratio for most
+# real-world tool outputs). Rough estimate is sufficient — a 30% error has
+# no practical effect on whether content is spilled.
+#
+# Tools whose purpose is content retrieval (task_read, scratchpad_read,
+# list_dir, memorize, task_done) are marked inline_only and bypass JIT.
+#
+# Recommended values:
+#   2000 (default) — most tool outputs stay inline; large fetches/reads spill
+#    500           — aggressive spilling for very long sessions
+#       0           — disables JIT entirely
+jit_spill_threshold_tokens = 2000  # internally × 4 → 8000-char threshold
+
+# ── Observation masking (Issue #197 Phase 2 — currently a no-op) ─────────────
+#
+# Eventually: fold tool outputs older than N turns into placeholders.
+# The mechanism uses scratchpad as the persistence layer, so masked
+# entries are never lost — only their inline visibility changes.
+#
+# Active research data (fetched articles, search results in synthesis)
+# is automatically protected because JIT already wrote it to scratchpad;
+# masking just hides the inline view, not the source of truth.
+#
+# Tuning note: deep-research tasks (multi-step fetch_url / web_search
+# collection followed by synthesis) routinely keep tool outputs relevant
+# for 15+ turns. 20 errs on the side of preserving research context;
+# operational tasks (debug loops, file edits) tolerate lower values like
+# 7-10. Set to 0 to disable when masking ships.
+mask_age_turns = 20
+
 # When true, confines run_bash to the workspace root (cwd=workspace).
 # File I/O tools (read_file, write_file, list_dir) always enforce workspace
 # boundaries regardless of this setting.

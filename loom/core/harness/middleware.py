@@ -168,6 +168,112 @@ class LogMiddleware(Middleware):
         return result
 
 
+class JITRetrievalMiddleware(Middleware):
+    """Just-in-time spill of large tool outputs to scratchpad (Issue #197).
+
+    When a tool produces output larger than ``threshold_chars``, this
+    middleware writes the full output to the session scratchpad and
+    replaces ``result.output`` with a structured placeholder pointing at
+    the scratchpad ref. The model sees a compact reference instead of the
+    raw payload, recovering token budget for synthesis-heavy turns.
+
+    **Placement**: must wrap LifecycleMiddleware on the outside so that
+    ``post_validator`` callbacks still see the full output for heuristic
+    inspection (Python tracebacks, pytest summaries, etc.). JIT spills only
+    affect what flows out to the message history, never what the verifier
+    inspects.
+
+    **Opt-out**: tools whose entire purpose is returning content the agent
+    needs inline (``task_read``, ``scratchpad_read``, ``list_dir``, etc.)
+    should set ``ToolDefinition.inline_only=True`` to bypass spill.
+
+    **Async-mode passthrough**: when ``result.metadata["async"] is True``
+    the tool already returned a job handle and the body is destined for
+    scratchpad through its own job pipeline — JIT skips to avoid double
+    indirection.
+
+    **Threshold**: configured in chars (~tokens × 4). Defaults to 8000
+    chars (~2000 tokens) if not specified.
+    """
+
+    DEFAULT_THRESHOLD_CHARS = 8000
+
+    def __init__(
+        self,
+        scratchpad: Any,
+        registry: Any,
+        threshold_chars: int = DEFAULT_THRESHOLD_CHARS,
+    ) -> None:
+        self._scratchpad = scratchpad
+        self._registry = registry
+        self._threshold_chars = max(0, threshold_chars)
+
+    async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        result = await next(call)
+
+        if self._threshold_chars <= 0 or self._scratchpad is None:
+            return result
+        if (result.metadata or {}).get("async") is True:
+            return result
+
+        tool_def = None
+        if self._registry is not None:
+            tool_def = self._registry.get(call.tool_name)
+        if tool_def is not None and getattr(tool_def, "inline_only", False):
+            return result
+
+        output_str = "" if result.output is None else str(result.output)
+        size = len(output_str)
+        if size <= self._threshold_chars:
+            return result
+
+        # Generate a stable, agent-readable ref. uuid suffix avoids
+        # collisions across tools that produce many outputs in a turn.
+        short_id = uuid.uuid4().hex[:6]
+        ref = f"auto_{call.tool_name}_{short_id}"
+        try:
+            self._scratchpad.write(ref, output_str)
+        except Exception as exc:
+            _log.warning(
+                "JIT spill to scratchpad failed for %r: %s — keeping inline.",
+                call.tool_name, exc,
+            )
+            return result
+
+        # Build a placeholder that gives the model two retrieval paths and
+        # explicit signals for fresh-vs-cached semantics. Designed to be
+        # parseable: every line uses the format expected by docs / tests,
+        # and the structured info lives in metadata as well.
+        placeholder = (
+            f"[tool output spilled to scratchpad — {size} chars]\n"
+            f"  tool: {call.tool_name}\n"
+            f"  ref:  scratchpad:{ref}\n"
+            f"  size: {size} chars (~{size // 4} tokens)\n"
+            f"\n"
+            f"  Read with scratchpad_read(ref='{ref}') for cached content,\n"
+            f"  or re-call {call.tool_name} for fresh data.\n"
+            f"  Agent: prefer cached for immutable resources (web pages,\n"
+            f"  static files); re-call for state that may have changed."
+        )
+
+        new_metadata = {
+            **(result.metadata or {}),
+            "jit_spilled": True,
+            "jit_ref": ref,
+            "jit_original_size": size,
+        }
+        return ToolResult(
+            call_id=result.call_id,
+            tool_name=result.tool_name,
+            success=result.success,
+            output=placeholder,
+            error=result.error,
+            failure_type=result.failure_type,
+            duration_ms=result.duration_ms,
+            metadata=new_metadata,
+        )
+
+
 class TraceMiddleware(Middleware):
     """
     Measures wall-clock execution time and fires an async callback after

@@ -73,6 +73,7 @@ from loom.core.events import (
 from loom.core.harness.lifecycle import ActionRecord, ExecutionEnvelope, LIFECYCLE_CTX_KEY
 from loom.core.harness.middleware import (
     BlastRadiusMiddleware,
+    JITRetrievalMiddleware,
     LifecycleGateMiddleware,
     LifecycleMiddleware,
     MiddlewarePipeline,
@@ -531,8 +532,14 @@ class LoomSession:
         # Registry — run_bash + workspace-aware filesystem tools
         # NOTE: tool factories are lazy-imported from loom.platform.cli.tools.
         # This coupling will be resolved when tools migrate to loom.core.tools.
-        _strict_sandbox: bool = config.get("harness", {}).get("strict_sandbox", False)
+        _harness_cfg = config.get("harness", {})
+        _strict_sandbox: bool = _harness_cfg.get("strict_sandbox", False)
         self._strict_sandbox = _strict_sandbox
+        # Issue #197: JIT spill threshold for tool outputs. Tokens × 4 ≈
+        # chars; 2000 tokens ≈ 8000 chars is conservative — most tool
+        # outputs stay inline. 0 disables spilling entirely.
+        _jit_tokens: int = int(_harness_cfg.get("jit_spill_threshold_tokens", 2000))
+        self._jit_threshold_chars = max(0, _jit_tokens) * 4
         self.registry = ToolRegistry()
         # Issue #154: JobStore + Scratchpad must exist before tools that may
         # submit to them (run_bash, fetch_url). Session-scoped, in-memory,
@@ -1058,8 +1065,17 @@ class LoomSession:
             make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
         )
 
+        # Issue #197: JIT must wrap LifecycleMiddleware on the outside so
+        # post_validators still see the full output for heuristic checks
+        # (run_bash traceback detection, etc.). JIT only mutates what
+        # propagates out to the message history.
         self._pipeline = MiddlewarePipeline(
             [
+                JITRetrievalMiddleware(
+                    scratchpad=self._scratchpad,
+                    registry=self.registry,
+                    threshold_chars=self._jit_threshold_chars,
+                ),
                 LifecycleMiddleware(
                     registry=self.registry,
                     on_lifecycle=self._on_lifecycle,
