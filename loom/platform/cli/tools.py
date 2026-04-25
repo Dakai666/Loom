@@ -2100,6 +2100,19 @@ async def _verify_fetch_url(call: ToolCall, result: ToolResult) -> VerifierResul
     Non-HTML responses (JSON APIs, plain text) are passed through unchecked
     — the "short body" heuristic only fires on HTML, since API responses
     can legitimately be very short.
+
+    Signals emitted (PR #202 review):
+      - ``html_error_page``: title matches a canonical error/challenge
+        pattern. Strong signal — usually means retry the URL or accept
+        the resource is unavailable.
+      - ``thin_html_content``: HTML page has a title but cleaned body is
+        nearly empty. Often a JS-rendered SPA (use a headless browser
+        instead) or a stripped error template (escalate as html_error_page
+        if title is unhelpful).
+
+    These signal tags are stable strings — telemetry consumers and any
+    future learning loop (#200) can dispatch on them without parsing
+    ``reason``.
     """
     # Async mode returns a job_id header, not content; no verification.
     if (result.metadata or {}).get("async") is True:
@@ -2133,6 +2146,12 @@ async def _verify_fetch_url(call: ToolCall, result: ToolResult) -> VerifierResul
     # SPA serving content via JS (captured as empty after script stripping)
     # or a minimalist error page. Either way, the agent didn't receive
     # usable content.
+    #
+    # Threshold note: 100 chars is conservative — any real article body
+    # after script/style/nav stripping reliably exceeds this. If a future
+    # site is observed under 100 chars legitimately, either narrow by
+    # domain heuristic or expose this as a per-tool config knob; do not
+    # raise the global floor without telemetry support.
     if len(body.strip()) < 100:
         return VerifierResult(
             passed=False,
