@@ -41,6 +41,12 @@ task_write(todos=[
 - **沒有 result 欄位**：所有實際產出走 `write_file` 寫到磁碟
 - **沒有 depends_on**：順序由你自己讀清單決定
 
+## 紀律：`in_progress` 要主動更新
+
+**開始做一個節點前**，先 `task_write` 把它的 status 從 `pending` 改成 `in_progress`；**做完後**再次 `task_write` 改成 `completed`。框架不會自動推進——這份「自己決定走到哪」的責任感是這個設計的核心精神。
+
+忘了更新也不會壞事，只是節點會留在 `pending`，self-check 會在 turn 結束前 nudge 你。但養成「開始前 → in_progress、做完 → completed」的習慣，看清單時才能立刻知道現在停在哪一步。
+
 ## When to use it
 
 - 多步驟任務（3+ 協調步驟），忘了哪步代價很大
