@@ -39,6 +39,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
 from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
@@ -611,6 +612,10 @@ class LoomSession:
         self._reflection: ReflectionAPI | None = None
         self._reflector: CounterFactualReflector | None = None
         self._pipeline: MiddlewarePipeline | None = None
+        # Issue #213: result of the last StartupDiagnostic.run_all() call.
+        # Populated at the end of start(); platforms (CLI/TUI/Discord) and
+        # telemetry can consult it for structured boot-time health state.
+        self._startup_report: "DiagnosticReport | None" = None
         self._memory_index: MemoryIndex = MemoryIndex()
         self._session_log: SessionLog | None = None
         self._governor: MemoryGovernor | None = None  # Issue #43
@@ -1129,6 +1134,25 @@ class LoomSession:
                 ),
             ]
         )
+
+        # Issue #213: post-wiring health check. Runs sequentially with
+        # only handle inspections / counts (no LLM round-trips), so
+        # startup latency stays unchanged. A failing check never aborts
+        # startup — operators see structured failures at the top of the
+        # session log instead of discovering them on the first turn.
+        self._startup_report = await StartupDiagnostic().run_all(self)
+        rendered = self._startup_report.render()
+        # Console for the operator …
+        console.print(rendered)
+        # … and structured log for ops / telemetry.
+        if self._startup_report.all_passed:
+            logger.info("startup_diagnostic: all checks passed")
+        else:
+            for f in self._startup_report.failures:
+                logger.warning(
+                    "startup_diagnostic: %s failed — %s (%s)",
+                    f.name, f.summary, f.detail,
+                )
 
     # ------------------------------------------------------------------
     # HITL pause / resume / cancel
