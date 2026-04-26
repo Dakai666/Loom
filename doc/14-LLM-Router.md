@@ -1,358 +1,129 @@
-# LLM Router
+# LLM Router（更新版）
 
-LLM Router 是 Loom 的模型選擇引擎。它根據請求的「意圖」自動將請求路由到最適合的模型，既保證回應品質，又控制成本。
-
----
-
-## 核心設計：前綴路由
-
-### 為什麼用前綴？
-
-傳統的做法是讓 LLM 自己判斷「這個問題該用什麼模型」。缺點：
-- 不準確（模型不了解自己的優缺點）
-- 增加 token 浪費
-- 延遲增加
-
-Loom 採用**前綴路由**：每個用戶訊息在進入處理管道前，會被分析並加上意圖前綴。
-
-### 內建前綴
-
-| 前綴 | 用途 | 預設模型 |
-|------|------|----------|
-| `/general` | 日常對話、問答 | MiniMax-M2.7 |
-| `/reasoning` | 複雜推理、規劃、分析 | o4-mini |
-| `/tools` | 需要工具調用的請求 | GPT-4o |
-| `/creative` | 創意寫作、翻譯 | MiniMax-M2.7 |
-| `/code` | 代碼生成、解釋 | o4-mini |
-
-### 前綴偵測邏輯
-
-```python
-# loom/core/cognition/router.py
-class IntentClassifier:
-    """簡單的關鍵詞/語境分類器"""
-    
-    PATTERNS = {
-        "/reasoning": ["分析", "解釋", "為什麼", "如何實現", "規劃", "設計", "評估"],
-        "/tools": ["查詢", "搜尋", "讀取", "寫入", "執行", "計算"],
-        "/creative": ["翻譯", "寫作", "創作", "編寫", "生成故事"],
-        "/code": ["代碼", "函數", "class", "def ", "function", "bug"],
-    }
-    
-    def classify(self, text: str) -> str:
-        text_lower = text.lower()
-        
-        # 1. 檢查明確前綴
-        for prefix in ["/general", "/reasoning", "/tools", "/creative", "/code"]:
-            if text_lower.startswith(prefix):
-                return prefix
-        
-        # 2. 關鍵詞匹配
-        for prefix, keywords in self.PATTERNS.items():
-            if any(kw in text_lower for kw in keywords):
-                return prefix
-        
-        # 3. 預設
-        return "/general"
-```
+> 依據實際 `loom/core/cognition/router.py` 重寫。
 
 ---
 
-## 多 Provider 支援
+## ⚠️ 與舊版文件的差異
 
-### Provider 抽象
+舊版文件描述的是**不存在的架構**（Intent-based routing、`RouterConfig`、`route_with_tools()`）。實作中：
 
-```python
-# loom/core/cognition/providers/base.py
-class LLMProvider(ABC):
-    """LLM Provider 抽象介面"""
-    
-    @abstractmethod
-    async def complete(
-        self,
-        messages: list[dict],
-        **kwargs
-    ) -> str:
-        """生成回應"""
-        pass
-    
-    @abstractmethod
-    async def embed(self, text: str) -> list[float]:
-        """計算 embedding（可選）"""
-        pass
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        pass
-    
-    @property
-    def supports_tools(self) -> bool:
-        return False
-```
-
-### MiniMax Provider
-
-```python
-# loom/core/cognition/providers/minimax.py
-class MiniMaxProvider(LLMProvider):
-    def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.minimax.io/v1",
-        )
-        self.model = "MiniMax-M2.7"
-    
-    @property
-    def name(self) -> str:
-        return "minimax"
-    
-    async def complete(self, messages: list[dict], **kwargs) -> str:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            **kwargs
-        )
-        return response.choices[0].message.content
-```
-
-### OpenAI Provider
-
-```python
-# loom/core/cognition/providers/openai.py
-class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key: str):
-        self.client = AsyncOpenAI(api_key=api_key)
-        self.model = "gpt-4o"
-    
-    @property
-    def name(self) -> str:
-        return "openai"
-    
-    @property
-    def supports_tools(self) -> bool:
-        return True  # OpenAI 原生支援 tool calling
-    
-    async def complete(self, messages: list[dict], **kwargs) -> str:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            **kwargs
-        )
-        return response.choices[0].message.content
-```
+- **無 Intent 分類**。Router 只做前綴匹配，無意圖分析。
+- **無 RouterConfig dataclass**。路由表是純 Python 常數。
+- **無 `route()` 方法**。主要方法是 `get_provider()` + `chat()` / `stream_chat()`。
+- **無 tool calling 特殊路由**。Tool calling 是 provider 自己的能力。
 
 ---
 
-## Router 核心邏輯
-
-### 配置
+## 實際路由表
 
 ```python
-# loom/core/cognition/router.py
-@dataclass
-class RouterConfig:
-    """Router 設定"""
-    
-    # 前綴 → 模型映射
-    prefix_routes: dict[str, str] = field(default_factory=lambda: {
-        "/general": "minimax",
-        "/reasoning": "reasoning",
-        "/tools": "openai",
-        "/creative": "minimax",
-        "/code": "reasoning",
-    })
-    
-    # 模型名稱 → provider 名稱
-    model_providers: dict[str, str] = field(default_factory=lambda: {
-        "minimax": "minimax",
-        "openai": "openai",
-        "reasoning": "openai",  # o4-mini 也是 OpenAI 的
-        "gpt-4o": "openai",
-        "MiniMax-M2.7": "minimax",
-        "o4-mini": "openai",
-    })
+_ROUTING: list[tuple[str, str]] = [
+    ("MiniMax-",   "minimax"),    # MiniMax-M2.7, MiniMax-Sirius 等
+    ("minimax-",   "minimax"),    # 小寫前綴
+    ("claude-",    "anthropic"),  # Anthropic claude-3.5-sonnet 等
+    ("gpt-",       "openai"),     # GPT-4o 等
+    ("ollama/",    "ollama"),     # 本地 Ollama 模型
+    ("lmstudio/",  "lmstudio"),   # 本地 LM Studio 模型
+]
 ```
 
-### 路由選擇
+**沒有匹配的 model 名稱** → 使用 `default_model`（從 `loom.toml` 讀取，預設 `MiniMax-M2.7`）。
+
+---
+
+## 核心 API
+
+### LLMRouter
 
 ```python
-# loom/core/cognition/router.py
 class LLMRouter:
-    def __init__(
-        self,
-        providers: dict[str, LLMProvider],
-        config: RouterConfig,
-    ):
-        self.providers = providers
-        self.config = config
-    
-    async def route(
-        self,
-        messages: list[dict],
-        intent_prefix: str = "/general",
-        **kwargs
-    ) -> str:
-        # 1. 根據 intent 前綴選擇模型
-        provider_name = self._get_provider(intent_prefix)
-        
-        # 2. 取得 provider
-        provider = self.providers.get(provider_name)
-        if not provider:
-            raise ValueError(f"Unknown provider: {provider_name}")
-        
-        # 3. 發送請求
-        return await provider.complete(messages, **kwargs)
-    
-    def _get_provider(self, intent_prefix: str) -> str:
-        # 從 prefix_routes 取得模型名稱
-        model = self.config.prefix_routes.get(
-            intent_prefix,
-            "minimax"  # 預設
-        )
-        
-        # 從 model_providers 取得 provider 名稱
-        return self.config.model_providers.get(model, "minimax")
+    def register(self, provider: LLMProvider, default: bool = False) -> "LLMRouter":
+        """註冊 provider，支援鏈式呼叫"""
+        ...
+
+    def get_provider(self, model: str) -> LLMProvider:
+        """根據 model 名稱前綴找到對應的 provider"""
+        for prefix, provider_name in self._ROUTING:
+            if model.startswith(prefix):
+                return self._providers[provider_name]
+        return self._providers[self._default]
+
+    async def chat(self, model, messages, tools=None, max_tokens=8096) -> LLMResponse:
+        """非 streaming 呼叫"""
+        provider = self.get_provider(model)
+        return await provider.chat(messages=messages, tools=tools, max_tokens=max_tokens)
+
+    async def stream_chat(self, model, messages, tools=None, max_tokens=8096, *, abort_signal=None):
+        """Streaming 呼叫，回傳 AsyncIterator"""
+        provider = self.get_provider(model)
+        async for item in provider.stream_chat(...):
+            yield item
+
+    def switch_model(self, model: str) -> bool:
+        """動態切換 provider 的 model"""
+        # 找到 prefix 對應的 provider，更新其 model 屬性
+        # 成功 → True，prefix 不認識 → False
+```
+
+### 路由流程圖
+
+```
+LLMRouter.chat(model="ollama/llama3.2", messages=[...])
+    │
+    ├─ get_provider("ollama/llama3.2")
+    │     ├─ "ollama/" 前綴匹配 → provider_name="ollama"
+    │     └─ return self._providers["ollama"]
+    │
+    └─ provider.chat(messages=[...])
+          └─ ollama_client.chat(model="llama3.2", ...)
 ```
 
 ---
 
-## 工具調用的特殊處理
-
-### 為什麼工具調用需要特殊路由？
-
-並非所有模型都支援 tool calling。MiniMax-M2.7 不支援，所以所有需要工具的請求都會路由到 GPT-4o。
-
-### Forced Provider
-
-對於需要明確 tool calling 的場景，Router 提供 `force_provider`：
+## 初始化（在 LoomSession.start() 內）
 
 ```python
-# loom/core/cognition/router.py
-async def route_with_tools(
-    self,
-    messages: list[dict],
-    tools: list[dict],  # OpenAI 格式的工具定義
-    **kwargs
-) -> str:
-    """工具調用的專用路由（強制使用 OpenAI）"""
-    
-    # 工具調用必須用支援 tool calling 的 provider
-    provider = self.providers.get("openai")
-    if not provider:
-        raise ValueError("OpenAI provider required for tool calling")
-    
-    return await provider.complete(
-        messages,
-        tools=tools,
-        **kwargs
-    )
+from loom.core.cognition.providers import (
+    MiniMaxProvider, AnthropicProvider, OllamaProvider, LMStudioProvider,
+)
+
+router = LLMRouter()
+router.register(MiniMaxProvider(api_key=..., model="MiniMax-M2.7"), default=True)
+router.register(AnthropicProvider(api_key=...))
+router.register(OllamaProvider(base_url="http://localhost:11434"))
 ```
 
 ---
 
-## loom.toml 配置
-
-```toml
-[cognition.router]
-
-# 預設模型
-default_model = "MiniMax-M2.7"
-
-# 前綴路由表
-[rognition.router.routes]
-"/general" = "minimax"
-"/reasoning" = "openai:o4-mini"
-"/tools" = "openai:gpt-4o"
-"/creative" = "minimax"
-"/code" = "openai:o4-mini"
-
-# Provider 設定
-[cognition.providers.minimax]
-type = "minimax"
-model = "MiniMax-M2.7"
-
-[cognition.providers.openai]
-type = "openai"
-model = "gpt-4o"
-```
-
----
-
-## Token 計算
-
-Router 在路由時會同時計算 token 數量，供 Context Budget 使用：
+## switch_model() — 動態模型切換
 
 ```python
-# loom/core/cognition/router.py
-async def route_with_tracking(
-    self,
-    messages: list[dict],
-    budget: ContextBudget,
-    **kwargs
-) -> str:
-    # 1. 計算 input tokens
-    input_tokens = self._count_tokens(messages)
-    
-    # 2. 檢查預估輸出是否超出預算
-    estimated_output = 500  # 預設估計值
-    if not budget.can_fit(input_tokens + estimated_output):
-        raise BudgetExceededError(
-            f"Request too large: {input_tokens} tokens "
-            f"(budget remaining: {budget.remaining})"
-        )
-    
-    # 3. 執行路由
-    response = await self.route(messages, **kwargs)
-    
-    # 4. 更新預算
-    output_tokens = self._count_tokens(response)
-    budget.consume(input_tokens + output_tokens)
-    
-    return response
+# 使用者要求切換到 claude
+result = router.switch_model("claude-3.5-sonnet")
+# → 找到 "claude-" prefix → 更新 anthropic provider 的 model 屬性
+# → return True
+
+# 無效前綴
+result = router.switch_model("unknown-model")
+# → 沒有匹配 → return False
 ```
 
 ---
 
-## 錯誤處理與 Fallback
+## 與舊文件的橋接
 
-### Provider 失敗時的 Fallback
+| 舊版描述 | 實作差異 |
+|---------|---------|
+| Intent 分類前綴（`/reasoning` 等）| 不存在，Router 只做字首匹配 |
+| `RouterConfig` dataclass | 不存在 |
+| `route_with_tools()` | 不存在，tool calling 是各 provider 的 native 能力 |
+| `route_with_tracking()` | 不存在，token 追蹤由 `ContextBudget` 單獨處理 |
+| Fallback 策略 | 不存在，各 provider 自己處理錯誤 |
+| 模型降級策略 | 不存在 |
 
-```python
-async def route_with_fallback(
-    self,
-    messages: list[dict],
-    intent_prefix: str = "/general",
-    **kwargs
-) -> str:
-    # 嘗試主 provider
-    try:
-        return await self.route(messages, intent_prefix, **kwargs)
-    except ProviderError as e:
-        # Fallback 到 MiniMax（最便宜、最穩定）
-        logger.warning(f"Primary provider failed: {e}, falling back to minimax")
-        return await self.providers["minimax"].complete(messages, **kwargs)
-```
-
-### 模型降級策略
-
-```python
-# 當 /reasoning 模型失敗時，降級到 /general
-FALLBACK_ROUTES = {
-    "openai:o4-mini": "minimax",
-    "openai:gpt-4o": "minimax",
-}
-```
+loom.toml 中的 provider 配置說明見 [37-loom-toml-參考.md](37-loom-toml-參考.md)。
 
 ---
 
-## 總結
-
-LLM Router 的設計哲學：**讓對的請求去對的模型**。
-
-| 設計 | 優點 |
-|------|------|
-| 前綴路由 | 簡單、可預測、低延遲 |
-| Provider 抽象 | 支援多 provider，無縫切換 |
-| Forced Provider | tool calling 自動使用正確模型 |
-| Fallback | 一個 provider 失敗時自動降級 |
+*更新版 | 2026-04-26 03:21 Asia/Taipei*

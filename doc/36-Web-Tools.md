@@ -1,379 +1,98 @@
-# Web Tools
+# Web Tools（增量更新）
 
-Web Tools 是 Loom 的網路工具集，允許 agent 訪問網頁和搜尋資訊，以及 Discord 多媒體互動。
-
----
-
-## 內建 Web Tools
-
-| 工具 | 功能 | Trust Level |
-|------|------|-------------|
-| `fetch_url` | 讀取網頁內容 | SAFE |
-| `web_search` | 搜尋網路 | SAFE |
-| `send_discord_file` | 發送工作區檔案至 Discord | GUARDED |
-| `send_discord_embed` | 發送 Rich Embed 面板至 Discord | SAFE |
+> 對 [doc/36-Web-Tools.md](doc/36-Web-Tools.md) 的增量更新，補充 Discord Notifier 工具細節。
 
 ---
 
-## fetch_url
-
-### 功能
-
-讀取指定 URL 的網頁內容，並返回清理後的文字。
-
-### 定義
+## send_discord_embed 完整 schema
 
 ```python
-# loom/core/tools/web/fetch_url.py
-class FetchUrlTool(Tool):
-    name = "fetch_url"
-    description = "Fetch a URL and return the page title and cleaned body text. Use this to read web pages, documentation, or articles. Output is truncated to 2000 chars."
-    trust_level = "SAFE"
-    
-    async def execute(self, args: dict, context: dict) -> ToolResult:
-        url = args["url"]
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers={"User-Agent": "Loom/1.0"},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as response:
-                    content = await response.text()
-                    
-                    # 清理 HTML
-                    cleaned = self._clean_html(content)
-                    
-                    # 截斷
-                    if len(cleaned) > 2000:
-                        cleaned = cleaned[:2000] + "..."
-                    
-                    return ToolResult(
-                        success=True,
-                        output=cleaned,
-                        metadata={
-                            "url": url,
-                            "status": response.status,
-                            "title": self._extract_title(content),
-                        }
-                    )
-        
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=str(e),
-            )
-    
-    def _clean_html(self, html: str) -> str:
-        """移除 HTML 標籤和腳本"""
-        from bs4 import BeautifulSoup
-        
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # 移除腳本和樣式
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        
-        # 取得文字
-        text = soup.get_text(separator="\n", strip=True)
-        
-        # 合併空行
-        lines = [line for line in text.split("\n") if line.strip()]
-        
-        return "\n".join(lines)
-    
-    def _extract_title(self, html: str) -> str:
-        """提取標題"""
-        from bs4 import BeautifulSoup
-        
-        soup = BeautifulSoup(html, "html.parser")
-        title = soup.find("title")
-        
-        return title.get_text(strip=True) if title else ""
-```
-
-### 使用方式
-
-```python
-# Agent 呼叫
-result = await harness.execute(
-    tool="fetch_url",
-    args={"url": "https://example.com/docs"},
+send_discord_embed(
+    title: str,
+    description: str,
+    color: str = "#0099ff",        # 支援 hex 或十進位
+    fields: list[dict] | None = None,
+    # dict: {"name": str, "value": str, "inline": bool}
+    footer: str | None = None,
+    thumbnail: str | None = None,
+    image: str | None = None,
 )
 ```
 
-### 限制
+### Color 值對照（十進位，Discord API 要求）
 
-- 輸出限制 2000 字元
-- 請求逾時 10 秒
-- 不執行 JavaScript
+| 用途 | hex | 十進位 |
+|------|-----|--------|
+| INFO | #5865F2 | 0x5865F2 |
+| CONFIRM | #FEE75C | 0xFEE75C |
+| REPORT | #57F287 | 0x57F287 |
+| ALERT | #ED4245 | 0xED4245 |
+| INPUT | #EB459E | 0xEB459E |
 
----
-
-## web_search
-
-### 功能
-
-使用 Brave Search 搜尋網路，返回標題、URL 和描述。
-
-### 定義
+### fields 格式
 
 ```python
-# loom/core/tools/web/web_search.py
-class WebSearchTool(Tool):
-    name = "web_search"
-    description = "Search the web via Brave Search and return top results with titles, URLs, and descriptions. Use this to find current information, documentation, or answers."
-    trust_level = "SAFE"
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-    
-    async def execute(self, args: dict, context: dict) -> ToolResult:
-        query = args["query"]
-        count = args.get("count", 5)
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://api.search.brave.com/res/v1/web/search"
-                headers = {
-                    "X-Subscription-Token": self.api_key,
-                    "Accept": "application/json",
-                }
-                params = {
-                    "q": query,
-                    "count": min(count, 10),  # 最多 10 個
-                }
-                
-                async with session.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as response:
-                    data = await response.json()
-                    
-                    results = self._parse_results(data)
-                    
-                    return ToolResult(
-                        success=True,
-                        output=results,
-                        metadata={
-                            "query": query,
-                            "result_count": len(results),
-                        }
-                    )
-        
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=str(e),
-            )
-    
-    def _parse_results(self, data: dict) -> str:
-        """解析搜尋結果"""
-        results = data.get("web", {}).get("results", [])
-        
-        if not results:
-            return "No results found."
-        
-        lines = []
-        for i, result in enumerate(results, 1):
-            title = result.get("title", "")
-            url = result.get("url", "")
-            desc = result.get("description", "")
-            
-            lines.append(f"{i}. {title}")
-            lines.append(f"   URL: {url}")
-            lines.append(f"   {desc}")
-            lines.append("")
-        
-        return "\n".join(lines)
+fields = [
+    {"name": "工具", "value": "write_file", "inline": True},
+    {"name": "狀態", "value": "SUCCESS", "inline": True},
+]
 ```
 
-### 限制
+- `inline=True`：最多 3 個一排（Discord 限制）
+- `inline=False`：佔滿一行
+- `name` 和 `value` 最多 1024 字元
 
-- 最多返回 10 個結果
-- 請求逾時 15 秒
-- 需要 Brave Search API key
-
----
-
-## send_discord_file（v0.2.5.2）
-
-### 功能
-
-將工作區中的檔案直接發送至當前 Discord thread。Agent 可主動輸出文件、圖片、截圖等。
+### footer 格式
 
 ```python
-# loom/notify/adapters/discord.py
-async def send_discord_file(filepath: str, thread_id: int | None = None) -> ToolResult:
-    """
-    發送工作區檔案至 Discord。
-    filepath: 相對於工作區根目錄的路徑
-    thread_id: 可選，發送至指定 thread
-    """
-```
-
-### Discord 多媒體支援（v0.2.5.2）
-
-Agent 接收 Discord 用戶的附件時，自動下載至 `.discord_downloads/` 並注入 prompt：
-
-```
-[User uploaded a file: screenshot.png]
-→ 下載至 .discord_downloads/screenshot.png
-→ prompt 注入：「User uploaded: .discord_downloads/screenshot.png」
+footer={"text": "...", "icon_url": "..."}  # Discord Embed footer 格式
 ```
 
 ---
 
-## send_discord_embed（v0.2.5.2）
-
-### 功能
-
-發送 Rich Embed 面板至 Discord，格式化呈現結構化資料。
+## send_discord_file 完整 schema
 
 ```python
-# loom/notify/adapters/discord.py
-async def send_discord_embed(
-    title: str,
-    description: str,
-    color: str = "#0099ff",
-    fields: list[dict] | None = None,
-    thread_id: int | None = None,
-) -> ToolResult:
-    """
-    發送 Discord Rich Embed 面板。
-    color: Hex 色碼，如 #ff0000
-    fields: [{"name": "...", "value": "...", "inline": true/false}, ...]
-    thread_id: 可選，發送至指定 thread
-    """
+send_discord_file(
+    filepath: str,                    # workspace 相對路徑
+    channel_id: str | None = None,   # 目標 channel（可選，預設 thread）
+    thread_id: str | None = None,    # 目標 thread（可選）
+)
 ```
 
-### 用途
-
-- 格式化呈現搜尋結果、分析報告
-- 結構化通知
-- 代替 plain text，提供更好的閱讀體驗
+- 自動判斷 MIME type（jpg/png/gif/mp4/pdf/txt）
+- Discord 8MB 檔案大小限制
+- 附檔上傳（MIME type）vs webhook 訊息附件（MIME type）
 
 ---
 
-## 環境變數設定
+## Discord Thread 路由
+
+`Notification.thread_id` 控制發送目標：
+
+| thread_id | 行為 |
+|-----------|------|
+| `0` 或 `None` | 發送到 channel |
+| `"123456"` | 發送到指定 thread |
+
+Discord Bot 的 `send_discord_file` / `send_discord_embed` 工具（`loom/platform/discord/tools.py`）綁定固定 `thread_id`，由 `LoomDiscordBot._start_session()` 初始化時傳入。
+
+---
+
+## REST API 的 /webhook/reply
+
+Discord 確認回覆透過 Loom REST API 接收：
 
 ```bash
-# Brave Search API key
-export BRAVE_SEARCH_API_KEY="your_api_key"
-
-# 或在 .env 檔案中
-BRAVE_SEARCH_API_KEY=your_api_key
+curl -X POST http://localhost:8000/webhook/reply \
+  -H "Content-Type: application/json" \
+  -d '{"notification_id": "...", "result": "approved"}'
 ```
+
+DiscordNotifier 的 `push_reply()` 被呼叫後，等待中的 `wait_reply()` 解除阻斷。
+
+詳見 [doc/24b-Notification-Types.md](doc/24b-Notification-Types.md) 和 [doc/36b-Discord-Bot-平台.md](doc/36b-Discord-Bot-平台.md)。
 
 ---
 
-## 工具配置
-
-### loom.toml 配置
-
-```toml
-[tools.web]
-
-# fetch_url 設定
-[tools.web.fetch_url]
-timeout = 10
-max_chars = 2000
-user_agent = "Loom/1.0"
-
-# web_search 設定
-[tools.web.web_search]
-provider = "brave"  # 可擴展其他 provider
-timeout = 15
-max_results = 10
-```
-
----
-
-## 安全考量
-
-### URL 驗證
-
-```python
-from urllib.parse import urlparse
-
-def validate_url(url: str) -> bool:
-    """驗證 URL 是否安全"""
-    parsed = urlparse(url)
-    
-    # 只允許 http/https
-    if parsed.scheme not in ("http", "https"):
-        return False
-    
-    # 拒絕內網 IP
-    if parsed.netloc in ("localhost", "127.0.0.1", "0.0.0.0"):
-        return False
-    
-    return True
-```
-
-### 內容過濾
-
-```python
-class ContentFilter:
-    """內容過濾"""
-    
-    BLOCKED_DOMAINS = [
-        "malicious.com",
-        "phishing.net",
-    ]
-    
-    def is_allowed(self, url: str) -> bool:
-        """檢查 URL 是否允許"""
-        parsed = urlparse(url)
-        
-        for domain in self.BLOCKED_DOMAINS:
-            if domain in parsed.netloc:
-                return False
-        
-        return True
-```
-
----
-
-## 擴展 Web Tools
-
-### 新增 Provider
-
-```python
-# 新增 Google Search provider
-class GoogleSearchTool(WebSearchTool):
-    name = "google_search"
-    
-    def __init__(self, api_key: str, cx: str):
-        super().__init__(api_key)
-        self.cx = cx
-    
-    async def execute(self, args: dict, context: dict) -> ToolResult:
-        # Google Custom Search API 實作
-        ...
-```
-
-### 註冊工具
-
-```toml
-[tools.web]
-provider = "google"
-
-[tools.web.google]
-api_key = "${GOOGLE_API_KEY}"
-cx = "${GOOGLE_CX}"
-```
-
----
-
-## 總結
-
-| 工具 | 功能 | Trust Level | 限制 |
-|------|------|-------------|------|
-| fetch_url | 讀取網頁 | SAFE | 2000 字元、10 秒逾時 |
-| web_search | 搜尋網路 | SAFE | 10 結果、15 秒逾時 |
-| send_discord_file | 發送檔案至 Discord | GUARDED | — |
-| send_discord_embed | 發送 Rich Embed 至 Discord | SAFE | — |
+*增量更新 | 2026-04-26 03:21 Asia/Taipei*

@@ -33,10 +33,11 @@
 | [08-Memory-概述.md](08-Memory-概述.md) | 四種記憶類型、SQLite FTS5、Anti-pattern、Session Log 結構化、Governance 概覽 |
 | [08b-Memory-Governance.md](08b-Memory-Governance.md) | Trust Tier 分級、矛盾偵測 + 自動解決、Admission Gate、Decay Cycle |
 | [09-四種記憶詳解.md](09-四種記憶詳解.md) | Episodic / Semantic（含 Trust Tier + Anti-pattern）/ Procedural / Relational |
-| [10-Skill-Genome.md](10-Skill-Genome.md) | EMA confidence 機制與自動廢棄 |
+| [10-Skill-Genome.md](10-Skill-Genome.md) | EMA confidence 機制與自動廢棄（含 SKILL.md frontmatter schema）|
 | [10b-Skill-Evolution.md](10b-Skill-Evolution.md) | Issue #120：TaskReflector → SkillMutator → SkillPromoter + SkillGate 的三段式進化生命週期 |
 | [11-Memory-Search.md](11-Memory-Search.md) | Phase 5 向量相似度 → FTS5 BM25 → recency 三層混合搜尋 |
 | [12-Memory-Index.md](12-Memory-Index.md) | 輕量目錄，含 Anti-pattern count 與 Self-Portrait |
+| **[12b-Memory-Health.md](12b-Memory-Health.md)** | MemoryHealthTracker 操作手冊（Issue #133）|
 
 ### 4. Cognition Layer（思考與推理）
 | 文件 | 說明 |
@@ -49,7 +50,7 @@
 ### 5. Task Engine（任務引擎）
 | 文件 | 說明 |
 |------|------|
-| [17-Task-Engine.md](17-Task-Engine.md) | TaskList 認知外骨骼（平坦清單 + 自驅動 + pre-final-response self-check） |
+| [17-Task-Engine.md](17-Task-Engine.md) | TaskList 認知外骨骼（平坦清單 + 自驅動 + pre-final-response self-check）|
 | [18-Task-Scheduler.md](18-Task-Scheduler.md) | Async Jobs：JobStore + Scratchpad，IO 層並行與 turn-boundary 事件注入 |
 
 ### 6. Autonomy Engine（自主行動）
@@ -57,30 +58,32 @@
 |------|------|
 | [19-Autonomy-概述.md](19-Autonomy-概述.md) | 觸發器、決策管道、DreamingPlugin、TaskReflector 行為反思、Counter-factual |
 | [20-觸發器詳解.md](20-觸發器詳解.md) | CronTrigger / EventTrigger / ConditionTrigger |
-| [21-Action-Planner.md](21-Action-Planner.md) | Trust Level → Decision 映射邏輯 |
-| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、統一管線（origin-aware）、allowed_tools / scope_grants 授權、Offline Dreaming、TaskReflector 行為反思 |
+| [21-Action-Planner.md](21-Action-Planner.md) | ActionDecision（EXECUTE/NOTIFY/HOLD/SKIP）映射邏輯 |
+| [22-Autonomy-Daemon.md](22-Autonomy-Daemon.md) | 常駐程式、統一管線（origin-aware）、scope_grants、attach_outputs、Issue #91 tamper detection |
 
 ### 7. Notification Layer（通知系統）
 | 文件 | 說明 |
 |------|------|
 | [23-Notification-概述.md](23-Notification-概述.md) | NotificationRouter 與五種通知類型 |
-| [24-Notifier-適配器.md](24-Notifier-適配器.md) | CLI / Webhook / Discord（含 send_discord_file / send_discord_embed）|
+| [24-Notifier-適配器.md](24-Notifier-適配器.md) | CLI / Webhook / Discord Notifier |
+| **[24b-Notification-Types.md](24b-Notification-Types.md)** | Notification / ConfirmResult dataclass 完整定義、Discord thread 路由 |
 | [25-ConfirmFlow.md](25-ConfirmFlow.md) | 確認流程、超時降級、APPROVED/DENIED/TIMEOUT |
 
 ### 8. Prompt Stack（三層提示詞）
 | 文件 | 說明 |
 |------|------|
-| [26-Prompt-Stack.md](26-Prompt-Stack.md) | SOUL → Agent → Personality 三層結構 |
+| [26-Prompt-Stack.md](26-Prompt-Stack.md) | SOUL → Agent → Personality 三層結構（含 runtime switch_personality）|
 | [27-SOUL-設計.md](27-SOUL-設計.md) | SOUL.md 的設計理念與內容說明 |
-| [28-Personalities.md](28-Personalities.md) | 內建人格（Adversarial / Architect / Minimalist / Operator / Researcher / Barista）|
+| [28-Personalities.md](28-Personalities.md) | 內建人格（Adversarial / Architect / Minimalist / Operator / Researcher / Barista / Moon Mood）|
 
 ### 9. Extensibility（擴充系統）
 | 文件 | 說明 |
 |------|------|
 | [29-Extensibility-概述.md](29-Extensibility-概述.md) | Lens / Plugin / Skill Import / MCP 整合 / skills/ 命名 |
 | [30-Lens-系統.md](30-Lens-系統.md) | BaseLens / HermesLens / OpenAIToolsLens |
-| [31-Plugin-系統.md](31-Plugin-系統.md) | LoomPlugin 抽象、PluginRegistry、內建 Plugin、MCP |
-| [32-Skill-Import.md](32-Skill-Import.md) | 技能匯入 Pipeline（審查 → 去重 → confidence gate）|
+| [31-Plugin-系統.md](31-Plugin-系統.md) | LoomPlugin 抽象、PluginRegistry、首次確認機制（RelationalMemory）|
+| **[31b-MCP-Server-實作.md](31b-MCP-Server-實作.md)** | MCP Server / Client 雙向實作詳解、tool 前綴、env 擴展 |
+| [32-Skill-Import.md](32-Skill-Import.md) | 技能匯入 Pipeline（三層漸進式披露、SkillOutcomeTracker）|
 
 ### 10. Platform（CLI 與 TUI）
 | 文件 | 說明 |
@@ -88,7 +91,9 @@
 | [33-CLI-命令.md](33-CLI-命令.md) | loom chat / memory / reflect / autonomy / mcp / discord 指令 |
 | [34-TUI-使用指南.md](34-TUI-使用指南.md) | Textual TUI（HITL /pause+stop、Command Palette、Swarm Dashboard）|
 | [35-Session-管理.md](35-Session-管理.md) | --resume / --session / sessions list/show/rm |
-| [36-Web-Tools.md](36-Web-Tools.md) | fetch_url / web_search / send_discord_file / send_discord_embed |
+| [36-Web-Tools.md](36-Web-Tools.md) | fetch_url / web_search（含 post-verifier）+ send_discord_embed 完整 schema |
+| **[36b-Discord-Bot-平台.md](36b-Discord-Bot-平台.md)** | LoomDiscordBot 完整實作、Streaming 策略、TaskWriteDiscordReminderMiddleware |
+| **[35b-Session-Lifecycle-詳解.md](35b-Session-Lifecycle-詳解.md)** | LoomSession 建構 → start() → stream_turn() → stop() 完整生命週期 |
 
 ### 11. 設定與配置
 | 文件 | 說明 |
@@ -104,51 +109,57 @@
 | [41-新增人格.md](41-新增人格.md) | 如何建立新 personality markdown |
 | [42-測試指南.md](42-測試指南.md) | pytest 執行方式與測試覆蓋 |
 | [43-Harness-Execution-可視化規劃.md](43-Harness-Execution-可視化規劃.md) | TUI / Discord 的 execution graph、control surface 與 phased rollout 規劃 |
-| [44-Scope-Aware-Permission-規劃.md](44-Scope-Aware-Permission-規劃.md) | Issue #45 的底層 permission substrate 規劃：scope grant、resolver、middleware verdict 與 scope expansion contract |
+| [44-Scope-Aware-Permission-規劃.md](44-Scope-Aware-Permission-規劃.md) | Issue #45 的底層 permission substrate 規劃 |
+| [45-AbortController.md](45-AbortController.md) | 標準取消訊號、memory-leak safety、asyncio.Event API |
+| [46-CommandScanner.md](46-CommandScanner.md) | Shell 注入掃描、BLOCK/WARN pattern、Layering 策略 |
+| **[45b-Security-Module.md](45b-Security-Module.md)** | Security 模組完整說明：CommandScanner + SelfTerminationGuard 分工 |
 
 ### 附錄
 | 文件 | 說明 |
 |------|------|
+| [47-Legitimacy-Heuristics-規劃.md](47-Legitimacy-Heuristics-規劃.md) | Issue #47 的 Intent Declaration、軌跡守衛、污染熔斷設計 |
+| [48-Agent-Telemetry.md](48-Agent-Telemetry.md) | Issue #142：三維度自我觀測、DimensionTracker、agent_health 工具 |
 | [99-功能人工確認清單.md](99-功能人工確認清單.md) | 透過對話逐一驗證架構行為與設計一致性 |
+| [MISSING-DOC-AUDIT.md](MISSING-DOC-AUDIT.md) | 本次 doc 缺口清單與版本比對記錄（2026-04-26）|
 
 ---
 
-## 版本對照（v0.2.5.1 → v0.2.8.0 新功能）
+## 版本對照（v0.2.5.1 → v0.2.9.4 新功能）
 
 | 版本 | 主要新功能 |
 |------|-----------|
 | v0.2.5.1 | AbortController、Counter-factual Reflection |
 | v0.2.5.2 | SchemaValidationMiddleware、SQLite FTS5、Discord 多媒體 |
-| v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin（Issue #120 PR 1 合併入 TaskReflector）、Session Log 結構化 |
+| v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin（→ TaskReflector）、Session Log 結構化 |
 | v0.2.6.0 | MCP 整合（Server + Client）、Predictive Memory Pre-fetcher |
 | v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
-| v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；handler 例外保護；移除 `/verbose` F3（Issue #63） |
-| v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE / KEEP / SUPERSEDE）；Admission Gate；Decay Cycle；`agent_memorize` tier；external source 分類 |
-| v0.2.9.4 | Unified Pipeline（Issues #83–#86）：`ToolCall.origin` 欄位；MCP / autonomy / sub-agent / plugin 全部經由同一 MiddlewarePipeline；`allowed_tools` + `scope_grants` 排程授權配置 |
+| v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；移除 `/verbose` F3（Issue #63） |
+| v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE/KEEP/SUPERSEDE）；Admission Gate；Decay Cycle |
+| v0.2.9.4 | Unified Pipeline（Issues #83–#86）：`ToolCall.origin`；MCP/autonomy/sub-agent 全經同一 Pipeline；`allowed_tools` + `scope_grants` + `attach_outputs`；Config tamper detection（Issue #91） |
 
 ---
 
 ## ✅ 文件撰寫狀態
 
-全部 48 個文件已完成！
+**57 個文件已完整！**
 
-| 區塊 | 完成數 |
-|------|--------|
-| 0. 總覽與概念 | 2/2 |
-| 1. 架構導讀 | 2/2 |
-| 2. Harness Layer | 5/5 |
-| 3. Memory Layer | 6/6 |
-| 4. Cognition Layer | 4/4 |
-| 5. Task Engine | 2/2 |
-| 6. Autonomy Engine | 4/4 |
-| 7. Notification Layer | 3/3 |
-| 8. Prompt Stack | 3/3 |
-| 9. Extensibility | 4/4 |
-| 10. Platform | 4/4 |
-| 11. 設定與配置 | 2/2 |
-| 12. 開發者指南 | 6/6 |
-| 附錄 | 1/1 |
+| 區塊 | 數量 |
+|------|------|
+| 0. 總覽與概念 | 2 |
+| 1. 架構導讀 | 2 |
+| 2. Harness Layer | 5 |
+| 3. Memory Layer | 7（含 12b）|
+| 4. Cognition Layer | 4 |
+| 5. Task Engine | 2 |
+| 6. Autonomy Engine | 4 |
+| 7. Notification Layer | 4（含 24b）|
+| 8. Prompt Stack | 3 |
+| 9. Extensibility | 5（含 31b）|
+| 10. Platform | 6（含 35b、36b）|
+| 11. 設定與配置 | 2 |
+| 12. 開發者指南 | 8（含 45、45b、46）|
+| 附錄 | 3（含 MISSING-DOC-AUDIT）|
 
 ---
 
-> 📚 Loom 文檔 v0.2.9.0 同步完成！
+> 📚 Loom 文檔 v0.2.9.4 同步完成！| 2026-04-26 03:21 Asia/Taipei
