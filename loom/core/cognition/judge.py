@@ -97,6 +97,32 @@ def is_high_stakes(envelopes: list["ExecutionEnvelopeView"]) -> bool:
     return False
 
 
+# ── Gate predicate ─────────────────────────────────────────────────────────
+
+
+def gate_should_fire(
+    envelopes: list["ExecutionEnvelopeView"],
+    final_text: str,
+) -> bool:
+    """Pure predicate — do we have enough signal to even run a judge?
+
+    Lifted out of the dispatcher so the caller can decide whether to spend
+    the per-turn idempotency token *before* committing it. Without this
+    split, a stream_turn that goes (text-only end_turn → reminder loop →
+    tool_use with MUTATES → end_turn with claim) burns its judge slot on
+    the first end_turn and silently skips the real completion.
+    """
+    if not envelopes:
+        return False
+    mutated = any(
+        "MUTATES" in (n.capabilities or [])
+        for env in envelopes for n in env.nodes
+    )
+    if not mutated:
+        return False
+    return claims_completion(final_text)
+
+
 # ── Digest construction ────────────────────────────────────────────────────
 
 _ARGS_PREVIEW_CAP = 200
@@ -257,15 +283,17 @@ async def run_judge(
 
 # ── Reminder formatting ────────────────────────────────────────────────────
 
-def format_verdict_reminder(verdict: JudgeVerdict, *, turn_offset: str = "previous") -> str:
+def format_verdict_reminder(verdict: JudgeVerdict) -> str:
     """Build the <system-reminder> body for fail/uncertain verdicts.
 
-    ``turn_offset`` is "previous" for async (verdict lands one turn late)
-    or "this" for sync (verdict refers to current turn).
+    Wording is intentionally turn-agnostic: async verdicts can land one or
+    even two turns after the claim they refer to (if the user replies
+    quickly), so anchoring to "previous turn" / "this turn" misleads in
+    edge cases. "your last completion claim" is true regardless.
     """
     marker = "✗ FAILED" if verdict.verdict == VERDICT_FAIL else "? UNCERTAIN"
     return (
-        f"Verdict on {turn_offset} turn (Judge):\n"
+        f"Verdict on your last completion claim (Judge):\n"
         f"{marker} — {verdict.reason}\n"
-        f"Re-check before continuing. If you disagree, say so explicitly."
+        f"Re-check before deciding next steps. If you disagree, say so explicitly."
     )

@@ -11,6 +11,7 @@ from loom.core.cognition.judge import (
     build_trace_digest,
     claims_completion,
     format_verdict_reminder,
+    gate_should_fire,
     is_high_stakes,
     parse_verdict,
 )
@@ -83,6 +84,72 @@ class TestHighStakes:
 
     def test_empty_envelopes(self):
         assert not is_high_stakes([])
+
+
+# ── gate predicate ──────────────────────────────────────────────────────────
+
+
+class TestGateShouldFire:
+    """Pure-predicate regression tests.
+
+    The bug this guards against: in v1 the dispatcher set
+    ``_judge_done = True`` before checking the gate, so a stream_turn that
+    went (text-only end_turn → reminder loop → tool_use w/ MUTATES →
+    end_turn w/ claim) would burn its judge token on the first end_turn
+    and silently skip the real completion. Splitting the gate out as a
+    pure predicate lets the caller decide when to commit the token.
+    """
+
+    def test_no_envelopes_skips(self):
+        assert not gate_should_fire([], "完成 ✅")
+
+    def test_envelopes_without_mutates_skip(self):
+        # Read-only investigation — agent says "完成" after grepping.
+        env = _envelope(_node("read_file", capabilities=["READ_PROBE"]))
+        assert not gate_should_fire([env], "看完了，沒問題 ✅")
+
+    def test_mutates_without_completion_claim_skips(self):
+        # Agent ran write_file then asked user a question.
+        env = _envelope(_node("write_file", capabilities=["MUTATES"]))
+        assert not gate_should_fire([env], "寫好初稿了，想再聽你的意見再下一步")
+
+    def test_mutates_plus_claim_fires(self):
+        env = _envelope(_node("write_file", capabilities=["MUTATES"]))
+        assert gate_should_fire([env], "技能 v1.1 已收斂 ✅")
+
+    def test_regression_late_appearing_mutates_still_judged(self):
+        """Iter 1 of a stream_turn had no MUTATES; later iters added them.
+
+        With the v1 buggy dispatcher this returned True at iter 1 (claim
+        present, no envelopes ⇒ False) and False at iter 3 because the
+        idempotency token was already consumed. Now the gate is pure and
+        the caller only commits the token when the gate actually returns
+        True — so iter 3 fires correctly.
+        """
+        # Iter 1 simulation: no envelopes yet, agent text claims completion.
+        # (Imagine the agent said "我先看一下 ✅" prematurely.)
+        assert not gate_should_fire([], "我先看一下 ✅")
+
+        # Iter 3 simulation: by now a write_file has run and the agent's
+        # final claim refers to the actual work.
+        env = _envelope(_node("write_file", capabilities=["MUTATES"]))
+        assert gate_should_fire([env], "已修正 race condition ✅")
+
+    def test_multiple_envelopes_one_with_mutates_fires(self):
+        envs = [
+            _envelope(_node("read_file", capabilities=["READ_PROBE"])),
+            _envelope(_node("run_bash", capabilities=["EXEC", "MUTATES"])),
+        ]
+        assert gate_should_fire(envs, "搞定")
+
+    def test_capabilities_none_treated_as_no_mutates(self):
+        n = ExecutionNodeView(
+            node_id="n1", call_id="c1", action_id="n1",
+            tool_name="custom", level=0, state="memorialized",
+            trust_level="GUARDED", capabilities=[],
+        )
+        env = _envelope(n)
+        assert not gate_should_fire([env], "完成")
 
 
 # ── trace digest ────────────────────────────────────────────────────────────
@@ -177,16 +244,24 @@ class TestVerdictParsing:
 class TestReminderFormat:
     def test_fail_reminder_contains_marker_and_reason(self):
         v = JudgeVerdict(verdict=VERDICT_FAIL, reason="claim contradicts trace")
-        body = format_verdict_reminder(v, turn_offset="previous")
+        body = format_verdict_reminder(v)
         assert "FAILED" in body
         assert "claim contradicts trace" in body
-        assert "previous" in body
+        assert "completion claim" in body
 
     def test_uncertain_reminder(self):
         v = JudgeVerdict(verdict=VERDICT_UNCERTAIN, reason="trace truncated")
-        body = format_verdict_reminder(v, turn_offset="this")
+        body = format_verdict_reminder(v)
         assert "UNCERTAIN" in body
-        assert "this" in body
+        assert "trace truncated" in body
+
+    def test_reminder_is_turn_agnostic(self):
+        """No 'previous' / 'this' anchors — async verdicts can land 2+ turns
+        late, so the wording must stay correct regardless of timing."""
+        v = JudgeVerdict(verdict=VERDICT_FAIL, reason="x")
+        body = format_verdict_reminder(v)
+        assert "previous turn" not in body
+        assert "this turn" not in body
 
 
 # ── system prompt sanity ────────────────────────────────────────────────────

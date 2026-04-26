@@ -50,8 +50,8 @@ from loom.core.cognition.judge import (
     VERDICT_PASS,
     VERDICT_UNCERTAIN,
     build_trace_digest,
-    claims_completion,
     format_verdict_reminder,
+    gate_should_fire,
     is_high_stakes,
     run_judge,
 )
@@ -1672,21 +1672,23 @@ class LoomSession:
                         self._telemetry_alerted_turns.add(self._turn_index)
                         continue
 
-                # Issue #196 Phase 2: turn-boundary judge. Gate runs once per
-                # stream_turn (idempotent guard above); if sync path injects a
-                # fail/uncertain reminder it `continue`s back to the LLM, so
-                # the agent sees the verdict in the same user-visible response.
-                # Async path schedules a background task and falls through.
+                # Issue #196 Phase 2: turn-boundary judge. Predicate is pure
+                # — only the *fire* path consumes the per-stream_turn token.
+                # That matters when an earlier end_turn iteration was a
+                # text-only response (no MUTATES, no claim) followed by a
+                # reminder loop that surfaces real tool work later: we don't
+                # want to burn the judge slot on the empty pre-state.
                 if not _judge_done and self._judge_mode != "off":
-                    _judge_done = True
                     _final_text = self._extract_final_assistant_text()
-                    _verdict_reminder = await self._maybe_run_judge(_final_text)
-                    if _verdict_reminder:
-                        self.messages.append({
-                            "role": "user",
-                            "content": f"<system-reminder>\n{_verdict_reminder}\n</system-reminder>",
-                        })
-                        continue
+                    if gate_should_fire(self._turn_envelopes(), _final_text):
+                        _judge_done = True
+                        _verdict_reminder = await self._maybe_run_judge(_final_text)
+                        if _verdict_reminder:
+                            self.messages.append({
+                                "role": "user",
+                                "content": f"<system-reminder>\n{_verdict_reminder}\n</system-reminder>",
+                            })
+                            continue
 
                 self._turn_index += 1
 
@@ -1874,10 +1876,14 @@ class LoomSession:
                     self._current_envelope.complete()
                 _completed_view = self._build_envelope_view(_batch_t0)
                 yield EnvelopeCompleted(envelope=_completed_view)
-                # Keep last 10 envelopes for TUI history display
+                # Keep last 50 envelopes — covers TUI history display *and*
+                # the Issue #196 turn-boundary judge digest. 10 was enough for
+                # the former; tool-heavy turns (Suno session, deep refactor)
+                # routinely exceed it within a single turn and would otherwise
+                # have older nodes evicted before the judge sees them.
                 self._recent_envelopes.append(_completed_view)
-                if len(self._recent_envelopes) > 10:
-                    self._recent_envelopes = self._recent_envelopes[-10:]
+                if len(self._recent_envelopes) > 50:
+                    self._recent_envelopes = self._recent_envelopes[-50:]
 
                 # ── Issue #108: Grants snapshot after each batch ──────────
                 yield self._build_grants_snapshot()
@@ -2051,34 +2057,21 @@ class LoomSession:
         ]
 
     async def _maybe_run_judge(self, final_text: str) -> str | None:
-        """Gate + dispatch for turn-boundary judge.
+        """Dispatch for the turn-boundary judge — assumes gate already passed.
 
         Returns a reminder body for the SYNC path when the verdict is
-        fail/uncertain (caller injects + continues). Returns None in all
-        other paths — gate skip, async dispatch, or sync pass.
+        fail/uncertain (caller injects + continues). Returns None for the
+        async path (verdict will land via ``_pending_verdicts`` next turn)
+        or sync ``pass`` verdicts (no noise).
         """
-        if self._judge_mode == "off":
-            return None
-
         envelopes = self._turn_envelopes()
-        if not envelopes:
-            return None  # No tools = nothing to verify
-        mutated = any(
-            "MUTATES" in (n.capabilities or [])
-            for env in envelopes for n in env.nodes
-        )
-        if not mutated:
-            return None
-        if not claims_completion(final_text):
-            return None
-
         digest = build_trace_digest(envelopes, final_text)
 
         if is_high_stakes(envelopes):
             verdict = await run_judge(self.router, self.model, digest)
             self._record_verdict_telemetry(verdict, sync=True)
             if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
-                return format_verdict_reminder(verdict, turn_offset="this")
+                return format_verdict_reminder(verdict)
             return None
 
         # Async path — fire-and-forget, verdict lands in next turn.
@@ -2094,9 +2087,7 @@ class LoomSession:
         verdict = await run_judge(self.router, self.model, digest)
         self._record_verdict_telemetry(verdict, sync=False)
         if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
-            self._pending_verdicts.append(
-                format_verdict_reminder(verdict, turn_offset="previous")
-            )
+            self._pending_verdicts.append(format_verdict_reminder(verdict))
 
     def _record_verdict_telemetry(self, verdict: "JudgeVerdict", *, sync: bool) -> None:
         """Best-effort log; never raises. Pass verdicts only land here, not
