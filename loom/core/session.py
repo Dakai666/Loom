@@ -2565,6 +2565,44 @@ class LoomSession:
             keep2.append(msg)
         self.messages = keep2
 
+        # Pass 4 (Issue #218): enforce tool_use ↔ tool_result adjacency.
+        # Anthropic API requires every assistant tool_use to be immediately
+        # followed by a user message containing the matching tool_result.
+        # Out-of-order pairs (both exist but separated by other messages) trigger
+        # 2013 even though Pass 2/3 are happy. Producer: a long-running tool
+        # subprocess kept running past a user interrupt / abort and its late
+        # result was appended after subsequent turns had already advanced.
+        # Repair strategy: index every tool result by tool_call_id, then re-emit
+        # canonical messages with each assistant's results pulled adjacent.
+        result_by_id: dict[str, dict] = {}
+        for msg in self.messages:
+            if msg.get("role") == "tool":
+                tid = msg.get("tool_call_id")
+                if tid:
+                    result_by_id[tid] = msg
+
+        emitted_result_ids: set[str] = set()
+        keep3: list[dict] = []
+        for msg in self.messages:
+            role = msg.get("role")
+            if role == "tool":
+                if msg.get("tool_call_id") in emitted_result_ids:
+                    continue  # already emitted adjacent to its assistant
+                # Result reached here without being emitted means its assistant
+                # has no tool_call referencing it — Pass 3 should have caught
+                # this, drop defensively.
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                keep3.append(msg)
+                for tc in msg["tool_calls"]:
+                    tid = tc.get("id")
+                    if tid and tid in result_by_id and tid not in emitted_result_ids:
+                        keep3.append(result_by_id[tid])
+                        emitted_result_ids.add(tid)
+                continue
+            keep3.append(msg)
+        self.messages = keep3
+
     def _telemetry_record_tool(
         self,
         tool_name: str,
