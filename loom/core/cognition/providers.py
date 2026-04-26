@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -361,6 +362,7 @@ class AnthropicProvider(LLMProvider):
         aborted = False
         _base_delay = 1.0
         _forensics_dumped = False
+        _retry_started = time.monotonic()
         for _attempt in range(self._max_retries):
             _yielded_any = False
             try:
@@ -397,6 +399,16 @@ class AnthropicProvider(LLMProvider):
                     or "connection" in exc_name
                 )
                 if not retryable or _attempt == self._max_retries - 1:
+                    # Annotate the exception with retry context so the
+                    # user-visible error is not just an empty "ReadTimeout: ".
+                    elapsed = time.monotonic() - _retry_started
+                    attempts = _attempt + 1
+                    orig = str(_exc) or type(_exc).__name__
+                    note = f" (after {attempts} attempt(s) in {elapsed:.1f}s)"
+                    try:
+                        _exc.args = (orig + note, *_exc.args[1:])
+                    except Exception:
+                        pass
                     raise
                 await asyncio.sleep(_base_delay * (2 ** _attempt))
 

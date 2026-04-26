@@ -433,7 +433,12 @@ def build_router() -> LLMRouter:
                 model=mm_model,
                 base_url="https://api.minimax.io/anthropic",
                 name="minimax",
-                timeout=120.0,
+                # 120s was too aggressive for MiniMax-M2.7 reasoning bursts —
+                # httpx read timeout is the max gap between streamed chunks,
+                # and heavy thinking turns routinely pause >120s before the
+                # first token. 300s tolerates that without making true hangs
+                # absurdly long to surface (still ~15min total over 3 retries).
+                timeout=300.0,
             ),
             default=True,
         )
