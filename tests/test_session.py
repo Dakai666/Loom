@@ -657,3 +657,53 @@ class TestSanitizeHistoryAdjacency:
                  for m in out]
         # Both orphans gone; only the two user messages remain.
         assert all(m.get("role") == "user" for m in out), roles
+
+
+class TestLogMessageTurnIndexCapture:
+    """Issue #218 Tier 2: _log_message must persist with the turn_index that
+    was current at *schedule* time, not at *run* time. Otherwise stream_turn
+    advancing _turn_index between an `ensure_future(_log_message(...))` call
+    and the task actually running mis-tags the row, which on reload reorders
+    the message via `ORDER BY turn_index ASC, id ASC` and breaks the
+    tool_use ↔ tool_result adjacency invariant.
+    """
+
+    async def test_explicit_turn_index_overrides_live_value(self):
+        from loom.core.session import LoomSession
+
+        captured: list[int] = []
+
+        class FakeLog:
+            async def log_message(self, session_id, turn_index, role,
+                                  content, metadata, raw_json=None):
+                captured.append(turn_index)
+
+        fake = SimpleNamespace()
+        fake._session_log = FakeLog()
+        fake._turn_index = 99  # simulate stream_turn having advanced
+        fake.session_id = "s1"
+
+        # Caller scheduled this when _turn_index was 7 — the row must persist
+        # at 7, not 99.
+        await LoomSession._log_message(
+            fake, "tool", "result", {"tool_call_id": "T1"}, turn_index=7,
+        )
+        assert captured == [7]
+
+    async def test_no_explicit_value_falls_back_to_live(self):
+        from loom.core.session import LoomSession
+
+        captured: list[int] = []
+
+        class FakeLog:
+            async def log_message(self, session_id, turn_index, role,
+                                  content, metadata, raw_json=None):
+                captured.append(turn_index)
+
+        fake = SimpleNamespace()
+        fake._session_log = FakeLog()
+        fake._turn_index = 12
+        fake.session_id = "s1"
+
+        await LoomSession._log_message(fake, "user", "hi")
+        assert captured == [12]
