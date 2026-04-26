@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -493,3 +494,69 @@ class TestProvisionalTitle:
 
         # Title from first session must be preserved after resume
         assert row[0] == "First Title"
+
+
+class TestStreamTurnLock:
+    """Regression: per-session ``_turn_lock`` must serialise concurrent
+    ``stream_turn()`` invocations so a mid-turn interrupt that fires a new
+    turn before the prior one fully unwinds (e.g. the Discord bot's
+    cancel-and-relaunch path) cannot let two LLM loops mutate
+    ``self.messages`` in parallel.
+
+    Without this lock, the symptom is "the agent does the same thing
+    twice": turn B observes turn A's partial assistant+tool history plus
+    the new user input, so the model re-runs A's last action.
+    """
+
+    async def test_lock_initialised_unlocked(self, tmp_path) -> None:
+        from loom.core.session import LoomSession
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+        assert isinstance(session._turn_lock, asyncio.Lock)
+        assert not session._turn_lock.locked()
+
+    async def test_concurrent_stream_turn_blocks_at_lock(self, tmp_path) -> None:
+        """If a prior turn still holds the lock, a new stream_turn() must
+        block before mutating ``self.messages`` — not race past it."""
+        from loom.core.session import LoomSession
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+
+        # Simulate an in-flight prior turn by holding the lock from outside.
+        await session._turn_lock.acquire()
+        baseline_history = list(session.messages)
+
+        async def consume() -> None:
+            async for _ in session.stream_turn("blocked-input"):
+                return
+
+        task = asyncio.create_task(consume())
+        # Yield the loop so the task advances as far as it can.
+        await asyncio.sleep(0.05)
+
+        # Critical invariant: the second caller has NOT appended the user
+        # message — the lock guards that mutation.
+        assert not task.done(), "stream_turn must block while _turn_lock is held"
+        assert session.messages == baseline_history, (
+            "stream_turn appended to history before acquiring _turn_lock — "
+            "concurrent turns can corrupt message ordering"
+        )
+
+        # Cleanup: release lock then cancel the now-runnable task before it
+        # touches subsystems that aren't wired (router, memory).
+        task.cancel()
+        session._turn_lock.release()
+        with contextlib.suppress(BaseException):
+            await task
