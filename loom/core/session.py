@@ -681,6 +681,16 @@ class LoomSession:
         # Abort controller for cancellation of in-flight LLM streaming calls.
         self._abort = AbortController()
 
+        # Serialises stream_turn() so concurrent invocations on the same
+        # session can never interleave message-history mutation. Without
+        # this, a mid-turn interrupt that fires a new turn before the old
+        # one fully unwinds (e.g. the Discord bot's cancel-and-relaunch
+        # path) lets two LLM loops mutate self.messages in parallel — the
+        # symptom is "the agent does the same thing twice" because turn B
+        # observes turn A's partial assistant+tool state plus the new
+        # user input.
+        self._turn_lock: asyncio.Lock = asyncio.Lock()
+
         # Issue #42: Action lifecycle tracking
         self._current_envelope: ExecutionEnvelope | None = None
         self._lifecycle_events: asyncio.Queue = asyncio.Queue()
@@ -1353,610 +1363,624 @@ class LoomSession:
         ToolEnd     — just after a tool call finishes
         TurnDone    — once all tool loops are resolved
         """
-        self._current_origin = origin
-
-        # Issue #131: Reset abort signal from previous turn so the session
-        # is not permanently stuck after a circuit-breaker trip.
-        self._abort.reset()
-        self._cancel_requested = False
-
-        # Issue #131: Reset per-turn deny counter so timeouts from a previous
-        # turn don't carry over and immediately trip the circuit breaker.
-        self.perm.recent_denies = 0
-
-        if hasattr(self, "_legitimacy_guard"):
-            self._legitimacy_guard.reset_probe()
-
-        # Prepend current datetime so the LLM always has temporal context.
-        # The UI shows the original user_input; the history gets the annotated version.
-        now_str = user_timestamp()
-        annotated = f"[{now_str}]\n{user_input}"
-        self.messages.append({"role": "user", "content": annotated})
-        asyncio.ensure_future(self._log_message("user", annotated))
-
-        # Issue #196 Phase 2: drain any async judge verdicts produced after
-        # the previous turn ended. Inject as separate <system-reminder>
-        # entries so the agent sees them alongside the new user input on
-        # this turn's first LLM call.
-        if self._pending_verdicts:
-            for body in self._pending_verdicts:
-                self.messages.append({
-                    "role": "user",
-                    "content": f"<system-reminder>\n{body}\n</system-reminder>",
-                })
-            self._pending_verdicts.clear()
-
-        await self._memory.episodic.write(
-            EpisodicEntry(
-                session_id=self.session_id,
-                event_type="message",
-                content=f"User: {user_input[:200]}",
+        # Serialise turns on this session. If a prior turn is still
+        # unwinding (e.g. caller fired ``task.cancel()`` but did not
+        # await the task), block here until it has fully exited so we
+        # never run two LLM loops on a shared self.messages.
+        if self._turn_lock.locked():
+            logger.warning(
+                "stream_turn: another turn still in flight on this session "
+                "— waiting for it to release before starting (origin=%s)",
+                origin,
             )
-        )
+        await self._turn_lock.acquire()
+        try:
+            self._current_origin = origin
 
-        # Sanitize first so _smart_compact never sees orphaned tool_call sequences.
-        # (Restart or mid-turn cancel can leave the assistant message in DB without
-        # a matching tool result — sanitize drops it before compaction reads history.)
-        self._sanitize_history()
-        # Issue #197 Phase 2: fold stale tool observations into scratchpad
-        # refs. Runs once per turn; safe because JIT (Phase 1) already
-        # guarantees the original content lives in scratchpad before this
-        # rewrite happens.
-        self._apply_observation_masking()
+            # Issue #131: Reset abort signal from previous turn so the session
+            # is not permanently stuck after a circuit-breaker trip.
+            self._abort.reset()
+            self._cancel_requested = False
 
-        # Compress before the first LLM call if already over threshold.
-        # (budget.used_tokens reflects the last response's actual token count,
-        # so this check is accurate from turn 2 onward.)
-        if self.budget.should_compress():
-            console.print(
-                f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}% — "
-                f"compressing…[/yellow]"
+            # Issue #131: Reset per-turn deny counter so timeouts from a previous
+            # turn don't carry over and immediately trip the circuit breaker.
+            self.perm.recent_denies = 0
+
+            if hasattr(self, "_legitimacy_guard"):
+                self._legitimacy_guard.reset_probe()
+
+            # Prepend current datetime so the LLM always has temporal context.
+            # The UI shows the original user_input; the history gets the annotated version.
+            now_str = user_timestamp()
+            annotated = f"[{now_str}]\n{user_input}"
+            self.messages.append({"role": "user", "content": annotated})
+            asyncio.ensure_future(self._log_message("user", annotated))
+
+            # Issue #196 Phase 2: drain any async judge verdicts produced after
+            # the previous turn ended. Inject as separate <system-reminder>
+            # entries so the agent sees them alongside the new user input on
+            # this turn's first LLM call.
+            if self._pending_verdicts:
+                for body in self._pending_verdicts:
+                    self.messages.append({
+                        "role": "user",
+                        "content": f"<system-reminder>\n{body}\n</system-reminder>",
+                    })
+                self._pending_verdicts.clear()
+
+            await self._memory.episodic.write(
+                EpisodicEntry(
+                    session_id=self.session_id,
+                    event_type="message",
+                    content=f"User: {user_input[:200]}",
+                )
             )
-            await self._smart_compact()
 
-        tools = self.registry.to_openai_schema()
-        tool_count = 0
-        input_tokens = 0
-        output_tokens = 0
-        t0 = time.monotonic()
-
-        # Think-block filter state — persists across the whole turn so multi-step
-        # reasoning (think → tool use → think again) is handled correctly.
-        _think_in = False           # currently inside <think>…</think>?
-        _think_shown = False        # emitted ThinkCollapsed for this streaming call?
-        _tbuf = ""                  # partial-tag lookahead buffer
-        _think_parts: list[str] = []  # accumulates think content for /think command
-        _current_think_start = 0    # index into _think_parts where current block began
-
-        _stream_retry = 0         # counts back-to-back stream_none retries
-        _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
-        _stop_reason = "complete"  # tracks why the loop exits
-
-        # Issue #205: TaskList self-check. On end_turn we inject a reminder
-        # at most once per stream_turn if the list still has active nodes,
-        # nudging the agent to either continue executing or rewrite the list
-        # to mark abandonment.
-        _tasklist_selfcheck_done = False
-        # Issue #154: Jobs status injection, also at most once per stream_turn.
-        # Reports newly-finished and still-running background jobs so the
-        # agent can absorb progress without polling.
-        _jobs_inject_done = False
-        # Issue #196 Phase 2: judge runs at most once per stream_turn —
-        # idempotent guard mirrors the pattern above.
-        _judge_done = False
-
-        while True:
-            # Check abort signal at top of each LLM call iteration.
-            # abort_signal is external (e.g. from AutonomyDaemon);
-            # self._abort.signal is internal (from cancel()).
-            sig = abort_signal if abort_signal is not None else self._abort.signal
-            if sig.is_set():
-                _stop_reason = "cancelled"
-                break
-            response: Any = None
-            _think_shown = False  # reset per streaming call (each tool round can think again)
-
-            # Repair any orphaned tool_call entries before each LLM call.
-            # This handles mid-turn cancellation (e.g. /stop while awaiting a
-            # Discord confirm button) that leaves the assistant message without
-            # matching tool results, which would produce a 2013 API error.
+            # Sanitize first so _smart_compact never sees orphaned tool_call sequences.
+            # (Restart or mid-turn cancel can leave the assistant message in DB without
+            # a matching tool result — sanitize drops it before compaction reads history.)
             self._sanitize_history()
+            # Issue #197 Phase 2: fold stale tool observations into scratchpad
+            # refs. Runs once per turn; safe because JIT (Phase 1) already
+            # guarantees the original content lives in scratchpad before this
+            # rewrite happens.
+            self._apply_observation_masking()
 
-            async for chunk, final in self.router.stream_chat(
-                model=self.model,
-                messages=self.messages,
-                tools=tools,
-                max_tokens=_resolve_output_max_tokens(
-                    self._loom_config, self.model,
-                ),
-                abort_signal=abort_signal,
-            ):
-                if final is None:
-                    if chunk:
-                        _tbuf += chunk
-                        out_parts: list[str] = []
-                        while _tbuf:
-                            if _think_in:
-                                close_idx = _tbuf.find("</think>")
-                                if close_idx >= 0:
-                                    _think_parts.append(_tbuf[:close_idx])
-                                    _think_in = False
-                                    _tbuf = _tbuf[close_idx + len("</think>"):]
-                                    if not _think_shown:
-                                        # Flush text accumulated before the think block,
-                                        # then emit a dedicated ThinkCollapsed event so
-                                        # each platform can render it in its own style.
-                                        if out_parts:
-                                            yield TextChunk(text="".join(out_parts))
-                                            out_parts = []
-                                        _think_full = "".join(
-                                            _think_parts[_current_think_start:]
-                                        ).strip()
-                                        _think_summary = _think_full[:120].replace("\n", " ")
-                                        yield ThinkCollapsed(
-                                            summary=_think_summary,
-                                            full=_think_full,
-                                        )
-                                        _think_shown = True
-                                else:
-                                    # Partial </think> at end? Accumulate up to lookahead.
-                                    partial = _find_partial_tag_suffix(_tbuf, "</think>")
-                                    if partial:
-                                        _think_parts.append(_tbuf[: len(_tbuf) - partial])
-                                        _tbuf = _tbuf[len(_tbuf) - partial :]
+            # Compress before the first LLM call if already over threshold.
+            # (budget.used_tokens reflects the last response's actual token count,
+            # so this check is accurate from turn 2 onward.)
+            if self.budget.should_compress():
+                console.print(
+                    f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}% — "
+                    f"compressing…[/yellow]"
+                )
+                await self._smart_compact()
+
+            tools = self.registry.to_openai_schema()
+            tool_count = 0
+            input_tokens = 0
+            output_tokens = 0
+            t0 = time.monotonic()
+
+            # Think-block filter state — persists across the whole turn so multi-step
+            # reasoning (think → tool use → think again) is handled correctly.
+            _think_in = False           # currently inside <think>…</think>?
+            _think_shown = False        # emitted ThinkCollapsed for this streaming call?
+            _tbuf = ""                  # partial-tag lookahead buffer
+            _think_parts: list[str] = []  # accumulates think content for /think command
+            _current_think_start = 0    # index into _think_parts where current block began
+
+            _stream_retry = 0         # counts back-to-back stream_none retries
+            _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
+            _stop_reason = "complete"  # tracks why the loop exits
+
+            # Issue #205: TaskList self-check. On end_turn we inject a reminder
+            # at most once per stream_turn if the list still has active nodes,
+            # nudging the agent to either continue executing or rewrite the list
+            # to mark abandonment.
+            _tasklist_selfcheck_done = False
+            # Issue #154: Jobs status injection, also at most once per stream_turn.
+            # Reports newly-finished and still-running background jobs so the
+            # agent can absorb progress without polling.
+            _jobs_inject_done = False
+            # Issue #196 Phase 2: judge runs at most once per stream_turn —
+            # idempotent guard mirrors the pattern above.
+            _judge_done = False
+
+            while True:
+                # Check abort signal at top of each LLM call iteration.
+                # abort_signal is external (e.g. from AutonomyDaemon);
+                # self._abort.signal is internal (from cancel()).
+                sig = abort_signal if abort_signal is not None else self._abort.signal
+                if sig.is_set():
+                    _stop_reason = "cancelled"
+                    break
+                response: Any = None
+                _think_shown = False  # reset per streaming call (each tool round can think again)
+
+                # Repair any orphaned tool_call entries before each LLM call.
+                # This handles mid-turn cancellation (e.g. /stop while awaiting a
+                # Discord confirm button) that leaves the assistant message without
+                # matching tool results, which would produce a 2013 API error.
+                self._sanitize_history()
+
+                async for chunk, final in self.router.stream_chat(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=tools,
+                    max_tokens=_resolve_output_max_tokens(
+                        self._loom_config, self.model,
+                    ),
+                    abort_signal=abort_signal,
+                ):
+                    if final is None:
+                        if chunk:
+                            _tbuf += chunk
+                            out_parts: list[str] = []
+                            while _tbuf:
+                                if _think_in:
+                                    close_idx = _tbuf.find("</think>")
+                                    if close_idx >= 0:
+                                        _think_parts.append(_tbuf[:close_idx])
+                                        _think_in = False
+                                        _tbuf = _tbuf[close_idx + len("</think>"):]
+                                        if not _think_shown:
+                                            # Flush text accumulated before the think block,
+                                            # then emit a dedicated ThinkCollapsed event so
+                                            # each platform can render it in its own style.
+                                            if out_parts:
+                                                yield TextChunk(text="".join(out_parts))
+                                                out_parts = []
+                                            _think_full = "".join(
+                                                _think_parts[_current_think_start:]
+                                            ).strip()
+                                            _think_summary = _think_full[:120].replace("\n", " ")
+                                            yield ThinkCollapsed(
+                                                summary=_think_summary,
+                                                full=_think_full,
+                                            )
+                                            _think_shown = True
                                     else:
-                                        _think_parts.append(_tbuf)
-                                        _tbuf = ""
-                                    break
-                            else:
-                                open_idx = _tbuf.find("<think>")
-                                if open_idx >= 0:
-                                    before = _tbuf[:open_idx]
-                                    if before:
-                                        out_parts.append(before)
-                                    _think_in = True
-                                    _current_think_start = len(_think_parts)
-                                    _tbuf = _tbuf[open_idx + len("<think>"):]
+                                        # Partial </think> at end? Accumulate up to lookahead.
+                                        partial = _find_partial_tag_suffix(_tbuf, "</think>")
+                                        if partial:
+                                            _think_parts.append(_tbuf[: len(_tbuf) - partial])
+                                            _tbuf = _tbuf[len(_tbuf) - partial :]
+                                        else:
+                                            _think_parts.append(_tbuf)
+                                            _tbuf = ""
+                                        break
                                 else:
-                                    # Partial <think> at end? Keep lookahead.
-                                    partial = _find_partial_tag_suffix(_tbuf, "<think>")
-                                    if partial:
-                                        before = _tbuf[: len(_tbuf) - partial]
+                                    open_idx = _tbuf.find("<think>")
+                                    if open_idx >= 0:
+                                        before = _tbuf[:open_idx]
                                         if before:
                                             out_parts.append(before)
-                                        _tbuf = _tbuf[len(_tbuf) - partial :]
+                                        _think_in = True
+                                        _current_think_start = len(_think_parts)
+                                        _tbuf = _tbuf[open_idx + len("<think>"):]
                                     else:
-                                        out_parts.append(_tbuf)
-                                        _tbuf = ""
-                                    break
-                        text = "".join(out_parts)
-                        if text:
-                            yield TextChunk(text=text)
-                else:
-                    response = final
+                                        # Partial <think> at end? Keep lookahead.
+                                        partial = _find_partial_tag_suffix(_tbuf, "<think>")
+                                        if partial:
+                                            before = _tbuf[: len(_tbuf) - partial]
+                                            if before:
+                                                out_parts.append(before)
+                                            _tbuf = _tbuf[len(_tbuf) - partial :]
+                                        else:
+                                            out_parts.append(_tbuf)
+                                            _tbuf = ""
+                                        break
+                            text = "".join(out_parts)
+                            if text:
+                                yield TextChunk(text=text)
+                    else:
+                        response = final
 
-            # Flush any buffered non-think content after each streaming call ends.
-            if _tbuf and not _think_in:
-                yield TextChunk(text=_tbuf)
-                _tbuf = ""
+                # Flush any buffered non-think content after each streaming call ends.
+                if _tbuf and not _think_in:
+                    yield TextChunk(text=_tbuf)
+                    _tbuf = ""
 
-            if response is None:
-                # Stream ended without a final message — connection likely dropped.
-                # Attempt a transparent retry (up to _MAX_STREAM_RETRIES) before
-                # giving up so transient MiniMax/network glitches don't silently
-                # kill long-running tasks.
-                if _stream_retry < _MAX_STREAM_RETRIES:
-                    _stream_retry += 1
-                    logger.warning(
-                        "stream_turn: response is None on attempt %d/%d — retrying…",
-                        _stream_retry, _MAX_STREAM_RETRIES,
+                if response is None:
+                    # Stream ended without a final message — connection likely dropped.
+                    # Attempt a transparent retry (up to _MAX_STREAM_RETRIES) before
+                    # giving up so transient MiniMax/network glitches don't silently
+                    # kill long-running tasks.
+                    if _stream_retry < _MAX_STREAM_RETRIES:
+                        _stream_retry += 1
+                        logger.warning(
+                            "stream_turn: response is None on attempt %d/%d — retrying…",
+                            _stream_retry, _MAX_STREAM_RETRIES,
+                        )
+                        yield TurnDropped(
+                            stop_reason="stream_none",
+                            retry_count=_stream_retry,
+                            tool_count=tool_count,
+                        )
+                        await asyncio.sleep(1.0 * _stream_retry)  # brief back-off
+                        # Re-sanitize history before retry in case partial state was appended
+                        self._sanitize_history()
+                        continue
+                    # All retries exhausted
+                    logger.error(
+                        "stream_turn: response is None after %d retries — dropping turn",
+                        _MAX_STREAM_RETRIES,
                     )
                     yield TurnDropped(
                         stop_reason="stream_none",
                         retry_count=_stream_retry,
                         tool_count=tool_count,
+                        exhausted=True,
                     )
-                    await asyncio.sleep(1.0 * _stream_retry)  # brief back-off
-                    # Re-sanitize history before retry in case partial state was appended
-                    self._sanitize_history()
-                    continue
-                # All retries exhausted
-                logger.error(
-                    "stream_turn: response is None after %d retries — dropping turn",
-                    _MAX_STREAM_RETRIES,
-                )
-                yield TurnDropped(
-                    stop_reason="stream_none",
-                    retry_count=_stream_retry,
-                    tool_count=tool_count,
-                    exhausted=True,
-                )
-                break
+                    break
 
-            # Surface native thinking blocks (Anthropic extended thinking API).
-            # stream.text_stream skips thinking content entirely — the blocks only
-            # appear in raw_message["_thinking_blocks"] after streaming finishes.
-            # Yield ThinkCollapsed *before* tool dispatch so the UI shows reasoning
-            # context inline, ahead of the resulting tool calls.
-            for _tb in response.raw_message.get("_thinking_blocks", []):
-                _tb_text = _tb.get("thinking", "").strip()
-                if not _tb_text:
-                    continue
-                _think_parts.append(_tb_text)   # include in /think output
-                yield ThinkCollapsed(
-                    summary=_tb_text[:120].replace("\n", " "),
-                    full=_tb_text,
-                )
-
-            # Replace (not accumulate) — input_tokens is the total context this call.
-            self.budget.record_response(response.input_tokens, response.output_tokens)
-            # Issue #142: feed the authoritative total into the context_layout
-            # dimension so layer attribution reflects real usage, not estimates.
-            if self._telemetry is not None:
-                ctx_dim = self._telemetry.get("context_layout")
-                if ctx_dim is not None:
-                    ctx_dim.update_total(response.input_tokens)
-                    self._telemetry.mark_dirty()
-            self.messages.append(response.raw_message)
-            input_tokens = response.input_tokens  # report latest actual value
-            output_tokens += response.output_tokens
-
-            # Log the full raw_message as JSON so tool_calls are preserved for resume.
-            # New path: raw_message goes into the dedicated `raw_json` column.
-            # The content field gets a plain-text representation for human readability
-            # (e.g. in observability queries). Legacy format=raw_message flag is
-            # preserved so old rows can still be replayed without migration.
-            _raw_json_str = json.dumps(response.raw_message, ensure_ascii=False)
-            _content_text = (
-                response.text or "[tool_use]"
-            )
-            asyncio.ensure_future(self._log_message(
-                "assistant",
-                _content_text,
-                {"format": "raw_message"},
-                raw_json=_raw_json_str,
-            ))
-
-            if response.stop_reason == "end_turn":
-                # Issue #205: Pre-final-response self-check. If the TaskList
-                # has pending/in-progress nodes and we haven't already nudged
-                # this turn, inject a reminder and loop back into the model.
-                # This catches the autonomy stall mode where an agent creates
-                # a plan, does some prep work, then ends silently without
-                # executing the planned nodes (cf. graph 66859851, 2026-04-17).
-                if (
-                    not _tasklist_selfcheck_done
-                    and hasattr(self, "_tasklist_manager")
-                    and self._tasklist_manager.has_active_nodes()
-                ):
-                    reminder = self._tasklist_manager.build_self_check_message()
-                    if reminder:
-                        self.messages.append({
-                            "role": "user",
-                            "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
-                        })
-                        _tasklist_selfcheck_done = True
+                # Surface native thinking blocks (Anthropic extended thinking API).
+                # stream.text_stream skips thinking content entirely — the blocks only
+                # appear in raw_message["_thinking_blocks"] after streaming finishes.
+                # Yield ThinkCollapsed *before* tool dispatch so the UI shows reasoning
+                # context inline, ahead of the resulting tool calls.
+                for _tb in response.raw_message.get("_thinking_blocks", []):
+                    _tb_text = _tb.get("thinking", "").strip()
+                    if not _tb_text:
                         continue
+                    _think_parts.append(_tb_text)   # include in /think output
+                    yield ThinkCollapsed(
+                        summary=_tb_text[:120].replace("\n", " "),
+                        full=_tb_text,
+                    )
 
-                # Issue #154: after TaskList self-check, report background
-                # jobs status if there's something new to say. Order matters:
-                # TaskList comes first so the agent sees planning context
-                # before absorbing IO updates.
-                if (
-                    not _jobs_inject_done
-                    and hasattr(self, "_jobstore")
-                ):
-                    jobs_msg = _build_jobs_inject_message(self._jobstore)
-                    if jobs_msg:
-                        self.messages.append({
-                            "role": "user",
-                            "content": f"<system-reminder>\n{jobs_msg}\n</system-reminder>",
-                        })
-                        _jobs_inject_done = True
-                        continue
+                # Replace (not accumulate) — input_tokens is the total context this call.
+                self.budget.record_response(response.input_tokens, response.output_tokens)
+                # Issue #142: feed the authoritative total into the context_layout
+                # dimension so layer attribution reflects real usage, not estimates.
+                if self._telemetry is not None:
+                    ctx_dim = self._telemetry.get("context_layout")
+                    if ctx_dim is not None:
+                        ctx_dim.update_total(response.input_tokens)
+                        self._telemetry.mark_dirty()
+                self.messages.append(response.raw_message)
+                input_tokens = response.input_tokens  # report latest actual value
+                output_tokens += response.output_tokens
 
-                # Issue #142: nudge the agent with a self-observability alert
-                # iff a dimension is outside bounds. Fires at most once per
-                # turn (tracked via _telemetry_alerted_turns) so repeat
-                # anomalies don't flood the context.
-                if (
-                    self._telemetry is not None
-                    and self._turn_index not in self._telemetry_alerted_turns
-                ):
-                    alert = self._telemetry.anomaly_report()
-                    if alert:
-                        self.messages.append({
-                            "role": "user",
-                            "content": f"<system-reminder>\n{alert}\n</system-reminder>",
-                        })
-                        self._telemetry_alerted_turns.add(self._turn_index)
-                        continue
+                # Log the full raw_message as JSON so tool_calls are preserved for resume.
+                # New path: raw_message goes into the dedicated `raw_json` column.
+                # The content field gets a plain-text representation for human readability
+                # (e.g. in observability queries). Legacy format=raw_message flag is
+                # preserved so old rows can still be replayed without migration.
+                _raw_json_str = json.dumps(response.raw_message, ensure_ascii=False)
+                _content_text = (
+                    response.text or "[tool_use]"
+                )
+                asyncio.ensure_future(self._log_message(
+                    "assistant",
+                    _content_text,
+                    {"format": "raw_message"},
+                    raw_json=_raw_json_str,
+                ))
 
-                # Issue #196 Phase 2: turn-boundary judge. Predicate is pure
-                # — only the *fire* path consumes the per-stream_turn token.
-                # That matters when an earlier end_turn iteration was a
-                # text-only response (no MUTATES, no claim) followed by a
-                # reminder loop that surfaces real tool work later: we don't
-                # want to burn the judge slot on the empty pre-state.
-                if not _judge_done and self._judge_mode != "off":
-                    _final_text = self._extract_final_assistant_text()
-                    if gate_should_fire(self._turn_envelopes(), _final_text):
-                        _judge_done = True
-                        _verdict_reminder = await self._maybe_run_judge(_final_text)
-                        if _verdict_reminder:
+                if response.stop_reason == "end_turn":
+                    # Issue #205: Pre-final-response self-check. If the TaskList
+                    # has pending/in-progress nodes and we haven't already nudged
+                    # this turn, inject a reminder and loop back into the model.
+                    # This catches the autonomy stall mode where an agent creates
+                    # a plan, does some prep work, then ends silently without
+                    # executing the planned nodes (cf. graph 66859851, 2026-04-17).
+                    if (
+                        not _tasklist_selfcheck_done
+                        and hasattr(self, "_tasklist_manager")
+                        and self._tasklist_manager.has_active_nodes()
+                    ):
+                        reminder = self._tasklist_manager.build_self_check_message()
+                        if reminder:
                             self.messages.append({
                                 "role": "user",
-                                "content": f"<system-reminder>\n{_verdict_reminder}\n</system-reminder>",
+                                "content": f"<system-reminder>\n{reminder}\n</system-reminder>",
                             })
+                            _tasklist_selfcheck_done = True
                             continue
 
-                self._turn_index += 1
+                    # Issue #154: after TaskList self-check, report background
+                    # jobs status if there's something new to say. Order matters:
+                    # TaskList comes first so the agent sees planning context
+                    # before absorbing IO updates.
+                    if (
+                        not _jobs_inject_done
+                        and hasattr(self, "_jobstore")
+                    ):
+                        jobs_msg = _build_jobs_inject_message(self._jobstore)
+                        if jobs_msg:
+                            self.messages.append({
+                                "role": "user",
+                                "content": f"<system-reminder>\n{jobs_msg}\n</system-reminder>",
+                            })
+                            _jobs_inject_done = True
+                            continue
 
-                # Issue #58: trigger skill self-assessment before TurnDone
-                self._trigger_skill_assessment()
+                    # Issue #142: nudge the agent with a self-observability alert
+                    # iff a dimension is outside bounds. Fires at most once per
+                    # turn (tracked via _telemetry_alerted_turns) so repeat
+                    # anomalies don't flood the context.
+                    if (
+                        self._telemetry is not None
+                        and self._turn_index not in self._telemetry_alerted_turns
+                    ):
+                        alert = self._telemetry.anomaly_report()
+                        if alert:
+                            self.messages.append({
+                                "role": "user",
+                                "content": f"<system-reminder>\n{alert}\n</system-reminder>",
+                            })
+                            self._telemetry_alerted_turns.add(self._turn_index)
+                            continue
 
-                # Mid-session episodic compression: configurable via loom.toml
-                # [memory] episodic_compress_threshold (default 30).
-                # Count only *uncompressed* rows so soft-deleted entries from
-                # prior compressions don't keep the threshold permanently
-                # satisfied (would re-trigger the LLM every turn).
-                try:
-                    ep_count = await self._memory.episodic.count_session(
-                        self.session_id, uncompressed_only=True,
+                    # Issue #196 Phase 2: turn-boundary judge. Predicate is pure
+                    # — only the *fire* path consumes the per-stream_turn token.
+                    # That matters when an earlier end_turn iteration was a
+                    # text-only response (no MUTATES, no claim) followed by a
+                    # reminder loop that surfaces real tool work later: we don't
+                    # want to burn the judge slot on the empty pre-state.
+                    if not _judge_done and self._judge_mode != "off":
+                        _final_text = self._extract_final_assistant_text()
+                        if gate_should_fire(self._turn_envelopes(), _final_text):
+                            _judge_done = True
+                            _verdict_reminder = await self._maybe_run_judge(_final_text)
+                            if _verdict_reminder:
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": f"<system-reminder>\n{_verdict_reminder}\n</system-reminder>",
+                                })
+                                continue
+
+                    self._turn_index += 1
+
+                    # Issue #58: trigger skill self-assessment before TurnDone
+                    self._trigger_skill_assessment()
+
+                    # Mid-session episodic compression: configurable via loom.toml
+                    # [memory] episodic_compress_threshold (default 30).
+                    # Count only *uncompressed* rows so soft-deleted entries from
+                    # prior compressions don't keep the threshold permanently
+                    # satisfied (would re-trigger the LLM every turn).
+                    try:
+                        ep_count = await self._memory.episodic.count_session(
+                            self.session_id, uncompressed_only=True,
+                        )
+                        if ep_count >= self._episodic_compress_threshold:
+                            fact_count = await compress_session(
+                                self.session_id,
+                                self._memory.episodic, self._memory.semantic,
+                                self.router, self.model,
+                                governor=self._governor,
+                                telemetry=self._telemetry,
+                            )
+                            if fact_count:
+                                yield CompressDone(fact_count=fact_count)
+                            # Rebuild MemoryIndex so long-running sessions (Discord)
+                            # see updated fact/anti-pattern counts without restarting.
+                            await self._refresh_memory_index()
+                    except Exception:
+                        pass  # never block the turn on compression failure
+
+                    self._last_think = "".join(_think_parts).strip()
+                    yield TurnDone(
+                        tool_count=tool_count,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        elapsed_ms=(time.monotonic() - t0) * 1000,
                     )
-                    if ep_count >= self._episodic_compress_threshold:
-                        fact_count = await compress_session(
-                            self.session_id,
-                            self._memory.episodic, self._memory.semantic,
-                            self.router, self.model,
-                            governor=self._governor,
-                            telemetry=self._telemetry,
-                        )
-                        if fact_count:
-                            yield CompressDone(fact_count=fact_count)
-                        # Rebuild MemoryIndex so long-running sessions (Discord)
-                        # see updated fact/anti-pattern counts without restarting.
-                        await self._refresh_memory_index()
-                except Exception:
-                    pass  # never block the turn on compression failure
+                    return
 
-                self._last_think = "".join(_think_parts).strip()
-                yield TurnDone(
-                    tool_count=tool_count,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    elapsed_ms=(time.monotonic() - t0) * 1000,
-                )
-                return
+                if response.stop_reason == "tool_use":
+                    # Attempt parallel dispatch when multiple tools are requested.
+                    # Falls back to sequential if any tool needs interactive confirmation
+                    # (GUARDED/CRITICAL not yet authorized) — parallel confirmation prompts
+                    # would interleave on the CLI.
+                    parallel = len(response.tool_uses) > 1 and self._all_authorized(
+                        response.tool_uses
+                    )
 
-            if response.stop_reason == "tool_use":
-                # Attempt parallel dispatch when multiple tools are requested.
-                # Falls back to sequential if any tool needs interactive confirmation
-                # (GUARDED/CRITICAL not yet authorized) — parallel confirmation prompts
-                # would interleave on the CLI.
-                parallel = len(response.tool_uses) > 1 and self._all_authorized(
-                    response.tool_uses
-                )
+                    # ── Issue #106: Create envelope for this tool batch ────────
+                    self._envelope_counter += 1
+                    envelope = ExecutionEnvelope(
+                        session_id=self.session_id,
+                        turn_index=self._turn_index,
+                    )
+                    self._current_envelope = envelope
+                    _batch_t0 = time.monotonic()
 
-                # ── Issue #106: Create envelope for this tool batch ────────
-                self._envelope_counter += 1
-                envelope = ExecutionEnvelope(
-                    session_id=self.session_id,
-                    turn_index=self._turn_index,
-                )
-                self._current_envelope = envelope
-                _batch_t0 = time.monotonic()
+                    # Yield EnvelopeStarted *before* ToolBegin events
+                    yield EnvelopeStarted(envelope=self._build_envelope_view(_batch_t0))
 
-                # Yield EnvelopeStarted *before* ToolBegin events
-                yield EnvelopeStarted(envelope=self._build_envelope_view(_batch_t0))
-
-                if parallel:
-                    # Announce all tools, then run concurrently
-                    for tu in response.tool_uses:
-                        yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
-                    dispatched = await self._dispatch_parallel(response.tool_uses)
-                    for tu, result, duration_ms in dispatched:
-                        tool_count += 1
-                        tool_output = str(result.output) if result.success else (result.error or "")
-                        yield ToolEnd(
-                            name=tu.name,
-                            success=result.success,
-                            output=tool_output[:200],
-                            duration_ms=duration_ms,
-                            call_id=tu.id,
-                        )
-                        self._telemetry_record_tool(
-                            tu.name, result=result, duration_ms=duration_ms,
-                        )
-                        # Drain lifecycle events queued during dispatch
-                        while not self._lifecycle_events.empty():
-                            yield self._lifecycle_events.get_nowait()
-                        # Issue #106: Yield envelope update after each tool completes
-                        yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
-                        # Issue #197 Phase 2: tag for observation masking.
-                        # Underscore-prefixed keys are ignored by provider
-                        # conversion (verified for OpenAI native + Anthropic
-                        # in providers.py — they explicitly read only role,
-                        # tool_call_id, content). If a future provider
-                        # changes that, _emit_turn / _tool_name MUST be
-                        # preserved — they're the data basis of masking.
-                        _tool_msg = self.router.format_tool_result(
-                            self.model, tu.id, tool_output, result.success,
-                        )
-                        _tool_msg["_emit_turn"] = self._turn_index
-                        _tool_msg["_tool_name"] = tu.name
-                        self.messages.append(_tool_msg)
-                        asyncio.ensure_future(self._log_message(
-                            "tool", tool_output[:500],
-                            {"tool_call_id": tu.id, "tool_name": tu.name},
-                        ))
-                else:
-                    # Sequential: single tool, or needs interactive confirmation.
-                    # Dispatched as a task so we can drain lifecycle events
-                    # (e.g. AWAITING_CONFIRM) while the confirm widget blocks.
-                    for tu in response.tool_uses:
-                        yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
-                        ts = time.monotonic()
-
-                        dispatch_task = asyncio.create_task(
-                            self._dispatch(tu.name, tu.args, tu.id)
-                        )
-                        # Drain lifecycle events while dispatch is in flight.
-                        # This makes ⏳ awaiting_confirm visible in the TUI
-                        # before the user responds to the confirm prompt (#109).
-                        _last_envelope_yield = time.monotonic()
-                        while not dispatch_task.done():
-                            try:
-                                await asyncio.wait_for(
-                                    asyncio.shield(dispatch_task), timeout=0.15,
-                                )
-                            except asyncio.TimeoutError:
-                                pass
-                            except Exception:
-                                break
-                            # Drain any lifecycle events queued during this tick
-                            drained = False
+                    if parallel:
+                        # Announce all tools, then run concurrently
+                        for tu in response.tool_uses:
+                            yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
+                        dispatched = await self._dispatch_parallel(response.tool_uses)
+                        for tu, result, duration_ms in dispatched:
+                            tool_count += 1
+                            tool_output = str(result.output) if result.success else (result.error or "")
+                            yield ToolEnd(
+                                name=tu.name,
+                                success=result.success,
+                                output=tool_output[:200],
+                                duration_ms=duration_ms,
+                                call_id=tu.id,
+                            )
+                            self._telemetry_record_tool(
+                                tu.name, result=result, duration_ms=duration_ms,
+                            )
+                            # Drain lifecycle events queued during dispatch
                             while not self._lifecycle_events.empty():
                                 yield self._lifecycle_events.get_nowait()
-                                drained = True
-                            # Yield envelope update if state changed, or as a
-                            # periodic fallback every ~1s so the TUI stays fresh
-                            # even if no lifecycle events fired (#108 review).
-                            now_mono = time.monotonic()
-                            if drained or (now_mono - _last_envelope_yield) > 1.0:
-                                yield EnvelopeUpdated(
-                                    envelope=self._build_envelope_view(_batch_t0)
-                                )
-                                _last_envelope_yield = now_mono
-
-                        # Collect the result
-                        try:
-                            result = dispatch_task.result()
-                        except Exception as _dispatch_exc:
-                            result = ToolResult(
-                                call_id=tu.id,
-                                tool_name=tu.name,
-                                success=False,
-                                error=f"Internal dispatch error: {_dispatch_exc}",
-                                failure_type="execution_error",
+                            # Issue #106: Yield envelope update after each tool completes
+                            yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
+                            # Issue #197 Phase 2: tag for observation masking.
+                            # Underscore-prefixed keys are ignored by provider
+                            # conversion (verified for OpenAI native + Anthropic
+                            # in providers.py — they explicitly read only role,
+                            # tool_call_id, content). If a future provider
+                            # changes that, _emit_turn / _tool_name MUST be
+                            # preserved — they're the data basis of masking.
+                            _tool_msg = self.router.format_tool_result(
+                                self.model, tu.id, tool_output, result.success,
                             )
+                            _tool_msg["_emit_turn"] = self._turn_index
+                            _tool_msg["_tool_name"] = tu.name
+                            self.messages.append(_tool_msg)
+                            asyncio.ensure_future(self._log_message(
+                                "tool", tool_output[:500],
+                                {"tool_call_id": tu.id, "tool_name": tu.name},
+                            ))
+                    else:
+                        # Sequential: single tool, or needs interactive confirmation.
+                        # Dispatched as a task so we can drain lifecycle events
+                        # (e.g. AWAITING_CONFIRM) while the confirm widget blocks.
+                        for tu in response.tool_uses:
+                            yield ToolBegin(name=tu.name, args=tu.args, call_id=tu.id)
+                            ts = time.monotonic()
 
-                        duration_ms = (time.monotonic() - ts) * 1000
-                        tool_count += 1
-                        tool_output = str(result.output) if result.success else (result.error or "")
-                        yield ToolEnd(
-                            name=tu.name,
-                            success=result.success,
-                            output=tool_output[:200],
-                            duration_ms=duration_ms,
-                            call_id=tu.id,
+                            dispatch_task = asyncio.create_task(
+                                self._dispatch(tu.name, tu.args, tu.id)
+                            )
+                            # Drain lifecycle events while dispatch is in flight.
+                            # This makes ⏳ awaiting_confirm visible in the TUI
+                            # before the user responds to the confirm prompt (#109).
+                            _last_envelope_yield = time.monotonic()
+                            while not dispatch_task.done():
+                                try:
+                                    await asyncio.wait_for(
+                                        asyncio.shield(dispatch_task), timeout=0.15,
+                                    )
+                                except asyncio.TimeoutError:
+                                    pass
+                                except Exception:
+                                    break
+                                # Drain any lifecycle events queued during this tick
+                                drained = False
+                                while not self._lifecycle_events.empty():
+                                    yield self._lifecycle_events.get_nowait()
+                                    drained = True
+                                # Yield envelope update if state changed, or as a
+                                # periodic fallback every ~1s so the TUI stays fresh
+                                # even if no lifecycle events fired (#108 review).
+                                now_mono = time.monotonic()
+                                if drained or (now_mono - _last_envelope_yield) > 1.0:
+                                    yield EnvelopeUpdated(
+                                        envelope=self._build_envelope_view(_batch_t0)
+                                    )
+                                    _last_envelope_yield = now_mono
+
+                            # Collect the result
+                            try:
+                                result = dispatch_task.result()
+                            except Exception as _dispatch_exc:
+                                result = ToolResult(
+                                    call_id=tu.id,
+                                    tool_name=tu.name,
+                                    success=False,
+                                    error=f"Internal dispatch error: {_dispatch_exc}",
+                                    failure_type="execution_error",
+                                )
+
+                            duration_ms = (time.monotonic() - ts) * 1000
+                            tool_count += 1
+                            tool_output = str(result.output) if result.success else (result.error or "")
+                            yield ToolEnd(
+                                name=tu.name,
+                                success=result.success,
+                                output=tool_output[:200],
+                                duration_ms=duration_ms,
+                                call_id=tu.id,
+                            )
+                            self._telemetry_record_tool(
+                                tu.name, result=result, duration_ms=duration_ms,
+                            )
+                            # Final drain of lifecycle events after dispatch
+                            while not self._lifecycle_events.empty():
+                                yield self._lifecycle_events.get_nowait()
+                            # Issue #106: Yield envelope update after each tool completes
+                            yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
+                            # Issue #197 Phase 2: tag for observation masking.
+                            _tool_msg = self.router.format_tool_result(
+                                self.model, tu.id, tool_output, result.success,
+                            )
+                            _tool_msg["_emit_turn"] = self._turn_index
+                            _tool_msg["_tool_name"] = tu.name
+                            self.messages.append(_tool_msg)
+                            asyncio.ensure_future(self._log_message(
+                                "tool", tool_output[:500],
+                                {"tool_call_id": tu.id, "tool_name": tu.name},
+                            ))
+
+                    # ── Issue #106: Envelope completed ─────────────────────────
+                    if self._current_envelope is not None:
+                        self._current_envelope.complete()
+                    _completed_view = self._build_envelope_view(_batch_t0)
+                    yield EnvelopeCompleted(envelope=_completed_view)
+                    # Keep last 50 envelopes — covers TUI history display *and*
+                    # the Issue #196 turn-boundary judge digest. 10 was enough for
+                    # the former; tool-heavy turns (Suno session, deep refactor)
+                    # routinely exceed it within a single turn and would otherwise
+                    # have older nodes evicted before the judge sees them.
+                    self._recent_envelopes.append(_completed_view)
+                    if len(self._recent_envelopes) > 50:
+                        self._recent_envelopes = self._recent_envelopes[-50:]
+
+                    # ── Issue #108: Grants snapshot after each batch ──────────
+                    yield self._build_grants_snapshot()
+
+                    # Issue #142: opportunistic flush — keeps DB state fresh
+                    # for any out-of-band `agent_health` query without adding
+                    # per-tool I/O. No-op when below persist_interval.
+                    if self._telemetry is not None:
+                        try:
+                            await self._telemetry.maybe_flush()
+                        except Exception as exc:
+                            logger.debug("Telemetry flush deferred: %s", exc)
+
+                    # Check budget after tool results are appended — the next LLM
+                    # call in this loop will include them and may push over the limit.
+                    if self.budget.should_compress():
+                        console.print(
+                            f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}%"
+                            f" mid-turn — compressing…[/yellow]"
                         )
-                        self._telemetry_record_tool(
-                            tu.name, result=result, duration_ms=duration_ms,
-                        )
-                        # Final drain of lifecycle events after dispatch
-                        while not self._lifecycle_events.empty():
-                            yield self._lifecycle_events.get_nowait()
-                        # Issue #106: Yield envelope update after each tool completes
-                        yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
-                        # Issue #197 Phase 2: tag for observation masking.
-                        _tool_msg = self.router.format_tool_result(
-                            self.model, tu.id, tool_output, result.success,
-                        )
-                        _tool_msg["_emit_turn"] = self._turn_index
-                        _tool_msg["_tool_name"] = tu.name
-                        self.messages.append(_tool_msg)
-                        asyncio.ensure_future(self._log_message(
-                            "tool", tool_output[:500],
-                            {"tool_call_id": tu.id, "tool_name": tu.name},
-                        ))
+                        await self._smart_compact()
 
-                # ── Issue #106: Envelope completed ─────────────────────────
-                if self._current_envelope is not None:
-                    self._current_envelope.complete()
-                _completed_view = self._build_envelope_view(_batch_t0)
-                yield EnvelopeCompleted(envelope=_completed_view)
-                # Keep last 50 envelopes — covers TUI history display *and*
-                # the Issue #196 turn-boundary judge digest. 10 was enough for
-                # the former; tool-heavy turns (Suno session, deep refactor)
-                # routinely exceed it within a single turn and would otherwise
-                # have older nodes evicted before the judge sees them.
-                self._recent_envelopes.append(_completed_view)
-                if len(self._recent_envelopes) > 50:
-                    self._recent_envelopes = self._recent_envelopes[-50:]
-
-                # ── Issue #108: Grants snapshot after each batch ──────────
-                yield self._build_grants_snapshot()
-
-                # Issue #142: opportunistic flush — keeps DB state fresh
-                # for any out-of-band `agent_health` query without adding
-                # per-tool I/O. No-op when below persist_interval.
-                if self._telemetry is not None:
-                    try:
-                        await self._telemetry.maybe_flush()
-                    except Exception as exc:
-                        logger.debug("Telemetry flush deferred: %s", exc)
-
-                # Check budget after tool results are appended — the next LLM
-                # call in this loop will include them and may push over the limit.
-                if self.budget.should_compress():
-                    console.print(
-                        f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}%"
-                        f" mid-turn — compressing…[/yellow]"
+                    # ── HITL check point ─────────────────────────────────────
+                    # Fires after every tool batch, before the next LLM call.
+                    # pause() sets _pause_requested; hitl_mode auto-sets it each batch.
+                    if self.hitl_mode:
+                        self._pause_requested = True
+                    if self._pause_requested:
+                        self._pause_requested = False
+                        self._resume_event.clear()
+                        yield TurnPaused(tool_count_so_far=tool_count)
+                        await self._resume_event.wait()
+                        self._resume_event.clear()
+                        if self._cancel_requested:
+                            self._cancel_requested = False
+                            self._last_think = "".join(_think_parts).strip()
+                            self._turn_index += 1
+                            # Issue #58: trigger skill self-assessment before TurnDone
+                            self._trigger_skill_assessment()
+                            yield TurnDone(
+                                tool_count=tool_count,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                elapsed_ms=(time.monotonic() - t0) * 1000,
+                            )
+                            return
+                else:
+                    # Unexpected stop_reason (e.g. 'max_tokens', unknown provider value).
+                    # Log and surface via TurnDropped so platforms can show a warning
+                    # rather than silently dropping the turn.
+                    _raw_stop = getattr(response, "stop_reason", "unknown")
+                    logger.warning(
+                        "stream_turn: unexpected stop_reason=%r after %d tool(s) — stopping",
+                        _raw_stop, tool_count,
                     )
-                    await self._smart_compact()
+                    yield TurnDropped(
+                        stop_reason=str(_raw_stop),
+                        retry_count=0,
+                        tool_count=tool_count,
+                    )
+                    break
 
-                # ── HITL check point ─────────────────────────────────────
-                # Fires after every tool batch, before the next LLM call.
-                # pause() sets _pause_requested; hitl_mode auto-sets it each batch.
-                if self.hitl_mode:
-                    self._pause_requested = True
-                if self._pause_requested:
-                    self._pause_requested = False
-                    self._resume_event.clear()
-                    yield TurnPaused(tool_count_so_far=tool_count)
-                    await self._resume_event.wait()
-                    self._resume_event.clear()
-                    if self._cancel_requested:
-                        self._cancel_requested = False
-                        self._last_think = "".join(_think_parts).strip()
-                        self._turn_index += 1
-                        # Issue #58: trigger skill self-assessment before TurnDone
-                        self._trigger_skill_assessment()
-                        yield TurnDone(
-                            tool_count=tool_count,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            elapsed_ms=(time.monotonic() - t0) * 1000,
-                        )
-                        return
-            else:
-                # Unexpected stop_reason (e.g. 'max_tokens', unknown provider value).
-                # Log and surface via TurnDropped so platforms can show a warning
-                # rather than silently dropping the turn.
-                _raw_stop = getattr(response, "stop_reason", "unknown")
-                logger.warning(
-                    "stream_turn: unexpected stop_reason=%r after %d tool(s) — stopping",
-                    _raw_stop, tool_count,
-                )
-                yield TurnDropped(
-                    stop_reason=str(_raw_stop),
-                    retry_count=0,
-                    tool_count=tool_count,
-                )
-                break
-
-        self._last_think = "".join(_think_parts).strip()
-        self._turn_index += 1
-        # Issue #58: trigger skill self-assessment before TurnDone
-        self._trigger_skill_assessment()
-        yield TurnDone(
-            tool_count=tool_count,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            elapsed_ms=(time.monotonic() - t0) * 1000,
-            stop_reason=_stop_reason,
-        )
+            self._last_think = "".join(_think_parts).strip()
+            self._turn_index += 1
+            # Issue #58: trigger skill self-assessment before TurnDone
+            self._trigger_skill_assessment()
+            yield TurnDone(
+                tool_count=tool_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                elapsed_ms=(time.monotonic() - t0) * 1000,
+                stop_reason=_stop_reason,
+            )
+        finally:
+            self._turn_lock.release()
 
     # ------------------------------------------------------------------
     # Issue #58: Skill self-assessment trigger
