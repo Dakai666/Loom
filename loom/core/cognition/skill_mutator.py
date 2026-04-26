@@ -27,6 +27,7 @@ PR 2 scope
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -148,6 +149,11 @@ class SkillMutator:
         self._min_suggestions = min_suggestions
         self._max_body_chars = max_body_chars
         self._fast_track_threshold = fast_track_threshold
+        # Issue #212: signal-preserving record of the most recent LLM
+        # failure so the session can surface mutator silence instead of
+        # swallowing it. Each entry: {path, skill, error, error_type,
+        # timestamp}. ``None`` means no failure observed yet.
+        self.last_failure: dict | None = None
 
     # ------------------------------------------------------------------
     # Public
@@ -202,7 +208,21 @@ class SkillMutator:
             )
             raw = (response.text or "").strip()
         except Exception as exc:
-            logger.debug("SkillMutator LLM call failed: %s", exc)
+            # Issue #212: silent LLM failures masked the entire skill
+            # evolution loop. Bump to WARNING with full traceback, and
+            # record on the mutator so callers (session, telemetry) can
+            # see *why* a candidate was not produced.
+            logger.warning(
+                "SkillMutator LLM call failed (skill=%s): %s",
+                parent.name, exc, exc_info=True,
+            )
+            self.last_failure = {
+                "path": "propose_candidate",
+                "skill": parent.name,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "timestamp": time.time(),
+            }
             return None
 
         new_body = _strip_fencing(raw)
@@ -282,7 +302,19 @@ class SkillMutator:
             )
             raw = (response.text or "").strip()
         except Exception as exc:
-            logger.debug("from_batch_diagnostic LLM call failed: %s", exc)
+            # Issue #212: see propose_candidate above — record so the
+            # silence is observable.
+            logger.warning(
+                "from_batch_diagnostic LLM call failed (skill=%s): %s",
+                parent.name, exc, exc_info=True,
+            )
+            self.last_failure = {
+                "path": "from_batch_diagnostic",
+                "skill": parent.name,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "timestamp": time.time(),
+            }
             return None
 
         new_body = _strip_fencing(raw)
