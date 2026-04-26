@@ -12,6 +12,7 @@ Execution order (outermost → innermost):
 import asyncio
 import logging
 import time
+import traceback
 import uuid
 
 _log = logging.getLogger(__name__)
@@ -86,9 +87,35 @@ class ToolResult:
     failure_type: str | None = None   # one of FAILURE_TYPES when success=False
     duration_ms: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Issue #212: full diagnostic context for tool/middleware exceptions.
+    # ``error`` stays a single line for the agent's prompt; ``error_context``
+    # carries the full traceback (or other structured detail) for telemetry,
+    # forensics, and post-mortem inspection. Always None on success.
+    error_context: str | None = None
 
 
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
+
+
+# ---------------------------------------------------------------------------
+# Issue #212: middleware signal preservation helpers
+# ---------------------------------------------------------------------------
+
+_TRACE_KEY = "middleware_trace"
+
+
+def _trace_middleware(
+    call: ToolCall, name: str, decision: str, **extra: Any,
+) -> None:
+    """Append a structured decision entry to ``call.metadata['middleware_trace']``.
+
+    Each entry is a small dict so the agent (and post-mortem tooling) can
+    answer "which middleware acted on this call, in what order, with what
+    outcome" without cross-referencing logs and ActionRecords. Cheap by
+    design — one list append per decision point.
+    """
+    trace = call.metadata.setdefault(_TRACE_KEY, [])
+    trace.append({"middleware": name, "decision": decision, **extra})
 
 # ---------------------------------------------------------------------------
 # Middleware base
@@ -236,7 +263,11 @@ class JITRetrievalMiddleware(Middleware):
         except Exception as exc:
             _log.warning(
                 "JIT spill to scratchpad failed for %r: %s — keeping inline.",
-                call.tool_name, exc,
+                call.tool_name, exc, exc_info=True,
+            )
+            _trace_middleware(
+                call, "JITRetrieval", "spill-failed",
+                reason=str(exc), error_context=traceback.format_exc(),
             )
             return result
 
@@ -271,6 +302,7 @@ class JITRetrievalMiddleware(Middleware):
             failure_type=result.failure_type,
             duration_ms=result.duration_ms,
             metadata=new_metadata,
+            error_context=result.error_context,
         )
 
 
@@ -555,6 +587,14 @@ class BlastRadiusMiddleware(Middleware):
         if ctx is not None:
             ctx.authorization_result = result
             ctx.authorization_reason = reason
+        # Issue #212: surface authorization decisions in middleware_trace
+        # so an agent inspecting a denied result can see "BlastRadius said
+        # X because Y" without cross-referencing the lifecycle ActionRecord.
+        _trace_middleware(
+            call, "BlastRadius",
+            "authorize" if result else "deny",
+            reason=reason,
+        )
 
     async def _enter_awaiting_confirm(self, call: ToolCall) -> None:
         """Transition ActionRecord to AWAITING_CONFIRM before prompting user (#109)."""
@@ -633,7 +673,11 @@ class BlastRadiusMiddleware(Middleware):
         except Exception as exc:
             _log.warning(
                 "scope_resolver for %r raised: %s — falling back to legacy",
-                call.tool_name, exc,
+                call.tool_name, exc, exc_info=True,
+            )
+            _trace_middleware(
+                call, "BlastRadius", "scope-resolver-raised",
+                reason=str(exc), error_context=traceback.format_exc(),
             )
             return self._FALLBACK_TO_LEGACY
 
@@ -941,7 +985,12 @@ class LifecycleGateMiddleware(Middleware):
             except Exception as exc:
                 _log.warning(
                     "precondition_check[%d] for %r raised: %s — treating as failed",
-                    i, call.tool_name, exc,
+                    i, call.tool_name, exc, exc_info=True,
+                )
+                _trace_middleware(
+                    call, "LifecycleGate", "precondition-raised",
+                    check_index=i, reason=str(exc),
+                    error_context=traceback.format_exc(),
                 )
                 passed = False
 
@@ -976,6 +1025,10 @@ class LifecycleGateMiddleware(Middleware):
                     )
                 error_text = "\n".join(error_lines)
 
+                _trace_middleware(
+                    call, "LifecycleGate", "precondition-failed",
+                    check_index=i, reason=desc, owner_skill=owner_skill,
+                )
                 await ctx.transition(
                     ActionState.ABORTED,
                     reason=f"Precondition failed: {desc}",
@@ -1030,19 +1083,31 @@ class LifecycleGateMiddleware(Middleware):
                 if exc is not None:
                     # Tool raised instead of returning ToolResult — convert and
                     # continue through OBSERVED so MEMORIALIZED always fires.
+                    tb = "".join(traceback.format_exception(
+                        type(exc), exc, exc.__traceback__,
+                    ))
                     _log.warning(
                         "tool %r raised during abort-raced execution: %s",
-                        call.tool_name, exc,
+                        call.tool_name, exc, exc_info=exc,
+                    )
+                    _trace_middleware(
+                        call, "LifecycleGate", "tool-raised",
+                        reason=str(exc), error_context=tb,
                     )
                     result = ToolResult(
                         call_id=call.id, tool_name=call.tool_name,
                         success=False, error=str(exc),
                         failure_type="execution_error",
+                        error_context=tb,
                     )
                 else:
                     result = exec_task.result()
             else:
                 # Abort signal fired during execution
+                _trace_middleware(
+                    call, "LifecycleGate", "aborted-during-execution",
+                    reason="abort signal during execution",
+                )
                 await ctx.transition(
                     ActionState.ABORTED,
                     reason="abort signal during execution",
@@ -1061,13 +1126,20 @@ class LifecycleGateMiddleware(Middleware):
             except Exception as exc:
                 # Tool raised instead of returning ToolResult — convert and
                 # continue through OBSERVED so MEMORIALIZED always fires.
+                tb = traceback.format_exc()
                 _log.warning(
                     "tool %r raised during execution: %s", call.tool_name, exc,
+                    exc_info=True,
+                )
+                _trace_middleware(
+                    call, "LifecycleGate", "tool-raised",
+                    reason=str(exc), error_context=tb,
                 )
                 result = ToolResult(
                     call_id=call.id, tool_name=call.tool_name,
                     success=False, error=str(exc),
                     failure_type="execution_error",
+                    error_context=tb,
                 )
 
         # ── OBSERVED — executor returned ──────────────────────────────
@@ -1285,7 +1357,12 @@ class LifecycleMiddleware(Middleware):
             except Exception as _val_exc:
                 _log.warning(
                     "post_validator for %r raised unexpectedly: %s — treating as passed",
-                    call.tool_name, _val_exc,
+                    call.tool_name, _val_exc, exc_info=True,
+                )
+                _trace_middleware(
+                    call, "Lifecycle", "post-validator-raised",
+                    reason=str(_val_exc),
+                    error_context=traceback.format_exc(),
                 )
                 raw_verdict = True
 
@@ -1316,11 +1393,21 @@ class LifecycleMiddleware(Middleware):
                         rb_result = await rollback_fn(call, result)
                         record.rollback_result = rb_result
                     except Exception as exc:
+                        tb = traceback.format_exc()
+                        _log.warning(
+                            "rollback_fn for %r raised: %s",
+                            call.tool_name, exc, exc_info=True,
+                        )
+                        _trace_middleware(
+                            call, "Lifecycle", "rollback-raised",
+                            reason=str(exc), error_context=tb,
+                        )
                         record.rollback_result = ToolResult(
                             call_id=call.id,
                             tool_name=call.tool_name,
                             success=False,
                             error=f"Rollback failed: {exc}",
+                            error_context=tb,
                         )
                     await ctx.transition(ActionState.REVERTED)
                     # Rolled-back result — still a semantic failure at heart.
