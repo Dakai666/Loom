@@ -44,6 +44,17 @@ from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
+from loom.core.cognition.judge import (
+    JudgeVerdict,
+    VERDICT_FAIL,
+    VERDICT_PASS,
+    VERDICT_UNCERTAIN,
+    build_trace_digest,
+    claims_completion,
+    format_verdict_reminder,
+    is_high_stakes,
+    run_judge,
+)
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
 from loom.core.cognition.skill_gate import SkillGate
@@ -545,6 +556,21 @@ class LoomSession:
         # collection followed by synthesis). 0 disables masking. JIT
         # ensures the original content is in scratchpad regardless.
         self._mask_age_turns: int = int(_harness_cfg.get("mask_age_turns", 20))
+
+        # Issue #196 Phase 2: turn-boundary LLM-as-judge. ``off`` disables;
+        # ``auto`` runs async by default and auto-upgrades to sync for
+        # high-stakes turns (CRITICAL trust / git push / PR ops).
+        _verif_cfg = config.get("verification", {})
+        self._judge_mode: str = str(_verif_cfg.get("judge_mode", "auto")).lower()
+        if self._judge_mode not in ("off", "auto"):
+            self._judge_mode = "auto"
+        # Verdicts produced async land here; drained as <system-reminder>
+        # at the start of the next stream_turn.
+        self._pending_verdicts: list[str] = []
+        # In-flight judge background tasks — kept so stop() can cancel them
+        # cleanly and so a single turn can't fire judge twice.
+        self._judge_tasks: set[asyncio.Task] = set()
+
         self.registry = ToolRegistry()
         # Issue #154: JobStore + Scratchpad must exist before tools that may
         # submit to them (run_bash, fetch_url). Session-scoped, in-memory,
@@ -1139,6 +1165,13 @@ class LoomSession:
                 await self._jobstore.cancel_all(reason="session_ended")
             except Exception as exc:
                 logger.error("JobStore.cancel_all failed: %s", exc, exc_info=True)
+        # Issue #196 Phase 2: cancel any in-flight judge tasks so a session
+        # shutdown doesn't leave verdict callbacks running against a torn-down
+        # router / message list.
+        if getattr(self, "_judge_tasks", None):
+            for _t in list(self._judge_tasks):
+                _t.cancel()
+            self._judge_tasks.clear()
         if hasattr(self, "_scratchpad"):
             self._scratchpad.clear()
         # Issue #64: unmount all skill-declared checks before closing
@@ -1341,6 +1374,18 @@ class LoomSession:
         self.messages.append({"role": "user", "content": annotated})
         asyncio.ensure_future(self._log_message("user", annotated))
 
+        # Issue #196 Phase 2: drain any async judge verdicts produced after
+        # the previous turn ended. Inject as separate <system-reminder>
+        # entries so the agent sees them alongside the new user input on
+        # this turn's first LLM call.
+        if self._pending_verdicts:
+            for body in self._pending_verdicts:
+                self.messages.append({
+                    "role": "user",
+                    "content": f"<system-reminder>\n{body}\n</system-reminder>",
+                })
+            self._pending_verdicts.clear()
+
         await self._memory.episodic.write(
             EpisodicEntry(
                 session_id=self.session_id,
@@ -1396,6 +1441,9 @@ class LoomSession:
         # Reports newly-finished and still-running background jobs so the
         # agent can absorb progress without polling.
         _jobs_inject_done = False
+        # Issue #196 Phase 2: judge runs at most once per stream_turn —
+        # idempotent guard mirrors the pattern above.
+        _judge_done = False
 
         while True:
             # Check abort signal at top of each LLM call iteration.
@@ -1622,6 +1670,22 @@ class LoomSession:
                             "content": f"<system-reminder>\n{alert}\n</system-reminder>",
                         })
                         self._telemetry_alerted_turns.add(self._turn_index)
+                        continue
+
+                # Issue #196 Phase 2: turn-boundary judge. Gate runs once per
+                # stream_turn (idempotent guard above); if sync path injects a
+                # fail/uncertain reminder it `continue`s back to the LLM, so
+                # the agent sees the verdict in the same user-visible response.
+                # Async path schedules a background task and falls through.
+                if not _judge_done and self._judge_mode != "off":
+                    _judge_done = True
+                    _final_text = self._extract_final_assistant_text()
+                    _verdict_reminder = await self._maybe_run_judge(_final_text)
+                    if _verdict_reminder:
+                        self.messages.append({
+                            "role": "user",
+                            "content": f"<system-reminder>\n{_verdict_reminder}\n</system-reminder>",
+                        })
                         continue
 
                 self._turn_index += 1
@@ -1957,6 +2021,90 @@ class LoomSession:
             turn_index=self._turn_index,
             turn_summary=turn_summary,
             envelopes=list(self._recent_envelopes),
+        )
+
+    # ------------------------------------------------------------------
+    # Issue #196 Phase 2: turn-boundary judge
+    # ------------------------------------------------------------------
+
+    def _extract_final_assistant_text(self) -> str:
+        """Last assistant message's text content — what the agent claimed."""
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content
+                # Anthropic-style content blocks: concatenate text blocks.
+                if isinstance(content, list):
+                    return "".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                return ""
+        return ""
+
+    def _turn_envelopes(self) -> list:
+        """Envelopes completed during the current turn (turn_index)."""
+        return [
+            env for env in self._recent_envelopes
+            if env.turn_index == self._turn_index
+        ]
+
+    async def _maybe_run_judge(self, final_text: str) -> str | None:
+        """Gate + dispatch for turn-boundary judge.
+
+        Returns a reminder body for the SYNC path when the verdict is
+        fail/uncertain (caller injects + continues). Returns None in all
+        other paths — gate skip, async dispatch, or sync pass.
+        """
+        if self._judge_mode == "off":
+            return None
+
+        envelopes = self._turn_envelopes()
+        if not envelopes:
+            return None  # No tools = nothing to verify
+        mutated = any(
+            "MUTATES" in (n.capabilities or [])
+            for env in envelopes for n in env.nodes
+        )
+        if not mutated:
+            return None
+        if not claims_completion(final_text):
+            return None
+
+        digest = build_trace_digest(envelopes, final_text)
+
+        if is_high_stakes(envelopes):
+            verdict = await run_judge(self.router, self.model, digest)
+            self._record_verdict_telemetry(verdict, sync=True)
+            if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
+                return format_verdict_reminder(verdict, turn_offset="this")
+            return None
+
+        # Async path — fire-and-forget, verdict lands in next turn.
+        task = asyncio.create_task(
+            self._run_judge_async(digest),
+            name=f"judge_t{self._turn_index}",
+        )
+        self._judge_tasks.add(task)
+        task.add_done_callback(self._judge_tasks.discard)
+        return None
+
+    async def _run_judge_async(self, digest: str) -> None:
+        verdict = await run_judge(self.router, self.model, digest)
+        self._record_verdict_telemetry(verdict, sync=False)
+        if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
+            self._pending_verdicts.append(
+                format_verdict_reminder(verdict, turn_offset="previous")
+            )
+
+    def _record_verdict_telemetry(self, verdict: "JudgeVerdict", *, sync: bool) -> None:
+        """Best-effort log; never raises. Pass verdicts only land here, not
+        in the agent's context — keeps the noise floor low."""
+        logger.info(
+            "judge.verdict turn=%d sync=%s verdict=%s reason=%r error=%r",
+            self._turn_index, sync, verdict.verdict,
+            verdict.reason[:160], verdict.error or "",
         )
 
     # ------------------------------------------------------------------
