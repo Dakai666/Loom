@@ -1178,7 +1178,7 @@ class LoomSession:
         """
         now_str = user_timestamp()
         self.messages.append({"role": "user", "content": f"[{now_str}]\n{message}"})
-        asyncio.ensure_future(self._log_message("user", message))
+        asyncio.ensure_future(self._log_message("user", message, turn_index=self._turn_index))
         self.resume()
 
     def cancel(self) -> None:
@@ -1418,7 +1418,7 @@ class LoomSession:
             now_str = user_timestamp()
             annotated = f"[{now_str}]\n{user_input}"
             self.messages.append({"role": "user", "content": annotated})
-            asyncio.ensure_future(self._log_message("user", annotated))
+            asyncio.ensure_future(self._log_message("user", annotated, turn_index=self._turn_index))
 
             # Issue #196 Phase 2: drain any async judge verdicts produced after
             # the previous turn ended. Inject as separate <system-reminder>
@@ -1661,6 +1661,7 @@ class LoomSession:
                     _content_text,
                     {"format": "raw_message"},
                     raw_json=_raw_json_str,
+                    turn_index=self._turn_index,
                 ))
 
                 if response.stop_reason == "end_turn":
@@ -1835,6 +1836,7 @@ class LoomSession:
                             asyncio.ensure_future(self._log_message(
                                 "tool", tool_output[:500],
                                 {"tool_call_id": tu.id, "tool_name": tu.name},
+                                turn_index=self._turn_index,
                             ))
                     else:
                         # Sequential: single tool, or needs interactive confirmation.
@@ -1915,6 +1917,7 @@ class LoomSession:
                             asyncio.ensure_future(self._log_message(
                                 "tool", tool_output[:500],
                                 {"tool_call_id": tu.id, "tool_name": tu.name},
+                                turn_index=self._turn_index,
                             ))
 
                     # ── Issue #106: Envelope completed ─────────────────────────
@@ -2628,13 +2631,24 @@ class LoomSession:
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,
-        raw_json: str | None = None,
+        raw_json: str | None = None, turn_index: int | None = None,
     ) -> None:
-        """Fire-and-forget session_log write. Exceptions are swallowed inside log_message."""
+        """Fire-and-forget session_log write. Exceptions are swallowed inside log_message.
+
+        Issue #218: ``turn_index`` is captured eagerly at the call site and
+        passed through, NOT read lazily from ``self._turn_index`` here.
+        Callers schedule this via ``asyncio.ensure_future`` so the body runs
+        an unknown number of event-loop ticks later — by then stream_turn
+        may have advanced ``_turn_index``, which would persist this row with
+        the wrong turn and reorder it on reload (root cause of #218 wire
+        2013 errors). When ``turn_index`` is omitted we fall back to the
+        live value for backwards compatibility.
+        """
         if self._session_log is None:
             return
+        ti = turn_index if turn_index is not None else self._turn_index
         await self._session_log.log_message(
-            self.session_id, self._turn_index, role, content, metadata or {},
+            self.session_id, ti, role, content, metadata or {},
             raw_json=raw_json,
         )
 
