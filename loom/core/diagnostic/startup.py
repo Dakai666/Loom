@@ -223,6 +223,13 @@ class SkillsCheck(DiagnosticCheck):
     Zero skills is *not* a failure — fresh installs and unit-test
     sessions legitimately have none. We only fail if the index itself
     failed to build.
+
+    Reads ``MemoryIndex.skill_count`` (the field the indexer actually
+    populates from ``ProceduralMemory.list_active()``). An earlier
+    version of this check read a non-existent ``.skills`` attribute via
+    ``getattr(..., "skills", [])`` and silently always reported zero —
+    masking real skill counts and creating the false appearance that
+    ``_auto_import_skills`` had stopped registering SkillGenomes.
     """
     name = "skills"
 
@@ -233,11 +240,11 @@ class SkillsCheck(DiagnosticCheck):
                 self.name, False, "MemoryIndex not built",
                 detail="session._memory_index is None",
             )
-        skills = list(getattr(index, "skills", []) or [])
-        if not skills:
+        count = int(getattr(index, "skill_count", 0) or 0)
+        if count == 0:
             return DiagnosticResult(self.name, True, "0 skills indexed")
         return DiagnosticResult(
-            self.name, True, f"{len(skills)} skill(s) indexed",
+            self.name, True, f"{count} skill(s) indexed",
         )
 
 

@@ -81,7 +81,14 @@ def _fake_session(
         ),
         _pipeline=pipeline,
         registry=registry,
-        _memory_index=SimpleNamespace(skills=[f"s{i}" for i in range(skills_count)]),
+        # Mirror the real ``MemoryIndex`` field names. An earlier version of
+        # the SkillsCheck read a non-existent ``.skills`` attribute and the
+        # fake here mirrored the same typo, so the test silently passed
+        # while the real check always reported zero.
+        _memory_index=SimpleNamespace(
+            skill_count=skills_count,
+            skill_catalog=[f"s{i}" for i in range(skills_count)],
+        ),
     )
 
 
@@ -196,6 +203,32 @@ class TestBuiltinChecks:
         r = await SkillsCheck().run(_fake_session(skills_count=0))
         assert r.passed
         assert "0 skills" in r.summary
+
+    @pytest.mark.asyncio
+    async def test_skills_check_reports_real_count(self) -> None:
+        """Regression: prior to the fix, SkillsCheck read a non-existent
+        ``index.skills`` attribute via ``getattr(..., "skills", [])`` and
+        always reported zero, masking the real skill count loaded by
+        ``_auto_import_skills``. This pins the contract that the check
+        reads ``skill_count`` and surfaces the actual number."""
+        r = await SkillsCheck().run(_fake_session(skills_count=10))
+        assert r.passed
+        assert "10 skill(s) indexed" in r.summary
+
+    @pytest.mark.asyncio
+    async def test_skills_check_uses_real_memoryindex_field(self) -> None:
+        """Regression: a pure ``MemoryIndex`` (no ``skills`` attribute,
+        only ``skill_count`` / ``skill_catalog``) must be readable by
+        SkillsCheck. This catches the original typo where the check
+        consulted an attribute name that ``MemoryIndex`` does not
+        define — the assertion below would fail under the old code."""
+        from loom.core.memory.index import MemoryIndex
+
+        index = MemoryIndex(skill_count=4, skill_catalog=[])
+        session = SimpleNamespace(_memory_index=index)
+        r = await SkillsCheck().run(session)
+        assert r.passed
+        assert "4 skill(s) indexed" in r.summary
 
     @pytest.mark.asyncio
     async def test_config_check_passes_when_config_loads(self, monkeypatch) -> None:
