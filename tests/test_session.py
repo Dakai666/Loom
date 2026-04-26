@@ -560,3 +560,100 @@ class TestStreamTurnLock:
         session._turn_lock.release()
         with contextlib.suppress(BaseException):
             await task
+
+
+class TestSanitizeHistoryAdjacency:
+    """Pass 4 (Issue #218): tool_use ↔ tool_result adjacency repair.
+
+    Anthropic API rejects (2013) any assistant tool_use not immediately
+    followed by its tool_result. Pass 2/3 only check existence anywhere;
+    Pass 4 enforces position so out-of-order pairs (e.g. late subprocess
+    completion appended after subsequent turns) are repaired.
+    """
+
+    def _call(self, cid: str, name: str = "run_bash") -> dict:
+        return {
+            "id": cid,
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }
+
+    def _asst(self, cids: list[str]) -> dict:
+        return {"role": "assistant", "content": "", "tool_calls": [self._call(c) for c in cids]}
+
+    def _tool(self, cid: str, content: str = "ok") -> dict:
+        return {"role": "tool", "tool_call_id": cid, "content": content}
+
+    def _from_loom_session(self, messages: list[dict]) -> list[dict]:
+        from loom.core.session import LoomSession
+        fake = SimpleNamespace()
+        fake.messages = [dict(m) for m in messages]
+        LoomSession._sanitize_history(fake)
+        return fake.messages
+
+    def test_late_arriving_tool_result_is_pulled_adjacent(self):
+        # Producer: user interrupted while T1 was running; harness ran T2/T3;
+        # T1's late result was appended after T3.
+        msgs = [
+            {"role": "user", "content": "go"},
+            self._asst(["T1"]),
+            {"role": "user", "content": "interrupt"},
+            self._asst(["T2"]),
+            self._tool("T2"),
+            self._asst(["T3"]),
+            self._tool("T3"),
+            self._tool("T1"),  # ← late
+        ]
+        out = self._from_loom_session(msgs)
+        # Each assistant tool_call must be immediately followed by its result.
+        for i, m in enumerate(out):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                cids = [tc["id"] for tc in m["tool_calls"]]
+                followers = out[i+1 : i+1+len(cids)]
+                follower_ids = [f.get("tool_call_id") for f in followers]
+                assert set(follower_ids) == set(cids), \
+                    f"assistant {cids} not immediately followed by results, got {follower_ids}"
+
+    def test_two_consecutive_assistants_repaired(self):
+        # Producer (no user interrupt): cancel/timeout left T1 dispatched but
+        # not awaited; harness moved to T2; T1's late result arrived after T2.
+        msgs = [
+            {"role": "user", "content": "go"},
+            self._asst(["T1"]),
+            self._asst(["T2"]),     # back-to-back assistants
+            self._tool("T2"),
+            self._tool("T1"),       # late
+        ]
+        out = self._from_loom_session(msgs)
+        # No two assistants with tool_calls may be adjacent.
+        for i in range(len(out) - 1):
+            a, b = out[i], out[i+1]
+            if a.get("role") == "assistant" and a.get("tool_calls"):
+                assert b.get("role") == "tool", \
+                    f"assistant tool_call at {i} followed by {b.get('role')}, not tool"
+
+    def test_well_formed_history_unchanged(self):
+        msgs = [
+            {"role": "user", "content": "go"},
+            self._asst(["T1"]),
+            self._tool("T1"),
+            self._asst(["T2"]),
+            self._tool("T2"),
+        ]
+        out = self._from_loom_session(msgs)
+        assert out == msgs
+
+    def test_orphan_pairs_still_dropped(self):
+        # Pass 2/3 invariants must still hold after Pass 4.
+        msgs = [
+            {"role": "user", "content": "go"},
+            self._asst(["T1"]),  # no result anywhere
+            {"role": "user", "content": "next"},
+            self._tool("T2"),    # no call anywhere
+        ]
+        out = self._from_loom_session(msgs)
+        roles = [(m.get("role"), m.get("tool_call_id") or
+                  [tc["id"] for tc in m.get("tool_calls", [])] or m.get("content"))
+                 for m in out]
+        # Both orphans gone; only the two user messages remain.
+        assert all(m.get("role") == "user" for m in out), roles
