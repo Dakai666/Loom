@@ -61,6 +61,11 @@ class SubAgentResult:
     failure_code: str | None = None
     recovery_suggestion: str | None = None
     error_context: dict[str, Any] = field(default_factory=dict)
+    # Issue #225: best-effort result the sub-agent explicitly committed via
+    # ``result_write``. Survives both end_turn and max_turns paths so the
+    # parent never gets an empty hand even when the sub-agent runs out of
+    # turns. None ⇒ sub-agent never called result_write.
+    result_slot: str | None = None
 
 
 async def run_subagent(
@@ -118,6 +123,53 @@ async def run_subagent(
         if config.allowed_tools is None and tool.trust_level != TrustLevel.SAFE:
             continue
         child_registry.register(tool)
+
+    # ── result_write — issue #225 ────────────────────────────────────────────
+    # Always-available tool that lets the sub-agent rewrite its best-effort
+    # result every turn. The slot is captured below as a closure cell so both
+    # end_turn and max_turns paths can read it. Registered AFTER the parent
+    # registry filtering so allowed_tools does not gate it.
+    _result_slot_cell: dict[str, str | None] = {"value": None}
+
+    async def _result_write(call: ToolCall) -> ToolResult:
+        content = call.args.get("content")
+        if not isinstance(content, str):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'content' must be a string",
+                failure_type="validation_error",
+            )
+        _result_slot_cell["value"] = content
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=f"[result slot updated, {len(content)} chars]",
+        )
+
+    child_registry.register(ToolDefinition(
+        name="result_write",
+        description=(
+            "Overwrite your best-effort task result. Each call replaces the slot "
+            "entirely — there is no append. The parent agent receives the latest "
+            "slot content even if you run out of turns, so write incrementally: "
+            "save what you have at every meaningful checkpoint, refine on the "
+            "next turn. Empty / never-called slot ⇒ parent gets your end_turn "
+            "text on success or nothing on max_turns."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Best-effort result so far. Replaces any prior slot.",
+                },
+            },
+            "required": ["content"],
+        },
+        executor=_result_write,
+    ))
 
     # Wrap memorize so writes are tagged with this agent's provenance
     _orig_memorize = child_registry.get("memorize")
@@ -198,8 +250,18 @@ async def run_subagent(
     system_prompt = (
         f"You are a sub-agent (id: {agent_id}) spawned by a parent agent.\n"
         f"Your workspace is: {workspace}\n"
+        f"You have a budget of {config.max_turns} turn(s).\n"
         f"Complete the following task and respond with a clear, concise result.\n"
         f"Do not ask clarifying questions — work with what you have.\n"
+        f"\n"
+        f"IMPORTANT — result_write contract:\n"
+        f"At every meaningful checkpoint, call `result_write(content=...)` "
+        f"to commit your best-effort result so far. The slot is overwrite-only "
+        f"(each call replaces the previous content). Whatever is in the slot "
+        f"when you exit — whether you reach end_turn naturally or run out of "
+        f"turns — is what the parent agent receives. Treat it as your hand-off "
+        f"buffer: write something useful early, refine it as you go.\n"
+        f"\n"
         f"Available tools: {', '.join(child_registry._tools.keys()) or 'none'}."
     )
     messages: list[dict[str, Any]] = [
@@ -220,6 +282,8 @@ async def run_subagent(
     consecutive_failure_tool: str | None = None
     consecutive_failure_count = 0
     max_consecutive_failures = 0
+    # Issue #225: idempotency for the wrap-up reminder injected near max_turns.
+    wrapup_warned = False
 
     # ── Agent loop ────────────────────────────────────────────────────────────
     while turns_used < config.max_turns:
@@ -264,6 +328,10 @@ async def run_subagent(
                     b.get("text", "") for b in raw_content
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
+            # Issue #225: result_slot is the explicit best-effort the sub-agent
+            # committed; prefer it over end_turn free text when both exist.
+            if _result_slot_cell["value"]:
+                final_output = _result_slot_cell["value"]
             break
 
         if response.stop_reason == "tool_use":
@@ -311,8 +379,32 @@ async def run_subagent(
                 messages.append(
                     router.format_tool_result(config.model, tu.id, tool_output, result.success)
                 )
+
+            # Issue #225: wrap-up reminder. When two turns remain, force the
+            # sub-agent to commit a result and end_turn rather than burn the
+            # last slot on a fresh tool chain. Idempotent — fires once.
+            turns_remaining = config.max_turns - turns_used
+            if (
+                turns_remaining == 2
+                and config.max_turns >= 3
+                and not wrapup_warned
+            ):
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<system-reminder>\n"
+                        "You have 2 turns left. On your next turn, call "
+                        "`result_write(content=...)` with your best-effort "
+                        "result so far, then end_turn. Do not start new long "
+                        "tool chains — wrap up.\n"
+                        "</system-reminder>"
+                    ),
+                })
+                wrapup_warned = True
         else:
             break
+
+    result_slot_value = _result_slot_cell["value"]
 
     if turns_used >= config.max_turns and not final_output:
         partial = assistant_text_trail.strip()
@@ -338,10 +430,14 @@ async def run_subagent(
             failure_code=failure_code,
             recovery_suggestion=recovery_suggestion,
             error_context=error_context,
+            result_slot=result_slot_value,
         )
+        # Issue #225: surface the explicit slot as the failure's output so the
+        # parent never sees an empty hand. success stays False — end_turn is
+        # the only honest "done" signal — but the work isn't lost.
         return SubAgentResult(
             success=False,
-            output="",
+            output=result_slot_value or "",
             agent_id=agent_id,
             turns_used=turns_used,
             tool_calls=total_tool_calls,
@@ -352,6 +448,7 @@ async def run_subagent(
             failure_code=failure_code,
             recovery_suggestion=recovery_suggestion,
             error_context=error_context,
+            result_slot=result_slot_value,
         )
 
     return SubAgentResult(
@@ -360,6 +457,7 @@ async def run_subagent(
         agent_id=agent_id,
         turns_used=turns_used,
         tool_calls=total_tool_calls,
+        result_slot=result_slot_value,
     )
 
 
@@ -409,6 +507,7 @@ def _write_failure_scratchpad(
     failure_code: str | None = None,
     recovery_suggestion: str | None = None,
     error_context: dict[str, Any] | None = None,
+    result_slot: str | None = None,
 ) -> None:
     """Write sub-agent failure context to scratchpad if available.
 
@@ -431,6 +530,7 @@ def _write_failure_scratchpad(
         "failure_code": failure_code,
         "recovery_suggestion": recovery_suggestion,
         "error_context": error_context or {},
+        "result_slot": result_slot,
     }
     try:
         scratchpad.write(ref, json.dumps(payload, ensure_ascii=False, indent=2))

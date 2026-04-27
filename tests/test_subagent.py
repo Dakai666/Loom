@@ -523,6 +523,44 @@ class TestSubAgentFailureCodes:
         assert result.error_context["max_consecutive_failures"] == 2
         assert result.error_context["stuck_tool"] is None
 
+    async def test_result_slot_in_scratchpad_payload(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #225: failure scratchpad payload carries the result_slot field."""
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response("c1", "trying"),
+        ])
+        scratchpad = Scratchpad()
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Task.",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=1,
+                agent_id="sub-slotpad",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+            scratchpad=scratchpad,
+        )
+
+        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}"))
+        # Field exists; None because result_write was never called.
+        assert "result_slot" in payload
+        assert payload["result_slot"] is None
+
     async def test_failure_code_in_scratchpad_payload(
         self,
         semantic: SemanticMemory,
@@ -563,3 +601,317 @@ class TestSubAgentFailureCodes:
         assert "always_fail" in payload["recovery_suggestion"]
         assert payload["error_context"]["stuck_tool"] == "always_fail"
         assert payload["error_context"]["max_consecutive_failures"] == 3
+
+
+# ── result_write slot — issue #225 ──────────────────────────────────────────
+
+
+def _result_write_response(call_id: str, content: str) -> LLMResponse:
+    """Assistant calls result_write(content=...) — registered by run_subagent."""
+    return LLMResponse(
+        text=None,
+        tool_uses=[ToolUse(id=call_id, name="result_write", args={"content": content})],
+        stop_reason="tool_use",
+        raw_message={
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use", "id": call_id,
+                    "name": "result_write", "input": {"content": content},
+                },
+            ],
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "result_write",
+                        "arguments": json.dumps({"content": content}),
+                    },
+                }
+            ],
+        },
+    )
+
+
+def _end_turn_response(text: str) -> LLMResponse:
+    return LLMResponse(
+        text=text,
+        tool_uses=[],
+        stop_reason="end_turn",
+        raw_message={"role": "assistant", "content": text},
+    )
+
+
+class TestResultWriteSlot:
+    """Issue #225: best-effort result slot survives both termination paths."""
+
+    async def test_slot_overrides_end_turn_text_on_success(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """When sub-agent committed a slot, it takes precedence over end_turn text.
+
+        The slot is the explicit hand-off; end_turn text is incidental closing
+        chatter. Parent should see the slot.
+        """
+        registry = ToolRegistry()
+        router = _FakeRouter([
+            _result_write_response("c1", "structured result payload"),
+            _end_turn_response("ok, done."),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Produce a result.",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=5,
+                agent_id="sub-slot-success",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is True
+        assert result.result_slot == "structured result payload"
+        assert result.output == "structured result payload"
+
+    async def test_slot_falls_back_to_end_turn_text_when_unset(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """No result_write call ⇒ end_turn text is the output (legacy contract)."""
+        registry = ToolRegistry()
+        router = _FakeRouter([_end_turn_response("done")])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Trivial.",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=3,
+                agent_id="sub-no-slot",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is True
+        assert result.result_slot is None
+        assert result.output == "done"
+
+    async def test_slot_survives_max_turns_failure(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """The big #225 win: slot is non-empty even though success=False.
+
+        Sub-agent commits a checkpoint, then keeps spinning, then runs out of
+        turns. Parent gets the checkpoint as output instead of an empty hand.
+        """
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _result_write_response("c1", "checkpoint A: 3/5 done"),
+            _tool_use_response("c2", "trying to finish"),
+        ])
+        scratchpad = Scratchpad()
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="Do five things.",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=2,
+                agent_id="sub-slot-maxturns",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+            scratchpad=scratchpad,
+        )
+
+        assert result.success is False
+        assert result.result_slot == "checkpoint A: 3/5 done"
+        # The key contract: output is non-empty on max_turns when slot was set.
+        assert result.output == "checkpoint A: 3/5 done"
+        # And the scratchpad payload carries it for full audit.
+        payload = json.loads(scratchpad.read(f"subagent_failure:sub-slot-maxturns"))
+        assert payload["result_slot"] == "checkpoint A: 3/5 done"
+
+    async def test_slot_overwrites_on_repeated_writes(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Each result_write replaces the slot — last write wins."""
+        registry = ToolRegistry()
+        router = _FakeRouter([
+            _result_write_response("c1", "version 1"),
+            _result_write_response("c2", "version 2 — refined"),
+            _end_turn_response("done"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="x",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=5,
+                agent_id="sub-overwrite",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.result_slot == "version 2 — refined"
+        assert result.output == "version 2 — refined"
+
+
+class TestWrapupReminder:
+    """Issue #225: harness injects a wrap-up reminder when 2 turns remain."""
+
+    async def test_reminder_injected_when_two_turns_left(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """With max_turns=4, after turn 2 (turns_remaining=2) reminder fires.
+
+        We verify by spying on the messages list — the test router records
+        the messages it received on each call.
+        """
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+
+        seen_messages: list[list[dict]] = []
+
+        class _SpyRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                seen_messages.append([dict(m) for m in messages])
+                async for chunk, final in super().stream_chat(model, messages, tools, max_tokens):
+                    yield chunk, final
+
+        router = _SpyRouter([
+            _tool_use_response("c1", "turn 1"),
+            _tool_use_response("c2", "turn 2"),
+            _tool_use_response("c3", "turn 3"),
+            _tool_use_response("c4", "turn 4"),
+        ])
+
+        await run_subagent(
+            SubAgentConfig(
+                task="x",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=4,
+                agent_id="sub-wrap",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        # The reminder is appended after the tool_use of turn 2 (turns_used==2,
+        # remaining==2), so the 3rd LLM call should see it in its messages.
+        third_call = seen_messages[2]
+        reminder_present = any(
+            isinstance(m.get("content"), str) and "2 turns left" in m["content"]
+            for m in third_call
+        )
+        assert reminder_present, "wrap-up reminder should be injected before turn 3"
+
+        # And it should fire only once — turn 4's messages should still contain
+        # exactly one such reminder.
+        fourth_call = seen_messages[3]
+        count = sum(
+            1 for m in fourth_call
+            if isinstance(m.get("content"), str) and "2 turns left" in m["content"]
+        )
+        assert count == 1, f"reminder should be idempotent; saw {count}"
+
+    async def test_reminder_skipped_when_max_turns_below_three(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """max_turns=2 gives no useful 'wrap up' window — reminder must not fire."""
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+
+        seen_messages: list[list[dict]] = []
+
+        class _SpyRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                seen_messages.append([dict(m) for m in messages])
+                async for chunk, final in super().stream_chat(model, messages, tools, max_tokens):
+                    yield chunk, final
+
+        router = _SpyRouter([
+            _tool_use_response("c1", "turn 1"),
+            _tool_use_response("c2", "turn 2"),
+        ])
+
+        await run_subagent(
+            SubAgentConfig(
+                task="x",
+                model="gpt-test",
+                allowed_tools=["always_fail"],
+                max_turns=2,
+                agent_id="sub-wrap-short",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        # No call should have seen the reminder.
+        for msgs in seen_messages:
+            for m in msgs:
+                assert not (
+                    isinstance(m.get("content"), str)
+                    and "2 turns left" in m["content"]
+                ), "no reminder expected when max_turns < 3"

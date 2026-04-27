@@ -2475,13 +2475,30 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 )
             if result.recovery_suggestion:
                 parts.append(f"hint: {result.recovery_suggestion}")
+            # Issue #225: if the sub-agent committed a best-effort result via
+            # result_write, surface it inline so the parent can act on it
+            # without a follow-up scratchpad_read. Truncate aggressively —
+            # full content stays in the scratchpad payload.
+            if result.result_slot:
+                slot_preview = result.result_slot
+                if len(slot_preview) > 800:
+                    slot_preview = slot_preview[:800] + " […truncated]"
+                parts.append(f"result_slot: {slot_preview}")
             parts.append(
                 f"Full failure context at scratchpad ref: subagent_failure:{result.agent_id} "
                 f"(read via scratchpad_read)."
             )
+            metadata = {
+                "subagent_agent_id": result.agent_id,
+                "subagent_turns_used": result.turns_used,
+                "subagent_tool_calls": result.tool_calls,
+                "subagent_failure_code": result.failure_code or "",
+                "subagent_has_result_slot": bool(result.result_slot),
+            }
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=" | ".join(parts),
-                              failure_type="execution_error")
+                              failure_type="execution_error",
+                              metadata=metadata)
 
     return ToolDefinition(
         name="spawn_agent",
