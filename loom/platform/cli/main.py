@@ -342,10 +342,12 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             console.print(
                 f"[dim]Current model: [bold]{session.model}[/bold]  "
                 f"providers: {providers}[/dim]\n"
-                "[dim]  MiniMax-*        requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/dim]\n"
-                "[dim]  claude-*         requires ANTHROPIC_API_KEY in .env[/dim]\n"
-                "[dim]  ollama/<name>    enable [providers.ollama] in loom.toml[/dim]\n"
-                "[dim]  lmstudio/<name>  enable [providers.lmstudio] in loom.toml[/dim]"
+                "[dim]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/dim]\n"
+                "[dim]  claude-*            requires ANTHROPIC_API_KEY in .env[/dim]\n"
+                "[dim]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/dim]\n"
+                "[dim]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/dim]\n"
+                "[dim]  ollama/<name>       enable [providers.ollama] in loom.toml[/dim]\n"
+                "[dim]  lmstudio/<name>     enable [providers.lmstudio] in loom.toml[/dim]"
             )
         else:
             ok = session.set_model(arg)
@@ -827,7 +829,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             providers = ", ".join(session.router.providers)
             app.notify(
                 f"Model: {session.model}  |  providers: {providers}\n"
-                "Prefixes: MiniMax-*  claude-*  ollama/<name>  lmstudio/<name>"
+                "Prefixes: MiniMax-*  claude-*  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)

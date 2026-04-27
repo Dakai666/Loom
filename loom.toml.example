@@ -30,10 +30,12 @@ personality = ""
 # default_model is used by all entrypoints when no --model flag is given.
 #
 # Supported prefixes:
-#   MiniMax-*         → MiniMax via Anthropic-compatible endpoint  (MINIMAX_API_KEY in .env)
-#   claude-*          → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
-#   ollama/<name>     → local Ollama server  (enable [providers.ollama] below)
-#   lmstudio/<name>   → local LM Studio      (enable [providers.lmstudio] below)
+#   MiniMax-*               → MiniMax via Anthropic-compatible endpoint  (MINIMAX_API_KEY in .env)
+#   claude-*                → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
+#   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
+#   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
+#   ollama/<name>           → local Ollama server  (enable [providers.ollama] below)
+#   lmstudio/<name>         → local LM Studio      (enable [providers.lmstudio] below)
 
 [cognition]
 default_model = "claude-sonnet-4-6"

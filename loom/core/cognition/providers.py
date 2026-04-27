@@ -7,9 +7,13 @@ a provider SDK directly — it always goes through this interface.
 
 Supported providers
 -------------------
-AnthropicProvider — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
-OllamaProvider    — local Ollama server (default http://localhost:11434/v1)
-LMStudioProvider  — local LM Studio server (default http://localhost:1234/v1)
+AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
+OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
+DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
+                     (registered as AnthropicProvider with name="deepseek",
+                      base_url="https://api.deepseek.com/anthropic")
+OllamaProvider     — local Ollama server (default http://localhost:11434/v1)
+LMStudioProvider   — local LM Studio server (default http://localhost:1234/v1)
 
 Internal message format (OpenAI-style, used as canonical across the framework)
 ----
@@ -241,12 +245,14 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None,
         max_tokens: int,
     ) -> LLMResponse:
-        anthropic_msgs = _to_anthropic_messages(messages)
+        system_text, anthropic_msgs = _to_anthropic_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": anthropic_msgs,
         }
+        if system_text:
+            kwargs["system"] = system_text
         if tools:
             kwargs["tools"] = [
                 {"name": t["name"], "description": t.get("description", ""),
@@ -328,12 +334,14 @@ class AnthropicProvider(LLMProvider):
         *,
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
-        anthropic_msgs = _to_anthropic_messages(messages)
+        system_text, anthropic_msgs = _to_anthropic_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "messages": anthropic_msgs,
         }
+        if system_text:
+            kwargs["system"] = system_text
         if tools:
             kwargs["tools"] = [
                 {
@@ -565,6 +573,7 @@ class _OpenAICompatibleBase(LLMProvider):
             kwargs["tools"] = self.format_tools(tools)
 
         full_content = ""
+        full_reasoning = ""
         tc_accum: dict[int, dict] = {}
         finish_reason: str | None = None
         input_tokens = 0
@@ -575,13 +584,22 @@ class _OpenAICompatibleBase(LLMProvider):
             async for chunk in stream:
                 if abort_signal is not None and abort_signal.is_set():
                     break
+                # Some providers (DeepSeek) report usage on the final chunk
+                # alongside choices instead of in a usage-only chunk.
+                if getattr(chunk, "usage", None):
+                    input_tokens = chunk.usage.prompt_tokens or input_tokens
+                    output_tokens = chunk.usage.completion_tokens or output_tokens
                 if not chunk.choices:
-                    if chunk.usage:
-                        input_tokens = chunk.usage.prompt_tokens or 0
-                        output_tokens = chunk.usage.completion_tokens or 0
                     continue
                 choice = chunk.choices[0]
                 delta = choice.delta
+                # DeepSeek thinking-mode emits reasoning_content separately
+                # from content. The API requires it to be echoed back in
+                # subsequent turns or it returns 400, so we have to capture
+                # and preserve it on raw_message.
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    full_reasoning += reasoning
                 if delta.content:
                     full_content += delta.content
                     yield (delta.content, None)
@@ -624,6 +642,8 @@ class _OpenAICompatibleBase(LLMProvider):
             stop_reason = "tool_use"
 
         raw_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+        if full_reasoning:
+            raw_message["reasoning_content"] = full_reasoning
         if tc_accum:
             raw_message["tool_calls"] = [
                 {
@@ -683,6 +703,35 @@ class OllamaProvider(_OpenAICompatibleBase):
     DEFAULT_TIMEOUT = 180.0
 
 
+class OpenRouterProvider(_OpenAICompatibleBase):
+    """
+    OpenRouter — OpenAI-compatible aggregator routing many models behind one API.
+
+    Routing prefix: ``openrouter/``
+    Default base URL: ``https://openrouter.ai/api/v1``
+
+    Model identifiers carry their own provider/model-name segments
+    (e.g. ``deepseek/deepseek-v4-pro``), so the full Loom model name is
+    ``openrouter/<vendor>/<model>``. Only the leading ``openrouter/`` prefix
+    is stripped before the API call — the rest is forwarded verbatim.
+
+    Usage::
+
+        /model openrouter/deepseek/deepseek-v4-pro
+        /model openrouter/anthropic/claude-sonnet-4
+
+    Configure in ``.env``::
+
+        OPENROUTER_API_KEY=sk-or-v1-...
+    """
+
+    name = "openrouter"
+    ROUTING_PREFIX = "openrouter/"
+    DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
+    DEFAULT_TIMEOUT = 180.0
+
+
 class LMStudioProvider(_OpenAICompatibleBase):
     """
     LM Studio local inference server via its OpenAI-compatible endpoint.
@@ -716,19 +765,32 @@ class LMStudioProvider(_OpenAICompatibleBase):
 
 def _to_anthropic_messages(
     messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[str | None, list[dict[str, Any]]]:
     """
     Convert OpenAI-style canonical messages to Anthropic wire format.
+
+    Returns ``(system_text, messages)``. Anthropic's API requires the system
+    prompt as a top-level ``system`` parameter — not inside the messages
+    array. Claude/MiniMax silently accept the wrong shape, but stricter
+    Anthropic-compatible endpoints (e.g. DeepSeek) reject it with 400.
+    Multiple system messages are concatenated with double newlines.
     """
     result: list[dict[str, Any]] = []
+    system_parts: list[str] = []
     i = 0
 
     while i < len(messages):
         msg = messages[i]
         role = msg["role"]
 
-        if role in ("user", "system"):
-            result.append({"role": role, "content": msg["content"]})
+        if role == "system":
+            content = msg.get("content", "")
+            if content:
+                system_parts.append(content)
+            i += 1
+
+        elif role == "user":
+            result.append({"role": "user", "content": msg["content"]})
             i += 1
 
         elif role == "assistant":
@@ -766,4 +828,5 @@ def _to_anthropic_messages(
         else:
             i += 1
 
-    return result
+    system_text = "\n\n".join(system_parts) if system_parts else None
+    return system_text, result

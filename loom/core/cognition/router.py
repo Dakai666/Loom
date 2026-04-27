@@ -71,6 +71,8 @@ class LLMRouter:
         ("minimax-",   "minimax"),
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
+        ("openrouter/", "openrouter"),
+        ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
         ("lmstudio/",  "lmstudio"),
     ]

@@ -577,7 +577,7 @@ class LoomDiscordBot:
                 providers = ", ".join(session.router.providers)
                 await message.channel.send(
                     f"Current model: **{session.model}**  providers: `{providers}`\n"
-                    "Prefixes: `MiniMax-*` · `claude-*` · `ollama/<name>` · `lmstudio/<name>`"
+                    "Prefixes: `MiniMax-*` · `claude-*` · `deepseek-*` · `openrouter/<vendor>/<model>` · `ollama/<name>` · `lmstudio/<name>`"
                 )
             else:
                 ok = session.set_model(arg)
@@ -691,7 +691,7 @@ class LoomDiscordBot:
                 "`/sessions` \u2014 List recent sessions\n"
                 "`/title <name>` \u2014 Set or show the session title\n"
                 "`/model` \u2014 Show current model + registered providers\n"
-                "`/model <name>` \u2014 Switch model  e.g. `ollama/llama3.2`  `claude-sonnet-4-6`\n"
+                "`/model <name>` \u2014 Switch model  e.g. `deepseek-v4-pro`  `claude-sonnet-4-6`\n"
                 "`/personality [name]` \u2014 Switch cognitive persona\n"
                 "`/personality off` \u2014 Remove active persona\n"
                 "`/think` \u2014 View last turn's reasoning chain\n"

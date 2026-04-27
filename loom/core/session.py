@@ -400,15 +400,21 @@ def build_router() -> LLMRouter:
     runtime via ``switch_model()``.
 
     Cloud providers (require API keys in .env):
-      MiniMax   — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
-      Anthropic — ANTHROPIC_API_KEY
+      MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
+      Anthropic  — ANTHROPIC_API_KEY
+      OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
+      DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
     Local providers (no key needed; enable in loom.toml or via env):
       Ollama    — [providers.ollama] enabled=true  or  OLLAMA_BASE_URL
       LM Studio — [providers.lmstudio] enabled=true  or  LMSTUDIO_BASE_URL
     """
     from loom.core.cognition.router import get_default_model
-    from loom.core.cognition.providers import OllamaProvider, LMStudioProvider
+    from loom.core.cognition.providers import (
+        OllamaProvider,
+        LMStudioProvider,
+        OpenRouterProvider,
+    )
 
     env = _load_env()
     cfg = _load_loom_config()
@@ -449,6 +455,63 @@ def build_router() -> LLMRouter:
         ant_model = default if default.startswith("claude") else "claude-sonnet-4-6"
         router.register(AnthropicProvider(api_key=anthropic_key, model=ant_model))
 
+    # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
+    openrouter_key = (
+        env.get("OPENROUTER_API_KEY")
+        or env.get("Openrouter_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY", "")
+    )
+    if openrouter_key:
+        openrouter_cfg = cfg.get("providers", {}).get("openrouter", {})
+        base_url = (
+            openrouter_cfg.get("base_url", "")
+            or OpenRouterProvider.DEFAULT_BASE_URL
+        )
+        raw_model = openrouter_cfg.get(
+            "default_model", OpenRouterProvider.DEFAULT_MODEL
+        )
+        openrouter_model = (
+            default if default.startswith("openrouter/")
+            else f"openrouter/{raw_model}"
+        )
+        router.register(
+            OpenRouterProvider(
+                base_url=base_url,
+                model=openrouter_model,
+                api_key=openrouter_key,
+            ),
+            default=default.startswith("openrouter/"),
+        )
+
+    # DeepSeek — official api.deepseek.com via Anthropic-compatible endpoint.
+    # Reuses AnthropicProvider so thinking blocks (DeepSeek v4-pro reasoning)
+    # are preserved across multi-turn tool use using the same code path that
+    # MiniMax uses. Bare model names (e.g. "deepseek-v4-pro") routed by the
+    # "deepseek-" prefix in LLMRouter._ROUTING — same pattern as MiniMax-* /
+    # claude-*, so no Loom-side prefix stripping is needed.
+    deepseek_key = (
+        env.get("DEEPSEEK_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY", "")
+    )
+    if deepseek_key:
+        deepseek_cfg = cfg.get("providers", {}).get("deepseek", {})
+        base_url = (
+            deepseek_cfg.get("base_url", "")
+            or "https://api.deepseek.com/anthropic"
+        )
+        raw_model = deepseek_cfg.get("default_model", "deepseek-v4-pro")
+        deepseek_model = default if default.startswith("deepseek-") else raw_model
+        router.register(
+            AnthropicProvider(
+                api_key=deepseek_key,
+                model=deepseek_model,
+                base_url=base_url,
+                name="deepseek",
+                timeout=300.0,
+            ),
+            default=default.startswith("deepseek-"),
+        )
+
     # Ollama — local server, no API key required
     ollama_cfg = cfg.get("providers", {}).get("ollama", {})
     ollama_url = (
@@ -484,7 +547,7 @@ def build_router() -> LLMRouter:
     if not router.providers:
         raise RuntimeError(
             "No LLM provider configured. "
-            "Add MINIMAX_API_KEY or ANTHROPIC_API_KEY to .env, "
+            "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
             "or enable a local provider in loom.toml ([providers.ollama] / [providers.lmstudio])."
         )
     return router
