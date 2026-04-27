@@ -826,6 +826,9 @@ class LoomDiscordBot:
         _total_actions = 0
         _total_failures = 0
         _total_elapsed_ms = 0.0
+        _cache_read_tokens = 0
+        _cache_creation_tokens = 0
+        _cache_input_tokens = 0
         _had_pause = False
         _had_rollback = False
 
@@ -988,6 +991,9 @@ class LoomDiscordBot:
                         pass  # too granular for Discord display
 
                     elif isinstance(event, TurnDone):
+                        _cache_read_tokens = event.cache_read_input_tokens
+                        _cache_creation_tokens = event.cache_creation_input_tokens
+                        _cache_input_tokens = event.input_tokens
                         if event.stop_reason == "cancelled":
                             await message.channel.send(
                                 "⚠️ **Turn aborted** — too many denied authorizations. "
@@ -1065,7 +1071,7 @@ class LoomDiscordBot:
                 if _had_rollback:
                     embed.add_field(name="Rollbacks", value="Yes", inline=True)
                 embed.add_field(name="Grants", value=grants_str, inline=True)
-                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {session.model}")
+                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {session.model}{cache_tag}")
                 await message.channel.send(embed=embed)
             else:
                 # Compact one-liner
@@ -1077,13 +1083,16 @@ class LoomDiscordBot:
                 await message.channel.send(f"-# {' · '.join(parts)}")
 
         # ── Footer: persona / context / model ────────────────────────────
+        cache_total = _cache_read_tokens + _cache_creation_tokens + _cache_input_tokens
+        cache_hit_pct = (_cache_read_tokens / cache_total * 100) if cache_total > 0 else 0.0
+        cache_tag = f"  ·  cache {cache_hit_pct:.0f}%" if cache_hit_pct > 0 else ""
         persona = session.current_personality or "default"
         pct = session.budget.usage_fraction * 100
         model = session.model
         # Skip footer if detail summary already includes it
         if not (self._summary_mode == "detail" and _envelope_count > 0):
             await message.channel.send(
-                f"-# {persona}  ·  context {pct:.1f}%  ·  {model}"
+                f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {model}"
             )
 
         # ── Mark done ─────────────────────────────────────────────────────

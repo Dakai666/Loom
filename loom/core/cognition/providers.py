@@ -103,6 +103,8 @@ class LLMResponse:
     stop_reason: str          # "end_turn" | "tool_use" | "max_tokens"
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     raw_message: dict[str, Any] = field(default_factory=dict)
 
 
@@ -252,7 +254,10 @@ class AnthropicProvider(LLMProvider):
             "messages": anthropic_msgs,
         }
         if system_text:
-            kwargs["system"] = system_text
+            kwargs["system"] = [
+                {"type": "text", "text": system_text,
+                 "cache_control": {"type": "ephemeral"}}
+            ]
         if tools:
             kwargs["tools"] = [
                 {"name": t["name"], "description": t.get("description", ""),
@@ -317,12 +322,16 @@ class AnthropicProvider(LLMProvider):
                 for tu in tool_uses
             ]
 
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+        cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
         return LLMResponse(
             text=text,
             tool_uses=tool_uses,
             stop_reason=stop_reason,
             input_tokens=response.usage.input_tokens if response.usage else 0,
             output_tokens=response.usage.output_tokens if response.usage else 0,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
             raw_message=raw_message,
         )
 

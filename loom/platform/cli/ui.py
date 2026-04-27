@@ -268,6 +268,7 @@ def status_bar(
     output_tokens: int,
     elapsed_ms: float,
     tool_count: int,
+    cache_hit_pct: float = 0.0,
 ) -> Text:
     """
     Render the closing status bar after a turn completes.
@@ -284,6 +285,7 @@ def status_bar(
         f"[dim]-[/dim]"
         f"[{ctx_color}]{bar}[/{ctx_color}]"
         f"[dim] context {pct:.1f}%  |  "
+        f"cache {cache_hit_pct:.0f}%  |  " if cache_hit_pct > 0 else ""
         f"{input_tokens}in / {output_tokens}out  |  "
         f"{elapsed_ms / 1000:.1f}s  |  "
         f"{tool_count} tool{'s' if tool_count != 1 else ''}"
