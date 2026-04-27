@@ -106,10 +106,17 @@ skills/loom_engineer/
 
 **目標：確認修乾淨了**
 
-- 跑相關測試：`python scripts/run_tests.py` 或 `pytest`
-- 確認沒有破壞其他功能
-- 確認所有 linter 通過（`ruff` / `ruff format`）
-- 確認類型檢查通過（如果有的話）
+**第一步永遠是 `pytest --collect-only`** — 這條 0.5 秒，只 import + 收集，不跑任何 test 邏輯。它擋掉的是 **import-time 級別的炸**：dataclass 欄位順序錯、循環 import、模組級 NameError。LLM 寫 code 最容易踩這類雷，眼睛看 diff 看不出來，只有讓 Python 真的 import 一次才知道。
+
+完整流程：
+1. `pytest --collect-only` — import sanity（**必跑，必先跑**）
+2. 跑相關測試：`python scripts/run_tests.py` 或 `pytest tests/test_<area>.py`
+3. 確認沒有破壞其他功能（必要時跑全套）
+4. UI / display 改動：寫死一組 sample input 跑一次 `print(...)`，眼睛看輸出長相
+5. 確認所有 linter 通過（`ruff` / `ruff format`）
+6. 確認類型檢查通過（如果有的話）
+
+**驗證沒過 → 不能進入階段 6**。這是硬規則。
 
 ### 階段 6：產出
 
@@ -155,6 +162,118 @@ skills/loom_engineer/
 - read_file 不要超過 20 個檔案
 - 寫入前要先說計畫（階段 3）
 - 不要在沒有確認的情況下直接寫入
+
+---
+
+## 🐛 LLM 寫 code 易踩雷區
+
+> 這些坑都不是「想得不夠深」造成的，是「沒實際跑過 code」造成的。
+> 看 diff 看不出來，眼睛掃過去都很自然。但是 Python interpreter 一加載就炸。
+> 動手前掃一眼這份清單，動手後 `pytest --collect-only` 兜底。
+
+### 1. dataclass 加欄位 → 先讀全 class 確認 default 順序
+
+Python 規則：**non-default 欄位必須在 default 欄位之前**。新加帶 default 的欄位，**插在所有 non-default 之後**。
+
+```python
+# ❌ 整個 module 不能 import：TypeError: non-default argument 'elapsed_ms' follows default argument
+@dataclass
+class TurnDone:
+    tool_count: int
+    cache_read_input_tokens: int = 0   # ← 帶 default
+    elapsed_ms: float                   # ← non-default 跟在 default 後面，炸
+    stop_reason: str = "complete"
+
+# ✅
+@dataclass
+class TurnDone:
+    tool_count: int
+    elapsed_ms: float                   # ← 所有 non-default 先列
+    cache_read_input_tokens: int = 0    # ← 帶 default 都放後面
+    stop_reason: str = "complete"
+```
+
+### 2. f-string 字面量之間不要塞條件式
+
+Python 的 implicit string concat 在 lex 階段就把相鄰字串黏起來，`if/else` 是後來才解析。所以 `"A" "B" if cond else ""` 會被吃成 `("A" "B") if cond else ""`，把左邊兩個字串都當條件式的 true 分支。
+
+```python
+# ❌ cond=True 時剩 "context |  cache 80%  |  "（沒 in/out、elapsed、tools）
+#     cond=False 時剩 "{input}in / ..." 之後（沒 context bar）
+text = (
+    f"context {pct}%  |  "
+    f"cache {x}%  |  " if cond else ""
+    f"{input}in / {output}out  |  "
+    f"{elapsed}s"
+)
+
+# ✅ 抽變數
+cache_seg = f"cache {x}%  |  " if cond else ""
+text = (
+    f"context {pct}%  |  {cache_seg}"
+    f"{input}in / {output}out  |  "
+    f"{elapsed}s"
+)
+```
+
+### 3. 跨 branch 引用的變數，定義要在引用之前
+
+LLM 常常先寫 if-block 才回頭定義變數。Python 不會在 parse 時抓這個，要 runtime 跑到那條 branch 才會 NameError。
+
+```python
+# ❌ branch A 取到時 cache_tag 還沒定義
+if detail_mode:
+    embed.set_footer(f"...{cache_tag}")   # NameError 待爆
+else:
+    print(f"...{cache_tag}")
+cache_tag = f"cache {pct}%" if pct > 0 else ""   # 太遲
+
+# ✅ 把 cache_tag 計算搬到所有引用之前
+cache_tag = f"cache {pct}%" if pct > 0 else ""
+if detail_mode:
+    embed.set_footer(f"...{cache_tag}")
+else:
+    print(f"...{cache_tag}")
+```
+
+### 4. 加新欄位的 accumulate vs replace 對齊鄰居
+
+加一個跟既有欄位語義相關的新欄位（cache_read 跟 input_tokens、retry_count 跟 turn_count），**先看鄰居用 `=` 還是 `+=`**，跟著走。混用會讓分子分母不同基底，計算出的指標對不上人類直覺。
+
+```python
+# 既有 convention: input_tokens 用 replace（每次 LLM call 的 usage 已是累積值）
+input_tokens = response.input_tokens   # replace
+
+# ❌ 新欄位用 += 會在 multi-tool-call turn 累加，3 次 call 各 12k 變成 36k
+cache_read_input_tokens += response.cache_read_input_tokens
+
+# ✅ 對齊 input_tokens 的 replace 語意
+cache_read_input_tokens = response.cache_read_input_tokens
+```
+
+CLAUDE.md 裡通常會註明這類 convention，動手前先 grep 一下 `replace semantics` / `accumulate`。
+
+### 5. UI / display 改動先 render 一次
+
+寫死一組 sample input 跑一次，眼睛看一秒，比解析 diff 快 100 倍。
+
+```python
+# 改完 status_bar 後：
+python -c "from loom.platform.cli.ui import status_bar; \
+  print(status_bar(0.5, 100, 50, 1234.0, 2, cache_hit_pct=80).plain); \
+  print(status_bar(0.5, 100, 50, 1234.0, 2, cache_hit_pct=0).plain)"
+```
+
+少了哪個區段、多了哪個符號，眼睛比 unit test 還快。
+
+### 6. 動手前 30 秒 — 強迫掃一遍鄰居
+
+加新欄位前：搜尋同一個 class / 函式中**已存在的相關欄位**，看它們的順序、語意、命名 convention。新東西跟著做，不要自己另起爐灶。
+
+```bash
+grep -B2 -A5 "class TurnDone" loom/core/events.py
+grep -B1 -A2 "input_tokens\b" loom/core/session.py | head -30
+```
 
 ---
 
