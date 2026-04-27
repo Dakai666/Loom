@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -35,6 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .forensics import get_forensics
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +325,20 @@ class AnthropicProvider(LLMProvider):
                 }
                 for tu in tool_uses
             ]
+
+        # Diagnostic: dump the raw usage payload when LOOM_DEBUG_USAGE=1.
+        # Cheap one-shot for verifying which cache fields the provider's wire
+        # actually returns (e.g. whether DeepSeek's /anthropic compat endpoint
+        # passes through prompt_cache_hit_tokens). Off by default.
+        if response.usage and os.environ.get("LOOM_DEBUG_USAGE") == "1":
+            try:
+                payload = response.usage.model_dump()
+            except Exception:
+                payload = {k: getattr(response.usage, k, None) for k in dir(response.usage) if not k.startswith("_")}
+            logger.warning(
+                "LOOM_DEBUG_USAGE provider=%s model=%s usage=%s",
+                self.name, self.model, json.dumps(payload, default=str),
+            )
 
         cache_read = (
             getattr(response.usage, "cache_read_input_tokens", 0)  # Anthropic
