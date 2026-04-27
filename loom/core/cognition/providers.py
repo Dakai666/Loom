@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -35,6 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .forensics import get_forensics
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +107,8 @@ class LLMResponse:
     stop_reason: str          # "end_turn" | "tool_use" | "max_tokens"
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     raw_message: dict[str, Any] = field(default_factory=dict)
 
 
@@ -252,7 +258,10 @@ class AnthropicProvider(LLMProvider):
             "messages": anthropic_msgs,
         }
         if system_text:
-            kwargs["system"] = system_text
+            kwargs["system"] = [
+                {"type": "text", "text": system_text,
+                 "cache_control": {"type": "ephemeral"}}
+            ]
         if tools:
             kwargs["tools"] = [
                 {"name": t["name"], "description": t.get("description", ""),
@@ -317,12 +326,38 @@ class AnthropicProvider(LLMProvider):
                 for tu in tool_uses
             ]
 
+        # Diagnostic: dump the raw usage payload when LOOM_DEBUG_USAGE=1.
+        # Cheap one-shot for verifying which cache fields the provider's wire
+        # actually returns (e.g. whether DeepSeek's /anthropic compat endpoint
+        # passes through prompt_cache_hit_tokens). Off by default.
+        if response.usage and os.environ.get("LOOM_DEBUG_USAGE") == "1":
+            try:
+                payload = response.usage.model_dump()
+            except Exception:
+                payload = {k: getattr(response.usage, k, None) for k in dir(response.usage) if not k.startswith("_")}
+            logger.warning(
+                "LOOM_DEBUG_USAGE provider=%s model=%s usage=%s",
+                self.name, self.model, json.dumps(payload, default=str),
+            )
+
+        cache_read = (
+            getattr(response.usage, "cache_read_input_tokens", 0)  # Anthropic
+            or getattr(response.usage, "prompt_cache_hit_tokens", 0)  # DeepSeek
+            or 0
+        )
+        cache_creation = (
+            getattr(response.usage, "cache_creation_input_tokens", 0)  # Anthropic
+            or getattr(response.usage, "prompt_cache_miss_tokens", 0)  # DeepSeek
+            or 0
+        )
         return LLMResponse(
             text=text,
             tool_uses=tool_uses,
             stop_reason=stop_reason,
             input_tokens=response.usage.input_tokens if response.usage else 0,
             output_tokens=response.usage.output_tokens if response.usage else 0,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
             raw_message=raw_message,
         )
 
@@ -441,6 +476,34 @@ class AnthropicProvider(LLMProvider):
                 input_tokens = final.usage.input_tokens
                 output_tokens = final.usage.output_tokens
 
+        # Cache token extraction — must mirror _sync_chat. The original PR #229
+        # added this only to the sync path, but streaming consumers (CLI /
+        # Discord) go through stream_chat — without these the cache hit % is
+        # always 0 in the live UIs even when the wire returns cache fields.
+        cache_read = 0
+        cache_creation = 0
+        if final is not None and final.usage:
+            cache_read = (
+                getattr(final.usage, "cache_read_input_tokens", 0)
+                or getattr(final.usage, "prompt_cache_hit_tokens", 0)
+                or 0
+            )
+            cache_creation = (
+                getattr(final.usage, "cache_creation_input_tokens", 0)
+                or getattr(final.usage, "prompt_cache_miss_tokens", 0)
+                or 0
+            )
+
+            if os.environ.get("LOOM_DEBUG_USAGE") == "1":
+                try:
+                    payload = final.usage.model_dump()
+                except Exception:
+                    payload = {k: getattr(final.usage, k, None) for k in dir(final.usage) if not k.startswith("_")}
+                logger.warning(
+                    "LOOM_DEBUG_USAGE provider=%s model=%s usage=%s",
+                    self.name, self.model, json.dumps(payload, default=str),
+                )
+
         raw_message: dict[str, Any] = {"role": "assistant", "content": full_text or ""}
         if thinking_blocks:
             raw_message["_thinking_blocks"] = thinking_blocks
@@ -463,6 +526,8 @@ class AnthropicProvider(LLMProvider):
             stop_reason=stop_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
             raw_message=raw_message,
         ))
 

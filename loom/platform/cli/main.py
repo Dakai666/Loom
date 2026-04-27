@@ -1210,6 +1210,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 clear_line()
                 if not at_line_start:
                     console.print()
+                cache_total = event.cache_read_input_tokens + event.cache_creation_input_tokens + event.input_tokens
+                cache_hit_pct = (event.cache_read_input_tokens / cache_total * 100) if cache_total > 0 else 0.0
                 elapsed = time.monotonic() - t0
                 console.print(
                     status_bar(
@@ -1218,6 +1220,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                         output_tokens=event.output_tokens,
                         elapsed_ms=elapsed * 1000,
                         tool_count=event.tool_count,
+                        cache_hit_pct=cache_hit_pct,
                     )
                 )
 

@@ -268,6 +268,7 @@ def status_bar(
     output_tokens: int,
     elapsed_ms: float,
     tool_count: int,
+    cache_hit_pct: float = 0.0,
 ) -> Text:
     """
     Render the closing status bar after a turn completes.
@@ -280,10 +281,15 @@ def status_bar(
     filled = int(bar_len * context_fraction)
     bar = "#" * filled + "." * (bar_len - filled)
 
+    # Extracted into a variable: a conditional expression mid-f-string would
+    # bind to adjacent string literals via implicit concat at lex time, eating
+    # the segments on either side. See PR #229 review.
+    cache_seg = f"cache {cache_hit_pct:.0f}%  |  " if cache_hit_pct > 0 else ""
+
     return Text.from_markup(
         f"[dim]-[/dim]"
         f"[{ctx_color}]{bar}[/{ctx_color}]"
-        f"[dim] context {pct:.1f}%  |  "
+        f"[dim] context {pct:.1f}%  |  {cache_seg}"
         f"{input_tokens}in / {output_tokens}out  |  "
         f"{elapsed_ms / 1000:.1f}s  |  "
         f"{tool_count} tool{'s' if tool_count != 1 else ''}"
