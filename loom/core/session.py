@@ -1714,8 +1714,12 @@ class LoomSession:
                 self.messages.append(response.raw_message)
                 input_tokens = response.input_tokens  # report latest actual value
                 output_tokens += response.output_tokens
-                cache_read_input_tokens += getattr(response, "cache_read_input_tokens", 0) or 0
-                cache_creation_input_tokens += getattr(response, "cache_creation_input_tokens", 0) or 0
+                # Cache tokens follow the same replace semantics as input_tokens:
+                # each LLM call's usage already reflects the cumulative cached
+                # context for that call. Accumulating with += would double-count
+                # across tool-call rounds and skew the displayed hit rate.
+                cache_read_input_tokens = getattr(response, "cache_read_input_tokens", 0) or 0
+                cache_creation_input_tokens = getattr(response, "cache_creation_input_tokens", 0) or 0
 
                 # Log the full raw_message as JSON so tool_calls are preserved for resume.
                 # New path: raw_message goes into the dedicated `raw_json` column.
@@ -1842,9 +1846,9 @@ class LoomSession:
                         tool_count=tool_count,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
+                        elapsed_ms=(time.monotonic() - t0) * 1000,
                         cache_read_input_tokens=cache_read_input_tokens,
                         cache_creation_input_tokens=cache_creation_input_tokens,
-                        elapsed_ms=(time.monotonic() - t0) * 1000,
                     )
                     return
 
@@ -2048,9 +2052,9 @@ class LoomSession:
                                 tool_count=tool_count,
                                 input_tokens=input_tokens,
                                 output_tokens=output_tokens,
-                        cache_read_input_tokens=cache_read_input_tokens,
-                        cache_creation_input_tokens=cache_creation_input_tokens,
                                 elapsed_ms=(time.monotonic() - t0) * 1000,
+                                cache_read_input_tokens=cache_read_input_tokens,
+                                cache_creation_input_tokens=cache_creation_input_tokens,
                             )
                             return
                 else:
@@ -2077,9 +2081,9 @@ class LoomSession:
                 tool_count=tool_count,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                        cache_read_input_tokens=cache_read_input_tokens,
-                        cache_creation_input_tokens=cache_creation_input_tokens,
                 elapsed_ms=(time.monotonic() - t0) * 1000,
+                cache_read_input_tokens=cache_read_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
                 stop_reason=_stop_reason,
             )
         finally:

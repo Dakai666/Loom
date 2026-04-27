@@ -180,9 +180,10 @@ class TurnDone:
     tool_count: int
     input_tokens: int
     output_tokens: int
+    elapsed_ms: float
+    # Defaulted fields must follow non-default fields (dataclass rule).
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
-    elapsed_ms: float
     stop_reason: str = "complete"  # "complete" | "cancelled"
 
 

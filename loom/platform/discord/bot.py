@@ -1047,6 +1047,13 @@ class LoomDiscordBot:
                 chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
                 await message.channel.send(chunk)
 
+        # cache_tag is consumed by both the embed footer (below) and the
+        # post-summary footer further down — compute once up front so the
+        # embed branch doesn't reference an undefined name. (PR #229 review.)
+        cache_total = _cache_read_tokens + _cache_creation_tokens + _cache_input_tokens
+        cache_hit_pct = (_cache_read_tokens / cache_total * 100) if cache_total > 0 else 0.0
+        cache_tag = f"  ·  cache {cache_hit_pct:.0f}%" if cache_hit_pct > 0 else ""
+
         # ── Turn summary (if enabled) ─────────────────────────────────────
         if self._summary_mode != "off" and _envelope_count > 0:
             # Grants info
@@ -1083,9 +1090,6 @@ class LoomDiscordBot:
                 await message.channel.send(f"-# {' · '.join(parts)}")
 
         # ── Footer: persona / context / model ────────────────────────────
-        cache_total = _cache_read_tokens + _cache_creation_tokens + _cache_input_tokens
-        cache_hit_pct = (_cache_read_tokens / cache_total * 100) if cache_total > 0 else 0.0
-        cache_tag = f"  ·  cache {cache_hit_pct:.0f}%" if cache_hit_pct > 0 else ""
         persona = session.current_personality or "default"
         pct = session.budget.usage_fraction * 100
         model = session.model
