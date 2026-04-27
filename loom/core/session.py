@@ -2126,6 +2126,11 @@ class LoomSession:
         if is_high_stakes(envelopes):
             verdict = await run_judge(self.router, self.model, digest)
             self._record_verdict_telemetry(verdict, sync=True)
+            if verdict.error:
+                # Judge itself failed (empty / malformed / network) —
+                # don't promote that into agent-facing noise. Telemetry
+                # already captured it. See issue #226.
+                return None
             if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
                 return format_verdict_reminder(verdict)
             return None
@@ -2142,6 +2147,9 @@ class LoomSession:
     async def _run_judge_async(self, digest: str) -> None:
         verdict = await run_judge(self.router, self.model, digest)
         self._record_verdict_telemetry(verdict, sync=False)
+        if verdict.error:
+            # Judge itself failed — telemetry only, no reminder. See #226.
+            return
         if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
             self._pending_verdicts.append(format_verdict_reminder(verdict))
 

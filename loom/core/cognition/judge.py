@@ -97,6 +97,28 @@ def is_high_stakes(envelopes: list["ExecutionEnvelopeView"]) -> bool:
     return False
 
 
+# ── Trace anomaly detection ────────────────────────────────────────────────
+
+# Non-success terminal states. Anything in here means a tool didn't reach
+# its happy-path conclusion — the kind of trace the judge has a real shot
+# at catching a say-do gap against.
+_TROUBLED_STATES: frozenset[str] = frozenset({
+    "denied",      # blocked by trust/scope/legitimacy
+    "aborted",     # cancelled mid-flight
+    "timed_out",   # blew the budget
+    "reverted",    # rolled back after the fact
+})
+
+
+def has_trace_anomaly(envelopes: list["ExecutionEnvelopeView"]) -> bool:
+    """True iff any node ended in a non-success terminal state."""
+    for env in envelopes:
+        for node in env.nodes:
+            if node.state in _TROUBLED_STATES:
+                return True
+    return False
+
+
 # ── Gate predicate ─────────────────────────────────────────────────────────
 
 
@@ -106,21 +128,32 @@ def gate_should_fire(
 ) -> bool:
     """Pure predicate — do we have enough signal to even run a judge?
 
+    Two structural triggers, no broad text-heuristic fallback:
+
+    - **High-stakes external action** (push / merge / release / CRITICAL
+      trust): always fire, regardless of claim. Externally visible
+      effects must be verified.
+    - **Trace anomaly + completion claim**: any node ended in a non-success
+      terminal state (denied / aborted / timed_out / reverted) AND the
+      agent's final text claims completion. Classic say-do gap.
+
+    Notably absent: bare ``MUTATES + claim``. Loom marks almost every
+    useful tool MUTATES (read_file, run_bash, write_file…), and agents
+    routinely close turns with "完成" / "done", so that combination
+    triggered on virtually every successful turn — pure noise. See
+    issue #226.
+
     Lifted out of the dispatcher so the caller can decide whether to spend
-    the per-turn idempotency token *before* committing it. Without this
-    split, a stream_turn that goes (text-only end_turn → reminder loop →
-    tool_use with MUTATES → end_turn with claim) burns its judge slot on
-    the first end_turn and silently skips the real completion.
+    the per-turn idempotency token *before* committing it (regression
+    guard for the iter-1-burns-the-slot bug).
     """
     if not envelopes:
         return False
-    mutated = any(
-        "MUTATES" in (n.capabilities or [])
-        for env in envelopes for n in env.nodes
-    )
-    if not mutated:
-        return False
-    return claims_completion(final_text)
+    if is_high_stakes(envelopes):
+        return True
+    if has_trace_anomaly(envelopes) and claims_completion(final_text):
+        return True
+    return False
 
 
 # ── Digest construction ────────────────────────────────────────────────────
