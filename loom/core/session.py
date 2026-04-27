@@ -47,14 +47,12 @@ from loom.core.cognition.providers import AnthropicProvider
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.judge import (
     JudgeVerdict,
-    VERDICT_FAIL,
-    VERDICT_PASS,
-    VERDICT_UNCERTAIN,
     build_trace_digest,
     format_verdict_reminder,
     gate_should_fire,
     is_high_stakes,
     run_judge,
+    should_inject_reminder,
 )
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
@@ -2126,12 +2124,7 @@ class LoomSession:
         if is_high_stakes(envelopes):
             verdict = await run_judge(self.router, self.model, digest)
             self._record_verdict_telemetry(verdict, sync=True)
-            if verdict.error:
-                # Judge itself failed (empty / malformed / network) —
-                # don't promote that into agent-facing noise. Telemetry
-                # already captured it. See issue #226.
-                return None
-            if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
+            if should_inject_reminder(verdict):
                 return format_verdict_reminder(verdict)
             return None
 
@@ -2147,10 +2140,7 @@ class LoomSession:
     async def _run_judge_async(self, digest: str) -> None:
         verdict = await run_judge(self.router, self.model, digest)
         self._record_verdict_telemetry(verdict, sync=False)
-        if verdict.error:
-            # Judge itself failed — telemetry only, no reminder. See #226.
-            return
-        if verdict.verdict in (VERDICT_FAIL, VERDICT_UNCERTAIN):
+        if should_inject_reminder(verdict):
             self._pending_verdicts.append(format_verdict_reminder(verdict))
 
     def _record_verdict_telemetry(self, verdict: "JudgeVerdict", *, sync: bool) -> None:

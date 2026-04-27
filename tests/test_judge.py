@@ -15,6 +15,7 @@ from loom.core.cognition.judge import (
     has_trace_anomaly,
     is_high_stakes,
     parse_verdict,
+    should_inject_reminder,
 )
 from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
 
@@ -285,6 +286,77 @@ class TestVerdictParsing:
     def test_case_insensitive(self):
         v = parse_verdict("verdict: PASS — looks good.")
         assert v.verdict == VERDICT_PASS
+
+
+# ── dispatch policy ─────────────────────────────────────────────────────────
+
+
+class TestShouldInjectReminder:
+    """The single predicate both sync + async dispatch paths consult.
+
+    Centralises the #226 fix: judge self-failures (verdict.error set) must
+    NOT be promoted to agent-facing reminders, regardless of what verdict
+    string parse_verdict happened to assign as a fallback.
+    """
+
+    def test_pass_is_silent(self):
+        v = JudgeVerdict(verdict=VERDICT_PASS, reason="all good")
+        assert not should_inject_reminder(v)
+
+    def test_fail_injects(self):
+        v = JudgeVerdict(verdict=VERDICT_FAIL, reason="say-do gap")
+        assert should_inject_reminder(v)
+
+    def test_uncertain_injects(self):
+        v = JudgeVerdict(verdict=VERDICT_UNCERTAIN, reason="ambiguous trace")
+        assert should_inject_reminder(v)
+
+    def test_error_swallows_uncertain(self):
+        # The exact #226 noise case: judge model returned empty → parse_verdict
+        # produced uncertain + error="empty_response". Must NOT inject.
+        v = JudgeVerdict(
+            verdict=VERDICT_UNCERTAIN,
+            reason="judge returned empty response",
+            error="empty_response",
+        )
+        assert not should_inject_reminder(v)
+
+    def test_error_swallows_fail(self):
+        # Defensive: even if a malformed-fallback path lands on `fail`, an
+        # error-tagged verdict still represents judge malfunction, not agent
+        # gap. Don't promote it.
+        v = JudgeVerdict(
+            verdict=VERDICT_FAIL,
+            reason="...",
+            error="malformed_verdict",
+        )
+        assert not should_inject_reminder(v)
+
+    def test_error_swallows_pass_too(self):
+        # Vacuously true (pass already silent) but locks the contract: the
+        # error gate runs first, independent of the verdict string.
+        v = JudgeVerdict(verdict=VERDICT_PASS, reason="x", error="boom")
+        assert not should_inject_reminder(v)
+
+
+# ── lifecycle drift guard ───────────────────────────────────────────────────
+
+
+def test_troubled_states_match_lifecycle_failure_states():
+    """If lifecycle adds a new failure state, this test breaks loud.
+
+    The judge module also asserts this at import time, but we duplicate the
+    check at test time so a CI failure points at this exact concern rather
+    than a generic ImportError.
+    """
+    from loom.core.cognition.judge import _TROUBLED_STATES
+    from loom.core.harness.lifecycle import _FAILURE_STATES
+
+    canonical = {s.value for s in _FAILURE_STATES}
+    assert canonical == _TROUBLED_STATES, (
+        f"lifecycle._FAILURE_STATES={canonical} drifted from "
+        f"judge._TROUBLED_STATES={_TROUBLED_STATES}"
+    )
 
 
 # ── reminder formatting ─────────────────────────────────────────────────────
