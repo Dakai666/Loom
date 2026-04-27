@@ -1,6 +1,6 @@
 """Loom — Harness-first, memory-native, self-directing agent framework."""
 
-__version__ = "0.2.5.1"
+__version__ = "0.3.5.0"
 
 from loom.extensibility.adapter import AdapterRegistry as _AdapterRegistry
 from loom.extensibility.plugin import LoomPlugin, PluginRegistry as _PluginRegistry
