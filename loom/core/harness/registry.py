@@ -129,6 +129,9 @@ class ToolDefinition:
         }
 
 
+_TOOL_NAME_PATTERN = __import__("re").compile(r"^[a-zA-Z0-9_-]+$")
+
+
 class ToolRegistry:
     """
     Central registry for all tools available to the agent.
@@ -141,6 +144,15 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
 
     def register(self, tool: ToolDefinition) -> None:
+        # Strict providers (DeepSeek, OpenAI) reject tool names that don't
+        # match ^[a-zA-Z0-9_-]+$. Catch violations at boot rather than
+        # letting them surface as opaque 400s mid-turn.
+        if not _TOOL_NAME_PATTERN.match(tool.name):
+            raise ValueError(
+                f"Invalid tool name {tool.name!r}: must match ^[a-zA-Z0-9_-]+$ "
+                f"(letters, digits, underscore, hyphen). Common offenders: "
+                f"':' '.' '/' — use '__' as a namespace separator instead."
+            )
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> ToolDefinition | None:
