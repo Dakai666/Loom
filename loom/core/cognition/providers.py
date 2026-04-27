@@ -322,8 +322,16 @@ class AnthropicProvider(LLMProvider):
                 for tu in tool_uses
             ]
 
-        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-        cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = (
+            getattr(response.usage, "cache_read_input_tokens", 0)  # Anthropic
+            or getattr(response.usage, "prompt_cache_hit_tokens", 0)  # DeepSeek
+            or 0
+        )
+        cache_creation = (
+            getattr(response.usage, "cache_creation_input_tokens", 0)  # Anthropic
+            or getattr(response.usage, "prompt_cache_miss_tokens", 0)  # DeepSeek
+            or 0
+        )
         return LLMResponse(
             text=text,
             tool_uses=tool_uses,
