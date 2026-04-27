@@ -228,8 +228,11 @@ class LoomMCPClient:
                         failure_type="execution_error",
                     )
 
-            # Prefix tool names to avoid collision: "filesystem:list_files"
-            prefixed_name = f"{self._cfg.name}:{tool_name}"
+            # Prefix tool names to avoid collision: "filesystem__list_files".
+            # Use "__" rather than ":" so the name matches ^[a-zA-Z0-9_-]+$,
+            # which strict providers (DeepSeek, OpenAI) enforce on tool
+            # names. Same convention Claude Code uses for MCP tools.
+            prefixed_name = f"{self._cfg.name}__{tool_name}"
             desc = mcp_tool.description or f"MCP tool from {self._cfg.name}"
             schema = mcp_tool.inputSchema if mcp_tool.inputSchema else {
                 "type": "object", "properties": {}
