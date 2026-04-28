@@ -265,6 +265,39 @@ async def test_tracker_anomaly_report_fires(store):
         assert "AGENT TELEMETRY ALERT" in alert
 
 
+async def test_tracker_anomaly_report_edge_triggered(store):
+    """Issue #219: once a dimension has alerted, repeat reports with the
+    same dimension in `since` must stay silent until it recovers and
+    re-enters the bad state."""
+    async with store.connect() as db:
+        tracker = AgentTelemetryTracker(db, "sess-edge")
+        tool_dim = tracker.get("tool_call")
+        tool_dim.record("recall", success=True, duration_ms=1.0)
+        for _ in range(4):
+            tool_dim.record("recall", success=False, duration_ms=1.0, error_msg="oops")
+
+        # Rising edge — first call fires.
+        assert tracker.alerting_dimensions() == {"tool_call"}
+        first = tracker.anomaly_report(since=set())
+        assert first is not None and "tool_call" in first
+
+        # Same condition, but dimension is already known-alerting → silent.
+        assert tracker.anomaly_report(since={"tool_call"}) is None
+
+        # Recover: enough successes push failure rate back below threshold.
+        for _ in range(20):
+            tool_dim.record("recall", success=True, duration_ms=1.0)
+        assert tracker.alerting_dimensions() == set()
+
+        # Re-enter bad state — must fire again on the new rising edge.
+        for _ in range(15):
+            tool_dim.record("recall", success=False, duration_ms=1.0, error_msg="oops again")
+        assert tracker.alerting_dimensions() == {"tool_call"}
+        # Caller's `since` reflects the just-cleared set (empty), so this fires.
+        second = tracker.anomaly_report(since=set())
+        assert second is not None and "tool_call" in second
+
+
 async def test_tracker_reports(store):
     async with store.connect() as db:
         tracker = AgentTelemetryTracker(db, "sess-e")
