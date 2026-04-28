@@ -142,7 +142,10 @@ class _ConfirmView(View):
 # LoomDiscordBot
 # ---------------------------------------------------------------------------
 
-_MAX_CHARS     = 2000  # Discord per-message limit
+_MAX_CHARS     = 1900  # Discord per-message limit is 2000; we leave 100 chars
+                       # headroom for prefixes, continuation markers, and the
+                       # occasional Discord-side count discrepancy. Going right
+                       # to the cap is what produced the 50035 errors in #231.
 _THREAD_ARCHIVE_MINUTES = 1440  # 24h auto-archive for threads
 
 # ── Envelope display helpers (Issue #110) ────────────────────────────────
@@ -354,7 +357,7 @@ class LoomDiscordBot:
             await self._run_turn(message, content, session)
         else:
             # Re-route to thread (message is already the first user turn)
-            fake_msg = await thread.send(f"> {content[:100]}")  # echo starter
+            fake_msg = await _safe_send(thread, f"> {content[:100]}")  # echo starter
             await self._run_turn(fake_msg, content, session)
 
     # ------------------------------------------------------------------
@@ -461,7 +464,7 @@ class LoomDiscordBot:
                             lines.append(f"• {s[:180]}")
                 elif diagnostic.mutation_suggestions:
                     lines.append(f"› {diagnostic.mutation_suggestions[0][:180]}")
-                await thread_ref.send("\n".join(lines))
+                await _safe_send(thread_ref, "\n".join(lines))
             except Exception:
                 pass
 
@@ -478,7 +481,7 @@ class LoomDiscordBot:
                     "auto_shadow": "🫥",
                     "deprecate": "🗑️",
                 }.get(event.kind, "•")
-                await thread_ref.send(f"{icon} **Skill lifecycle:** {event.one_line_summary()}")
+                await _safe_send(thread_ref, f"{icon} **Skill lifecycle:** {event.one_line_summary()}")
             except Exception:
                 pass
 
@@ -513,7 +516,7 @@ class LoomDiscordBot:
         # Commands that require being in a thread
         _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto", "/scope", "/summary", "/title"}
         if command in _needs_session and not is_thread:
-            await message.channel.send(
+            await _safe_send(message.channel, 
                 f"`{command}` must be used inside a session thread.  "
                 "Start one by sending a message here."
             )
@@ -524,7 +527,7 @@ class LoomDiscordBot:
                 # Create a new sibling thread from the parent channel
                 parent = message.channel.parent  # type: ignore[union-attr]
                 if parent is None:
-                    await message.channel.send("Cannot create a new thread here.")
+                    await _safe_send(message.channel, "Cannot create a new thread here.")
                     return
                 new_thread = await parent.create_thread(
                     name="New session",
@@ -532,10 +535,10 @@ class LoomDiscordBot:
                     type=discord.ChannelType.public_thread,
                 )
                 await self._start_session(new_thread.id)
-                await new_thread.send("✨ New session started. Send your first message here.")
-                await message.channel.send(f"✨ Opened new session → {new_thread.mention}")
+                await _safe_send(new_thread, "✨ New session started. Send your first message here.")
+                await _safe_send(message.channel, f"✨ Opened new session → {new_thread.mention}")
             else:
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     "Send any message here to start a new session thread."
                 )
 
@@ -545,7 +548,7 @@ class LoomDiscordBot:
             async with session._store.connect() as conn:
                 rows = await _SL(conn).list_sessions(limit=10)
             if not rows:
-                await message.channel.send("*(no saved sessions)*")
+                await _safe_send(message.channel, "*(no saved sessions)*")
                 return
             lines = ["**Recent sessions:**\n"]
             for i, r in enumerate(rows, 1):
@@ -553,21 +556,21 @@ class LoomDiscordBot:
                 sid = r["session_id"][:8]
                 active = " ◀ current" if r["session_id"] == session.session_id else ""
                 lines.append(f"`{i}.` `{sid}` — {title}{active}")
-            await message.channel.send("\n".join(lines))
+            await _safe_send(message.channel, "\n".join(lines))
 
         elif command == "/think":
             assert session is not None
             think = session._last_think
             if think:
                 body = think[:1800] + ("\n*(truncated)*" if len(think) > 1800 else "")
-                await message.channel.send(f"**Reasoning chain:**\n```\n{body}\n```")
+                await _safe_send(message.channel, f"**Reasoning chain:**\n```\n{body}\n```")
             else:
-                await message.channel.send("*(no reasoning chain captured for the last turn)*")
+                await _safe_send(message.channel, "*(no reasoning chain captured for the last turn)*")
 
         elif command == "/compact":
             assert session is not None
             pct = session.budget.usage_fraction * 100
-            msg = await message.channel.send(f"⏳ Compacting context ({pct:.1f}% used)…")
+            msg = await _safe_send(message.channel, f"⏳ Compacting context ({pct:.1f}% used)…")
             await session._smart_compact()
             await _safe_edit(msg, "✅ Context compacted.")
 
@@ -575,16 +578,16 @@ class LoomDiscordBot:
             assert session is not None
             if not arg:
                 providers = ", ".join(session.router.providers)
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     f"Current model: **{session.model}**  providers: `{providers}`\n"
                     "Prefixes: `MiniMax-*` · `claude-*` · `deepseek-*` · `openrouter/<vendor>/<model>` · `ollama/<name>` · `lmstudio/<name>`"
                 )
             else:
                 ok = session.set_model(arg)
                 if ok:
-                    await message.channel.send(f"Model switched to: **{arg}**")
+                    await _safe_send(message.channel, f"Model switched to: **{arg}**")
                 else:
-                    await message.channel.send(
+                    await _safe_send(message.channel, 
                         f"Cannot switch to `{arg}` — prefix not recognised or provider "
                         "not registered (check `.env` key or `loom.toml [providers.*]`)."
                     )
@@ -594,20 +597,20 @@ class LoomDiscordBot:
             if not arg:
                 p = session.current_personality
                 avail = session._stack.available_personalities()
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     f"Active: **{p or '(none)'}**  |  "
                     f"Available: `{'`, `'.join(avail) or '(none)'}`"
                 )
             elif arg == "off":
                 session.switch_personality("off")
-                await message.channel.send("Personality cleared.")
+                await _safe_send(message.channel, "Personality cleared.")
             else:
                 ok = session.switch_personality(arg)
                 if ok:
-                    await message.channel.send(f"Personality → **{arg}**")
+                    await _safe_send(message.channel, f"Personality → **{arg}**")
                 else:
                     avail = session._stack.available_personalities()
-                    await message.channel.send(
+                    await _safe_send(message.channel, 
                         f"❌ Unknown personality `{arg}`. "
                         f"Available: `{'`, `'.join(avail) or '(none)'}`"
                     )
@@ -615,7 +618,7 @@ class LoomDiscordBot:
         elif command == "/auto":
             assert session is not None
             if not session._strict_sandbox:
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     "❌ `/auto` requires `strict_sandbox = true` in `loom.toml`.\n"
                     "Without workspace confinement, auto-approving `run_bash` "
                     "would grant unrestricted shell access."
@@ -624,12 +627,12 @@ class LoomDiscordBot:
                 session.perm.exec_auto = not session.perm.exec_auto
                 state = "on" if session.perm.exec_auto else "off"
                 if session.perm.exec_auto:
-                    await message.channel.send(
+                    await _safe_send(message.channel, 
                         f"✅ Exec auto-approve: **{state}** — `run_bash` pre-authorized within workspace.\n"
                         "Absolute paths that escape the workspace still require confirmation."
                     )
                 else:
-                    await message.channel.send(
+                    await _safe_send(message.channel, 
                         f"🔒 Exec auto-approve: **{state}** — `run_bash` will confirm every call."
                     )
 
@@ -642,15 +645,15 @@ class LoomDiscordBot:
                 "`c` to cancel, or send a redirect message."
                 if session.hitl_mode else ""
             )
-            await message.channel.send(f"HITL pause mode: **{state}**{extra}")
+            await _safe_send(message.channel, f"HITL pause mode: **{state}**{extra}")
 
         elif command == "/stop":
             task = self._running_turns.get(message.channel.id)
             if task and not task.done():
                 task.cancel()
-                await message.channel.send("🛑 Stopped.")
+                await _safe_send(message.channel, "🛑 Stopped.")
             else:
-                await message.channel.send("*(nothing is running)*")
+                await _safe_send(message.channel, "*(nothing is running)*")
 
         elif command == "/budget":
             assert session is not None
@@ -659,7 +662,7 @@ class LoomDiscordBot:
             total = session.budget.total_tokens
             bar_filled = int(pct / 5)
             bar = "█" * bar_filled + "░" * (20 - bar_filled)
-            await message.channel.send(
+            await _safe_send(message.channel, 
                 f"**Context Budget**\n"
                 f"`{bar}` {pct:.1f}%\n"
                 f"`{used:,}` / `{total:,}` tokens"
@@ -673,7 +676,7 @@ class LoomDiscordBot:
                 async with session._store.connect() as conn:
                     meta = await _SL(conn).get_session(session.session_id)
                 current = (meta or {}).get("title")
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     f"Current title: **{current or '(untitled)'}**\n"
                     "Usage: `/title <new title>`"
                 )
@@ -682,10 +685,10 @@ class LoomDiscordBot:
                 from loom.core.memory.session_log import SessionLog as _SL
                 async with session._store.connect() as conn:
                     await _SL(conn).update_title(session.session_id, arg)
-                await message.channel.send(f"✅ Session title → **{arg}**")
+                await _safe_send(message.channel, f"✅ Session title → **{arg}**")
 
         elif command == "/help":
-            await message.channel.send(
+            await _safe_send(message.channel, 
                 "**Loom commands**\n\n"
                 "`/new` \u2014 Open a new session thread\n"
                 "`/sessions` \u2014 List recent sessions\n"
@@ -711,15 +714,15 @@ class LoomDiscordBot:
         elif command == "/summary":
             valid_modes = ("off", "on", "detail")
             if not arg:
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     f"Turn summary mode: **{self._summary_mode}**\n"
                     f"Usage: `/summary off` · `/summary on` · `/summary detail`"
                 )
             elif arg.lower() in valid_modes:
                 self._summary_mode = arg.lower()
-                await message.channel.send(f"Turn summary mode → **{self._summary_mode}**")
+                await _safe_send(message.channel, f"Turn summary mode → **{self._summary_mode}**")
             else:
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     f"Unknown mode `{arg}`. Use: `off` · `on` · `detail`"
                 )
 
@@ -736,7 +739,7 @@ class LoomDiscordBot:
                     if g.valid_until <= 0 or g.valid_until > now
                 ]
                 if not active:
-                    await message.channel.send("*(no active scope grants)*")
+                    await _safe_send(message.channel, "*(no active scope grants)*")
                 else:
                     lines = [f"**Active Scope Grants ({len(active)})**\n```"]
                     lines.append(f"{'ID':>3}  {'Tool':<16} {'Selector':<20} {'TTL':<10}")
@@ -751,22 +754,22 @@ class LoomDiscordBot:
                         tool = g.action if g.action != "*" else g.resource
                         lines.append(f"{idx:>3}  {tool:<16} {g.selector:<20} {ttl:<10}")
                     lines.append("```")
-                    await message.channel.send("\n".join(lines))
+                    await _safe_send(message.channel, "\n".join(lines))
 
             elif subcmd == "revoke":
                 if not subarg.isdigit():
-                    await message.channel.send("Usage: `/scope revoke <id>`")
+                    await _safe_send(message.channel, "Usage: `/scope revoke <id>`")
                 else:
                     grant_id = int(subarg)
                     if 0 <= grant_id < len(session.perm.grants):
                         g = session.perm.grants[grant_id]
                         tool = g.action if g.action != "*" else g.resource
                         session.perm.revoke_matching(lambda x, _g=g: x is _g)
-                        await message.channel.send(
+                        await _safe_send(message.channel, 
                             f"✅ Revoked grant #{grant_id}: `{tool}` · {g.selector}"
                         )
                     else:
-                        await message.channel.send(
+                        await _safe_send(message.channel, 
                             f"❌ Invalid grant ID `{grant_id}`. Use `/scope list` to see valid IDs."
                         )
 
@@ -774,15 +777,15 @@ class LoomDiscordBot:
                 count = len(session.perm.grants)
                 session.perm.grants.clear()
                 session.perm._usage.clear()
-                await message.channel.send(f"🧹 Cleared {count} scope grant(s).")
+                await _safe_send(message.channel, f"🧹 Cleared {count} scope grant(s).")
 
             else:
-                await message.channel.send(
+                await _safe_send(message.channel, 
                     "Usage: `/scope list` · `/scope revoke <id>` · `/scope clear`"
                 )
 
         else:
-            await message.channel.send(
+            await _safe_send(message.channel, 
                 f"Unknown command `{command}`. Type `/help` for the command list."
             )
 
@@ -813,7 +816,7 @@ class LoomDiscordBot:
             pass
 
         # Placeholder shown while working; deleted if no tools were used.
-        status_msg = await message.channel.send("-# ◌ working…")
+        status_msg = await _safe_send(message.channel, "-# ◌ working…")
 
         tool_buf = ""       # accumulates tool activity lines (edited into status_msg)
         narration_buf = ""  # accumulates LLM text; flushed as send-once before each tool
@@ -842,7 +845,7 @@ class LoomDiscordBot:
                     elif isinstance(event, ThinkCollapsed):
                         # Send as a persistent message so it isn't overwritten
                         # by subsequent envelope edits.
-                        await message.channel.send(f"-# 💭 {event.summary}")
+                        await _safe_send(message.channel, f"-# 💭 {event.summary}")
 
                     elif isinstance(event, EnvelopeStarted):
                         _envelope_active = True
@@ -851,7 +854,7 @@ class LoomDiscordBot:
                         narration = narration_buf.strip()
                         narration_buf = ""
                         if len(narration) >= 10:
-                            await message.channel.send(f"⬥ {narration}")
+                            await _safe_send(message.channel, f"⬥ {narration}")
                         tool_buf = _format_envelope_status(event.envelope)
                         await _safe_edit(status_msg, tool_buf.lstrip())
                         _last_envelope_edit = time.monotonic()
@@ -880,7 +883,7 @@ class LoomDiscordBot:
                         frozen = _format_envelope_status(event.envelope)
                         await _safe_edit(status_msg, frozen.lstrip())
                         # Create a fresh status_msg for the next envelope
-                        status_msg = await message.channel.send("-# ◌ working…")
+                        status_msg = await _safe_send(message.channel, "-# ◌ working…")
                         tool_buf = ""
                         _last_envelope_edit = time.monotonic()
 
@@ -889,7 +892,7 @@ class LoomDiscordBot:
                         narration = narration_buf.strip()
                         narration_buf = ""
                         if len(narration) >= 10:
-                            await message.channel.send(f"⬥ {narration}")
+                            await _safe_send(message.channel, f"⬥ {narration}")
 
                         if not _envelope_active:
                             # Build tool line with kimaki-style symbol:
@@ -956,7 +959,7 @@ class LoomDiscordBot:
                             tool_buf += "\n*(pause timed out — cancelled)*"
 
                     elif isinstance(event, CompressDone):
-                        await message.channel.send(
+                        await _safe_send(message.channel, 
                             f"-# 🧠 記憶壓縮：{event.fact_count} 條事實已存入語意記憶"
                         )
 
@@ -977,7 +980,7 @@ class LoomDiscordBot:
                                 f"-# ⚠️ 任務中止：`stop_reason={event.stop_reason}` "
                                 f"（已完成 {event.tool_count} 個工具）"
                             )
-                        await message.channel.send(drop_msg)
+                        await _safe_send(message.channel, drop_msg)
 
                     elif isinstance(event, ActionRolledBack):
                         _had_rollback = True
@@ -995,7 +998,7 @@ class LoomDiscordBot:
                         _cache_creation_tokens = event.cache_creation_input_tokens
                         _cache_input_tokens = event.input_tokens
                         if event.stop_reason == "cancelled":
-                            await message.channel.send(
+                            await _safe_send(message.channel, 
                                 "⚠️ **Turn aborted** — too many denied authorizations. "
                                 "Your session is still active; send a new message to continue."
                             )
@@ -1019,7 +1022,7 @@ class LoomDiscordBot:
                     await _safe_edit(status_msg, "🛑 *(stopped)*")
                 partial = narration_buf.strip()
                 if partial:
-                    await message.channel.send(f"⬥ {partial}\n\n🛑 *(stopped)*")
+                    await _safe_send(message.channel, f"⬥ {partial}\n\n🛑 *(stopped)*")
                 raise
 
             except Exception as exc:
@@ -1042,10 +1045,8 @@ class LoomDiscordBot:
         if not final and not tool_buf:
             final = "*(no response)*"
         if final:
-            remaining = f"⬥ {final}" if not final.startswith("⬥") else final
-            while remaining:
-                chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
-                await message.channel.send(chunk)
+            payload = f"⬥ {final}" if not final.startswith("⬥") else final
+            await _safe_send(message.channel, payload)
 
         # cache_tag is consumed by both the embed footer (below) and the
         # post-summary footer further down — compute once up front so the
@@ -1087,7 +1088,7 @@ class LoomDiscordBot:
                     parts.append(f"{_total_failures} failed")
                 parts.append(f"{_total_elapsed_ms / 1000:.1f}s")
                 parts.append(grants_str)
-                await message.channel.send(f"-# {' · '.join(parts)}")
+                await _safe_send(message.channel, f"-# {' · '.join(parts)}")
 
         # ── Footer: persona / context / model ────────────────────────────
         persona = session.current_personality or "default"
@@ -1095,7 +1096,7 @@ class LoomDiscordBot:
         model = session.model
         # Skip footer if detail summary already includes it
         if not (self._summary_mode == "detail" and _envelope_count > 0):
-            await message.channel.send(
+            await _safe_send(message.channel, 
                 f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {model}"
             )
 
@@ -1131,7 +1132,7 @@ class LoomDiscordBot:
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
 
-            msg = await channel.send(
+            msg = await _safe_send(channel, 
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
@@ -1146,12 +1147,12 @@ class LoomDiscordBot:
                 self._active_confirmations.pop(thread_id, None)
 
             if decision == ConfirmDecision.SCOPE:
-                await channel.send(
+                await _safe_send(channel, 
                     f"⏱️ **Scope lease granted** for `{call.tool_name}` — "
                     f"auto-approved for this scope for the next **{_LEASE_TTL_MIN} minutes**."
                 )
             elif decision == ConfirmDecision.AUTO:
-                await channel.send(
+                await _safe_send(channel, 
                     f"⚡ **Permanent auto-approve granted** for `{call.tool_name}` — "
                     f"all future calls of this tool class will be approved automatically."
                 )
@@ -1185,8 +1186,8 @@ class LoomDiscordBot:
 # ---------------------------------------------------------------------------
 
 async def _safe_edit(
-    message: discord.Message, 
-    content: str, 
+    message: discord.Message,
+    content: str,
     view: discord.ui.View | None = None
 ) -> None:
     try:
@@ -1196,3 +1197,50 @@ async def _safe_edit(
         await message.edit(**kwargs)
     except discord.HTTPException:
         pass
+
+
+async def _safe_send(
+    channel,
+    content: str,
+    **kwargs,
+) -> "discord.Message | None":
+    """Length-aware ``channel.send(content=...)`` for plain-text messages.
+
+    Splits ``content`` into ``_MAX_CHARS``-sized chunks and sends them as
+    sequential messages — Discord's 2000-char hard limit raises 50035, which
+    historically bubbled out of the per-turn task and aborted the loop (#231).
+    Catches ``discord.HTTPException`` so transient API errors no longer kill
+    the turn either.
+
+    Returns the *last* sent message (so callers that store the handle for a
+    follow-up edit get a valid target). Returns None if every send raised.
+
+    Out of scope: embed / file sends, which carry their own per-field limits;
+    callers should pass those through ``channel.send`` directly until a
+    dedicated helper lands (see #231 follow-ups).
+    """
+    if not content:
+        if not kwargs:
+            return None
+        try:
+            return await channel.send(**kwargs)
+        except discord.HTTPException:
+            return None
+
+    last: "discord.Message | None" = None
+    remaining = content
+    while remaining:
+        chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
+        try:
+            last = await channel.send(chunk, **kwargs)
+        except discord.HTTPException:
+            # Drop this chunk but keep going — partial delivery beats killing
+            # the turn loop. The kwargs (view=, allowed_mentions=, …) only
+            # apply to the first attempt where they matter; subsequent chunks
+            # carry plain text.
+            kwargs = {}
+            continue
+        # Per-message kwargs (view, file, reference) should only attach to the
+        # first chunk; otherwise we'd duplicate buttons / replies on every part.
+        kwargs = {}
+    return last
