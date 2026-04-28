@@ -54,13 +54,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 try:
     import discord
-    from discord import ButtonStyle, Interaction
+    from discord import ButtonStyle, Interaction, app_commands
     from discord.ui import Button, View
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -245,8 +246,14 @@ class LoomDiscordBot:
 
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.guilds = True  # required for slash command registration (#189)
         self._client = discord.Client(intents=intents)
+        self._tree = app_commands.CommandTree(self._client)
         self._setup_events()
+        # Register native /loom-* slash commands. Text-prefix commands stay
+        # alongside them (CLI/Discord parity is intentional, see #189).
+        from loom.platform.discord.commands import register_slash_commands
+        register_slash_commands(self)
 
     # ------------------------------------------------------------------
     # Discord event handlers
@@ -264,6 +271,23 @@ class LoomDiscordBot:
                 print(f"[Loom Discord] Accepting messages from user IDs: {bot._allowed_users}")
             if bot._allowed_channels:
                 print(f"[Loom Discord] Operating in channels: {bot._allowed_channels}")
+
+            # Sync slash commands. LOOM_DISCORD_DEV_GUILD_ID makes iteration
+            # bearable (per-guild syncs are instant; the global tree takes up
+            # to an hour to propagate). Failures are logged but never block
+            # startup — text-prefix commands still work.
+            try:
+                dev_guild = os.environ.get("LOOM_DISCORD_DEV_GUILD_ID")
+                if dev_guild and dev_guild.isdigit():
+                    guild_obj = discord.Object(id=int(dev_guild))
+                    bot._tree.copy_global_to(guild=guild_obj)
+                    cmds = await bot._tree.sync(guild=guild_obj)
+                    print(f"[Loom Discord] Synced {len(cmds)} slash command(s) to dev guild {dev_guild}")
+                else:
+                    cmds = await bot._tree.sync()
+                    print(f"[Loom Discord] Synced {len(cmds)} slash command(s) globally (may take ≤1h to appear)")
+            except Exception as e:  # pragma: no cover — runtime path
+                print(f"[Loom Discord] Slash command sync failed: {e}")
 
         @client.event
         async def on_message(message: discord.Message) -> None:
@@ -519,6 +543,232 @@ class LoomDiscordBot:
     # Slash commands
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Commands — per-command bodies (#189)
+    # ------------------------------------------------------------------
+    #
+    # Each ``_cmd_*`` helper produces a single user-facing reply string and
+    # has no Discord-side side effects (so both the legacy text dispatcher
+    # *and* the slash-command dispatcher in ``commands.py`` can call them
+    # against the same backend).
+    #
+    # ``/compact`` and ``/new`` are deliberately exempted — they each fire
+    # multiple Discord messages (status → completion, parent → child thread)
+    # and stay fully resolved inside their dispatchers. Trying to flatten
+    # them into a single string would invent a worse abstraction than just
+    # writing the two paths twice.
+    #
+    # We are *not* deleting the text-prefix path. CLI/Discord parity is a
+    # feature: every command works the same way you'd type it in `loom chat`
+    # and there's no reason to force users to relearn one of the two.
+
+    _SLASH_NEEDS_SESSION = frozenset({
+        "/think", "/compact", "/pause", "/stop", "/budget",
+        "/auto", "/scope", "/summary", "/title", "/sessions",
+        "/model", "/personality",
+    })
+
+    HELP_TEXT = (
+        "**Loom commands**\n\n"
+        "`/new` — Open a new session thread\n"
+        "`/sessions` — List recent sessions\n"
+        "`/title <name>` — Set or show the session title\n"
+        "`/model` — Show current model + registered providers\n"
+        "`/model <name>` — Switch model  e.g. `deepseek-v4-pro`  `claude-sonnet-4-6`\n"
+        "`/personality [name]` — Switch cognitive persona\n"
+        "`/personality off` — Remove active persona\n"
+        "`/think` — View last turn's reasoning chain\n"
+        "`/compact` — Compress older context\n"
+        "`/auto` — Toggle run_bash auto-approve (requires strict_sandbox)\n"
+        "`/pause` — Toggle HITL auto-pause after each tool batch\n"
+        "`/stop` — Immediately cancel the current running turn\n"
+        "`/budget` — Show context token usage\n"
+        "`/scope` — Manage scope grants: `list` \xb7 `revoke <id>` \xb7 `clear`\n"
+        "`/summary` — Turn summary mode: `off` \xb7 `on` \xb7 `detail`\n"
+        "`/help` — Show this message\n\n"
+        "Every command is also registered as a native `/loom-*` slash command — "
+        "type `/loom` to see them in Discord's autocomplete.\n\n"
+        "Personalities: `adversarial` \xb7 `minimalist` \xb7 `architect` \xb7 `researcher` \xb7 `operator`\n\n"
+        "*Send any message in the main channel to start a new session thread.*"
+    )
+
+    def _cmd_help(self) -> str:
+        return self.HELP_TEXT
+
+    async def _cmd_sessions(self, session: "LoomSession") -> str:
+        from loom.core.memory.session_log import SessionLog as _SL
+        async with session._store.connect() as conn:
+            rows = await _SL(conn).list_sessions(limit=10)
+        if not rows:
+            return "*(no saved sessions)*"
+        lines = ["**Recent sessions:**\n"]
+        for i, r in enumerate(rows, 1):
+            title = r.get("title") or "(untitled)"
+            sid = r["session_id"][:8]
+            active = " ◀ current" if r["session_id"] == session.session_id else ""
+            lines.append(f"`{i}.` `{sid}` — {title}{active}")
+        return "\n".join(lines)
+
+    def _cmd_think(self, session: "LoomSession") -> str:
+        think = session._last_think
+        if not think:
+            return "*(no reasoning chain captured for the last turn)*"
+        body = think[:1800] + ("\n*(truncated)*" if len(think) > 1800 else "")
+        return f"**Reasoning chain:**\n```\n{body}\n```"
+
+    def _cmd_model(self, session: "LoomSession", arg: str) -> str:
+        if not arg:
+            providers = ", ".join(session.router.providers)
+            return (
+                f"Current model: **{session.model}**  providers: `{providers}`\n"
+                "Prefixes: `MiniMax-*` · `claude-*` · `deepseek-*` · "
+                "`openrouter/<vendor>/<model>` · `ollama/<name>` · `lmstudio/<name>`"
+            )
+        if session.set_model(arg):
+            return f"Model switched to: **{arg}**"
+        return (
+            f"Cannot switch to `{arg}` — prefix not recognised or provider "
+            "not registered (check `.env` key or `loom.toml [providers.*]`)."
+        )
+
+    def _cmd_personality(self, session: "LoomSession", arg: str) -> str:
+        if not arg:
+            p = session.current_personality
+            avail = session._stack.available_personalities()
+            return (
+                f"Active: **{p or '(none)'}**  |  "
+                f"Available: `{'`, `'.join(avail) or '(none)'}`"
+            )
+        if arg == "off":
+            session.switch_personality("off")
+            return "Personality cleared."
+        if session.switch_personality(arg):
+            return f"Personality → **{arg}**"
+        avail = session._stack.available_personalities()
+        return (
+            f"❌ Unknown personality `{arg}`. "
+            f"Available: `{'`, `'.join(avail) or '(none)'}`"
+        )
+
+    def _cmd_auto(self, session: "LoomSession") -> str:
+        if not session._strict_sandbox:
+            return (
+                "❌ `/auto` requires `strict_sandbox = true` in `loom.toml`.\n"
+                "Without workspace confinement, auto-approving `run_bash` "
+                "would grant unrestricted shell access."
+            )
+        session.perm.exec_auto = not session.perm.exec_auto
+        state = "on" if session.perm.exec_auto else "off"
+        if session.perm.exec_auto:
+            return (
+                f"✅ Exec auto-approve: **{state}** — `run_bash` pre-authorized within workspace.\n"
+                "Absolute paths that escape the workspace still require confirmation."
+            )
+        return f"🔒 Exec auto-approve: **{state}** — `run_bash` will confirm every call."
+
+    def _cmd_pause(self, session: "LoomSession") -> str:
+        session.hitl_mode = not session.hitl_mode
+        state = "on" if session.hitl_mode else "off"
+        extra = (
+            "\nAgent will pause after each tool batch — reply `r` to resume, "
+            "`c` to cancel, or send a redirect message."
+            if session.hitl_mode else ""
+        )
+        return f"HITL pause mode: **{state}**{extra}"
+
+    def _cmd_stop(self, channel_id: int) -> str:
+        task = self._running_turns.get(channel_id)
+        if task and not task.done():
+            task.cancel()
+            return "🛑 Stopped."
+        return "*(nothing is running)*"
+
+    def _cmd_budget(self, session: "LoomSession") -> str:
+        pct = session.budget.usage_fraction * 100
+        used = session.budget.used_tokens
+        total = session.budget.total_tokens
+        bar_filled = int(pct / 5)
+        bar = "█" * bar_filled + "░" * (20 - bar_filled)
+        return (
+            f"**Context Budget**\n"
+            f"`{bar}` {pct:.1f}%\n"
+            f"`{used:,}` / `{total:,}` tokens"
+        )
+
+    async def _cmd_title(self, session: "LoomSession", arg: str) -> str:
+        from loom.core.memory.session_log import SessionLog as _SL
+        if not arg:
+            async with session._store.connect() as conn:
+                meta = await _SL(conn).get_session(session.session_id)
+            current = (meta or {}).get("title")
+            return (
+                f"Current title: **{current or '(untitled)'}**\n"
+                "Usage: `/title <new title>`"
+            )
+        async with session._store.connect() as conn:
+            await _SL(conn).update_title(session.session_id, arg)
+        return f"✅ Session title → **{arg}**"
+
+    def _cmd_summary(self, arg: str) -> str:
+        valid_modes = ("off", "on", "detail")
+        if not arg:
+            return (
+                f"Turn summary mode: **{self._summary_mode}**\n"
+                "Usage: `/summary off` · `/summary on` · `/summary detail`"
+            )
+        if arg.lower() in valid_modes:
+            self._summary_mode = arg.lower()
+            return f"Turn summary mode → **{self._summary_mode}**"
+        return f"Unknown mode `{arg}`. Use: `off` · `on` · `detail`"
+
+    def _cmd_scope(self, session: "LoomSession", subcmd: str, subarg: str) -> str:
+        subcmd = (subcmd or "list").lower()
+        if subcmd == "list":
+            now = time.time()
+            active = [
+                (i, g) for i, g in enumerate(session.perm.grants)
+                if g.valid_until <= 0 or g.valid_until > now
+            ]
+            if not active:
+                return "*(no active scope grants)*"
+            lines = [f"**Active Scope Grants ({len(active)})**\n```"]
+            lines.append(f"{'ID':>3}  {'Tool':<16} {'Selector':<20} {'TTL':<10}")
+            lines.append(f"{'─'*3}  {'─'*16} {'─'*20} {'─'*10}")
+            for idx, g in active:
+                if g.valid_until <= 0:
+                    ttl = "∞ (auto)" if g.source == "auto_approve" else "∞ (perm)"
+                else:
+                    remaining = int(g.valid_until - now)
+                    m, s = divmod(remaining, 60)
+                    ttl = f"{m}m {s:02d}s"
+                tool = g.action if g.action != "*" else g.resource
+                lines.append(f"{idx:>3}  {tool:<16} {g.selector:<20} {ttl:<10}")
+            lines.append("```")
+            return "\n".join(lines)
+
+        if subcmd == "revoke":
+            if not subarg or not subarg.isdigit():
+                return "Usage: `/scope revoke <id>`"
+            grant_id = int(subarg)
+            if 0 <= grant_id < len(session.perm.grants):
+                g = session.perm.grants[grant_id]
+                tool = g.action if g.action != "*" else g.resource
+                session.perm.revoke_matching(lambda x, _g=g: x is _g)
+                return f"✅ Revoked grant #{grant_id}: `{tool}` · {g.selector}"
+            return f"❌ Invalid grant ID `{grant_id}`. Use `/scope list` to see valid IDs."
+
+        if subcmd == "clear":
+            count = len(session.perm.grants)
+            session.perm.grants.clear()
+            session.perm._usage.clear()
+            return f"🧹 Cleared {count} scope grant(s)."
+
+        return "Usage: `/scope list` · `/scope revoke <id>` · `/scope clear`"
+
+    # ------------------------------------------------------------------
+    # Text-prefix dispatcher (kept alongside slash commands for CLI parity)
+    # ------------------------------------------------------------------
+
     async def _handle_slash(
         self,
         message: discord.Message,
@@ -530,18 +780,16 @@ class LoomDiscordBot:
         command = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
 
-        # Commands that require being in a thread
-        _needs_session = {"/think", "/compact", "/pause", "/stop", "/budget", "/auto", "/scope", "/summary", "/title"}
-        if command in _needs_session and not is_thread:
-            await _safe_send(message.channel, 
+        if command in self._SLASH_NEEDS_SESSION and not is_thread:
+            await _safe_send(message.channel,
                 f"`{command}` must be used inside a session thread.  "
                 "Start one by sending a message here."
             )
             return
 
+        # Multi-step / side-effecting commands stay inline.
         if command == "/new":
             if is_thread:
-                # Create a new sibling thread from the parent channel
                 parent = message.channel.parent  # type: ignore[union-attr]
                 if parent is None:
                     await _safe_send(message.channel, "Cannot create a new thread here.")
@@ -555,256 +803,53 @@ class LoomDiscordBot:
                 await _safe_send(new_thread, "✨ New session started. Send your first message here.")
                 await _safe_send(message.channel, f"✨ Opened new session → {new_thread.mention}")
             else:
-                await _safe_send(message.channel, 
+                await _safe_send(message.channel,
                     "Send any message here to start a new session thread."
                 )
+            return
 
-        elif command == "/sessions":
-            assert session is not None
-            from loom.core.memory.session_log import SessionLog as _SL
-            async with session._store.connect() as conn:
-                rows = await _SL(conn).list_sessions(limit=10)
-            if not rows:
-                await _safe_send(message.channel, "*(no saved sessions)*")
-                return
-            lines = ["**Recent sessions:**\n"]
-            for i, r in enumerate(rows, 1):
-                title = r.get("title") or "(untitled)"
-                sid = r["session_id"][:8]
-                active = " ◀ current" if r["session_id"] == session.session_id else ""
-                lines.append(f"`{i}.` `{sid}` — {title}{active}")
-            await _safe_send(message.channel, "\n".join(lines))
-
-        elif command == "/think":
-            assert session is not None
-            think = session._last_think
-            if think:
-                body = think[:1800] + ("\n*(truncated)*" if len(think) > 1800 else "")
-                await _safe_send(message.channel, f"**Reasoning chain:**\n```\n{body}\n```")
-            else:
-                await _safe_send(message.channel, "*(no reasoning chain captured for the last turn)*")
-
-        elif command == "/compact":
+        if command == "/compact":
             assert session is not None
             pct = session.budget.usage_fraction * 100
             msg = await _safe_send(message.channel, f"⏳ Compacting context ({pct:.1f}% used)…")
             await session._smart_compact()
             await _safe_edit(msg, "✅ Context compacted.")
+            return
 
+        # Pure-string commands → delegate to _cmd_*.
+        reply: str | None = None
+        if command == "/help":
+            reply = self._cmd_help()
+        elif command == "/sessions":
+            reply = await self._cmd_sessions(session)  # type: ignore[arg-type]
+        elif command == "/think":
+            reply = self._cmd_think(session)  # type: ignore[arg-type]
         elif command == "/model":
-            assert session is not None
-            if not arg:
-                providers = ", ".join(session.router.providers)
-                await _safe_send(message.channel, 
-                    f"Current model: **{session.model}**  providers: `{providers}`\n"
-                    "Prefixes: `MiniMax-*` · `claude-*` · `deepseek-*` · `openrouter/<vendor>/<model>` · `ollama/<name>` · `lmstudio/<name>`"
-                )
-            else:
-                ok = session.set_model(arg)
-                if ok:
-                    await _safe_send(message.channel, f"Model switched to: **{arg}**")
-                else:
-                    await _safe_send(message.channel, 
-                        f"Cannot switch to `{arg}` — prefix not recognised or provider "
-                        "not registered (check `.env` key or `loom.toml [providers.*]`)."
-                    )
-
+            reply = self._cmd_model(session, arg)  # type: ignore[arg-type]
         elif command == "/personality":
-            assert session is not None
-            if not arg:
-                p = session.current_personality
-                avail = session._stack.available_personalities()
-                await _safe_send(message.channel, 
-                    f"Active: **{p or '(none)'}**  |  "
-                    f"Available: `{'`, `'.join(avail) or '(none)'}`"
-                )
-            elif arg == "off":
-                session.switch_personality("off")
-                await _safe_send(message.channel, "Personality cleared.")
-            else:
-                ok = session.switch_personality(arg)
-                if ok:
-                    await _safe_send(message.channel, f"Personality → **{arg}**")
-                else:
-                    avail = session._stack.available_personalities()
-                    await _safe_send(message.channel, 
-                        f"❌ Unknown personality `{arg}`. "
-                        f"Available: `{'`, `'.join(avail) or '(none)'}`"
-                    )
-
+            reply = self._cmd_personality(session, arg)  # type: ignore[arg-type]
         elif command == "/auto":
-            assert session is not None
-            if not session._strict_sandbox:
-                await _safe_send(message.channel, 
-                    "❌ `/auto` requires `strict_sandbox = true` in `loom.toml`.\n"
-                    "Without workspace confinement, auto-approving `run_bash` "
-                    "would grant unrestricted shell access."
-                )
-            else:
-                session.perm.exec_auto = not session.perm.exec_auto
-                state = "on" if session.perm.exec_auto else "off"
-                if session.perm.exec_auto:
-                    await _safe_send(message.channel, 
-                        f"✅ Exec auto-approve: **{state}** — `run_bash` pre-authorized within workspace.\n"
-                        "Absolute paths that escape the workspace still require confirmation."
-                    )
-                else:
-                    await _safe_send(message.channel, 
-                        f"🔒 Exec auto-approve: **{state}** — `run_bash` will confirm every call."
-                    )
-
+            reply = self._cmd_auto(session)  # type: ignore[arg-type]
         elif command == "/pause":
-            assert session is not None
-            session.hitl_mode = not session.hitl_mode
-            state = "on" if session.hitl_mode else "off"
-            extra = (
-                "\nAgent will pause after each tool batch — reply `r` to resume, "
-                "`c` to cancel, or send a redirect message."
-                if session.hitl_mode else ""
-            )
-            await _safe_send(message.channel, f"HITL pause mode: **{state}**{extra}")
-
+            reply = self._cmd_pause(session)  # type: ignore[arg-type]
         elif command == "/stop":
-            task = self._running_turns.get(message.channel.id)
-            if task and not task.done():
-                task.cancel()
-                await _safe_send(message.channel, "🛑 Stopped.")
-            else:
-                await _safe_send(message.channel, "*(nothing is running)*")
-
+            reply = self._cmd_stop(message.channel.id)
         elif command == "/budget":
-            assert session is not None
-            pct = session.budget.usage_fraction * 100
-            used = session.budget.used_tokens
-            total = session.budget.total_tokens
-            bar_filled = int(pct / 5)
-            bar = "█" * bar_filled + "░" * (20 - bar_filled)
-            await _safe_send(message.channel, 
-                f"**Context Budget**\n"
-                f"`{bar}` {pct:.1f}%\n"
-                f"`{used:,}` / `{total:,}` tokens"
-            )
-
+            reply = self._cmd_budget(session)  # type: ignore[arg-type]
         elif command == "/title":
-            assert session is not None
-            if not arg:
-                # Show current title
-                from loom.core.memory.session_log import SessionLog as _SL
-                async with session._store.connect() as conn:
-                    meta = await _SL(conn).get_session(session.session_id)
-                current = (meta or {}).get("title")
-                await _safe_send(message.channel, 
-                    f"Current title: **{current or '(untitled)'}**\n"
-                    "Usage: `/title <new title>`"
-                )
-            else:
-                # Update title
-                from loom.core.memory.session_log import SessionLog as _SL
-                async with session._store.connect() as conn:
-                    await _SL(conn).update_title(session.session_id, arg)
-                await _safe_send(message.channel, f"✅ Session title → **{arg}**")
-
-        elif command == "/help":
-            await _safe_send(message.channel, 
-                "**Loom commands**\n\n"
-                "`/new` \u2014 Open a new session thread\n"
-                "`/sessions` \u2014 List recent sessions\n"
-                "`/title <name>` \u2014 Set or show the session title\n"
-                "`/model` \u2014 Show current model + registered providers\n"
-                "`/model <name>` \u2014 Switch model  e.g. `deepseek-v4-pro`  `claude-sonnet-4-6`\n"
-                "`/personality [name]` \u2014 Switch cognitive persona\n"
-                "`/personality off` \u2014 Remove active persona\n"
-                "`/think` \u2014 View last turn's reasoning chain\n"
-                "`/compact` \u2014 Compress older context\n"
-                "`/auto` \u2014 Toggle run_bash auto-approve (requires strict_sandbox)\n"
-                "`/pause` \u2014 Toggle HITL auto-pause after each tool batch\n"
-                "`/stop` \u2014 Immediately cancel the current running turn\n"
-                "`/budget` \u2014 Show context token usage\n"
-                "`/scope` \u2014 Manage scope grants: `list` \xb7 `revoke <id>` \xb7 `clear`\n"
-                "`/summary` \u2014 Turn summary mode: `off` \xb7 `on` \xb7 `detail`\n"
-                "`/help` \u2014 Show this message\n\n"
-                "Personalities: `adversarial` \xb7 `minimalist` \xb7 `architect` \xb7 `researcher` \xb7 `operator`\n\n"
-                "*Send any message in the main channel to start a new session thread.*"
-            )
-
-
+            reply = await self._cmd_title(session, arg)  # type: ignore[arg-type]
         elif command == "/summary":
-            valid_modes = ("off", "on", "detail")
-            if not arg:
-                await _safe_send(message.channel, 
-                    f"Turn summary mode: **{self._summary_mode}**\n"
-                    f"Usage: `/summary off` · `/summary on` · `/summary detail`"
-                )
-            elif arg.lower() in valid_modes:
-                self._summary_mode = arg.lower()
-                await _safe_send(message.channel, f"Turn summary mode → **{self._summary_mode}**")
-            else:
-                await _safe_send(message.channel, 
-                    f"Unknown mode `{arg}`. Use: `off` · `on` · `detail`"
-                )
-
+            reply = self._cmd_summary(arg)
         elif command == "/scope":
-            assert session is not None
             sub = arg.split(maxsplit=1)
-            subcmd = sub[0].lower() if sub else "list"
+            subcmd = sub[0] if sub else "list"
             subarg = sub[1].strip() if len(sub) > 1 else ""
-
-            if subcmd == "list":
-                now = time.time()
-                active = [
-                    (i, g) for i, g in enumerate(session.perm.grants)
-                    if g.valid_until <= 0 or g.valid_until > now
-                ]
-                if not active:
-                    await _safe_send(message.channel, "*(no active scope grants)*")
-                else:
-                    lines = [f"**Active Scope Grants ({len(active)})**\n```"]
-                    lines.append(f"{'ID':>3}  {'Tool':<16} {'Selector':<20} {'TTL':<10}")
-                    lines.append(f"{'─'*3}  {'─'*16} {'─'*20} {'─'*10}")
-                    for idx, g in active:
-                        if g.valid_until <= 0:
-                            ttl = "∞ (auto)" if g.source == "auto_approve" else "∞ (perm)"
-                        else:
-                            remaining = int(g.valid_until - now)
-                            m, s = divmod(remaining, 60)
-                            ttl = f"{m}m {s:02d}s"
-                        tool = g.action if g.action != "*" else g.resource
-                        lines.append(f"{idx:>3}  {tool:<16} {g.selector:<20} {ttl:<10}")
-                    lines.append("```")
-                    await _safe_send(message.channel, "\n".join(lines))
-
-            elif subcmd == "revoke":
-                if not subarg.isdigit():
-                    await _safe_send(message.channel, "Usage: `/scope revoke <id>`")
-                else:
-                    grant_id = int(subarg)
-                    if 0 <= grant_id < len(session.perm.grants):
-                        g = session.perm.grants[grant_id]
-                        tool = g.action if g.action != "*" else g.resource
-                        session.perm.revoke_matching(lambda x, _g=g: x is _g)
-                        await _safe_send(message.channel, 
-                            f"✅ Revoked grant #{grant_id}: `{tool}` · {g.selector}"
-                        )
-                    else:
-                        await _safe_send(message.channel, 
-                            f"❌ Invalid grant ID `{grant_id}`. Use `/scope list` to see valid IDs."
-                        )
-
-            elif subcmd == "clear":
-                count = len(session.perm.grants)
-                session.perm.grants.clear()
-                session.perm._usage.clear()
-                await _safe_send(message.channel, f"🧹 Cleared {count} scope grant(s).")
-
-            else:
-                await _safe_send(message.channel, 
-                    "Usage: `/scope list` · `/scope revoke <id>` · `/scope clear`"
-                )
-
+            reply = self._cmd_scope(session, subcmd, subarg)  # type: ignore[arg-type]
         else:
-            await _safe_send(message.channel, 
-                f"Unknown command `{command}`. Type `/help` for the command list."
-            )
+            reply = f"Unknown command `{command}`. Type `/help` for the command list."
+
+        if reply is not None:
+            await _safe_send(message.channel, reply)
 
     # ------------------------------------------------------------------
     # Agent turn
