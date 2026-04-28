@@ -575,15 +575,25 @@ class AgentTelemetryTracker:
         blocks = [dim.render_detail() for dim in self._dims.values()]
         return "\n\n".join(blocks)
 
-    def anomaly_report(self) -> str | None:
-        """Compact injectable string when one or more dimensions signal
-        trouble. Returns None when everything is nominal — the turn-boundary
+    def alerting_dimensions(self) -> set[str]:
+        """Names of dimensions currently in an anomalous state."""
+        return {d.name for d in self._dims.values() if d.has_anomaly()}
+
+    def anomaly_report(self, since: set[str] | None = None) -> str | None:
+        """Compact injectable string for dimensions that are currently
+        anomalous. Returns None when nothing fires — the turn-boundary
         injector uses None to stay silent.
+
+        When ``since`` is provided, dimensions already present in that set are
+        treated as "still alerting" and excluded from the report; only rising-
+        edge transitions are surfaced. This is how Issue #219 dedupes the
+        alert — once an anomaly has been announced, it stays quiet until it
+        clears and re-enters the bad state.
         """
         active = [
             (d.name, d.describe_anomaly())
             for d in self._dims.values()
-            if d.has_anomaly()
+            if d.has_anomaly() and (since is None or d.name not in since)
         ]
         if not active:
             return None

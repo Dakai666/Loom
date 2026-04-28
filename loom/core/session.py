@@ -789,7 +789,12 @@ class LoomSession:
             tuple(_tele_dims) if _tele_dims else DEFAULT_DIMENSIONS
         )
         self._telemetry: "AgentTelemetryTracker | None" = None
-        self._telemetry_alerted_turns: set[int] = set()
+        # Dimensions currently in an alerting state. Edge-triggered: an
+        # anomaly fires once when it rises into this set, then stays quiet
+        # until it recovers (drops out) and crosses the threshold again.
+        # Replaces the old per-turn dedup which still re-fired every turn
+        # while the rolling window stayed bad (#219).
+        self._telemetry_alerting_dims: set[str] = set()
 
     # ------------------------------------------------------------------
     # Personality management
@@ -1776,21 +1781,25 @@ class LoomSession:
                             _jobs_inject_done = True
                             continue
 
-                    # Issue #142: nudge the agent with a self-observability alert
-                    # iff a dimension is outside bounds. Fires at most once per
-                    # turn (tracked via _telemetry_alerted_turns) so repeat
-                    # anomalies don't flood the context.
-                    if (
-                        self._telemetry is not None
-                        and self._turn_index not in self._telemetry_alerted_turns
-                    ):
-                        alert = self._telemetry.anomaly_report()
+                    # Issue #142 / #219: nudge the agent with a self-
+                    # observability alert when a dimension *transitions* into
+                    # an anomalous state. Edge-triggered against
+                    # `_telemetry_alerting_dims` so repeat anomalies don't
+                    # flood the context every turn while the rolling window
+                    # stays bad.
+                    if self._telemetry is not None:
+                        currently = self._telemetry.alerting_dimensions()
+                        alert = self._telemetry.anomaly_report(
+                            since=self._telemetry_alerting_dims
+                        )
+                        # Update tracked set regardless: dimensions that have
+                        # recovered drop out, so they can re-fire on next entry.
+                        self._telemetry_alerting_dims = currently
                         if alert:
                             self.messages.append({
                                 "role": "user",
                                 "content": f"<system-reminder>\n{alert}\n</system-reminder>",
                             })
-                            self._telemetry_alerted_turns.add(self._turn_index)
                             continue
 
                     # Issue #196 Phase 2: turn-boundary judge. Predicate is pure
