@@ -80,10 +80,12 @@ from loom.platform.cli.ui import (
     TurnDone, TurnDropped, TurnPaused,
 )
 from loom.platform.discord.tools import (
+    make_add_discord_reaction_tool,
     make_send_discord_embed_tool,
     make_send_discord_file_tool,
     make_send_discord_select_tool,
 )
+from loom.platform.discord.reactions import REACTION
 
 if TYPE_CHECKING:
     from loom.core.session import LoomSession
@@ -235,6 +237,10 @@ class LoomDiscordBot:
         # as _active_confirmations: cancelled-turn cleanup disables the view
         # so the user isn't left staring at a stale dropdown.
         self._active_selects: dict[int, discord.Message] = {}
+        # thread_id → most recent user message id (#188). Used as the default
+        # target for `add_discord_reaction` when the agent doesn't pass
+        # an explicit message_id.
+        self._last_user_msg: dict[int, int] = {}
         # Turn summary display mode: "off" | "on" | "detail"
         self._summary_mode: str = "on"
 
@@ -333,6 +339,9 @@ class LoomDiscordBot:
             existing = bot._running_turns.get(key)
             if existing and not existing.done():
                 existing.cancel()
+            # Remember this message id so add_discord_reaction has a default
+            # target when the agent doesn't pass message_id explicitly (#188).
+            bot._last_user_msg[key] = message.id
             task = asyncio.ensure_future(bot._handle_message(message, content, is_thread))
             bot._running_turns[key] = task
             task.add_done_callback(lambda _t, k=key: bot._running_turns.pop(k, None))
@@ -466,9 +475,17 @@ class LoomDiscordBot:
                 unregister_active=lambda tid: self._active_selects.pop(tid, None),
             )
         )
+        session.registry.register(
+            make_add_discord_reaction_tool(
+                self._client,
+                thread_id,
+                last_user_message_lookup=self._last_user_msg.get,
+            )
+        )
         session.perm.authorize("send_discord_file")
         session.perm.authorize("send_discord_embed")
         session.perm.authorize("send_discord_select")
+        session.perm.authorize("add_discord_reaction")
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:
@@ -871,9 +888,9 @@ class LoomDiscordBot:
         - Reaction ⚙️ on the user's message: immediate "received" acknowledgement.
         - channel.typing(): "Bot is typing…" indicator while the turn runs.
         """
-        # ── Acknowledge receipt ───────────────────────────────────────────
+        # ── Acknowledge receipt (#188 lifecycle reaction) ────────────────
         try:
-            await message.add_reaction("⚙️")
+            await message.add_reaction(REACTION["received"])
         except discord.HTTPException:
             pass
 
@@ -1094,10 +1111,23 @@ class LoomDiscordBot:
                 partial = narration_buf.strip()
                 if partial:
                     await _safe_send(message.channel, f"⬥ {partial}\n\n🛑 *(stopped)*")
+
+                # Lifecycle reaction (#188): swap ⚙️ for 🔴 so the at-a-glance
+                # state on the user message reflects the abort.
+                try:
+                    await message.remove_reaction(REACTION["received"], self._client.user)
+                    await message.add_reaction(REACTION["failed"])
+                except discord.HTTPException:
+                    pass
                 raise
 
             except Exception as exc:
                 await _safe_edit(status_msg, f"❌ Error: {exc}")
+                try:
+                    await message.remove_reaction(REACTION["received"], self._client.user)
+                    await message.add_reaction(REACTION["failed"])
+                except discord.HTTPException:
+                    pass
                 return
 
         # typing() context exits here — "Bot is typing…" disappears.
@@ -1171,10 +1201,10 @@ class LoomDiscordBot:
                 f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {model}"
             )
 
-        # ── Mark done ─────────────────────────────────────────────────────
+        # ── Mark done (#188 lifecycle reaction) ──────────────────────────
         try:
-            await message.remove_reaction("⚙️", self._client.user)
-            await message.add_reaction("✅")
+            await message.remove_reaction(REACTION["received"], self._client.user)
+            await message.add_reaction(REACTION["done"])
         except discord.HTTPException:
             pass
 
