@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -275,7 +276,6 @@ class LoomDiscordBot:
             # bearable (per-guild syncs are instant; the global tree takes up
             # to an hour to propagate). Failures are logged but never block
             # startup — text-prefix commands still work.
-            import os
             try:
                 dev_guild = os.environ.get("LOOM_DISCORD_DEV_GUILD_ID")
                 if dev_guild and dev_guild.isdigit():
