@@ -64,65 +64,185 @@ def make_send_discord_file_tool(client: discord.Client, thread_id: int, workspac
     )
 
 def make_send_discord_embed_tool(client: discord.Client, thread_id: int) -> ToolDefinition:
+    """Rich embed v2 (#188) — title / description / fields plus thumbnail,
+    author, footer, auto-timestamp, and a colour palette by tier name.
+
+    Validates against Discord's hard caps up front (#231 follow-up) so an
+    oversize embed becomes a clean tool error instead of a 50035.
+    """
+    from loom.platform.discord.embeds import build_embed, validate_embed_args
+
     async def executor(call: ToolCall) -> ToolResult:
-        import discord as _discord
+        err = validate_embed_args(call.args)
+        if err:
+            return ToolResult(call.id, call.tool_name, False, error=err)
+
         channel = client.get_channel(thread_id)
         if channel is None:
-            return ToolResult(call.id, call.tool_name, False, error="Discord channel/thread not found or accessible.")
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="Discord channel/thread not found or accessible.",
+            )
 
-        title = call.args.get("title")
-        description = call.args.get("description", "")
-        color_hex = call.args.get("color", "#0099ff")
-        fields = call.args.get("fields", [])
-
-        try:
-            color_int = int(str(color_hex).lstrip("#"), 16)
-        except (ValueError, TypeError):
-            color_int = 0x0099ff
-
-        embed = _discord.Embed(title=title, description=description, color=color_int)
-        
-        if isinstance(fields, list):
-            for field in fields:
-                if isinstance(field, dict):
-                    name = field.get("name", "Field")
-                    value = field.get("value", "-")
-                    inline = field.get("inline", False)
-                    embed.add_field(name=str(name), value=str(value), inline=bool(inline))
-            
+        embed = build_embed(call.args)
         try:
             await channel.send(embed=embed)
-            return ToolResult(call.id, call.tool_name, True, output="Successfully sent rich embed to Discord.")
+            return ToolResult(
+                call.id, call.tool_name, True,
+                output="Successfully sent rich embed to Discord.",
+            )
         except Exception as e:
             return ToolResult(call.id, call.tool_name, False, error=f"Failed to send embed: {e}")
 
     return ToolDefinition(
         name="send_discord_embed",
-        description="Send a beautiful rich embed panel to Discord. Use this to present structured data, summarize points, or give aesthetic feedback.",
+        description=(
+            "Send a rich embed panel (Discord card-style block) to the current "
+            "thread. Use for structured summaries, status dashboards, or any "
+            "moment where a wall of plain text would feel flat. Supports "
+            "thumbnail / author / footer / auto-timestamp and a named colour "
+            "tier (info/confirm/report/alert/input) on top of raw hex colours. "
+            "Inline fields tile horizontally — useful for metrics rows."
+        ),
         trust_level=TrustLevel.SAFE,
         input_schema={
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Title of the embed."},
-                "description": {"type": "string", "description": "Main description text."},
-                "color": {"type": "string", "description": "Hex color code (e.g. '#ff0000'). Default is '#0099ff'."},
+                "title": {"type": "string", "description": "Embed title (≤256 chars)."},
+                "description": {"type": "string", "description": "Main body (≤4096 chars)."},
+                "color": {
+                    "type": "string",
+                    "description": (
+                        "Either a tier name (info · confirm · report · alert · input) "
+                        "or a hex code like '#ff0000'. Default: 'info'."
+                    ),
+                },
+                "thumbnail": {"type": "string", "description": "URL of a small image shown top-right."},
+                "author_name": {"type": "string", "description": "Top-left attribution name."},
+                "author_icon": {"type": "string", "description": "URL of an icon next to author name."},
+                "footer": {"type": "string", "description": "Footer text (≤2048 chars)."},
+                "timestamp": {
+                    "type": "boolean",
+                    "description": "If true, append an ISO timestamp in the footer.",
+                },
                 "fields": {
                     "type": "array",
-                    "description": "Optional fields to add to the embed.",
+                    "description": "Up to 25 fields. Each name ≤256, value ≤1024.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Field title."},
-                            "value": {"type": "string", "description": "Field content."},
-                            "inline": {"type": "boolean", "description": "Whether to display field inline."}
+                            "name": {"type": "string"},
+                            "value": {"type": "string"},
+                            "inline": {"type": "boolean"},
                         },
-                        "required": ["name", "value"]
-                    }
-                }
+                        "required": ["name", "value"],
+                    },
+                },
             },
-            "required": ["title", "description"]
+            "required": ["title", "description"],
         },
-        executor=executor
+        executor=executor,
+    )
+
+
+def make_add_discord_reaction_tool(
+    client: discord.Client,
+    thread_id: int,
+    *,
+    last_user_message_lookup,
+) -> ToolDefinition:
+    """Tool that lets the agent express mood / agreement / surprise via
+    emoji reactions on a thread message (#188).
+
+    Lifecycle reactions (⚙️/✅/🔴) are added by the bot automatically on
+    turn boundaries; this tool is for the agent's own voice — celebration,
+    sympathy, quiet acknowledgement, anything where a single emoji says
+    more than a sentence.
+
+    ``last_user_message_lookup`` is a callable returning the most recent
+    user-message id in the bound thread, used as the default target when
+    the agent doesn't pass an explicit ``message_id``.
+    """
+    from loom.platform.discord.reactions import REACTION, resolve
+
+    async def executor(call: ToolCall) -> ToolResult:
+        import discord as _discord
+
+        emoji_arg = call.args.get("emoji")
+        if not isinstance(emoji_arg, str) or not emoji_arg.strip():
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="'emoji' is required (raw emoji or shortcode like 'celebrate').",
+            )
+        try:
+            emoji = resolve(emoji_arg)
+        except ValueError as e:
+            return ToolResult(call.id, call.tool_name, False, error=str(e))
+
+        channel = client.get_channel(thread_id)
+        if channel is None:
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="Discord channel/thread not found or accessible.",
+            )
+
+        message_id = call.args.get("message_id")
+        if message_id is None:
+            message_id = last_user_message_lookup(thread_id)
+        if message_id is None:
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="No target message — pass 'message_id' or wait for a user message in this thread.",
+            )
+
+        try:
+            target = await channel.fetch_message(int(message_id))
+            await target.add_reaction(emoji)
+        except _discord.HTTPException as e:
+            return ToolResult(call.id, call.tool_name, False, error=f"Failed to add reaction: {e}")
+        except (ValueError, TypeError):
+            return ToolResult(call.id, call.tool_name, False, error="Invalid message_id.")
+
+        return ToolResult(
+            call.id, call.tool_name, True,
+            output={"emoji": emoji, "message_id": int(message_id)},
+        )
+
+    # Hint of the curated vocabulary for the tool description — agent
+    # gets to see the named shortcodes inline alongside the example
+    # emoji. Lifecycle keys stay out (those are bot-managed).
+    expressive = ", ".join(
+        f"{name}={emoji}" for name, emoji in REACTION.items()
+        if name not in {"received", "done", "failed", "warning"}
+    )
+
+    return ToolDefinition(
+        name="add_discord_reaction",
+        description=(
+            "Add an emoji reaction to a message in the current Discord thread "
+            "to express mood, agreement, or quiet acknowledgement. Targets the "
+            "user's most recent message by default. Accepts any unicode emoji, "
+            "OR one of these shortcodes: " + expressive + ". Lifecycle "
+            "reactions (⚙️/✅/🔴) are managed automatically — don't duplicate "
+            "them. Use sparingly: a single reaction can land harder than a "
+            "paragraph; spamming feels noisy."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "description": "Unicode emoji (e.g. '🎉') or shortcode (e.g. 'celebrate').",
+                },
+                "message_id": {
+                    "type": "integer",
+                    "description": "Optional. Defaults to the most recent user message in the thread.",
+                },
+            },
+            "required": ["emoji"],
+        },
+        executor=executor,
     )
 
 
