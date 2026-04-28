@@ -5,8 +5,9 @@ Provides capabilities to send files and rich embeds directly to the Discord thre
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     import discord
@@ -14,6 +15,15 @@ if TYPE_CHECKING:
 from loom.core.harness.registry import ToolDefinition
 from loom.core.harness.permissions import TrustLevel
 from loom.core.harness.middleware import ToolCall, ToolResult
+
+
+# Discord SelectMenu hard limits — surface as constants so callers and tests
+# can reference them without re-deriving from the API docs.
+_SELECT_MAX_OPTIONS = 25
+_SELECT_LABEL_MAX = 100
+_SELECT_DESCRIPTION_MAX = 100
+_SELECT_TIMEOUT_DEFAULT = 60
+_SELECT_TIMEOUT_MAX = 600  # 10 min — anything longer is almost certainly a bug
 
 def make_send_discord_file_tool(client: discord.Client, thread_id: int, workspace: Path) -> ToolDefinition:
     async def executor(call: ToolCall) -> ToolResult:
@@ -113,4 +123,233 @@ def make_send_discord_embed_tool(client: discord.Client, thread_id: int) -> Tool
             "required": ["title", "description"]
         },
         executor=executor
+    )
+
+
+def _validate_select_args(args: dict[str, Any]) -> str | None:
+    """Return an error string if args are unusable, else None.
+
+    Validation runs before we touch Discord so the agent gets a clean tool
+    error instead of a 50035 from the API. Discord's hard caps (25 options,
+    100-char label/description) are non-negotiable — exceeding them silently
+    truncates or 400s; we'd rather reject and let the agent retry.
+    """
+    title = args.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return "Missing or empty 'title'."
+
+    options = args.get("options")
+    if not isinstance(options, list) or not options:
+        return "'options' must be a non-empty list."
+    if len(options) > _SELECT_MAX_OPTIONS:
+        return f"Discord allows at most {_SELECT_MAX_OPTIONS} options per select menu (got {len(options)})."
+
+    seen_values: set[str] = set()
+    for i, opt in enumerate(options):
+        if not isinstance(opt, dict):
+            return f"options[{i}] must be an object."
+        label = opt.get("label")
+        value = opt.get("value")
+        if not isinstance(label, str) or not label:
+            return f"options[{i}].label is required."
+        if not isinstance(value, str) or not value:
+            return f"options[{i}].value is required."
+        if len(label) > _SELECT_LABEL_MAX:
+            return f"options[{i}].label exceeds {_SELECT_LABEL_MAX} chars."
+        desc = opt.get("description")
+        if desc is not None:
+            if not isinstance(desc, str):
+                return f"options[{i}].description must be a string."
+            if len(desc) > _SELECT_DESCRIPTION_MAX:
+                return f"options[{i}].description exceeds {_SELECT_DESCRIPTION_MAX} chars."
+        if value in seen_values:
+            return f"Duplicate option value: {value!r}."
+        seen_values.add(value)
+
+    max_values = args.get("max_values", 1)
+    if not isinstance(max_values, int) or max_values < 1:
+        return "'max_values' must be a positive integer."
+    if max_values > len(options):
+        return f"'max_values' ({max_values}) cannot exceed option count ({len(options)})."
+
+    timeout = args.get("timeout_seconds", _SELECT_TIMEOUT_DEFAULT)
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        return "'timeout_seconds' must be a positive number."
+    if timeout > _SELECT_TIMEOUT_MAX:
+        return f"'timeout_seconds' must be ≤ {_SELECT_TIMEOUT_MAX}."
+
+    return None
+
+
+def make_send_discord_select_tool(
+    client: discord.Client,
+    thread_id: int,
+    *,
+    register_active: Callable[[int, Any], None] | None = None,
+    unregister_active: Callable[[int], None] | None = None,
+) -> ToolDefinition:
+    """Tool factory for ``send_discord_select`` (#190).
+
+    Renders a Discord SelectMenu in the bound thread and **blocks** the tool
+    call until the user picks an option or the timeout expires. This is the
+    same pattern as ``_ConfirmView`` — choosing is just a different verb than
+    confirming, but the lifecycle (render → wait → disable) is identical.
+
+    The optional ``register_active`` / ``unregister_active`` hooks let the bot
+    track in-flight select menus per thread so a cancelled turn can disable
+    them mid-flight (matches ``_active_confirmations`` behaviour). They are
+    optional so the factory stays unit-testable without a live bot.
+    """
+    async def executor(call: ToolCall) -> ToolResult:
+        import discord as _discord
+
+        err = _validate_select_args(call.args)
+        if err:
+            return ToolResult(call.id, call.tool_name, False, error=err)
+
+        channel = client.get_channel(thread_id)
+        if channel is None:
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="Discord channel/thread not found or accessible.",
+            )
+
+        title: str = call.args["title"]
+        placeholder: str = call.args.get("placeholder") or "Choose an option"
+        options: list[dict[str, Any]] = call.args["options"]
+        max_values: int = int(call.args.get("max_values", 1))
+        timeout: float = float(call.args.get("timeout_seconds", _SELECT_TIMEOUT_DEFAULT))
+
+        # Build the options + view.
+        select_options = [
+            _discord.SelectOption(
+                label=o["label"],
+                value=o["value"],
+                description=o.get("description"),
+            )
+            for o in options
+        ]
+
+        done: asyncio.Event = asyncio.Event()
+        result_state: dict[str, Any] = {"selected": None, "cancelled": False}
+
+        select = _discord.ui.Select(
+            placeholder=placeholder[:_SELECT_LABEL_MAX],
+            min_values=1,
+            max_values=max_values,
+            options=select_options,
+        )
+
+        async def _on_select(interaction: _discord.Interaction) -> None:
+            picks = list(select.values)
+            label_for = {o["value"]: o["label"] for o in options}
+            result_state["selected"] = picks
+            result_state["labels"] = [label_for.get(v, v) for v in picks]
+            done.set()
+            # Edit the message to disable further interaction. Echo the choice
+            # so the thread reads as a coherent dialogue instead of leaving a
+            # frozen menu behind.
+            picked_str = ", ".join(label_for.get(v, v) for v in picks)
+            try:
+                await interaction.response.edit_message(
+                    content=f"✅ **{title}** → {picked_str}", view=None,
+                )
+            except _discord.HTTPException:
+                pass
+
+        select.callback = _on_select
+        view = _discord.ui.View(timeout=timeout)
+        view.add_item(select)
+
+        msg = None
+        try:
+            msg = await channel.send(content=f"**{title}**", view=view)
+        except _discord.HTTPException as e:
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error=f"Failed to send select menu: {e}",
+            )
+
+        if register_active is not None:
+            register_active(thread_id, msg)
+
+        try:
+            # asyncio.wait_for drives the timeout authoritatively. The View's
+            # own timer is parallel but only governs Discord's UI-side
+            # disable; this loop owns the agent's wait.
+            await asyncio.wait_for(done.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # View timeout already fired; tidy the message so the menu doesn't
+            # linger as a clickable trap.
+            result_state["cancelled"] = True
+            try:
+                await msg.edit(content=f"⌛ **{title}** — no response (timed out).", view=None)
+            except _discord.HTTPException:
+                pass
+        finally:
+            if unregister_active is not None:
+                unregister_active(thread_id)
+
+        if result_state["cancelled"] or result_state["selected"] is None:
+            return ToolResult(
+                call.id, call.tool_name, True,
+                output={"cancelled": True},
+            )
+
+        picks = result_state["selected"]
+        labels = result_state["labels"]
+        if max_values == 1:
+            output = {"selected": picks[0], "label": labels[0]}
+        else:
+            output = {"selected": picks, "labels": labels}
+        return ToolResult(call.id, call.tool_name, True, output=output)
+
+    return ToolDefinition(
+        name="send_discord_select",
+        description=(
+            "Present the user with a bounded set of choices via a Discord "
+            "SelectMenu (dropdown) and **block** until they pick one. Use "
+            "*sparingly* — only when the choice set is inherently bounded "
+            "(≤25), typing the answer would be high-friction, and a free-text "
+            "reply would be ambiguous. For open-ended questions, just ask in "
+            "natural language. Returns either {selected, label[s]} on a pick "
+            "or {cancelled: true} on timeout."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Prompt shown above the menu.",
+                },
+                "placeholder": {
+                    "type": "string",
+                    "description": "Greyed-out hint inside the dropdown before a choice is made.",
+                },
+                "options": {
+                    "type": "array",
+                    "description": f"Choices (max {_SELECT_MAX_OPTIONS}). Values must be unique.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": f"Visible text (max {_SELECT_LABEL_MAX} chars)."},
+                            "value": {"type": "string", "description": "Stable identifier returned to the agent."},
+                            "description": {"type": "string", "description": f"Optional sub-text (max {_SELECT_DESCRIPTION_MAX} chars)."},
+                        },
+                        "required": ["label", "value"],
+                    },
+                },
+                "max_values": {
+                    "type": "integer",
+                    "description": "How many options the user may pick. Default 1.",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": f"Seconds before auto-cancel. Default {_SELECT_TIMEOUT_DEFAULT}, max {_SELECT_TIMEOUT_MAX}.",
+                },
+            },
+            "required": ["title", "options"],
+        },
+        executor=executor,
     )

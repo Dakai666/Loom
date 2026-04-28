@@ -78,7 +78,11 @@ from loom.platform.cli.ui import (
     CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd,
     TurnDone, TurnDropped, TurnPaused,
 )
-from loom.platform.discord.tools import make_send_discord_file_tool, make_send_discord_embed_tool
+from loom.platform.discord.tools import (
+    make_send_discord_embed_tool,
+    make_send_discord_file_tool,
+    make_send_discord_select_tool,
+)
 
 if TYPE_CHECKING:
     from loom.core.session import LoomSession
@@ -226,6 +230,10 @@ class LoomDiscordBot:
         self._running_turns: dict[int, asyncio.Task] = {}
         # thread_id → currently active confirmation message (Allow/Deny prompt)
         self._active_confirmations: dict[int, discord.Message] = {}
+        # thread_id → currently active SelectMenu message (#190). Same role
+        # as _active_confirmations: cancelled-turn cleanup disables the view
+        # so the user isn't left staring at a stale dropdown.
+        self._active_selects: dict[int, discord.Message] = {}
         # Turn summary display mode: "off" | "on" | "detail"
         self._summary_mode: str = "on"
 
@@ -426,8 +434,17 @@ class LoomDiscordBot:
         # Inject Discord tools
         session.registry.register(make_send_discord_file_tool(self._client, thread_id, session.workspace))
         session.registry.register(make_send_discord_embed_tool(self._client, thread_id))
+        session.registry.register(
+            make_send_discord_select_tool(
+                self._client,
+                thread_id,
+                register_active=lambda tid, msg: self._active_selects.__setitem__(tid, msg),
+                unregister_active=lambda tid: self._active_selects.pop(tid, None),
+            )
+        )
         session.perm.authorize("send_discord_file")
         session.perm.authorize("send_discord_embed")
+        session.perm.authorize("send_discord_select")
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:
@@ -1010,6 +1027,15 @@ class LoomDiscordBot:
                 if conf_msg:
                     try:
                         await _safe_edit(conf_msg, "🛑 **Turn Cancelled** — authorization revoked.", view=None)
+                    except Exception:
+                        pass
+
+                # Same for any in-flight SelectMenu (#190): disable so the user
+                # isn't left with a clickable menu pointing at an aborted turn.
+                sel_msg = self._active_selects.pop(message.channel.id, None)
+                if sel_msg:
+                    try:
+                        await _safe_edit(sel_msg, "🛑 **Turn Cancelled** — selection discarded.", view=None)
                     except Exception:
                         pass
 
