@@ -615,8 +615,33 @@ def tool_running_line(name: str, frame_index: int = 0) -> Text:
     )
 
 
-def tool_end_line(name: str, success: bool, duration_ms: float) -> Text:
-    """Rich Text for a completed tool-call line."""
+def tool_end_line(
+    name: str, success: bool, duration_ms: float, frozen: bool = False
+) -> Text:
+    """Rich Text for a completed tool-call line.
+
+    Two visual stages share this helper:
+
+    - ``frozen=False`` is the **committed** stage (default): green/red
+      accent on the icon, ms count and status word so the freshly-
+      finished envelope still draws the eye.
+    - ``frozen=True`` is the **frozen** stage: every fragment muted,
+      the row sinks into the visual background. Used by the cursor-up
+      reblit 3s after ToolEnd when no other content has been printed
+      below the row (doc/49 §2 "完成即蒸發").
+    """
+    if frozen:
+        icon_word = "ok" if success else "!!"
+        status_word = "done" if success else "failed"
+        # Build with Text.append rather than from_markup — bare ``[ok]``
+        # in a markup string gets parsed as an (unknown) style tag and
+        # silently swallowed, leaving a blank gap where the icon was
+        out = Text()
+        out.append(
+            f"  [{icon_word}] {name}  {duration_ms:.0f}ms  {status_word}",
+            style="loom.muted",
+        )
+        return out
     icon = "[loom.success]ok[/loom.success]" if success else "[loom.error]!![/loom.error]"
     status = "[loom.success]done[/loom.success]" if success else "[loom.error]failed[/loom.error]"
     return Text.from_markup(
