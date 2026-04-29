@@ -85,7 +85,17 @@ class FooterState:
 
     model: str = ""
     persona: str | None = None
+    # Context window utilisation — surfaces in footer when >60%
     token_pct: float = 0.0
+    # Last-turn stats. Kept out of scrollback (PR-A printed these
+    # inline as the "context X% | cache Y% | A in / B out | Cs | N
+    # tools" status_bar; that's noise the user doesn't need to keep
+    # scrolling past). All four cleared between turns
+    last_turn_cache_hit: float | None = None
+    last_turn_input_tokens: int | None = None
+    last_turn_output_tokens: int | None = None
+    last_turn_elapsed_s: float | None = None
+    last_turn_tool_count: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,16 +126,18 @@ class _PauseState:
 
 _APP_STYLE = Style.from_dict(
     {
-        # Input area
-        "input.prompt":          f"bold {PARCHMENT_ACCENT}",
+        # Input area — no prompt label; the buffer text is the input
         "input.text":            PARCHMENT_TEXT,
-        # Footer — minimal in D1; D4 expands
-        "footer":                f"bg:{PARCHMENT_SURFACE} {PARCHMENT_MUTED}",
-        "footer.brand":          f"bg:{PARCHMENT_SURFACE} {PARCHMENT_ACCENT}",
-        "footer.budget.ok":      f"bg:{PARCHMENT_SURFACE} {PARCHMENT_MUTED}",
-        "footer.budget.warn":    f"bg:{PARCHMENT_SURFACE} {PARCHMENT_WARNING}",
-        "footer.budget.high":    f"bg:{PARCHMENT_SURFACE} {PARCHMENT_ERROR}",
-        # Confirm / Pause widget
+        # Footer — transparent background (follows terminal). User
+        # feedback after PR-D1 first run: explicit bg felt obtrusive
+        # against varied terminal themes
+        "footer":                PARCHMENT_MUTED,
+        "footer.brand":          PARCHMENT_ACCENT,
+        "footer.budget.ok":      PARCHMENT_MUTED,
+        "footer.budget.warn":    PARCHMENT_WARNING,
+        "footer.budget.high":    PARCHMENT_ERROR,
+        "footer.stats":          PARCHMENT_MUTED,
+        # Confirm / Pause widget — also no bg, blend with terminal
         "widget.title":          PARCHMENT_TEXT,
         "widget.body":           PARCHMENT_MUTED,
         "widget.option":         PARCHMENT_TEXT,
@@ -134,7 +146,8 @@ _APP_STYLE = Style.from_dict(
         "widget.footer":         f"italic {PARCHMENT_MUTED}",
         # Auto-suggestion ghost text
         "auto-suggestion":       PARCHMENT_BORDER,
-        # Completion menu
+        # Completion menu — keep subtle bg; this is dropdown UI not
+        # ambient surface. Dropdowns benefit from contrast
         "completion-menu":                         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
         "completion-menu.completion":              f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
         "completion-menu.completion.current":      f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG} bold",
@@ -301,24 +314,20 @@ class LoomApp:
         is_pause = Condition(lambda: self._mode[0] == "pause")
         is_redirect = Condition(lambda: self._mode[0] == "redirect")
 
-        # Input area — always height ≥ 1, expands as user types up to ~10
+        # Input area — single Window, no separate prompt label.
+        # Feedback after PR-D1 first run: the "you ›" label was visually
+        # noisy and a separate Window for it caused the bottom area to
+        # re-flow during streaming, sometimes attaching the label to
+        # the end of the agent's last sentence. Submitted text echoes
+        # to scrollback (see _on_submit in main.py) so the input area
+        # doesn't need its own label
         input_window = ConditionalContainer(
-            HSplit([
-                Window(
-                    content=FormattedTextControl(
-                        lambda: FormattedText([("class:input.prompt", "you › ")]),
-                        focusable=False,
-                    ),
-                    height=1,
-                    dont_extend_height=True,
-                ),
-                Window(
-                    content=BufferControl(buffer=self._input_buffer),
-                    wrap_lines=True,
-                    height=Dimension(min=1, max=10),
-                    style="class:input.text",
-                ),
-            ]),
+            Window(
+                content=BufferControl(buffer=self._input_buffer),
+                wrap_lines=True,
+                height=Dimension(min=1, max=10),
+                style="class:input.text",
+            ),
             filter=is_input,
         )
 
@@ -342,23 +351,13 @@ class LoomApp:
             filter=is_pause,
         )
 
-        # Redirect text input
+        # Redirect text input — same simplification: single Window
         redirect_window = ConditionalContainer(
-            HSplit([
-                Window(
-                    content=FormattedTextControl(
-                        lambda: FormattedText([("class:input.prompt", "redirect › ")]),
-                        focusable=False,
-                    ),
-                    height=1,
-                    dont_extend_height=True,
-                ),
-                Window(
-                    content=BufferControl(buffer=self._redirect_buffer),
-                    height=1,
-                    style="class:input.text",
-                ),
-            ]),
+            Window(
+                content=BufferControl(buffer=self._redirect_buffer),
+                height=1,
+                style="class:input.text",
+            ),
             filter=is_redirect,
         )
 
@@ -396,28 +395,44 @@ class LoomApp:
     def _render_footer(self) -> FormattedText:
         parts: list[tuple[str, str]] = []
 
-        # Left edge: model · persona
+        # Left: model · persona (identity reminder)
         left = self.footer.model
         if self.footer.persona:
             left = f"{self.footer.persona} · {left}"
         if left:
             parts.append(("class:footer", f" {left} "))
 
-        # Centre: token budget when >60%
-        pct = self.footer.token_pct
-        if pct > 60:
+        # Middle: turn stats (context %, cache %, in/out, elapsed,
+        # tool count). Folded in from PR-A's inline status_bar so the
+        # post-turn metrics live in one place instead of scrolling
+        # away. Hidden until at least one turn has completed
+        s = self.footer
+        stats: list[str] = []
+        if s.token_pct > 60:
             token = (
-                "footer.budget.high" if pct > 95
-                else "footer.budget.warn" if pct > 80
+                "footer.budget.high" if s.token_pct > 95
+                else "footer.budget.warn" if s.token_pct > 80
                 else "footer.budget.ok"
             )
             parts.append(("class:footer", "  "))
-            parts.append((f"class:{token}", f"⚡ tok {pct:.0f}%"))
+            parts.append((f"class:{token}", f"⚡ tok {s.token_pct:.0f}%"))
+        if s.last_turn_cache_hit is not None:
+            stats.append(f"cache {s.last_turn_cache_hit:.0f}%")
+        if (s.last_turn_input_tokens is not None
+                and s.last_turn_output_tokens is not None):
+            stats.append(
+                f"{s.last_turn_input_tokens}in / {s.last_turn_output_tokens}out"
+            )
+        if s.last_turn_elapsed_s is not None:
+            stats.append(f"{s.last_turn_elapsed_s:.1f}s")
+        if s.last_turn_tool_count is not None:
+            n = s.last_turn_tool_count
+            stats.append(f"{n} tool{'s' if n != 1 else ''}")
+        if stats:
+            parts.append(("class:footer", "  "))
+            parts.append(("class:footer.stats", " · ".join(stats)))
 
-        # Right edge: ▎ Loom brand mark — pad with spaces to push it
-        # right. We don't know terminal width here so rely on
-        # FormattedTextControl's natural alignment.
-        # (D4 will refine layout; D1 keeps it simple)
+        # Right: ▎ Loom brand mark
         parts.append(("class:footer", "  "))
         parts.append(("class:footer.brand", "▎ Loom "))
 
@@ -495,8 +510,19 @@ class LoomApp:
 
         @kb.add("escape", "enter",
                 filter=Condition(lambda: self._mode[0] == "input"))
+        @kb.add("c-j",
+                filter=Condition(lambda: self._mode[0] == "input"))
         def _input_newline(event):
-            """Alt+Enter (Esc,Enter on most terminals) → insert newline."""
+            """Insert newline.
+
+            Two bindings because terminals are inconsistent:
+              - ``Esc, Enter`` is the canonical prompt_toolkit form for
+                Alt+Enter, requires "Use Option as Meta" enabled in
+                Terminal.app / iTerm2 (off by default on macOS — the
+                first PR-D1 test caught this)
+              - ``Ctrl+J`` sends a literal newline byte across all
+                terminals, no profile setting required
+            """
             self._input_buffer.insert_text("\n")
 
         @kb.add("c-d",

@@ -268,6 +268,19 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             app.application.exit()
             return
 
+        # Echo the submitted text to scrollback so the user can see
+        # what they sent. The persistent app's input buffer clears on
+        # submit (so the bottom area becomes ready for the next
+        # message), and without an explicit echo there'd be no record
+        # of what was typed.
+        echo_lines = stripped.splitlines() or [stripped]
+        first, *rest = echo_lines
+        console.print(
+            f"[loom.muted]you ›[/loom.muted] [loom.text]{first}[/loom.text]"
+        )
+        for line in rest:
+            console.print(f"[loom.muted]      [/loom.muted][loom.text]{line}[/loom.text]")
+
         # Abort-on-submit: if a turn is in flight, cancel and queue
         # the new message with the interrupt prefix.
         in_flight = current_turn_task is not None and not current_turn_task.done()
@@ -1424,16 +1437,31 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 cache_total = event.cache_read_input_tokens + event.cache_creation_input_tokens + event.input_tokens
                 cache_hit_pct = (event.cache_read_input_tokens / cache_total * 100) if cache_total > 0 else 0.0
                 elapsed = time.monotonic() - t0
-                console.print(
-                    status_bar(
-                        context_fraction=session.budget.usage_fraction,
-                        input_tokens=event.input_tokens,
-                        output_tokens=event.output_tokens,
-                        elapsed_ms=elapsed * 1000,
-                        tool_count=event.tool_count,
-                        cache_hit_pct=cache_hit_pct,
+                # PR-D1: route turn stats into the persistent footer
+                # instead of printing an inline status_bar that scrolls
+                # away after the next turn. When no LoomApp is wired
+                # (tests / scripts) fall back to the inline print so
+                # CLI ergonomics outside `loom chat` don't regress
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    s = loom_app.footer
+                    s.last_turn_cache_hit = cache_hit_pct
+                    s.last_turn_input_tokens = event.input_tokens
+                    s.last_turn_output_tokens = event.output_tokens
+                    s.last_turn_elapsed_s = elapsed
+                    s.last_turn_tool_count = event.tool_count
+                    loom_app.invalidate()
+                else:
+                    console.print(
+                        status_bar(
+                            context_fraction=session.budget.usage_fraction,
+                            input_tokens=event.input_tokens,
+                            output_tokens=event.output_tokens,
+                            elapsed_ms=elapsed * 1000,
+                            tool_count=event.tool_count,
+                            cache_hit_pct=cache_hit_pct,
+                        )
                     )
-                )
 
     except asyncio.CancelledError:
         # PR-A2: turn was cancelled by user-initiated abort (Enter on
