@@ -638,7 +638,14 @@ class LoomApp:
                 ("class:tasklist.collapsed", f" ✓ {done}/{total} done\n"),
             ])
 
+        # Leading blank line — separates the panel from whatever
+        # streaming output sits directly above. Without it, when run_bash
+        # or any active envelope is pushing rapid output up into
+        # scrollback, the redraw cycle can visually butt the panel's
+        # first line right against the previous output and look like
+        # the header got displaced
         parts: list[tuple[str, str]] = [
+            ("", "\n"),
             ("class:tasklist.title", f" 📋 task list  {done}/{total}\n"),
         ]
         for t in todos:
