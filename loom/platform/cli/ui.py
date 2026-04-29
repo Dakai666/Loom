@@ -563,24 +563,33 @@ def tool_spinner_line(
     out.append(spinner, style="loom.warning")
     out.append("] ", style="loom.muted")
 
-    if width is None or len(prefix_visual) + len(body_plain) <= width:
-        # Fits on one line — keep the original styled rendering
+    if width is None:
+        # Caller didn't pass width — keep single-line styled form
         out.append(name, style="loom.warning")
         if args_preview:
             out.append(f"({args_preview})")
         return out
 
-    # Hanging-indent wrap: textwrap on the plain body within the
-    # available width so continuation lines line up under the name
-    import textwrap as _tw
+    from wcwidth import wcswidth as _ws
+    body_cells = _ws(body_plain)
+    if body_cells is None or body_cells < 0:
+        body_cells = len(body_plain)
+    if len(prefix_visual) + body_cells <= width:
+        # Fits on one line in display cells (not just code points,
+        # so CJK doesn't sneak past and trigger terminal soft-wrap)
+        out.append(name, style="loom.warning")
+        if args_preview:
+            out.append(f"({args_preview})")
+        return out
+
+    # Hanging-indent wrap. Prefer breaking at ``, `` (between args)
+    # over splitting inside an arg value — the latter splits a
+    # ``key="some long value"`` mid-string and looks weird because
+    # the closing quote ends up on a different visual line. Only
+    # fall back to inner wrap when a single arg is too long for the
+    # available width.
     body_width = max(20, width - len(prefix_visual))
-    wrapped = _tw.wrap(
-        body_plain,
-        width=body_width,
-        break_long_words=True,
-        break_on_hyphens=False,
-        drop_whitespace=False,
-    ) or [body_plain]
+    wrapped = _wrap_args_body(body_plain, body_width)
 
     first = wrapped[0]
     if first.startswith(name):
@@ -742,6 +751,96 @@ def _smart_truncate(value: str, max_len: int = 80) -> str:
         tail_budget = max_len - head_budget - 1  # -1 for "…"
         return value[:head_budget] + "…" + value[-tail_budget:]
     return value[:max_len] + "…"
+
+
+def _wrap_args_body(body: str, width: int) -> list[str]:
+    """Wrap a ``name(key=val, key=val, …)`` body for hanging indent.
+
+    Width is measured in **display cells** (wcswidth), not code
+    points — otherwise CJK / emoji content undercounts by ~2× and
+    the terminal silently soft-wraps without the indent we wanted.
+
+    Greedy packs whole args onto each line, breaking at ``, ``
+    boundaries between args (so a ``key="value"`` is never split
+    across lines under normal sizing). Only when a single arg's
+    rendered form exceeds the available width do we fall back to
+    cell-aware char wrapping inside the value.
+    """
+    from wcwidth import wcswidth as _ws
+
+    def cells(s: str) -> int:
+        n = _ws(s)
+        return max(0, n) if n is not None else len(s)
+
+    if cells(body) <= width:
+        return [body]
+
+    parts = body.split(", ")
+
+    if len(parts) == 1:
+        return _wrap_cells(body, width)
+
+    lines: list[str] = []
+    current = ""
+    for i, p in enumerate(parts):
+        sep = "" if i == len(parts) - 1 else ", "
+        chunk = p + sep
+        if not current:
+            current = chunk
+            continue
+        if cells(current) + cells(chunk) <= width:
+            current += chunk
+        else:
+            lines.append(current)
+            current = chunk
+    if current:
+        lines.append(current)
+
+    final: list[str] = []
+    for line in lines:
+        if cells(line) <= width:
+            final.append(line)
+        else:
+            final.extend(_wrap_cells(line, width))
+    return final
+
+
+def _wrap_cells(s: str, width: int) -> list[str]:
+    """Cell-width-aware char wrap. Prefers ASCII space breaks within
+    the current row; falls back to mid-string break when no space is
+    available before the row fills (e.g. unbroken CJK runs)."""
+    from wcwidth import wcwidth as _wcw
+
+    def cw(ch: str) -> int:
+        n = _wcw(ch)
+        return max(0, n) if n is not None else 1
+
+    lines: list[str] = []
+    cur = ""
+    cur_w = 0
+    last_space = -1
+    for ch in s:
+        w = cw(ch)
+        if cur_w + w > width and cur:
+            if last_space > 0:
+                lines.append(cur[:last_space].rstrip())
+                rest = cur[last_space:].lstrip()
+                cur = rest + ch
+                cur_w = sum(cw(c) for c in cur)
+                last_space = cur.rfind(" ") if " " in cur else -1
+            else:
+                lines.append(cur)
+                cur = ch
+                cur_w = w
+                last_space = -1
+            continue
+        if ch == " ":
+            last_space = len(cur)
+        cur += ch
+        cur_w += w
+    if cur:
+        lines.append(cur)
+    return lines
 
 
 def _format_args(args: dict[str, Any], max_value_len: int = 80) -> str:
