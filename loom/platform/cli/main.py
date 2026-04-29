@@ -355,6 +355,15 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             except asyncio.TimeoutError:
                 continue
 
+            # PR-E follow-up: a fully-completed TaskList (collapsed to
+            # ``✓ N/N done``) is stale the moment the user starts a new
+            # turn. Without this it would linger until the next
+            # task_write call, which feels like a UI leak. Clearing
+            # here ``acknowledges'' the previous list and frees the
+            # bottom region for whatever comes next
+            if app._tasklist_state.collapsed:
+                app.update_tasklist([])
+
             # Slash commands run inline — no streaming turn, no cancel.
             if text.startswith("/"):
                 try:
