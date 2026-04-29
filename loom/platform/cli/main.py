@@ -1555,7 +1555,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     at_line_start = True
                 active_tool = event.name
                 frame_index = 0
-                console.print(tool_begin_line(event.name, event.args))
+                console.print(
+                    tool_begin_line(event.name, event.args, width=_terminal_width())
+                )
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
                 # PR-D4: track in footer for live ▸ <tool> · <elapsed>
