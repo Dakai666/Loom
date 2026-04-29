@@ -724,7 +724,36 @@ $ loom chat
 
 ---
 
-## 19. 出處與相依
+## 19. PR-D 完成度（2026-04-29）
+
+實作落地後檢核：
+
+### ✅ 已完成
+- Persistent prompt_toolkit Application（取代 prompt_async 迴圈 + 三事件協議）
+- Multiline 輸入重啟（Alt+Enter / Ctrl+J 換行）
+- Footer：model · persona · context% · 🔑 grants · ▸ active envelope · last-turn stats · ▎ Loom brand
+- Footer 中段 compaction spinner 模式（壓縮中時其他資訊靜音）
+- Confirm / HITL pause / Redirect 用 mode-flag widget（用過即焚，零 scrollback 殘留）
+- Streaming line-buffer fix（CJK 截斷 bug 解決）
+- Welcome ceremony：`console.clear()` + 5 行 ASCII signature（取代雙 Panel）
+- Thinking indicator：input 上方 `● Loom is thinking···`，2Hz 動畫，第一個 stream event 自動消失
+- Input 區頂端視覺分隔線（`───`）
+- Bottom anchor：app 啟動時 cursor padding 推到終端底部
+- 整段刪除 PR-A 的支點 code（`_run_interactive`、三事件 events、`_INTERRUPT_PREFIX`、render_cursor、streaming cursor + clear_line）
+
+### 🟡 延到 PR-D merge 後 follow-up
+這幾件涉及 scrollback cursor 操作，風險較大、可獨立追蹤：
+- **三階淡出**（active → committed → frozen）— 需要 cursor up 重塗已輸出 envelope，跟 patch_stdout 互動敏感
+- **並行 envelope group panel** — 多 spinner 同時轉 + 全 COMMITTED 後 collapse；buffer envelope events 邏輯重，影響面廣
+- **Markdown 渲染** — streaming 中無法乾淨 render（chunk 可能切在 `**hel` 中段）；turn 結束後 cursor 回去重塗已 stream 過的 markdown 也是 scrollback 修改
+- **Loom Agent per-line guide** — 移除後實測下不需要
+
+### 🚫 取消
+- 「取代 doc/34-TUI-使用指南.md」— 原案以為 PR-D 會取代 TUI 模式，實際上 TUI（`loom chat --tui`）跟 plain CLI 是兩個並存模式，PR-D 只動 plain CLI
+
+---
+
+## 20. 出處與相依
 
 - 設計母文件：`doc/49-CLI-Refresh-設計.md`
 - 已合併：PR-A (#237) PR-B (#242) PR-C (#244)
