@@ -727,6 +727,31 @@ def make_run_bash_tool(
 
             output = stdout.decode("utf-8", errors="replace")
             success = proc.returncode == 0
+
+            # Issue #254: Whitelist legitimate non-zero shell exits so they
+            # aren't flagged as tool failures (polluting telemetry) and
+            # don't trigger is_error=True in the LLM.
+            if not success:
+                cmd_stripped = command.strip()
+                # Use split to check the last command in a pipeline, or just look for the tool name
+                # in the command string if it's simple enough.
+                is_grep = "grep " in cmd_stripped or "egrep " in cmd_stripped or "fgrep " in cmd_stripped
+                is_test = "test " in cmd_stripped or "[ " in cmd_stripped
+                is_git_diff = "git diff" in cmd_stripped
+                is_gh_jq = "gh api" in cmd_stripped and "--jq" in cmd_stripped
+
+                if proc.returncode == 1 and (is_grep or is_test or is_git_diff):
+                    success = True
+                elif proc.returncode == 5 and is_gh_jq:
+                    success = True
+
+            if success and proc.returncode != 0:
+                # We converted a non-zero exit to a success. Inject the exit
+                # code into the output so the agent still receives the boolean
+                # signal (e.g., test -f returning false).
+                marker = f"[Command exited with {proc.returncode}]"
+                output = f"{output}\n{marker}" if output else marker
+
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=success, output=output,

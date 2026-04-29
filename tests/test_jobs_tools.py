@@ -86,6 +86,54 @@ class TestRunBashAsyncMode:
         assert result.success
         assert "fallback" in result.output
 
+# --- async_mode on run_bash -----------------------------------------
+
+
+class TestRunBashExpectedNonZero:
+    async def test_grep_no_match_is_success(self, tmp_path: Path):
+        tool = make_run_bash_tool(tmp_path)
+        # grep -q exits 1 when no lines are matched. Should be success=True.
+        result = await tool.executor(_call("run_bash", {
+            "command": "echo 'foo' | grep -q 'bar'",
+            "justification": "test",
+        }))
+        assert result.success is True
+        assert result.metadata["exit_code"] == 1
+        assert "[Command exited with 1]" in result.output
+
+    async def test_test_f_false_is_success(self, tmp_path: Path):
+        tool = make_run_bash_tool(tmp_path)
+        # test -f exits 1 when file doesn't exist. Should be success=True.
+        result = await tool.executor(_call("run_bash", {
+            "command": "test -f /tmp/definitely_not_a_real_file_123",
+            "justification": "test",
+        }))
+        assert result.success is True
+        assert result.metadata["exit_code"] == 1
+        assert "[Command exited with 1]" in result.output
+
+    async def test_gh_api_jq_empty_is_success(self, tmp_path: Path):
+        tool = make_run_bash_tool(tmp_path)
+        # Mocking gh api --jq since gh might not be installed or authenticated.
+        # We just need bash to return 5 and the command to start with gh api.
+        result = await tool.executor(_call("run_bash", {
+            "command": "gh api --jq '.items' || exit 5",
+            "justification": "test",
+        }))
+        assert result.success is True
+        assert result.metadata["exit_code"] == 5
+        assert "[Command exited with 5]" in result.output
+
+    async def test_grep_syntax_error_is_failure(self, tmp_path: Path):
+        tool = make_run_bash_tool(tmp_path)
+        # grep without pattern exits 2. Should be success=False.
+        result = await tool.executor(_call("run_bash", {
+            "command": "grep",
+            "justification": "test",
+        }))
+        assert result.success is False
+        assert result.metadata["exit_code"] == 2
+        assert "Exit code 2" in result.error
 
 # --- jobs_* tools ----------------------------------------------------
 
