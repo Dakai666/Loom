@@ -1252,31 +1252,13 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     frame_index = 0
 
     # ── Loom Agent turn intro ─────────────────────────────────────────────
-    # PR-C: replace the bold-green "loom" Rule with a Loom Agent-themed
-    # marker. Per-line "Loom ▎" left-edge guide on streaming text is
-    # deferred to PR-D's renderer rewrite — would need newline-detection
-    # in the streaming loop, which is the same path PR-D rebuilds anyway.
-    pct = session.budget.usage_fraction * 100
-    ctx_token = (
-        "loom.success" if pct < 60
-        else "loom.warning" if pct < 85
-        else "loom.error"
-    )
-    persona_tag = (
-        f"  [loom.muted]·  persona: {session.current_personality}[/loom.muted]"
-        if session.current_personality
-        else ""
-    )
-    # Plain Text instead of Rule — Rule always extends a horizontal line
-    # after the title, which crowds the marker. The Loom Agent intro is
-    # meant to read as a quiet signature, not a banner.
+    # Loom Agent turn intro — minimal marker, no metadata.
+    # The footer already shows persona · model · context% · stats, so
+    # repeating any of that here just adds visual debt. Keep this to
+    # a single ``Loom ▎`` so the turn boundary is legible without
+    # duplicating footer info.
     console.print(
-        Text.from_markup(
-            f"[loom.agent.guide]Loom ▎[/loom.agent.guide]"
-            f"[loom.muted]  context [/loom.muted]"
-            f"[{ctx_token}]{pct:.1f}%[/{ctx_token}]"
-            f"{persona_tag}"
-        )
+        Text.from_markup("[loom.agent.guide]Loom ▎[/loom.agent.guide]")
     )
 
     def _cancel_spinner() -> None:
