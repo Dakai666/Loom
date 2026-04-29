@@ -2542,7 +2542,7 @@ class LoomSession:
             msg["content"] = (
                 f"[observation folded — {tname or 'tool'} from {age} turns ago, "
                 f"superseded by a more recent call]\n"
-                f"  ref: scratchpad:{ref}\n"
+                f"  ref: scratchpad://{ref}\n"
                 f"  Read with scratchpad_read(ref='{ref}') if you still need "
                 f"the full output."
             )
