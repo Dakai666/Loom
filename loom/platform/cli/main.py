@@ -55,6 +55,7 @@ from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.session_log import SessionLog
+from loom.platform.cli.theme import LOOM_THEME
 from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
@@ -76,7 +77,7 @@ from loom.platform.cli.ui import (
     tool_running_line,
 )
 
-console = Console(highlight=False)
+console = Console(highlight=False, theme=LOOM_THEME)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
