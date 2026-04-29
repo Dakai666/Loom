@@ -489,6 +489,15 @@ PR-A 留底（doc/49 已知 bug 段）：
 
 ---
 
+## D1 live-test 後新增的 D2 任務
+
+從第一次 `loom chat` 實測累積：
+
+- **Footer logo 方向**：✅ 已改為 `Loom ▎`（與 agent guide 同向），不再是 `▎ Loom` 中斷風
+- **💭 think 顯示時序錯位**（待 D2 處理）：Anthropic native thinking blocks 必須在 `stream.text_stream` 完成後才能讀到（在 `response.raw_message["_thinking_blocks"]`），所以目前 ThinkCollapsed 是在 response text 全部 stream 完之後才 yield 的。但語意順序是「先想後答」——使用者期待 💭 在回應**之前**而不是之後。D2 streaming renderer 改寫時要解決：候選方案 (a) turn 開頭印 `💭 thinking…` 占位，讀到內容後 cursor up 重塗 (b) 改用 stream events 級 API 提早抓 thinking (c) buffer response text、ThinkCollapsed 後再印（破 streaming）。傾向 (a)
+- **Loom Agent per-line 引線**（已在 D2 計畫內）：streaming text 跨行時每行帶 `Loom ▎` guide
+- **CJK 截斷 bug**（已在 D2 計畫內）：streaming 行首被吃，老 bug
+
 ## 17. Test plan 草稿
 
 - [ ] 啟動 `loom chat`，input 區黏底，footer 出現

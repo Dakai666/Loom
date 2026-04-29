@@ -432,9 +432,11 @@ class LoomApp:
             parts.append(("class:footer", "  "))
             parts.append(("class:footer.stats", " · ".join(stats)))
 
-        # Right: ▎ Loom brand mark
+        # Right: Loom ▎ brand mark — bar to the right of "Loom" so the
+        # marker mirrors the agent guide style ("Loom ▎ ...") rather
+        # than reading as "interrupted by a vertical line".
         parts.append(("class:footer", "  "))
-        parts.append(("class:footer.brand", "▎ Loom "))
+        parts.append(("class:footer.brand", " Loom ▎ "))
 
         return FormattedText(parts)
 
