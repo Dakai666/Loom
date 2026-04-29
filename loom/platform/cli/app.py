@@ -280,7 +280,8 @@ class LoomApp:
         natural terminal scrollback while the input + footer stay
         anchored at the bottom.
         """
-        await self._app.run_in_terminal(callback)
+        from prompt_toolkit.application import run_in_terminal as _rit
+        await _rit(callback)
 
     async def request_confirm(
         self,

@@ -538,23 +538,69 @@ def response_panel(
 # ASCII spinner frames (cp950 safe, Rich-markup safe — no backslash)
 _SPINNER_FRAMES = ["-", "~", "|", "+"]
 
-def tool_spinner_line(name: str, args: dict[str, Any], frame_index: int = 0) -> Text:
+def tool_spinner_line(
+    name: str,
+    args: dict[str, Any],
+    frame_index: int = 0,
+    width: int | None = None,
+) -> Text:
     """
     Rich Text for a tool-call-in-progress line with ASCII spinner.
     Frame index 0 shows [- ], 1 shows [\\ ], etc.
+
+    When ``width`` is given and the rendered line would overflow it,
+    the args body wraps with a hanging indent so continuation lines
+    align under the tool name instead of restarting at column 0.
     """
     spinner = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
     args_preview = _format_args(args)
-    return Text.from_markup(
-        f"  [loom.muted][[/loom.muted][loom.warning]{spinner}[/loom.warning][loom.muted]][/loom.muted] "
-        f"[loom.warning]{name}[/loom.warning]"
-        f"{f'({args_preview})' if args_preview else ''}"
-    )
+    body_plain = f"{name}{f'({args_preview})' if args_preview else ''}"
+    prefix_visual = "  [-] "  # 6 cells; spinner glyph is always 1 wide
+    indent = " " * len(prefix_visual)
+
+    out = Text()
+    out.append("  [", style="loom.muted")
+    out.append(spinner, style="loom.warning")
+    out.append("] ", style="loom.muted")
+
+    if width is None or len(prefix_visual) + len(body_plain) <= width:
+        # Fits on one line — keep the original styled rendering
+        out.append(name, style="loom.warning")
+        if args_preview:
+            out.append(f"({args_preview})")
+        return out
+
+    # Hanging-indent wrap: textwrap on the plain body within the
+    # available width so continuation lines line up under the name
+    import textwrap as _tw
+    body_width = max(20, width - len(prefix_visual))
+    wrapped = _tw.wrap(
+        body_plain,
+        width=body_width,
+        break_long_words=True,
+        break_on_hyphens=False,
+        drop_whitespace=False,
+    ) or [body_plain]
+
+    first = wrapped[0]
+    if first.startswith(name):
+        out.append(name, style="loom.warning")
+        out.append(first[len(name):])
+    else:
+        # Edge case: name itself longer than body_width — fall back
+        # to unstyled split rather than trying to slice a style span
+        out.append(first)
+    for cont in wrapped[1:]:
+        out.append("\n")
+        out.append(indent + cont)
+    return out
 
 
-def tool_begin_line(name: str, args: dict[str, Any]) -> Text:
+def tool_begin_line(
+    name: str, args: dict[str, Any], width: int | None = None
+) -> Text:
     """Rich Text for a tool-call-in-progress line (alias for compatibility)."""
-    return tool_spinner_line(name, args, 0)
+    return tool_spinner_line(name, args, 0, width=width)
 
 
 def tool_running_line(name: str, frame_index: int = 0) -> Text:

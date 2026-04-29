@@ -1409,6 +1409,113 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             _sys.stdout.flush()
             _stream_pending = ""
 
+    # PR-E follow-up #248: markdown reblit at TurnDone.
+    # ``_segment_buffer`` accumulates streamed text since the last
+    # tool row (or turn start). At TurnDone we cursor-up that segment
+    # and re-print it as Rich Markdown so **bold**, headings, code
+    # blocks etc. become formatted instead of raw. Per-segment
+    # tracking — not the whole turn — because tool rows printed
+    # mid-turn are anchored content we cannot rewrite.
+    _segment_buffer = ""
+
+    def _terminal_width() -> int:
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            try:
+                return max(20, loom_app.application.output.get_size().columns)
+            except Exception:
+                pass
+        try:
+            import os as _os
+            return max(20, _os.get_terminal_size().columns)
+        except Exception:
+            return 80
+
+    def _segment_visual_rows(text: str, width: int) -> int:
+        """Rows the cursor advanced while writing ``text`` to a
+        terminal of ``width`` cols. Accounts for soft-wrap on long
+        lines and CJK/emoji double-width cells. Used to compute how
+        many lines to cursor-up before re-rendering Markdown."""
+        from wcwidth import wcwidth as _wcw
+        row = 0
+        col = 0
+        for ch in text:
+            if ch == "\n":
+                row += 1
+                col = 0
+                continue
+            w = _wcw(ch)
+            if w < 0:
+                w = 1
+            if col + w > width:
+                row += 1
+                col = w
+            else:
+                col += w
+                if col == width:
+                    row += 1
+                    col = 0
+        return row
+
+    async def _markdown_reblit() -> None:
+        """Replace the last streamed text segment with Rich Markdown.
+
+        Skips plain prose (no markdown markers) — reblitting pure text
+        only causes visual flicker without adding signal. When the
+        segment never produced visible rows (e.g. tool-only turn or
+        ended exactly where it started), there's nothing to overwrite.
+        """
+        text = _segment_buffer
+        if not text or not text.strip():
+            return
+        # Cheap markdown sniff — only reblit when there's something
+        # to gain. Covers bold/italic/strikethrough, ATX headings,
+        # code spans, fenced code, lists (-/*/+ and 1.), blockquotes
+        # (incl. nested), links, tables. ``***`` (bold-italic) and
+        # ``__`` (alt bold) are subsets of ``**``/``_`` so already
+        # matched by those entries
+        markers = (
+            "**", "__", "_", "~~", "`", "```",
+            "# ", "## ", "### ", "#### ",
+            "- ", "* ", "+ ", "1. ", "2. ",
+            "> ", "](", "| ",
+        )
+        if not any(m in text for m in markers):
+            return
+
+        width = _terminal_width()
+        # Cursor at TurnDone always sits at col 0 of the row *below*
+        # the last content row: either the segment's own trailing \n
+        # advanced it there, or the ``if not at_line_start`` branch
+        # in TurnDone printed an extra \n. So:
+        #   ends with \n  → helper already counted the advance
+        #   no trailing \n → helper undercount by 1 (the added \n)
+        rows = _segment_visual_rows(text, width)
+        if not text.endswith("\n"):
+            rows += 1
+
+        from rich.markdown import Markdown as _Markdown
+
+        if rows <= 0:
+            # Cursor is already at the start of where the segment
+            # was; nothing to overwrite. ``text.strip()`` non-empty
+            # combined with rows == 0 only happens for whitespace-
+            # only segments which the early-return covered, so this
+            # is effectively unreachable — guard anyway
+            return
+
+        def _reblit() -> None:
+            import sys as _sys
+            _sys.stdout.write(f"\r\033[{rows}A\033[J")
+            _sys.stdout.flush()
+            console.print(_Markdown(text.rstrip()))
+
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            await loom_app.print_above(_reblit)
+        else:
+            _reblit()
+
     # PR-D4: clear the "thinking" footer indicator on the first
     # observable event of the turn. After that, the active envelope
     # / streaming output / turn stats take over the footer's middle.
@@ -1430,6 +1537,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             if isinstance(event, TextChunk):
                 _stream_pending += event.text
                 text_buffer += event.text
+                _segment_buffer += event.text
                 _flush_streaming()
                 at_line_start = (not _stream_pending) and event.text.endswith("\n")
 
@@ -1447,6 +1555,10 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             elif isinstance(event, ToolBegin):
                 # Drain pending streamed text before the tool row
                 _flush_streaming(force=True)
+                # Tool row anchors content we cannot rewrite; close
+                # the current markdown-reblit segment so only post-
+                # tool text gets reblit at TurnDone
+                _segment_buffer = ""
                 # Cancel any running spinner
                 _cancel_spinner()
                 # Ensure tool rows start on a fresh line
@@ -1455,7 +1567,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     at_line_start = True
                 active_tool = event.name
                 frame_index = 0
-                console.print(tool_begin_line(event.name, event.args))
+                console.print(
+                    tool_begin_line(event.name, event.args, width=_terminal_width())
+                )
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
                 # PR-D4: track in footer for live ▸ <tool> · <elapsed>
@@ -1574,6 +1688,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 clear_line()
                 if not at_line_start:
                     console.print()
+                # PR-E follow-up #248: reblit the final text segment
+                # as Rich Markdown. No-op if the turn ended on a tool
+                # row, or if the segment is plain prose with no
+                # markdown markers worth rendering
+                await _markdown_reblit()
                 cache_total = event.cache_read_input_tokens + event.cache_creation_input_tokens + event.input_tokens
                 cache_hit_pct = (event.cache_read_input_tokens / cache_total * 100) if cache_total > 0 else 0.0
                 elapsed = time.monotonic() - t0
