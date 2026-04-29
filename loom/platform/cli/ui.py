@@ -130,20 +130,30 @@ class SlashCompleter(Completer):
 # prompt_toolkit session factory
 # ---------------------------------------------------------------------------
 
+from loom.platform.cli.theme import (
+    PARCHMENT_ACCENT,
+    PARCHMENT_BG,
+    PARCHMENT_BORDER,
+    PARCHMENT_ERROR,
+    PARCHMENT_MUTED,
+    PARCHMENT_SUCCESS,
+    PARCHMENT_SURFACE,
+    PARCHMENT_TEXT,
+)
+
+# prompt_toolkit's Style.from_dict can't read from a Rich Theme — it has
+# its own colour vocabulary. Reference PARCHMENT_* constants so the two
+# layers stay aligned without manually duplicating hex codes.
 _PT_STYLE = Style.from_dict(
     {
-        # Prompt indicator (the "you ›" before input)
-        "prompt": "bold #c8a464",         # amber gold (羊皮卷 accent)
-        # Hint text (continuation prompt on multi-line)
-        "prompt.continuation": "#8a7a5e", # muted parchment
-        # Auto-suggestion ghost text
-        "auto-suggestion": "#4a4038",     # subtle border-grey
-        # Completion menu
-        "completion-menu":         "bg:#242018 #e0cfa0",
-        "completion-menu.completion":         "bg:#242018 #e0cfa0",
-        "completion-menu.completion.current": "bg:#c8a464 #1c1814 bold",
-        "completion-menu.meta.completion":         "bg:#242018 #8a7a5e",
-        "completion-menu.meta.completion.current": "bg:#c8a464 #1c1814",
+        "prompt": f"bold {PARCHMENT_ACCENT}",
+        "prompt.continuation": PARCHMENT_MUTED,
+        "auto-suggestion": PARCHMENT_BORDER,
+        "completion-menu":                         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
+        "completion-menu.completion":              f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
+        "completion-menu.completion.current":      f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG} bold",
+        "completion-menu.meta.completion":         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_MUTED}",
+        "completion-menu.meta.completion.current": f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG}",
         "": "",
     }
 )
@@ -266,15 +276,15 @@ class SelectOption:
 
 _SELECT_STYLE = Style.from_dict(
     {
-        "select.title":    "#e0cfa0",            # parchment cream, no bold/reverse
-        "select.body":     "#8a7a5e",
-        "select.subtle":   "#8a7a5e",
-        "select.option":   "#e0cfa0",
-        "select.option.cursor": "bold #c8a464",  # cursor row: bold amber, no bg flip
-        "select.shortcut": "#8a7a5e",            # shortcut hint: dim, no emphasis
-        "select.footer":   "#8a7a5e italic",
-        "select.deny":     "#b87060",
-        "select.approve":  "#7a9e78",
+        "select.title":         PARCHMENT_TEXT,
+        "select.body":          PARCHMENT_MUTED,
+        "select.subtle":        PARCHMENT_MUTED,
+        "select.option":        PARCHMENT_TEXT,
+        "select.option.cursor": f"bold {PARCHMENT_ACCENT}",
+        "select.shortcut":      PARCHMENT_MUTED,
+        "select.footer":        f"{PARCHMENT_MUTED} italic",
+        "select.deny":          PARCHMENT_ERROR,
+        "select.approve":       PARCHMENT_SUCCESS,
     }
 )
 
@@ -403,10 +413,10 @@ def render_header(model: str, db: str) -> Panel:
     """Top-of-session banner."""
     return Panel(
         Text.from_markup(
-            f"[bold cyan]Loom[/bold cyan]  [dim]v0.3.0[/dim]\n"
-            f"model [green]{model}[/green]  |  memory [dim]{db}[/dim]\n"
-            f"[dim]Type [bold]exit[/bold] or Ctrl-C to quit  |  "
-            f"/personality <name>  |  /compact  |  /help[/dim]"
+            f"[bold loom.accent]Loom[/bold loom.accent]  [loom.muted]v0.3.0[/loom.muted]\n"
+            f"model [loom.success]{model}[/loom.success]  |  memory [loom.muted]{db}[/loom.muted]\n"
+            f"[loom.muted]Type [bold]exit[/bold] or Ctrl-C to quit  |  "
+            f"/personality <name>  |  /compact  |  /help[/loom.muted]"
         ),
         border_style="cyan",
     )
@@ -431,17 +441,17 @@ def response_panel(
     ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
     subtitle_parts = [f"[{ctx_color}]context {pct:.1f}%[/{ctx_color}]"]
     if personality:
-        subtitle_parts.append(f"[dim]persona: {personality}[/dim]")
+        subtitle_parts.append(f"[loom.muted]persona: {personality}[/loom.muted]")
     subtitle = "  ".join(subtitle_parts)
 
     if text:
         content = Markdown(text)
         border = "green"
-        title = "[bold green]loom[/bold green]"
+        title = "[bold loom.success]loom[/bold loom.success]"
     else:
-        content = Text.from_markup("[dim]thinking…[/dim]" if is_thinking else "")
+        content = Text.from_markup("[loom.muted]thinking…[/loom.muted]" if is_thinking else "")
         border = "dim"
-        title = "[dim green]loom[/dim green]"
+        title = "[loom.muted]loom[/loom.muted]"
 
     return Panel(
         content,
@@ -463,8 +473,8 @@ def tool_spinner_line(name: str, args: dict[str, Any], frame_index: int = 0) -> 
     spinner = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
     args_preview = _format_args(args)
     return Text.from_markup(
-        f"  [dim][[/dim][yellow]{spinner}[/yellow][dim]][/dim] "
-        f"[yellow]{name}[/yellow]"
+        f"  [loom.muted][[/loom.muted][loom.warning]{spinner}[/loom.warning][loom.muted]][/loom.muted] "
+        f"[loom.warning]{name}[/loom.warning]"
         f"{f'({args_preview})' if args_preview else ''}"
     )
 
@@ -481,20 +491,20 @@ def tool_running_line(name: str, frame_index: int = 0) -> Text:
     """
     spinner = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
     return Text.from_markup(
-        f"  [dim][[/dim][yellow]{spinner}[/yellow][dim]][/dim] "
-        f"[dim]{name} running...[/dim]"
+        f"  [loom.muted][[/loom.muted][loom.warning]{spinner}[/loom.warning][loom.muted]][/loom.muted] "
+        f"[loom.muted]{name} running...[/loom.muted]"
     )
 
 
 def tool_end_line(name: str, success: bool, duration_ms: float) -> Text:
     """Rich Text for a completed tool-call line."""
-    icon = "[green]ok[/green]" if success else "[red]!![/red]"
-    status = "[green]done[/green]" if success else "[red]failed[/red]"
+    icon = "[loom.success]ok[/loom.success]" if success else "[loom.error]!![/loom.error]"
+    status = "[loom.success]done[/loom.success]" if success else "[loom.error]failed[/loom.error]"
     return Text.from_markup(
-        f"  [dim][[/dim]{icon}[dim]][/dim] "
-        f"[dim]{name}[/dim]  "
+        f"  [loom.muted][[/loom.muted]{icon}[loom.muted]][/loom.muted] "
+        f"[loom.muted]{name}[/loom.muted]  "
         f"[{('green' if success else 'red')}]{duration_ms:.0f}ms[/{('green' if success else 'red')}]  "
-        f"[dim]{status}[/dim]"
+        f"[loom.muted]{status}[/loom.muted]"
     )
 
 
@@ -533,7 +543,7 @@ def clear_line() -> None:
 
 def render_cursor() -> Text:
     """Return Rich Text with just the cursor."""
-    return Text.from_markup(f"[bold yellow]{streaming_cursor()}[/bold yellow]")
+    return Text.from_markup(f"[bold loom.warning]{streaming_cursor()}[/bold loom.warning]")
 
 
 def status_bar(
@@ -561,13 +571,13 @@ def status_bar(
     cache_seg = f"cache {cache_hit_pct:.0f}%  |  " if cache_hit_pct > 0 else ""
 
     return Text.from_markup(
-        f"[dim]-[/dim]"
+        f"[loom.muted]-[/loom.muted]"
         f"[{ctx_color}]{bar}[/{ctx_color}]"
-        f"[dim] context {pct:.1f}%  |  {cache_seg}"
+        f"[loom.muted] context {pct:.1f}%  |  {cache_seg}"
         f"{input_tokens}in / {output_tokens}out  |  "
         f"{elapsed_ms / 1000:.1f}s  |  "
         f"{tool_count} tool{'s' if tool_count != 1 else ''}"
-        f"[/dim][dim]-[/dim]"
+        f"[/loom.muted][loom.muted]-[/loom.muted]"
     )
 
 
