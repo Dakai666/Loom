@@ -378,9 +378,18 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 current_turn_task = None
                 app.footer.thinking = False
 
-            # Update footer token budget after each turn boundary.
+            # Update footer token budget + grants at each turn boundary
+            # (per doc/49 decision: TTL refresh on turn edge, not per-
+            # second tick — keeps the footer visually stable while the
+            # user is reading).
             app.footer.token_pct = session.budget.usage_fraction * 100
             app.footer.persona = session.current_personality
+            try:
+                snapshot = session._build_grants_snapshot()
+                app.footer.grants_active = snapshot.active_count
+                app.footer.grants_next_expiry_secs = snapshot.next_expiry_secs
+            except Exception:
+                pass
             app.invalidate()
 
     async def footer_ticker() -> None:

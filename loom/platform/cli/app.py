@@ -102,9 +102,14 @@ class FooterState:
     # like a hang
     compacting: bool = False
     # Loom is thinking (LLM call dispatched, no stream output yet).
-    # Surfaces as a soft animated indicator in the footer so the user
-    # knows their input is being chewed on
+    # Surfaces as a soft animated indicator above the input separator
+    # so the user knows their input is being chewed on
     thinking: bool = False
+    # Number of active scope grants and seconds until the nearest one
+    # expires. Refreshed at turn boundaries (per doc/49 decision —
+    # don't tick every second). 0 grants → both fields 0
+    grants_active: int = 0
+    grants_next_expiry_secs: float = 0.0
     # Last-turn stats. Kept out of scrollback (PR-A printed these
     # inline as the "context X% | cache Y% | A in / B out | Cs | N
     # tools" status_bar; that's noise the user doesn't need to keep
@@ -157,6 +162,7 @@ _APP_STYLE = Style.from_dict(
         "footer.stats":          PARCHMENT_MUTED,
         "footer.envelope":       PARCHMENT_ACCENT,
         "footer.compaction":     PARCHMENT_WARNING,
+        "footer.grant":          PARCHMENT_MUTED,
         # Thinking indicator above the input separator
         "thinking":              PARCHMENT_MUTED,
         "thinking.dot":          PARCHMENT_ACCENT,
@@ -472,6 +478,22 @@ class LoomApp:
         )
         parts.append(("class:footer", "  "))
         parts.append((f"class:{token}", f"context {s.token_pct:.1f}%"))
+
+        # Active scope grants — show 🔑 N · M:SS for the nearest
+        # expiring lease. Refreshed at turn boundaries (no per-second
+        # ticking; doc/49 decision)
+        if s.grants_active > 0:
+            ttl = s.grants_next_expiry_secs
+            if ttl > 0:
+                m, sec = divmod(int(ttl), 60)
+                ttl_label = f"{m}:{sec:02d}" if m < 60 else f"{m // 60}h{m % 60}m"
+            else:
+                ttl_label = "∞"  # session-scoped grant, no expiry
+            parts.append(("class:footer", "  "))
+            parts.append(
+                ("class:footer.grant",
+                 f"🔑 {s.grants_active}·{ttl_label}")
+            )
 
         # Active envelopes — show the most recent one with elapsed
         # time. When >1 in flight, prefix with count: ``3× ▸ ...``.
