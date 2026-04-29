@@ -169,13 +169,15 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     session.subscribe_promotion(_cli_promotion)
 
     # PR-C3: route BlastRadiusMiddleware authorisation decisions through
-    # the harness channel. Green-light events go to flash() (no-op in
-    # PR-C, footer in PR-D); red-light events留底 inline so the user can
-    # forensically trace why a tool was blocked.
+    # the harness channel. Red-light events留底 inline so the user can
+    # forensically trace why a tool was blocked. Green-light events stay
+    # silent — pre-authorized / exec_auto / scope-allow are routine
+    # successes, not events worth announcing. PR-D will reassess whether
+    # any *specific* green-light kind (e.g. "new scope grant just issued")
+    # deserves a footer flash, but blanket flashing every approval would
+    # spam the surface and contradict doc/49's "綠燈不出聲" principle.
     def _on_lifecycle(call: "ToolCall", result: bool, reason: str) -> None:
-        if result:
-            harness.flash(f"auth: {call.tool_name} ok ({reason})")
-        else:
+        if not result:
             harness.inline(
                 f"auth denied: {call.tool_name} — {reason}",
                 level="warning",

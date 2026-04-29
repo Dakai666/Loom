@@ -2717,24 +2717,20 @@ class LoomSession:
         self.messages = keep3
 
         # PR-C4: surface a one-line harness note when sanitize actually
-        # repaired anything. Three signals:
+        # repaired anything. Two signals:
         #   _args_fixed  — Pass 1 truncated/non-string arg blobs rebuilt
         #   _msgs_dropped — Pass 2/3/4 dropped orphaned tool_use or
         #                   tool_result messages
-        # Stored on the session so the platform layer can pick it up at
-        # the start of the next turn (once-per-turn dedup is the caller's
-        # job — see _sanitize_callback wiring in main.py).
+        # When nothing changed, stays silent (the design point: only
+        # speak when something actually moved).
         _msgs_dropped = max(0, _msgs_before - len(self.messages))
         if _args_fixed or _msgs_dropped:
-            self._last_sanitize_repaired = (_args_fixed, _msgs_dropped)
             cb = getattr(self, "_on_sanitize_repaired", None)
             if cb is not None:
                 try:
                     cb(_args_fixed, _msgs_dropped)
                 except Exception:
                     pass
-        else:
-            self._last_sanitize_repaired = None
 
     def _telemetry_record_tool(
         self,
