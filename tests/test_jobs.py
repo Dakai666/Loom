@@ -28,6 +28,17 @@ class TestScratchpad:
         pad.write("abc", "data")
         assert pad.read("scratchpad://abc") == "data"
 
+    def test_read_accepts_single_colon_uri(self):
+        """Issue #243: JIT/masking placeholders used ``scratchpad:ref`` (single
+        colon) but ``_strip_uri`` only handled ``scratchpad://``. Agents that
+        copied the ref from placeholder text got KeyError on lookup."""
+        pad = Scratchpad()
+        pad.write("auto_read_file_abcdef", "big content")
+        # Single-colon form — the format JIT placeholders originally emitted
+        assert pad.read("scratchpad:auto_read_file_abcdef") == "big content"
+        assert pad.size("scratchpad:auto_read_file_abcdef") == len(b"big content")
+        assert "scratchpad:auto_read_file_abcdef" in pad
+
     def test_read_bytes_decode(self):
         pad = Scratchpad()
         pad.write("b", b"bytes payload")

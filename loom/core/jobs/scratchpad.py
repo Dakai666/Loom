@@ -75,7 +75,15 @@ class Scratchpad:
 
     @staticmethod
     def _strip_uri(ref: str) -> str:
-        return ref[len(URI_PREFIX):] if ref.startswith(URI_PREFIX) else ref
+        # Handle both canonical ``scratchpad://ref`` and the single-colon
+        # ``scratchpad:ref`` format that JIT / masking placeholders emit.
+        # Issue #243: agents copy the ref from placeholder text and the
+        # single-colon variant was silently failing lookups.
+        if ref.startswith(URI_PREFIX):
+            return ref[len(URI_PREFIX):]
+        if ref.startswith("scratchpad:"):
+            return ref[len("scratchpad:"):]
+        return ref
 
 
 def _apply_section(text: str, section: str) -> str:

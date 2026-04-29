@@ -278,7 +278,7 @@ class JITRetrievalMiddleware(Middleware):
         placeholder = (
             f"[tool output spilled to scratchpad — {size} chars]\n"
             f"  tool: {call.tool_name}\n"
-            f"  ref:  scratchpad:{ref}\n"
+            f"  ref:  scratchpad://{ref}\n"
             f"  size: {size} chars (~{size // 4} tokens)\n"
             f"\n"
             f"  Read with scratchpad_read(ref='{ref}') for cached content,\n"
