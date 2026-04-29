@@ -9,6 +9,8 @@ those concepts went away with ``task_done``.
 
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from .tasklist import TaskList
 
 
@@ -18,6 +20,12 @@ class TaskListManager:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self._list: TaskList | None = None
+        # Optional observer fired after every write — UI layers (CLI
+        # floating panel) subscribe so they can re-render. Keep it a
+        # single callback; if more listeners are needed later, swap
+        # for a list. Failures inside the callback are swallowed so a
+        # broken UI never poisons the agent's tool result.
+        self.on_change: Optional[Callable[[dict], None]] = None
 
     @property
     def tasklist(self) -> TaskList | None:
@@ -38,11 +46,18 @@ class TaskListManager:
         """
         if not todos:
             self._list = None
-            return {"total": 0, "by_status": {}, "todos": []}
-        lst = TaskList()
-        lst.replace(todos)
-        self._list = lst
-        return lst.status_summary()
+            summary = {"total": 0, "by_status": {}, "todos": []}
+        else:
+            lst = TaskList()
+            lst.replace(todos)
+            self._list = lst
+            summary = lst.status_summary()
+        if self.on_change is not None:
+            try:
+                self.on_change(summary)
+            except Exception:
+                pass
+        return summary
 
     def status(self) -> dict:
         if self._list is None:
