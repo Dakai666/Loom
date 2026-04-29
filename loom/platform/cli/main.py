@@ -213,17 +213,11 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     # PR-D4: clear the noisy startup output (resume log, MCP load,
     # diagnostic block, …) before drawing the welcome signature so
     # the user sees a clean ceremony instead of scrollback debris.
-    # The original log lines are still there before the clear and
-    # technically scrollable up if anyone really wants them; in
-    # practice the signature anchors the session start.
     console.clear()
 
     # 5-line ASCII signature replaces the old render_header Panel +
     # MemoryIndex Panel splatter. The full MemoryIndex still feeds
-    # the LLM's system prompt unchanged — only the user-facing
-    # greeting is consolidated. Counts pulled from the index so the
-    # user gets a sense of session weight without paging through
-    # skill catalogs.
+    # the LLM's system prompt unchanged.
     from loom.platform.cli.ui import render_welcome_signature
     _idx = session._memory_index
     console.print(
@@ -237,6 +231,24 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             relation_count=getattr(_idx, "relational_count", 0),
         )
     )
+
+    # PR-D4: anchor the persistent app's bottom region to the actual
+    # bottom of the terminal. ``full_screen=False`` mode draws the
+    # bottom area at whatever row the cursor was on when run() was
+    # called — without padding, that's just below the welcome sig
+    # near the top of the terminal, leaving a sea of empty rows
+    # underneath. Pad with blank lines so the cursor sits near the
+    # terminal's last row before the app starts. As streaming output
+    # arrives via patch_stdout, those padding rows scroll up and out
+    # naturally
+    import shutil as _shutil
+    import sys as _sys
+    _term_h = _shutil.get_terminal_size(fallback=(80, 24)).lines
+    # Welcome sig footprint ~ 6 lines (5 visible + leading newline);
+    # bottom area ~ 4 lines (thinking + separator + input + footer)
+    _pad = max(0, _term_h - 6 - 4)
+    _sys.stdout.write("\n" * _pad)
+    _sys.stdout.flush()
 
     # ── PR-D1: persistent prompt_toolkit Application ──────────────────────
     #

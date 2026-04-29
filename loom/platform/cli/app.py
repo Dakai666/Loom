@@ -157,6 +157,9 @@ _APP_STYLE = Style.from_dict(
         "footer.stats":          PARCHMENT_MUTED,
         "footer.envelope":       PARCHMENT_ACCENT,
         "footer.compaction":     PARCHMENT_WARNING,
+        # Thinking indicator above the input separator
+        "thinking":              PARCHMENT_MUTED,
+        "thinking.dot":          PARCHMENT_ACCENT,
         # Confirm / Pause widget — also no bg, blend with terminal
         "widget.title":          PARCHMENT_TEXT,
         "widget.body":           PARCHMENT_MUTED,
@@ -398,8 +401,22 @@ class LoomApp:
             style=f"fg:{PARCHMENT_BORDER}",
         )
 
+        # Thinking indicator — appears as its own line *above* the
+        # separator (so visually attached to the input region), only
+        # while ``footer.thinking`` is True. Mirrors Claude Code-style
+        # "● thinking…" status above the prompt rather than tucking
+        # it into the footer
+        thinking_window = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(self._render_thinking),
+                height=1,
+            ),
+            filter=Condition(lambda: self.footer.thinking),
+        )
+
         layout = Layout(
             HSplit([
+                thinking_window,
                 separator_window,
                 input_window,
                 confirm_window,
@@ -468,15 +485,8 @@ class LoomApp:
             label += f"▸ {latest.name} · {elapsed:.1f}s"
             parts.append(("class:footer", "  "))
             parts.append(("class:footer.envelope", label))
-        elif s.thinking:
-            # Thinking indicator — animated dots driven by ticker
-            # invalidate. ``import time`` here so we can use
-            # monotonic() as the animation phase
-            import time as _t
-            phase = int(_t.monotonic() * 2) % 4
-            dots = "·" * phase + " " * (3 - phase)
-            parts.append(("class:footer", "  "))
-            parts.append(("class:footer.envelope", f"▸ Loom thinking{dots}"))
+        # Thinking indicator no longer rendered here — moved to its
+        # own window above the input separator (see _render_thinking)
 
         # Last-turn stats — only show when no tool is currently in
         # flight (otherwise the active envelope already tells the
@@ -500,6 +510,22 @@ class LoomApp:
                 parts.append(("class:footer.stats", " · ".join(stats)))
 
         return FormattedText(parts)
+
+    def _render_thinking(self) -> FormattedText:
+        """Animated thinking indicator above the input separator.
+
+        Style: ``● Loom is thinking···`` with the dots cycling on the
+        ticker invalidate. Bullet glyph in accent gold so it reads as
+        a status pip; the rest in muted parchment so the line stays
+        quiet relative to streaming output.
+        """
+        import time as _t
+        phase = int(_t.monotonic() * 2) % 4
+        dots = "·" * phase + " " * (3 - phase)
+        return FormattedText([
+            ("class:thinking.dot", " ● "),
+            ("class:thinking", f"Loom is thinking{dots}"),
+        ])
 
     def _render_confirm(self) -> FormattedText:
         if self._confirm_state is None:
