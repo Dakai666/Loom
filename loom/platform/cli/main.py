@@ -55,6 +55,7 @@ from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.session_log import SessionLog
+from loom.platform.cli.theme import LOOM_THEME
 from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
@@ -76,7 +77,7 @@ from loom.platform.cli.ui import (
     tool_running_line,
 )
 
-console = Console(highlight=False)
+console = Console(highlight=False, theme=LOOM_THEME)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -121,9 +122,9 @@ async def _resolve_and_chat(
         if rows:
             resolved_id = rows[0]["session_id"]
             title = rows[0].get("title") or "(no title)"
-            console.print(f"[dim]Resuming session [cyan]{resolved_id}[/cyan]: {title}[/dim]")
+            console.print(f"[loom.muted]Resuming session [loom.accent]{resolved_id}[/loom.accent]: {title}[/loom.muted]")
         else:
-            console.print("[dim]No sessions found — starting a new session.[/dim]")
+            console.print("[loom.muted]No sessions found — starting a new session.[/loom.muted]")
 
     if tui:
         await _chat_tui(model, db, resume_session_id=resolved_id)
@@ -140,10 +141,10 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
         vis = session._reflection_visibility
         if vis == "off":
             return
-        console.print(f"[dim]  ⇢ diagnosed {diagnostic.one_line_summary()}[/dim]")
+        console.print(f"[loom.muted]  ⇢ diagnosed {diagnostic.one_line_summary()}[/loom.muted]")
         if vis == "verbose" and diagnostic.mutation_suggestions:
             for hint in diagnostic.mutation_suggestions[:2]:
-                console.print(f"[dim]      · {hint}[/dim]")
+                console.print(f"[loom.muted]      · {hint}[/loom.muted]")
 
     session.subscribe_diagnostic(_cli_diagnostic)
 
@@ -156,7 +157,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             "deprecate": "red",
         }.get(event.kind, "white")
         console.print(
-            f"[dim]  ⇢ [/dim][{colour}]{event.one_line_summary()}[/{colour}]"
+            f"[loom.muted]  ⇢ [/loom.muted][{colour}]{event.one_line_summary()}[/{colour}]"
         )
 
     session.subscribe_promotion(_cli_promotion)
@@ -167,7 +168,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
         console.print(
             Panel(
                 session._memory_index.render(),
-                title="[cyan]Memory[/cyan]",
+                title="[loom.accent]Memory[/loom.accent]",
                 border_style="dim",
             )
         )
@@ -295,7 +296,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             in_flight = current_turn_task is not None and not current_turn_task.done()
             if in_flight:
                 session.cancel()
-                console.print("[dim #c8924a]⏸  上一輪已中斷，接收新訊息…[/dim #c8924a]")
+                console.print("[loom.muted]⏸  上一輪已中斷，接收新訊息…[/loom.muted]")
                 try:
                     await asyncio.wait_for(current_turn_task, timeout=3.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -321,7 +322,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 try:
                     await _handle_slash(text, session)
                 except Exception as exc:
-                    console.print(f"[red]Slash command error: {exc}[/red]")
+                    console.print(f"[loom.error]Slash command error: {exc}[/loom.error]")
                 continue
 
             # Detect interruption marker injected by input_loop.
@@ -340,7 +341,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
-                console.print(f"[red]Turn error: {exc}[/red]")
+                console.print(f"[loom.error]Turn error: {exc}[/loom.error]")
             finally:
                 current_turn_task = None
 
@@ -367,7 +368,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                     pass
     finally:
         await session.stop()
-        console.print("\n[dim]Session ended. Goodbye.[/dim]")
+        console.print("\n[loom.muted]Session ended. Goodbye.[/loom.muted]")
 
 
 def _format_ttl(g: Any) -> str:
@@ -464,9 +465,9 @@ def _handle_scope_command(session: "LoomSession", args: str, console: Any) -> No
     if not args or args == "list":
         purged = perm.purge_expired()
         if not perm.grants:
-            console.print("[dim]  No active scope grants.[/dim]")
+            console.print("[loom.muted]  No active scope grants.[/loom.muted]")
             if purged:
-                console.print(f"[dim]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/dim]")
+                console.print(f"[loom.muted]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/loom.muted]")
             return
 
         table = Table(title="Active Scope Grants", border_style="dim", show_lines=False)
@@ -489,10 +490,10 @@ def _handle_scope_command(session: "LoomSession", args: str, console: Any) -> No
             )
         console.print(table)
         if purged:
-            console.print(f"[dim]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/dim]")
+            console.print(f"[loom.muted]  ({purged} expired grant{'s' if purged != 1 else ''} removed)[/loom.muted]")
     else:
         # Delegate revoke/clear/help to shared core
-        _scope_command_core(perm, args, lambda msg: console.print(f"[dim]  {msg}[/dim]"))
+        _scope_command_core(perm, args, lambda msg: console.print(f"[loom.muted]  {msg}[/loom.muted]"))
 
 
 async def _handle_slash(cmd: str, session: "LoomSession") -> None:
@@ -505,24 +506,24 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         if not arg:
             providers = ", ".join(session.router.providers)
             console.print(
-                f"[dim]Current model: [bold]{session.model}[/bold]  "
-                f"providers: {providers}[/dim]\n"
-                "[dim]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/dim]\n"
-                "[dim]  claude-*            requires ANTHROPIC_API_KEY in .env[/dim]\n"
-                "[dim]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/dim]\n"
-                "[dim]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/dim]\n"
-                "[dim]  ollama/<name>       enable [providers.ollama] in loom.toml[/dim]\n"
-                "[dim]  lmstudio/<name>     enable [providers.lmstudio] in loom.toml[/dim]"
+                f"[loom.muted]Current model: [bold]{session.model}[/bold]  "
+                f"providers: {providers}[/loom.muted]\n"
+                "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
+                "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
+                "[loom.muted]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/loom.muted]\n"
+                "[loom.muted]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/loom.muted]\n"
+                "[loom.muted]  ollama/<name>       enable [providers.ollama] in loom.toml[/loom.muted]\n"
+                "[loom.muted]  lmstudio/<name>     enable [providers.lmstudio] in loom.toml[/loom.muted]"
             )
         else:
             ok = session.set_model(arg)
             if ok:
-                console.print(f"[dim]Model switched to: [bold]{arg}[/bold][/dim]")
+                console.print(f"[loom.muted]Model switched to: [bold]{arg}[/bold][/loom.muted]")
             else:
                 console.print(
-                    f"[red]Could not switch to '{arg}'.[/red] "
-                    "[dim]Either the prefix is not recognised, or the provider is not registered "
-                    "(check API key in .env or enable in loom.toml).[/dim]"
+                    f"[loom.error]Could not switch to '{arg}'.[/loom.error] "
+                    "[loom.muted]Either the prefix is not recognised, or the provider is not registered "
+                    "(check API key in .env or enable in loom.toml).[/loom.muted]"
                 )
 
     if command == "/personality":
@@ -530,63 +531,63 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             p = session.current_personality
             avail = session._stack.available_personalities()
             console.print(
-                f"[dim]Active: [bold]{p or '(none)'}[/bold]  "
-                f"Available: {', '.join(avail) or '(none)'}[/dim]"
+                f"[loom.muted]Active: [bold]{p or '(none)'}[/bold]  "
+                f"Available: {', '.join(avail) or '(none)'}[/loom.muted]"
             )
         elif arg == "off":
             session.switch_personality("off")
-            console.print("[dim]Personality cleared.[/dim]")
+            console.print("[loom.muted]Personality cleared.[/loom.muted]")
         else:
             ok = session.switch_personality(arg)
             if ok:
-                console.print(f"[dim]Personality -> [bold]{arg}[/bold][/dim]")
+                console.print(f"[loom.muted]Personality -> [bold]{arg}[/bold][/loom.muted]")
             else:
                 avail = session._stack.available_personalities()
                 console.print(
-                    f"[red]Unknown personality '{arg}'.[/red] "
-                    f"[dim]Available: {', '.join(avail) or '(none)'}[/dim]"
+                    f"[loom.error]Unknown personality '{arg}'.[/loom.error] "
+                    f"[loom.muted]Available: {', '.join(avail) or '(none)'}[/loom.muted]"
                 )
 
     elif command == "/think":
         think = session._last_think
         if think:
             console.print(
-                Panel(think, title="[dim]Reasoning chain[/dim]", border_style="dim")
+                Panel(think, title="[loom.muted]Reasoning chain[/loom.muted]", border_style="dim")
             )
         else:
-            console.print("[dim]No reasoning chain captured for the last turn.[/dim]")
+            console.print("[loom.muted]No reasoning chain captured for the last turn.[/loom.muted]")
 
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
-        console.print(f"[dim]  Compacting context ({pct:.1f}% used)…[/dim]")
+        console.print(f"[loom.muted]  Compacting context ({pct:.1f}% used)…[/loom.muted]")
         await session._smart_compact()
 
     elif command == "/stop":
         # In CLI the turn is a blocking await — the user can't type while it runs.
         # /stop typed before a turn starts is a no-op; the real interrupt is Ctrl+C.
         console.print(
-            "[dim]  /stop interrupts a running turn.  "
-            "In CLI mode, press [yellow]Ctrl+C[/yellow] while the agent is responding.[/dim]"
+            "[loom.muted]  /stop interrupts a running turn.  "
+            "In CLI mode, press [loom.warning]Ctrl+C[/loom.warning] while the agent is responding.[/loom.muted]"
         )
 
     elif command == "/auto":
         if not session._strict_sandbox:
             console.print(
-                "[yellow]  /auto requires strict_sandbox = true in loom.toml.[/yellow]\n"
-                "[dim]  Without workspace confinement, auto-approving run_bash "
-                "would grant unrestricted shell access.[/dim]"
+                "[loom.warning]  /auto requires strict_sandbox = true in loom.toml.[/loom.warning]\n"
+                "[loom.muted]  Without workspace confinement, auto-approving run_bash "
+                "would grant unrestricted shell access.[/loom.muted]"
             )
         else:
             session.perm.exec_auto = not session.perm.exec_auto
             state = "on" if session.perm.exec_auto else "off"
             if session.perm.exec_auto:
                 console.print(
-                    f"[dim]Exec auto-approve: [green]{state}[/green] — "
+                    f"[loom.muted]Exec auto-approve: [loom.success]{state}[/loom.success] — "
                     "run_bash pre-authorized within workspace. "
-                    "Absolute paths that escape the workspace still require confirmation.[/dim]"
+                    "Absolute paths that escape the workspace still require confirmation.[/loom.muted]"
                 )
             else:
-                console.print(f"[dim]Exec auto-approve: [yellow]{state}[/yellow] — run_bash will confirm every call.[/dim]")
+                console.print(f"[loom.muted]Exec auto-approve: [loom.warning]{state}[/loom.warning] — run_bash will confirm every call.[/loom.muted]")
 
     elif command.startswith("/scope"):
         _scope_args = command[len("/scope"):].strip()
@@ -597,55 +598,55 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         session.hitl_mode = not session.hitl_mode
         state = "on" if session.hitl_mode else "off"
         console.print(
-            f"[dim]HITL pause mode: [{'yellow' if session.hitl_mode else 'green'}]{state}"
-            f"[/{'yellow' if session.hitl_mode else 'green'}][/dim]"
+            f"[loom.muted]HITL pause mode: [{'yellow' if session.hitl_mode else 'green'}]{state}"
+            f"[/{'yellow' if session.hitl_mode else 'green'}][/loom.muted]"
         )
         if session.hitl_mode:
             console.print(
-                "[dim]  The agent will pause after each tool batch for your input.[/dim]\n"
-                "[dim]  At pause> :  r(esume) · c(ancel) · <message>(redirect)[/dim]"
+                "[loom.muted]  The agent will pause after each tool batch for your input.[/loom.muted]\n"
+                "[loom.muted]  At pause> :  r(esume) · c(ancel) · <message>(redirect)[/loom.muted]"
             )
 
     elif command == "/help":
         console.print(
             Panel(
                 "[bold]Session[/bold]\n\n"
-                "  Start a new session:    [yellow]loom chat[/yellow]\n"
-                "  Resume last session:    [yellow]loom chat --resume[/yellow]\n"
-                "  Resume specific:        [yellow]loom chat --session <id>[/yellow]\n"
-                "  List sessions:          [yellow]loom sessions list[/yellow]\n\n"
+                "  Start a new session:    [loom.warning]loom chat[/loom.warning]\n"
+                "  Resume last session:    [loom.warning]loom chat --resume[/loom.warning]\n"
+                "  Resume specific:        [loom.warning]loom chat --session <id>[/loom.warning]\n"
+                "  List sessions:          [loom.warning]loom sessions list[/loom.warning]\n\n"
                 "[bold]Slash commands[/bold]\n\n"
-                "  [yellow]/new[/yellow]                       Start a fresh session\n"
-                "  [yellow]/sessions[/yellow]                  Browse and switch sessions\n"
-                "  [yellow]/model[/yellow]                     Show current model + registered providers\n"
-                "  [yellow]/model[/yellow] [dim]<name>[/dim]              Switch model at runtime\n"
-                "    [dim]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/dim]\n"
-                "    [dim]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/dim]\n"
-                "    [dim]ollama/<model>          → local Ollama  (enable in loom.toml)[/dim]\n"
-                "    [dim]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/dim]\n"
-                "  [yellow]/personality[/yellow] [dim]<name>[/dim]      Switch cognitive persona\n"
-                "  [yellow]/personality off[/yellow]           Remove active persona\n"
-                "  [yellow]/think[/yellow]                     View last turn's reasoning chain\n"
-                "  [yellow]/compact[/yellow]                   Compress older context\n"
-                "  [yellow]/auto[/yellow]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
-                "  [yellow]/scope[/yellow]                     List active scope grants (leases)\n"
-                "  [yellow]/scope revoke <N>[/yellow]          Revoke a specific grant\n"
-                "  [yellow]/scope clear[/yellow]               Revoke all non-system grants\n"
-                "  [yellow]/pause[/yellow]                     Toggle HITL pause after each tool batch\n"
-                "  [yellow]/stop[/yellow]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
-                "  [yellow]/help[/yellow]                      Show this message\n\n"
+                "  [loom.warning]/new[/loom.warning]                       Start a fresh session\n"
+                "  [loom.warning]/sessions[/loom.warning]                  Browse and switch sessions\n"
+                "  [loom.warning]/model[/loom.warning]                     Show current model + registered providers\n"
+                "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
+                "    [loom.muted]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
+                "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
+                "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
+                "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
+                "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
+                "  [loom.warning]/personality off[/loom.warning]           Remove active persona\n"
+                "  [loom.warning]/think[/loom.warning]                     View last turn's reasoning chain\n"
+                "  [loom.warning]/compact[/loom.warning]                   Compress older context\n"
+                "  [loom.warning]/auto[/loom.warning]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
+                "  [loom.warning]/scope[/loom.warning]                     List active scope grants (leases)\n"
+                "  [loom.warning]/scope revoke <N>[/loom.warning]          Revoke a specific grant\n"
+                "  [loom.warning]/scope clear[/loom.warning]               Revoke all non-system grants\n"
+                "  [loom.warning]/pause[/loom.warning]                     Toggle HITL pause after each tool batch\n"
+                "  [loom.warning]/stop[/loom.warning]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
+                "  [loom.warning]/help[/loom.warning]                      Show this message\n\n"
                 "[bold]Keyboard shortcuts[/bold]\n\n"
-                "  [dim]Ctrl-L[/dim]       Clear screen\n"
-                "  [dim]up / down[/dim]    Browse input history\n"
-                "  [dim]Tab[/dim]          Autocomplete slash commands\n"
-                "  [dim]exit / Ctrl-C[/dim]  End session",
-                title="[yellow] Loom — command reference [/yellow]",
+                "  [loom.muted]Ctrl-L[/loom.muted]       Clear screen\n"
+                "  [loom.muted]up / down[/loom.muted]    Browse input history\n"
+                "  [loom.muted]Tab[/loom.muted]          Autocomplete slash commands\n"
+                "  [loom.muted]exit / Ctrl-C[/loom.muted]  End session",
+                title="[loom.warning] Loom — command reference [/loom.warning]",
                 border_style="yellow",
             )
         )
 
     else:
-        console.print(f"[dim]Unknown command '{command}'. Type /help for help.[/dim]")
+        console.print(f"[loom.muted]Unknown command '{command}'. Type /help for help.[/loom.muted]")
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +742,9 @@ class LoomChatApp:
                         else:
                             agent_texts.append(c[:60].replace("\n", " "))
                     
-                    sum_text = f"[bold yellow]Turn {t_idx}[/] [cyan]{user_text}[/]"
+                    sum_text = f"[bold loom.warning]Turn {t_idx}[/] [loom.accent]{user_text}[/]"
                     if agent_texts:
-                        sum_text += f"\n   [dim]↳ {' | '.join(agent_texts)[:120]}[/]"
+                        sum_text += f"\n   [loom.muted]↳ {' | '.join(agent_texts)[:120]}[/]"
                     
                     turns_data.append((t_idx, sum_text))
                 
@@ -1253,14 +1254,14 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     pct = session.budget.usage_fraction * 100
     ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
     persona_tag = (
-        f"  [dim]|  persona: {session.current_personality}[/dim]"
+        f"  [loom.muted]|  persona: {session.current_personality}[/loom.muted]"
         if session.current_personality
         else ""
     )
     console.print(
         Rule(
-            f"[bold green]loom[/bold green]"
-            f"[dim]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/dim]"
+            f"[bold loom.success]loom[/bold loom.success]"
+            f"[loom.muted]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/loom.muted]"
             f"{persona_tag}",
             style="green",
         )
@@ -1309,7 +1310,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 if not at_line_start:
                     console.print()
                 console.print(
-                    Text.from_markup(f"[dim]💭 {event.summary}[/dim]")
+                    Text.from_markup(f"[loom.muted]💭 {event.summary}[/loom.muted]")
                 )
                 at_line_start = True
 
@@ -1345,9 +1346,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     console.print()
                 console.print(
                     Rule(
-                        f"[#c8924a]⏸  Paused[/#c8924a]  "
-                        f"[dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
-                        style="#c8924a",
+                        f"[loom.warning]⏸  Paused[/loom.warning]  "
+                        f"[loom.muted]({event.tool_count_so_far} tool(s) so far)[/loom.muted]",
+                        style="loom.warning",
                     )
                 )
 
@@ -1394,7 +1395,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     raw = (raw or "").strip()
                     if raw:
                         session.resume_with(raw)
-                        console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
+                        console.print(f"[loom.muted]  Injected: {raw[:80]}[/loom.muted]")
                     else:
                         session.resume()
                 else:  # _PAUSE_RESUME
@@ -1429,8 +1430,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         console.print()
         console.print(
             Rule(
-                "[#c8924a]⏸  ABORTED[/#c8924a]  [dim]turn cut short by user[/dim]",
-                style="#c8924a",
+                "[loom.warning]⏸  ABORTED[/loom.warning]  [loom.muted]turn cut short by user[/loom.muted]",
+                style="loom.warning",
             )
         )
         raise
@@ -1438,7 +1439,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         _cancel_spinner()
         clear_line()
         console.print()
-        console.print(f"[red]Error: {exc}[/red]")
+        console.print(f"[loom.error]Error: {exc}[/loom.error]")
     finally:
         # Defensive: ensure the spinner task never outlives this turn,
         # even if neither except branch fired (clean exit) or if a path
@@ -1490,7 +1491,7 @@ async def _sessions_list(db: str, limit: int) -> None:
         rows = await sl.list_sessions(limit)
 
     if not rows:
-        console.print("[dim]No sessions found.[/dim]")
+        console.print("[loom.muted]No sessions found.[/loom.muted]")
         return
 
     table = Table(title="Sessions", show_header=True, header_style="bold cyan")
@@ -1502,7 +1503,7 @@ async def _sessions_list(db: str, limit: int) -> None:
     for r in rows:
         table.add_row(
             r["session_id"],
-            r["title"] or "[dim](no title)[/dim]",
+            r["title"] or "[loom.muted](no title)[/loom.muted]",
             r["model"],
             str(r["turn_count"]),
             r["last_active"][:16].replace("T", " "),
@@ -1519,14 +1520,14 @@ async def _sessions_show(session_id: str, db: str) -> None:
         messages = await sl.load_messages(session_id)
 
     if meta is None:
-        console.print(f"[red]Session '{session_id}' not found.[/red]")
+        console.print(f"[loom.error]Session '{session_id}' not found.[/loom.error]")
         return
 
-    console.print(Rule(f"[cyan]Session {session_id}[/cyan]"))
+    console.print(Rule(f"[loom.accent]Session {session_id}[/loom.accent]"))
     console.print(
-        f"[dim]Model: {meta['model']}  |  "
+        f"[loom.muted]Model: {meta['model']}  |  "
         f"Turns: {meta['turn_count']}  |  "
-        f"Started: {meta['started_at'][:16].replace('T', ' ')}[/dim]"
+        f"Started: {meta['started_at'][:16].replace('T', ' ')}[/loom.muted]"
     )
     console.print()
 
@@ -1534,12 +1535,12 @@ async def _sessions_show(session_id: str, db: str) -> None:
         role = msg.get("role", "")
         content = msg.get("content", "") or ""
         if role == "user":
-            console.print(f"[bold yellow]you>[/bold yellow] {content}")
+            console.print(f"[bold loom.warning]you>[/bold loom.warning] {content}")
         elif role == "assistant":
             if content:
                 console.print(Markdown(content))
         elif role == "tool":
-            console.print(f"[dim]  [tool] {str(content)[:300]}[/dim]")
+            console.print(f"[loom.muted]  [tool] {str(content)[:300]}[/loom.muted]")
         console.print()
 
 
@@ -1550,10 +1551,10 @@ async def _sessions_rm(session_id: str, db: str) -> None:
         sl = SessionLog(conn)
         meta = await sl.get_session(session_id)
         if meta is None:
-            console.print(f"[red]Session '{session_id}' not found.[/red]")
+            console.print(f"[loom.error]Session '{session_id}' not found.[/loom.error]")
             return
         await sl.delete_session(session_id)
-    console.print(f"[dim]Session [cyan]{session_id}[/cyan] deleted.[/dim]")
+    console.print(f"[loom.muted]Session [loom.accent]{session_id}[/loom.accent] deleted.[/loom.muted]")
 
 
 # ---------------------------------------------------------------------------
@@ -1580,14 +1581,14 @@ async def _memory_list(db: str, limit: int) -> None:
         entries = await sem.list_recent(limit)
 
     if not entries:
-        console.print("[dim]No semantic memories yet.[/dim]")
+        console.print("[loom.muted]No semantic memories yet.[/loom.muted]")
         return
 
-    console.print(Rule("[cyan]Semantic Memory[/cyan]"))
+    console.print(Rule("[loom.accent]Semantic Memory[/loom.accent]"))
     for e in entries:
         c = "green" if e.confidence > 0.7 else "yellow" if e.confidence > 0.4 else "red"
         console.print(
-            f"  [{c}]{e.confidence:.2f}[/{c}]  [dim]{e.key}[/dim]\n       {e.value}\n"
+            f"  [{c}]{e.confidence:.2f}[/{c}]  [loom.muted]{e.key}[/loom.muted]\n       {e.value}\n"
         )
 
 
@@ -1623,10 +1624,10 @@ async def _reflect(session_id: str | None, db: str) -> None:
         api = ReflectionAPI(facade)
 
         if session_id is None:
-            console.print("[dim]No session ID given — showing skill health only.[/dim]")
+            console.print("[loom.muted]No session ID given — showing skill health only.[/loom.muted]")
         else:
             summary = await api.session_summary(session_id)
-            console.print(Panel(summary, title=f"[cyan]Session {session_id}[/cyan]"))
+            console.print(Panel(summary, title=f"[loom.accent]Session {session_id}[/loom.accent]"))
 
             rates = await api.tool_success_rate(session_id)
             if rates:
@@ -1640,10 +1641,10 @@ async def _reflect(session_id: str | None, db: str) -> None:
             console.print(Rule("Skill health"))
             for s in skills:
                 console.print(
-                    f"  [green]{s['confidence']:.2f}[/green]  "
+                    f"  [loom.success]{s['confidence']:.2f}[/loom.success]  "
                     f"[bold]{s['name']}[/bold]  "
-                    f"[dim]used {s['usage_count']}×  "
-                    f"tags: {s['tags']}[/dim]"
+                    f"[loom.muted]used {s['usage_count']}×  "
+                    f"tags: {s['tags']}[/loom.muted]"
                 )
 
 
@@ -1685,15 +1686,15 @@ async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
 
     if not entries:
         where = f" for skill '{skill}'" if skill else ""
-        console.print(f"[dim]No diagnostics found{where}.[/dim]")
+        console.print(f"[loom.muted]No diagnostics found{where}.[/loom.muted]")
         return
 
-    console.print(Rule("[cyan]Recent skill diagnostics[/cyan]"))
+    console.print(Rule("[loom.accent]Recent skill diagnostics[/loom.accent]"))
     for e in entries:
         try:
             diag = TaskDiagnostic.from_json(e.value)
         except Exception:
-            console.print(f"  [red]![/red] [dim]{e.key}[/dim]  (unparseable)")
+            console.print(f"  [loom.error]![/loom.error] [loom.muted]{e.key}[/loom.muted]  (unparseable)")
             continue
 
         score_color = (
@@ -1703,14 +1704,14 @@ async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
         )
         ts = diag.timestamp.strftime("%Y-%m-%d %H:%M")
         console.print(
-            f"[dim]{ts}[/dim]  "
-            f"[bold cyan]{diag.skill_name}[/bold cyan]  "
-            f"[dim]{diag.task_type}[/dim]  "
+            f"[loom.muted]{ts}[/loom.muted]  "
+            f"[bold loom.accent]{diag.skill_name}[/bold loom.accent]  "
+            f"[loom.muted]{diag.task_type}[/loom.muted]  "
             f"[{score_color}]{diag.quality_score:.1f}[/{score_color}]"
         )
         if diag.instructions_violated:
             for v in diag.instructions_violated[:3]:
-                console.print(f"   [red]✗[/red] {v}")
+                console.print(f"   [loom.error]✗[/loom.error] {v}")
         if diag.mutation_suggestions:
             console.print("   [bold]→ suggestions:[/bold]")
             for s in diag.mutation_suggestions[:3]:
@@ -1778,10 +1779,10 @@ async def _skill_candidates(
         if status:
             where.append(f"status='{status.lower()}'")
         suffix = f" ({', '.join(where)})" if where else ""
-        console.print(f"[dim]No skill candidates found{suffix}.[/dim]")
+        console.print(f"[loom.muted]No skill candidates found{suffix}.[/loom.muted]")
         return
 
-    console.print(Rule("[cyan]Skill candidates[/cyan]"))
+    console.print(Rule("[loom.accent]Skill candidates[/loom.accent]"))
     status_color = {
         "generated": "yellow",
         "shadow": "cyan",
@@ -1796,18 +1797,18 @@ async def _skill_candidates(
             f"{k}={v:.1f}" for k, v in c.pareto_scores.items()
         ) or "—"
         console.print(
-            f"[dim]{ts}[/dim]  "
-            f"[bold cyan]{c.parent_skill_name}[/bold cyan] v{c.parent_version}  "
+            f"[loom.muted]{ts}[/loom.muted]  "
+            f"[bold loom.accent]{c.parent_skill_name}[/bold loom.accent] v{c.parent_version}  "
             f"[{colour}]{c.status}[/{colour}]  "
-            f"[dim]{c.mutation_strategy}[/dim]  "
-            f"[dim]scores={score_bits}[/dim]  "
-            f"[dim]id={c.id[:8]}[/dim]"
+            f"[loom.muted]{c.mutation_strategy}[/loom.muted]  "
+            f"[loom.muted]scores={score_bits}[/loom.muted]  "
+            f"[loom.muted]id={c.id[:8]}[/loom.muted]"
         )
         if c.notes:
-            console.print(f"   [dim]note:[/dim] {c.notes}")
+            console.print(f"   [loom.muted]note:[/loom.muted] {c.notes}")
         if c.diagnostic_keys:
             console.print(
-                f"   [dim]from:[/dim] {', '.join(c.diagnostic_keys[:2])}"
+                f"   [loom.muted]from:[/loom.muted] {', '.join(c.diagnostic_keys[:2])}"
                 + (" …" if len(c.diagnostic_keys) > 2 else "")
             )
         if show_body:
@@ -1837,19 +1838,19 @@ async def _skill_promote(candidate_id: str, reason: str | None, db: str) -> None
         # Resolve short (8-char) prefixes for operator ergonomics.
         resolved = await _resolve_candidate_id(proc, candidate_id)
         if resolved is None:
-            console.print(f"[red]No candidate matches id prefix {candidate_id!r}.[/red]")
+            console.print(f"[loom.error]No candidate matches id prefix {candidate_id!r}.[/loom.error]")
             return
         promoter = SkillPromoter(procedural=proc)
         try:
             parent = await promoter.promote(resolved, reason=reason)
         except ValueError as exc:
-            console.print(f"[red]Refused:[/red] {exc}")
+            console.print(f"[loom.error]Refused:[/loom.error] {exc}")
             return
     if parent is None:
-        console.print(f"[red]Promotion failed — candidate or parent missing.[/red]")
+        console.print(f"[loom.error]Promotion failed — candidate or parent missing.[/loom.error]")
         return
     console.print(
-        f"[green]Promoted[/green] [bold cyan]{parent.name}[/bold cyan] "
+        f"[loom.success]Promoted[/loom.success] [bold loom.accent]{parent.name}[/bold loom.accent] "
         f"→ v{parent.version}"
     )
 
@@ -1882,11 +1883,11 @@ async def _skill_rollback(
     if parent is None:
         suffix = f" v{to_version}" if to_version else ""
         console.print(
-            f"[red]Rollback failed — no history entry for {skill_name}{suffix}.[/red]"
+            f"[loom.error]Rollback failed — no history entry for {skill_name}{suffix}.[/loom.error]"
         )
         return
     console.print(
-        f"[yellow]Rolled back[/yellow] [bold cyan]{parent.name}[/bold cyan] "
+        f"[loom.warning]Rolled back[/loom.warning] [bold loom.accent]{parent.name}[/bold loom.accent] "
         f"→ v{parent.version}"
     )
 
@@ -1910,20 +1911,20 @@ async def _skill_history(skill_name: str, limit: int, db: str) -> None:
         records = await proc.list_history(skill_name, limit=limit)
 
     if not records:
-        console.print(f"[dim]No archived versions for {skill_name}.[/dim]")
+        console.print(f"[loom.muted]No archived versions for {skill_name}.[/loom.muted]")
         return
 
-    console.print(Rule(f"[cyan]{skill_name} — version history[/cyan]"))
+    console.print(Rule(f"[loom.accent]{skill_name} — version history[/loom.accent]"))
     reason_color = {"promote": "green", "rollback": "yellow", "manual": "dim"}
     for r in records:
         ts = r.archived_at.strftime("%Y-%m-%d %H:%M")
         colour = reason_color.get(r.reason, "white")
         src = (
-            f"  [dim]from candidate {r.source_candidate_id[:8]}[/dim]"
+            f"  [loom.muted]from candidate {r.source_candidate_id[:8]}[/loom.muted]"
             if r.source_candidate_id else ""
         )
         console.print(
-            f"[dim]{ts}[/dim]  v{r.version}  "
+            f"[loom.muted]{ts}[/loom.muted]  v{r.version}  "
             f"[{colour}]{r.reason}[/{colour}]{src}"
         )
 
@@ -1952,7 +1953,7 @@ def skill_set_maturity(
             tag = normalised
         else:
             console.print(
-                f"[red]Invalid tag {tag!r}.[/red] Use 'mature', 'needs_improvement', or --clear."
+                f"[loom.error]Invalid tag {tag!r}.[/loom.error] Use 'mature', 'needs_improvement', or --clear."
             )
             return
     asyncio.run(_skill_set_maturity(skill_name, tag, db))
@@ -1967,11 +1968,11 @@ async def _skill_set_maturity(skill_name: str, tag: str | None, db: str) -> None
         proc = ProceduralMemory(conn)
         ok = await proc.update_maturity_tag(skill_name, tag)
     if not ok:
-        console.print(f"[red]Skill {skill_name!r} not found.[/red]")
+        console.print(f"[loom.error]Skill {skill_name!r} not found.[/loom.error]")
         return
     display = tag if tag is not None else "(cleared)"
     console.print(
-        f"[green]Updated[/green] [bold cyan]{skill_name}[/bold cyan] "
+        f"[loom.success]Updated[/loom.success] [bold loom.accent]{skill_name}[/bold loom.accent] "
         f"maturity_tag → {display}"
     )
 
@@ -2023,63 +2024,63 @@ async def _skill_review(skill_name: str, db: str) -> None:
         eval_entries = await sem.list_by_prefix(f"skill:{skill_name}:eval:", limit=20)
         insight_entries = await sem.list_by_prefix(f"skill:{skill_name}:insight:", limit=5)
 
-    console.print(Rule(f"[bold cyan]{skill_name}[/bold cyan] — skill review"))
+    console.print(Rule(f"[bold loom.accent]{skill_name}[/bold loom.accent] — skill review"))
 
     # ── Genome ──────────────────────────────────────────────────────────
     if genome is None:
         # Empty state: most of the time the skill name is a typo or the
         # skill has been generated but never loaded.  Point the operator
         # at the next action instead of just reporting absence.
-        console.print(f"[red]No SkillGenome found for '{skill_name}'.[/red]")
+        console.print(f"[loom.error]No SkillGenome found for '{skill_name}'.[/loom.error]")
         suggestions: list[str] = []
         if candidates:
             suggestions.append(
                 f"  • {len(candidates)} candidate(s) exist in the pool — "
-                f"run [cyan]loom skill candidates {skill_name}[/cyan] to inspect."
+                f"run [loom.accent]loom skill candidates {skill_name}[/loom.accent] to inspect."
             )
         if eval_entries or insight_entries:
             suggestions.append(
                 f"  • Grader / Analyzer records exist for this name — "
-                f"the genome may have been deprecated. Check [cyan]loom skill list[/cyan]."
+                f"the genome may have been deprecated. Check [loom.accent]loom skill list[/loom.accent]."
             )
         if not suggestions:
             suggestions.extend([
-                "  • Check the name with [cyan]loom skill list[/cyan] "
+                "  • Check the name with [loom.accent]loom skill list[/loom.accent] "
                 "(typos are the most common cause).",
                 "  • If this is a new skill, run the meta-skill-engineer workflow: "
-                "[cyan]loom chat[/cyan] → ask Loom to create a skill.",
+                "[loom.accent]loom chat[/loom.accent] → ask Loom to create a skill.",
                 "  • Pending candidates can still be listed via "
-                "[cyan]loom skill candidates[/cyan].",
+                "[loom.accent]loom skill candidates[/loom.accent].",
             ])
         console.print("\n".join(suggestions))
         return
     maturity = (
-        f"  [bold yellow]{genome.maturity_tag}[/bold yellow]"
+        f"  [bold loom.warning]{genome.maturity_tag}[/bold loom.warning]"
         if genome.maturity_tag else ""
     )
     console.print(
-        f"  v{genome.version}  confidence=[cyan]{genome.confidence:.2f}[/cyan]"
+        f"  v{genome.version}  confidence=[loom.accent]{genome.confidence:.2f}[/loom.accent]"
         f"  usage={genome.usage_count}{maturity}"
     )
 
     # ── Eval history ────────────────────────────────────────────────────
     if eval_entries:
-        console.print(Rule("[dim]Grader eval history[/dim]", style="dim"))
+        console.print(Rule("[loom.muted]Grader eval history[/loom.muted]", style="dim"))
         for e in sorted(eval_entries, key=lambda x: x.key):
             ts = e.created_at.strftime("%Y-%m-%d") if e.created_at else "?"
-            console.print(f"  [dim]{ts}[/dim]  [bold]{e.key.split(':')[-1]}[/bold]  {e.value[:120]}")
+            console.print(f"  [loom.muted]{ts}[/loom.muted]  [bold]{e.key.split(':')[-1]}[/bold]  {e.value[:120]}")
     else:
-        console.print("[dim]  No Grader eval records yet.[/dim]")
+        console.print("[loom.muted]  No Grader eval records yet.[/loom.muted]")
 
     # ── Insights ────────────────────────────────────────────────────────
     if insight_entries:
-        console.print(Rule("[dim]Analyzer insights[/dim]", style="dim"))
+        console.print(Rule("[loom.muted]Analyzer insights[/loom.muted]", style="dim"))
         for e in insight_entries:
-            console.print(f"  [dim]{e.key}[/dim]  {e.value[:120]}")
+            console.print(f"  [loom.muted]{e.key}[/loom.muted]  {e.value[:120]}")
 
     # ── Candidate pool ──────────────────────────────────────────────────
     if candidates:
-        console.print(Rule("[dim]Candidate pool[/dim]", style="dim"))
+        console.print(Rule("[loom.muted]Candidate pool[/loom.muted]", style="dim"))
         status_color = {
             "generated": "white", "shadow": "cyan", "promoted": "green",
             "deprecated": "dim", "rolled_back": "yellow",
@@ -2087,20 +2088,20 @@ async def _skill_review(skill_name: str, db: str) -> None:
         for c in candidates:
             ts = c.created_at.strftime("%Y-%m-%d %H:%M")
             col = status_color.get(c.status, "white")
-            ft = " [bold yellow]⚡fast-track[/bold yellow]" if c.fast_track else ""
+            ft = " [bold loom.warning]⚡fast-track[/bold loom.warning]" if c.fast_track else ""
             console.print(
-                f"  [dim]{ts}[/dim]  [{col}]{c.status}[/{col}]"
+                f"  [loom.muted]{ts}[/loom.muted]  [{col}]{c.status}[/{col}]"
                 f"  {c.id[:8]}  {c.mutation_strategy}{ft}"
             )
     else:
-        console.print("[dim]  No candidates in pool.[/dim]")
+        console.print("[loom.muted]  No candidates in pool.[/loom.muted]")
 
     # ── Version history ─────────────────────────────────────────────────
     if history_records:
-        console.print(Rule("[dim]Recent version history[/dim]", style="dim"))
+        console.print(Rule("[loom.muted]Recent version history[/loom.muted]", style="dim"))
         for r in history_records:
             ts = r.archived_at.strftime("%Y-%m-%d %H:%M")
-            console.print(f"  [dim]{ts}[/dim]  v{r.version}  [{r.reason}]")
+            console.print(f"  [loom.muted]{ts}[/loom.muted]  v{r.version}  [{r.reason}]")
 
 
 # loom import command
@@ -2155,7 +2156,7 @@ async def _import(
     try:
         source = _json.loads(raw_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        console.print(f"[red]Could not read '{raw_path}': {exc}[/red]")
+        console.print(f"[loom.error]Could not read '{raw_path}': {exc}[/loom.error]")
         return
 
     # Extract via lens
@@ -2163,20 +2164,20 @@ async def _import(
     if result is None:
         avail = ", ".join(lens_registry.registered_names) or "(none)"
         console.print(
-            f"[red]No lens matched this file.[/red] "
-            f"[dim]Available: {avail}. Use --lens to specify one.[/dim]"
+            f"[loom.error]No lens matched this file.[/loom.error] "
+            f"[loom.muted]Available: {avail}. Use --lens to specify one.[/loom.muted]"
         )
         return
 
-    console.print(f"[dim]Lens:[/dim] [cyan]{result.source}[/cyan]  "
-                  f"[dim]File:[/dim] {raw_path.name}")
+    console.print(f"[loom.muted]Lens:[/loom.muted] [loom.accent]{result.source}[/loom.accent]  "
+                  f"[loom.muted]File:[/loom.muted] {raw_path.name}")
 
     if result.warnings:
         for w in result.warnings:
-            console.print(f"  [yellow]⚠[/yellow]  {w}")
+            console.print(f"  [loom.warning]⚠[/loom.warning]  {w}")
 
     if result.is_empty:
-        console.print("[dim]Nothing to import.[/dim]")
+        console.print("[loom.muted]Nothing to import.[/loom.muted]")
         return
 
     store = SQLiteStore(db)
@@ -2194,21 +2195,21 @@ async def _import(
             rejected = [d for d in decisions if not d.approved]
 
             for d in approved:
-                marker = "[dim](dry-run)[/dim]" if dry_run else "[green]✓[/green]"
+                marker = "[loom.muted](dry-run)[/loom.muted]" if dry_run else "[loom.success]✓[/loom.success]"
                 console.print(
-                    f"  {marker} [cyan]{d.skill_name}[/cyan]  "
-                    f"[dim]conf={d.adjusted_confidence:.2f}[/dim]"
+                    f"  {marker} [loom.accent]{d.skill_name}[/loom.accent]  "
+                    f"[loom.muted]conf={d.adjusted_confidence:.2f}[/loom.muted]"
                 )
             for d in rejected:
                 console.print(
-                    f"  [dim]✗[/dim] [dim]{d.skill_name}[/dim]  "
-                    f"[red]{d.reason}[/red]"
+                    f"  [loom.muted]✗[/loom.muted] [loom.muted]{d.skill_name}[/loom.muted]  "
+                    f"[loom.error]{d.reason}[/loom.error]"
                 )
 
             if not dry_run and approved:
                 count = await pipeline.import_approved(decisions, result.skills)
                 console.print(
-                    f"\n  [green]{count} skill(s) written to ProceduralMemory.[/green]"
+                    f"\n  [loom.success]{count} skill(s) written to ProceduralMemory.[/loom.success]"
                 )
 
         # ── Tool adapters ────────────────────────────────────────────────────
@@ -2219,28 +2220,28 @@ async def _import(
                     a.get("trust_level", "safe"), "white"
                 )
                 console.print(
-                    f"  [dim]·[/dim] [cyan]{a['name']}[/cyan]  "
+                    f"  [loom.muted]·[/loom.muted] [loom.accent]{a['name']}[/loom.accent]  "
                     f"[{trust_color}]{a.get('trust_level', 'safe').upper()}[/{trust_color}]  "
-                    f"[dim]{a.get('description', '')[:60]}[/dim]"
+                    f"[loom.muted]{a.get('description', '')[:60]}[/loom.muted]"
                 )
             if dry_run:
                 console.print(
-                    "  [dim](dry-run) Adapters listed but not installed into any session.[/dim]"
+                    "  [loom.muted](dry-run) Adapters listed but not installed into any session.[/loom.muted]"
                 )
             else:
                 console.print(
-                    "  [dim]Adapters listed. Use AdapterRegistry.from_lens_result() "
-                    "in code, or place tools in loom_tools.py for auto-loading.[/dim]"
+                    "  [loom.muted]Adapters listed. Use AdapterRegistry.from_lens_result() "
+                    "in code, or place tools in loom_tools.py for auto-loading.[/loom.muted]"
                 )
 
         # ── Middleware patterns (informational) ──────────────────────────────
         if result.middleware_patterns:
             console.print(
                 f"\n[bold]Middleware patterns[/bold] "
-                f"[dim](informational — not imported)[/dim]"
+                f"[loom.muted](informational — not imported)[/loom.muted]"
             )
             for m in result.middleware_patterns:
-                console.print(f"  [dim]·[/dim] {m['name']}  {m.get('description', '')[:60]}")
+                console.print(f"  [loom.muted]·[/loom.muted] {m['name']}  {m.get('description', '')[:60]}")
 
 
 # ---------------------------------------------------------------------------
@@ -2297,7 +2298,7 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
             rest_api_url=rest_api_url or None,
         )
         notify_router.register(discord_notifier)
-        console.print(f"[dim]  Discord notifier registered.[/dim]")
+        console.print(f"[loom.muted]  Discord notifier registered.[/loom.muted]")
 
     confirm_flow = ConfirmFlow(
         send_fn=notify_router.send,
@@ -2318,10 +2319,10 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
     n = daemon.load_config(config)
     console.print(
         Panel(
-            f"[bold cyan]Loom Autonomy Daemon[/bold cyan]\n"
-            f"Loaded [green]{n}[/green] trigger(s) from [dim]{config}[/dim]\n"
+            f"[bold loom.accent]Loom Autonomy Daemon[/bold loom.accent]\n"
+            f"Loaded [loom.success]{n}[/loom.success] trigger(s) from [loom.muted]{config}[/loom.muted]\n"
             f"Poll interval: {interval}s  |  model: {model}\n"
-            f"[dim]Press Ctrl-C to stop.[/dim]",
+            f"[loom.muted]Press Ctrl-C to stop.[/loom.muted]",
             border_style="cyan",
         )
     )
@@ -2332,7 +2333,7 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
         pass
     finally:
         await session.stop()
-        console.print("[dim]Autonomy daemon stopped.[/dim]")
+        console.print("[loom.muted]Autonomy daemon stopped.[/loom.muted]")
 
 
 @autonomy.command("status")
@@ -2350,10 +2351,10 @@ def autonomy_status(config: str) -> None:
     n = daemon.load_config(config)
     triggers = daemon.registered_triggers()
 
-    console.print(Rule("[cyan]Registered Triggers[/cyan]"))
+    console.print(Rule("[loom.accent]Registered Triggers[/loom.accent]"))
     if not triggers:
         console.print(
-            "[dim]No triggers found (check autonomy.enabled in loom.toml)[/dim]"
+            "[loom.muted]No triggers found (check autonomy.enabled in loom.toml)[/loom.muted]"
         )
         return
 
@@ -2361,8 +2362,8 @@ def autonomy_status(config: str) -> None:
         color = "green" if t["enabled"] else "dim"
         console.print(
             f"  [{color}]{t['name']}[/{color}]  "
-            f"[dim]{t['kind']}[/dim]  "
-            f"trust=[yellow]{t['trust_level']}[/yellow]\n"
+            f"[loom.muted]{t['kind']}[/loom.muted]  "
+            f"trust=[loom.warning]{t['trust_level']}[/loom.warning]\n"
             f"    {t['intent']}\n"
         )
 
@@ -2402,7 +2403,7 @@ async def _autonomy_emit(event_name: str, config: str, model: str, db: str) -> N
     daemon.load_config(config)
     fired = await daemon.evaluator.emit(event_name)
     console.print(
-        f"[cyan]Emitted[/cyan] '{event_name}' → fired triggers: {fired or ['(none)']}"
+        f"[loom.accent]Emitted[/loom.accent] '{event_name}' → fired triggers: {fired or ['(none)']}"
     )
     await session.stop()
 
@@ -2428,14 +2429,14 @@ def api_start(host: str, port: int, db: str, reload: bool) -> None:
         from loom.platform.api.server import run_server
     except ImportError:
         console.print(
-            "[red]FastAPI not installed.[/red] "
+            "[loom.error]FastAPI not installed.[/loom.error] "
             "Run:  [bold]pip install loom[api][/bold]"
         )
         raise SystemExit(1)
     console.print(
-        f"[bold cyan]Loom API[/bold cyan]  "
+        f"[bold loom.accent]Loom API[/bold loom.accent]  "
         f"http://{host}:{port}  |  db: {db}\n"
-        f"[dim]Docs: http://{host}:{port}/docs[/dim]"
+        f"[loom.muted]Docs: http://{host}:{port}/docs[/loom.muted]"
     )
     run_server(host=host, port=port, db_path=db, reload=reload)
 
@@ -2487,7 +2488,7 @@ def discord_start(
         from loom.platform.discord.bot import LoomDiscordBot
     except ImportError:
         console.print(
-            "[red]discord.py not installed.[/red] "
+            "[loom.error]discord.py not installed.[/loom.error] "
             "Run:  [bold]pip install loom[discord][/bold]"
         )
         raise SystemExit(1)
@@ -2496,7 +2497,7 @@ def discord_start(
 
     resolved_token = token or env.get("DISCORD_BOT_TOKEN", "")
     if not resolved_token:
-        console.print("[red]No Discord bot token.[/red] Set --token or DISCORD_BOT_TOKEN in .env")
+        console.print("[loom.error]No Discord bot token.[/loom.error] Set --token or DISCORD_BOT_TOKEN in .env")
         raise SystemExit(1)
 
     def _parse_ids(cli_ids: tuple[int, ...], env_key: str) -> list[int]:
@@ -2520,28 +2521,28 @@ def discord_start(
         allowed_user_ids=user_list or None,
     )
 
-    info_lines = [f"[bold cyan]Loom Discord Bot[/bold cyan]  model: {model}  |  db: {db}"]
+    info_lines = [f"[bold loom.accent]Loom Discord Bot[/bold loom.accent]  model: {model}  |  db: {db}"]
     if channel_list:
-        info_lines.append(f"[dim]  Channel:  {channel_list}[/dim]")
+        info_lines.append(f"[loom.muted]  Channel:  {channel_list}[/loom.muted]")
     else:
-        info_lines.append("[dim]  Channels: @mentions everywhere[/dim]")
+        info_lines.append("[loom.muted]  Channels: @mentions everywhere[/loom.muted]")
     if user_list:
-        info_lines.append(f"[dim]  Users:    {user_list}[/dim]")
+        info_lines.append(f"[loom.muted]  Users:    {user_list}[/loom.muted]")
     else:
-        info_lines.append("[dim]  Users:    unrestricted[/dim]")
+        info_lines.append("[loom.muted]  Users:    unrestricted[/loom.muted]")
 
     if autonomy:
         # Resolve the notification channel: explicit flag > first bot channel > error
         resolved_notify_ch = notify_channel_id or (channel_list[0] if channel_list else 0)
         if not resolved_notify_ch:
             console.print(
-                "[red]--autonomy requires a target channel.[/red] "
+                "[loom.error]--autonomy requires a target channel.[/loom.error] "
                 "Pass --channel <id> or --notify-channel <id>."
             )
             raise SystemExit(1)
         info_lines.append(
-            f"[dim]  Autonomy: [green]on[/green]  "
-            f"config={autonomy_config}  notify-channel={resolved_notify_ch}[/dim]"
+            f"[loom.muted]  Autonomy: [loom.success]on[/loom.success]  "
+            f"config={autonomy_config}  notify-channel={resolved_notify_ch}[/loom.muted]"
         )
         console.print("\n".join(info_lines))
         asyncio.run(
@@ -2614,7 +2615,7 @@ async def _discord_with_autonomy(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
     n = daemon.load_config(config_path)
-    console.print(f"[dim]Autonomy: {n} trigger(s) loaded from {config_path}[/dim]")
+    console.print(f"[loom.muted]Autonomy: {n} trigger(s) loaded from {config_path}[/loom.muted]")
 
     _background_tasks: set[asyncio.Task] = set()  # strong refs prevent GC
 
@@ -2622,7 +2623,7 @@ async def _discord_with_autonomy(
         # Wait for the Discord connection before the daemon begins polling,
         # so notifications can be delivered from the first fire onwards.
         await bot._client.wait_until_ready()
-        console.print("[dim]Autonomy daemon started.[/dim]")
+        console.print("[loom.muted]Autonomy daemon started.[/loom.muted]")
         _t = asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
         _background_tasks.add(_t)
         _t.add_done_callback(_background_tasks.discard)
@@ -2676,7 +2677,7 @@ def mcp_serve(db: str, model: str) -> None:
         from loom.extensibility.mcp_server import run_mcp_server
     except ImportError:
         console.print(
-            "[red]MCP SDK not installed.[/red] "
+            "[loom.error]MCP SDK not installed.[/loom.error] "
             "Run: [bold]pip install 'loom[mcp]'[/bold]"
         )
         raise SystemExit(1)
@@ -2717,7 +2718,7 @@ def mcp_connect(server_spec: str, trust: str, db: str, model: str) -> None:
         from loom.extensibility.mcp_client import LoomMCPClient, MCPServerConfig
     except ImportError:
         console.print(
-            "[red]MCP SDK not installed.[/red] "
+            "[loom.error]MCP SDK not installed.[/loom.error] "
             "Run: [bold]pip install 'loom[mcp]'[/bold]"
         )
         raise SystemExit(1)
@@ -2738,32 +2739,32 @@ def mcp_connect(server_spec: str, trust: str, db: str, model: str) -> None:
         try:
             tools = await client.connect_and_list_tools()
         except Exception as exc:
-            console.print(f"[red]Failed to connect:[/red] {exc}")
+            console.print(f"[loom.error]Failed to connect:[/loom.error] {exc}")
             raise SystemExit(1)
         finally:
             await client.disconnect()
 
         if not tools:
-            console.print("[yellow]No tools found on this MCP server.[/yellow]")
+            console.print("[loom.warning]No tools found on this MCP server.[/loom.warning]")
             return
 
         console.print(
-            f"[bold cyan]{len(tools)} tool(s)[/bold cyan] available from "
+            f"[bold loom.accent]{len(tools)} tool(s)[/bold loom.accent] available from "
             f"[bold]{server_spec}[/bold]:\n"
         )
         for t in tools:
             desc = t.description or "(no description)"
-            console.print(f"  [green]{t.name}[/green]  [dim]{desc[:80]}[/dim]")
+            console.print(f"  [loom.success]{t.name}[/loom.success]  [loom.muted]{desc[:80]}[/loom.muted]")
         console.print(
-            "\n[dim]Add this server to loom.toml [[mcp.servers]] "
-            "to load it automatically:[/dim]"
+            "\n[loom.muted]Add this server to loom.toml [[mcp.servers]] "
+            "to load it automatically:[/loom.muted]"
         )
         console.print(
-            f"\n  [dim][[mcp.servers]]\n"
+            f"\n  [loom.muted][[mcp.servers]]\n"
             f"  name    = \"remote\"\n"
             f"  command = \"{command}\"\n"
             f"  args    = {json.dumps(args)}\n"
-            f"  trust_level = \"{trust}\"[/dim]"
+            f"  trust_level = \"{trust}\"[/loom.muted]"
         )
 
     asyncio.run(_run())
