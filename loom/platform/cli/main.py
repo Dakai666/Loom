@@ -69,9 +69,6 @@ from loom.platform.cli.ui import (
     TurnDropped,
     TurnPaused,
     clear_line,
-    make_prompt_session,
-    render_cursor,
-    render_header,
     status_bar,
     tool_begin_line,
     tool_end_line,
@@ -213,152 +210,132 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     session._on_sanitize_repaired = _on_sanitize       # type: ignore[attr-defined]
     session._on_governor_reject = _on_governor_reject  # type: ignore[attr-defined]
 
-    console.print(render_header(model, db))
+    # PR-D4: clear the noisy startup output (resume log, MCP load,
+    # diagnostic block, …) before drawing the welcome signature so
+    # the user sees a clean ceremony instead of scrollback debris.
+    console.clear()
 
-    if not session._memory_index.is_empty:
-        console.print(
-            Panel(
-                session._memory_index.render(),
-                title="[loom.accent]Memory[/loom.accent]",
-                border_style="dim",
-            )
+    # 5-line ASCII signature replaces the old render_header Panel +
+    # MemoryIndex Panel splatter. The full MemoryIndex still feeds
+    # the LLM's system prompt unchanged.
+    from loom.platform.cli.ui import render_welcome_signature
+    _idx = session._memory_index
+    console.print(
+        render_welcome_signature(
+            model=model,
+            persona=session.current_personality,
+            skill_count=getattr(_idx, "skill_count", 0),
+            fact_count=getattr(_idx, "semantic_count", 0),
+            mcp_count=len(session._mcp_clients),
+            episode_count=getattr(_idx, "episode_sessions", 0),
+            relation_count=getattr(_idx, "relational_count", 0),
         )
+    )
 
-    prompt_session = make_prompt_session()
+    # PR-D4: anchor the persistent app's bottom region to the actual
+    # bottom of the terminal. ``full_screen=False`` mode draws the
+    # bottom area at whatever row the cursor was on when run() was
+    # called — without padding, that's just below the welcome sig
+    # near the top of the terminal, leaving a sea of empty rows
+    # underneath. Pad with blank lines so the cursor sits near the
+    # terminal's last row before the app starts. As streaming output
+    # arrives via patch_stdout, those padding rows scroll up and out
+    # naturally
+    import shutil as _shutil
+    import sys as _sys
+    _term_h = _shutil.get_terminal_size(fallback=(80, 24)).lines
+    # Welcome sig footprint ~ 6 lines (5 visible + leading newline);
+    # bottom area ~ 5 lines (thinking + sep_top + input + sep_bottom +
+    # footer). Conditional/thinking only shows during agent calls so a
+    # frame more is fine.
+    _pad = max(0, _term_h - 6 - 5)
+    _sys.stdout.write("\n" * _pad)
+    _sys.stdout.flush()
 
-    # ── PR-A2: producer/consumer for abort-on-submit ──────────────────────
+    # ── PR-D1: persistent prompt_toolkit Application ──────────────────────
     #
-    # Two concurrent tasks share the terminal via prompt_toolkit's
-    # ``patch_stdout`` so the prompt stays anchored at the bottom while
-    # streaming output renders above it:
+    # Replaces PR-A's per-iteration ``prompt_async`` + three-event stdin
+    # coordinator. The LoomApp owns the bottom region of the terminal
+    # (input area + footer + transient confirm/pause overlays) for the
+    # entire chat session. Streaming output flows into the natural
+    # scrollback above it via ``patch_stdout``, which is still needed
+    # to keep ``console.print`` calls cooperating with the persistent
+    # bottom rendering.
     #
-    #   input_loop  — reads user lines, queues them. If a turn is in
-    #                 flight, calls session.cancel() first and prefixes
-    #                 the new message with an interruption marker.
+    # Producer/consumer architecture:
+    #   - LoomApp.on_submit  — fires when user presses Enter in INPUT
+    #                          mode; pushes the text into input_queue.
+    #                          If a turn is in flight, cancel + queue
+    #                          with an interrupt prefix.
+    #   - turn_loop          — drains the queue and runs streaming
+    #                          turns via _run_streaming_turn.
     #
-    #   turn_loop   — drains the queue: slash commands run inline (no
-    #                 turn cancel), regular text spawns a streaming
-    #                 turn task that input_loop can cancel.
-    #
-    # Race notes:
-    # - current_turn_task is read+cancelled from input_loop and assigned
-    #   from turn_loop. Single-threaded asyncio gives us atomic ref
-    #   reads; cancelling an already-done task is a no-op.
-    # - wait_for(..., timeout=3.0) on cancel ensures we don't block the
-    #   user forever if a turn refuses to unwind.
+    # Confirm / HITL pause / HITL redirect — all routed through the
+    # app's mode-flag mechanism (LoomApp.request_confirm / request_pause
+    # / request_redirect_text). No nested Applications; the widgets
+    # render inside the same app's layout, so the "Application is not
+    # running" race that PR-A worked around with three-event coordination
+    # simply cannot occur.
     _INTERRUPT_PREFIX = "\x00LOOM_INTERRUPT\x00"
     input_queue: asyncio.Queue[str] = asyncio.Queue()
     current_turn_task: asyncio.Task | None = None
     shutdown = asyncio.Event()
 
-    # ── PR-A3: confirm-prompt stdin coordination ──────────────────────────
-    #
-    # Interactive widgets (select_prompt in ui.py — used by tool confirm
-    # and HITL pause) need exclusive stdin while running. The challenge:
-    # input_loop's PromptSession runs its own prompt_toolkit Application
-    # that owns stdin's vt100 input handler. If we start a second
-    # Application before the first has fully detached its input, the new
-    # one races with stale key callbacks and crashes ("Application is
-    # not running").
-    #
-    # Coordination protocol:
-    #   - input_released  — set when input_loop is NOT inside prompt_async.
-    #                       Cleared on entry, set on exit (via finally).
-    #   - confirm_active  — set while a widget owns stdin.
-    #   - confirm_done    — set after the widget releases.
-    #
-    # _run_interactive: signals confirm_active, asks the live input
-    # Application to exit, waits for input_loop to actually return from
-    # prompt_async (input_released), then starts the widget. This
-    # guarantees stdin is fully detached before the new Application
-    # tries to attach.
-    confirm_active = asyncio.Event()
-    confirm_done = asyncio.Event()
-    confirm_done.set()
-    input_released = asyncio.Event()
-    input_released.set()  # input_loop hasn't entered prompt_async yet
+    # Build the persistent app first so we can register its callbacks
+    # before kicking off the run loop. ``app`` is captured by the
+    # on_submit closure below.
+    from loom.platform.cli.app import build_loom_app
 
-    async def _run_interactive(coro_factory) -> Any:
-        from prompt_toolkit.application.current import get_app_or_none
+    async def _on_submit(text: str) -> None:
+        nonlocal current_turn_task
+        stripped = text.strip()
+        if not stripped:
+            return
 
-        confirm_active.set()
-        confirm_done.clear()
+        if stripped.lower() in {"exit", "quit", "q"}:
+            shutdown.set()
+            app.application.exit()
+            return
 
-        live_app = get_app_or_none()
-        if live_app is not None and getattr(live_app, "is_running", False):
+        # Echo the submitted text to scrollback so the user can see
+        # what they sent. The persistent app's input buffer clears on
+        # submit (so the bottom area becomes ready for the next
+        # message), and without an explicit echo there'd be no record
+        # of what was typed.
+        echo_lines = stripped.splitlines() or [stripped]
+        first, *rest = echo_lines
+        console.print(
+            f"[loom.muted]you ›[/loom.muted] [loom.text]{first}[/loom.text]"
+        )
+        for line in rest:
+            console.print(f"[loom.muted]      [/loom.muted][loom.text]{line}[/loom.text]")
+
+        # Abort-on-submit: if a turn is in flight, cancel and queue
+        # the new message with the interrupt prefix.
+        in_flight = current_turn_task is not None and not current_turn_task.done()
+        if in_flight:
+            session.cancel()
+            harness.inline("⏸ 上一輪已中斷，接收新訊息…", level="info")
             try:
-                live_app.exit(result=None)
+                await asyncio.wait_for(current_turn_task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
             except Exception:
                 pass
+            await input_queue.put(_INTERRUPT_PREFIX + stripped)
+        else:
+            await input_queue.put(stripped)
 
-        # Wait for input_loop to fully unwind out of prompt_async — its
-        # finally block sets input_released. Cap the wait at 1s so a
-        # misbehaving prompt_toolkit detach can't deadlock the user.
-        try:
-            await asyncio.wait_for(input_released.wait(), timeout=1.0)
-        except asyncio.TimeoutError:
-            pass
+    app = build_loom_app(on_submit=_on_submit)
+    app.footer.model = model
+    app.footer.persona = session.current_personality
 
-        try:
-            return await coro_factory()
-        finally:
-            confirm_active.clear()
-            confirm_done.set()
-
-    session._run_interactive = _run_interactive  # type: ignore[attr-defined]
-
-    async def input_loop() -> None:
-        nonlocal current_turn_task
-        while not shutdown.is_set():
-            # If a confirm widget owns stdin, sit out until it's done.
-            if confirm_active.is_set():
-                await confirm_done.wait()
-                continue
-
-            input_released.clear()
-            try:
-                try:
-                    user_input = await prompt_session.prompt_async(
-                        [("class:prompt", "\nyou › ")],
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    shutdown.set()
-                    return
-                except asyncio.CancelledError:
-                    return
-            finally:
-                input_released.set()
-
-            # _run_interactive forces our prompt_async to exit with result=None.
-            # In that case loop back so the confirm_active gate above engages.
-            if user_input is None:
-                continue
-
-            text = user_input.strip()
-            if not text:
-                continue
-
-            if text.lower() in {"exit", "quit", "q"}:
-                shutdown.set()
-                return
-
-            # If a turn is in flight, abort it and mark the new message
-            # so turn_loop can prepend an interruption note for the LLM.
-            in_flight = current_turn_task is not None and not current_turn_task.done()
-            if in_flight:
-                session.cancel()
-                harness.inline("⏸ 上一輪已中斷，接收新訊息…", level="info")
-                try:
-                    await asyncio.wait_for(current_turn_task, timeout=3.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-                except Exception:
-                    # Turn task may have raised; that's fine — we just
-                    # want it finished before queueing the next message.
-                    pass
-                await input_queue.put(_INTERRUPT_PREFIX + text)
-            else:
-                await input_queue.put(text)
+    # Wire confirm + pause routing into the session so _confirm_tool_cli
+    # and the HITL pause path can render through the app's mode flag
+    # instead of spinning their own short-lived Applications. Sessions
+    # used outside `loom chat` (tests, scripts) still fall back to
+    # select_prompt as before.
+    session._loom_app = app  # type: ignore[attr-defined]
 
     async def turn_loop() -> None:
         nonlocal current_turn_task
@@ -376,14 +353,20 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                     harness.inline(f"slash command error: {exc}", level="error")
                 continue
 
-            # Detect interruption marker injected by input_loop.
+            # Detect interruption marker injected by _on_submit.
             if text.startswith(_INTERRUPT_PREFIX):
                 text = text[len(_INTERRUPT_PREFIX):]
-                # Lightweight cue for the LLM that the prior turn was
-                # cut short by the user — keeps cognition coherent.
                 text = "[使用者打斷上一輪並接續]\n" + text
 
             console.print()
+            # PR-D4: thinking indicator. Set True the moment we
+            # dispatch the streaming turn; cleared inside
+            # _run_streaming_turn the first time anything visible
+            # happens (TextChunk / ToolBegin / TurnDone). If turn
+            # crashes / aborts before that, the finally below still
+            # clears it
+            app.footer.thinking = True
+            app.invalidate()
             current_turn_task = asyncio.create_task(
                 _run_streaming_turn(session, text)
             )
@@ -395,21 +378,48 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 harness.inline(f"turn error: {exc}", level="error")
             finally:
                 current_turn_task = None
+                app.footer.thinking = False
 
-    # patch_stdout(raw=True) keeps the prompt anchored while Rich's ANSI
-    # output streams above. raw=True passes escape sequences through so
-    # cursor manipulation (spinner, clear_line) still works.
+            # Update footer token budget + grants at each turn boundary
+            # (per doc/49 decision: TTL refresh on turn edge, not per-
+            # second tick — keeps the footer visually stable while the
+            # user is reading).
+            app.footer.token_pct = session.budget.usage_fraction * 100
+            app.footer.persona = session.current_personality
+            try:
+                snapshot = session._build_grants_snapshot()
+                app.footer.grants_active = snapshot.active_count
+                app.footer.grants_next_expiry_secs = snapshot.next_expiry_secs
+            except Exception:
+                pass
+            app.invalidate()
+
+    async def footer_ticker() -> None:
+        """Tick the footer at 2 Hz so live fields (active envelope
+        elapsed, compaction spinner, thinking dots) progress
+        visibly."""
+        while not shutdown.is_set():
+            if (app.footer.active_envelopes
+                    or app.footer.compacting
+                    or app.footer.thinking):
+                app.invalidate()
+            await asyncio.sleep(0.5)
+
+    # patch_stdout makes console.print flow above the app's persistent
+    # bottom region. raw=True passes escape sequences through so the
+    # existing Rich rendering (panels, spinners) keeps working.
     from prompt_toolkit.patch_stdout import patch_stdout
 
     try:
         with patch_stdout(raw=True):
+            app_task = asyncio.create_task(app.run())
+            turn_task = asyncio.create_task(turn_loop())
+            ticker_task = asyncio.create_task(footer_ticker())
             done, pending = await asyncio.wait(
-                {
-                    asyncio.create_task(input_loop()),
-                    asyncio.create_task(turn_loop()),
-                },
+                {app_task, turn_task, ticker_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            shutdown.set()
             for task in pending:
                 task.cancel()
             for task in pending:
@@ -610,8 +620,25 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
+        # PR-D4: surface compaction in footer BEFORE the inline message
+        # so the spinner is visible from the very first frame; clear
+        # immediately after _smart_compact returns so the footer
+        # snaps back to normal without waiting for the next ticker
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            loom_app.footer.compacting = True
+            loom_app.invalidate()
         harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
-        await session._smart_compact()
+        try:
+            await session._smart_compact()
+        finally:
+            if loom_app is not None:
+                loom_app.footer.compacting = False
+                loom_app.invalidate()
+                # Update token% from the just-finished compaction so
+                # the user sees the new context% immediately
+                loom_app.footer.token_pct = session.budget.usage_fraction * 100
+                loom_app.invalidate()
 
     elif command == "/stop":
         # In CLI the turn is a blocking await — the user can't type while it runs.
@@ -1302,31 +1329,13 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     frame_index = 0
 
     # ── Loom Agent turn intro ─────────────────────────────────────────────
-    # PR-C: replace the bold-green "loom" Rule with a Loom Agent-themed
-    # marker. Per-line "Loom ▎" left-edge guide on streaming text is
-    # deferred to PR-D's renderer rewrite — would need newline-detection
-    # in the streaming loop, which is the same path PR-D rebuilds anyway.
-    pct = session.budget.usage_fraction * 100
-    ctx_token = (
-        "loom.success" if pct < 60
-        else "loom.warning" if pct < 85
-        else "loom.error"
-    )
-    persona_tag = (
-        f"  [loom.muted]·  persona: {session.current_personality}[/loom.muted]"
-        if session.current_personality
-        else ""
-    )
-    # Plain Text instead of Rule — Rule always extends a horizontal line
-    # after the title, which crowds the marker. The Loom Agent intro is
-    # meant to read as a quiet signature, not a banner.
+    # Loom Agent turn intro — minimal marker, no metadata.
+    # The footer already shows persona · model · context% · stats, so
+    # repeating any of that here just adds visual debt. Keep this to
+    # a single ``Loom ▎`` so the turn boundary is legible without
+    # duplicating footer info.
     console.print(
-        Text.from_markup(
-            f"[loom.agent.guide]Loom ▎[/loom.agent.guide]"
-            f"[loom.muted]  context [/loom.muted]"
-            f"[{ctx_token}]{pct:.1f}%[/{ctx_token}]"
-            f"{persona_tag}"
-        )
+        Text.from_markup("[loom.agent.guide]Loom ▎[/loom.agent.guide]")
     )
 
     def _cancel_spinner() -> None:
@@ -1354,29 +1363,81 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     # Give the session a handle to cancel the spinner before confirm prompts.
     session._cancel_spinner_fn = _cancel_spinner
 
+    # PR-D2 attempt 3 at the CJK truncation bug. Hypothesis: chunks
+    # arriving from the LLM are split at arbitrary byte offsets — a
+    # Chinese line of 7 wide chars is roughly 14 cells / 21 bytes,
+    # arriving as 2-3 separate chunks. patch_stdout's StdoutProxy
+    # buffers + flushes asynchronously via run_in_terminal; if the
+    # bottom-area redraw fires *between* two chunks of the same line,
+    # the redraw repositions cursor to col 0 of the line, and the
+    # next chunk overwrites whatever was already there — eating the
+    # opening characters of that line.
+    #
+    # Fix: buffer streaming chunks line-by-line, flush on newline. A
+    # full line is written atomically, so the bottom-area redraw
+    # cycle can't interleave inside it
+    _stream_pending = ""
+
+    def _flush_streaming(force: bool = False) -> None:
+        """Drain the line buffer.
+
+        Lines (text up to and including a ``\n``) are written
+        atomically. With ``force=True`` (called at TurnDone) any
+        partial trailing text is also flushed.
+        """
+        nonlocal _stream_pending
+        import sys as _sys
+        if not _stream_pending:
+            return
+        if "\n" in _stream_pending:
+            idx = _stream_pending.rfind("\n")
+            done = _stream_pending[: idx + 1]
+            _stream_pending = _stream_pending[idx + 1:]
+            _sys.stdout.write(done)
+            _sys.stdout.flush()
+        if force and _stream_pending:
+            _sys.stdout.write(_stream_pending)
+            _sys.stdout.flush()
+            _stream_pending = ""
+
+    # PR-D4: clear the "thinking" footer indicator on the first
+    # observable event of the turn. After that, the active envelope
+    # / streaming output / turn stats take over the footer's middle.
+    _thinking_cleared = False
+
+    def _clear_thinking() -> None:
+        nonlocal _thinking_cleared
+        if _thinking_cleared:
+            return
+        _thinking_cleared = True
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            loom_app.footer.thinking = False
+            loom_app.invalidate()
+
     try:
         async for event in session.stream_turn(user_input):
+            _clear_thinking()
             if isinstance(event, TextChunk):
-                # Clear cursor from previous position
-                clear_line()
-                # Print text chunk
-                console.print(event.text, end="", markup=False, highlight=False)
+                _stream_pending += event.text
                 text_buffer += event.text
-                at_line_start = event.text.endswith("\n")
-                # Print streaming cursor at end
-                console.print(render_cursor(), end="")
+                _flush_streaming()
+                at_line_start = (not _stream_pending) and event.text.endswith("\n")
 
             elif isinstance(event, ThinkCollapsed):
-                # Show condensed reasoning summary inline; use /think for full content.
-                clear_line()
-                if not at_line_start:
-                    console.print()
-                console.print(
-                    Text.from_markup(f"[loom.muted]💭 {event.summary}[/loom.muted]")
-                )
-                at_line_start = True
+                # PR-D2: silent in CLI. Anthropic native thinking blocks
+                # only become readable after ``stream.text_stream``
+                # completes (session.py:1707), so the inline summary
+                # always landed *below* the response — visually out of
+                # order and crowding the input area. The full chain is
+                # still stored on ``session._last_think`` and accessible
+                # via ``/think``. Other platforms (Discord, TUI) render
+                # ThinkCollapsed in their own way and aren't affected
+                pass
 
             elif isinstance(event, ToolBegin):
+                # Drain pending streamed text before the tool row
+                _flush_streaming(force=True)
                 # Cancel any running spinner
                 _cancel_spinner()
                 # Ensure tool rows start on a fresh line
@@ -1388,6 +1449,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 console.print(tool_begin_line(event.name, event.args))
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
+                # PR-D4: track in footer for live ▸ <tool> · <elapsed>
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    from loom.platform.cli.app import _ActiveEnvelope
+                    import time as _t
+                    loom_app.footer.active_envelopes.append(
+                        _ActiveEnvelope(name=event.name, started_monotonic=_t.monotonic())
+                    )
+                    loom_app.invalidate()
 
             elif isinstance(event, ToolEnd):
                 # Cancel spinner and clear its line
@@ -1399,6 +1469,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 at_line_start = True
                 active_tool = None
                 console.print()
+                # PR-D4: drop matching envelope from footer
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    envs = loom_app.footer.active_envelopes
+                    for i in range(len(envs) - 1, -1, -1):
+                        if envs[i].name == event.name:
+                            envs.pop(i)
+                            break
+                    loom_app.invalidate()
 
             elif isinstance(event, TurnPaused):
                 # ── HITL pause (PR-A3: arrow-key widget) ──────────────────
@@ -1414,46 +1493,60 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     )
                 )
 
-                from loom.platform.cli.ui import SelectOption, select_prompt
-
                 _PAUSE_RESUME = "resume"
                 _PAUSE_CANCEL = "cancel"
                 _PAUSE_REDIRECT = "redirect"
 
-                async def _pause_pick():
-                    return await select_prompt(
-                        title="絲已暫停，下一步？",
+                # PR-D1: route through LoomApp's mode-flag widgets so the
+                # pause + redirect overlays render inside the layout
+                # (用過即焚, no scrollback residue) rather than spinning
+                # nested Applications.
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    choice = await loom_app.request_pause(
+                        title="Loom 已暫停，下一步？",
                         options=[
-                            SelectOption(label="繼續執行剩下的工具",
-                                         value=_PAUSE_RESUME, shortcut="r"),
-                            SelectOption(label="導向新指令並繼續",
-                                         value=_PAUSE_REDIRECT, shortcut="m"),
-                            SelectOption(label="取消這個 turn",
-                                         value=_PAUSE_CANCEL, shortcut="c"),
+                            ("繼續執行剩下的工具", _PAUSE_RESUME,   "r"),
+                            ("導向新指令並繼續",   _PAUSE_REDIRECT, "m"),
+                            ("取消這個 turn",     _PAUSE_CANCEL,   "c"),
                         ],
                         default_index=0,
                         cancel_value=_PAUSE_CANCEL,
                     )
-
-                runner = getattr(session, "_run_interactive", None)
-                choice = await (runner(_pause_pick) if runner else _pause_pick())
+                else:
+                    # Fallback for tests / scripts without a running app.
+                    from loom.platform.cli.ui import SelectOption, select_prompt
+                    async def _pause_pick():
+                        return await select_prompt(
+                            title="Loom 已暫停，下一步？",
+                            options=[
+                                SelectOption(label="繼續執行剩下的工具", value=_PAUSE_RESUME,   shortcut="r"),
+                                SelectOption(label="導向新指令並繼續",   value=_PAUSE_REDIRECT, shortcut="m"),
+                                SelectOption(label="取消這個 turn",     value=_PAUSE_CANCEL,   shortcut="c"),
+                            ],
+                            default_index=0,
+                            cancel_value=_PAUSE_CANCEL,
+                        )
+                    runner = getattr(session, "_run_interactive", None)
+                    choice = await (runner(_pause_pick) if runner else _pause_pick())
 
                 if choice == _PAUSE_CANCEL:
                     session.cancel()
                 elif choice == _PAUSE_REDIRECT:
-                    # Sub-prompt for the redirect text. Routed through the
-                    # same _run_interactive so input_loop stays paused.
-                    async def _ask_redirect():
+                    if loom_app is not None:
+                        raw = await loom_app.request_redirect_text()
+                    else:
                         from prompt_toolkit import PromptSession as _PS
-                        ps = _PS()
-                        try:
-                            return await ps.prompt_async(
-                                [("class:prompt", "redirect › ")],
-                            )
-                        except (EOFError, KeyboardInterrupt):
-                            return ""
-
-                    raw = await (runner(_ask_redirect) if runner else _ask_redirect())
+                        async def _ask_redirect():
+                            ps = _PS()
+                            try:
+                                return await ps.prompt_async(
+                                    [("class:prompt", "redirect › ")],
+                                )
+                            except (EOFError, KeyboardInterrupt):
+                                return ""
+                        runner = getattr(session, "_run_interactive", None)
+                        raw = await (runner(_ask_redirect) if runner else _ask_redirect())
                     raw = (raw or "").strip()
                     if raw:
                         session.resume_with(raw)
@@ -1464,6 +1557,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     session.resume()
 
             elif isinstance(event, TurnDone):
+                # Drain any unterminated trailing chunk before
+                # printing the post-turn UI
+                _flush_streaming(force=True)
                 # Cancel any running spinner and clear cursor
                 _cancel_spinner()
                 clear_line()
@@ -1472,21 +1568,37 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 cache_total = event.cache_read_input_tokens + event.cache_creation_input_tokens + event.input_tokens
                 cache_hit_pct = (event.cache_read_input_tokens / cache_total * 100) if cache_total > 0 else 0.0
                 elapsed = time.monotonic() - t0
-                console.print(
-                    status_bar(
-                        context_fraction=session.budget.usage_fraction,
-                        input_tokens=event.input_tokens,
-                        output_tokens=event.output_tokens,
-                        elapsed_ms=elapsed * 1000,
-                        tool_count=event.tool_count,
-                        cache_hit_pct=cache_hit_pct,
+                # PR-D1: route turn stats into the persistent footer
+                # instead of printing an inline status_bar that scrolls
+                # away after the next turn. When no LoomApp is wired
+                # (tests / scripts) fall back to the inline print so
+                # CLI ergonomics outside `loom chat` don't regress
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    s = loom_app.footer
+                    s.last_turn_cache_hit = cache_hit_pct
+                    s.last_turn_input_tokens = event.input_tokens
+                    s.last_turn_output_tokens = event.output_tokens
+                    s.last_turn_elapsed_s = elapsed
+                    s.last_turn_tool_count = event.tool_count
+                    loom_app.invalidate()
+                else:
+                    console.print(
+                        status_bar(
+                            context_fraction=session.budget.usage_fraction,
+                            input_tokens=event.input_tokens,
+                            output_tokens=event.output_tokens,
+                            elapsed_ms=elapsed * 1000,
+                            tool_count=event.tool_count,
+                            cache_hit_pct=cache_hit_pct,
+                        )
                     )
-                )
 
     except asyncio.CancelledError:
         # PR-A2: turn was cancelled by user-initiated abort (Enter on
         # next message). Render a clean ABORTED marker and re-raise so
         # the caller's await sees the cancellation.
+        _flush_streaming(force=True)
         _cancel_spinner()
         clear_line()
         console.print()
@@ -1498,6 +1610,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         )
         raise
     except Exception as exc:
+        _flush_streaming(force=True)
         _cancel_spinner()
         clear_line()
         console.print()
@@ -1506,6 +1619,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         # Defensive: ensure the spinner task never outlives this turn,
         # even if neither except branch fired (clean exit) or if a path
         # added later forgets to cancel it.
+        _flush_streaming(force=True)
         _cancel_spinner()
 
 

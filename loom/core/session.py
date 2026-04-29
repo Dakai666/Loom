@@ -3158,6 +3158,57 @@ class LoomSession:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_scope_summary_plain(call: ToolCall) -> str:
+        """Plain-text scope summary for the LoomApp confirm widget.
+
+        Mirrors :meth:`_format_scope_panel` but strips Rich markup so it
+        renders cleanly inside a prompt_toolkit FormattedTextControl,
+        which doesn't speak Rich's ``[bold]`` syntax.
+        """
+        from loom.core.harness.scope import (
+            DiffReason, ScopeDiff, ScopeRequest,
+        )
+
+        scope_req: ScopeRequest | None = call.metadata.get("scope_request")
+        diff: ScopeDiff | None = call.metadata.get("scope_diff")
+
+        if scope_req is None:
+            arg_lines: list[str] = []
+            for k, v in call.args.items():
+                if isinstance(v, str):
+                    display = v if len(v) <= 120 else v[:40] + "…" + v[-40:]
+                    arg_lines.append(f"  {k}: {display}")
+                else:
+                    arg_lines.append(f"  {k}: {v!r}")
+            return "\n".join(arg_lines) if arg_lines else "(no args)"
+
+        _REASON_LABELS: dict[DiffReason, str] = {
+            DiffReason.FIRST_TIME: "First time accessing this resource",
+            DiffReason.SELECTOR_EXPANSION: "Expanding beyond previously approved scope",
+            DiffReason.CONSTRAINT_EXPANSION: "Exceeding previously approved limits",
+            DiffReason.RESOURCE_TYPE_NEW: "New resource type not previously authorized",
+        }
+
+        lines: list[str] = []
+        for req in scope_req.requirements:
+            line = f"  {req.resource}:{req.action} → {req.selector}"
+            if req.constraints.get("scope_unknown"):
+                line += "  ⚠ scope could not be fully resolved"
+            lines.append(line)
+        if diff is not None and not diff.is_fully_covered:
+            reason_label = _REASON_LABELS.get(diff.reason, str(diff.reason.value))
+            lines.append(reason_label)
+            if diff.covered:
+                lines.append(
+                    "  ✓ covered: " + ", ".join(r.selector for r in diff.covered)
+                )
+            if diff.missing:
+                lines.append(
+                    "  ● new: " + ", ".join(r.selector for r in diff.missing)
+                )
+        return "\n".join(lines)
+
     async def _confirm_tool_cli(self, call: ToolCall) -> "ConfirmDecision":
         """
         CLI-specific confirmation prompt — arrow-key inline widget.
@@ -3185,17 +3236,47 @@ class LoomSession:
             self._cancel_spinner_fn()
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
-        console.print()
 
-        # Render the static context panel above the inline widget.
         verdict = call.metadata.get("scope_verdict")
-        if verdict == PermissionVerdict.EXPAND_SCOPE:
-            title = "[#b87060]⚠ Scope expansion required[/#b87060]"
-            border_style = "#b87060"
-        else:
-            title = "[#c8924a]  Tool requires confirmation[/#c8924a]"
-            border_style = "#c8924a"
 
+        widget_title = (
+            f"Loom 想執行 [{call.tool_name}]  ·  信任度 {call.trust_level.plain}"
+        )
+        if verdict == PermissionVerdict.EXPAND_SCOPE:
+            widget_title = "⚠ " + widget_title
+
+        # PR-D1: when running under the persistent LoomApp, route through
+        # its mode-flag widget so confirm renders inside the layout (not
+        # in scrollback) and disappears completely after decision —
+        # satisfies the "用過即焚" requirement #236 added. Scope summary
+        # is folded into the widget body so we don't print a separate
+        # Rich Panel that would leak into scrollback.
+        loom_app = getattr(self, "_loom_app", None)
+        if loom_app is not None:
+            return await loom_app.request_confirm(
+                title=widget_title,
+                body=self._format_scope_summary_plain(call),
+                options=[
+                    ("允許這次",                        ConfirmDecision.ONCE,   "y"),
+                    ("允許並記住 30 分鐘 (lease)",      ConfirmDecision.SCOPE,  "s"),
+                    ("允許並永久授權此 scope",          ConfirmDecision.AUTO,   "a"),
+                    ("拒絕",                            ConfirmDecision.DENY,   "n"),
+                ],
+                default_index=3,  # cursor on DENY for safety
+                cancel_value=ConfirmDecision.DENY,
+            )
+
+        # Fallback for tests / scripts without a running LoomApp:
+        # render the legacy Rich Panel (which leaves scrollback residue,
+        # acceptable in non-interactive contexts) and use the standalone
+        # select_prompt widget.
+        console.print()
+        if verdict == PermissionVerdict.EXPAND_SCOPE:
+            title = "[loom.error]⚠ Scope expansion required[/loom.error]"
+            border_style = "loom.error"
+        else:
+            title = "[loom.warning]  Tool requires confirmation[/loom.warning]"
+            border_style = "loom.warning"
         console.print(
             Panel(
                 self._format_scope_panel(call),
@@ -3203,45 +3284,21 @@ class LoomSession:
                 border_style=border_style,
             )
         )
-
         options = [
-            SelectOption(
-                label="允許這次",
-                value=ConfirmDecision.ONCE,
-                shortcut="y",
-            ),
-            SelectOption(
-                label="允許並記住 30 分鐘 (lease)",
-                value=ConfirmDecision.SCOPE,
-                shortcut="s",
-            ),
-            SelectOption(
-                label="允許並永久授權此 scope",
-                value=ConfirmDecision.AUTO,
-                shortcut="a",
-            ),
-            SelectOption(
-                label="拒絕",
-                value=ConfirmDecision.DENY,
-                shortcut="n",
-            ),
+            SelectOption(label="允許這次",                   value=ConfirmDecision.ONCE,  shortcut="y"),
+            SelectOption(label="允許並記住 30 分鐘 (lease)", value=ConfirmDecision.SCOPE, shortcut="s"),
+            SelectOption(label="允許並永久授權此 scope",     value=ConfirmDecision.AUTO,  shortcut="a"),
+            SelectOption(label="拒絕",                       value=ConfirmDecision.DENY,  shortcut="n"),
         ]
-
-        widget_title = (
-            f"Loom 想執行 [{call.tool_name}]  ·  信任度 {call.trust_level.plain}"
-        )
 
         async def _run():
             return await select_prompt(
                 title=widget_title,
                 options=options,
-                default_index=3,  # cursor starts on DENY (safer default)
+                default_index=3,
                 cancel_value=ConfirmDecision.DENY,
             )
 
-        # If running under the CLI chat loop, route through the input-loop
-        # coordinator so we own stdin cleanly. Otherwise (tests, scripts)
-        # run the widget directly.
         runner = getattr(self, "_run_interactive", None)
         if runner is not None:
             return await runner(_run)

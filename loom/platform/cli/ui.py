@@ -410,7 +410,12 @@ async def select_prompt(
 
 
 def render_header(model: str, db: str) -> Panel:
-    """Top-of-session banner."""
+    """Top-of-session banner — legacy 2-line greeting.
+
+    PR-D4 introduced :func:`render_welcome_signature` which consolidates
+    this header + the MemoryIndex Panel into a 3-line mini signature.
+    Kept for tests / non-CLI callers that still construct it.
+    """
     return Panel(
         Text.from_markup(
             f"[bold loom.accent]Loom[/bold loom.accent]  [loom.muted]v0.3.0[/loom.muted]\n"
@@ -419,6 +424,74 @@ def render_header(model: str, db: str) -> Panel:
             f"/personality <name>  |  /compact  |  /help[/loom.muted]"
         ),
         border_style="cyan",
+    )
+
+
+def render_welcome_signature(
+    *,
+    model: str,
+    persona: str | None,
+    skill_count: int = 0,
+    fact_count: int = 0,
+    mcp_count: int = 0,
+    episode_count: int = 0,
+    relation_count: int = 0,
+) -> Text:
+    """ASCII signature + stats block for ``loom chat`` startup.
+
+    Replaces the previous render_header Panel + MemoryIndex Panel
+    splatter with a compact branded greeting. The full MemoryIndex
+    still feeds the LLM's system prompt — this only changes what
+    the user sees on startup.
+
+    Format::
+
+           ╱╲╱╲╱╲╱╲╱
+          ╱  Loom  ╲       v0.3.x
+           ╲╱╲╱╲╱╲╱
+        ─────  12 skills · 14k facts · 3 mcp · 47 episodes
+              ╲    minimax-m2.7  ·  persona: tarot
+
+    The triple top row is a loose nod to the warp/weft weave that
+    gives the project its name; deliberately understated so it
+    doesn't dominate the terminal. Stats fields with zero counts
+    are silently skipped.
+    """
+    from loom import __version__
+
+    def _abbrev(n: int) -> str:
+        # Strip trailing zero before suffix: 14000 → "14k" not "14.0k"
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+        return str(n)
+
+    stats: list[str] = []
+    if skill_count:
+        stats.append(f"{_abbrev(skill_count)} skills")
+    if fact_count:
+        stats.append(f"{_abbrev(fact_count)} facts")
+    if mcp_count:
+        stats.append(f"{mcp_count} mcp")
+    if episode_count:
+        stats.append(f"{_abbrev(episode_count)} episodes")
+    if relation_count:
+        stats.append(f"{_abbrev(relation_count)} relations")
+    stats_line = " · ".join(stats) if stats else "fresh session"
+
+    persona_tag = f"  ·  persona: {persona}" if persona else ""
+
+    # Five-line signature: woven mark on top, stats + identity below
+    return Text.from_markup(
+        "\n"
+        "[loom.muted]    ╱╲╱╲╱╲╱╲╱[/loom.muted]\n"
+        "[loom.muted]   ╱  [/loom.muted][loom.accent]Loom[/loom.accent]"
+        f"[loom.muted]  ╲     v{__version__}[/loom.muted]\n"
+        "[loom.muted]    ╲╱╲╱╲╱╲╱[/loom.muted]\n"
+        f"[loom.muted] ─────  {stats_line}[/loom.muted]\n"
+        f"[loom.muted]      ╲   [/loom.muted][loom.text]{model}[/loom.text]"
+        f"[loom.muted]{persona_tag}[/loom.muted]\n"
     )
 
 
