@@ -3204,44 +3204,46 @@ class LoomSession:
             )
         )
 
-        options = [
-            SelectOption(
-                label="允許這次",
-                value=ConfirmDecision.ONCE,
-                shortcut="y",
-            ),
-            SelectOption(
-                label="允許並記住 30 分鐘 (lease)",
-                value=ConfirmDecision.SCOPE,
-                shortcut="s",
-            ),
-            SelectOption(
-                label="允許並永久授權此 scope",
-                value=ConfirmDecision.AUTO,
-                shortcut="a",
-            ),
-            SelectOption(
-                label="拒絕",
-                value=ConfirmDecision.DENY,
-                shortcut="n",
-            ),
-        ]
-
         widget_title = (
             f"Loom 想執行 [{call.tool_name}]  ·  信任度 {call.trust_level.plain}"
         )
+
+        # PR-D1: when running under the persistent LoomApp, route through
+        # its mode-flag widget so confirm renders inside the layout (not
+        # in scrollback) and disappears completely after decision —
+        # satisfies the "用過即焚" requirement #236 added.
+        loom_app = getattr(self, "_loom_app", None)
+        if loom_app is not None:
+            return await loom_app.request_confirm(
+                title=widget_title,
+                body=self._format_scope_panel(call),
+                options=[
+                    ("允許這次",                        ConfirmDecision.ONCE,   "y"),
+                    ("允許並記住 30 分鐘 (lease)",      ConfirmDecision.SCOPE,  "s"),
+                    ("允許並永久授權此 scope",          ConfirmDecision.AUTO,   "a"),
+                    ("拒絕",                            ConfirmDecision.DENY,   "n"),
+                ],
+                default_index=3,  # cursor on DENY for safety
+                cancel_value=ConfirmDecision.DENY,
+            )
+
+        # Fallback for tests / scripts without a running LoomApp:
+        # use the standalone select_prompt (PR-A3 widget).
+        options = [
+            SelectOption(label="允許這次",                   value=ConfirmDecision.ONCE,  shortcut="y"),
+            SelectOption(label="允許並記住 30 分鐘 (lease)", value=ConfirmDecision.SCOPE, shortcut="s"),
+            SelectOption(label="允許並永久授權此 scope",     value=ConfirmDecision.AUTO,  shortcut="a"),
+            SelectOption(label="拒絕",                       value=ConfirmDecision.DENY,  shortcut="n"),
+        ]
 
         async def _run():
             return await select_prompt(
                 title=widget_title,
                 options=options,
-                default_index=3,  # cursor starts on DENY (safer default)
+                default_index=3,
                 cancel_value=ConfirmDecision.DENY,
             )
 
-        # If running under the CLI chat loop, route through the input-loop
-        # coordinator so we own stdin cleanly. Otherwise (tests, scripts)
-        # run the widget directly.
         runner = getattr(self, "_run_interactive", None)
         if runner is not None:
             return await runner(_run)
