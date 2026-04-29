@@ -951,7 +951,19 @@ class LoomSession:
         # ``self._memory`` was built up-front (right after governor init).
         # See "Issue #147 Phase C: build the facade up-front" above.
         self.registry.register(make_recall_tool(self._memory))
-        self.registry.register(make_memorize_tool(self._memory))
+        # PR-C4: when the governor blocks a write, fire the session-level
+        # hook so the platform layer can surface a "governor rejected"
+        # harness inline. Accept stays silent.
+        def _governor_reject_hook(key: str, tier: str, contradictions: int) -> None:
+            cb = getattr(self, "_on_governor_reject", None)
+            if cb is not None:
+                try:
+                    cb(key, tier, contradictions)
+                except Exception:
+                    pass
+        self.registry.register(
+            make_memorize_tool(self._memory, on_reject=_governor_reject_hook)
+        )
         self.registry.register(make_relate_tool(self._memory))
         self.registry.register(make_query_relations_tool(self._memory))
         self.registry.register(make_memory_health_tool(self._governor))
@@ -2545,8 +2557,15 @@ class LoomSession:
            Re-serialize from an empty dict so the API accepts the message.
         2. Trim any assistant message whose tool_calls are not all followed by
            matching tool result messages (orphaned tool_calls → 2013 error).
+
+        PR-C4: when a repair actually happens, populate
+        ``self._last_sanitize_repaired`` so the platform layer can surface
+        a one-line "⚙ harness › sanitize: …" message. ``None`` means
+        "ran but found nothing to fix" — silent.
         """
         msgs = self.messages
+        _args_fixed = 0
+        _msgs_before = len(msgs)
 
         # Pass 1: repair invalid arguments JSON in-place
         for msg in msgs:
@@ -2557,11 +2576,13 @@ class LoomSession:
                 raw_args = fn.get("arguments", "{}")
                 if not isinstance(raw_args, str):
                     fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                    _args_fixed += 1
                     continue
                 try:
                     json.loads(raw_args)
                 except (json.JSONDecodeError, ValueError):
                     fn["arguments"] = "{}"
+                    _args_fixed += 1
 
         # Pass 2: remove assistant messages with orphaned tool_calls
         # Build set of all tool result ids present in the history.
@@ -2694,6 +2715,22 @@ class LoomSession:
                 continue
             keep3.append(msg)
         self.messages = keep3
+
+        # PR-C4: surface a one-line harness note when sanitize actually
+        # repaired anything. Two signals:
+        #   _args_fixed  — Pass 1 truncated/non-string arg blobs rebuilt
+        #   _msgs_dropped — Pass 2/3/4 dropped orphaned tool_use or
+        #                   tool_result messages
+        # When nothing changed, stays silent (the design point: only
+        # speak when something actually moved).
+        _msgs_dropped = max(0, _msgs_before - len(self.messages))
+        if _args_fixed or _msgs_dropped:
+            cb = getattr(self, "_on_sanitize_repaired", None)
+            if cb is not None:
+                try:
+                    cb(_args_fixed, _msgs_dropped)
+                except Exception:
+                    pass
 
     def _telemetry_record_tool(
         self,

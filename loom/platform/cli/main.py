@@ -55,6 +55,7 @@ from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.session_log import SessionLog
+from loom.platform.cli.harness_channel import HarnessChannel
 from loom.platform.cli.theme import LOOM_THEME
 from loom.platform.cli.ui import (
     ActionRolledBack,
@@ -78,6 +79,11 @@ from loom.platform.cli.ui import (
 )
 
 console = Console(highlight=False, theme=LOOM_THEME)
+
+# Harness messages route through this channel — see harness_channel.py.
+# Module-level instance so non-_chat code paths (slash commands, error
+# handlers) can emit without threading a parameter through every call.
+harness = HarnessChannel(console)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -161,6 +167,51 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
         )
 
     session.subscribe_promotion(_cli_promotion)
+
+    # PR-C3: route BlastRadiusMiddleware authorisation decisions through
+    # the harness channel. Red-light events留底 inline so the user can
+    # forensically trace why a tool was blocked. Green-light events stay
+    # silent — pre-authorized / exec_auto / scope-allow are routine
+    # successes, not events worth announcing. PR-D will reassess whether
+    # any *specific* green-light kind (e.g. "new scope grant just issued")
+    # deserves a footer flash, but blanket flashing every approval would
+    # spam the surface and contradict doc/49's "綠燈不出聲" principle.
+    def _on_lifecycle(call: "ToolCall", result: bool, reason: str) -> None:
+        if not result:
+            harness.inline(
+                f"auth denied: {call.tool_name} — {reason}",
+                level="warning",
+            )
+
+    for _mw in session._pipeline._middlewares:
+        if isinstance(_mw, BlastRadiusMiddleware):
+            _mw._on_lifecycle_event = _on_lifecycle
+            break
+
+    # PR-C4: surface history sanitize repairs and governor rejections.
+    # Both are silent today; making them visible takes them off the
+    # "weird invisible behaviour" list that haunts users of generative
+    # systems.
+    def _on_sanitize(args_fixed: int, msgs_dropped: int) -> None:
+        parts: list[str] = []
+        if args_fixed:
+            parts.append(f"{args_fixed} arg(s) repaired")
+        if msgs_dropped:
+            parts.append(f"{msgs_dropped} orphan message(s) dropped")
+        if parts:
+            harness.inline(f"sanitize: {', '.join(parts)}", level="info")
+
+    def _on_governor_reject(key: str, tier: str, contradictions: int) -> None:
+        detail = f"tier={tier}"
+        if contradictions:
+            detail += f", {contradictions} contradiction(s)"
+        harness.inline(
+            f"governor blocked memorize {key!r} ({detail})",
+            level="warning",
+        )
+
+    session._on_sanitize_repaired = _on_sanitize       # type: ignore[attr-defined]
+    session._on_governor_reject = _on_governor_reject  # type: ignore[attr-defined]
 
     console.print(render_header(model, db))
 
@@ -296,7 +347,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             in_flight = current_turn_task is not None and not current_turn_task.done()
             if in_flight:
                 session.cancel()
-                console.print("[loom.muted]⏸  上一輪已中斷，接收新訊息…[/loom.muted]")
+                harness.inline("⏸ 上一輪已中斷，接收新訊息…", level="info")
                 try:
                     await asyncio.wait_for(current_turn_task, timeout=3.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -322,7 +373,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 try:
                     await _handle_slash(text, session)
                 except Exception as exc:
-                    console.print(f"[loom.error]Slash command error: {exc}[/loom.error]")
+                    harness.inline(f"slash command error: {exc}", level="error")
                 continue
 
             # Detect interruption marker injected by input_loop.
@@ -341,7 +392,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
-                console.print(f"[loom.error]Turn error: {exc}[/loom.error]")
+                harness.inline(f"turn error: {exc}", level="error")
             finally:
                 current_turn_task = None
 
@@ -559,7 +610,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
-        console.print(f"[loom.muted]  Compacting context ({pct:.1f}% used)…[/loom.muted]")
+        harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
         await session._smart_compact()
 
     elif command == "/stop":
@@ -1250,20 +1301,31 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     spinner_task: asyncio.Task | None = None
     frame_index = 0
 
-    # ── Opening rule ──────────────────────────────────────────────────────────
+    # ── Loom Agent turn intro ─────────────────────────────────────────────
+    # PR-C: replace the bold-green "loom" Rule with a Loom Agent-themed
+    # marker. Per-line "Loom ▎" left-edge guide on streaming text is
+    # deferred to PR-D's renderer rewrite — would need newline-detection
+    # in the streaming loop, which is the same path PR-D rebuilds anyway.
     pct = session.budget.usage_fraction * 100
-    ctx_color = "green" if pct < 60 else "yellow" if pct < 85 else "red"
+    ctx_token = (
+        "loom.success" if pct < 60
+        else "loom.warning" if pct < 85
+        else "loom.error"
+    )
     persona_tag = (
-        f"  [loom.muted]|  persona: {session.current_personality}[/loom.muted]"
+        f"  [loom.muted]·  persona: {session.current_personality}[/loom.muted]"
         if session.current_personality
         else ""
     )
+    # Plain Text instead of Rule — Rule always extends a horizontal line
+    # after the title, which crowds the marker. The Loom Agent intro is
+    # meant to read as a quiet signature, not a banner.
     console.print(
-        Rule(
-            f"[bold loom.success]loom[/bold loom.success]"
-            f"[loom.muted]  |  [{ctx_color}]context {pct:.1f}%[/{ctx_color}][/loom.muted]"
-            f"{persona_tag}",
-            style="green",
+        Text.from_markup(
+            f"[loom.agent.guide]Loom ▎[/loom.agent.guide]"
+            f"[loom.muted]  context [/loom.muted]"
+            f"[{ctx_token}]{pct:.1f}%[/{ctx_token}]"
+            f"{persona_tag}"
         )
     )
 
@@ -1439,7 +1501,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         _cancel_spinner()
         clear_line()
         console.print()
-        console.print(f"[loom.error]Error: {exc}[/loom.error]")
+        harness.inline(f"turn aborted with error: {exc}", level="error")
     finally:
         # Defensive: ensure the spinner task never outlives this turn,
         # even if neither except branch fired (clean exit) or if a path

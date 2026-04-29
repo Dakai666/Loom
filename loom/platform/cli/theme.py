@@ -58,6 +58,14 @@ LOOM_THEME = Theme(
         "loom.border":      PARCHMENT_BORDER,
         # Surfaces
         "loom.harness.bg":  f"on {PARCHMENT_SURFACE}",
+        # Harness signature — the "⚙ harness ›" prefix on inline harness
+        # messages. Distinct token so PR-D can tweak it without rippling
+        # to every call site.
+        "loom.harness.signature": PARCHMENT_ACCENT,
+        # Loom Agent intro guide — the "Loom ▎" left-edge silk-coloured
+        # marker that opens each turn. Kept distinct from accent in case
+        # we want a different shade later (e.g. silk-pink for personality).
+        "loom.agent.guide":  PARCHMENT_ACCENT,
         # Convenience composites — emphasis variants used at multiple call
         # sites. Add sparingly; prefer composing tokens at the call site.
         "loom.accent.bold": f"bold {PARCHMENT_ACCENT}",

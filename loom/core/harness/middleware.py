@@ -500,6 +500,14 @@ class BlastRadiusMiddleware(Middleware):
         self._confirm = confirm_fn
         self._exec_escape_fn = exec_escape_fn
         self._registry = registry
+        # PR-C: optional platform-side hook fired on every authorisation
+        # decision. Lets the CLI route green-light events to the footer
+        # (no留底) and red-light events to the inline harness stream.
+        # Signature: (call, result, reason) -> None. Kept Optional so the
+        # core stays platform-agnostic — main.py wires it in _chat().
+        self._on_lifecycle_event: (
+            "Callable[[ToolCall, bool, str], None] | None"
+        ) = None
 
     def _exec_auto_approved(self, call: ToolCall) -> bool:
         """
@@ -595,6 +603,15 @@ class BlastRadiusMiddleware(Middleware):
             "authorize" if result else "deny",
             reason=reason,
         )
+
+        # PR-C: optional platform hook for surfacing the decision in the
+        # CLI/Discord stream. Wrapped in a broad except so a buggy
+        # listener can never abort the harness pipeline.
+        if self._on_lifecycle_event is not None:
+            try:
+                self._on_lifecycle_event(call, result, reason)
+            except Exception:
+                pass
 
     async def _enter_awaiting_confirm(self, call: ToolCall) -> None:
         """Transition ActionRecord to AWAITING_CONFIRM before prompting user (#109)."""

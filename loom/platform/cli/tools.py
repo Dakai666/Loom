@@ -872,7 +872,11 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     )
 
 
-def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
+def make_memorize_tool(
+    memory: "MemoryFacade",
+    *,
+    on_reject: "Callable[[str, str, int], None] | None" = None,
+) -> ToolDefinition:
     """
     Create a GUARDED ``memorize`` tool bound to the given MemoryFacade.
 
@@ -882,6 +886,15 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
     falls back to a direct semantic upsert.  Either way the result shape
     (``GovernedWriteResult``) is uniform, and embedding-write failures
     are surfaced through a structured WARN log inside the facade.
+
+    Parameters
+    ----------
+    on_reject : callable, optional
+        Fired when the governor blocks a write. Signature:
+        ``(key, trust_tier, contradictions_found) -> None``. Used by the
+        platform layer to surface a harness inline message — accept events
+        stay silent (PR-C4 design: governor only speaks when it stops
+        something).
     """
     from loom.core.memory.semantic import SemanticEntry
 
@@ -903,6 +916,11 @@ def make_memorize_tool(memory: "MemoryFacade") -> ToolDefinition:
                 f"Memorize skipped for {key!r}: existing entry has higher trust "
                 f"(tier={gov_result.trust_tier}, contradictions={gov_result.contradictions_found})"
             )
+            if on_reject is not None:
+                try:
+                    on_reject(key, gov_result.trust_tier, gov_result.contradictions_found)
+                except Exception:
+                    pass
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=True, output=msg)
 
