@@ -1469,10 +1469,17 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         if not text or not text.strip():
             return
         # Cheap markdown sniff — only reblit when there's something
-        # to gain. Catches bold/italic, headings, code spans, fenced
-        # code, lists, blockquotes, links
-        markers = ("**", "__", "# ", "## ", "### ", "`", "```",
-                   "- ", "* ", "> ", "](", "1. ")
+        # to gain. Covers bold/italic/strikethrough, ATX headings,
+        # code spans, fenced code, lists (-/*/+ and 1.), blockquotes
+        # (incl. nested), links, tables. ``***`` (bold-italic) and
+        # ``__`` (alt bold) are subsets of ``**``/``_`` so already
+        # matched by those entries
+        markers = (
+            "**", "__", "_", "~~", "`", "```",
+            "# ", "## ", "### ", "#### ",
+            "- ", "* ", "+ ", "1. ", "2. ",
+            "> ", "](", "| ",
+        )
         if not any(m in text for m in markers):
             return
 
@@ -1489,12 +1496,17 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
         from rich.markdown import Markdown as _Markdown
 
+        if rows <= 0:
+            # Cursor is already at the start of where the segment
+            # was; nothing to overwrite. ``text.strip()`` non-empty
+            # combined with rows == 0 only happens for whitespace-
+            # only segments which the early-return covered, so this
+            # is effectively unreachable — guard anyway
+            return
+
         def _reblit() -> None:
             import sys as _sys
-            if rows > 0:
-                _sys.stdout.write(f"\r\033[{rows}A\033[J")
-            else:
-                _sys.stdout.write("\r\033[J")
+            _sys.stdout.write(f"\r\033[{rows}A\033[J")
             _sys.stdout.flush()
             console.print(_Markdown(text.rstrip()))
 
