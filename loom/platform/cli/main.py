@@ -186,6 +186,31 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             _mw._on_lifecycle_event = _on_lifecycle
             break
 
+    # PR-C4: surface history sanitize repairs and governor rejections.
+    # Both are silent today; making them visible takes them off the
+    # "weird invisible behaviour" list that haunts users of generative
+    # systems.
+    def _on_sanitize(args_fixed: int, msgs_dropped: int) -> None:
+        parts: list[str] = []
+        if args_fixed:
+            parts.append(f"{args_fixed} arg(s) repaired")
+        if msgs_dropped:
+            parts.append(f"{msgs_dropped} orphan message(s) dropped")
+        if parts:
+            harness.inline(f"sanitize: {', '.join(parts)}", level="info")
+
+    def _on_governor_reject(key: str, tier: str, contradictions: int) -> None:
+        detail = f"tier={tier}"
+        if contradictions:
+            detail += f", {contradictions} contradiction(s)"
+        harness.inline(
+            f"governor blocked memorize {key!r} ({detail})",
+            level="warning",
+        )
+
+    session._on_sanitize_repaired = _on_sanitize       # type: ignore[attr-defined]
+    session._on_governor_reject = _on_governor_reject  # type: ignore[attr-defined]
+
     console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
