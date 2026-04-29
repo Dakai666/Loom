@@ -1286,27 +1286,50 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     # Give the session a handle to cancel the spinner before confirm prompts.
     session._cancel_spinner_fn = _cancel_spinner
 
+    # PR-D2 attempt 3 at the CJK truncation bug. Hypothesis: chunks
+    # arriving from the LLM are split at arbitrary byte offsets — a
+    # Chinese line of 7 wide chars is roughly 14 cells / 21 bytes,
+    # arriving as 2-3 separate chunks. patch_stdout's StdoutProxy
+    # buffers + flushes asynchronously via run_in_terminal; if the
+    # bottom-area redraw fires *between* two chunks of the same line,
+    # the redraw repositions cursor to col 0 of the line, and the
+    # next chunk overwrites whatever was already there — eating the
+    # opening characters of that line.
+    #
+    # Fix: buffer streaming chunks line-by-line, flush on newline. A
+    # full line is written atomically, so the bottom-area redraw
+    # cycle can't interleave inside it
+    _stream_pending = ""
+
+    def _flush_streaming(force: bool = False) -> None:
+        """Drain the line buffer.
+
+        Lines (text up to and including a ``\n``) are written
+        atomically. With ``force=True`` (called at TurnDone) any
+        partial trailing text is also flushed.
+        """
+        nonlocal _stream_pending
+        import sys as _sys
+        if not _stream_pending:
+            return
+        if "\n" in _stream_pending:
+            idx = _stream_pending.rfind("\n")
+            done = _stream_pending[: idx + 1]
+            _stream_pending = _stream_pending[idx + 1:]
+            _sys.stdout.write(done)
+            _sys.stdout.flush()
+        if force and _stream_pending:
+            _sys.stdout.write(_stream_pending)
+            _sys.stdout.flush()
+            _stream_pending = ""
+
     try:
         async for event in session.stream_turn(user_input):
             if isinstance(event, TextChunk):
-                # PR-D2 attempt 2 at the CJK truncation bug. The
-                # earlier "drop the streaming cursor" attempt didn't
-                # fix it, so the root cause isn't the ``\r\033[K`` —
-                # it's most likely Rich's own wrap calculation on
-                # wide-char (CJK) content racing the persistent app's
-                # bottom-area redraw via patch_stdout.
-                #
-                # Bypass Rich for streaming text entirely: write the
-                # raw chunk to stdout. ``patch_stdout`` (active in
-                # ``_chat``) still intercepts and routes through
-                # ``run_in_terminal``, so the output lands cleanly
-                # above the bottom region — but without Rich's wrap /
-                # ANSI processing that was producing the truncation
-                import sys as _sys
-                _sys.stdout.write(event.text)
-                _sys.stdout.flush()
+                _stream_pending += event.text
                 text_buffer += event.text
-                at_line_start = event.text.endswith("\n")
+                _flush_streaming()
+                at_line_start = (not _stream_pending) and event.text.endswith("\n")
 
             elif isinstance(event, ThinkCollapsed):
                 # PR-D2: silent in CLI. Anthropic native thinking blocks
@@ -1320,6 +1343,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 pass
 
             elif isinstance(event, ToolBegin):
+                # Drain pending streamed text before the tool row
+                _flush_streaming(force=True)
                 # Cancel any running spinner
                 _cancel_spinner()
                 # Ensure tool rows start on a fresh line
@@ -1421,6 +1446,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     session.resume()
 
             elif isinstance(event, TurnDone):
+                # Drain any unterminated trailing chunk before
+                # printing the post-turn UI
+                _flush_streaming(force=True)
                 # Cancel any running spinner and clear cursor
                 _cancel_spinner()
                 clear_line()
@@ -1459,6 +1487,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         # PR-A2: turn was cancelled by user-initiated abort (Enter on
         # next message). Render a clean ABORTED marker and re-raise so
         # the caller's await sees the cancellation.
+        _flush_streaming(force=True)
         _cancel_spinner()
         clear_line()
         console.print()
@@ -1470,6 +1499,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         )
         raise
     except Exception as exc:
+        _flush_streaming(force=True)
         _cancel_spinner()
         clear_line()
         console.print()
@@ -1478,6 +1508,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         # Defensive: ensure the spinner task never outlives this turn,
         # even if neither except branch fired (clean exit) or if a path
         # added later forgets to cancel it.
+        _flush_streaming(force=True)
         _cancel_spinner()
 
 
