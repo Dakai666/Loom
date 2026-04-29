@@ -280,13 +280,16 @@ class AnthropicProvider(LLMProvider):
         try:
             response = self._client.messages.create(**kwargs)
         except BaseException as _exc:
-            forensics.dump_on_failure(
-                provider="anthropic",
-                model=self.model,
-                canonical_messages=messages,
-                wire_messages=anthropic_msgs,
-                error=_exc,
-            )
+            # User-initiated cancellation is not a failure — don't pollute
+            # the forensics directory with normal abort flow.
+            if not isinstance(_exc, asyncio.CancelledError):
+                forensics.dump_on_failure(
+                    provider="anthropic",
+                    model=self.model,
+                    canonical_messages=messages,
+                    wire_messages=anthropic_msgs,
+                    error=_exc,
+                )
             raise
 
         text: str | None = None
@@ -420,6 +423,10 @@ class AnthropicProvider(LLMProvider):
                     final = None if aborted else await stream.get_final_message()
                 break  # success
             except BaseException as _exc:
+                # User-initiated cancellation: graceful abort path,
+                # don't dump and don't retry. Just propagate.
+                if isinstance(_exc, asyncio.CancelledError):
+                    raise
                 # Dump forensics on the first failure only — retries on the
                 # same payload would just produce identical dumps.
                 if not _forensics_dumped:

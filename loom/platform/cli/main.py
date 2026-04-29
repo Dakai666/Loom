@@ -174,31 +174,127 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     prompt_session = make_prompt_session()
 
-    try:
-        while True:
-            # ── Read user input (prompt_toolkit — multiline + file history + fuzzy slash) ──
+    # ── PR-A2: producer/consumer for abort-on-submit ──────────────────────
+    #
+    # Two concurrent tasks share the terminal via prompt_toolkit's
+    # ``patch_stdout`` so the prompt stays anchored at the bottom while
+    # streaming output renders above it:
+    #
+    #   input_loop  — reads user lines, queues them. If a turn is in
+    #                 flight, calls session.cancel() first and prefixes
+    #                 the new message with an interruption marker.
+    #
+    #   turn_loop   — drains the queue: slash commands run inline (no
+    #                 turn cancel), regular text spawns a streaming
+    #                 turn task that input_loop can cancel.
+    #
+    # Race notes:
+    # - current_turn_task is read+cancelled from input_loop and assigned
+    #   from turn_loop. Single-threaded asyncio gives us atomic ref
+    #   reads; cancelling an already-done task is a no-op.
+    # - wait_for(..., timeout=3.0) on cancel ensures we don't block the
+    #   user forever if a turn refuses to unwind.
+    _INTERRUPT_PREFIX = "\x00LOOM_INTERRUPT\x00"
+    input_queue: asyncio.Queue[str] = asyncio.Queue()
+    current_turn_task: asyncio.Task | None = None
+    shutdown = asyncio.Event()
+
+    async def input_loop() -> None:
+        nonlocal current_turn_task
+        while not shutdown.is_set():
             try:
                 user_input: str = await prompt_session.prompt_async(
                     [("class:prompt", "\nyou › ")],
                 )
             except (EOFError, KeyboardInterrupt):
-                break
+                shutdown.set()
+                return
+            except asyncio.CancelledError:
+                return
 
-            if not user_input.strip():
+            text = user_input.strip()
+            if not text:
                 continue
 
-            if user_input.strip().lower() in {"exit", "quit", "q"}:
-                break
+            if text.lower() in {"exit", "quit", "q"}:
+                shutdown.set()
+                return
 
-            # ── Slash commands ────────────────────────────────────────────
-            if user_input.startswith("/"):
-                await _handle_slash(user_input.strip(), session)
+            # If a turn is in flight, abort it and mark the new message
+            # so turn_loop can prepend an interruption note for the LLM.
+            in_flight = current_turn_task is not None and not current_turn_task.done()
+            if in_flight:
+                session.cancel()
+                console.print("[dim #c8924a]⏸  上一輪已中斷，接收新訊息…[/dim #c8924a]")
+                try:
+                    await asyncio.wait_for(current_turn_task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    # Turn task may have raised; that's fine — we just
+                    # want it finished before queueing the next message.
+                    pass
+                await input_queue.put(_INTERRUPT_PREFIX + text)
+            else:
+                await input_queue.put(text)
+
+    async def turn_loop() -> None:
+        nonlocal current_turn_task
+        while not shutdown.is_set():
+            try:
+                text = await asyncio.wait_for(input_queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
                 continue
 
-            # ── Streaming turn with Rich Live display ─────────────────────
+            # Slash commands run inline — no streaming turn, no cancel.
+            if text.startswith("/"):
+                try:
+                    await _handle_slash(text, session)
+                except Exception as exc:
+                    console.print(f"[red]Slash command error: {exc}[/red]")
+                continue
+
+            # Detect interruption marker injected by input_loop.
+            if text.startswith(_INTERRUPT_PREFIX):
+                text = text[len(_INTERRUPT_PREFIX):]
+                # Lightweight cue for the LLM that the prior turn was
+                # cut short by the user — keeps cognition coherent.
+                text = "[使用者打斷上一輪並接續]\n" + text
+
             console.print()
-            await _run_streaming_turn(session, user_input)
+            current_turn_task = asyncio.create_task(
+                _run_streaming_turn(session, text)
+            )
+            try:
+                await current_turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                console.print(f"[red]Turn error: {exc}[/red]")
+            finally:
+                current_turn_task = None
 
+    # patch_stdout(raw=True) keeps the prompt anchored while Rich's ANSI
+    # output streams above. raw=True passes escape sequences through so
+    # cursor manipulation (spinner, clear_line) still works.
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    try:
+        with patch_stdout(raw=True):
+            done, pending = await asyncio.wait(
+                {
+                    asyncio.create_task(input_loop()),
+                    asyncio.create_task(turn_loop()),
+                },
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
     finally:
         await session.stop()
         console.print("\n[dim]Session ended. Goodbye.[/dim]")
@@ -1223,11 +1319,30 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     )
                 )
 
+    except asyncio.CancelledError:
+        # PR-A2: turn was cancelled by user-initiated abort (Enter on
+        # next message). Render a clean ABORTED marker and re-raise so
+        # the caller's await sees the cancellation.
+        _cancel_spinner()
+        clear_line()
+        console.print()
+        console.print(
+            Rule(
+                "[#c8924a]⏸  ABORTED[/#c8924a]  [dim]turn cut short by user[/dim]",
+                style="#c8924a",
+            )
+        )
+        raise
     except Exception as exc:
         _cancel_spinner()
         clear_line()
         console.print()
         console.print(f"[red]Error: {exc}[/red]")
+    finally:
+        # Defensive: ensure the spinner task never outlives this turn,
+        # even if neither except branch fired (clean exit) or if a path
+        # added later forgets to cancel it.
+        _cancel_spinner()
 
 
 # ---------------------------------------------------------------------------
