@@ -199,18 +199,88 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     current_turn_task: asyncio.Task | None = None
     shutdown = asyncio.Event()
 
+    # ── PR-A3: confirm-prompt stdin coordination ──────────────────────────
+    #
+    # Interactive widgets (select_prompt in ui.py — used by tool confirm
+    # and HITL pause) need exclusive stdin while running. The challenge:
+    # input_loop's PromptSession runs its own prompt_toolkit Application
+    # that owns stdin's vt100 input handler. If we start a second
+    # Application before the first has fully detached its input, the new
+    # one races with stale key callbacks and crashes ("Application is
+    # not running").
+    #
+    # Coordination protocol:
+    #   - input_released  — set when input_loop is NOT inside prompt_async.
+    #                       Cleared on entry, set on exit (via finally).
+    #   - confirm_active  — set while a widget owns stdin.
+    #   - confirm_done    — set after the widget releases.
+    #
+    # _run_interactive: signals confirm_active, asks the live input
+    # Application to exit, waits for input_loop to actually return from
+    # prompt_async (input_released), then starts the widget. This
+    # guarantees stdin is fully detached before the new Application
+    # tries to attach.
+    confirm_active = asyncio.Event()
+    confirm_done = asyncio.Event()
+    confirm_done.set()
+    input_released = asyncio.Event()
+    input_released.set()  # input_loop hasn't entered prompt_async yet
+
+    async def _run_interactive(coro_factory) -> Any:
+        from prompt_toolkit.application.current import get_app_or_none
+
+        confirm_active.set()
+        confirm_done.clear()
+
+        live_app = get_app_or_none()
+        if live_app is not None and getattr(live_app, "is_running", False):
+            try:
+                live_app.exit(result=None)
+            except Exception:
+                pass
+
+        # Wait for input_loop to fully unwind out of prompt_async — its
+        # finally block sets input_released. Cap the wait at 1s so a
+        # misbehaving prompt_toolkit detach can't deadlock the user.
+        try:
+            await asyncio.wait_for(input_released.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            return await coro_factory()
+        finally:
+            confirm_active.clear()
+            confirm_done.set()
+
+    session._run_interactive = _run_interactive  # type: ignore[attr-defined]
+
     async def input_loop() -> None:
         nonlocal current_turn_task
         while not shutdown.is_set():
+            # If a confirm widget owns stdin, sit out until it's done.
+            if confirm_active.is_set():
+                await confirm_done.wait()
+                continue
+
+            input_released.clear()
             try:
-                user_input: str = await prompt_session.prompt_async(
-                    [("class:prompt", "\nyou › ")],
-                )
-            except (EOFError, KeyboardInterrupt):
-                shutdown.set()
-                return
-            except asyncio.CancelledError:
-                return
+                try:
+                    user_input = await prompt_session.prompt_async(
+                        [("class:prompt", "\nyou › ")],
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    shutdown.set()
+                    return
+                except asyncio.CancelledError:
+                    return
+            finally:
+                input_released.set()
+
+            # _run_interactive forces our prompt_async to exit with result=None.
+            # In that case loop back so the confirm_active gate above engages.
+            if user_input is None:
+                continue
 
             text = user_input.strip()
             if not text:
@@ -1268,36 +1338,67 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 console.print()
 
             elif isinstance(event, TurnPaused):
-                # ── HITL pause ────────────────────────────────────────────
+                # ── HITL pause (PR-A3: arrow-key widget) ──────────────────
                 _cancel_spinner()
                 clear_line()
                 if not at_line_start:
                     console.print()
                 console.print(
                     Rule(
-                        f"[yellow]⏸  Paused[/yellow]  [dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
-                        style="yellow",
+                        f"[#c8924a]⏸  Paused[/#c8924a]  "
+                        f"[dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
+                        style="#c8924a",
                     )
                 )
-                console.print(
-                    "[dim]  r[/dim] resume  [dim]·[/dim]  "
-                    "[dim]c[/dim] cancel  [dim]·[/dim]  "
-                    "[dim]<message>[/dim] redirect and resume"
-                )
-                try:
-                    raw = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input("pause> ").strip()
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    raw = "c"
 
-                if raw in ("c", "cancel"):
+                from loom.platform.cli.ui import SelectOption, select_prompt
+
+                _PAUSE_RESUME = "resume"
+                _PAUSE_CANCEL = "cancel"
+                _PAUSE_REDIRECT = "redirect"
+
+                async def _pause_pick():
+                    return await select_prompt(
+                        title="絲已暫停，下一步？",
+                        options=[
+                            SelectOption(label="繼續執行剩下的工具",
+                                         value=_PAUSE_RESUME, shortcut="r"),
+                            SelectOption(label="導向新指令並繼續",
+                                         value=_PAUSE_REDIRECT, shortcut="m"),
+                            SelectOption(label="取消這個 turn",
+                                         value=_PAUSE_CANCEL, shortcut="c"),
+                        ],
+                        default_index=0,
+                        cancel_value=_PAUSE_CANCEL,
+                    )
+
+                runner = getattr(session, "_run_interactive", None)
+                choice = await (runner(_pause_pick) if runner else _pause_pick())
+
+                if choice == _PAUSE_CANCEL:
                     session.cancel()
-                elif raw in ("r", "resume", ""):
+                elif choice == _PAUSE_REDIRECT:
+                    # Sub-prompt for the redirect text. Routed through the
+                    # same _run_interactive so input_loop stays paused.
+                    async def _ask_redirect():
+                        from prompt_toolkit import PromptSession as _PS
+                        ps = _PS()
+                        try:
+                            return await ps.prompt_async(
+                                [("class:prompt", "redirect › ")],
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            return ""
+
+                    raw = await (runner(_ask_redirect) if runner else _ask_redirect())
+                    raw = (raw or "").strip()
+                    if raw:
+                        session.resume_with(raw)
+                        console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
+                    else:
+                        session.resume()
+                else:  # _PAUSE_RESUME
                     session.resume()
-                else:
-                    session.resume_with(raw)
-                    console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
 
             elif isinstance(event, TurnDone):
                 # Cancel any running spinner and clear cursor

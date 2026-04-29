@@ -42,6 +42,14 @@ ALLOWED_EXCEPTIONS: list[tuple[str, str]] = [
     # coupling: those tool factories belong in loom.core.tools and will be
     # migrated in a follow-up (issue #69).
     ("loom.core.session", "loom.platform.cli.tools"),
+    # PR-A3 (#236): _confirm_tool_cli renders an arrow-key widget defined
+    # in loom.platform.cli.ui (select_prompt). Same architectural smell as
+    # the cli.tools exception above — interactive UI logic ideally lives
+    # closer to the platform layer, but the confirm path is anchored on
+    # the session because BlastRadiusMiddleware needs a session-scoped
+    # confirm_fn. Will be untangled when CLI-specific session methods
+    # move to a platform adapter.
+    ("loom.core.session", "loom.platform.cli.ui"),
 ]
 
 

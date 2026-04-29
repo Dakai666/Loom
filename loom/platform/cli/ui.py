@@ -19,6 +19,7 @@ Display strategy
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.markdown import Markdown
@@ -28,6 +29,7 @@ from rich.text import Text
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import (
     CompleteEvent,
@@ -37,8 +39,12 @@ from prompt_toolkit.completion import (
 )
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_focus
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
 
 # ---------------------------------------------------------------------------
@@ -233,6 +239,159 @@ def make_prompt_session(
         multiline=False,
         mouse_support=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# select_prompt — arrow-key inline selection (PR-A3)
+# ---------------------------------------------------------------------------
+#
+# Replaces single-key ``input("y/n: ")`` confirms with an inline widget
+# that supports up/down arrow navigation, Enter to confirm, single-key
+# shortcuts (still typeable for muscle memory), and Esc to cancel.
+#
+# The widget runs as a short-lived prompt_toolkit Application which
+# competes for stdin with the main input loop. Callers must ensure the
+# main input loop is paused before invoking — see ``confirm_active``
+# coordination in ``platform/cli/main.py``.
+
+
+@dataclass
+class SelectOption:
+    """One choice in a select_prompt menu."""
+    label: str
+    value: Any
+    shortcut: str | None = None      # single-letter direct selection
+    style: str = ""                   # optional Rich-like style applied to label
+
+
+_SELECT_STYLE = Style.from_dict(
+    {
+        "select.title":    "#e0cfa0",            # parchment cream, no bold/reverse
+        "select.body":     "#8a7a5e",
+        "select.subtle":   "#8a7a5e",
+        "select.option":   "#e0cfa0",
+        "select.option.cursor": "bold #c8a464",  # cursor row: bold amber, no bg flip
+        "select.shortcut": "#8a7a5e",            # shortcut hint: dim, no emphasis
+        "select.footer":   "#8a7a5e italic",
+        "select.deny":     "#b87060",
+        "select.approve":  "#7a9e78",
+    }
+)
+
+
+async def select_prompt(
+    *,
+    title: str,
+    body: str = "",
+    options: list[SelectOption],
+    default_index: int = 0,
+    cancel_value: Any = None,
+    footer_hint: str | None = None,
+) -> Any:
+    """Show an inline arrow-key selection menu and return the chosen value.
+
+    Parameters
+    ----------
+    title : str
+        Single-line header (e.g. tool name + trust level).
+    body : str
+        Optional secondary description (truncated args, justification, …).
+    options : list[SelectOption]
+        Choices in display order. Each option's ``shortcut`` (if set) lets
+        the user pick it directly without arrow nav.
+    default_index : int
+        Cursor starts on this option.
+    cancel_value : Any
+        Returned when the user presses Esc / Ctrl+C.
+    footer_hint : str | None
+        Override the default ``↑↓ select  ⏎ confirm  esc cancel`` hint.
+    """
+    cursor = max(0, min(default_index, len(options) - 1))
+    shortcut_index = {
+        opt.shortcut.lower(): idx
+        for idx, opt in enumerate(options)
+        if opt.shortcut
+    }
+
+    def _render() -> FormattedText:
+        lines: list[tuple[str, str]] = []
+        if title:
+            lines.append(("class:select.title", f"{title}\n"))
+        if body:
+            lines.append(("class:select.body", f"{body}\n"))
+        if title or body:
+            lines.append(("", "\n"))
+
+        for idx, opt in enumerate(options):
+            is_cursor = idx == cursor
+            arrow = " ▸ " if is_cursor else "   "
+            style = "class:select.option.cursor" if is_cursor else "class:select.option"
+            label = opt.label
+            if opt.shortcut and not is_cursor:
+                # Embed shortcut hint as suffix in subtle style
+                lines.append((style, f"{arrow}{label}"))
+                lines.append(("class:select.shortcut", f"  ({opt.shortcut})"))
+                lines.append(("", "\n"))
+            else:
+                lines.append((style, f"{arrow}{label}"))
+                if opt.shortcut and is_cursor:
+                    lines.append(("class:select.option.cursor", f"  ({opt.shortcut})"))
+                lines.append(("", "\n"))
+
+        lines.append(("", "\n"))
+        hint = footer_hint or "↑↓ 選擇  ⏎ 確認  esc 取消"
+        if shortcut_index:
+            shortcuts = "/".join(s for s in shortcut_index)
+            hint += f"  ·  直接按 {shortcuts}"
+        lines.append(("class:select.footer", hint))
+        return FormattedText(lines)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _up(event):
+        nonlocal cursor
+        cursor = (cursor - 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("down")
+    @kb.add("c-n")
+    def _down(event):
+        nonlocal cursor
+        cursor = (cursor + 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _confirm(event):
+        event.app.exit(result=options[cursor].value)
+
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=cancel_value)
+
+    # Bind each shortcut key directly
+    for shortcut, idx in shortcut_index.items():
+        @kb.add(shortcut)
+        def _shortcut(event, _idx=idx):  # default-arg captures idx per loop
+            event.app.exit(result=options[_idx].value)
+
+    body_window = Window(
+        content=FormattedTextControl(_render, focusable=True),
+        height=Dimension(min=len(options) + (3 if title or body else 1)),
+        wrap_lines=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([body_window])),
+        key_bindings=kb,
+        style=_SELECT_STYLE,
+        full_screen=False,
+        mouse_support=False,
+    )
+
+    return await app.run_async()
 
 
 # ---------------------------------------------------------------------------
