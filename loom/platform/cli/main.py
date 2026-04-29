@@ -69,7 +69,6 @@ from loom.platform.cli.ui import (
     TurnDropped,
     TurnPaused,
     clear_line,
-    render_header,
     status_bar,
     tool_begin_line,
     tool_end_line,
@@ -211,16 +210,24 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     session._on_sanitize_repaired = _on_sanitize       # type: ignore[attr-defined]
     session._on_governor_reject = _on_governor_reject  # type: ignore[attr-defined]
 
-    console.print(render_header(model, db))
-
-    if not session._memory_index.is_empty:
-        console.print(
-            Panel(
-                session._memory_index.render(),
-                title="[loom.accent]Memory[/loom.accent]",
-                border_style="dim",
-            )
+    # PR-D4: 3-line mini signature replaces the old render_header Panel
+    # + MemoryIndex Panel splatter. The full MemoryIndex still feeds
+    # the LLM's system prompt unchanged — only the user-facing greeting
+    # is consolidated. Counts pulled from the index so the user gets a
+    # sense of session weight without paging through skill catalogs.
+    from loom.platform.cli.ui import render_welcome_signature
+    _idx = session._memory_index
+    console.print(
+        render_welcome_signature(
+            model=model,
+            persona=session.current_personality,
+            skill_count=getattr(_idx, "skill_count", 0),
+            fact_count=getattr(_idx, "semantic_count", 0),
+            mcp_count=len(session._mcp_clients),
+            episode_count=getattr(_idx, "episode_sessions", 0),
+            relation_count=getattr(_idx, "relational_count", 0),
         )
+    )
 
     # ── PR-D1: persistent prompt_toolkit Application ──────────────────────
     #
