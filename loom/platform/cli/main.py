@@ -245,8 +245,10 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     import sys as _sys
     _term_h = _shutil.get_terminal_size(fallback=(80, 24)).lines
     # Welcome sig footprint ~ 6 lines (5 visible + leading newline);
-    # bottom area ~ 4 lines (thinking + separator + input + footer)
-    _pad = max(0, _term_h - 6 - 4)
+    # bottom area ~ 5 lines (thinking + sep_top + input + sep_bottom +
+    # footer). Conditional/thinking only shows during agent calls so a
+    # frame more is fine.
+    _pad = max(0, _term_h - 6 - 5)
     _sys.stdout.write("\n" * _pad)
     _sys.stdout.flush()
 

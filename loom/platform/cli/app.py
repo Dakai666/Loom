@@ -397,11 +397,17 @@ class LoomApp:
             style="class:footer",
         )
 
-        # Separator above the bottom region — makes the visual
-        # boundary between scrollback and the persistent input/footer
-        # explicit. Filled with a horizontal rule character; styled
-        # in the muted-border palette
-        separator_window = Window(
+        # Separators above + below the input region — make the visual
+        # boundary between scrollback / input / footer explicit. Filled
+        # with a horizontal rule character; styled in the muted-border
+        # palette. Two separate Window instances so each can sit at its
+        # correct position in the HSplit
+        separator_top = Window(
+            char="─",
+            height=1,
+            style=f"fg:{PARCHMENT_BORDER}",
+        )
+        separator_bottom = Window(
             char="─",
             height=1,
             style=f"fg:{PARCHMENT_BORDER}",
@@ -423,11 +429,12 @@ class LoomApp:
         layout = Layout(
             HSplit([
                 thinking_window,
-                separator_window,
+                separator_top,
                 input_window,
                 confirm_window,
                 pause_window,
                 redirect_window,
+                separator_bottom,
                 footer_window,
             ]),
             focused_element=self._input_buffer,
