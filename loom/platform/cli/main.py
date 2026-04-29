@@ -353,6 +353,14 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             app.footer.persona = session.current_personality
             app.invalidate()
 
+    async def footer_ticker() -> None:
+        """Tick the footer at 2 Hz so live fields (active envelope
+        elapsed, compaction spinner) progress visibly."""
+        while not shutdown.is_set():
+            if app.footer.active_envelopes or app.footer.compacting:
+                app.invalidate()
+            await asyncio.sleep(0.5)
+
     # patch_stdout makes console.print flow above the app's persistent
     # bottom region. raw=True passes escape sequences through so the
     # existing Rich rendering (panels, spinners) keeps working.
@@ -362,8 +370,9 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
         with patch_stdout(raw=True):
             app_task = asyncio.create_task(app.run())
             turn_task = asyncio.create_task(turn_loop())
+            ticker_task = asyncio.create_task(footer_ticker())
             done, pending = await asyncio.wait(
-                {app_task, turn_task},
+                {app_task, turn_task, ticker_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             shutdown.set()
@@ -568,7 +577,18 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
         harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
-        await session._smart_compact()
+        # PR-D4: surface compaction in footer so the multi-second pause
+        # doesn't read as a hang
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            loom_app.footer.compacting = True
+            loom_app.invalidate()
+        try:
+            await session._smart_compact()
+        finally:
+            if loom_app is not None:
+                loom_app.footer.compacting = False
+                loom_app.invalidate()
 
     elif command == "/stop":
         # In CLI the turn is a blocking await — the user can't type while it runs.
@@ -1363,6 +1383,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 console.print(tool_begin_line(event.name, event.args))
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
+                # PR-D4: track in footer for live ▸ <tool> · <elapsed>
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    from loom.platform.cli.app import _ActiveEnvelope
+                    import time as _t
+                    loom_app.footer.active_envelopes.append(
+                        _ActiveEnvelope(name=event.name, started_monotonic=_t.monotonic())
+                    )
+                    loom_app.invalidate()
 
             elif isinstance(event, ToolEnd):
                 # Cancel spinner and clear its line
@@ -1374,6 +1403,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 at_line_start = True
                 active_tool = None
                 console.print()
+                # PR-D4: drop matching envelope from footer
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    envs = loom_app.footer.active_envelopes
+                    for i in range(len(envs) - 1, -1, -1):
+                        if envs[i].name == event.name:
+                            envs.pop(i)
+                            break
+                    loom_app.invalidate()
 
             elif isinstance(event, TurnPaused):
                 # ── HITL pause (PR-A3: arrow-key widget) ──────────────────

@@ -75,6 +75,13 @@ Mode = Literal["input", "confirm", "pause", "redirect"]
 
 
 @dataclass
+class _ActiveEnvelope:
+    """A tool envelope currently in flight — for footer summary."""
+    name: str
+    started_monotonic: float
+
+
+@dataclass
 class FooterState:
     """Mutable state read by ``render_footer`` on every redraw.
 
@@ -87,6 +94,13 @@ class FooterState:
     persona: str | None = None
     # Context window utilisation — surfaces in footer when >60%
     token_pct: float = 0.0
+    # Tools currently running. footer shows the most recent one's
+    # name + elapsed; if multiple, prefix with ``Nx`` count
+    active_envelopes: list[_ActiveEnvelope] = field(default_factory=list)
+    # Compaction in progress — when True, footer hides everything
+    # else and shows ``⚡ 壓縮中…`` so the long pause doesn't look
+    # like a hang
+    compacting: bool = False
     # Last-turn stats. Kept out of scrollback (PR-A printed these
     # inline as the "context X% | cache Y% | A in / B out | Cs | N
     # tools" status_bar; that's noise the user doesn't need to keep
@@ -137,6 +151,8 @@ _APP_STYLE = Style.from_dict(
         "footer.budget.warn":    PARCHMENT_WARNING,
         "footer.budget.high":    PARCHMENT_ERROR,
         "footer.stats":          PARCHMENT_MUTED,
+        "footer.envelope":       PARCHMENT_ACCENT,
+        "footer.compaction":     PARCHMENT_WARNING,
         # Confirm / Pause widget — also no bg, blend with terminal
         "widget.title":          PARCHMENT_TEXT,
         "widget.body":           PARCHMENT_MUTED,
@@ -406,13 +422,17 @@ class LoomApp:
         if left:
             parts.append(("class:footer", f" {left} "))
 
-        # Context % — always visible. Originally hidden under 60% per
-        # doc/49 § C-plan, but the once-per-turn intro that used to
-        # carry it has been pared back to just ``Loom ▎``, so keeping
-        # context% visible in footer is the only place it lives now.
-        # Colour ladder unchanged: muted under 60%, ochre 60-80%,
-        # warning 80-95%, error >95%
         s = self.footer
+
+        # If compacting: replace the middle area with the spinner
+        # message so the user doesn't think the agent has hung
+        if s.compacting:
+            parts.append(("class:footer", "  "))
+            parts.append(("class:footer.compaction", "⚡ 壓縮中…"))
+            return FormattedText(parts)
+
+        # Context % — always visible. Colour ladder: muted under 60%,
+        # ochre 60-80%, warning 80-95%, error >95%
         token = (
             "footer.budget.high" if s.token_pct > 95
             else "footer.budget.warn" if s.token_pct > 80
@@ -421,25 +441,39 @@ class LoomApp:
         parts.append(("class:footer", "  "))
         parts.append((f"class:{token}", f"context {s.token_pct:.1f}%"))
 
-        # Last-turn stats — folded in from the old inline status_bar
-        # so the post-turn metrics live in one place instead of
-        # scrolling away. Hidden until at least one turn has completed
-        stats: list[str] = []
-        if s.last_turn_cache_hit is not None:
-            stats.append(f"cache {s.last_turn_cache_hit:.0f}%")
-        if (s.last_turn_input_tokens is not None
-                and s.last_turn_output_tokens is not None):
-            stats.append(
-                f"{s.last_turn_input_tokens}in / {s.last_turn_output_tokens}out"
-            )
-        if s.last_turn_elapsed_s is not None:
-            stats.append(f"{s.last_turn_elapsed_s:.1f}s")
-        if s.last_turn_tool_count is not None:
-            n = s.last_turn_tool_count
-            stats.append(f"{n} tool{'s' if n != 1 else ''}")
-        if stats:
+        # Active envelopes — show the most recent one with elapsed
+        # time. When >1 in flight, prefix with count: ``3× ▸ ...``.
+        # Updates as ToolBegin / ToolEnd fire (see main.py wiring)
+        envs = s.active_envelopes
+        if envs:
+            import time as _t
+            latest = envs[-1]
+            elapsed = max(0.0, _t.monotonic() - latest.started_monotonic)
+            label = f"{len(envs)}× " if len(envs) > 1 else ""
+            label += f"▸ {latest.name} · {elapsed:.1f}s"
             parts.append(("class:footer", "  "))
-            parts.append(("class:footer.stats", " · ".join(stats)))
+            parts.append(("class:footer.envelope", label))
+
+        # Last-turn stats — only show when no tool is currently in
+        # flight (otherwise the active envelope already tells the
+        # user "we're busy")
+        if not envs:
+            stats: list[str] = []
+            if s.last_turn_cache_hit is not None:
+                stats.append(f"cache {s.last_turn_cache_hit:.0f}%")
+            if (s.last_turn_input_tokens is not None
+                    and s.last_turn_output_tokens is not None):
+                stats.append(
+                    f"{s.last_turn_input_tokens}in / {s.last_turn_output_tokens}out"
+                )
+            if s.last_turn_elapsed_s is not None:
+                stats.append(f"{s.last_turn_elapsed_s:.1f}s")
+            if s.last_turn_tool_count is not None:
+                n = s.last_turn_tool_count
+                stats.append(f"{n} tool{'s' if n != 1 else ''}")
+            if stats:
+                parts.append(("class:footer", "  "))
+                parts.append(("class:footer.stats", " · ".join(stats)))
 
         return FormattedText(parts)
 
