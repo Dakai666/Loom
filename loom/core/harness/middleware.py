@@ -390,6 +390,15 @@ class LegitimacyGuardMiddleware(Middleware):
         # Tools that have successfully executed once this session; probe
         # requirement is waived for these on subsequent turns (Issue #118).
         self._session_trusted: set[str] = set()
+        # Optional UI callback fired when a trajectory anomaly is flagged.
+        # Wired by the platform layer so the warning can route through
+        # the harness channel (``⚙ harness ›``) instead of the bare
+        # logging path that landed unstyled in scrollback. Signature:
+        # ``(tool_name: str, origin: str) -> None``. Failures inside
+        # the callback are swallowed
+        self._on_trajectory_anomaly: (
+            Callable[[str, str], None] | None
+        ) = None
 
     @staticmethod
     def _is_probe(call: ToolCall) -> bool:
@@ -450,12 +459,27 @@ class LegitimacyGuardMiddleware(Middleware):
                 # readers) can see why an EXEC call lost its exec_auto fast-pass.
                 # Without this, autonomous runs that get blocked by the soft
                 # guard look indistinguishable from a generic permission denial.
-                _log.warning(
-                    "Trajectory anomaly: %s called with EXEC capability before "
-                    "any probe this turn (origin=%s); exec_auto fast-pass will "
-                    "be revoked downstream.",
-                    call.tool_name, call.origin,
-                )
+                # When a UI callback is wired (interactive CLI), demote the
+                # log to DEBUG — the styled harness inline already covers
+                # operator-facing surfacing and the bare log just leaked
+                # unstyled into scrollback. Headless paths (autonomy daemon,
+                # tests) still get the WARNING for forensics
+                if self._on_trajectory_anomaly is not None:
+                    _log.debug(
+                        "Trajectory anomaly: %s (origin=%s); exec_auto revoked.",
+                        call.tool_name, call.origin,
+                    )
+                    try:
+                        self._on_trajectory_anomaly(call.tool_name, call.origin)
+                    except Exception:
+                        pass
+                else:
+                    _log.warning(
+                        "Trajectory anomaly: %s called with EXEC capability before "
+                        "any probe this turn (origin=%s); exec_auto fast-pass will "
+                        "be revoked downstream.",
+                        call.tool_name, call.origin,
+                    )
 
         result = await next(call)
 

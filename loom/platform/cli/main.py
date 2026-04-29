@@ -185,6 +185,24 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
             _mw._on_lifecycle_event = _on_lifecycle
             break
 
+    # Route LegitimacyGuardMiddleware's trajectory-anomaly warning
+    # through the harness channel too. Before this, the message
+    # landed via the stdlib logger and printed unstyled into scrollback,
+    # looking like it belonged to the surrounding tool args (the user
+    # could not tell it was a separate harness signal).
+    def _on_trajectory_anomaly(tool_name: str, origin: str) -> None:
+        harness.inline(
+            f"trajectory anomaly: {tool_name} ran EXEC without a prior "
+            f"probe (origin={origin}); exec_auto fast-pass revoked.",
+            level="warning",
+        )
+
+    from loom.core.harness.middleware import LegitimacyGuardMiddleware
+    for _mw in session._pipeline._middlewares:
+        if isinstance(_mw, LegitimacyGuardMiddleware):
+            _mw._on_trajectory_anomaly = _on_trajectory_anomaly
+            break
+
     # PR-C4: surface history sanitize repairs and governor rejections.
     # Both are silent today; making them visible takes them off the
     # "weird invisible behaviour" list that haunts users of generative
