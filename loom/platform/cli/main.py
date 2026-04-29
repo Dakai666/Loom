@@ -1315,14 +1315,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         if session.current_personality
         else ""
     )
+    # Plain Text instead of Rule — Rule always extends a horizontal line
+    # after the title, which crowds the marker. The Loom Agent intro is
+    # meant to read as a quiet signature, not a banner.
     console.print(
-        Rule(
+        Text.from_markup(
             f"[loom.agent.guide]Loom ▎[/loom.agent.guide]"
             f"[loom.muted]  context [/loom.muted]"
             f"[{ctx_token}]{pct:.1f}%[/{ctx_token}]"
-            f"{persona_tag}",
-            style="loom.border",
-            align="left",
+            f"{persona_tag}"
         )
     )
 
