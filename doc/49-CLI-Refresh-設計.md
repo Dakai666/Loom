@@ -259,6 +259,30 @@ PR-E  TaskList live 浮動面板
 - **Multiline 輸入暫不啟用**：
   `multiline=True` 與 Rich 的 `\r\033[K` clear_line 互動會放大上面那個截斷 bug。A1 階段已將 `multiline=False`，Alt+Enter 換行能力延到 PR-D 與 stream renderer 重寫一起做。
 
+## PR-D 預計要重寫的東西（讓未來的我們不要驚訝）
+
+PR-A 為了快速上線輸入升級 + abort-on-submit + arrow-key confirm，採用了 **「每輪 `prompt_async` + 短暫 widget Application」** 的模型。PR-D 要切到 **「單一 persistent Application + 固定 bottom Window」** 的 Linear Stream 架構，下面這些東西**幾乎確定要砍掉重寫**，不是 PR-A 的退化、是路線轉換：
+
+- **三事件 stdin 協調協議**（`confirm_active` / `confirm_done` / `input_released`）：
+  目前依賴 `prompt_async` 迴圈模型才需要這套協議——多個 Application 搶 stdin 才有 race。Persistent Application 模型下，confirm widget 變成主 Application 的 sub-mode（layout 切換），沒有 stdin 移交問題，整套協議拿掉。
+
+- **`_run_interactive` 包裝器**：
+  同上，PR-D 之後不再需要「暫停 input loop → 跑 widget → 恢復」的舞蹈。改成主 Application 直接切 mode。
+
+- **`patch_stdout(raw=True)`**：
+  Persistent Application 下不需要 patch_stdout，因為 streaming 輸出本來就走 Application 的 output buffer，不會跟 prompt 區搶。
+
+PR-D 也要在 testing note 裡明確覆蓋：
+
+- **Multi-line input + streaming output 共存**：PR-A deferred multiline，PR-D 既要解 streaming 截斷又要重啟 multiline——兩個改動共用同一條 render path。回歸測試必須驗證**兩者同時打開**沒有交叉 bug，否則無法獨立確認問題出自哪一邊。
+
+## Merge 後追蹤事項（PR-A 留尾）
+
+- 非互動 context（test / script 直接呼叫 `_confirm_tool_cli`）的 widget timeout 行為——目前 `_run_interactive` 缺席時會等到 1s timeout 再啟動，行為正確但缺 smoke test
+- 確認 widget 標題列「Loom」的 L 在某些終端 theme 下顯示為反白（A3 PR review 發現）——色彩微調
+- `_format_scope_panel` 從 `[bold]` 改 `[#c8a464]` 的對比度——透明背景終端下需要驗證閱讀性
+- 多輪連續打斷（連發三條訊息，第二三條的排隊處理）尚未在 test plan 覆蓋
+
 ---
 
 ## 參考
