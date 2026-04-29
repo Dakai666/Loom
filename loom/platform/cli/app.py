@@ -406,16 +406,20 @@ class LoomApp:
         if left:
             parts.append(("class:footer", f" {left} "))
 
-        # Token budget when >60%
+        # Context % — always visible. Originally hidden under 60% per
+        # doc/49 § C-plan, but the once-per-turn intro that used to
+        # carry it has been pared back to just ``Loom ▎``, so keeping
+        # context% visible in footer is the only place it lives now.
+        # Colour ladder unchanged: muted under 60%, ochre 60-80%,
+        # warning 80-95%, error >95%
         s = self.footer
-        if s.token_pct > 60:
-            token = (
-                "footer.budget.high" if s.token_pct > 95
-                else "footer.budget.warn" if s.token_pct > 80
-                else "footer.budget.ok"
-            )
-            parts.append(("class:footer", "  "))
-            parts.append((f"class:{token}", f"⚡ tok {s.token_pct:.0f}%"))
+        token = (
+            "footer.budget.high" if s.token_pct > 95
+            else "footer.budget.warn" if s.token_pct > 80
+            else "footer.budget.ok"
+        )
+        parts.append(("class:footer", "  "))
+        parts.append((f"class:{token}", f"context {s.token_pct:.1f}%"))
 
         # Last-turn stats — folded in from the old inline status_bar
         # so the post-turn metrics live in one place instead of

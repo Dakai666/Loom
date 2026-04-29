@@ -1289,14 +1289,22 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     try:
         async for event in session.stream_turn(user_input):
             if isinstance(event, TextChunk):
-                # PR-D2: plain stream into scrollback — no per-chunk
-                # cursor (was the source of the CJK soft-wrap clear
-                # bug, dropped earlier in D2) and no per-line agent
-                # guide (the once-per-turn ``Loom ▎  context X%``
-                # header is enough identity; per-line markers read as
-                # quote-block clutter, especially across paragraph
-                # breaks)
-                console.print(event.text, end="", markup=False, highlight=False)
+                # PR-D2 attempt 2 at the CJK truncation bug. The
+                # earlier "drop the streaming cursor" attempt didn't
+                # fix it, so the root cause isn't the ``\r\033[K`` —
+                # it's most likely Rich's own wrap calculation on
+                # wide-char (CJK) content racing the persistent app's
+                # bottom-area redraw via patch_stdout.
+                #
+                # Bypass Rich for streaming text entirely: write the
+                # raw chunk to stdout. ``patch_stdout`` (active in
+                # ``_chat``) still intercepts and routes through
+                # ``run_in_terminal``, so the output lands cleanly
+                # above the bottom region — but without Rich's wrap /
+                # ANSI processing that was producing the truncation
+                import sys as _sys
+                _sys.stdout.write(event.text)
+                _sys.stdout.flush()
                 text_buffer += event.text
                 at_line_start = event.text.endswith("\n")
 
