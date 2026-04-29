@@ -1516,6 +1516,62 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         else:
             _reblit()
 
+    # PR-E follow-up #246: envelope three-stage fade.
+    # After ToolEnd we paint the row in **committed** style (the
+    # default — green/red accent). 3s later, if no other content has
+    # been printed below it, we cursor-up reblit it as **frozen**
+    # (fully muted) so the visual weight sinks. ``_output_seq``
+    # increments on every printable event and the freeze timer
+    # rejects when its captured value no longer matches — that's how
+    # we detect "something else got printed underneath".
+    _output_seq = 0
+    _freeze_task: asyncio.Task | None = None
+
+    def _bump_output_seq() -> None:
+        nonlocal _output_seq
+        _output_seq += 1
+
+    def _cancel_pending_freeze() -> None:
+        nonlocal _freeze_task
+        if _freeze_task and not _freeze_task.done():
+            _freeze_task.cancel()
+        _freeze_task = None
+
+    async def _freeze_envelope(seq_at_schedule: int, name: str, success: bool,
+                                duration_ms: float) -> None:
+        """Sleep, then reblit the most-recent ToolEnd row as frozen.
+
+        Bails if anything else printed in the meantime — only the
+        envelope still anchored at the bottom can have its visual
+        weight reduced via cursor-up.
+        """
+        try:
+            await asyncio.sleep(3.0)
+        except asyncio.CancelledError:
+            return
+        if _output_seq != seq_at_schedule:
+            return
+
+        def _rewrite() -> None:
+            import sys as _sys
+            # Layout above cursor: [tool_end row] [blank row] [cursor]
+            # → up 2, clear forward, reprint frozen + blank
+            _sys.stdout.write("\r\033[2A\033[J")
+            _sys.stdout.flush()
+            console.print(tool_end_line(name, success, duration_ms, frozen=True))
+            console.print()
+
+        loom_app = getattr(session, "_loom_app", None)
+        try:
+            if loom_app is not None:
+                await loom_app.print_above(_rewrite)
+            else:
+                _rewrite()
+        except Exception:
+            # Don't let a cosmetic reblit failure poison the turn —
+            # cursor manipulation can fail under terminal resize, etc.
+            pass
+
     # PR-D4: clear the "thinking" footer indicator on the first
     # observable event of the turn. After that, the active envelope
     # / streaming output / turn stats take over the footer's middle.
@@ -1535,6 +1591,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         async for event in session.stream_turn(user_input):
             _clear_thinking()
             if isinstance(event, TextChunk):
+                _bump_output_seq()
                 _stream_pending += event.text
                 text_buffer += event.text
                 _segment_buffer += event.text
@@ -1553,12 +1610,16 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 pass
 
             elif isinstance(event, ToolBegin):
+                _bump_output_seq()
                 # Drain pending streamed text before the tool row
                 _flush_streaming(force=True)
                 # Tool row anchors content we cannot rewrite; close
                 # the current markdown-reblit segment so only post-
                 # tool text gets reblit at TurnDone
                 _segment_buffer = ""
+                # New tool row prints below the prior committed
+                # envelope — that prior one can no longer freeze
+                _cancel_pending_freeze()
                 # Cancel any running spinner
                 _cancel_spinner()
                 # Ensure tool rows start on a fresh line
@@ -1583,6 +1644,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     loom_app.invalidate()
 
             elif isinstance(event, ToolEnd):
+                _bump_output_seq()
                 # Cancel spinner and clear its line
                 _cancel_spinner()
                 clear_line()
@@ -1592,6 +1654,14 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 at_line_start = True
                 active_tool = None
                 console.print()
+                # Schedule the freeze reblit. Any printable event
+                # before the timer expires bumps _output_seq and
+                # invalidates this scheduled freeze
+                _cancel_pending_freeze()
+                _freeze_task = asyncio.create_task(
+                    _freeze_envelope(_output_seq, event.name,
+                                     event.success, event.duration_ms)
+                )
                 # PR-D4: drop matching envelope from footer
                 loom_app = getattr(session, "_loom_app", None)
                 if loom_app is not None:
@@ -1603,6 +1673,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     loom_app.invalidate()
 
             elif isinstance(event, TurnPaused):
+                _bump_output_seq()
+                _cancel_pending_freeze()
                 # ── HITL pause (PR-A3: arrow-key widget) ──────────────────
                 _cancel_spinner()
                 clear_line()
@@ -1680,6 +1752,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     session.resume()
 
             elif isinstance(event, TurnDone):
+                _bump_output_seq()
+                # Cancel any pending freeze before we touch the
+                # cursor — markdown reblit will move it past the
+                # frozen target row anyway
+                _cancel_pending_freeze()
                 # Drain any unterminated trailing chunk before
                 # printing the post-turn UI
                 _flush_streaming(force=True)
@@ -1744,6 +1821,10 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         console.print()
         harness.inline(f"turn aborted with error: {exc}", level="error")
     finally:
+        # PR-E follow-up #246: pending freeze must not outlive the turn —
+        # the cursor relationship to the tool_end row breaks once any
+        # post-turn UI prints (status, next prompt, etc.)
+        _cancel_pending_freeze()
         # Defensive: ensure the spinner task never outlives this turn,
         # even if neither except branch fired (clean exit) or if a path
         # added later forgets to cancel it.
