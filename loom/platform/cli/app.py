@@ -395,19 +395,19 @@ class LoomApp:
     def _render_footer(self) -> FormattedText:
         parts: list[tuple[str, str]] = []
 
-        # Left: model · persona (identity reminder)
+        # Far left: Loom ▎ brand mark — anchors the line as Loom's
+        # identity, mirrors the agent guide style.
+        parts.append(("class:footer.brand", " Loom ▎ "))
+
+        # Then: model · persona (identity context)
         left = self.footer.model
         if self.footer.persona:
             left = f"{self.footer.persona} · {left}"
         if left:
             parts.append(("class:footer", f" {left} "))
 
-        # Middle: turn stats (context %, cache %, in/out, elapsed,
-        # tool count). Folded in from PR-A's inline status_bar so the
-        # post-turn metrics live in one place instead of scrolling
-        # away. Hidden until at least one turn has completed
+        # Token budget when >60%
         s = self.footer
-        stats: list[str] = []
         if s.token_pct > 60:
             token = (
                 "footer.budget.high" if s.token_pct > 95
@@ -416,6 +416,11 @@ class LoomApp:
             )
             parts.append(("class:footer", "  "))
             parts.append((f"class:{token}", f"⚡ tok {s.token_pct:.0f}%"))
+
+        # Last-turn stats — folded in from the old inline status_bar
+        # so the post-turn metrics live in one place instead of
+        # scrolling away. Hidden until at least one turn has completed
+        stats: list[str] = []
         if s.last_turn_cache_hit is not None:
             stats.append(f"cache {s.last_turn_cache_hit:.0f}%")
         if (s.last_turn_input_tokens is not None
@@ -431,12 +436,6 @@ class LoomApp:
         if stats:
             parts.append(("class:footer", "  "))
             parts.append(("class:footer.stats", " · ".join(stats)))
-
-        # Right: Loom ▎ brand mark — bar to the right of "Loom" so the
-        # marker mirrors the agent guide style ("Loom ▎ ...") rather
-        # than reading as "interrupted by a vertical line".
-        parts.append(("class:footer", "  "))
-        parts.append(("class:footer.brand", " Loom ▎ "))
 
         return FormattedText(parts)
 

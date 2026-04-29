@@ -1304,69 +1304,30 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     # Give the session a handle to cancel the spinner before confirm prompts.
     session._cancel_spinner_fn = _cancel_spinner
 
-    # PR-D2: per-line agent guide.
-    # Each line of streaming agent text begins with "Loom ▎  " in muted
-    # parchment colour. Streaming chunks arrive in arbitrary
-    # boundaries, so we maintain ``at_line_start`` across calls and
-    # split chunks on ``\n`` to prefix each new line.
-    _AGENT_GUIDE = "[loom.muted]Loom ▎[/loom.muted]  "
-
-    def _print_agent_chunk(chunk: str, at_start: bool) -> bool:
-        """Print a streaming text chunk with per-line agent guide.
-
-        Returns the new ``at_line_start`` state — True iff the chunk
-        ended with a newline (next chunk should begin with a guide).
-        """
-        if not chunk:
-            return at_start
-
-        parts = chunk.split("\n")
-        # parts[0] continues the current line. If we're at line start
-        # and the part has content, prepend a guide.
-        if at_start and parts[0]:
-            console.print(Text.from_markup(_AGENT_GUIDE), end="", markup=True)
-            at_start = False
-        if parts[0]:
-            console.print(parts[0], end="", markup=False, highlight=False)
-
-        # Each subsequent part is preceded by a newline + a fresh guide
-        # (skip guide if the part is empty — rare, doubled newlines).
-        for part in parts[1:]:
-            console.print()  # newline
-            at_start = True
-            if part:
-                console.print(Text.from_markup(_AGENT_GUIDE), end="", markup=True)
-                at_start = False
-                console.print(part, end="", markup=False, highlight=False)
-
-        return at_start
-
     try:
         async for event in session.stream_turn(user_input):
             if isinstance(event, TextChunk):
-                # PR-D2: drop the streaming cursor + clear_line. The
-                # persistent app's footer signals "active" via active-
-                # envelope tracking; the per-chunk ">" cursor was only
-                # useful as a visual liveness hint and its companion
-                # ``\r\033[K`` clear was the root cause of the CJK
-                # soft-wrap truncation old bug
-                at_line_start = _print_agent_chunk(event.text, at_line_start)
+                # PR-D2: plain stream into scrollback — no per-chunk
+                # cursor (was the source of the CJK soft-wrap clear
+                # bug, dropped earlier in D2) and no per-line agent
+                # guide (the once-per-turn ``Loom ▎  context X%``
+                # header is enough identity; per-line markers read as
+                # quote-block clutter, especially across paragraph
+                # breaks)
+                console.print(event.text, end="", markup=False, highlight=False)
                 text_buffer += event.text
+                at_line_start = event.text.endswith("\n")
 
             elif isinstance(event, ThinkCollapsed):
-                # Show condensed reasoning summary inline; /think for
-                # full content. Note: for Anthropic native thinking
-                # blocks this fires *after* response text streamed (see
-                # session.py:1707), so the summary appears below the
-                # response. Reordering would require Anthropic stream-
-                # event-level integration — out of D2 scope, tracked
-                # in doc/49b
-                if not at_line_start:
-                    console.print()
-                console.print(
-                    Text.from_markup(f"[loom.muted]💭 {event.summary}[/loom.muted]")
-                )
-                at_line_start = True
+                # PR-D2: silent in CLI. Anthropic native thinking blocks
+                # only become readable after ``stream.text_stream``
+                # completes (session.py:1707), so the inline summary
+                # always landed *below* the response — visually out of
+                # order and crowding the input area. The full chain is
+                # still stored on ``session._last_think`` and accessible
+                # via ``/think``. Other platforms (Discord, TUI) render
+                # ThinkCollapsed in their own way and aren't affected
+                pass
 
             elif isinstance(event, ToolBegin):
                 # Cancel any running spinner
