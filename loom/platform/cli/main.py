@@ -168,6 +168,24 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     session.subscribe_promotion(_cli_promotion)
 
+    # PR-C3: route BlastRadiusMiddleware authorisation decisions through
+    # the harness channel. Green-light events go to flash() (no-op in
+    # PR-C, footer in PR-D); red-light events留底 inline so the user can
+    # forensically trace why a tool was blocked.
+    def _on_lifecycle(call: "ToolCall", result: bool, reason: str) -> None:
+        if result:
+            harness.flash(f"auth: {call.tool_name} ok ({reason})")
+        else:
+            harness.inline(
+                f"auth denied: {call.tool_name} — {reason}",
+                level="warning",
+            )
+
+    for _mw in session._pipeline._middlewares:
+        if isinstance(_mw, BlastRadiusMiddleware):
+            _mw._on_lifecycle_event = _on_lifecycle
+            break
+
     console.print(render_header(model, db))
 
     if not session._memory_index.is_empty:
