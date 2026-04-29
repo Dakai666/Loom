@@ -19,16 +19,32 @@ Display strategy
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from pathlib import Path
+
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.application import Application
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import (
+    CompleteEvent,
+    Completer,
+    Completion,
+    FuzzyCompleter,
+)
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_focus
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
 
 # ---------------------------------------------------------------------------
@@ -50,36 +66,64 @@ from loom.core.events import (  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
-# Slash command autocomplete
+# Slash command catalog — single source of truth for completer + /help
 # ---------------------------------------------------------------------------
+#
+# Each entry: (command, description). Descriptions show as completion meta.
+# Keep alphabetically grouped by command root for predictable nav.
 
-_SLASH_WORDS = [
-    "/personality",
-    "/personality off",
-    "/personality adversarial",
-    "/personality minimalist",
-    "/personality architect",
-    "/personality researcher",
-    "/personality operator",
-    "/think",
-    "/new",
-    "/compact",
-    "/scope",
-    "/scope revoke",
-    "/scope clear",
-    "/pause",
-    "/stop",
-    "/help",
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/auto",                       "toggle run_bash auto-approve (requires strict_sandbox)"),
+    ("/compact",                    "compress older context (smart compaction)"),
+    ("/help",                       "show command reference"),
+    ("/model",                      "show current model + registered providers"),
+    ("/model claude-sonnet-4-6",    "switch to Anthropic Claude Sonnet 4.6"),
+    ("/model claude-opus-4-7",      "switch to Anthropic Claude Opus 4.7"),
+    ("/model MiniMax-M2.7",         "switch to MiniMax-M2.7 (default)"),
+    ("/new",                        "start a fresh session"),
+    ("/pause",                      "toggle HITL pause after each tool batch"),
+    ("/personality",                "show active persona + available list"),
+    ("/personality off",            "clear active persona"),
+    ("/personality adversarial",    "switch persona → adversarial"),
+    ("/personality architect",      "switch persona → architect"),
+    ("/personality minimalist",     "switch persona → minimalist"),
+    ("/personality operator",       "switch persona → operator"),
+    ("/personality researcher",     "switch persona → researcher"),
+    ("/scope",                      "list active scope grants"),
+    ("/scope clear",                "revoke all non-system grants"),
+    ("/scope revoke",               "revoke a specific grant by index"),
+    ("/sessions",                   "browse and switch sessions"),
+    ("/stop",                       "interrupt a running turn (CLI: Ctrl+C)"),
+    ("/think",                      "view last turn's reasoning chain"),
 ]
 
 
-class SlashCompleter(WordCompleter):
-    def __init__(self) -> None:
-        super().__init__(
-            _SLASH_WORDS,
-            match_middle=False,
-            sentence=True,
-        )
+class SlashCompleter(Completer):
+    """Slash-command completer with metadata + prefix matching.
+
+    Wrap with :class:`FuzzyCompleter` for fuzzy match — done in
+    :func:`make_prompt_session`.
+    """
+
+    def __init__(self, commands: list[tuple[str, str]] | None = None) -> None:
+        self._commands = commands if commands is not None else SLASH_COMMANDS
+
+    def get_completions(self, document: Document, _: CompleteEvent):
+        # Only complete on the first line, when text starts with "/".
+        # Avoids triggering completer on subsequent lines of multi-line input.
+        text = document.text_before_cursor
+        if "\n" in text:
+            return
+        if not text.startswith("/"):
+            return
+        for cmd, desc in self._commands:
+            if cmd.startswith(text):
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display=cmd,
+                    display_meta=desc,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -88,36 +132,266 @@ class SlashCompleter(WordCompleter):
 
 _PT_STYLE = Style.from_dict(
     {
-        "prompt": "bold cyan",
+        # Prompt indicator (the "you ›" before input)
+        "prompt": "bold #c8a464",         # amber gold (羊皮卷 accent)
+        # Hint text (continuation prompt on multi-line)
+        "prompt.continuation": "#8a7a5e", # muted parchment
+        # Auto-suggestion ghost text
+        "auto-suggestion": "#4a4038",     # subtle border-grey
+        # Completion menu
+        "completion-menu":         "bg:#242018 #e0cfa0",
+        "completion-menu.completion":         "bg:#242018 #e0cfa0",
+        "completion-menu.completion.current": "bg:#c8a464 #1c1814 bold",
+        "completion-menu.meta.completion":         "bg:#242018 #8a7a5e",
+        "completion-menu.meta.completion.current": "bg:#c8a464 #1c1814",
         "": "",
     }
 )
 
+_HISTORY_PATH = Path.home() / ".loom" / "cli_history"
+
 
 def _build_key_bindings() -> KeyBindings:
-    """Build key bindings for Ctrl+L (clear)."""
+    """Build key bindings.
+
+    Defaults provided by prompt_toolkit (we don't override):
+      - Ctrl+C / Ctrl+D on empty buffer → exit
+      - Up / Down → history navigation (single-line buffer)
+      - Tab → completion
+
+    Custom:
+      - Ctrl+L              → clear screen
+      - Enter               → submit (even in multiline mode)
+      - Alt+Enter / Esc,Enter → insert newline
+      - Esc (alone, double-tap) → clear buffer
+    """
     kb = KeyBindings()
 
     @kb.add("c-l")
-    def clear_screen(_) -> None:
-        """Ctrl+L: clear terminal screen."""
+    def clear_screen(event) -> None:
         from rich.console import Console
-
         _console = Console()
         _console.clear()
+        # Re-render the prompt after clear
+        event.app.renderer.reset()
+        event.app.invalidate()
+
+    @kb.add("enter", filter=has_focus("DEFAULT_BUFFER"))
+    def submit_on_enter(event) -> None:
+        """Plain Enter → submit (overrides multiline default of inserting newline)."""
+        buf = event.current_buffer
+        # Empty buffer → no-op (don't submit empty input)
+        if not buf.text.strip():
+            return
+        buf.validate_and_handle()
+
+    @kb.add("escape", "enter", filter=has_focus("DEFAULT_BUFFER"))
+    def newline_on_alt_enter(event) -> None:
+        """Alt+Enter (sent by terminals as Esc,Enter) → insert newline."""
+        event.current_buffer.insert_text("\n")
 
     return kb
 
 
-def make_prompt_session() -> PromptSession:
-    """Create a PromptSession with input history, slash autocomplete, and key bindings."""
+def make_prompt_session(
+    *,
+    history_path: Path | None = None,
+    slash_commands: list[tuple[str, str]] | None = None,
+) -> PromptSession:
+    """Create a PromptSession with multiline input, file history, and fuzzy slash autocomplete.
+
+    Parameters
+    ----------
+    history_path : Path | None
+        Where to persist input history. Defaults to ``~/.loom/cli_history``.
+        Falls back to in-memory history if the path is not writable.
+    slash_commands : list[(cmd, desc)] | None
+        Override the slash command catalog (e.g., for tests). Defaults to
+        :data:`SLASH_COMMANDS`.
+    """
+    # Resolve history location, with graceful fallback to in-memory.
+    history: FileHistory | InMemoryHistory
+    path = history_path if history_path is not None else _HISTORY_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        history = FileHistory(str(path))
+    except OSError:
+        history = InMemoryHistory()
+
+    completer = FuzzyCompleter(
+        SlashCompleter(slash_commands),
+        # Empty pattern produces no fuzzy noise; only fuzzy-match real input.
+        enable_fuzzy=True,
+    )
+
     return PromptSession(
-        history=InMemoryHistory(),
-        completer=SlashCompleter(),
+        history=history,
+        completer=completer,
         complete_while_typing=True,
+        auto_suggest=AutoSuggestFromHistory(),
         style=_PT_STYLE,
         key_bindings=_build_key_bindings(),
+        # multiline=True deferred: prompt_toolkit's multi-line cursor
+        # bookkeeping leaves terminal state that interacts badly with
+        # Rich's raw `\r\033[K` clear_line on streaming output (CJK
+        # boundary truncation). Revisit alongside Rich render rewrite
+        # in PR-D.
+        multiline=False,
+        mouse_support=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# select_prompt — arrow-key inline selection (PR-A3)
+# ---------------------------------------------------------------------------
+#
+# Replaces single-key ``input("y/n: ")`` confirms with an inline widget
+# that supports up/down arrow navigation, Enter to confirm, single-key
+# shortcuts (still typeable for muscle memory), and Esc to cancel.
+#
+# The widget runs as a short-lived prompt_toolkit Application which
+# competes for stdin with the main input loop. Callers must ensure the
+# main input loop is paused before invoking — see ``confirm_active``
+# coordination in ``platform/cli/main.py``.
+
+
+@dataclass
+class SelectOption:
+    """One choice in a select_prompt menu."""
+    label: str
+    value: Any
+    shortcut: str | None = None      # single-letter direct selection
+    style: str = ""                   # optional Rich-like style applied to label
+
+
+_SELECT_STYLE = Style.from_dict(
+    {
+        "select.title":    "#e0cfa0",            # parchment cream, no bold/reverse
+        "select.body":     "#8a7a5e",
+        "select.subtle":   "#8a7a5e",
+        "select.option":   "#e0cfa0",
+        "select.option.cursor": "bold #c8a464",  # cursor row: bold amber, no bg flip
+        "select.shortcut": "#8a7a5e",            # shortcut hint: dim, no emphasis
+        "select.footer":   "#8a7a5e italic",
+        "select.deny":     "#b87060",
+        "select.approve":  "#7a9e78",
+    }
+)
+
+
+async def select_prompt(
+    *,
+    title: str,
+    body: str = "",
+    options: list[SelectOption],
+    default_index: int = 0,
+    cancel_value: Any = None,
+    footer_hint: str | None = None,
+) -> Any:
+    """Show an inline arrow-key selection menu and return the chosen value.
+
+    Parameters
+    ----------
+    title : str
+        Single-line header (e.g. tool name + trust level).
+    body : str
+        Optional secondary description (truncated args, justification, …).
+    options : list[SelectOption]
+        Choices in display order. Each option's ``shortcut`` (if set) lets
+        the user pick it directly without arrow nav.
+    default_index : int
+        Cursor starts on this option.
+    cancel_value : Any
+        Returned when the user presses Esc / Ctrl+C.
+    footer_hint : str | None
+        Override the default ``↑↓ select  ⏎ confirm  esc cancel`` hint.
+    """
+    cursor = max(0, min(default_index, len(options) - 1))
+    shortcut_index = {
+        opt.shortcut.lower(): idx
+        for idx, opt in enumerate(options)
+        if opt.shortcut
+    }
+
+    def _render() -> FormattedText:
+        lines: list[tuple[str, str]] = []
+        if title:
+            lines.append(("class:select.title", f"{title}\n"))
+        if body:
+            lines.append(("class:select.body", f"{body}\n"))
+        if title or body:
+            lines.append(("", "\n"))
+
+        for idx, opt in enumerate(options):
+            is_cursor = idx == cursor
+            arrow = " ▸ " if is_cursor else "   "
+            style = "class:select.option.cursor" if is_cursor else "class:select.option"
+            label = opt.label
+            if opt.shortcut and not is_cursor:
+                # Embed shortcut hint as suffix in subtle style
+                lines.append((style, f"{arrow}{label}"))
+                lines.append(("class:select.shortcut", f"  ({opt.shortcut})"))
+                lines.append(("", "\n"))
+            else:
+                lines.append((style, f"{arrow}{label}"))
+                if opt.shortcut and is_cursor:
+                    lines.append(("class:select.option.cursor", f"  ({opt.shortcut})"))
+                lines.append(("", "\n"))
+
+        lines.append(("", "\n"))
+        hint = footer_hint or "↑↓ 選擇  ⏎ 確認  esc 取消"
+        if shortcut_index:
+            shortcuts = "/".join(s for s in shortcut_index)
+            hint += f"  ·  直接按 {shortcuts}"
+        lines.append(("class:select.footer", hint))
+        return FormattedText(lines)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("c-p")
+    def _up(event):
+        nonlocal cursor
+        cursor = (cursor - 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("down")
+    @kb.add("c-n")
+    def _down(event):
+        nonlocal cursor
+        cursor = (cursor + 1) % len(options)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _confirm(event):
+        event.app.exit(result=options[cursor].value)
+
+    @kb.add("escape", eager=True)
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=cancel_value)
+
+    # Bind each shortcut key directly
+    for shortcut, idx in shortcut_index.items():
+        @kb.add(shortcut)
+        def _shortcut(event, _idx=idx):  # default-arg captures idx per loop
+            event.app.exit(result=options[_idx].value)
+
+    body_window = Window(
+        content=FormattedTextControl(_render, focusable=True),
+        height=Dimension(min=len(options) + (3 if title or body else 1)),
+        wrap_lines=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([body_window])),
+        key_bindings=kb,
+        style=_SELECT_STYLE,
+        full_screen=False,
+        mouse_support=False,
+    )
+
+    return await app.run_async()
 
 
 # ---------------------------------------------------------------------------

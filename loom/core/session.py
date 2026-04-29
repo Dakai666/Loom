@@ -3073,7 +3073,7 @@ class LoomSession:
                     arg_lines.append(f"  [cyan]{k}[/cyan]: {v!r}")
             args_display = "\n".join(arg_lines) if arg_lines else "  (no args)"
             return (
-                f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}\n"
+                f"[#c8a464]{call.tool_name}[/#c8a464]  {call.trust_level.label}\n"
                 f"{args_display}"
             )
 
@@ -3094,7 +3094,7 @@ class LoomSession:
         )
 
         lines: list[str] = [
-            f"[bold]{call.tool_name}[/bold]  {call.trust_level.label}",
+            f"[#c8a464]{call.tool_name}[/#c8a464]  {call.trust_level.label}",
         ]
 
         # Scope summary: what the tool wants to access
@@ -3123,24 +3123,26 @@ class LoomSession:
 
     async def _confirm_tool_cli(self, call: ToolCall) -> "ConfirmDecision":
         """
-        CLI-specific confirmation prompt (stdin / Rich panel).
+        CLI-specific confirmation prompt — arrow-key inline widget.
 
         Phase C (Issue #45): scope metadata → verdict + diff info.
         Phase B (Issue #88): returns ConfirmDecision (y/s/a/N) instead of bool.
+        PR-A3 (#236): replaces single-key stdin prompt with arrow-key
+        :func:`select_prompt`. Single-letter shortcuts (y/s/a/N) preserved
+        for muscle memory.
 
         Returns
         -------
         ConfirmDecision
-            DENY  — user typed N or Enter (default)
-            ONCE  — user typed y (approve and grant this scope for the session)
-            SCOPE — user typed s (approve with a 30-min lease, auto-expires)
-            AUTO  — user typed a (permanent grant, same scope, no expiry)
+            DENY  — Esc, Ctrl+C, or "N" shortcut
+            ONCE  — "y" shortcut (approve this call only)
+            SCOPE — "s" shortcut (30-min session lease)
+            AUTO  — "a" shortcut (permanent grant for this scope)
         """
         from loom.core.harness.scope import ConfirmDecision, PermissionVerdict
+        from loom.platform.cli.ui import SelectOption, select_prompt
 
-        # Stop any running spinner before printing the confirm panel so the
-        # spinner animation doesn't overwrite the prompt input line.
-        # Write \r\033[K directly to stdout — Rich Console.print strips \r.
+        # Stop any running spinner so it doesn't overwrite the widget area.
         import sys
         if self._cancel_spinner_fn is not None:
             self._cancel_spinner_fn()
@@ -3148,41 +3150,65 @@ class LoomSession:
             sys.stdout.flush()
         console.print()
 
-        # Determine panel styling from verdict
+        # Render the static context panel above the inline widget.
         verdict = call.metadata.get("scope_verdict")
         if verdict == PermissionVerdict.EXPAND_SCOPE:
-            title = "[red]⚠ Scope expansion required[/red]"
-            border_style = "red"
+            title = "[#b87060]⚠ Scope expansion required[/#b87060]"
+            border_style = "#b87060"
         else:
-            title = "[yellow]  Tool requires confirmation[/yellow]"
-            border_style = "yellow"
+            title = "[#c8924a]  Tool requires confirmation[/#c8924a]"
+            border_style = "#c8924a"
 
         console.print(
             Panel(
                 self._format_scope_panel(call),
                 title=title,
-                subtitle="[dim]y=approve  s=lease (30m)  a=permanent  N=deny[/dim]",
                 border_style=border_style,
             )
         )
-        # Use prompt_toolkit so the prompt renders correctly on all terminals.
-        from prompt_toolkit import prompt as pt_prompt
 
-        try:
-            answer = await asyncio.get_event_loop().run_in_executor(
-                None, pt_prompt, "Allow? [y=approve/s=lease/a=permanent/N]: "
+        options = [
+            SelectOption(
+                label="允許這次",
+                value=ConfirmDecision.ONCE,
+                shortcut="y",
+            ),
+            SelectOption(
+                label="允許並記住 30 分鐘 (lease)",
+                value=ConfirmDecision.SCOPE,
+                shortcut="s",
+            ),
+            SelectOption(
+                label="允許並永久授權此 scope",
+                value=ConfirmDecision.AUTO,
+                shortcut="a",
+            ),
+            SelectOption(
+                label="拒絕",
+                value=ConfirmDecision.DENY,
+                shortcut="n",
+            ),
+        ]
+
+        widget_title = (
+            f"Loom 想執行 [{call.tool_name}]  ·  信任度 {call.trust_level.plain}"
+        )
+
+        async def _run():
+            return await select_prompt(
+                title=widget_title,
+                options=options,
+                default_index=3,  # cursor starts on DENY (safer default)
+                cancel_value=ConfirmDecision.DENY,
             )
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
 
-        choice = answer.strip().lower()
-        if choice in {"y", "yes"}:
-            return ConfirmDecision.ONCE
-        if choice in {"s", "scope"}:
-            return ConfirmDecision.SCOPE
-        if choice in {"a", "auto"}:
-            return ConfirmDecision.AUTO
-        return ConfirmDecision.DENY
+        # If running under the CLI chat loop, route through the input-loop
+        # coordinator so we own stdin cleanly. Otherwise (tests, scripts)
+        # run the widget directly.
+        runner = getattr(self, "_run_interactive", None)
+        if runner is not None:
+            return await runner(_run)
+        return await _run()
 
     def _all_authorized(self, tool_uses: list) -> bool:
         """

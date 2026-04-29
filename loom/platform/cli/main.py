@@ -174,32 +174,197 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     prompt_session = make_prompt_session()
 
-    try:
-        while True:
-            # ── Read user input (prompt_toolkit — history + autocomplete) ──
+    # ── PR-A2: producer/consumer for abort-on-submit ──────────────────────
+    #
+    # Two concurrent tasks share the terminal via prompt_toolkit's
+    # ``patch_stdout`` so the prompt stays anchored at the bottom while
+    # streaming output renders above it:
+    #
+    #   input_loop  — reads user lines, queues them. If a turn is in
+    #                 flight, calls session.cancel() first and prefixes
+    #                 the new message with an interruption marker.
+    #
+    #   turn_loop   — drains the queue: slash commands run inline (no
+    #                 turn cancel), regular text spawns a streaming
+    #                 turn task that input_loop can cancel.
+    #
+    # Race notes:
+    # - current_turn_task is read+cancelled from input_loop and assigned
+    #   from turn_loop. Single-threaded asyncio gives us atomic ref
+    #   reads; cancelling an already-done task is a no-op.
+    # - wait_for(..., timeout=3.0) on cancel ensures we don't block the
+    #   user forever if a turn refuses to unwind.
+    _INTERRUPT_PREFIX = "\x00LOOM_INTERRUPT\x00"
+    input_queue: asyncio.Queue[str] = asyncio.Queue()
+    current_turn_task: asyncio.Task | None = None
+    shutdown = asyncio.Event()
+
+    # ── PR-A3: confirm-prompt stdin coordination ──────────────────────────
+    #
+    # Interactive widgets (select_prompt in ui.py — used by tool confirm
+    # and HITL pause) need exclusive stdin while running. The challenge:
+    # input_loop's PromptSession runs its own prompt_toolkit Application
+    # that owns stdin's vt100 input handler. If we start a second
+    # Application before the first has fully detached its input, the new
+    # one races with stale key callbacks and crashes ("Application is
+    # not running").
+    #
+    # Coordination protocol:
+    #   - input_released  — set when input_loop is NOT inside prompt_async.
+    #                       Cleared on entry, set on exit (via finally).
+    #   - confirm_active  — set while a widget owns stdin.
+    #   - confirm_done    — set after the widget releases.
+    #
+    # _run_interactive: signals confirm_active, asks the live input
+    # Application to exit, waits for input_loop to actually return from
+    # prompt_async (input_released), then starts the widget. This
+    # guarantees stdin is fully detached before the new Application
+    # tries to attach.
+    confirm_active = asyncio.Event()
+    confirm_done = asyncio.Event()
+    confirm_done.set()
+    input_released = asyncio.Event()
+    input_released.set()  # input_loop hasn't entered prompt_async yet
+
+    async def _run_interactive(coro_factory) -> Any:
+        from prompt_toolkit.application.current import get_app_or_none
+
+        confirm_active.set()
+        confirm_done.clear()
+
+        live_app = get_app_or_none()
+        if live_app is not None and getattr(live_app, "is_running", False):
             try:
-                user_input: str = await prompt_session.prompt_async(
-                    "\nyou> ",
-                    style=None,
-                )
-            except (EOFError, KeyboardInterrupt):
-                break
+                live_app.exit(result=None)
+            except Exception:
+                pass
 
-            if not user_input.strip():
+        # Wait for input_loop to fully unwind out of prompt_async — its
+        # finally block sets input_released. Cap the wait at 1s so a
+        # misbehaving prompt_toolkit detach can't deadlock the user.
+        try:
+            await asyncio.wait_for(input_released.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            return await coro_factory()
+        finally:
+            confirm_active.clear()
+            confirm_done.set()
+
+    session._run_interactive = _run_interactive  # type: ignore[attr-defined]
+
+    async def input_loop() -> None:
+        nonlocal current_turn_task
+        while not shutdown.is_set():
+            # If a confirm widget owns stdin, sit out until it's done.
+            if confirm_active.is_set():
+                await confirm_done.wait()
                 continue
 
-            if user_input.strip().lower() in {"exit", "quit", "q"}:
-                break
+            input_released.clear()
+            try:
+                try:
+                    user_input = await prompt_session.prompt_async(
+                        [("class:prompt", "\nyou › ")],
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    shutdown.set()
+                    return
+                except asyncio.CancelledError:
+                    return
+            finally:
+                input_released.set()
 
-            # ── Slash commands ────────────────────────────────────────────
-            if user_input.startswith("/"):
-                await _handle_slash(user_input.strip(), session)
+            # _run_interactive forces our prompt_async to exit with result=None.
+            # In that case loop back so the confirm_active gate above engages.
+            if user_input is None:
                 continue
 
-            # ── Streaming turn with Rich Live display ─────────────────────
+            text = user_input.strip()
+            if not text:
+                continue
+
+            if text.lower() in {"exit", "quit", "q"}:
+                shutdown.set()
+                return
+
+            # If a turn is in flight, abort it and mark the new message
+            # so turn_loop can prepend an interruption note for the LLM.
+            in_flight = current_turn_task is not None and not current_turn_task.done()
+            if in_flight:
+                session.cancel()
+                console.print("[dim #c8924a]⏸  上一輪已中斷，接收新訊息…[/dim #c8924a]")
+                try:
+                    await asyncio.wait_for(current_turn_task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    # Turn task may have raised; that's fine — we just
+                    # want it finished before queueing the next message.
+                    pass
+                await input_queue.put(_INTERRUPT_PREFIX + text)
+            else:
+                await input_queue.put(text)
+
+    async def turn_loop() -> None:
+        nonlocal current_turn_task
+        while not shutdown.is_set():
+            try:
+                text = await asyncio.wait_for(input_queue.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
+
+            # Slash commands run inline — no streaming turn, no cancel.
+            if text.startswith("/"):
+                try:
+                    await _handle_slash(text, session)
+                except Exception as exc:
+                    console.print(f"[red]Slash command error: {exc}[/red]")
+                continue
+
+            # Detect interruption marker injected by input_loop.
+            if text.startswith(_INTERRUPT_PREFIX):
+                text = text[len(_INTERRUPT_PREFIX):]
+                # Lightweight cue for the LLM that the prior turn was
+                # cut short by the user — keeps cognition coherent.
+                text = "[使用者打斷上一輪並接續]\n" + text
+
             console.print()
-            await _run_streaming_turn(session, user_input)
+            current_turn_task = asyncio.create_task(
+                _run_streaming_turn(session, text)
+            )
+            try:
+                await current_turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                console.print(f"[red]Turn error: {exc}[/red]")
+            finally:
+                current_turn_task = None
 
+    # patch_stdout(raw=True) keeps the prompt anchored while Rich's ANSI
+    # output streams above. raw=True passes escape sequences through so
+    # cursor manipulation (spinner, clear_line) still works.
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    try:
+        with patch_stdout(raw=True):
+            done, pending = await asyncio.wait(
+                {
+                    asyncio.create_task(input_loop()),
+                    asyncio.create_task(turn_loop()),
+                },
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
     finally:
         await session.stop()
         console.print("\n[dim]Session ended. Goodbye.[/dim]")
@@ -1173,36 +1338,67 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 console.print()
 
             elif isinstance(event, TurnPaused):
-                # ── HITL pause ────────────────────────────────────────────
+                # ── HITL pause (PR-A3: arrow-key widget) ──────────────────
                 _cancel_spinner()
                 clear_line()
                 if not at_line_start:
                     console.print()
                 console.print(
                     Rule(
-                        f"[yellow]⏸  Paused[/yellow]  [dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
-                        style="yellow",
+                        f"[#c8924a]⏸  Paused[/#c8924a]  "
+                        f"[dim]({event.tool_count_so_far} tool(s) so far)[/dim]",
+                        style="#c8924a",
                     )
                 )
-                console.print(
-                    "[dim]  r[/dim] resume  [dim]·[/dim]  "
-                    "[dim]c[/dim] cancel  [dim]·[/dim]  "
-                    "[dim]<message>[/dim] redirect and resume"
-                )
-                try:
-                    raw = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input("pause> ").strip()
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    raw = "c"
 
-                if raw in ("c", "cancel"):
+                from loom.platform.cli.ui import SelectOption, select_prompt
+
+                _PAUSE_RESUME = "resume"
+                _PAUSE_CANCEL = "cancel"
+                _PAUSE_REDIRECT = "redirect"
+
+                async def _pause_pick():
+                    return await select_prompt(
+                        title="絲已暫停，下一步？",
+                        options=[
+                            SelectOption(label="繼續執行剩下的工具",
+                                         value=_PAUSE_RESUME, shortcut="r"),
+                            SelectOption(label="導向新指令並繼續",
+                                         value=_PAUSE_REDIRECT, shortcut="m"),
+                            SelectOption(label="取消這個 turn",
+                                         value=_PAUSE_CANCEL, shortcut="c"),
+                        ],
+                        default_index=0,
+                        cancel_value=_PAUSE_CANCEL,
+                    )
+
+                runner = getattr(session, "_run_interactive", None)
+                choice = await (runner(_pause_pick) if runner else _pause_pick())
+
+                if choice == _PAUSE_CANCEL:
                     session.cancel()
-                elif raw in ("r", "resume", ""):
+                elif choice == _PAUSE_REDIRECT:
+                    # Sub-prompt for the redirect text. Routed through the
+                    # same _run_interactive so input_loop stays paused.
+                    async def _ask_redirect():
+                        from prompt_toolkit import PromptSession as _PS
+                        ps = _PS()
+                        try:
+                            return await ps.prompt_async(
+                                [("class:prompt", "redirect › ")],
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            return ""
+
+                    raw = await (runner(_ask_redirect) if runner else _ask_redirect())
+                    raw = (raw or "").strip()
+                    if raw:
+                        session.resume_with(raw)
+                        console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
+                    else:
+                        session.resume()
+                else:  # _PAUSE_RESUME
                     session.resume()
-                else:
-                    session.resume_with(raw)
-                    console.print(f"[dim]  Injected: {raw[:80]}[/dim]")
 
             elif isinstance(event, TurnDone):
                 # Cancel any running spinner and clear cursor
@@ -1224,11 +1420,30 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     )
                 )
 
+    except asyncio.CancelledError:
+        # PR-A2: turn was cancelled by user-initiated abort (Enter on
+        # next message). Render a clean ABORTED marker and re-raise so
+        # the caller's await sees the cancellation.
+        _cancel_spinner()
+        clear_line()
+        console.print()
+        console.print(
+            Rule(
+                "[#c8924a]⏸  ABORTED[/#c8924a]  [dim]turn cut short by user[/dim]",
+                style="#c8924a",
+            )
+        )
+        raise
     except Exception as exc:
         _cancel_spinner()
         clear_line()
         console.print()
         console.print(f"[red]Error: {exc}[/red]")
+    finally:
+        # Defensive: ensure the spinner task never outlives this turn,
+        # even if neither except branch fired (clean exit) or if a path
+        # added later forgets to cancel it.
+        _cancel_spinner()
 
 
 # ---------------------------------------------------------------------------
