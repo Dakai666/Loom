@@ -210,11 +210,20 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     session._on_sanitize_repaired = _on_sanitize       # type: ignore[attr-defined]
     session._on_governor_reject = _on_governor_reject  # type: ignore[attr-defined]
 
-    # PR-D4: 3-line mini signature replaces the old render_header Panel
-    # + MemoryIndex Panel splatter. The full MemoryIndex still feeds
-    # the LLM's system prompt unchanged — only the user-facing greeting
-    # is consolidated. Counts pulled from the index so the user gets a
-    # sense of session weight without paging through skill catalogs.
+    # PR-D4: clear the noisy startup output (resume log, MCP load,
+    # diagnostic block, …) before drawing the welcome signature so
+    # the user sees a clean ceremony instead of scrollback debris.
+    # The original log lines are still there before the clear and
+    # technically scrollable up if anyone really wants them; in
+    # practice the signature anchors the session start.
+    console.clear()
+
+    # 5-line ASCII signature replaces the old render_header Panel +
+    # MemoryIndex Panel splatter. The full MemoryIndex still feeds
+    # the LLM's system prompt unchanged — only the user-facing
+    # greeting is consolidated. Counts pulled from the index so the
+    # user gets a sense of session weight without paging through
+    # skill catalogs.
     from loom.platform.cli.ui import render_welcome_signature
     _idx = session._memory_index
     console.print(
@@ -336,6 +345,14 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 text = "[使用者打斷上一輪並接續]\n" + text
 
             console.print()
+            # PR-D4: thinking indicator. Set True the moment we
+            # dispatch the streaming turn; cleared inside
+            # _run_streaming_turn the first time anything visible
+            # happens (TextChunk / ToolBegin / TurnDone). If turn
+            # crashes / aborts before that, the finally below still
+            # clears it
+            app.footer.thinking = True
+            app.invalidate()
             current_turn_task = asyncio.create_task(
                 _run_streaming_turn(session, text)
             )
@@ -347,6 +364,7 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 harness.inline(f"turn error: {exc}", level="error")
             finally:
                 current_turn_task = None
+                app.footer.thinking = False
 
             # Update footer token budget after each turn boundary.
             app.footer.token_pct = session.budget.usage_fraction * 100
@@ -355,9 +373,12 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     async def footer_ticker() -> None:
         """Tick the footer at 2 Hz so live fields (active envelope
-        elapsed, compaction spinner) progress visibly."""
+        elapsed, compaction spinner, thinking dots) progress
+        visibly."""
         while not shutdown.is_set():
-            if app.footer.active_envelopes or app.footer.compacting:
+            if (app.footer.active_envelopes
+                    or app.footer.compacting
+                    or app.footer.thinking):
                 app.invalidate()
             await asyncio.sleep(0.5)
 
@@ -576,18 +597,24 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
     elif command == "/compact":
         pct = session.budget.usage_fraction * 100
-        harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
-        # PR-D4: surface compaction in footer so the multi-second pause
-        # doesn't read as a hang
+        # PR-D4: surface compaction in footer BEFORE the inline message
+        # so the spinner is visible from the very first frame; clear
+        # immediately after _smart_compact returns so the footer
+        # snaps back to normal without waiting for the next ticker
         loom_app = getattr(session, "_loom_app", None)
         if loom_app is not None:
             loom_app.footer.compacting = True
             loom_app.invalidate()
+        harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
         try:
             await session._smart_compact()
         finally:
             if loom_app is not None:
                 loom_app.footer.compacting = False
+                loom_app.invalidate()
+                # Update token% from the just-finished compaction so
+                # the user sees the new context% immediately
+                loom_app.footer.token_pct = session.budget.usage_fraction * 100
                 loom_app.invalidate()
 
     elif command == "/stop":
@@ -1350,8 +1377,24 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             _sys.stdout.flush()
             _stream_pending = ""
 
+    # PR-D4: clear the "thinking" footer indicator on the first
+    # observable event of the turn. After that, the active envelope
+    # / streaming output / turn stats take over the footer's middle.
+    _thinking_cleared = False
+
+    def _clear_thinking() -> None:
+        nonlocal _thinking_cleared
+        if _thinking_cleared:
+            return
+        _thinking_cleared = True
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is not None:
+            loom_app.footer.thinking = False
+            loom_app.invalidate()
+
     try:
         async for event in session.stream_turn(user_input):
+            _clear_thinking()
             if isinstance(event, TextChunk):
                 _stream_pending += event.text
                 text_buffer += event.text

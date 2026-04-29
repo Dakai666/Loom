@@ -101,6 +101,10 @@ class FooterState:
     # else and shows ``⚡ 壓縮中…`` so the long pause doesn't look
     # like a hang
     compacting: bool = False
+    # Loom is thinking (LLM call dispatched, no stream output yet).
+    # Surfaces as a soft animated indicator in the footer so the user
+    # knows their input is being chewed on
+    thinking: bool = False
     # Last-turn stats. Kept out of scrollback (PR-A printed these
     # inline as the "context X% | cache Y% | A in / B out | Cs | N
     # tools" status_bar; that's noise the user doesn't need to keep
@@ -384,8 +388,19 @@ class LoomApp:
             style="class:footer",
         )
 
+        # Separator above the bottom region — makes the visual
+        # boundary between scrollback and the persistent input/footer
+        # explicit. Filled with a horizontal rule character; styled
+        # in the muted-border palette
+        separator_window = Window(
+            char="─",
+            height=1,
+            style=f"fg:{PARCHMENT_BORDER}",
+        )
+
         layout = Layout(
             HSplit([
+                separator_window,
                 input_window,
                 confirm_window,
                 pause_window,
@@ -453,6 +468,15 @@ class LoomApp:
             label += f"▸ {latest.name} · {elapsed:.1f}s"
             parts.append(("class:footer", "  "))
             parts.append(("class:footer.envelope", label))
+        elif s.thinking:
+            # Thinking indicator — animated dots driven by ticker
+            # invalidate. ``import time`` here so we can use
+            # monotonic() as the animation phase
+            import time as _t
+            phase = int(_t.monotonic() * 2) % 4
+            dots = "·" * phase + " " * (3 - phase)
+            parts.append(("class:footer", "  "))
+            parts.append(("class:footer.envelope", f"▸ Loom thinking{dots}"))
 
         # Last-turn stats — only show when no tool is currently in
         # flight (otherwise the active envelope already tells the
