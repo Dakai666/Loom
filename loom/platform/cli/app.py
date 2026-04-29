@@ -612,9 +612,16 @@ class LoomApp:
         """Floating TaskList panel — agent's todo board (PR-E, #236).
 
         Hidden when no list is active. When everything is completed,
-        collapses to a single ``✓ N/N done`` line so the finished list
-        doesn't dominate the bottom region. Otherwise renders a bordered
-        block with one line per todo: ✓ done, ▸ in-progress, ○ pending.
+        collapses to a single ``✓ N/N done`` line. Otherwise renders a
+        header line + one row per todo (✓ done, ▸ in-progress, ○ pending).
+
+        Originally drew a closed ╭─╮/╰─╯ box, but it had two problems:
+        (1) emoji width vs ``len()`` mismatch made the right edge jagged,
+        (2) when an active envelope was running, the footer redraw racing
+        with streaming output could displace the top border line. Without
+        a box there is nothing for those races to break — each row is
+        self-contained and the surrounding ``separator_top`` already
+        provides the visual boundary between panel and input.
         """
         todos = self._tasklist_state.todos
         if not todos:
@@ -631,19 +638,12 @@ class LoomApp:
                 ("class:tasklist.collapsed", f" ✓ {done}/{total} done\n"),
             ])
 
-        parts: list[tuple[str, str]] = []
-        title = f" 📋 task list  {done}/{total} "
-        # Top border with embedded title
-        bar = "─" * max(4, 48 - len(title))
-        parts.append(("class:tasklist.frame", "╭─"))
-        parts.append(("class:tasklist.title", title))
-        parts.append(("class:tasklist.frame", bar + "╮\n"))
-
+        parts: list[tuple[str, str]] = [
+            ("class:tasklist.title", f" 📋 task list  {done}/{total}\n"),
+        ]
         for t in todos:
             status = (t.get("status") or "pending").lower()
             content = (t.get("content") or "").strip()
-            # Truncate to fit a reasonable width; full content is in
-            # the agent's own state, the panel is just a glance
             if len(content) > 56:
                 content = content[:55] + "…"
             if status == "completed":
@@ -652,12 +652,7 @@ class LoomApp:
                 glyph, cls = "▸", "class:tasklist.active"
             else:
                 glyph, cls = "○", "class:tasklist.pending"
-            parts.append(("class:tasklist.frame", "│ "))
-            parts.append((cls, f"{glyph} {content}"))
-            parts.append(("class:tasklist.frame", "\n"))
-
-        parts.append(("class:tasklist.frame",
-                      "╰" + "─" * (len(title) + len(bar) + 2) + "╯\n"))
+            parts.append((cls, f"   {glyph} {content}\n"))
         return FormattedText(parts)
 
     def _render_confirm(self) -> FormattedText:
