@@ -25,9 +25,19 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from pathlib import Path
+
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import (
+    CompleteEvent,
+    Completer,
+    Completion,
+    FuzzyCompleter,
+)
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import has_focus
+from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
@@ -50,36 +60,64 @@ from loom.core.events import (  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
-# Slash command autocomplete
+# Slash command catalog — single source of truth for completer + /help
 # ---------------------------------------------------------------------------
+#
+# Each entry: (command, description). Descriptions show as completion meta.
+# Keep alphabetically grouped by command root for predictable nav.
 
-_SLASH_WORDS = [
-    "/personality",
-    "/personality off",
-    "/personality adversarial",
-    "/personality minimalist",
-    "/personality architect",
-    "/personality researcher",
-    "/personality operator",
-    "/think",
-    "/new",
-    "/compact",
-    "/scope",
-    "/scope revoke",
-    "/scope clear",
-    "/pause",
-    "/stop",
-    "/help",
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/auto",                       "toggle run_bash auto-approve (requires strict_sandbox)"),
+    ("/compact",                    "compress older context (smart compaction)"),
+    ("/help",                       "show command reference"),
+    ("/model",                      "show current model + registered providers"),
+    ("/model claude-sonnet-4-6",    "switch to Anthropic Claude Sonnet 4.6"),
+    ("/model claude-opus-4-7",      "switch to Anthropic Claude Opus 4.7"),
+    ("/model MiniMax-M2.7",         "switch to MiniMax-M2.7 (default)"),
+    ("/new",                        "start a fresh session"),
+    ("/pause",                      "toggle HITL pause after each tool batch"),
+    ("/personality",                "show active persona + available list"),
+    ("/personality off",            "clear active persona"),
+    ("/personality adversarial",    "switch persona → adversarial"),
+    ("/personality architect",      "switch persona → architect"),
+    ("/personality minimalist",     "switch persona → minimalist"),
+    ("/personality operator",       "switch persona → operator"),
+    ("/personality researcher",     "switch persona → researcher"),
+    ("/scope",                      "list active scope grants"),
+    ("/scope clear",                "revoke all non-system grants"),
+    ("/scope revoke",               "revoke a specific grant by index"),
+    ("/sessions",                   "browse and switch sessions"),
+    ("/stop",                       "interrupt a running turn (CLI: Ctrl+C)"),
+    ("/think",                      "view last turn's reasoning chain"),
 ]
 
 
-class SlashCompleter(WordCompleter):
-    def __init__(self) -> None:
-        super().__init__(
-            _SLASH_WORDS,
-            match_middle=False,
-            sentence=True,
-        )
+class SlashCompleter(Completer):
+    """Slash-command completer with metadata + prefix matching.
+
+    Wrap with :class:`FuzzyCompleter` for fuzzy match — done in
+    :func:`make_prompt_session`.
+    """
+
+    def __init__(self, commands: list[tuple[str, str]] | None = None) -> None:
+        self._commands = commands if commands is not None else SLASH_COMMANDS
+
+    def get_completions(self, document: Document, _: CompleteEvent):
+        # Only complete on the first line, when text starts with "/".
+        # Avoids triggering completer on subsequent lines of multi-line input.
+        text = document.text_before_cursor
+        if "\n" in text:
+            return
+        if not text.startswith("/"):
+            return
+        for cmd, desc in self._commands:
+            if cmd.startswith(text):
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display=cmd,
+                    display_meta=desc,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -88,35 +126,112 @@ class SlashCompleter(WordCompleter):
 
 _PT_STYLE = Style.from_dict(
     {
-        "prompt": "bold cyan",
+        # Prompt indicator (the "you ›" before input)
+        "prompt": "bold #c8a464",         # amber gold (羊皮卷 accent)
+        # Hint text (continuation prompt on multi-line)
+        "prompt.continuation": "#8a7a5e", # muted parchment
+        # Auto-suggestion ghost text
+        "auto-suggestion": "#4a4038",     # subtle border-grey
+        # Completion menu
+        "completion-menu":         "bg:#242018 #e0cfa0",
+        "completion-menu.completion":         "bg:#242018 #e0cfa0",
+        "completion-menu.completion.current": "bg:#c8a464 #1c1814 bold",
+        "completion-menu.meta.completion":         "bg:#242018 #8a7a5e",
+        "completion-menu.meta.completion.current": "bg:#c8a464 #1c1814",
         "": "",
     }
 )
 
+_HISTORY_PATH = Path.home() / ".loom" / "cli_history"
+
 
 def _build_key_bindings() -> KeyBindings:
-    """Build key bindings for Ctrl+L (clear)."""
+    """Build key bindings.
+
+    Defaults provided by prompt_toolkit (we don't override):
+      - Ctrl+C / Ctrl+D on empty buffer → exit
+      - Up / Down → history navigation (single-line buffer)
+      - Tab → completion
+
+    Custom:
+      - Ctrl+L              → clear screen
+      - Enter               → submit (even in multiline mode)
+      - Alt+Enter / Esc,Enter → insert newline
+      - Esc (alone, double-tap) → clear buffer
+    """
     kb = KeyBindings()
 
     @kb.add("c-l")
-    def clear_screen(_) -> None:
-        """Ctrl+L: clear terminal screen."""
+    def clear_screen(event) -> None:
         from rich.console import Console
-
         _console = Console()
         _console.clear()
+        # Re-render the prompt after clear
+        event.app.renderer.reset()
+        event.app.invalidate()
+
+    @kb.add("enter", filter=has_focus("DEFAULT_BUFFER"))
+    def submit_on_enter(event) -> None:
+        """Plain Enter → submit (overrides multiline default of inserting newline)."""
+        buf = event.current_buffer
+        # Empty buffer → no-op (don't submit empty input)
+        if not buf.text.strip():
+            return
+        buf.validate_and_handle()
+
+    @kb.add("escape", "enter", filter=has_focus("DEFAULT_BUFFER"))
+    def newline_on_alt_enter(event) -> None:
+        """Alt+Enter (sent by terminals as Esc,Enter) → insert newline."""
+        event.current_buffer.insert_text("\n")
 
     return kb
 
 
-def make_prompt_session() -> PromptSession:
-    """Create a PromptSession with input history, slash autocomplete, and key bindings."""
+def make_prompt_session(
+    *,
+    history_path: Path | None = None,
+    slash_commands: list[tuple[str, str]] | None = None,
+) -> PromptSession:
+    """Create a PromptSession with multiline input, file history, and fuzzy slash autocomplete.
+
+    Parameters
+    ----------
+    history_path : Path | None
+        Where to persist input history. Defaults to ``~/.loom/cli_history``.
+        Falls back to in-memory history if the path is not writable.
+    slash_commands : list[(cmd, desc)] | None
+        Override the slash command catalog (e.g., for tests). Defaults to
+        :data:`SLASH_COMMANDS`.
+    """
+    # Resolve history location, with graceful fallback to in-memory.
+    history: FileHistory | InMemoryHistory
+    path = history_path if history_path is not None else _HISTORY_PATH
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        history = FileHistory(str(path))
+    except OSError:
+        history = InMemoryHistory()
+
+    completer = FuzzyCompleter(
+        SlashCompleter(slash_commands),
+        # Empty pattern produces no fuzzy noise; only fuzzy-match real input.
+        enable_fuzzy=True,
+    )
+
     return PromptSession(
-        history=InMemoryHistory(),
-        completer=SlashCompleter(),
+        history=history,
+        completer=completer,
         complete_while_typing=True,
+        auto_suggest=AutoSuggestFromHistory(),
         style=_PT_STYLE,
         key_bindings=_build_key_bindings(),
+        # multiline=True deferred: prompt_toolkit's multi-line cursor
+        # bookkeeping leaves terminal state that interacts badly with
+        # Rich's raw `\r\033[K` clear_line on streaming output (CJK
+        # boundary truncation). Revisit alongside Rich render rewrite
+        # in PR-D.
+        multiline=False,
+        mouse_support=False,
     )
 
 

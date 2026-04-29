@@ -176,11 +176,10 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
 
     try:
         while True:
-            # ── Read user input (prompt_toolkit — history + autocomplete) ──
+            # ── Read user input (prompt_toolkit — multiline + file history + fuzzy slash) ──
             try:
                 user_input: str = await prompt_session.prompt_async(
-                    "\nyou> ",
-                    style=None,
+                    [("class:prompt", "\nyou › ")],
                 )
             except (EOFError, KeyboardInterrupt):
                 break
