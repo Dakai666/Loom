@@ -143,6 +143,20 @@ class _PauseState:
     future: asyncio.Future | None = None
 
 
+@dataclass
+class _TaskListState:
+    """Snapshot of the agent's TaskList for the floating panel.
+
+    Replaced wholesale on every ``task_write``. Empty ``todos`` means
+    hide the panel entirely.
+    """
+    todos: list[dict] = field(default_factory=list)
+    # Auto-collapse when every todo is completed — render a single
+    # ``✓ N/N done`` line instead of the full panel. Until expand-toggle
+    # is wired (follow-up), the collapsed view is one-shot
+    collapsed: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Style — extends prompt_toolkit's class-based style with our palette
 # ---------------------------------------------------------------------------
@@ -155,7 +169,7 @@ _APP_STYLE = Style.from_dict(
         # feedback after PR-D1 first run: explicit bg felt obtrusive
         # against varied terminal themes
         "footer":                PARCHMENT_MUTED,
-        "footer.brand":          PARCHMENT_ACCENT,
+        "footer.brand":          f"{PARCHMENT_ACCENT} bold",
         "footer.budget.ok":      PARCHMENT_MUTED,
         "footer.budget.warn":    PARCHMENT_WARNING,
         "footer.budget.high":    PARCHMENT_ERROR,
@@ -166,6 +180,13 @@ _APP_STYLE = Style.from_dict(
         # Thinking indicator above the input separator
         "thinking":              PARCHMENT_MUTED,
         "thinking.dot":          PARCHMENT_ACCENT,
+        # Floating TaskList panel
+        "tasklist.frame":        PARCHMENT_BORDER,
+        "tasklist.title":        f"{PARCHMENT_ACCENT} bold",
+        "tasklist.done":         PARCHMENT_SUCCESS,
+        "tasklist.active":       PARCHMENT_ACCENT,
+        "tasklist.pending":      PARCHMENT_MUTED,
+        "tasklist.collapsed":    PARCHMENT_SUCCESS,
         # Confirm / Pause widget — also no bg, blend with terminal
         "widget.title":          PARCHMENT_TEXT,
         "widget.body":           PARCHMENT_MUTED,
@@ -222,6 +243,7 @@ class LoomApp:
         self._confirm_state: _ConfirmState | None = None
         self._pause_state: _PauseState | None = None
         self._redirect_future: asyncio.Future | None = None
+        self._tasklist_state = _TaskListState()
 
         # Footer state
         self.footer = FooterState()
@@ -318,6 +340,24 @@ class LoomApp:
             self._mode[0] = "input"
             self._app.invalidate()
 
+    def update_tasklist(self, todos: list[dict]) -> None:
+        """Replace the floating task panel snapshot.
+
+        Wired from ``TaskListManager.on_change`` so every ``task_write``
+        propagates here. Empty list hides the panel. When every todo is
+        ``completed`` we auto-collapse to a one-line summary so a finished
+        list doesn't dominate the bottom region.
+        """
+        self._tasklist_state.todos = list(todos or [])
+        if self._tasklist_state.todos and all(
+            (t.get("status") or "").lower() == "completed"
+            for t in self._tasklist_state.todos
+        ):
+            self._tasklist_state.collapsed = True
+        else:
+            self._tasklist_state.collapsed = False
+        self._app.invalidate()
+
     async def request_redirect_text(self) -> str:
         """Switch to redirect mode for free-form text entry (HITL redirect)."""
         future: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -413,6 +453,20 @@ class LoomApp:
             style=f"fg:{PARCHMENT_BORDER}",
         )
 
+        # Floating TaskList panel — sits above the thinking indicator
+        # (highest in the bottom stack) so it's the closest visual
+        # neighbour to scrollback. Hidden entirely when no list is
+        # active. Height is dynamic; ConditionalContainer collapses to
+        # zero when the render emits empty FormattedText
+        tasklist_window = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(self._render_tasklist),
+                height=Dimension(min=1, max=12),
+                wrap_lines=False,
+            ),
+            filter=Condition(lambda: bool(self._tasklist_state.todos)),
+        )
+
         # Thinking indicator — appears as its own line *above* the
         # separator (so visually attached to the input region), only
         # while ``footer.thinking`` is True. Mirrors Claude Code-style
@@ -428,6 +482,7 @@ class LoomApp:
 
         layout = Layout(
             HSplit([
+                tasklist_window,
                 thinking_window,
                 separator_top,
                 input_window,
@@ -456,16 +511,13 @@ class LoomApp:
     def _render_footer(self) -> FormattedText:
         parts: list[tuple[str, str]] = []
 
-        # Far left: Loom ▎ brand mark — anchors the line as Loom's
-        # identity, mirrors the agent guide style.
-        parts.append(("class:footer.brand", " Loom ▎ "))
+        # Far left: bold Loom brand mark — anchors the line as Loom's
+        # identity. Persona is omitted (welcome screen already announces
+        # it; footer real estate goes to live state).
+        parts.append(("class:footer.brand", " Loom "))
 
-        # Then: model · persona (identity context)
-        left = self.footer.model
-        if self.footer.persona:
-            left = f"{self.footer.persona} · {left}"
-        if left:
-            parts.append(("class:footer", f" {left} "))
+        if self.footer.model:
+            parts.append(("class:footer", f"  {self.footer.model} "))
 
         s = self.footer
 
@@ -555,6 +607,60 @@ class LoomApp:
             ("class:thinking.dot", " ● "),
             ("class:thinking", f"Loom is thinking{dots}"),
         ])
+
+    def _render_tasklist(self) -> FormattedText:
+        """Floating TaskList panel — agent's todo board (PR-E, #236).
+
+        Hidden when no list is active. When everything is completed,
+        collapses to a single ``✓ N/N done`` line. Otherwise renders a
+        header line + one row per todo (✓ done, ▸ in-progress, ○ pending).
+
+        Originally drew a closed ╭─╮/╰─╯ box, but it had two problems:
+        (1) emoji width vs ``len()`` mismatch made the right edge jagged,
+        (2) when an active envelope was running, the footer redraw racing
+        with streaming output could displace the top border line. Without
+        a box there is nothing for those races to break — each row is
+        self-contained and the surrounding ``separator_top`` already
+        provides the visual boundary between panel and input.
+        """
+        todos = self._tasklist_state.todos
+        if not todos:
+            return FormattedText([])
+
+        total = len(todos)
+        done = sum(
+            1 for t in todos
+            if (t.get("status") or "").lower() == "completed"
+        )
+
+        if self._tasklist_state.collapsed:
+            return FormattedText([
+                ("class:tasklist.collapsed", f" ✓ {done}/{total} done\n"),
+            ])
+
+        # Leading blank line — separates the panel from whatever
+        # streaming output sits directly above. Without it, when run_bash
+        # or any active envelope is pushing rapid output up into
+        # scrollback, the redraw cycle can visually butt the panel's
+        # first line right against the previous output and look like
+        # the header got displaced
+        parts: list[tuple[str, str]] = [
+            ("", "\n"),
+            ("class:tasklist.title", f" 📋 task list  {done}/{total}\n"),
+        ]
+        for t in todos:
+            status = (t.get("status") or "pending").lower()
+            content = (t.get("content") or "").strip()
+            if len(content) > 56:
+                content = content[:55] + "…"
+            if status == "completed":
+                glyph, cls = "✓", "class:tasklist.done"
+            elif status == "in_progress":
+                glyph, cls = "▸", "class:tasklist.active"
+            else:
+                glyph, cls = "○", "class:tasklist.pending"
+            parts.append((cls, f"   {glyph} {content}\n"))
+        return FormattedText(parts)
 
     def _render_confirm(self) -> FormattedText:
         if self._confirm_state is None:

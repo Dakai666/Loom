@@ -337,6 +337,16 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
     # select_prompt as before.
     session._loom_app = app  # type: ignore[attr-defined]
 
+    # PR-E (#236): mirror task_write into the floating panel. The
+    # manager fires ``on_change`` with the post-write status summary
+    # after every task_write tool call (replace semantics — full list
+    # every time), so the panel just re-renders from that snapshot.
+    tlm = getattr(session, "_tasklist_manager", None)
+    if tlm is not None:
+        def _push_tasklist(summary: dict) -> None:
+            app.update_tasklist(summary.get("todos") or [])
+        tlm.on_change = _push_tasklist
+
     async def turn_loop() -> None:
         nonlocal current_turn_task
         while not shutdown.is_set():
@@ -344,6 +354,15 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 text = await asyncio.wait_for(input_queue.get(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
+
+            # PR-E follow-up: a fully-completed TaskList (collapsed to
+            # ``✓ N/N done``) is stale the moment the user starts a new
+            # turn. Without this it would linger until the next
+            # task_write call, which feels like a UI leak. Clearing
+            # here ``acknowledges'' the previous list and frees the
+            # bottom region for whatever comes next
+            if app._tasklist_state.collapsed:
+                app.update_tasklist([])
 
             # Slash commands run inline — no streaming turn, no cancel.
             if text.startswith("/"):
@@ -1327,16 +1346,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     active_tool: str | None = None
     spinner_task: asyncio.Task | None = None
     frame_index = 0
-
-    # ── Loom Agent turn intro ─────────────────────────────────────────────
-    # Loom Agent turn intro — minimal marker, no metadata.
-    # The footer already shows persona · model · context% · stats, so
-    # repeating any of that here just adds visual debt. Keep this to
-    # a single ``Loom ▎`` so the turn boundary is legible without
-    # duplicating footer info.
-    console.print(
-        Text.from_markup("[loom.agent.guide]Loom ▎[/loom.agent.guide]")
-    )
 
     def _cancel_spinner() -> None:
         nonlocal spinner_task
