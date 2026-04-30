@@ -314,7 +314,14 @@ class LoomApp:
         finally:
             self._confirm_state = None
             self._mode[0] = "input"
-            self._app.invalidate()
+            # prompt_toolkit's non-fullscreen renderer holds onto the
+            # row count it last drew at — when a tall widget (confirm
+            # with N options) closes, plain ``invalidate()`` redraws
+            # at the new shorter size *but the previously-claimed rows
+            # stay reserved*, leaving the input area visually expanded.
+            # ``renderer.erase()`` clears the rendered region so the
+            # next draw reclaims rows from scratch
+            self._shrink_after_widget_close()
 
     async def request_pause(
         self,
@@ -339,7 +346,7 @@ class LoomApp:
         finally:
             self._pause_state = None
             self._mode[0] = "input"
-            self._app.invalidate()
+            self._shrink_after_widget_close()
 
     def update_tasklist(self, todos: list[dict]) -> None:
         """Replace the floating task panel snapshot.
@@ -371,7 +378,20 @@ class LoomApp:
             self._redirect_future = None
             self._redirect_buffer.text = ""
             self._mode[0] = "input"
-            self._app.invalidate()
+            self._shrink_after_widget_close()
+
+    def _shrink_after_widget_close(self) -> None:
+        """Force the renderer to reclaim rows after a tall mode-widget
+        (confirm / pause / redirect) closes. Without this the input
+        area visually stays at the widget's row count even though the
+        layout has switched back. ``renderer.erase()`` clears the
+        currently-drawn region; ``invalidate()`` schedules a redraw
+        which then claims rows fresh based on the new layout."""
+        try:
+            self._app.renderer.erase(leave_alternate_screen=True)
+        except Exception:
+            pass
+        self._app.invalidate()
 
     # ------------------------------------------------------------------
     # Layout builders
