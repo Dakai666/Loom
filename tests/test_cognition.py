@@ -151,14 +151,19 @@ class TestContextBudget:
 # ---------------------------------------------------------------------------
 
 class TestToAnthropicMessages:
+    """`_to_anthropic_messages` returns ``(system_text, messages)`` — system
+    is hoisted to a top-level kwarg per Anthropic wire spec (DeepSeek
+    endpoint is strict about this). Tests destructure accordingly."""
+
     def test_user_message_passthrough(self):
         msgs = [{"role": "user", "content": "Hello"}]
-        result = _to_anthropic_messages(msgs)
+        system, result = _to_anthropic_messages(msgs)
+        assert system is None
         assert result == [{"role": "user", "content": "Hello"}]
 
     def test_assistant_text_only(self):
         msgs = [{"role": "assistant", "content": "Hi there", "tool_calls": []}]
-        result = _to_anthropic_messages(msgs)
+        _, result = _to_anthropic_messages(msgs)
         assert len(result) == 1
         assert result[0]["role"] == "assistant"
         # Content has a text block
@@ -179,7 +184,7 @@ class TestToAnthropicMessages:
                 }],
             }
         ]
-        result = _to_anthropic_messages(msgs)
+        _, result = _to_anthropic_messages(msgs)
         content = result[0]["content"]
         tool_block = next(b for b in content if b.get("type") == "tool_use")
         assert tool_block["name"] == "read_file"
@@ -190,7 +195,7 @@ class TestToAnthropicMessages:
             {"role": "tool", "tool_call_id": "tc1", "content": "result A"},
             {"role": "tool", "tool_call_id": "tc2", "content": "result B"},
         ]
-        result = _to_anthropic_messages(msgs)
+        _, result = _to_anthropic_messages(msgs)
         # Both tool results collapsed into one user message
         assert len(result) == 1
         assert result[0]["role"] == "user"
@@ -207,9 +212,20 @@ class TestToAnthropicMessages:
             {"role": "tool", "tool_call_id": "tc1", "content": "file.txt"},
             {"role": "assistant", "content": "Done."},
         ]
-        result = _to_anthropic_messages(msgs)
+        _, result = _to_anthropic_messages(msgs)
         roles = [m["role"] for m in result]
         assert roles == ["user", "assistant", "user", "assistant"]
+
+    def test_system_hoisted_to_top_level(self):
+        msgs = [
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hi"},
+        ]
+        system, result = _to_anthropic_messages(msgs)
+        assert system == "you are helpful"
+        # System must NOT appear in the messages array — DeepSeek rejects it
+        assert all(m["role"] != "system" for m in result)
+        assert result == [{"role": "user", "content": "hi"}]
 
 
 # ---------------------------------------------------------------------------
