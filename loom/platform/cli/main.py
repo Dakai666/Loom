@@ -61,9 +61,6 @@ from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
-    EnvelopeCompleted,
-    EnvelopeStarted,
-    EnvelopeUpdated,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -72,9 +69,6 @@ from loom.platform.cli.ui import (
     TurnDropped,
     TurnPaused,
     clear_line,
-    parallel_group_footer,
-    parallel_group_header,
-    parallel_group_row,
     status_bar,
     tool_begin_line,
     tool_end_line,
@@ -1596,18 +1590,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             # cursor manipulation can fail under terminal resize, etc.
             pass
 
-    # PR-E follow-up #247: parallel envelope group panel.
-    # When the agent dispatches >1 tools in a single envelope, we
-    # suppress the per-tool ``[-] tool(...)`` rows + spinner (the
-    # footer ``Nx ▸ tool · elapsed`` already covers live state) and
-    # frame the completed rows under a thin rule. Single-tool batches
-    # behave exactly as before.
-    _parallel_mode = False
-    _parallel_total = 0
-    _parallel_done_ok = 0
-    _parallel_done_total = 0
-    _parallel_started_at: float = 0.0
-
     # PR-D4: clear the "thinking" footer indicator on the first
     # observable event of the turn. After that, the active envelope
     # / streaming output / turn stats take over the footer's middle.
@@ -1645,45 +1627,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # ThinkCollapsed in their own way and aren't affected
                 pass
 
-            elif isinstance(event, EnvelopeStarted):
-                # #247: enter parallel mode only when the batch holds
-                # multiple tools. Single-tool envelopes fall through to
-                # ToolBegin's existing inline rendering
-                if event.envelope.node_count > 1:
-                    _bump_output_seq()
-                    _flush_streaming(force=True)
-                    _segment_buffer = ""
-                    _cancel_pending_freeze()
-                    if not at_line_start:
-                        console.print()
-                        at_line_start = True
-                    _parallel_mode = True
-                    _parallel_total = event.envelope.node_count
-                    _parallel_done_ok = 0
-                    _parallel_done_total = 0
-                    _parallel_started_at = time.monotonic()
-                    console.print(parallel_group_header(_parallel_total))
-
-            elif isinstance(event, EnvelopeUpdated):
-                # No-op for the CLI — per-tool ToolEnd already drives
-                # the row-by-row redraw inside the group
-                pass
-
-            elif isinstance(event, EnvelopeCompleted):
-                if _parallel_mode:
-                    elapsed_ms = (time.monotonic() - _parallel_started_at) * 1000
-                    console.print(
-                        parallel_group_footer(
-                            _parallel_done_ok, _parallel_total, elapsed_ms
-                        )
-                    )
-                    console.print()
-                    at_line_start = True
-                    _parallel_mode = False
-                    _parallel_total = 0
-                    _parallel_done_ok = 0
-                    _parallel_done_total = 0
-
             elif isinstance(event, ToolBegin):
                 _bump_output_seq()
                 # Drain pending streamed text before the tool row
@@ -1692,24 +1635,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # the current markdown-reblit segment so only post-
                 # tool text gets reblit at TurnDone
                 _segment_buffer = ""
-                # In parallel mode the per-tool row is suppressed —
-                # footer ``Nx ▸ tool · elapsed`` covers live state and
-                # individual ToolEnd rows print under the group header
-                # as they complete. Still update footer envelope list
-                active_tool = event.name
-                if _parallel_mode:
-                    loom_app = getattr(session, "_loom_app", None)
-                    if loom_app is not None:
-                        from loom.platform.cli.app import _ActiveEnvelope
-                        import time as _t
-                        loom_app.footer.active_envelopes.append(
-                            _ActiveEnvelope(
-                                name=event.name,
-                                started_monotonic=_t.monotonic(),
-                            )
-                        )
-                        loom_app.invalidate()
-                    continue
                 # New tool row prints below the prior committed
                 # envelope — that prior one can no longer freeze
                 _cancel_pending_freeze()
@@ -1719,6 +1644,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 if not at_line_start:
                     console.print()
                     at_line_start = True
+                active_tool = event.name
                 frame_index = 0
                 console.print(
                     tool_begin_line(event.name, event.args, width=_terminal_width())
@@ -1740,30 +1666,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # Cancel spinner and clear its line
                 _cancel_spinner()
                 clear_line()
-                if _parallel_mode:
-                    # Group-panel row, no per-tool freeze (cursor-up
-                    # math doesn't compose with sibling rows). Still
-                    # drop the matching footer envelope so the live
-                    # ``Nx ▸ tool · elapsed`` decrements correctly
-                    console.print(
-                        parallel_group_row(
-                            event.name, event.success, event.duration_ms
-                        )
-                    )
-                    at_line_start = True
-                    active_tool = None
-                    _parallel_done_total += 1
-                    if event.success:
-                        _parallel_done_ok += 1
-                    loom_app = getattr(session, "_loom_app", None)
-                    if loom_app is not None:
-                        envs = loom_app.footer.active_envelopes
-                        for i in range(len(envs) - 1, -1, -1):
-                            if envs[i].name == event.name:
-                                envs.pop(i)
-                                break
-                        loom_app.invalidate()
-                    continue
                 console.print(
                     tool_end_line(event.name, event.success, event.duration_ms)
                 )
