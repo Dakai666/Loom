@@ -367,10 +367,24 @@ class LoomApp:
         self._app.invalidate()
 
     async def request_redirect_text(self) -> str:
-        """Switch to redirect mode for free-form text entry (HITL redirect)."""
+        """Switch to redirect mode for free-form text entry (HITL redirect).
+
+        Focus is explicitly transferred to ``_redirect_buffer`` and back.
+        Without this, the still-focused (but hidden) ``_input_buffer``
+        receives keystrokes — digits/letters land in the wrong buffer
+        and Enter both submits that hidden text as a fresh turn and
+        resolves the redirect future with an empty string. Confirm
+        widgets don't hit this because they use FormattedTextControl
+        with their own ``<any>`` keybindings, but BufferControl needs
+        focus to receive characters.
+        """
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._redirect_future = future
         self._mode[0] = "redirect"
+        try:
+            self._app.layout.focus(self._redirect_buffer)
+        except Exception:
+            pass
         self._app.invalidate()
         try:
             return await future
@@ -378,6 +392,10 @@ class LoomApp:
             self._redirect_future = None
             self._redirect_buffer.text = ""
             self._mode[0] = "input"
+            try:
+                self._app.layout.focus(self._input_buffer)
+            except Exception:
+                pass
             self._shrink_after_widget_close()
 
     def _shrink_after_widget_close(self) -> None:
