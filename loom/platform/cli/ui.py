@@ -24,6 +24,8 @@ from typing import Any
 
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.align import Align
+from rich.columns import Columns
 from rich.text import Text
 
 from pathlib import Path
@@ -439,37 +441,52 @@ def render_welcome_signature(
     relation_count: int = 0,
     session_title: str | None = None,
     session_id_short: str | None = None,
-) -> Text:
-    """ASCII signature + stats block for ``loom chat`` startup.
+) -> "Columns | Text":
+    r"""ASCII logo + stats block for ``loom chat`` startup.
 
-    Replaces the previous render_header Panel + MemoryIndex Panel
-    splatter with a compact branded greeting. The full MemoryIndex
-    still feeds the LLM's system prompt — this only changes what
-    the user sees on startup.
+    Renders a 7-line ASCII "LOOM" wordmark in accent gold on the left,
+    with version, stats, model, persona, and session info on the right.
+    The full MemoryIndex still feeds the LLM's system prompt — this
+    only changes what the user sees on startup.
 
-    Format::
+    Format (left | right)::
 
-           ╱╲╱╲╱╲╱╲╱
-          ╱  Loom  ╲       v0.3.x
-           ╲╱╲╱╲╱╲╱
-        ─────  12 skills · 14k facts · 3 mcp · 47 episodes
-              ╲    minimax-m2.7  ·  persona: tarot
+        ___        ______      ______   ___      ___       Loom v0.3.x
+        |"  |      /    " \    /    " \ |"  \    /"  |      ─────────────
+        ||  |     // ____  \  // ____  \ \   \  //   |      12 skills · 14k facts
+        |:  |    /  /    ) :)/  /    ) :)/\\  \/.    |      3 mcp · 47 episodes
+         \  |___(: (____/ //(: (____/ //|: \.        |      ─────────────
+        ( \_|:  \\        /  \        / |.  \    /:  |      minimax-m2.7
+         \_______)\"_____/    \"_____/  |___|\__/|___|      persona: tarot
 
-    The triple top row is a loose nod to the warp/weft weave that
-    gives the project its name; deliberately understated so it
-    doesn't dominate the terminal. Stats fields with zero counts
-    are silently skipped.
+    Stats fields with zero counts are silently skipped.
     """
     from loom import __version__
 
     def _abbrev(n: int) -> str:
-        # Strip trailing zero before suffix: 14000 → "14k" not "14.0k"
         if n >= 1_000_000:
             return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
         if n >= 1_000:
             return f"{n / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
         return str(n)
 
+    # ── Left: 7-line ASCII LOOM logo (accent gold) ────────────
+    LOGO_LINES = [
+        r" ___        ______      ______   ___      ___ ",
+        r'|"  |      /    " \    /    " \ |"  \    /"  |',
+        r'||  |     // ____  \  // ____  \ \   \  //   |',
+        r'|:  |    /  /    ) :)/  /    ) :)/\   \/.    |',
+        r' \  |___(: (____/ //(: (____/ //|: \.        |',
+        r'( \_|:  \\        /  \        / |.  \    /:  |',
+        r' \_______)\"_____/    \"_____/  |___|\__/|___|',
+        '',
+        "Chaos is just a piece of cloth",
+        "that hasn't been sorted out yet."
+    ]
+    logo_text = Text('\n'.join(LOGO_LINES), style="loom.accent")
+    logo_panel = Panel(logo_text, border_style="loom.border", padding=(0, 1))
+
+    # ── Right: info panel ────────────────────────────────────
     stats: list[str] = []
     if skill_count:
         stats.append(f"{_abbrev(skill_count)} skills")
@@ -483,35 +500,34 @@ def render_welcome_signature(
         stats.append(f"{_abbrev(relation_count)} relations")
     stats_line = " · ".join(stats) if stats else "fresh session"
 
-    persona_tag = f"  ·  persona: {persona}" if persona else ""
+    persona_tag = f"\n[loom.muted]persona: {persona}[/loom.muted]" if persona else ""
 
-    # Session identity line — title (when set) + short id, so the user
-    # always knows which thread they're in. Hidden entirely when both
-    # are absent (e.g. very first chat before any session exists)
-    session_line = ""
+    session_block = ""
     if session_title or session_id_short:
         bits: list[str] = []
         if session_title:
             bits.append(f"[loom.accent]{session_title}[/loom.accent]")
         if session_id_short:
-            bits.append(f"[loom.muted]({session_id_short})[/loom.muted]")
-        session_line = (
-            f"[loom.muted]      ╲   [/loom.muted]" + "  ".join(bits) + "\n"
-        )
+            bits.append(f"\n[loom.muted]({session_id_short})[/loom.muted]")
+        session_block = "\n[loom.muted]───────────────────────────────────────────────[/loom.muted]" + "  ".join(bits)
 
-    # Five-line signature: woven mark on top, stats + identity below
-    return Text.from_markup(
-        "\n"
-        "[loom.muted]    ╱╲╱╲╱╲╱╲╱[/loom.muted]\n"
-        "[loom.muted]   ╱  [/loom.muted][loom.accent]Loom[/loom.accent]"
-        f"[loom.muted]  ╲     v{__version__}[/loom.muted]\n"
-        "[loom.muted]    ╲╱╲╱╲╱╲╱[/loom.muted]\n"
-        f"[loom.muted] ─────  {stats_line}[/loom.muted]\n"
-        f"[loom.muted]      ╲   [/loom.muted][loom.text]{model}[/loom.text]"
-        f"[loom.muted]{persona_tag}[/loom.muted]\n"
-        + session_line
+    info_markup = (
+        f"[bold loom.text]Loom[/bold loom.text] [loom.muted]v{__version__}[/loom.muted]"
+        f"\n[loom.muted]───────────────────────────────────────────────[/loom.muted]"
+        f"\n[loom.text]{stats_line}[/loom.text]"
+        f"\n[loom.muted]───────────────────────────────────────────────[/loom.muted]"
+        f"\n[loom.text]{model}[/loom.text]"
+        f"{persona_tag}"
+        f"{session_block}"
+    )
+    info_text = Text.from_markup(info_markup)
+    info_panel = Panel(
+        Align.center(info_text, vertical="middle"),
+        border_style="loom.border",
+        padding=(1, 2),
     )
 
+    return Columns([logo_panel, info_panel], expand=False, padding=(1, 0))
 
 def response_panel(
     text: str,
