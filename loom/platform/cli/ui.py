@@ -440,25 +440,21 @@ def render_welcome_signature(
     session_title: str | None = None,
     session_id_short: str | None = None,
 ) -> Text:
-    """ASCII signature + stats block for ``loom chat`` startup.
+    r"""ASCII logo + stats block for ``loom chat`` startup.
 
-    Replaces the previous render_header Panel + MemoryIndex Panel
-    splatter with a compact branded greeting. The full MemoryIndex
-    still feeds the LLM's system prompt — this only changes what
-    the user sees on startup.
+    Replaces the previous woven-mark header with a 3-line compact
+    ASCII "LOOM" logo. The full MemoryIndex still feeds the LLM's
+    system prompt — this only changes what the user sees on startup.
 
     Format::
 
-           ╱╲╱╲╱╲╱╲╱
-          ╱  Loom  ╲       v0.3.x
-           ╲╱╲╱╲╱╲╱
-        ─────  12 skills · 14k facts · 3 mcp · 47 episodes
-              ╲    minimax-m2.7  ·  persona: tarot
+             __   __        
+        |    /  \ /  \  |\/|     v0.3.x
+        |___ \__/ \__/  |  |
+         ─────  12 skills · 14k facts · 3 mcp · 47 episodes
+               ╲    minimax-m2.7  ·  persona: tarot
 
-    The triple top row is a loose nod to the warp/weft weave that
-    gives the project its name; deliberately understated so it
-    doesn't dominate the terminal. Stats fields with zero counts
-    are silently skipped.
+    Stats fields with zero counts are silently skipped.
     """
     from loom import __version__
 
@@ -499,13 +495,13 @@ def render_welcome_signature(
             f"[loom.muted]      ╲   [/loom.muted]" + "  ".join(bits) + "\n"
         )
 
-    # Five-line signature: woven mark on top, stats + identity below
+    # ASCII logo (3-line minimal "LOOM") + stats + identity below
     return Text.from_markup(
         "\n"
-        "[loom.muted]    ╱╲╱╲╱╲╱╲╱[/loom.muted]\n"
-        "[loom.muted]   ╱  [/loom.muted][loom.accent]Loom[/loom.accent]"
-        f"[loom.muted]  ╲     v{__version__}[/loom.muted]\n"
-        "[loom.muted]    ╲╱╲╱╲╱╲╱[/loom.muted]\n"
+        f"[loom.accent]     __   __        [/loom.accent]\n"
+        f"[loom.accent]|    /  \\ /  \\  |\\/|[/loom.accent]"
+        f"[loom.muted]     v{__version__}[/loom.muted]\n"
+        f"[loom.accent]|___ \\__/ \\__/  |  |[/loom.accent]\n"
         f"[loom.muted] ─────  {stats_line}[/loom.muted]\n"
         f"[loom.muted]      ╲   [/loom.muted][loom.text]{model}[/loom.text]"
         f"[loom.muted]{persona_tag}[/loom.muted]\n"
