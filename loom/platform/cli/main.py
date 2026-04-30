@@ -149,6 +149,10 @@ async def _resolve_and_chat(
                 resume_session_id=next_target,
                 init_title=init_title,
             )
+            # ``--name`` is intentionally a one-shot: it labels the
+            # session the user just opened, not every session they
+            # might subsequently switch to via ``/sessions``. Each
+            # post-switch session keeps whatever title is in the DB
             init_title = None
             if switch_to is None:
                 return
@@ -180,8 +184,11 @@ async def _chat(
         try:
             async with session._store.connect() as conn:
                 await SessionLog(conn).update_title(session.session_id, init_title)
-        except Exception:
-            pass
+        except Exception as exc:
+            harness.inline(
+                f"could not apply --name {init_title!r}: {exc}",
+                level="error",
+            )
 
     # Issue #260: signal channel for ``/sessions`` and ``/new`` to
     # request a session restart. Slash handler sets it; ``turn_loop``
@@ -298,8 +305,10 @@ async def _chat(
             _meta = await SessionLog(conn).get_session(session.session_id)
         if _meta:
             _session_title = _meta.get("title")
-    except Exception:
-        pass
+    except Exception as exc:
+        # Cosmetic: title is a presentation field. Fail open with a
+        # debug-level note so prod issues are still traceable
+        logger.debug("session title lookup failed: %s", exc)
 
     console.print(
         render_welcome_signature(
@@ -324,7 +333,8 @@ async def _chat(
         try:
             async with session._store.connect() as conn:
                 _msgs = await SessionLog(conn).load_messages(session.session_id)
-        except Exception:
+        except Exception as exc:
+            logger.debug("resume preview load_messages failed: %s", exc)
             _msgs = []
         # Keep only user/assistant text turns; drop tool messages and
         # blank assistant entries (those usually mean a tool-only turn)
@@ -491,16 +501,26 @@ async def _chat(
                     await _handle_slash(text, session)
                 except Exception as exc:
                     harness.inline(f"slash command error: {exc}", level="error")
-                # Issue #260: ``/sessions`` / ``/new`` set a switch
-                # target on the session. Exit the LoomApp so the outer
-                # loop in ``_resolve_and_chat`` can restart with the
-                # requested session
+                # Issue #260: ``/sessions`` / ``/new`` request a session
+                # restart by setting ``session._cli_next_target``. The
+                # full restart path is intentionally indirect:
+                #   slash handler sets _cli_next_target
+                #   → here: shutdown.set() + app.application.exit()
+                #   → ``app.run()`` task completes → asyncio.wait wakes
+                #   → ``_chat`` finally reads _cli_next_target and returns it
+                #   → outer loop in ``_resolve_and_chat`` restarts with the
+                #     new session_id
+                # Don't shortcut this by returning directly — patch_stdout
+                # cleanup + session.stop() must run via the existing path
                 if getattr(session, "_cli_next_target", None) is not None:
                     shutdown.set()
                     try:
                         app.application.exit()
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        harness.inline(
+                            f"app exit signalling failed: {_exc}",
+                            level="error",
+                        )
                 continue
 
             # Detect interruption marker injected by _on_submit.
@@ -832,8 +852,15 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
         loom_app = getattr(session, "_loom_app", None)
         if loom_app is None:
+            # Non-interactive context (tests / scripts) — picker can't
+            # take input. Tell the user where to look instead so they
+            # don't just see the list and wonder what to do
             console.print(
-                "[loom.muted]  (no LoomApp wired — interactive picker unavailable)[/loom.muted]"
+                "[loom.warning]  Interactive picker unavailable in this "
+                "context.[/loom.warning] [loom.muted]Use [/loom.muted]"
+                "[loom.warning]loom sessions list[/loom.warning][loom.muted] / "
+                "[/loom.muted][loom.warning]loom chat --session <id>[/loom.warning] "
+                "[loom.muted]from the shell instead.[/loom.muted]"
             )
             return
 
