@@ -437,6 +437,8 @@ def render_welcome_signature(
     mcp_count: int = 0,
     episode_count: int = 0,
     relation_count: int = 0,
+    session_title: str | None = None,
+    session_id_short: str | None = None,
 ) -> Text:
     """ASCII signature + stats block for ``loom chat`` startup.
 
@@ -483,6 +485,20 @@ def render_welcome_signature(
 
     persona_tag = f"  ·  persona: {persona}" if persona else ""
 
+    # Session identity line — title (when set) + short id, so the user
+    # always knows which thread they're in. Hidden entirely when both
+    # are absent (e.g. very first chat before any session exists)
+    session_line = ""
+    if session_title or session_id_short:
+        bits: list[str] = []
+        if session_title:
+            bits.append(f"[loom.accent]{session_title}[/loom.accent]")
+        if session_id_short:
+            bits.append(f"[loom.muted]({session_id_short})[/loom.muted]")
+        session_line = (
+            f"[loom.muted]      ╲   [/loom.muted]" + "  ".join(bits) + "\n"
+        )
+
     # Five-line signature: woven mark on top, stats + identity below
     return Text.from_markup(
         "\n"
@@ -493,6 +509,7 @@ def render_welcome_signature(
         f"[loom.muted] ─────  {stats_line}[/loom.muted]\n"
         f"[loom.muted]      ╲   [/loom.muted][loom.text]{model}[/loom.text]"
         f"[loom.muted]{persona_tag}[/loom.muted]\n"
+        + session_line
     )
 
 

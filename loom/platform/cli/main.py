@@ -288,6 +288,19 @@ async def _chat(
     # the LLM's system prompt unchanged.
     from loom.platform.cli.ui import render_welcome_signature
     _idx = session._memory_index
+
+    # Issue #260: surface session title + short id in the signature so
+    # the user always knows which thread they're sitting in (after
+    # ``/sessions`` switch, or after ``--resume``)
+    _session_title: str | None = None
+    try:
+        async with session._store.connect() as conn:
+            _meta = await SessionLog(conn).get_session(session.session_id)
+        if _meta:
+            _session_title = _meta.get("title")
+    except Exception:
+        pass
+
     console.print(
         render_welcome_signature(
             model=model,
@@ -297,8 +310,48 @@ async def _chat(
             mcp_count=len(session._mcp_clients),
             episode_count=getattr(_idx, "episode_sessions", 0),
             relation_count=getattr(_idx, "relational_count", 0),
+            session_title=_session_title,
+            session_id_short=session.session_id[:8],
         )
     )
+
+    # Issue #260: when resuming a session that has prior content, echo
+    # the last few user / assistant turns into scrollback so the user
+    # has visual context for what was discussed before. Limited to last
+    # 4 messages and 240 chars each — full history is in the DB and
+    # still in the LLM's context, this is just a visual aid
+    if resume_session_id and session.session_id == resume_session_id:
+        try:
+            async with session._store.connect() as conn:
+                _msgs = await SessionLog(conn).load_messages(session.session_id)
+        except Exception:
+            _msgs = []
+        # Keep only user/assistant text turns; drop tool messages and
+        # blank assistant entries (those usually mean a tool-only turn)
+        _preview = [
+            m for m in _msgs
+            if m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+            and m.get("content", "").strip()
+        ][-4:]
+        if _preview:
+            console.print()
+            console.print(
+                "[loom.muted]  ↳ previous turns "
+                f"({len(_msgs)} messages total)[/loom.muted]"
+            )
+            for m in _preview:
+                role = m.get("role", "")
+                content = m.get("content", "").strip().replace("\n", " ")
+                if len(content) > 240:
+                    content = content[:237] + "…"
+                tag = (
+                    "[loom.accent]you ›[/loom.accent]"
+                    if role == "user"
+                    else "[loom.muted]Loom ▎[/loom.muted]"
+                )
+                console.print(f"  {tag} [loom.muted]{content}[/loom.muted]")
+            console.print()
 
     # PR-D4: anchor the persistent app's bottom region to the actual
     # bottom of the terminal. ``full_screen=False`` mode draws the
