@@ -718,12 +718,25 @@ def make_run_bash_tool(
                 cwd=cwd,
             )
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                                  success=False, error=f"Command timed out after {timeout}s",
-                                  failure_type="timeout")
+                try:
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                      success=False, error=f"Command timed out after {timeout}s",
+                                      failure_type="timeout")
+            finally:
+                # Issue #222: cancellation (Discord cancel-and-relaunch,
+                # _abort.abort()) bypasses the TimeoutError branch — kill
+                # the subprocess so we don't orphan Playwright / shell
+                # children. returncode is None iff still running.
+                if proc.returncode is None:
+                    proc.kill()
+                    try:
+                        await proc.wait()
+                    except BaseException:
+                        pass
 
             output = stdout.decode("utf-8", errors="replace")
             success = proc.returncode == 0
@@ -809,10 +822,20 @@ async def _run_bash_job(
             cwd=cwd,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return None, None, f"Command timed out after {timeout}s"
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return None, None, f"Command timed out after {timeout}s"
+        finally:
+            # Issue #222: kill on cancellation so async jobs don't orphan.
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except BaseException:
+                    pass
         output = stdout.decode("utf-8", errors="replace")
         ref = f"bash_{uuid.uuid4().hex[:8]}"
         scratchpad.write(ref, output)

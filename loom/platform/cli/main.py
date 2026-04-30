@@ -375,11 +375,13 @@ async def _chat(
     import shutil as _shutil
     import sys as _sys
     _term_h = _shutil.get_terminal_size(fallback=(80, 24)).lines
-    # Welcome sig footprint ~ 6 lines (5 visible + leading newline);
+    # Welcome sig footprint ~ 12 lines (Columns of two Panels: 2 borders
+    # + 7-line LOOM logo + 1 blank + 2 motto lines on the left; right
+    # info panel is shorter and shares the same outer borders).
     # bottom area ~ 5 lines (thinking + sep_top + input + sep_bottom +
     # footer). Conditional/thinking only shows during agent calls so a
     # frame more is fine.
-    _pad = max(0, _term_h - 6 - 5)
+    _pad = max(0, _term_h - 12 - 5)
     _sys.stdout.write("\n" * _pad)
     _sys.stdout.flush()
 

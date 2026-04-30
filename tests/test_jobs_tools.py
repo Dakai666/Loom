@@ -135,6 +135,51 @@ class TestRunBashExpectedNonZero:
         assert result.metadata["exit_code"] == 2
         assert "Exit code 2" in result.error
 
+# --- Issue #222: subprocess cleanup on cancellation -----------------
+
+
+class TestRunBashCancelKill:
+    async def test_cancel_kills_inflight_subprocess(self, tmp_path: Path, monkeypatch):
+        """When the awaiting task is cancelled, the subprocess must be killed
+        rather than orphaned. Issue #222 / #218 Tier 3."""
+        import asyncio as _asyncio
+        from loom.platform.cli import tools as _tools
+
+        captured: dict = {}
+        real_create = _asyncio.create_subprocess_shell
+
+        async def _spy_create(*args, **kwargs):
+            proc = await real_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        monkeypatch.setattr(_tools.asyncio, "create_subprocess_shell", _spy_create)
+
+        tool = make_run_bash_tool(tmp_path)
+        task = _asyncio.create_task(tool.executor(_call("run_bash", {
+            "command": "sleep 30",
+            "justification": "test cancel",
+            "timeout": 60,
+        })))
+        # Let the subprocess actually spawn before cancelling.
+        for _ in range(50):
+            if "proc" in captured:
+                break
+            await _asyncio.sleep(0.02)
+        assert "proc" in captured, "subprocess never spawned"
+
+        task.cancel()
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+
+        # Give the finally block a tick to run proc.wait().
+        for _ in range(50):
+            if captured["proc"].returncode is not None:
+                break
+            await _asyncio.sleep(0.02)
+        assert captured["proc"].returncode is not None, "subprocess was orphaned"
+
+
 # --- jobs_* tools ----------------------------------------------------
 
 
