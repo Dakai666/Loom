@@ -99,9 +99,12 @@ def cli() -> None:
 @click.option("--tui", is_flag=True, default=False, help="Use Textual TUI interface.")
 @click.option("--resume", is_flag=True, default=False, help="Resume the most recent session.")
 @click.option("--session", "resume_id", default=None, metavar="ID", help="Resume a specific session by ID.")
-def chat(model: str, db: str, tui: bool, resume: bool, resume_id: str | None) -> None:
+@click.option("--name", "name", default=None, metavar="TITLE",
+              help="Set a title on the new (or resumed) session for easier identification.")
+def chat(model: str, db: str, tui: bool, resume: bool, resume_id: str | None,
+         name: str | None) -> None:
     """Start an interactive agent session."""
-    asyncio.run(_resolve_and_chat(model, db, tui, resume, resume_id))
+    asyncio.run(_resolve_and_chat(model, db, tui, resume, resume_id, name))
 
 
 async def _resolve_and_chat(
@@ -110,6 +113,7 @@ async def _resolve_and_chat(
     tui: bool,
     resume: bool,
     resume_id: str | None,
+    name: str | None = None,
 ) -> None:
     """Resolve --resume / --session flags, then launch the appropriate interface."""
     if model is None:
@@ -132,12 +136,58 @@ async def _resolve_and_chat(
     if tui:
         await _chat_tui(model, db, resume_session_id=resolved_id)
     else:
-        await _chat(model, db, resume_session_id=resolved_id)
+        # Issue #260: CLI session switch loop — ``/sessions`` and
+        # ``/new`` set ``session._cli_next_target`` and then exit the
+        # LoomApp. ``_chat`` returns that target string; we restart with
+        # the requested session. ``--name`` is applied only on first
+        # iteration (subsequent switches inherit whatever title is in DB)
+        next_target: str | None = resolved_id
+        init_title: str | None = name
+        while True:
+            switch_to = await _chat(
+                model, db,
+                resume_session_id=next_target,
+                init_title=init_title,
+            )
+            init_title = None
+            if switch_to is None:
+                return
+            if switch_to == "__new__":
+                next_target = None
+            else:
+                next_target = switch_to
 
 
-async def _chat(model: str, db: str, resume_session_id: str | None = None) -> None:
+async def _chat(
+    model: str,
+    db: str,
+    resume_session_id: str | None = None,
+    init_title: str | None = None,
+) -> str | None:
+    """Run one chat session. Returns:
+
+    - ``None`` on normal exit (user closed the app)
+    - a ``session_id`` string when ``/sessions`` picked a different session
+    - ``"__new__"`` when ``/new`` requested a fresh session
+    """
     session = LoomSession(model=model, db_path=db, resume_session_id=resume_session_id)
     await session.start()
+
+    # Issue #260: apply ``--name`` (or the title set by ``/name``) so the
+    # session shows up in the picker / ``loom sessions list`` with the
+    # operator-friendly label rather than just its UUID
+    if init_title:
+        try:
+            async with session._store.connect() as conn:
+                await SessionLog(conn).update_title(session.session_id, init_title)
+        except Exception:
+            pass
+
+    # Issue #260: signal channel for ``/sessions`` and ``/new`` to
+    # request a session restart. Slash handler sets it; ``turn_loop``
+    # observes it and exits the LoomApp; this function reads + returns
+    # it so the outer loop in ``_resolve_and_chat`` can act
+    session._cli_next_target = None  # type: ignore[attr-defined]
 
     # Issue #120 PR1: show diagnostic summaries inline in the CLI.
     async def _cli_diagnostic(diagnostic):
@@ -388,6 +438,16 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                     await _handle_slash(text, session)
                 except Exception as exc:
                     harness.inline(f"slash command error: {exc}", level="error")
+                # Issue #260: ``/sessions`` / ``/new`` set a switch
+                # target on the session. Exit the LoomApp so the outer
+                # loop in ``_resolve_and_chat`` can restart with the
+                # requested session
+                if getattr(session, "_cli_next_target", None) is not None:
+                    shutdown.set()
+                    try:
+                        app.application.exit()
+                    except Exception:
+                        pass
                 continue
 
             # Detect interruption marker injected by _on_submit.
@@ -465,8 +525,11 @@ async def _chat(model: str, db: str, resume_session_id: str | None = None) -> No
                 except (asyncio.CancelledError, Exception):
                     pass
     finally:
+        switch_to = getattr(session, "_cli_next_target", None)
         await session.stop()
-        console.print("\n[loom.muted]Session ended. Goodbye.[/loom.muted]")
+        if switch_to is None:
+            console.print("\n[loom.muted]Session ended. Goodbye.[/loom.muted]")
+    return switch_to
 
 
 def _format_ttl(g: Any) -> str:
@@ -677,6 +740,96 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 loom_app.footer.token_pct = session.budget.usage_fraction * 100
                 loom_app.invalidate()
 
+    elif command == "/sessions":
+        # Issue #260: list recent sessions, let the user pick one by
+        # number. Submitting an empty line is a no-op (stay in current
+        # session). The actual switch is performed by the outer loop in
+        # ``_resolve_and_chat`` after we set ``_cli_next_target`` and
+        # exit the LoomApp; here we only persist the intent
+        from loom.core.memory.session_log import SessionLog as _SL
+
+        async with session._store.connect() as conn:
+            rows = await _SL(conn).list_sessions(limit=20)
+
+        if not rows:
+            console.print("[loom.muted]No sessions found.[/loom.muted]")
+            return
+
+        console.print("[bold]Sessions[/bold]")
+        for i, r in enumerate(rows, 1):
+            sid = r.get("session_id", "")
+            sid_short = sid[:8]
+            title = r.get("title") or "(untitled)"
+            last = (r.get("last_active") or "")[:16].replace("T", " ")
+            turns = r.get("turn_count", 0)
+            mark = (
+                "[loom.accent]●[/loom.accent]"
+                if sid == session.session_id
+                else " "
+            )
+            console.print(
+                f"  {mark} [loom.warning]{i:>2}[/loom.warning] "
+                f"[loom.text]{title[:40]:<40}[/loom.text] "
+                f"[loom.muted]{sid_short}  {last}  {turns}t[/loom.muted]"
+            )
+        console.print(
+            "[loom.muted]  Enter a number to switch, "
+            "[loom.warning]n[/loom.warning] for new session, or just press Enter to stay.[/loom.muted]"
+        )
+
+        loom_app = getattr(session, "_loom_app", None)
+        if loom_app is None:
+            console.print(
+                "[loom.muted]  (no LoomApp wired — interactive picker unavailable)[/loom.muted]"
+            )
+            return
+
+        try:
+            choice = (await loom_app.request_redirect_text()).strip().lower()
+        except Exception:
+            choice = ""
+
+        if not choice:
+            return
+        if choice in ("n", "new"):
+            session._cli_next_target = "__new__"  # type: ignore[attr-defined]
+            return
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(rows):
+                target = rows[idx].get("session_id", "")
+                if target and target != session.session_id:
+                    session._cli_next_target = target  # type: ignore[attr-defined]
+                else:
+                    console.print("[loom.muted]  Already in this session.[/loom.muted]")
+                return
+        console.print(f"[loom.warning]  Invalid choice: {choice!r}[/loom.warning]")
+
+    elif command == "/new":
+        # Mirrors TUI's behaviour — start a fresh session. Outer loop
+        # picks up the marker and restarts with no resume_session_id
+        session._cli_next_target = "__new__"  # type: ignore[attr-defined]
+
+    elif command == "/name":
+        # Issue #260: rename the current session in place. Title shows
+        # up immediately in ``loom sessions list`` and on the next
+        # ``/sessions`` picker open
+        if not arg:
+            console.print(
+                "[loom.muted]Usage: [loom.warning]/name <title>[/loom.warning][/loom.muted]"
+            )
+        else:
+            try:
+                from loom.core.memory.session_log import SessionLog as _SL
+                async with session._store.connect() as conn:
+                    await _SL(conn).update_title(session.session_id, arg)
+                console.print(
+                    f"[loom.muted]  ✓ Session renamed → "
+                    f"[loom.accent]{arg}[/loom.accent][/loom.muted]"
+                )
+            except Exception as exc:
+                console.print(f"[loom.error]  Rename failed: {exc}[/loom.error]")
+
     elif command == "/stop":
         # In CLI the turn is a blocking await — the user can't type while it runs.
         # /stop typed before a turn starts is a no-op; the real interrupt is Ctrl+C.
@@ -732,7 +885,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  List sessions:          [loom.warning]loom sessions list[/loom.warning]\n\n"
                 "[bold]Slash commands[/bold]\n\n"
                 "  [loom.warning]/new[/loom.warning]                       Start a fresh session\n"
-                "  [loom.warning]/sessions[/loom.warning]                  Browse and switch sessions\n"
+                "  [loom.warning]/sessions[/loom.warning]                  List + switch sessions (numbered picker)\n"
+                "  [loom.warning]/name[/loom.warning] [loom.muted]<title>[/loom.muted]             Rename the current session\n"
                 "  [loom.warning]/model[/loom.warning]                     Show current model + registered providers\n"
                 "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
                 "    [loom.muted]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"

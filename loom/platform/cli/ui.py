@@ -80,6 +80,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/model claude-sonnet-4-6",    "switch to Anthropic Claude Sonnet 4.6"),
     ("/model claude-opus-4-7",      "switch to Anthropic Claude Opus 4.7"),
     ("/model MiniMax-M2.7",         "switch to MiniMax-M2.7 (default)"),
+    ("/name",                       "rename the current session"),
     ("/new",                        "start a fresh session"),
     ("/pause",                      "toggle HITL pause after each tool batch"),
     ("/personality",                "show active persona + available list"),
