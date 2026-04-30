@@ -241,6 +241,10 @@ PR-E  TaskList live 浮動面板
 
 ---
 
+## 已知終端限制（無解，記錄即可）
+
+- **終端機 resize 中段截斷**（#250）：`loom chat` 啟動後若調整終端視窗大小，scrollback 中段已渲染的內容會被截斷或錯位。prompt_toolkit 的持久 Application 確實接 SIGWINCH 並把 bottom area 重畫對齊，但**已寫入 scrollback 的內容是終端自己管理**——多數終端機 reflow wrapped lines 的能力有限，特別是 CJK / 雙寬字元 + soft-wrap 組合下。這是終端層限制不是 Loom bug，使用上的建議是「啟動後盡量不調整視窗」。
+
 ## 未決問題
 
 - 「查看完整參數」展開後是 inline 還是另開 pager？需要實作時決定
