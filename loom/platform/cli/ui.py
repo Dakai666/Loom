@@ -55,6 +55,9 @@ from loom.core.events import (  # noqa: E402, F401
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    EnvelopeCompleted,
+    EnvelopeStarted,
+    EnvelopeUpdated,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -657,6 +660,70 @@ def tool_end_line(
         f"  [loom.muted][[/loom.muted]{icon}[loom.muted]][/loom.muted] "
         f"[loom.muted]{name}[/loom.muted]  "
         f"[{('green' if success else 'red')}]{duration_ms:.0f}ms[/{('green' if success else 'red')}]  "
+        f"[loom.muted]{status}[/loom.muted]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parallel envelope group panel (#247)
+# ---------------------------------------------------------------------------
+#
+# When the agent dispatches >1 tools in a single envelope, the CLI groups
+# their rows under a thin rule header instead of letting them line up flat
+# alongside serial calls. No box (lessons from TaskList #236) — just a
+# dashed rule + label, indented child rows, dashed close.
+#
+#     ── parallel · 3 tools ─────────────
+#        [ok] read_file       12ms  done
+#        [ok] list_dir         3ms  done
+#        [ok] web_search    1230ms  done
+#     ── ✓ 3/3 tools · 1.3s ─────────────
+#
+# The header / footer rules emit at PARCHMENT_BORDER muted weight so the
+# group reads as scaffolding, not content.
+
+_PARALLEL_RULE_TOTAL = 36  # visual length cap for the dashed rule
+
+
+def parallel_group_header(node_count: int) -> Text:
+    label = f" parallel · {node_count} tools "
+    pad = max(4, _PARALLEL_RULE_TOTAL - len(label) - 2)
+    return Text.from_markup(
+        f"  [loom.muted]──[/loom.muted]"
+        f"[loom.accent]{label}[/loom.accent]"
+        f"[loom.muted]{'─' * pad}[/loom.muted]"
+    )
+
+
+def parallel_group_footer(done: int, total: int, elapsed_ms: float) -> Text:
+    """Closing rule for the group. ``done`` is success count; failures
+    flip the icon to warning so the user sees something dropped."""
+    all_ok = done == total
+    icon = "✓" if all_ok else "⚠"
+    icon_style = "loom.success" if all_ok else "loom.warning"
+    secs = elapsed_ms / 1000.0
+    label = f" {icon} {done}/{total} tools · {secs:.1f}s "
+    pad = max(4, _PARALLEL_RULE_TOTAL - len(label) - 2)
+    return Text.from_markup(
+        f"  [loom.muted]──[/loom.muted]"
+        f"[{icon_style}]{label}[/{icon_style}]"
+        f"[loom.muted]{'─' * pad}[/loom.muted]"
+    )
+
+
+def parallel_group_row(name: str, success: bool, duration_ms: float) -> Text:
+    """One tool's completed row inside the group panel. Reuses the same
+    icon/colour vocabulary as ``tool_end_line`` so a serial vs grouped
+    completion of the same tool reads identically — just with a deeper
+    indent to signal containment."""
+    icon = "[loom.success]ok[/loom.success]" if success else "[loom.error]!![/loom.error]"
+    status = "[loom.success]done[/loom.success]" if success else "[loom.error]failed[/loom.error]"
+    name_style = "loom.muted" if success else "loom.error"
+    ms_color = "green" if success else "red"
+    return Text.from_markup(
+        f"     [loom.muted][[/loom.muted]{icon}[loom.muted]][/loom.muted] "
+        f"[{name_style}]{name}[/{name_style}]  "
+        f"[{ms_color}]{duration_ms:.0f}ms[/{ms_color}]  "
         f"[loom.muted]{status}[/loom.muted]"
     )
 
