@@ -481,7 +481,7 @@ def render_welcome_signature(
         r' \_______)\"_____/    \"_____/  |___|\__/|___|',
         '',
         "Chaos is just a piece of cloth",
-        "that hasn't been sorted out yet.          -Siyi-"
+        "that hasn't been sorted out yet."
     ]
     logo_text = Text('\n'.join(LOGO_LINES), style="loom.accent")
     logo_panel = Panel(logo_text, border_style="loom.border", padding=(0, 1))
