@@ -53,6 +53,31 @@
 
 ---
 
+## 同回合並行工具呼叫（Parallel Tool Use）
+
+> harness 支援單一 assistant 訊息內發出多個 `tool_use` block，會以 `asyncio.gather` 真正並發執行。完成後三個結果一起回到下一輪上下文。
+
+**何時用**——獨立、唯讀、彼此無依賴的 SAFE 工作：
+
+- 同時 `read_file` 多個檔案（檢查 N 個模組的標頭、收 4 篇 doc 的最後一段）
+- 同時 `list_dir` 多個目錄
+- 同時 `grep` 多個 pattern 或多個目錄
+- 同時 `recall` 多個記憶 key
+- 多個 `fetch_url` 抓獨立 URL（純讀，不寫）
+
+**何時不用**——任何一條打勾就改回序列：
+
+- 任一工具是 GUARDED 或 CRITICAL 且**這次 session 還沒被授權**——harness 會 fallback 序列（不是壞事，避免授權彈窗交錯）
+- write_file / 任何 mutation——後一個動作可能依賴前一個的結果，並行只會引入 race
+- 任一是 EXEC（`run_bash` 等）且該 turn 還沒先 probe——會被 LegitimacyGuard 標 `trajectory_anomaly`，反而失去 fast-pass
+- 結果之間有邏輯先後（讀 A 的內容才能決定要不要讀 B）——序列才是對的
+
+**怎麼發**——同一個 assistant 訊息裡列出多個 `tool_use`。CLI / Discord / TUI 都會把這批呼叫顯示成 group panel：`── parallel · 3 tools ──` 開頭，每個工具完成後的 row 收進框內。
+
+**判斷心法**——「如果我是先做 A 再做 B 不會比同時做更安全 / 不會有人需要中間狀態，那就同時發」。安全是 SAFE 信任層級的設計目的，正面利用它。
+
+---
+
 ## 背景任務（Async Jobs）
 
 > Issue #154：IO 類工具（`fetch_url`、`run_bash`）可用 `async_mode=True` 派到背景執行，結果落入 session-scoped Scratchpad。
