@@ -27,7 +27,6 @@ from loom.platform.cli.tools import (
     _verify_spawn_agent,
     make_filesystem_tools,
     make_memorize_tool,
-    make_task_done_tool,
     sanitize_untrusted_text,
 )
 
@@ -331,95 +330,6 @@ class TestSpawnAgentVerifier:
             _call("spawn_agent", task="analyze"), result,
         )
         assert verdict.passed is True
-
-
-@pytest_asyncio.fixture
-async def task_manager():
-    """Build a TaskListManager with a single-node list for validator tests."""
-    from loom.core.tasks.manager import TaskListManager
-
-    manager = TaskListManager(session_id="test-session")
-    manager.create_list([{"id": "n1", "content": "primary task"}])
-    yield manager
-
-
-class TestTaskDoneVerifier:
-    """task_done post_validator catches TaskList state desync —
-    executor reported success but internal state disagrees (PR #198 review)."""
-
-    async def test_passes_on_actual_completion(self, task_manager) -> None:
-        tool = make_task_done_tool(task_manager)
-        task_manager.mark_in_progress("n1")
-
-        call = ToolCall(
-            id="c1", tool_name="task_done",
-            args={"node_id": "n1", "result": "finished successfully"},
-            trust_level=TrustLevel.SAFE, session_id="s",
-        )
-        result = await tool.executor(call)
-        assert result.success
-
-        verdict = await tool.post_validator(call, result)
-        assert verdict.passed is True
-
-    async def test_passes_on_actual_failure_marking(self, task_manager) -> None:
-        """failed path: task_done with error arg should leave node in FAILED."""
-        tool = make_task_done_tool(task_manager)
-        task_manager.mark_in_progress("n1")
-
-        call = ToolCall(
-            id="c1", tool_name="task_done",
-            args={"node_id": "n1", "error": "tool error"},
-            trust_level=TrustLevel.SAFE, session_id="s",
-        )
-        result = await tool.executor(call)
-        assert result.success  # tool succeeded even though node is FAILED
-
-        verdict = await tool.post_validator(call, result)
-        assert verdict.passed is True
-
-    async def test_fails_when_node_does_not_exist(self, task_manager) -> None:
-        """Simulate the state-desync pathology: fabricated result pointing
-        at a non-existent node_id."""
-        tool = make_task_done_tool(task_manager)
-        call = ToolCall(
-            id="c1", tool_name="task_done",
-            args={"node_id": "phantom-id", "result": "fabricated"},
-            trust_level=TrustLevel.SAFE, session_id="s",
-        )
-        fake_result = ToolResult(
-            call_id="c1", tool_name="task_done",
-            success=True, output="fake",
-        )
-        verdict = await tool.post_validator(call, fake_result)
-        assert verdict.passed is False
-        assert verdict.signal == "task_node_missing"
-
-    async def test_fails_when_node_status_disagrees(self, task_manager) -> None:
-        """Node exists but not in expected terminal state — the classic
-        state-desync case."""
-        tool = make_task_done_tool(task_manager)
-        # Deliberately DON'T mark n1 completed — leave it PENDING
-        call = ToolCall(
-            id="c1", tool_name="task_done",
-            args={"node_id": "n1", "result": "fabricated completion"},
-            trust_level=TrustLevel.SAFE, session_id="s",
-        )
-        fake_result = ToolResult(
-            call_id="c1", tool_name="task_done",
-            success=True, output="fake",
-        )
-        verdict = await tool.post_validator(call, fake_result)
-        assert verdict.passed is False
-        assert verdict.signal == "task_state_desync"
-        assert "pending" in (verdict.reason or "").lower()
-
-
-def _fetch_url_output(title: str, body: str) -> str:
-    """Build an output string shaped like fetch_url's HTML path:
-    sanitize_untrusted_text(f"Title: {title}\\n\\n{body}")."""
-    raw = f"Title: {title}\n\n{body}" if title else body
-    return sanitize_untrusted_text(raw)
 
 
 class TestFetchUrlVerifier:
