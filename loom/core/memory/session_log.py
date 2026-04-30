@@ -296,5 +296,14 @@ class SessionLog:
             # Re-attach tool_call_id for tool messages (required by OpenAI format)
             if role == "tool" and "tool_call_id" in meta:
                 msg["tool_call_id"] = meta["tool_call_id"]
+            # Issue #222: re-attach observation-masking tags so resumed
+            # sessions retain turn provenance for _apply_observation_masking
+            # and _sanitize_history Pass 4. Underscore prefix keeps them out
+            # of provider conversion (see session.py:1925 commentary).
+            if role == "tool":
+                if "emit_turn" in meta:
+                    msg["_emit_turn"] = meta["emit_turn"]
+                if "tool_name" in meta:
+                    msg["_tool_name"] = meta["tool_name"]
             result.append(msg)
         return result

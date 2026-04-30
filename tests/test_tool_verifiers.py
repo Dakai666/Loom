@@ -332,6 +332,13 @@ class TestSpawnAgentVerifier:
         assert verdict.passed is True
 
 
+def _fetch_url_output(title: str, body: str) -> str:
+    """Build an output string shaped like fetch_url's HTML path:
+    sanitize_untrusted_text(f"Title: {title}\\n\\n{body}")."""
+    raw = f"Title: {title}\n\n{body}" if title else body
+    return sanitize_untrusted_text(raw)
+
+
 class TestFetchUrlVerifier:
     """fetch_url post_validator catches HTTP-2xx silent failures —
     error-page templates, CDN challenges, thin SPA responses (Issue #199)."""

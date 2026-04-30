@@ -1932,7 +1932,11 @@ class LoomSession:
                             self.messages.append(_tool_msg)
                             asyncio.ensure_future(self._log_message(
                                 "tool", tool_output[:500],
-                                {"tool_call_id": tu.id, "tool_name": tu.name},
+                                {
+                                    "tool_call_id": tu.id,
+                                    "tool_name": tu.name,
+                                    "emit_turn": self._turn_index,
+                                },
                                 turn_index=self._turn_index,
                             ))
                     else:
@@ -2013,7 +2017,11 @@ class LoomSession:
                             self.messages.append(_tool_msg)
                             asyncio.ensure_future(self._log_message(
                                 "tool", tool_output[:500],
-                                {"tool_call_id": tu.id, "tool_name": tu.name},
+                                {
+                                    "tool_call_id": tu.id,
+                                    "tool_name": tu.name,
+                                    "emit_turn": self._turn_index,
+                                },
                                 turn_index=self._turn_index,
                             ))
 
