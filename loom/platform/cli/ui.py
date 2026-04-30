@@ -472,15 +472,18 @@ def render_welcome_signature(
 
     # ── Left: 7-line ASCII LOOM logo (accent gold) ────────────
     LOGO_LINES = [
-        r"___        ______      ______   ___      ___ ",
+        r" ___        ______      ______   ___      ___ ",
         r'|"  |      /    " \    /    " \ |"  \    /"  |',
         r'||  |     // ____  \  // ____  \ \   \  //   |',
-        r'|:  |    /  /    ) :)/  /    ) :)/\  \/.    |',
+        r'|:  |    /  /    ) :)/  /    ) :)/\   \/.    |',
         r' \  |___(: (____/ //(: (____/ //|: \.        |',
-        r'( \_|:  \        /  \        / |.  \    /:  |',
-        r' \_______)"_____/    "_____/  |___|\__/|___|',
+        r'( \_|:  \\        /  \        / |.  \    /:  |',
+        r' \_______)\"_____/    \"_____/  |___|\__/|___|',
+        '',
+        "Chaos is just a piece of cloth",
+        "that hasn't been sorted out yet.          -Siyi-"
     ]
-    logo_text = Text("\n".join(LOGO_LINES), style="loom.accent")
+    logo_text = Text('\n'.join(LOGO_LINES), style="loom.accent")
     logo_panel = Panel(logo_text, border_style="loom.border", padding=(0, 1))
 
     # ── Right: info panel ────────────────────────────────────
@@ -505,14 +508,14 @@ def render_welcome_signature(
         if session_title:
             bits.append(f"[loom.accent]{session_title}[/loom.accent]")
         if session_id_short:
-            bits.append(f"[loom.muted]({session_id_short})[/loom.muted]")
-        session_block = "\n[loom.muted]──────────────────────────[/loom.muted]\n" + "  ".join(bits)
+            bits.append(f"\n[loom.muted]({session_id_short})[/loom.muted]")
+        session_block = "\n[loom.muted]───────────────────────────────────────────────[/loom.muted]" + "  ".join(bits)
 
     info_markup = (
-        f"[bold loom.text]Loom[/bold loom.text] [loom.muted]v{__version__}[/loom.muted]\n"
-        f"\n[loom.muted]──────────────────────────[/loom.muted]\n"
-        f"\n[loom.text]{stats_line}[/loom.text]\n"
-        f"\n[loom.muted]──────────────────────────[/loom.muted]\n"
+        f"[bold loom.text]Loom[/bold loom.text] [loom.muted]v{__version__}[/loom.muted]"
+        f"\n[loom.muted]───────────────────────────────────────────────[/loom.muted]"
+        f"\n[loom.text]{stats_line}[/loom.text]"
+        f"\n[loom.muted]───────────────────────────────────────────────[/loom.muted]"
         f"\n[loom.text]{model}[/loom.text]"
         f"{persona_tag}"
         f"{session_block}"
