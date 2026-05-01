@@ -120,6 +120,25 @@ class LLMProvider(ABC):
     """Abstract base for all LLM providers."""
     name: str
 
+    # Issue #272: each provider declares its own model→native max output
+    # tokens table here. ``native_max_tokens`` consults the table; the
+    # session-level resolver uses this as a fallback when loom.toml
+    # doesn't override. Subclasses populate; default is empty.
+    NATIVE_OUTPUT_LIMITS: dict[str, int] = {}
+
+    def native_max_tokens(self, model: str) -> int | None:
+        """Return the provider's declared native output cap for *model*.
+
+        Returns ``None`` when the model is unknown to this provider — the
+        session resolver should then fall back to its conservative default.
+        Lookup is case-insensitive so loom.toml entries like
+        ``"MiniMax-M2.7"`` and ``"minimax-m2.7"`` both resolve correctly
+        against the canonical lower-cased table.
+        """
+        if not model:
+            return None
+        return self.NATIVE_OUTPUT_LIMITS.get(model.lower())
+
     @abstractmethod
     async def chat(
         self,
@@ -203,6 +222,33 @@ class AnthropicProvider(LLMProvider):
     """
 
     name = "anthropic"
+
+    # Issue #272: model→native output cap. Keys are lower-cased for
+    # case-insensitive lookup. Includes MiniMax + DeepSeek because both
+    # ride the Anthropic-compatible endpoint via this same class.
+    #
+    # Sources:
+    #   - Anthropic: https://docs.anthropic.com/en/docs/about-claude/models
+    #     Sonnet 4.6 needs the ``output-128k-2025-02-19`` beta header to
+    #     reach 64K; without it the cap is 8K. We assume the harness's
+    #     anthropic SDK opt-in is active (it is, per providers.py:228).
+    #   - MiniMax: 64K matches the user-validated value previously sitting
+    #     in loom.toml ``output_max_tokens_overrides``.
+    #   - DeepSeek: 8K is the documented standard cap for deepseek-chat
+    #     and deepseek-coder; deepseek-reasoner is the same.
+    NATIVE_OUTPUT_LIMITS: dict[str, int] = {
+        # Anthropic Claude family
+        "claude-opus-4-7": 32768,
+        "claude-sonnet-4-6": 65536,
+        "claude-haiku-4-5": 8192,
+        "claude-haiku-4-5-20251001": 8192,
+        # MiniMax via Anthropic-compat endpoint
+        "minimax-m2.7": 65536,
+        # DeepSeek via Anthropic-compat endpoint
+        "deepseek-v3": 8192,
+        "deepseek-chat": 8192,
+        "deepseek-reasoner": 8192,
+    }
 
     def __init__(
         self,
