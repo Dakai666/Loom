@@ -72,6 +72,7 @@ from loom.core.events import (
     ExecutionNodeView,
     GrantSummary,
     GrantsSnapshot,
+    ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -273,6 +274,12 @@ def _load_loom_config() -> dict:
 # models often 4-8K) so a single hardcoded value was either wasteful or
 # clipping long tool-loop turns. Resolved once at session start.
 _DEFAULT_OUTPUT_MAX_TOKENS = 8192
+
+# Issue #271: max consecutive max_tokens-with-zero-tools recoveries within a
+# single stream_turn() before falling through to TurnDropped. Two attempts
+# is empirically enough for deep-reasoning prompts (10-question deductive
+# quizzes) without risking unbounded loops on pathologically long inputs.
+_MAX_REASONING_CONTINUATIONS = 2
 
 
 def _resolve_output_max_tokens(cfg: dict, model: str) -> int:
@@ -623,6 +630,22 @@ class LoomSession:
         # collection followed by synthesis). 0 disables masking. JIT
         # ensures the original content is in scratchpad regardless.
         self._mask_age_turns: int = int(_harness_cfg.get("mask_age_turns", 20))
+
+        # Issue #271: when stop_reason='max_tokens' fires after 0 tools, inject
+        # a system-reminder telling the agent to spill in-flight reasoning to
+        # scratchpad and resume, instead of silently truncating. ``"auto"``
+        # enables (default), ``"off"`` falls back to the original drop path.
+        _continuation_mode = str(
+            _harness_cfg.get("reasoning_continuation", "auto")
+        ).lower()
+        if _continuation_mode not in ("auto", "off"):
+            _continuation_mode = "auto"
+        self._reasoning_continuation_mode: str = _continuation_mode
+        # Per-turn counter, reset at the top of stream_turn(). Capped at
+        # ``_MAX_REASONING_CONTINUATIONS`` before falling through to
+        # TurnDropped to prevent unbounded loops on pathologically long
+        # prompts.
+        self._consecutive_max_tokens: int = 0
 
         # Issue #196 Phase 2: turn-boundary LLM-as-judge. ``off`` disables;
         # ``auto`` runs async by default and auto-upgrades to sync for
@@ -1551,6 +1574,12 @@ class LoomSession:
             cache_creation_input_tokens = 0
             t0 = time.monotonic()
 
+            # Issue #271: clear per-turn reasoning-continuation counter. The
+            # detector at the bottom of the stop_reason switch increments it
+            # whenever max_tokens fires after 0 tools; resetting here ensures
+            # state from a prior turn doesn't bleed into this one.
+            self._consecutive_max_tokens = 0
+
             # Think-block filter state — persists across the whole turn so multi-step
             # reasoning (think → tool use → think again) is handled correctly.
             _think_in = False           # currently inside <think>…</think>?
@@ -2088,9 +2117,61 @@ class LoomSession:
                             return
                 else:
                     # Unexpected stop_reason (e.g. 'max_tokens', unknown provider value).
-                    # Log and surface via TurnDropped so platforms can show a warning
-                    # rather than silently dropping the turn.
                     _raw_stop = getattr(response, "stop_reason", "unknown")
+
+                    # Issue #271: max_tokens with 0 tools is the high-reasoning
+                    # truncation case. The model exhausted its output budget
+                    # purely on reasoning — no tool calls, no recovery hook.
+                    # Inject a system-reminder telling the agent to spill
+                    # in-flight thinking to scratchpad and resume next round,
+                    # then re-enter the while loop so the LLM gets another
+                    # response window. Capped at _MAX_REASONING_CONTINUATIONS
+                    # to prevent unbounded loops; falls through to TurnDropped
+                    # afterwards. The truncated assistant text was already
+                    # appended to ``self.messages`` in the streaming branch
+                    # above, so the agent has its own prior reasoning visible
+                    # when it resumes.
+                    if self._should_continue_reasoning(_raw_stop, tool_count):
+                        self._consecutive_max_tokens += 1
+                        _ref = (
+                            f"auto_reasoning_t{self._turn_index}"
+                            f"_{self._consecutive_max_tokens}"
+                        )
+                        logger.info(
+                            "reasoning_continuation: max_tokens after 0 tools, "
+                            "attempt %d/%d — injecting reminder (ref=%s)",
+                            self._consecutive_max_tokens,
+                            _MAX_REASONING_CONTINUATIONS,
+                            _ref,
+                        )
+                        yield ReasoningContinuation(
+                            attempt=self._consecutive_max_tokens,
+                            max_attempts=_MAX_REASONING_CONTINUATIONS,
+                        )
+                        self.messages.append({
+                            "role": "user",
+                            "content": (
+                                "<system-reminder>\n"
+                                f"你的回答超出單輪輸出上限"
+                                f"（延伸 {self._consecutive_max_tokens}/"
+                                f"{_MAX_REASONING_CONTINUATIONS} 次）。"
+                                "為了不打斷推理：\n"
+                                f"1. 把目前進行中的關鍵推理摘要寫到 scratchpad，"
+                                f"建議 ref `{_ref}`\n"
+                                "2. 在這一輪精簡產出 —— 引用該 ref 接續，"
+                                "避免重複展開所有推理\n"
+                                "3. 如果題目本質需要長篇連續回應，"
+                                "先輸出最關鍵的結論部分，剩餘細節放 scratchpad\n"
+                                "</system-reminder>"
+                            ),
+                        })
+                        # Re-enter the while loop for another LLM call. The
+                        # appended reminder + truncated prior assistant text
+                        # both feed into the next sanitize+stream pass.
+                        continue
+
+                    # Either disabled, not max_tokens, or budget exhausted →
+                    # original drop path (logger warning + TurnDropped event).
                     logger.warning(
                         "stream_turn: unexpected stop_reason=%r after %d tool(s) — stopping",
                         _raw_stop, tool_count,
@@ -2762,6 +2843,26 @@ class LoomSession:
             error_msg=result.error if not result.success else None,
         )
         self._telemetry.mark_dirty()
+
+    def _should_continue_reasoning(self, stop_reason: str, tool_count: int) -> bool:
+        """Decide whether to inject a continuation reminder for #271.
+
+        Returns True iff all of:
+          - reasoning_continuation mode is not "off"
+          - stop_reason is "max_tokens" (the high-reasoning truncation case)
+          - 0 tools fired this round (recovery via system-reminder; if tools
+            ran the path is more ambiguous and likely user-input territory)
+          - retry budget not yet exhausted
+
+        Extracted as a pure predicate so the truth table is unit-testable
+        without spinning up a full stream_turn pipeline.
+        """
+        return (
+            self._reasoning_continuation_mode != "off"
+            and stop_reason == "max_tokens"
+            and tool_count == 0
+            and self._consecutive_max_tokens < _MAX_REASONING_CONTINUATIONS
+        )
 
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,

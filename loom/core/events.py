@@ -25,6 +25,7 @@ add ``Producers:`` / ``Consumers:`` entries to the event's docstring.
 | ThinkCollapsed      |  ✓  |  ✓  |    ✓    |   no     |
 | TurnPaused          |  ✓  |  ✓  |    ✓    |   no     |
 | TurnDropped         |  ✓  |  —  |    ✓    |   no     |
+| ReasoningContinuation |  ✓  |  ✓  |    ✓    |   no     |
 | CompressDone        |  —  |  —  |    ✓    |   no     |
 | ActionStateChange   |  —  |  ✓  |  skip   |   no     |
 | ActionRolledBack    |  —  |  ✓  |    ✓    |   no     |
@@ -216,6 +217,35 @@ class TurnDropped:
     retry_count: int = 0
     tool_count: int = 0
     exhausted: bool = False
+
+
+@dataclass
+class ReasoningContinuation:
+    """The model hit ``stop_reason='max_tokens'`` with no tool calls — harness
+    is auto-injecting a ``<system-reminder>`` to encourage the agent to spill
+    in-flight reasoning to scratchpad and resume in the next response.
+
+    Issue #271. Replaces the silent truncation that emitted only a logger
+    warning. The harness gives the model up to ``max_attempts`` tries before
+    falling through to ``TurnDropped``.
+
+    ``attempt``      — which retry this is (1, 2, …)
+    ``max_attempts`` — total budget; agent should self-segment more aggressively
+                       if approaching it
+    ``display_text`` — short user-facing message; platforms render verbatim
+
+    Producers:
+        LoomSession.stream_turn()
+
+    Consumers:
+        CLI     ✓  prints display_text in dim style
+        TUI     ✓  small status row (same channel as ThinkCollapsed)
+        Discord ✓  sends as a -# small persistent message
+    """
+
+    attempt: int
+    max_attempts: int
+    display_text: str = "有點複雜，我再繼續想想…"
 
 
 @dataclass
@@ -494,6 +524,7 @@ __all__ = [
     "ExecutionNodeView",
     "GrantSummary",
     "GrantsSnapshot",
+    "ReasoningContinuation",
     "TextChunk",
     "ThinkCollapsed",
     "ToolBegin",
