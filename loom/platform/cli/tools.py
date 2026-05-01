@@ -1103,28 +1103,30 @@ def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
 
 def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
     """
-    Create a SAFE ``agent_health`` tool (Issue #142).
+    Create a SAFE ``agent_health`` tool (Issue #142, #285).
 
     Wraps ``AgentTelemetryTracker`` so the agent can pull its own
     observability state on demand. Keep it pull-only: anomalies are already
     pushed at turn boundaries — this tool is for the cases where the agent
     wants to look without being prompted.
 
-    Args:
-        dimension: optional — one of ``tool_call``, ``context_layout``,
-                   ``memory_compression``. Returns that dimension's detail.
-        minimal:   optional bool — if true, returns the one-line summary
-                   (cheap check before drilling into a specific dimension).
+    Progressive disclosure (Issue #285):
+      - default            → one-line summary across all dimensions (cheap)
+      - ``dimension=X``    → detail for one dimension (drill-down)
+      - ``full=true``      → full detail across all dimensions (expensive)
+
+    Anomalies (if any) are appended in all modes so the agent never needs a
+    second call to decide whether to act.
     """
     async def _agent_health(call: ToolCall) -> ToolResult:
         dimension = call.args.get("dimension")
-        minimal = bool(call.args.get("minimal", False))
-        if minimal:
-            output = tracker.report_minimal() or "(no telemetry data yet)"
-        else:
+        full = bool(call.args.get("full", False))
+        if dimension:
             output = tracker.report_detail(dimension) or "(no telemetry data yet)"
-        # Surface current anomalies inline so the agent doesn't need two calls
-        # to decide whether to act.
+        elif full:
+            output = tracker.report_detail() or "(no telemetry data yet)"
+        else:
+            output = tracker.report_minimal() or "(no telemetry data yet)"
         alert = tracker.anomaly_report()
         if alert:
             output = f"{output}\n\n{alert}"
@@ -1139,11 +1141,13 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
         name="agent_health",
         description=(
             "Inspect your own observability telemetry: tool call success/latency, "
-            "context token layout, memory-compression yield, runtime identity, context budget, session turns, and loaded skills. Call with "
-            "`dimension=<tool_call|context_layout|memory_compression|runtime_identity|context_budget|session_turns|loaded_skills>` to drill "
-            "down, or `minimal=true` for a one-line composite summary. Use when "
-            "you want to self-check before a risky action, or when investigating "
-            "suspected behavioral drift."
+            "context token layout, memory-compression yield, runtime identity, "
+            "context budget, session turns, and loaded skills. "
+            "Default is a one-line summary across all dimensions. "
+            "Pass `dimension=<name>` to drill into one, or `full=true` to dump "
+            "every dimension's detail at once (expensive — only use when "
+            "investigating). Use this to self-check before a risky action or "
+            "when suspecting behavioral drift."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1152,11 +1156,11 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
                 "dimension": {
                     "type": "string",
                     "enum": ["tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills"],
-                    "description": "Specific dimension to inspect. Omit for full report.",
+                    "description": "Specific dimension to inspect.",
                 },
-                "minimal": {
+                "full": {
                     "type": "boolean",
-                    "description": "One-line summary across all dimensions.",
+                    "description": "Dump every dimension's full detail. Default false (summary only).",
                     "default": False,
                 },
             },

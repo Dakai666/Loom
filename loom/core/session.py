@@ -3030,9 +3030,12 @@ class LoomSession:
         active = self._active_tier()
         if active == old_tier:
             return None
-        # Issue #279: update runtime_identity on tier switch
-        if self._telemetry is not None:
-            _ri = self._telemetry.get("runtime_identity")
+        # Issue #279: update runtime_identity on tier switch.
+        # Use getattr — _set_sticky_tier is unit-tested with a SimpleNamespace
+        # self that does not always carry a _telemetry attribute.
+        _telemetry = getattr(self, "_telemetry", None)
+        if _telemetry is not None:
+            _ri = _telemetry.get("runtime_identity")
             if _ri is not None:
                 _ri.update(model=self._tier_models.get(active, self._model),
                            tier=active)
