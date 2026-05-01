@@ -59,7 +59,11 @@ class TestContextBudgetDimension:
         budget.record_response(input_tokens=85000, output_tokens=1000)
         dim = ContextBudgetDimension(budget=budget)
         assert dim.has_anomaly() is True
-        assert dim.describe_anomaly() is not None
+        msg = dim.describe_anomaly()
+        assert msg is not None
+        assert "auto-compact" in msg
+        assert "next turn" in msg
+        assert "current tool batch" in msg
 
     def test_no_anomaly_when_under_threshold(self):
         budget = ContextBudget(total_tokens=100000)
@@ -90,13 +94,10 @@ class TestSessionTurnsDimension:
         assert dim.snapshot()["turns"] == 2
         assert dim.snapshot()["turns"] == 3
 
-    def test_stage_label(self):
-        dim = SessionTurnsDimension(turn_index_fn=lambda: 0)
-        assert "early" in dim.render_detail()
-        dim5 = SessionTurnsDimension(turn_index_fn=lambda: 5)
-        assert "mid" in dim5.render_detail()
-        dim20 = SessionTurnsDimension(turn_index_fn=lambda: 20)
-        assert "deep" in dim20.render_detail()
+    def test_detail_shows_current_turn(self):
+        dim = SessionTurnsDimension(turn_index_fn=lambda: 7)
+        detail = dim.render_detail()
+        assert "current turn: 7" in detail
 
 
 class TestLoadedSkillsDimension:
