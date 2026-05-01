@@ -1306,6 +1306,7 @@ def make_load_skill_tool(
     relational: "RelationalMemory | None" = None,
     confirm_fn: "Callable | None" = None,
     skill_gate: "SkillGate | None" = None,
+    on_loaded: "Callable[[str], None] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -1421,6 +1422,8 @@ def make_load_skill_tool(
 
         # Record activation
         _loaded_this_session.add(name)
+        if on_loaded is not None:
+            on_loaded(name)
         if outcome_tracker is not None:
             _turn = turn_index_fn() if turn_index_fn else 0
             outcome_tracker.record_activation(name, _turn)

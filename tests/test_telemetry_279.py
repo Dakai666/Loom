@@ -77,22 +77,26 @@ class TestContextBudgetDimension:
 
 class TestSessionTurnsDimension:
     def test_starts_at_zero(self):
-        dim = SessionTurnsDimension()
+        dim = SessionTurnsDimension(turn_index_fn=lambda: 0)
         assert dim.snapshot()["turns"] == 0
 
-    def test_increment_works(self):
-        dim = SessionTurnsDimension()
-        dim.increment()
-        dim.increment()
-        dim.increment()
+    def test_reads_from_lambda(self):
+        _calls = [0]
+        def _counter():
+            _calls[0] += 1
+            return _calls[0]
+        dim = SessionTurnsDimension(turn_index_fn=_counter)
+        assert dim.snapshot()["turns"] == 1
+        assert dim.snapshot()["turns"] == 2
         assert dim.snapshot()["turns"] == 3
 
     def test_stage_label(self):
-        dim = SessionTurnsDimension()
+        dim = SessionTurnsDimension(turn_index_fn=lambda: 0)
         assert "early" in dim.render_detail()
-        for _ in range(5):
-            dim.increment()
-        assert "mid" in dim.render_detail()
+        dim5 = SessionTurnsDimension(turn_index_fn=lambda: 5)
+        assert "mid" in dim5.render_detail()
+        dim20 = SessionTurnsDimension(turn_index_fn=lambda: 20)
+        assert "deep" in dim20.render_detail()
 
 
 class TestLoadedSkillsDimension:

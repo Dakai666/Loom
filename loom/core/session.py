@@ -984,6 +984,7 @@ class LoomSession:
                 stack=self._stack,
                 messages_ref=self.messages,
                 max_window=self.budget.total_tokens,
+                turn_index_fn=lambda: self._turn_index,
             )
             await self._telemetry.ensure_table()
 
@@ -1001,6 +1002,11 @@ class LoomSession:
         # Build MemoryIndex and inject into system prompt
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
         skill_catalog = await self._auto_import_skills()
+        # Issue #279: seed loaded_skills baseline from auto-imported skills
+        if self._telemetry is not None:
+            _ls = self._telemetry.get("loaded_skills")
+            if _ls is not None and skill_catalog:
+                _ls.update([s.name for s in skill_catalog])
         indexer = MemoryIndexer(
             semantic, procedural, episodic, relational,
             skill_catalog=skill_catalog,
@@ -1190,15 +1196,6 @@ class LoomSession:
         # skill check approval uses _confirm_fn so both paths stay in sync.
         self._confirm_fn = self._confirm_tool_cli
 
-        # Issue #279: track loaded skills in telemetry
-        def _on_skill_loaded(skill_name: str) -> None:
-            if self._telemetry is not None:
-                _ls = self._telemetry.get("loaded_skills")
-                if _ls is not None:
-                    current = _ls.snapshot()["skills"]
-                    if skill_name not in current:
-                        _ls.update(current + [skill_name])
-
         self.registry.register(make_load_skill_tool(
             self._memory.procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
@@ -1208,6 +1205,11 @@ class LoomSession:
             relational=self._memory.relational,
             confirm_fn=lambda call: self._confirm_fn(call),
             skill_gate=self._skill_gate,
+            on_loaded=lambda name: (
+                self._telemetry.get("loaded_skills").update(
+                    self._telemetry.get("loaded_skills").snapshot()["skills"] + [name]
+                ) if self._telemetry and self._telemetry.get("loaded_skills") else None
+            ),
         ))
 
         # Issue #276: agent-side tier control. Only register when at least

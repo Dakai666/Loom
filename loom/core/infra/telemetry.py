@@ -371,6 +371,7 @@ class ContextLayoutDimension(DimensionTracker):
         stack: "PromptStack | None" = None,
         messages_ref: list | None = None,
         max_window: int = 200_000,
+        turn_index_fn: "Callable[[], int] | None" = None,
     ) -> None:
         self._stack = stack
         self._messages_ref = messages_ref
@@ -558,11 +559,12 @@ class SessionTurnsDimension(DimensionTracker):
 
     name = "session_turns"
 
-    def __init__(self) -> None:
-        self._turns: int = 0
+    def __init__(self, turn_index_fn: "Callable[[], int] | None" = None) -> None:
+        self._turn_index_fn = turn_index_fn
 
-    def increment(self) -> None:
-        self._turns += 1
+    @property
+    def _turns(self) -> int:
+        return self._turn_index_fn() if self._turn_index_fn else 0
 
     def snapshot(self) -> dict[str, Any]:
         return {"turns": self._turns}
@@ -571,10 +573,11 @@ class SessionTurnsDimension(DimensionTracker):
         return f"turns: {self._turns}"
 
     def render_detail(self) -> str:
+        t = self._turns
         return (
             f"## session_turns\n"
-            f"- current turn: {self._turns}\n"
-            f"- session stage: {'early' if self._turns < 5 else 'mid' if self._turns < 20 else 'deep'}"
+            f"- current turn: {t}\n"
+            f"- session stage: {'early' if t < 5 else 'mid' if t < 20 else 'deep'}"
         )
 
 
@@ -626,10 +629,9 @@ def _build_dimension(name: str, **kwargs: Any) -> DimensionTracker | None:
     if name == "context_budget":
         return ContextBudgetDimension(**kwargs)
     if name == "session_turns":
-        return SessionTurnsDimension()
+        return SessionTurnsDimension(turn_index_fn=kwargs.get("turn_index_fn"))
     if name == "loaded_skills":
         return LoadedSkillsDimension()
-        return MemoryCompressionDimension()
     logger.warning("Unknown telemetry dimension: %s", name)
     return None
 
@@ -655,6 +657,7 @@ class AgentTelemetryTracker:
         stack: "PromptStack | None" = None,
         messages_ref: list | None = None,
         max_window: int = 200_000,
+        turn_index_fn: "Callable[[], int] | None" = None,
     ) -> None:
         self._db = db
         self._session_id = session_id
@@ -671,6 +674,8 @@ class AgentTelemetryTracker:
                     "messages_ref": messages_ref,
                     "max_window": max_window,
                 }
+            if name == "session_turns":
+                kwargs = {"turn_index_fn": turn_index_fn}
             d = _build_dimension(name, **kwargs)
             if d is not None:
                 self._dims[name] = d
