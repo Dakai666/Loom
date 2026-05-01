@@ -120,6 +120,16 @@ class FooterState:
     last_turn_elapsed_s: float | None = None
     last_turn_tool_count: int | None = None
 
+    # Issue #276: tier badge. ``tier`` and ``default_tier`` are both ints
+    # (or both 0 when the tier system isn't configured — render skips).
+    # ``turns_at_tier`` is the consecutive count for hint display.
+    # ``tier_expiry_hint_active`` flips True when the harness emits
+    # TierExpiryHint and stays until next sticky transition.
+    tier: int = 0
+    default_tier: int = 0
+    turns_at_tier: int = 0
+    tier_expiry_hint_active: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Confirm / Pause widget state
@@ -559,6 +569,18 @@ class LoomApp:
             parts.append(("class:footer", f"  {self.footer.model} "))
 
         s = self.footer
+
+        # Issue #276: tier badge — only when sticky on non-default tier.
+        # Bright when over reminder threshold so the hint is unmissable.
+        if s.tier and s.default_tier and s.tier != s.default_tier:
+            badge_style = (
+                "class:footer.budget.warn" if s.tier_expiry_hint_active
+                else "class:footer.grant"
+            )
+            parts.append(("class:footer", "  "))
+            parts.append(
+                (badge_style, f"⇪ Tier {s.tier} · {s.turns_at_tier}t")
+            )
 
         # If compacting: replace the middle area with the spinner
         # message so the user doesn't think the agent has hung

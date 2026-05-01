@@ -61,6 +61,11 @@ class SkillGenome:
     Parsed from SKILL.md frontmatter, resolved to callables at load_skill() time.
     """
     maturity_tag: str | None = None
+    # Issue #276: skill-declared LLM tier requirement. ``None`` = no opinion
+    # (skill can run on any tier); a positive int = "this skill expects to
+    # be evaluated by the model mapped to that tier". When activated, the
+    # harness escalates to ``max(loaded_skill_tiers)``.
+    model_tier: int | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

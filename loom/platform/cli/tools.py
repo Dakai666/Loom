@@ -3011,3 +3011,115 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         impact_scope="agent",
         inline_only=True,  # Re-spilling scratchpad reads is paradoxical; #197
     )
+
+
+# ------------------------------------------------------------------
+# Issue #276 — agent-side LLM tier control
+# ------------------------------------------------------------------
+
+def make_request_model_tier_tool(session: Any) -> ToolDefinition:
+    """Agent-callable: explicitly switch the active LLM tier.
+
+    Issue #276. The harness auto-escalates from skill metadata
+    (``model_tier: 2``), but the agent itself sometimes recognises
+    "this needs deep reasoning" or "we're done with the hard part" before
+    a skill activation makes that obvious. This tool is the explicit
+    self-call mechanism — agency via tool, not heuristics.
+
+    Wires through ``session._set_sticky_tier`` and queues the resulting
+    ``TierChanged`` event onto the session's lifecycle queue so it
+    surfaces alongside other stream events without bespoke plumbing.
+
+    Reason is **mandatory** because each tier switch should leave a
+    decision-trace in the envelope log — useful for graphify analysis
+    of when 絲絲 self-escalates, and what triggered the call.
+    """
+    async def _executor(call: ToolCall) -> ToolResult:
+        try:
+            tier = int(call.args.get("tier"))
+        except (TypeError, ValueError):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'tier' must be a positive integer (1, 2, …)",
+            )
+        reason = str(call.args.get("reason", "")).strip()
+        if not reason:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'reason' is required — describe why this switch is warranted",
+            )
+        cleared_sticky = bool(call.args.get("cleared_sticky", False))
+        # Validate the requested tier exists in the configured table.
+        if tier not in session._tier_models:
+            available = sorted(session._tier_models.keys())
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=(
+                    f"Tier {tier} is not configured. Available tiers: {available}. "
+                    f"Configure via [cognition.tiers] in loom.toml."
+                ),
+            )
+
+        # cleared_sticky=True forces a clear regardless of the requested tier
+        # — semantic flag for "I'm explicitly ending this sticky session".
+        target = None if cleared_sticky else tier
+        ev = session._set_sticky_tier(target, reason=reason, source="agent")
+        if ev is not None:
+            # Surface to the stream loop so platforms see TierChanged in
+            # the same channel as ToolBegin / EnvelopeUpdated.
+            session._lifecycle_events.put_nowait(ev)
+
+        active_tier = session._active_tier()
+        active_model = session._active_model()
+        msg = (
+            f"Active tier: {active_tier} → {active_model}. "
+            + ("(sticky cleared, will follow default_tier)" if target is None
+               else f"(sticky on tier {target})")
+        )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=msg,
+            metadata={
+                "tier": active_tier,
+                "model": active_model,
+                "sticky": session._sticky_tier,
+            },
+        )
+
+    return ToolDefinition(
+        name="request_model_tier",
+        description=(
+            "Switch the active LLM tier (Issue #276). Use when the current "
+            "task's reasoning load doesn't match the active engine — e.g. "
+            "escalate to Tier 2 before tackling a multi-constraint puzzle, "
+            "or step back to Tier 1 when a deep phase has concluded. "
+            "``cleared_sticky=True`` ends the sticky session explicitly. "
+            "Reason is mandatory: it lands in the envelope log."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tier": {
+                    "type": "integer",
+                    "description": "Target tier (1=daily, 2=deep, …); must be configured in loom.toml.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the switch is warranted — one short sentence.",
+                },
+                "cleared_sticky": {
+                    "type": "boolean",
+                    "description": "Set true to explicitly end the sticky session (return to default_tier).",
+                },
+            },
+            "required": ["tier", "reason"],
+        },
+        executor=_executor,
+        tags=["cognition", "tier"],
+        impact_scope="agent",
+    )

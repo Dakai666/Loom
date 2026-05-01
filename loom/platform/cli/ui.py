@@ -60,6 +60,8 @@ from loom.core.events import (  # noqa: E402, F401
     ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
+    TierChanged,
+    TierExpiryHint,
     ToolBegin,
     ToolEnd,
     TurnDone,

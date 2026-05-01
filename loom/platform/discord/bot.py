@@ -77,6 +77,7 @@ from loom.core.events import (
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
     CompressDone, ReasoningContinuation, TextChunk, ThinkCollapsed,
+    TierChanged, TierExpiryHint,
     ToolBegin, ToolEnd, TurnDone, TurnDropped, TurnPaused,
 )
 from loom.platform.discord.tools import (
@@ -1050,6 +1051,25 @@ class LoomDiscordBot:
                             message.channel,
                             f"-# 🤔 {event.display_text}"
                             f"（延伸 {event.attempt}/{event.max_attempts}）",
+                        )
+
+                    elif isinstance(event, TierChanged):
+                        # Issue #276: tier moved — surface so users see why
+                        # latency / quality changed.
+                        arrow = "⇪" if event.to_tier > event.from_tier else "⇩"
+                        await _safe_send(
+                            message.channel,
+                            f"-# {arrow} Tier {event.from_tier} → "
+                            f"Tier {event.to_tier} · `{event.to_model}` "
+                            f"（{event.source}: {event.reason}）",
+                        )
+
+                    elif isinstance(event, TierExpiryHint):
+                        await _safe_send(
+                            message.channel,
+                            f"-# ⏳ Tier {event.tier} 已跑 "
+                            f"{event.turns_used} turns（閾值 {event.threshold}）"
+                            f"，可考慮降級。",
                         )
 
                     elif isinstance(event, TurnDropped):

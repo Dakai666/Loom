@@ -63,6 +63,26 @@ max_tokens    = 8096
 # "claude-opus-4-7"    = 16384
 
 # ─────────────────────────────────────────────
+# Issue #276 — LLM Tier system
+# ─────────────────────────────────────────────
+# Skills can declare ``model_tier: 2`` in their SKILL.md frontmatter,
+# at which point the harness escalates to the model mapped to that tier
+# below. Default is daily (Tier 1). Tier 2 stays sticky until the agent
+# self-downgrades or the user issues ``/tier 1``.
+#
+# Why: a single agent persona (絲絲 + skills + workflow) routes to
+# different reasoning engines based on task difficulty. Daily chat
+# stays cheap; deep reasoning gets the heavy artillery.
+[cognition.tiers]
+1 = "minimax-m2.7"           # daily — light reasoning, fast & cheap
+2 = "deepseek-v4-pro"        # deep — multi-constraint puzzles, long CoT
+default_tier = 1
+# After this many consecutive turns at non-default tier, harness emits a
+# soft TierExpiryHint reminding the agent / user that downgrade may be in
+# order. Reminder only — never force-switches.
+reminder_after_turns = 10
+
+# ─────────────────────────────────────────────
 # Local providers
 # ─────────────────────────────────────────────
 # Enable Ollama or LM Studio without any API key.

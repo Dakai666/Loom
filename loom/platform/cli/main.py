@@ -64,6 +64,8 @@ from loom.platform.cli.ui import (
     ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
+    TierChanged,
+    TierExpiryHint,
     ToolBegin,
     ToolEnd,
     TurnDone,
@@ -463,6 +465,11 @@ async def _chat(
     app = build_loom_app(on_submit=_on_submit)
     app.footer.model = model
     app.footer.persona = session.current_personality
+    # Issue #276: seed tier badge state from session config so the footer
+    # has the right context immediately (saves the "old tier showing for
+    # one turn before refresh" UX issue from #275).
+    app.footer.default_tier = session._default_tier if session._tier_models else 0
+    app.footer.tier = session._active_tier() if session._tier_models else 0
 
     # Wire confirm + pause routing into the session so _confirm_tool_cli
     # and the HITL pause path can render through the app's mode flag
@@ -563,7 +570,15 @@ async def _chat(
             # footer.model immediately on switch, but a future code path
             # could change session.model without going through them. Keep
             # the badge aligned with reality at every turn edge.
-            app.footer.model = session.model
+            # Issue #276: when tier system is active, show the tier-resolved
+            # model rather than the raw session.model (they may diverge
+            # mid-turn after a sticky escalation).
+            if session._tier_models:
+                app.footer.model = session._active_model()
+                app.footer.tier = session._active_tier()
+                app.footer.turns_at_tier = session._turns_at_current_tier
+            else:
+                app.footer.model = session.model
             try:
                 snapshot = session._build_grants_snapshot()
                 app.footer.grants_active = snapshot.active_count
@@ -774,6 +789,56 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                     "[loom.muted]Either the prefix is not recognised, or the provider is not registered "
                     "(check API key in .env or enable in loom.toml).[/loom.muted]"
                 )
+
+    elif command == "/tier":
+        # Issue #276: tier system manual control.
+        if not session._tier_models:
+            console.print(
+                "[loom.muted]Tier system not configured. Add a [cognition.tiers] block "
+                "to loom.toml to enable.[/loom.muted]"
+            )
+        elif not arg:
+            # Status read-out
+            active = session._active_tier()
+            sticky = session._sticky_tier
+            model = session._active_model()
+            sticky_str = f"sticky on Tier {sticky}" if sticky is not None else "follows default"
+            console.print(
+                f"[loom.muted]Active: [bold]Tier {active}[/bold] · {model}  "
+                f"({sticky_str}, {session._turns_at_current_tier} turns)[/loom.muted]"
+            )
+            for t in sorted(session._tier_models):
+                marker = " ← active" if t == active else ""
+                console.print(
+                    f"[loom.muted]  Tier {t}: {session._tier_models[t]}{marker}[/loom.muted]"
+                )
+        else:
+            try:
+                target_tier = int(arg.split()[0])
+            except (TypeError, ValueError):
+                console.print(
+                    f"[loom.error]Invalid tier '{arg}'.[/loom.error] "
+                    "[loom.muted]Use ``/tier`` for status or ``/tier N`` to switch.[/loom.muted]"
+                )
+            else:
+                if target_tier not in session._tier_models:
+                    console.print(
+                        f"[loom.error]Tier {target_tier} not configured.[/loom.error]"
+                    )
+                else:
+                    new_sticky = None if target_tier == session._default_tier else target_tier
+                    ev = session._set_sticky_tier(
+                        new_sticky, reason="user /tier", source="user",
+                    )
+                    if ev is not None:
+                        session._lifecycle_events.put_nowait(ev)
+                    console.print(
+                        f"[loom.muted]Tier → [bold]{session._active_tier()}[/bold] · "
+                        f"{session._active_model()}[/loom.muted]"
+                    )
+                    if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                        loom_app.footer.model = session._active_model()
+                        loom_app.invalidate()
 
     elif command == "/personality":
         if not arg:
@@ -1061,6 +1126,8 @@ class LoomChatApp:
             EnvelopeCompleted,
             GrantsSnapshot,
             ReasoningContinuation,
+            TierChanged,
+            TierExpiryHint,
         )
 
         class _App(LoomApp):
@@ -1321,6 +1388,25 @@ class LoomChatApp:
                                 f"[dim]🤔 {ev.display_text} "
                                 f"(延伸 {ev.attempt}/{ev.max_attempts})[/dim]"
                             )
+                        elif isinstance(ev, TierChanged):
+                            # Issue #276: tier moved — refresh footer + log.
+                            arrow = "⇪" if ev.to_tier > ev.from_tier else "⇩"
+                            console.print(
+                                f"[dim]{arrow} Tier {ev.from_tier} → {ev.to_tier} · "
+                                f"{ev.to_model}  ({ev.source}: {ev.reason})[/dim]"
+                            )
+                            self.footer.model = ev.to_model
+                            self.footer.tier = ev.to_tier
+                            self.footer.tier_expiry_hint_active = False
+                            self.invalidate()
+                        elif isinstance(ev, TierExpiryHint):
+                            console.print(
+                                f"[yellow]⏳ Tier {ev.tier} 已跑 "
+                                f"{ev.turns_used} turns；可考慮 /tier 1 降級。[/yellow]"
+                            )
+                            self.footer.tier_expiry_hint_active = True
+                            self.footer.turns_at_tier = ev.turns_used
+                            self.invalidate()
                         elif isinstance(ev, GrantsSnapshot):
                             tui_grants = [
                                 TuiGrantInfo(
@@ -1384,6 +1470,48 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                     "not registered (check .env key or loom.toml [providers.*]).",
                     severity="error",
                 )
+
+    elif command == "/tier":
+        # Issue #276: tier system manual control (TUI variant).
+        if not session._tier_models:
+            app.notify(
+                "Tier system not configured. Add [cognition.tiers] to loom.toml.",
+                severity="warning",
+            )
+        elif not arg:
+            active = session._active_tier()
+            model = session._active_model()
+            sticky = session._sticky_tier
+            sticky_str = f"sticky Tier {sticky}" if sticky is not None else "default"
+            tiers = "\n".join(
+                f"  Tier {t}: {session._tier_models[t]}"
+                + (" ← active" if t == active else "")
+                for t in sorted(session._tier_models)
+            )
+            app.notify(
+                f"Active: Tier {active} · {model}  ({sticky_str}, "
+                f"{session._turns_at_current_tier} turns)\n{tiers}"
+            )
+        else:
+            try:
+                target_tier = int(arg.split()[0])
+            except (TypeError, ValueError):
+                app.notify(f"Invalid tier '{arg}'", severity="error")
+            else:
+                if target_tier not in session._tier_models:
+                    app.notify(f"Tier {target_tier} not configured", severity="error")
+                else:
+                    new_sticky = None if target_tier == session._default_tier else target_tier
+                    ev = session._set_sticky_tier(
+                        new_sticky, reason="user /tier", source="user",
+                    )
+                    if ev is not None:
+                        session._lifecycle_events.put_nowait(ev)
+                    app.notify(
+                        f"Tier → {session._active_tier()} · {session._active_model()}"
+                    )
+                    app.footer.model = session._active_model()
+                    app.invalidate()
 
     elif command == "/personality":
         if not arg:
@@ -1897,6 +2025,36 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     f"[dim]🤔 {event.display_text} "
                     f"(延伸 {event.attempt}/{event.max_attempts})[/dim]"
                 )
+
+            elif isinstance(event, TierChanged):
+                # Issue #276: tier moved — refresh footer immediately, log
+                # to console. The TUI / Discord paths handle their own
+                # display below; this is the plain CLI mirror.
+                _flush_streaming(force=True)
+                arrow = "⇪" if event.to_tier > event.from_tier else "⇩"
+                console.print(
+                    f"[dim]{arrow} Tier {event.from_tier} → {event.to_tier} · "
+                    f"{event.to_model}  ({event.source}: {event.reason})[/dim]"
+                )
+                # Footer needs to track the new model NOW, not at next
+                # turn boundary (same lesson as #275).
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.footer.model = event.to_model
+                    loom_app.footer.tier = event.to_tier
+                    loom_app.footer.tier_expiry_hint_active = False
+                    loom_app.invalidate()
+
+            elif isinstance(event, TierExpiryHint):
+                _flush_streaming(force=True)
+                console.print(
+                    f"[loom.warning]⏳ 已在 Tier {event.tier} 跑了 "
+                    f"{event.turns_used} turns（閾值 {event.threshold}）。"
+                    f"如果深度推理階段已結束，可考慮 /tier {1} 或讓絲絲 "
+                    f"自行 request_model_tier(1).[/loom.warning]"
+                )
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.footer.tier_expiry_hint_active = True
+                    loom_app.invalidate()
 
             elif isinstance(event, ToolBegin):
                 _bump_output_seq()

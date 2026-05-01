@@ -26,6 +26,8 @@ add ``Producers:`` / ``Consumers:`` entries to the event's docstring.
 | TurnPaused          |  ✓  |  ✓  |    ✓    |   no     |
 | TurnDropped         |  ✓  |  —  |    ✓    |   no     |
 | ReasoningContinuation |  ✓  |  ✓  |    ✓    |   no     |
+| TierChanged         |  ✓  |  ✓  |    ✓    |   no     |
+| TierExpiryHint      |  ✓  |  ✓  |    ✓    |   no     |
 | CompressDone        |  —  |  —  |    ✓    |   no     |
 | ActionStateChange   |  —  |  ✓  |  skip   |   no     |
 | ActionRolledBack    |  —  |  ✓  |    ✓    |   no     |
@@ -246,6 +248,73 @@ class ReasoningContinuation:
     attempt: int
     max_attempts: int
     display_text: str = "有點複雜，我再繼續想想…"
+
+
+@dataclass
+class TierChanged:
+    """The active LLM tier moved — either up (escalation) or down (release).
+
+    Issue #276. Emitted whenever the resolved tier changes, regardless of
+    trigger source (skill activation, agent self-call, user slash command).
+
+    ``from_tier`` / ``to_tier``  — the two tier ints; equal values are not
+                                   emitted (no-op transitions are skipped).
+    ``from_model`` / ``to_model`` — concrete model names mapped from the
+                                   tiers via ``[cognition.tiers]``.
+    ``source``                   — ``"skill"`` (auto-escalate from skill
+                                   metadata), ``"agent"`` (request_model_tier
+                                   tool), ``"user"`` (``/tier`` command), or
+                                   ``"clear"`` (sticky cleared).
+    ``reason``                   — free-form caller-supplied note; lands in
+                                   envelope log for graphify analysis.
+
+    Producers:
+        LoomSession.stream_turn() — emitted before the LLM call when the
+        tier resolver decides to move.
+
+    Consumers:
+        CLI     ✓  prints a small dim line ("⇪ Tier 2 · deepseek-v4-pro")
+        TUI     ✓  refreshes footer model + tier badge
+        Discord ✓  -# small persistent message
+    """
+
+    from_tier: int
+    to_tier: int
+    from_model: str
+    to_model: str
+    source: str
+    reason: str = ""
+
+
+@dataclass
+class TierExpiryHint:
+    """Soft reminder that the active sticky tier has been held for a while.
+
+    Issue #276. Emitted at most once per sticky session, when
+    ``turns_at_current_tier >= reminder_after_turns``. Never auto-reverts —
+    purely informational so the agent can self-evaluate whether to
+    downgrade via ``request_model_tier`` and the user sees the same
+    information in the UI.
+
+    ``tier``        — the currently-active sticky tier
+    ``model``       — the resolved model name
+    ``turns_used``  — how many turns we've spent at this tier
+    ``threshold``   — the configured ``reminder_after_turns`` value
+
+    Producers:
+        LoomSession.stream_turn() — at TurnDone time, after counter
+        increment.
+
+    Consumers:
+        CLI     ✓  bright-coloured footer indicator + dim console line
+        TUI     ✓  same, via dispatch_stream_event
+        Discord ✓  -# small persistent message
+    """
+
+    tier: int
+    model: str
+    turns_used: int
+    threshold: int
 
 
 @dataclass
@@ -526,6 +595,8 @@ __all__ = [
     "GrantsSnapshot",
     "ReasoningContinuation",
     "TextChunk",
+    "TierChanged",
+    "TierExpiryHint",
     "ThinkCollapsed",
     "ToolBegin",
     "ToolEnd",
