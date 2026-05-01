@@ -59,7 +59,13 @@ class TestFrontmatterModelTier:
                 f"---\nname: x\ndescription: y\nmodel_tier: {bad!r}\n---\n"
             )
             _, _, _, _, model_tier = _parse_skill_frontmatter(raw)
-            assert model_tier is None or model_tier == int(bad) and bad > 0, bad
+            # Parens make precedence explicit (絲絲 #277 review N1):
+            #   None  → invalid value rejected
+            #   int   → only allowed when input was a positive int
+            assert (
+                model_tier is None
+                or (model_tier == int(bad) and bad > 0)
+            ), bad
 
     def test_string_tier_coerced_to_int(self):
         raw = "---\nname: x\ndescription: y\nmodel_tier: '3'\n---\n"
