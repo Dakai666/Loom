@@ -1139,8 +1139,8 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
         name="agent_health",
         description=(
             "Inspect your own observability telemetry: tool call success/latency, "
-            "context token layout, and memory-compression yield. Call with "
-            "`dimension=<tool_call|context_layout|memory_compression>` to drill "
+            "context token layout, memory-compression yield, runtime identity, context budget, session turns, and loaded skills. Call with "
+            "`dimension=<tool_call|context_layout|memory_compression|runtime_identity|context_budget|session_turns|loaded_skills>` to drill "
             "down, or `minimal=true` for a one-line composite summary. Use when "
             "you want to self-check before a risky action, or when investigating "
             "suspected behavioral drift."
@@ -1151,7 +1151,7 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
             "properties": {
                 "dimension": {
                     "type": "string",
-                    "enum": ["tool_call", "context_layout", "memory_compression"],
+                    "enum": ["tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills"],
                     "description": "Specific dimension to inspect. Omit for full report.",
                 },
                 "minimal": {

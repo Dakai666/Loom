@@ -449,11 +449,166 @@ class ContextLayoutDimension(DimensionTracker):
             lines.append(f"  - {name}: ~{toks:,} tokens ({share:.1%})")
         return "\n".join(lines)
 
+# ── Dimension: runtime_identity ───────────────────────────────────────────
+
+class RuntimeIdentityDimension(DimensionTracker):
+    """Exposes current model, tier, and training cutoff to the agent."""
+
+    name = "runtime_identity"
+
+    def __init__(self) -> None:
+        self._model: str = "unknown"
+        self._tier: int = 1
+        self._tier_models: dict[int, str] = {}
+        self._training_cutoff: str = "unknown"
+
+    def update(self, *, model: str | None = None, tier: int | None = None,
+               tier_models: dict[int, str] | None = None,
+               training_cutoff: str | None = None) -> None:
+        if model is not None:
+            self._model = model
+        if tier is not None:
+            self._tier = tier
+        if tier_models is not None:
+            self._tier_models = tier_models
+        if training_cutoff is not None:
+            self._training_cutoff = training_cutoff
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "model": self._model,
+            "tier": self._tier,
+            "tier_models": {str(k): v for k, v in self._tier_models.items()},
+            "training_cutoff": self._training_cutoff,
+        }
+
+    def render_summary(self) -> str:
+        return f"model: {self._model} (T{self._tier})"
+
+    def render_detail(self) -> str:
+        tms = ", ".join(f"T{t}={m}" for t, m in sorted(self._tier_models.items()))
+        return (
+            f"## runtime_identity\n"
+            f"- model: {self._model}\n"
+            f"- tier: {self._tier}\n"
+            f"- tier models: {tms or '(not configured)'}\n"
+            f"- training cutoff: {self._training_cutoff}"
+        )
+
+
+# ── Dimension: context_budget ─────────────────────────────────────────────
+
+class ContextBudgetDimension(DimensionTracker):
+    """Token budget gauge —油表."""
+
+    name = "context_budget"
+
+    def __init__(self, budget: "ContextBudget | None" = None) -> None:
+        self._budget = budget
+
+    def set_budget(self, budget: "ContextBudget") -> None:
+        self._budget = budget
+
+    def snapshot(self) -> dict[str, Any]:
+        if self._budget is None:
+            return {"used": 0, "total": 0, "remaining": 0, "usage_fraction": 0.0}
+        return {
+            "used": self._budget.used_tokens,
+            "total": self._budget.total_tokens,
+            "remaining": self._budget.remaining,
+            "usage_fraction": self._budget.usage_fraction,
+        }
+
+    def render_summary(self) -> str:
+        if self._budget is None:
+            return "budget: N/A"
+        return (
+            f"budget: {self._budget.used_tokens:,}/{self._budget.total_tokens:,} "
+            f"({self._budget.usage_fraction:.0%})"
+        )
+
+    def render_detail(self) -> str:
+        snap = self.snapshot()
+        return (
+            f"## context_budget\n"
+            f"- used: {snap['used']:,} tokens\n"
+            f"- total: {snap['total']:,} tokens\n"
+            f"- remaining: {snap['remaining']:,} tokens\n"
+            f"- usage: {snap['usage_fraction']:.1%}"
+        )
+
+    def has_anomaly(self) -> bool:
+        return self._budget is not None and self._budget.should_compress()
+
+    def describe_anomaly(self) -> str | None:
+        if not self.has_anomaly():
+            return None
+        if self._budget is None:
+            return None
+        return (
+            f"Context at {self._budget.usage_fraction:.0%} — "
+            f"consider compression soon."
+        )
+
+
+# ── Dimension: session_turns ──────────────────────────────────────────────
+
+class SessionTurnsDimension(DimensionTracker):
+    """Session turn counter —里程表."""
+
+    name = "session_turns"
+
+    def __init__(self) -> None:
+        self._turns: int = 0
+
+    def increment(self) -> None:
+        self._turns += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"turns": self._turns}
+
+    def render_summary(self) -> str:
+        return f"turns: {self._turns}"
+
+    def render_detail(self) -> str:
+        return (
+            f"## session_turns\n"
+            f"- current turn: {self._turns}\n"
+            f"- session stage: {'early' if self._turns < 5 else 'mid' if self._turns < 20 else 'deep'}"
+        )
+
+
+# ── Dimension: loaded_skills ──────────────────────────────────────────────
+
+class LoadedSkillsDimension(DimensionTracker):
+    """Tracks currently loaded skills."""
+
+    name = "loaded_skills"
+
+    def __init__(self) -> None:
+        self._skills: list[str] = []
+
+    def update(self, skills: list[str]) -> None:
+        self._skills = sorted(skills)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"skills": list(self._skills), "count": len(self._skills)}
+
+    def render_summary(self) -> str:
+        return f"skills: {len(self._skills)} loaded"
+
+    def render_detail(self) -> str:
+        if not self._skills:
+            return "## loaded_skills\n- (none loaded)"
+        lines = ["## loaded_skills"]
+        for s in self._skills:
+            lines.append(f"  - {s}")
+        return "\n".join(lines)
 
 # ── Aggregator ────────────────────────────────────────────────────────────
 
 #: Default v1 dimension set. Overridable via ``loom.toml [telemetry].dimensions``.
-DEFAULT_DIMENSIONS = ("tool_call", "context_layout", "memory_compression")
+DEFAULT_DIMENSIONS = ("tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills")
 
 
 def _build_dimension(name: str, **kwargs: Any) -> DimensionTracker | None:
@@ -465,6 +620,15 @@ def _build_dimension(name: str, **kwargs: Any) -> DimensionTracker | None:
     if name == "context_layout":
         return ContextLayoutDimension(**kwargs)
     if name == "memory_compression":
+        return MemoryCompressionDimension()
+    if name == "runtime_identity":
+        return RuntimeIdentityDimension()
+    if name == "context_budget":
+        return ContextBudgetDimension(**kwargs)
+    if name == "session_turns":
+        return SessionTurnsDimension()
+    if name == "loaded_skills":
+        return LoadedSkillsDimension()
         return MemoryCompressionDimension()
     logger.warning("Unknown telemetry dimension: %s", name)
     return None

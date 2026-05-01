@@ -987,6 +987,17 @@ class LoomSession:
             )
             await self._telemetry.ensure_table()
 
+            # Issue #279: wire new dimensions with their data sources
+            _ri = self._telemetry.get("runtime_identity")
+            if _ri is not None:
+                _model = self._active_model()
+                _tier = self._active_tier()
+                _ri.update(model=_model, tier=_tier,
+                           tier_models=self._tier_models)
+            _cb = self._telemetry.get("context_budget")
+            if _cb is not None:
+                _cb.set_budget(self.budget)
+
         # Build MemoryIndex and inject into system prompt
         # Issue #56: auto-import skills from workspace/skills/ and ~/.loom/skills/
         skill_catalog = await self._auto_import_skills()
@@ -1178,6 +1189,15 @@ class LoomSession:
         # BlastRadiusMiddleware._confirm is also patched by TUI/Discord;
         # skill check approval uses _confirm_fn so both paths stay in sync.
         self._confirm_fn = self._confirm_tool_cli
+
+        # Issue #279: track loaded skills in telemetry
+        def _on_skill_loaded(skill_name: str) -> None:
+            if self._telemetry is not None:
+                _ls = self._telemetry.get("loaded_skills")
+                if _ls is not None:
+                    current = _ls.snapshot()["skills"]
+                    if skill_name not in current:
+                        _ls.update(current + [skill_name])
 
         self.registry.register(make_load_skill_tool(
             self._memory.procedural, skills_dirs,
@@ -3004,6 +3024,12 @@ class LoomSession:
         active = self._active_tier()
         if active == old_tier:
             return None
+        # Issue #279: update runtime_identity on tier switch
+        if self._telemetry is not None:
+            _ri = self._telemetry.get("runtime_identity")
+            if _ri is not None:
+                _ri.update(model=self._tier_models.get(active, self._model),
+                           tier=active)
         return TierChanged(
             from_tier=old_tier,
             to_tier=active,
