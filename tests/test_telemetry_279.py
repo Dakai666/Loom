@@ -63,6 +63,7 @@ class TestContextBudgetDimension:
         assert msg is not None
         assert "auto-compact" in msg
         assert "next turn" in msg
+        assert "current tool batch" in msg
 
     def test_no_anomaly_when_under_threshold(self):
         budget = ContextBudget(total_tokens=100000)

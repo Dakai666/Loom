@@ -541,7 +541,8 @@ class ContextBudgetDimension(DimensionTracker):
         return (
             f"Context at {self._budget.usage_fraction:.0%} — "
             f"harness will auto-compact at start of next turn. "
-            f"Avoid starting long tool chains this turn."
+            f"Finish the current tool batch, then avoid starting "
+            f"new long chains until after compaction."
         )
 
 
