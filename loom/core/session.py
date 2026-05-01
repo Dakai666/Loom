@@ -1006,7 +1006,8 @@ class LoomSession:
         if self._telemetry is not None:
             _ls = self._telemetry.get("loaded_skills")
             if _ls is not None and skill_catalog:
-                _ls.update([s.name for s in skill_catalog])
+                for s in skill_catalog:
+                    _ls.add(s.name)
         indexer = MemoryIndexer(
             semantic, procedural, episodic, relational,
             skill_catalog=skill_catalog,
@@ -1196,6 +1197,13 @@ class LoomSession:
         # skill check approval uses _confirm_fn so both paths stay in sync.
         self._confirm_fn = self._confirm_tool_cli
 
+        # Issue #279: track loaded skills in telemetry
+        def _on_skill_loaded(skill_name: str) -> None:
+            if self._telemetry is not None:
+                _ls = self._telemetry.get("loaded_skills")
+                if _ls is not None:
+                    _ls.add(skill_name)
+
         self.registry.register(make_load_skill_tool(
             self._memory.procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
@@ -1205,11 +1213,7 @@ class LoomSession:
             relational=self._memory.relational,
             confirm_fn=lambda call: self._confirm_fn(call),
             skill_gate=self._skill_gate,
-            on_loaded=lambda name: (
-                self._telemetry.get("loaded_skills").update(
-                    self._telemetry.get("loaded_skills").snapshot()["skills"] + [name]
-                ) if self._telemetry and self._telemetry.get("loaded_skills") else None
-            ),
+
         ))
 
         # Issue #276: agent-side tier control. Only register when at least

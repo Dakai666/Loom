@@ -594,6 +594,10 @@ class LoadedSkillsDimension(DimensionTracker):
     def update(self, skills: list[str]) -> None:
         self._skills = sorted(skills)
 
+    def add(self, name: str) -> None:
+        if name not in self._skills:
+            self._skills = sorted(self._skills + [name])
+
     def snapshot(self) -> dict[str, Any]:
         return {"skills": list(self._skills), "count": len(self._skills)}
 
