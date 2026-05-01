@@ -3167,7 +3167,7 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
             },
             "required": ["tier", "reason"],
         },
-        executor=None,
+        executor=_executor,
         tags=["cognition", "tier"],
         impact_scope="agent",
     )
