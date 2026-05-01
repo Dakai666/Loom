@@ -76,8 +76,8 @@ from loom.core.events import (
 )
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
-    CompressDone, TextChunk, ThinkCollapsed, ToolBegin, ToolEnd,
-    TurnDone, TurnDropped, TurnPaused,
+    CompressDone, ReasoningContinuation, TextChunk, ThinkCollapsed,
+    ToolBegin, ToolEnd, TurnDone, TurnDropped, TurnPaused,
 )
 from loom.platform.discord.tools import (
     make_add_discord_reaction_tool,
@@ -1038,8 +1038,18 @@ class LoomDiscordBot:
                             tool_buf += "\n*(pause timed out — cancelled)*"
 
                     elif isinstance(event, CompressDone):
-                        await _safe_send(message.channel, 
+                        await _safe_send(message.channel,
                             f"-# 🧠 記憶壓縮：{event.fact_count} 條事實已存入語意記憶"
+                        )
+
+                    elif isinstance(event, ReasoningContinuation):
+                        # Issue #271: max_tokens recovery hint — small
+                        # persistent message so the user knows the agent is
+                        # extending reasoning rather than stalling.
+                        await _safe_send(
+                            message.channel,
+                            f"-# 🤔 {event.display_text}"
+                            f"（延伸 {event.attempt}/{event.max_attempts}）",
                         )
 
                     elif isinstance(event, TurnDropped):

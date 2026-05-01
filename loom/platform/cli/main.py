@@ -61,6 +61,7 @@ from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
     ToolBegin,
@@ -1047,6 +1048,7 @@ class LoomChatApp:
             EnvelopeUpdated,
             EnvelopeCompleted,
             GrantsSnapshot,
+            ReasoningContinuation,
         )
 
         class _App(LoomApp):
@@ -1298,6 +1300,14 @@ class LoomChatApp:
                         elif isinstance(ev, EnvelopeCompleted):
                             await self.dispatch_stream_event(
                                 TuiEnvelopeCompleted(envelope=ev.envelope)
+                            )
+                        elif isinstance(ev, ReasoningContinuation):
+                            # Issue #271: surface as a console line via
+                            # patch_stdout so the user sees the agent
+                            # extending reasoning rather than stalling.
+                            console.print(
+                                f"[dim]🤔 {ev.display_text} "
+                                f"(延伸 {ev.attempt}/{ev.max_attempts})[/dim]"
                             )
                         elif isinstance(ev, GrantsSnapshot):
                             tui_grants = [
@@ -1862,6 +1872,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # via ``/think``. Other platforms (Discord, TUI) render
                 # ThinkCollapsed in their own way and aren't affected
                 pass
+
+            elif isinstance(event, ReasoningContinuation):
+                # Issue #271: drain any in-flight streamed text before
+                # the indicator so it lands on its own line.
+                _flush_streaming(force=True)
+                console.print(
+                    f"[dim]🤔 {event.display_text} "
+                    f"(延伸 {event.attempt}/{event.max_attempts})[/dim]"
+                )
 
             elif isinstance(event, ToolBegin):
                 _bump_output_seq()
