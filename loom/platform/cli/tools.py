@@ -1189,7 +1189,7 @@ def make_probe_file_tool() -> ToolDefinition:
             call_id=call.id,
             tool_name="probe_file",
             success=True,
-            text=f"File marked as probed: {path}",
+            output=f"File marked as probed: {path}",
         )
 
     return ToolDefinition(

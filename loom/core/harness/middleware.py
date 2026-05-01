@@ -410,7 +410,7 @@ class LegitimacyGuardMiddleware(Middleware):
         command = (call.args.get('command', '') or '').strip()
         if not command:
             return False
-        first_word = command.split()[0] if command else ''
+        first_word = command.split()[0]
         if first_word not in LegitimacyGuardMiddleware._READONLY_COMMANDS:
             return False
         if first_word == 'sed' and '-n' not in command:

@@ -375,3 +375,17 @@ async def test_readonly_bash_permits_write(handler):
     )
     res = await guard.process(call_write, handler)
     assert res.success
+
+
+@pytest.mark.asyncio
+async def test_probe_file_tool_executes_successfully():
+    """probe_file executor must build a valid ToolResult — would catch the
+    `text=` vs `output=` typo that initially shipped in #287.
+    """
+    from loom.platform.cli.tools import make_probe_file_tool
+
+    td = make_probe_file_tool()
+    call = make_call("probe_file", TrustLevel.SAFE, {"path": "/tmp/foo.py"})
+    res = await td.executor(call)
+    assert res.success
+    assert "/tmp/foo.py" in res.output
