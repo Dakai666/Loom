@@ -453,7 +453,7 @@ class ContextLayoutDimension(DimensionTracker):
 # ── Dimension: runtime_identity ───────────────────────────────────────────
 
 class RuntimeIdentityDimension(DimensionTracker):
-    """Exposes current model, tier, and training cutoff to the agent."""
+    """Exposes current model and tier to the agent."""
 
     name = "runtime_identity"
 
@@ -461,26 +461,21 @@ class RuntimeIdentityDimension(DimensionTracker):
         self._model: str = "unknown"
         self._tier: int = 1
         self._tier_models: dict[int, str] = {}
-        self._training_cutoff: str = "unknown"
 
     def update(self, *, model: str | None = None, tier: int | None = None,
-               tier_models: dict[int, str] | None = None,
-               training_cutoff: str | None = None) -> None:
+               tier_models: dict[int, str] | None = None) -> None:
         if model is not None:
             self._model = model
         if tier is not None:
             self._tier = tier
         if tier_models is not None:
             self._tier_models = tier_models
-        if training_cutoff is not None:
-            self._training_cutoff = training_cutoff
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "model": self._model,
             "tier": self._tier,
             "tier_models": {str(k): v for k, v in self._tier_models.items()},
-            "training_cutoff": self._training_cutoff,
         }
 
     def render_summary(self) -> str:
@@ -492,8 +487,7 @@ class RuntimeIdentityDimension(DimensionTracker):
             f"## runtime_identity\n"
             f"- model: {self._model}\n"
             f"- tier: {self._tier}\n"
-            f"- tier models: {tms or '(not configured)'}\n"
-            f"- training cutoff: {self._training_cutoff}"
+            f"- tier models: {tms or '(not configured)'}"
         )
 
 
@@ -542,13 +536,13 @@ class ContextBudgetDimension(DimensionTracker):
         return self._budget is not None and self._budget.should_compress()
 
     def describe_anomaly(self) -> str | None:
-        if not self.has_anomaly():
-            return None
-        if self._budget is None:
+        if not self.has_anomaly() or self._budget is None:
             return None
         return (
             f"Context at {self._budget.usage_fraction:.0%} — "
-            f"consider compression soon."
+            f"harness will auto-compact at start of next turn. "
+            f"Finish the current tool batch, then avoid starting "
+            f"new long chains until after compaction."
         )
 
 
@@ -573,12 +567,7 @@ class SessionTurnsDimension(DimensionTracker):
         return f"turns: {self._turns}"
 
     def render_detail(self) -> str:
-        t = self._turns
-        return (
-            f"## session_turns\n"
-            f"- current turn: {t}\n"
-            f"- session stage: {'early' if t < 5 else 'mid' if t < 20 else 'deep'}"
-        )
+        return f"## session_turns\n- current turn: {self._turns}"
 
 
 # ── Dimension: loaded_skills ──────────────────────────────────────────────
