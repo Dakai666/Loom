@@ -1171,6 +1171,51 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
     )
 
 
+
+def make_probe_file_tool() -> ToolDefinition:
+    """
+    Create a SAFE ``probe_file`` tool (Issue #283).
+
+    Lets the agent explicitly mark a file as probed when using
+    non-``read_file`` means (grep, head, sed -n, etc.) to inspect
+    its contents.  Calling this tool sets ``has_probed`` in
+    LegitimacyGuardMiddleware, preventing spurious trajectory anomaly
+    warnings on subsequent ``run_bash`` writes to the same file.
+    """
+
+    async def _probe_file(call: ToolCall) -> ToolResult:
+        path = call.args.get("path", "")
+        return ToolResult(
+            call_id=call.id,
+            tool_name="probe_file",
+            success=True,
+            output=f"File marked as probed: {path}",
+        )
+
+    return ToolDefinition(
+        name="probe_file",
+        description=(
+            "Mark a file as probed. Use after inspecting a file with grep, head, "
+            "or other non-read_file means.  This prevents LegitimacyGuard from "
+            "flagging subsequent writes as trajectory anomalies."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file that was probed.",
+                },
+            },
+            "required": ["path"],
+        },
+        executor=_probe_file,
+        trust_level=TrustLevel.SAFE,
+        tags=["io", "guard"],
+        impact_scope="file",
+    )
+
+
 def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
     Create a GUARDED ``relate`` tool bound to the given MemoryFacade.

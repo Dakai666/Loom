@@ -19,7 +19,7 @@ _log = logging.getLogger(__name__)
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, ClassVar
 
 from .permissions import ToolCapability, TrustLevel
 
@@ -380,6 +380,11 @@ class LegitimacyGuardMiddleware(Middleware):
     intentionally leaves ``_session_trusted`` intact.
     """
 
+    # Read-only shell commands that count as file probes (Issue #283).
+    _READONLY_COMMANDS: ClassVar[frozenset[str]] = frozenset({
+        "grep", "head", "cat", "awk", "sed", "tail", "wc",
+    })
+
     def __init__(self) -> None:
         self.has_probed: bool = False
         # Only file-writing tools belong here.  exec tools (run_bash) and MCP
@@ -401,6 +406,18 @@ class LegitimacyGuardMiddleware(Middleware):
         ) = None
 
     @staticmethod
+    def _is_readonly_bash(call: ToolCall) -> bool:
+        command = (call.args.get('command', '') or '').strip()
+        if not command:
+            return False
+        first_word = command.split()[0]
+        if first_word not in LegitimacyGuardMiddleware._READONLY_COMMANDS:
+            return False
+        if first_word == 'sed' and '-n' not in command:
+            return False
+        return True
+
+    @staticmethod
     def _is_probe(call: ToolCall) -> bool:
         """Issue #167: capability flag OR SAFE trust counts as a probe."""
         if call.capabilities & ToolCapability.READ_PROBE:
@@ -412,6 +429,10 @@ class LegitimacyGuardMiddleware(Middleware):
         self.has_probed = False
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
+        # Issue #283: read-only bash commands count as probes
+        if call.tool_name == 'run_bash' and self._is_readonly_bash(call):
+            self.has_probed = True
+
         if self._is_probe(call):
             self.has_probed = True
 
