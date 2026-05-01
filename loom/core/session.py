@@ -1047,6 +1047,7 @@ class LoomSession:
         # Register memory tools with injected stores
         from loom.platform.cli.tools import (
             make_agent_health_tool,
+            make_probe_file_tool,
             make_exec_escape_fn,
             make_fetch_url_tool,
             make_load_skill_tool,
@@ -1117,6 +1118,9 @@ class LoomSession:
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
+
+        # Issue #283: probe_file — agent-initiated context establishment
+        self.registry.register(make_probe_file_tool())
 
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker

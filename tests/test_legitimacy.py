@@ -299,3 +299,79 @@ async def test_circuit_breaker_resets_on_allow(perm_ctx, registry, handler):
     res3 = await bmw.process(call, handler)
     assert res3.success
     assert perm_ctx.recent_denies == 0
+
+
+@pytest.mark.asyncio
+async def test_readonly_bash_counts_as_probe(handler):
+    """Issue #283: grep, head, cat, etc. set has_probed."""
+    guard = LegitimacyGuardMiddleware()
+
+    call_grep = make_call(
+        "run_bash", TrustLevel.GUARDED,
+        {"command": "grep -n 'class ' file.py"},
+        capabilities=ToolCapability.EXEC,
+    )
+    await guard.process(call_grep, handler)
+    assert guard.has_probed
+
+
+@pytest.mark.asyncio
+async def test_sed_minus_n_counts_as_probe(handler):
+    """sed -n is read-only and should count as a probe."""
+    guard = LegitimacyGuardMiddleware()
+
+    call_sed = make_call(
+        "run_bash", TrustLevel.GUARDED,
+        {"command": "sed -n '100,120p' file.py"},
+        capabilities=ToolCapability.EXEC,
+    )
+    await guard.process(call_sed, handler)
+    assert guard.has_probed
+
+
+@pytest.mark.asyncio
+async def test_sed_without_n_does_not_count(handler):
+    """sed without -n is mutating (sed -i ...), NOT a probe."""
+    guard = LegitimacyGuardMiddleware()
+
+    call_sed = make_call(
+        "run_bash", TrustLevel.GUARDED,
+        {"command": "sed -i 's/old/new/' file.py"},
+        capabilities=ToolCapability.EXEC,
+    )
+    await guard.process(call_sed, handler)
+    assert not guard.has_probed
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_does_not_count(handler):
+    """Arbitrary commands like python3 are not whitelisted."""
+    guard = LegitimacyGuardMiddleware()
+
+    call_py = make_call(
+        "run_bash", TrustLevel.GUARDED,
+        {"command": "python3 -c 'print(1)'"},
+        capabilities=ToolCapability.EXEC,
+    )
+    await guard.process(call_py, handler)
+    assert not guard.has_probed
+
+
+@pytest.mark.asyncio
+async def test_readonly_bash_permits_write(handler):
+    """After a read-only bash, write_file should be allowed."""
+    guard = LegitimacyGuardMiddleware()
+
+    call_grep = make_call(
+        "run_bash", TrustLevel.GUARDED,
+        {"command": "grep class file.py"},
+        capabilities=ToolCapability.EXEC,
+    )
+    await guard.process(call_grep, handler)
+
+    call_write = make_call(
+        "write_file", TrustLevel.GUARDED,
+        {"path": "file.py", "content": "x"},
+    )
+    res = await guard.process(call_write, handler)
+    assert res.success
