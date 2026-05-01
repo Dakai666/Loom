@@ -1139,8 +1139,8 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
         name="agent_health",
         description=(
             "Inspect your own observability telemetry: tool call success/latency, "
-            "context token layout, and memory-compression yield. Call with "
-            "`dimension=<tool_call|context_layout|memory_compression>` to drill "
+            "context token layout, memory-compression yield, runtime identity, context budget, session turns, and loaded skills. Call with "
+            "`dimension=<tool_call|context_layout|memory_compression|runtime_identity|context_budget|session_turns|loaded_skills>` to drill "
             "down, or `minimal=true` for a one-line composite summary. Use when "
             "you want to self-check before a risky action, or when investigating "
             "suspected behavioral drift."
@@ -1151,7 +1151,7 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
             "properties": {
                 "dimension": {
                     "type": "string",
-                    "enum": ["tool_call", "context_layout", "memory_compression"],
+                    "enum": ["tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills"],
                     "description": "Specific dimension to inspect. Omit for full report.",
                 },
                 "minimal": {
@@ -1306,6 +1306,7 @@ def make_load_skill_tool(
     relational: "RelationalMemory | None" = None,
     confirm_fn: "Callable | None" = None,
     skill_gate: "SkillGate | None" = None,
+    on_loaded: "Callable[[str], None] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -1421,6 +1422,8 @@ def make_load_skill_tool(
 
         # Record activation
         _loaded_this_session.add(name)
+        if on_loaded is not None:
+            on_loaded(name)
         if outcome_tracker is not None:
             _turn = turn_index_fn() if turn_index_fn else 0
             outcome_tracker.record_activation(name, _turn)
