@@ -101,6 +101,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/sessions",                   "browse and switch sessions"),
     ("/stop",                       "interrupt a running turn (CLI: Ctrl+C)"),
     ("/think",                      "view last turn's reasoning chain"),
+    ("/tier",                       "show active LLM tier + sticky state (#276)"),
+    ("/tier 1",                     "switch to Tier 1 (daily reasoning)"),
+    ("/tier 2",                     "switch to Tier 2 (deep reasoning)"),
 ]
 
 

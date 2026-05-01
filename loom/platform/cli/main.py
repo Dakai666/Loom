@@ -1055,6 +1055,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
                 "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
                 "  [loom.warning]/personality off[/loom.warning]           Remove active persona\n"
+                "  [loom.warning]/tier[/loom.warning]                      Show active LLM tier + sticky state (#276)\n"
+                "  [loom.warning]/tier[/loom.warning] [loom.muted]<N>[/loom.muted]                 Switch tier (1 = daily · 2 = deep reasoning)\n"
                 "  [loom.warning]/think[/loom.warning]                     View last turn's reasoning chain\n"
                 "  [loom.warning]/compact[/loom.warning]                   Compress older context\n"
                 "  [loom.warning]/auto[/loom.warning]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
