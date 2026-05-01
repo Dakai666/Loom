@@ -1174,13 +1174,15 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
 
 def make_probe_file_tool() -> ToolDefinition:
     """
-    Create a SAFE ``probe_file`` tool (Issue #283).
+    Create a SAFE ``probe_file`` tool (Issues #283, #288).
 
-    Lets the agent explicitly mark a file as probed when using
-    non-``read_file`` means (grep, head, sed -n, etc.) to inspect
-    its contents.  Calling this tool sets ``has_probed`` in
-    LegitimacyGuardMiddleware, preventing spurious trajectory anomaly
-    warnings on subsequent ``run_bash`` writes to the same file.
+    Fallback marker for cases where LegitimacyGuard cannot infer the
+    probed file from the tool call itself — e.g. shell pipelines
+    (``cat a.py | grep foo``), variable expansion, or custom scripts
+    that print file contents. Standard ``read_file`` and simple
+    ``grep``/``head``/``sed -n`` invocations already auto-register
+    the file path; calling ``probe_file`` redundantly in those cases
+    just burns context.
     """
 
     async def _probe_file(call: ToolCall) -> ToolResult:
@@ -1195,9 +1197,12 @@ def make_probe_file_tool() -> ToolDefinition:
     return ToolDefinition(
         name="probe_file",
         description=(
-            "Mark a file as probed. Use after inspecting a file with grep, head, "
-            "or other non-read_file means.  This prevents LegitimacyGuard from "
-            "flagging subsequent writes as trajectory anomalies."
+            "Mark a specific file as probed when LegitimacyGuard cannot infer "
+            "the path from your tool call (complex bash pipelines, custom "
+            "scripts, etc.). Do NOT call this after standard read_file or "
+            "simple grep/head/sed -n invocations — those already register "
+            "the path automatically and a redundant probe_file just burns "
+            "context."
         ),
         input_schema={
             "type": "object",
