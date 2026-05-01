@@ -20,6 +20,8 @@ _COMMANDS = [
     ("/model <name>",           "Switch model  e.g. deepseek-v4-pro  claude-sonnet-4-6"),
     ("/personality [name]",     "Switch cognitive persona"),
     ("/personality off",        "Remove active persona"),
+    ("/tier",                   "Show active LLM tier + sticky state"),
+    ("/tier <N>",               "Switch tier (1 = daily · 2 = deep reasoning)"),
     ("/compact",                "Compress older context (frees tokens)"),
     ("/auto",                   "Toggle run_bash auto-approve (requires strict_sandbox)"),
     ("/pause",                  "Toggle HITL auto-pause after each tool batch"),

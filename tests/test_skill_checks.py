@@ -460,7 +460,7 @@ precondition_checks:
 
 # Security Assessment
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         assert name == "security_assessment"
         assert len(pc_refs) == 2
         assert pc_refs[0]["ref"] == "checks.require_not_production"
@@ -476,7 +476,7 @@ description: A simple skill.
 ---
 Body.
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         assert pc_refs == []
 
     def test_invalid_precondition_checks_ignored(self):
@@ -493,7 +493,7 @@ precondition_checks:
 ---
 Body.
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         # Only the valid entry should survive
         assert len(pc_refs) == 1
         assert pc_refs[0]["ref"] == "valid.fn"

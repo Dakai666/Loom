@@ -37,7 +37,7 @@ description: Full implementation cycle from issue to PR.
 
 Some body content here.
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         assert name == "loom-engineer"
         assert "implementation" in desc.lower() or "PR" in desc
         assert isinstance(tags, list)
@@ -55,14 +55,14 @@ tags:
 ---
 Body.
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         assert name == "test-skill"
         assert tags == ["coding", "testing"]
 
     def test_no_frontmatter(self):
         from loom.core.session import _parse_skill_frontmatter
 
-        name, desc, tags, pc_refs = _parse_skill_frontmatter("# Just a markdown file")
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter("# Just a markdown file")
         assert name == ""
         assert desc == ""
 
@@ -76,7 +76,7 @@ description: Use this when: the user asks
 Body.
 """
         # Should handle colons in description gracefully or fail gracefully
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         # Either parses or returns empty — both are acceptable
         assert isinstance(name, str)
         assert isinstance(desc, str)
@@ -89,7 +89,7 @@ name: no-desc
 ---
 Body.
 """
-        name, desc, tags, pc_refs = _parse_skill_frontmatter(raw)
+        name, desc, tags, pc_refs, _model_tier = _parse_skill_frontmatter(raw)
         assert name == "no-desc"
         assert desc == ""
 

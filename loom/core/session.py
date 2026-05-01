@@ -74,6 +74,8 @@ from loom.core.events import (
     GrantsSnapshot,
     ReasoningContinuation,
     TextChunk,
+    TierChanged,
+    TierExpiryHint,
     ThinkCollapsed,
     ToolBegin,
     ToolEnd,
@@ -342,29 +344,36 @@ def _load_env(project_root: Path | None = None) -> dict[str, str]:
     return {}
 
 
-def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str], list[dict]]:
+def _parse_skill_frontmatter(
+    raw: str,
+) -> tuple[str, str, list[str], list[dict], int | None]:
     """
     Parse YAML frontmatter from a SKILL.md file.
 
-    Returns (name, description, tags, precondition_check_refs).
-    On parse failure returns empty strings/lists.
+    Returns ``(name, description, tags, precondition_check_refs, model_tier)``.
+    On parse failure returns empty strings / lists / ``None``.
     Follows Agent Skills spec lenient validation: best-effort parsing.
+
+    Issue #276: ``model_tier`` is an optional positive int declaring the
+    LLM tier this skill expects (1 = daily, 2 = deep reasoning, …). The
+    harness escalates the active model when the skill is loaded. ``None``
+    means "no opinion".
     """
     if not raw.startswith("---"):
-        return "", "", [], []
+        return "", "", [], [], None
 
     parts = raw.split("---", 2)
     if len(parts) < 3:
-        return "", "", [], []
+        return "", "", [], [], None
 
     yaml_text = parts[1].strip()
     try:
         import yaml
         data = yaml.safe_load(yaml_text)
         if not isinstance(data, dict):
-            return "", "", [], []
+            return "", "", [], [], None
     except Exception:
-        return "", "", [], []
+        return "", "", [], [], None
 
     name = str(data.get("name", "")).strip()
     description = str(data.get("description", "")).strip()
@@ -384,7 +393,17 @@ def _parse_skill_frontmatter(raw: str) -> tuple[str, str, list[str], list[dict]]
         if isinstance(entry, dict) and entry.get("ref") and entry.get("applies_to"):
             valid_refs.append(entry)
 
-    return name, description, tags, valid_refs
+    # Issue #276: skill-declared LLM tier requirement
+    raw_tier = data.get("model_tier")
+    model_tier: int | None
+    try:
+        model_tier = int(raw_tier) if raw_tier is not None else None
+        if model_tier is not None and model_tier < 1:
+            model_tier = None  # invalid; treat as unspecified
+    except (TypeError, ValueError):
+        model_tier = None
+
+    return name, description, tags, valid_refs, model_tier
 
 
 def _build_jobs_inject_message(jobstore: Any) -> str | None:
@@ -653,6 +672,37 @@ class LoomSession:
         # collection followed by synthesis). 0 disables masking. JIT
         # ensures the original content is in scratchpad regardless.
         self._mask_age_turns: int = int(_harness_cfg.get("mask_age_turns", 20))
+
+        # Issue #276: LLM tier system. ``[cognition.tiers]`` maps int → model
+        # name. Skills declare ``model_tier: N`` in frontmatter; when activated,
+        # the harness escalates to that tier (sticky). Agent / user can
+        # downgrade explicitly. ``reminder_after_turns`` triggers a soft hint
+        # — never auto-reverts.
+        _tier_cfg = (config.get("cognition") or {}).get("tiers", {}) or {}
+        self._tier_models: dict[int, str] = {}
+        for k, v in _tier_cfg.items():
+            try:
+                tier_int = int(k)
+                if isinstance(v, str) and v.strip():
+                    self._tier_models[tier_int] = v.strip()
+            except (TypeError, ValueError):
+                continue
+        self._default_tier: int = int(_tier_cfg.get("default_tier", 1) or 1)
+        self._tier_reminder_after_turns: int = int(
+            _tier_cfg.get("reminder_after_turns", 10) or 10
+        )
+        # ``None`` = follow ``_default_tier``; integer = sticky override.
+        self._sticky_tier: int | None = None
+        # Counts consecutive turns at the *active* tier (sticky or default).
+        # Reset on tier change; surfaces in TierExpiryHint after threshold.
+        self._turns_at_current_tier: int = 0
+        # Tracks "did we already emit a reminder this sticky session?" so we
+        # don't spam the agent every turn after the threshold is hit.
+        self._tier_reminder_emitted: bool = False
+        # Issue #276: skill name → declared tier, populated during skill
+        # bootstrap. ``_compute_skill_max_tier`` reads this synchronously
+        # from inside stream_turn (procedural.get is async).
+        self._skill_tier_snapshot: dict[str, int] = {}
 
         # Issue #271: when stop_reason='max_tokens' fires after 0 tools, inject
         # a system-reminder telling the agent to spill in-flight reasoning to
@@ -1139,6 +1189,14 @@ class LoomSession:
             confirm_fn=lambda call: self._confirm_fn(call),
             skill_gate=self._skill_gate,
         ))
+
+        # Issue #276: agent-side tier control. Only register when at least
+        # one tier is configured — running on a session with no [cognition.tiers]
+        # block has no use for this tool and we'd just confuse the agent
+        # with options that map to nothing.
+        if self._tier_models:
+            from loom.platform.cli.tools import make_request_model_tier_tool
+            self.registry.register(make_request_model_tier_tool(self))
 
         # Issue #64 Phase B: Register unload_skill tool
         from loom.platform.cli.tools import make_unload_skill_tool
@@ -1645,12 +1703,32 @@ class LoomSession:
                 # matching tool results, which would produce a 2013 API error.
                 self._sanitize_history()
 
+                # Issue #276: skill-driven tier escalation. If the agent has
+                # loaded a skill with model_tier=N higher than the current
+                # active tier, escalate sticky before the next LLM call.
+                # Only ever moves UP automatically; downgrade requires explicit
+                # request_model_tier / /tier from agent or user.
+                _skill_tier = self._compute_skill_max_tier()
+                if _skill_tier > self._active_tier():
+                    _ev = self._set_sticky_tier(
+                        _skill_tier,
+                        reason=f"skill_max={_skill_tier}",
+                        source="skill",
+                    )
+                    if _ev is not None:
+                        yield _ev
+
+                # Resolve the active model for this call from the tier system.
+                # When tiers aren't configured, _active_model() falls back to
+                # self.model (legacy behavior preserved).
+                _active_model = self._active_model()
+
                 async for chunk, final in self.router.stream_chat(
-                    model=self.model,
+                    model=_active_model,
                     messages=self.messages,
                     tools=tools,
                     max_tokens=_resolve_output_max_tokens(
-                        self._loom_config, self.model, router=self.router,
+                        self._loom_config, _active_model, router=self.router,
                     ),
                     abort_signal=abort_signal,
                 ):
@@ -1915,6 +1993,9 @@ class LoomSession:
                         pass  # never block the turn on compression failure
 
                     self._last_think = "".join(_think_parts).strip()
+                    _tier_hint = self._tick_tier_counter()
+                    if _tier_hint is not None:
+                        yield _tier_hint
                     yield TurnDone(
                         tool_count=tool_count,
                         input_tokens=input_tokens,
@@ -2129,6 +2210,9 @@ class LoomSession:
                             self._turn_index += 1
                             # Issue #58: trigger skill self-assessment before TurnDone
                             self._trigger_skill_assessment()
+                            _tier_hint = self._tick_tier_counter()
+                            if _tier_hint is not None:
+                                yield _tier_hint
                             yield TurnDone(
                                 tool_count=tool_count,
                                 input_tokens=input_tokens,
@@ -2210,6 +2294,9 @@ class LoomSession:
             self._turn_index += 1
             # Issue #58: trigger skill self-assessment before TurnDone
             self._trigger_skill_assessment()
+            _tier_hint = self._tick_tier_counter()
+            if _tier_hint is not None:
+                yield _tier_hint
             yield TurnDone(
                 tool_count=tool_count,
                 input_tokens=input_tokens,
@@ -2406,7 +2493,9 @@ class LoomSession:
                     continue
 
                 # Parse YAML frontmatter
-                name, description, tags, pc_refs = _parse_skill_frontmatter(raw)
+                name, description, tags, pc_refs, model_tier = (
+                    _parse_skill_frontmatter(raw)
+                )
                 if not name:
                     # Fallback: use directory name
                     name = skill_dir.name
@@ -2441,9 +2530,21 @@ class LoomSession:
                         success_rate=existing.success_rate if existing else 0.0,
                         tags=tags or (existing.tags if existing else []),
                         precondition_check_refs=pc_refs,
+                        model_tier=model_tier,
                     )
                     await self._memory.procedural.upsert(genome)
                     logger.debug("Auto-imported skill '%s' from %s", name, skill_md)
+
+                # Issue #276: cache name → tier in a sync-readable snapshot
+                # so ``_compute_skill_max_tier`` can resolve at LLM-call time
+                # without an awaitable lookup.
+                effective_tier = (
+                    model_tier
+                    if model_tier is not None
+                    else (existing.model_tier if existing else None)
+                )
+                if effective_tier is not None:
+                    self._skill_tier_snapshot[name] = effective_tier
 
                 # Add to catalog for Tier 1 disclosure
                 catalog.append(SkillCatalogEntry(
@@ -2866,6 +2967,107 @@ class LoomSession:
             error_msg=result.error if not result.success else None,
         )
         self._telemetry.mark_dirty()
+
+    def _active_tier(self) -> int:
+        """Effective tier this turn — sticky override or default."""
+        return self._sticky_tier if self._sticky_tier is not None else self._default_tier
+
+    def _active_model(self) -> str:
+        """Resolve the model name for the active tier.
+
+        Falls back to ``self._model`` (the constructor / ``set_model`` value)
+        when the tier system isn't configured for this tier — preserves
+        backward compatibility with sessions that don't use #276 at all.
+        """
+        tier = self._active_tier()
+        return self._tier_models.get(tier, self._model)
+
+    def _set_sticky_tier(
+        self, new_tier: int | None, *, reason: str, source: str,
+    ) -> "TierChanged | None":
+        """Update sticky tier + reset counters. Returns a TierChanged event
+        when the active tier actually moved, else None.
+
+        ``source`` is one of ``"skill"`` / ``"agent"`` / ``"user"`` / ``"clear"``
+        and lands in the event for telemetry / graphify analysis.
+        """
+        old_tier = self._active_tier()
+        # Normalize: setting sticky to default_tier is equivalent to clearing,
+        # so the "no override" state remains canonical.
+        if new_tier == self._default_tier:
+            new_tier = None
+        if new_tier == self._sticky_tier:
+            return None  # no-op
+        self._sticky_tier = new_tier
+        self._turns_at_current_tier = 0
+        self._tier_reminder_emitted = False
+        active = self._active_tier()
+        if active == old_tier:
+            return None
+        return TierChanged(
+            from_tier=old_tier,
+            to_tier=active,
+            from_model=self._tier_models.get(old_tier, self._model),
+            to_model=self._tier_models.get(active, self._model),
+            source=source,
+            reason=reason,
+        )
+
+    def _tick_tier_counter(self) -> "TierExpiryHint | None":
+        """Increment the per-turn counter for the active tier and return a
+        ``TierExpiryHint`` event the first time the threshold is crossed
+        within a sticky session.
+
+        Called once per ``stream_turn`` completion (immediately before
+        ``TurnDone``). Skips emission when:
+          - We're on the default tier (no sticky to expire)
+          - Threshold isn't configured (``<= 0``)
+          - The hint has already been emitted this sticky session
+        """
+        self._turns_at_current_tier += 1
+        if self._sticky_tier is None:
+            return None
+        if self._tier_reminder_after_turns <= 0:
+            return None
+        if self._tier_reminder_emitted:
+            return None
+        if self._turns_at_current_tier < self._tier_reminder_after_turns:
+            return None
+        self._tier_reminder_emitted = True
+        return TierExpiryHint(
+            tier=self._sticky_tier,
+            model=self._active_model(),
+            turns_used=self._turns_at_current_tier,
+            threshold=self._tier_reminder_after_turns,
+        )
+
+    def _compute_skill_max_tier(self) -> int:
+        """Take max ``model_tier`` across currently-activated skills.
+
+        Skills with no declared tier contribute 0, never escalating.
+        """
+        tracker = getattr(self, "_skill_outcome_tracker", None)
+        if tracker is None:
+            return 0
+        try:
+            names = tracker.activated_skills
+        except Exception:
+            return 0
+        if not names:
+            return 0
+        max_tier = 0
+        for name in names:
+            try:
+                # Cached lookup; ProceduralMemory.get is async, so we use the
+                # in-memory snapshot if available. The snapshot is populated
+                # at session start by _refresh_memory_index.
+                snapshot = getattr(self, "_skill_tier_snapshot", {})
+                tier = snapshot.get(name, 0)
+            except Exception:
+                tier = 0
+            if tier > max_tier:
+                max_tier = tier
+        return max_tier
 
     def _should_continue_reasoning(self, stop_reason: str, tool_count: int) -> bool:
         """Decide whether to inject a continuation reminder for #271.
