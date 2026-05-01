@@ -1,9 +1,10 @@
 """
-Precondition checks for loom_engineer skill (Issue #64 Phase B).
+Precondition checks for Code_Weaver skill.
 
-loom_engineer is an implementation skill — it modifies code, runs tests,
-and produces commits.  These checks enforce safety invariants that the
-SKILL.md describes as discipline but cannot enforce at the framework level.
+Code_Weaver is a unified coding skill — it modifies code, runs tests,
+performs analysis, and interacts with GitHub. These checks enforce
+safety invariants that the SKILL.md describes as discipline but cannot
+enforce at the framework level.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ import asyncio
 async def require_git_repo(call) -> bool:
     """Ensure we're inside a git repository before modifying anything.
 
-    loom_engineer's entire workflow (branch, commit, PR) assumes git.
-    Running outside a repo would produce broken output.
+    Code_Weaver's entire workflow (branch, commit, PR, diff) assumes git.
+    Running outside a repo would produce broken output or wrong analysis.
     """
     proc = await asyncio.create_subprocess_exec(
         "git", "rev-parse", "--is-inside-work-tree",
@@ -29,8 +30,8 @@ async def require_git_repo(call) -> bool:
 async def reject_force_push(call) -> bool:
     """Block ``git push --force`` and variants to prevent history rewrite.
 
-    loom_engineer principle #6: "review 先於 commit".
-    Force-pushing bypasses review and can destroy others' work.
+    Code_Weaver Layer 1 原則 2（Scope 先確認）+ 原則 5（驗證先於產出）:
+    Force-pushing bypasses review and can destroy collaborators' work.
     """
     cmd = call.args.get("command", "")
     if "push" not in cmd:
