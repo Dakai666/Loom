@@ -103,3 +103,62 @@ class TestSlashModel:
 
         joined = "\n".join(capture_console)
         assert "Unknown command" in joined
+
+
+class TestFooterSyncOnModelSwitch:
+    """The footer's model badge must reflect the new model immediately on
+    a successful ``/model`` switch — not wait until next turn boundary."""
+
+    async def test_footer_updated_after_successful_switch(
+        self, capture_console
+    ) -> None:
+        from types import SimpleNamespace as _NS
+
+        # Stand-in LoomApp with the surface the slash handler touches.
+        invalidate_calls: list[bool] = []
+        loom_app = _NS(
+            footer=_NS(model="minimax-m2.7"),
+            invalidate=lambda: invalidate_calls.append(True),
+        )
+
+        session = _stub_session()
+        session._loom_app = loom_app
+
+        await cli_main._handle_slash("/model claude-opus-4-7", session)
+
+        assert loom_app.footer.model == "claude-opus-4-7", (
+            "footer.model not refreshed after /model switch"
+        )
+        assert invalidate_calls, "app.invalidate() was not called — UI won't redraw"
+
+    async def test_footer_unchanged_on_failed_switch(
+        self, capture_console
+    ) -> None:
+        """A failed switch must NOT alter the footer (would be misleading)."""
+        from types import SimpleNamespace as _NS
+
+        loom_app = _NS(
+            footer=_NS(model="minimax-m2.7"),
+            invalidate=lambda: None,
+        )
+
+        session = _stub_session(switch_ok=False)
+        session._loom_app = loom_app
+
+        await cli_main._handle_slash("/model gibberish-model", session)
+
+        assert loom_app.footer.model == "minimax-m2.7", (
+            "footer.model changed on failed switch — UI now lies about the active model"
+        )
+
+    async def test_no_loom_app_does_not_crash(
+        self, capture_console
+    ) -> None:
+        """Sessions used outside the persistent app (tests, scripts) have
+        no ``_loom_app`` — slash handler must tolerate that gracefully."""
+        session = _stub_session()
+        # Explicitly absent — getattr default branch fires
+        assert not hasattr(session, "_loom_app")
+
+        # Just shouldn't raise.
+        await cli_main._handle_slash("/model some-model", session)

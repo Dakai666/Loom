@@ -559,6 +559,11 @@ async def _chat(
             # user is reading).
             app.footer.token_pct = session.budget.usage_fraction * 100
             app.footer.persona = session.current_personality
+            # Belt-and-suspenders for /model: slash handlers update
+            # footer.model immediately on switch, but a future code path
+            # could change session.model without going through them. Keep
+            # the badge aligned with reality at every turn edge.
+            app.footer.model = session.model
             try:
                 snapshot = session._build_grants_snapshot()
                 app.footer.grants_active = snapshot.active_count
@@ -756,6 +761,13 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             ok = session.set_model(arg)
             if ok:
                 console.print(f"[loom.muted]Model switched to: [bold]{arg}[/bold][/loom.muted]")
+                # Footer was set once at startup (build_loom_app) and never
+                # refreshed for runtime model switches — user saw the success
+                # line above but the bottom badge kept showing the old name
+                # until the next turn boundary's stat refresh.
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.footer.model = arg
+                    loom_app.invalidate()
             else:
                 console.print(
                     f"[loom.error]Could not switch to '{arg}'.[/loom.error] "
@@ -1362,6 +1374,10 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             ok = session.set_model(arg)
             if ok:
                 app.notify(f"Model switched to: {arg}")
+                # Mirror the change into the footer badge so the bottom
+                # region stops showing the old model until next turn.
+                app.footer.model = arg
+                app.invalidate()
             else:
                 app.notify(
                     f"Cannot switch to '{arg}' — prefix not recognised or provider "
@@ -1369,7 +1385,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                     severity="error",
                 )
 
-    if command == "/personality":
+    elif command == "/personality":
         if not arg:
             p = session.current_personality
             avail = session._stack.available_personalities()
