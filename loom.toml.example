@@ -41,18 +41,26 @@ personality = ""
 default_model = "claude-sonnet-4-6"
 max_tokens    = 8096
 
-# Output-token cap for the main stream_turn() LLM call. Different providers
-# have wildly different ceilings — MiniMax-M2.7 supports ~64K, Claude Sonnet
-# 4.6 supports ~64K, small local models often 4-8K. Set a conservative
-# session-wide default and override per-model below.
-output_max_tokens = 32768
-
-# Per-model overrides (table key = exact model name). Entries here win over
-# the default above. Unknown models fall through to output_max_tokens.
-[cognition.output_max_tokens_overrides]
-"MiniMax-M2.7"       = 65536
-"claude-sonnet-4-6"  = 65536
-"claude-opus-4-7"    = 32768
+# Output-token cap for the main stream_turn() LLM call.
+#
+# Issue #272: providers now declare native limits in their
+# NATIVE_OUTPUT_LIMITS table (loom/core/cognition/providers.py), so the
+# values below are no longer required for supported models. Set them
+# only when you genuinely want a *shorter* response than the model can
+# produce — e.g. for cost control on free tiers, or to force concise
+# answers in a specific deployment.
+#
+# Resolution order:
+#   1. [cognition.output_max_tokens_overrides][<model>]  ← user override
+#   2. [cognition].output_max_tokens                      ← global user-set
+#   3. provider's NATIVE_OUTPUT_LIMITS[<model>]           ← provider truth
+#   4. _DEFAULT_OUTPUT_MAX_TOKENS = 8192                  ← last-resort
+#
+# output_max_tokens = 8192
+#
+# [cognition.output_max_tokens_overrides]
+# "MiniMax-M2.7"       = 32768   # cap a chatty model
+# "claude-opus-4-7"    = 16384
 
 # ─────────────────────────────────────────────
 # Local providers

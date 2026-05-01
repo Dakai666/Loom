@@ -763,7 +763,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                     "(check API key in .env or enable in loom.toml).[/loom.muted]"
                 )
 
-    if command == "/personality":
+    elif command == "/personality":
         if not arg:
             p = session.current_personality
             avail = session._stack.available_personalities()

@@ -282,11 +282,23 @@ _DEFAULT_OUTPUT_MAX_TOKENS = 8192
 _MAX_REASONING_CONTINUATIONS = 2
 
 
-def _resolve_output_max_tokens(cfg: dict, model: str) -> int:
-    """Return the output-token cap for *model* from ``[cognition]``.
+def _resolve_output_max_tokens(
+    cfg: dict, model: str, router: "LLMRouter | None" = None,
+) -> int:
+    """Return the output-token cap for *model*.
 
-    Precedence: ``[cognition.output_max_tokens_overrides][<model>]`` →
-    ``[cognition].output_max_tokens`` → ``_DEFAULT_OUTPUT_MAX_TOKENS``.
+    Precedence (Issue #272):
+      1. ``[cognition.output_max_tokens_overrides][<model>]`` — explicit
+         user override, case-sensitive (intentional: user typed it).
+      2. ``[cognition].output_max_tokens`` — global user-set cap.
+      3. **Provider-declared native limit** — provider class knows what its
+         own models support. Lookup is case-insensitive. New models become
+         available without loom.toml edits.
+      4. ``_DEFAULT_OUTPUT_MAX_TOKENS`` — last-resort fallback.
+
+    The provider-native step (3) is the one that lets users drop the
+    overrides table entirely once their models are in the provider's
+    ``NATIVE_OUTPUT_LIMITS``.
     """
     cog = cfg.get("cognition", {}) or {}
     overrides = cog.get("output_max_tokens_overrides", {}) or {}
@@ -300,6 +312,17 @@ def _resolve_output_max_tokens(cfg: dict, model: str) -> int:
         try:
             return int(default)
         except (TypeError, ValueError):
+            pass
+    # Step 3 — ask the provider what its native ceiling is for this model.
+    if router is not None:
+        try:
+            provider = router.get_provider(model)
+            native = provider.native_max_tokens(model)
+            if native is not None and native > 0:
+                return int(native)
+        except Exception:
+            # Routing failures or missing provider shouldn't break the call;
+            # fall through to the constant default.
             pass
     return _DEFAULT_OUTPUT_MAX_TOKENS
 
@@ -1627,7 +1650,7 @@ class LoomSession:
                     messages=self.messages,
                     tools=tools,
                     max_tokens=_resolve_output_max_tokens(
-                        self._loom_config, self.model,
+                        self._loom_config, self.model, router=self.router,
                     ),
                     abort_signal=abort_signal,
                 ):
