@@ -3192,13 +3192,18 @@ def make_clear_model_tier_tool(session: Any) -> ToolDefinition:
                 success=False,
                 error="'reason' is required — describe why the sticky session is ending",
             )
+        sticky_before = session._sticky_tier
         ev = session._set_sticky_tier(None, reason=reason, source="agent")
         if ev is not None:
             session._lifecycle_events.put_nowait(ev)
 
         active_tier = session._active_tier()
         active_model = session._active_model()
-        msg = f"Sticky cleared. Active tier: {active_tier} -> {active_model} (following default_tier)."
+        if sticky_before is None:
+            msg = f"No active sticky to clear (already on tier {active_tier} — {active_model})."
+        else:
+            old_model = session._tier_models.get(sticky_before, "?")
+            msg = f"Sticky cleared (was T{sticky_before} {old_model}). Now T{active_tier} {active_model} (default)."
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=msg,
@@ -3206,6 +3211,7 @@ def make_clear_model_tier_tool(session: Any) -> ToolDefinition:
                 "tier": active_tier,
                 "model": active_model,
                 "sticky": session._sticky_tier,
+                "previous_sticky": sticky_before,
             },
         )
 
