@@ -3090,6 +3090,9 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
     Reason is **mandatory** because each tier switch should leave a
     decision-trace in the envelope log — useful for graphify analysis
     of when 絲絲 self-escalates, and what triggered the call.
+
+    Use ``clear_model_tier`` to end a sticky session and return to
+    the default tier.
     """
     async def _executor(call: ToolCall) -> ToolResult:
         try:
@@ -3107,7 +3110,6 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
                 success=False,
                 error="'reason' is required — describe why this switch is warranted",
             )
-        cleared_sticky = bool(call.args.get("cleared_sticky", False))
         # Validate the requested tier exists in the configured table.
         if tier not in session._tier_models:
             available = sorted(session._tier_models.keys())
@@ -3120,10 +3122,7 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
                 ),
             )
 
-        # cleared_sticky=True forces a clear regardless of the requested tier
-        # — semantic flag for "I'm explicitly ending this sticky session".
-        target = None if cleared_sticky else tier
-        ev = session._set_sticky_tier(target, reason=reason, source="agent")
+        ev = session._set_sticky_tier(tier, reason=reason, source="agent")
         if ev is not None:
             # Surface to the stream loop so platforms see TierChanged in
             # the same channel as ToolBegin / EnvelopeUpdated.
@@ -3131,11 +3130,7 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
 
         active_tier = session._active_tier()
         active_model = session._active_model()
-        msg = (
-            f"Active tier: {active_tier} → {active_model}. "
-            + ("(sticky cleared, will follow default_tier)" if target is None
-               else f"(sticky on tier {target})")
-        )
+        msg = f"Active tier: {active_tier} → {active_model}. (sticky on tier {tier})"
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=msg,
@@ -3153,7 +3148,7 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
             "task's reasoning load doesn't match the active engine — e.g. "
             "escalate to Tier 2 before tackling a multi-constraint puzzle, "
             "or step back to Tier 1 when a deep phase has concluded. "
-            "``cleared_sticky=True`` ends the sticky session explicitly. "
+            "To clear a sticky session, use ``clear_model_tier`` instead. "
             "Reason is mandatory: it lands in the envelope log."
         ),
         trust_level=TrustLevel.SAFE,
@@ -3169,12 +3164,70 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
                     "type": "string",
                     "description": "Why the switch is warranted — one short sentence.",
                 },
-                "cleared_sticky": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly end the sticky session (return to default_tier).",
-                },
             },
             "required": ["tier", "reason"],
+        },
+        executor=_executor,
+        tags=["cognition", "tier"],
+        impact_scope="agent",
+    )
+
+
+def make_clear_model_tier_tool(session: Any) -> ToolDefinition:
+    """Agent-callable: explicitly clear a sticky tier session.
+
+    Issue #278. Companion to ``request_model_tier`` — when a deep phase
+    is done, the agent calls this to release the sticky tier and return
+    to ``default_tier``.  No tier argument needed because the intent is
+    unambiguous: "I'm done, go back to normal."
+
+    Wires through ``session._set_sticky_tier(None, ...)`` — same
+    underlying state machine as ``request_model_tier``.
+    """
+    async def _executor(call: ToolCall) -> ToolResult:
+        reason = str(call.args.get("reason", "")).strip()
+        if not reason:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'reason' is required — describe why the sticky session is ending",
+            )
+        ev = session._set_sticky_tier(None, reason=reason, source="agent")
+        if ev is not None:
+            session._lifecycle_events.put_nowait(ev)
+
+        active_tier = session._active_tier()
+        active_model = session._active_model()
+        msg = f"Sticky cleared. Active tier: {active_tier} -> {active_model} (following default_tier)."
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=msg,
+            metadata={
+                "tier": active_tier,
+                "model": active_model,
+                "sticky": session._sticky_tier,
+            },
+        )
+
+    return ToolDefinition(
+        name="clear_model_tier",
+        description=(
+            "Clear a sticky tier session (Issue #278). Use when a deep "
+            "phase has concluded and the agent should return to the "
+            "default tier. No tier argument — the intent is unambiguous: "
+            "release the sticky and follow default_tier."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why the sticky session is ending — one short sentence.",
+                },
+            },
+            "required": ["reason"],
         },
         executor=_executor,
         tags=["cognition", "tier"],
