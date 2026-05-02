@@ -21,7 +21,7 @@ import pytest
 from loom.core.events import TierChanged, TierExpiryHint
 from loom.core.session import LoomSession, _parse_skill_frontmatter
 from loom.core.memory.procedural import SkillGenome
-from loom.platform.cli.tools import make_request_model_tier_tool
+from loom.platform.cli.tools import make_request_model_tier_tool, make_clear_model_tier_tool
 
 
 # ---------------------------------------------------------------------------
@@ -316,16 +316,25 @@ class TestRequestModelTierTool:
         assert ev.source == "agent"
         assert ev.reason == "multi-constraint puzzle"
 
-    async def test_cleared_sticky_force_clears(self):
+    async def test_clear_model_tier_releases_sticky(self):
+        """Issue #278: clear_model_tier should release sticky without needing a tier arg."""
         s = self._session_with_queue(sticky_tier=2)
-        tool = make_request_model_tier_tool(s)
+        tool = make_clear_model_tier_tool(s)
         result = await tool.executor(_call(
-            "request_model_tier",
-            tier=2, reason="phase done", cleared_sticky=True,
+            "clear_model_tier", reason="phase done",
         ))
         assert result.success
-        assert s._sticky_tier is None  # explicitly cleared
+        assert s._sticky_tier is None
         assert "cleared" in result.output.lower()
+
+    async def test_clear_model_tier_rejects_empty_reason(self):
+        s = self._session_with_queue(sticky_tier=2)
+        tool = make_clear_model_tier_tool(s)
+        result = await tool.executor(_call(
+            "clear_model_tier",
+        ))
+        assert result.success is False
+        assert "reason" in result.error.lower()
 
     async def test_metadata_carries_state(self):
         s = self._session_with_queue()

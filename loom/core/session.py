@@ -1225,8 +1225,12 @@ class LoomSession:
         # block has no use for this tool and we'd just confuse the agent
         # with options that map to nothing.
         if self._tier_models:
-            from loom.platform.cli.tools import make_request_model_tier_tool
+            from loom.platform.cli.tools import (
+                make_request_model_tier_tool,
+                make_clear_model_tier_tool,
+            )
             self.registry.register(make_request_model_tier_tool(self))
+            self.registry.register(make_clear_model_tier_tool(self))
 
         # Issue #64 Phase B: Register unload_skill tool
         from loom.platform.cli.tools import make_unload_skill_tool
