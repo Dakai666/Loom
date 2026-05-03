@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
@@ -94,16 +93,10 @@ def classify_source(source: str | None) -> tuple[str, float]:
     return "unknown", TRUST_TIERS["unknown"]
 
 
-_DEFAULT_HALF_LIFE_DAYS = 90.0  # confidence halves after this many days of no update
-
-
-def _effective_confidence(confidence: float, updated_at: datetime,
-                           half_life_days: float = _DEFAULT_HALF_LIFE_DAYS) -> float:
-    """Exponential decay: confidence * 2^(-days_since_update / half_life).
-    Returns at least 0.01 so a stale entry is never completely invisible."""
-    days = (datetime.now(UTC) - updated_at).total_seconds() / 86400.0
-    decayed = confidence * math.pow(2.0, -days / half_life_days)
-    return max(0.01, round(decayed, 4))
+# Memory Lifecycle (issue #281 P2): half-life is now (domain × temporal)
+# in loom/core/memory/lifecycle.py. The legacy ``_DEFAULT_HALF_LIFE_DAYS``
+# constant + module-level ``_effective_confidence`` helper were removed —
+# all callers go through ``MemoryLifecycle`` or the dataclass method below.
 
 
 @dataclass
@@ -125,9 +118,19 @@ class SemanticEntry:
         self.domain = normalize_domain(self.domain)
         self.temporal = normalize_temporal(self.temporal)
 
-    def effective_confidence(self, half_life_days: float = _DEFAULT_HALF_LIFE_DAYS) -> float:
-        """Time-decayed confidence score."""
-        return _effective_confidence(self.confidence, self.updated_at, half_life_days)
+    def effective_confidence(self) -> float:
+        """Time-decayed confidence using the (domain, temporal) half-life.
+
+        See :mod:`loom.core.memory.lifecycle` for the half-life table.
+        """
+        from loom.core.memory.lifecycle import effective_confidence
+        return effective_confidence(
+            confidence=self.confidence,
+            updated_at=self.updated_at,
+            last_accessed_at=self.last_accessed_at,
+            domain=self.domain,
+            temporal=self.temporal,
+        )
 
 
 _SELECT_COLS = (
@@ -352,40 +355,34 @@ class SemanticMemory:
         threshold: float = 0.1,
         dry_run: bool = False,
     ) -> dict:
-        """
-        Delete semantic entries whose effective_confidence has decayed below *threshold*.
+        """Run one decay+demote cycle on the semantic table only.
 
-        Effective confidence = stored_confidence × 2^(-days_since_update / half_life).
-        A 90-day half-life means:
-          - confidence=0.8 → drops below 0.1 after ~282 days of no update
-          - confidence=1.0 → drops below 0.1 after ~299 days of no update
+        Delegates to :class:`MemoryLifecycle` — half-life is determined per
+        ``(domain, temporal)`` (see ``lifecycle._HALF_LIFE_TABLE``) rather
+        than the legacy single-90d value. Two-stage transition: rows with
+        ``temporal='recent'`` whose effective_confidence has fallen below
+        ``threshold`` are demoted to ``archived`` (preserved for second-
+        chance recall); rows already ``archived`` and still below threshold
+        are deleted.
 
-        Returns a dict: {examined, pruned, threshold, dry_run}
-        If dry_run=True the query runs but nothing is deleted.
+        Returns the same dict shape callers expect (``examined`` / ``pruned``
+        / ``retained``), where ``pruned`` totals archived + deleted so the
+        ``memory_prune`` tool's output stays meaningful.
         """
-        cursor = await self._db.execute(
-            "SELECT key, confidence, updated_at FROM semantic_entries"
+        from loom.core.memory.lifecycle import MemoryLifecycle
+
+        cycle = MemoryLifecycle(self._db, threshold=threshold)
+        examined, archived, deleted = await cycle.run_for_table(
+            "semantic_entries", dry_run=dry_run,
         )
-        rows = await cursor.fetchall()
-
-        to_prune: list[str] = []
-        for key, confidence, updated_at_str in rows:
-            updated_at = datetime.fromisoformat(updated_at_str)
-            if _effective_confidence(confidence, updated_at) < threshold:
-                to_prune.append(key)
-
-        if not dry_run and to_prune:
-            placeholders = ",".join("?" * len(to_prune))
-            await self._db.execute(
-                f"DELETE FROM semantic_entries WHERE key IN ({placeholders})",
-                to_prune,
-            )
-            await self._db.commit()
+        pruned = archived + deleted
 
         return {
-            "examined": len(rows),
-            "pruned": len(to_prune),
-            "retained": len(rows) - len(to_prune),
+            "examined": examined,
+            "pruned": pruned,
+            "archived": archived,
+            "deleted": deleted,
+            "retained": examined - pruned,
             "threshold": threshold,
             "dry_run": dry_run,
         }

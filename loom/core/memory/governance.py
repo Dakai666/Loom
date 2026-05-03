@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
@@ -77,15 +76,27 @@ class AdmissionResult:
 
 @dataclass
 class DecayCycleResult:
-    """Summary of a periodic decay/prune cycle."""
+    """Summary of a periodic decay/prune cycle.
+
+    Memory Lifecycle (issue #281 P2) introduces a two-stage transition:
+    rows can be **archived** (demoted to second-chance state) before being
+    **deleted**. ``*_pruned`` totals archived + deleted so legacy callers
+    keep a single number; ``*_archived`` is exposed for richer reporting.
+    """
     semantic_pruned: int
     episodic_pruned: int
     relational_pruned: int
     total_examined: int
+    semantic_archived: int = 0
+    relational_archived: int = 0
 
     @property
     def total_pruned(self) -> int:
         return self.semantic_pruned + self.episodic_pruned + self.relational_pruned
+
+    @property
+    def total_archived(self) -> int:
+        return self.semantic_archived + self.relational_archived
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +139,10 @@ class MemoryGovernor:
         self._admission_threshold: float = cfg.get("admission_threshold", 0.5)
         self._episodic_ttl_days: int = cfg.get("episodic_ttl_days", 30)
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
-        self._relational_decay_factor: float = cfg.get("relational_decay_factor", 1.5)
+        # Note: ``relational_decay_factor`` is no longer used — Memory
+        # Lifecycle (issue #281 P2) computes per-domain half-lives directly.
+        # Config key stays accepted (and ignored) for backward compatibility
+        # with existing loom.toml entries.
         self._governance_log_write_warning_emitted = False
 
         # Issue #133: memory health tracking for agent self-observability
@@ -331,32 +345,35 @@ class MemoryGovernor:
     async def run_decay_cycle(self) -> DecayCycleResult:
         """Execute periodic decay across all memory types.
 
-        Called at session shutdown (after compression).
+        Called at session shutdown (after compression). Memory Lifecycle
+        (issue #281 P2) drives the semantic + relational paths via a single
+        ``(domain, temporal)`` half-life table; episodic TTL stays here
+        because it's a flat age cutoff, not effective_confidence.
 
-        - **Semantic**: prune entries whose effective_confidence < threshold
-        - **Episodic**: delete entries older than TTL days
-        - **Relational**: decay dreaming-sourced triples with higher factor
+        Fixes issue #299 — relational triples from every source are now
+        examined, not just ``source='dreaming'``.
         """
-        total_examined = 0
+        from loom.core.memory.lifecycle import MemoryLifecycle
 
-        # ── Semantic decay ──────────────────────────────────────────────
-        sem_result = await self._semantic.prune_decayed(
-            threshold=self._semantic_decay_threshold,
-        )
-        semantic_pruned = sem_result.get("pruned", 0)
-        total_examined += sem_result.get("examined", 0)
+        cycle = MemoryLifecycle(self._db, threshold=self._semantic_decay_threshold)
+        lifecycle_result = await cycle.run()
 
-        # ── Episodic TTL ────────────────────────────────────────────────
+        # ── Episodic TTL (still a flat age check, not lifecycle-managed) ──
         episodic_pruned = await self._prune_episodic_ttl()
 
-        # ── Relational decay ────────────────────────────────────────────
-        relational_pruned = await self._prune_relational_decay()
-
         result = DecayCycleResult(
-            semantic_pruned=semantic_pruned,
+            semantic_pruned=(
+                lifecycle_result.semantic_archived + lifecycle_result.semantic_deleted
+            ),
             episodic_pruned=episodic_pruned,
-            relational_pruned=relational_pruned,
-            total_examined=total_examined,
+            relational_pruned=(
+                lifecycle_result.relational_archived + lifecycle_result.relational_deleted
+            ),
+            total_examined=(
+                lifecycle_result.semantic_examined + lifecycle_result.relational_examined
+            ),
+            semantic_archived=lifecycle_result.semantic_archived,
+            relational_archived=lifecycle_result.relational_archived,
         )
 
         if result.total_pruned > 0:
@@ -364,10 +381,12 @@ class MemoryGovernor:
                 "governance:decay",
                 f"Pruned {result.total_pruned} entries",
                 {
-                    "semantic": semantic_pruned,
+                    "semantic_archived": lifecycle_result.semantic_archived,
+                    "semantic_deleted":  lifecycle_result.semantic_deleted,
+                    "relational_archived": lifecycle_result.relational_archived,
+                    "relational_deleted":  lifecycle_result.relational_deleted,
                     "episodic": episodic_pruned,
-                    "relational": relational_pruned,
-                    "examined": total_examined,
+                    "examined": result.total_examined,
                 },
             )
 
@@ -388,56 +407,6 @@ class MemoryGovernor:
         except Exception as exc:
             logger.debug("Episodic TTL prune failed: %s", exc)
             return 0
-
-    async def _prune_relational_decay(self) -> int:
-        """Prune dreaming-sourced relational triples with accelerated decay.
-
-        Dreaming triples use a shorter effective half-life:
-        base_half_life / relational_decay_factor.
-
-        Only triples with source='dreaming' are subject to accelerated decay.
-        """
-        base_half_life = 90.0  # days
-        effective_half_life = base_half_life / self._relational_decay_factor
-
-        try:
-            cursor = await self._db.execute(
-                "SELECT id, confidence, updated_at FROM relational_entries "
-                "WHERE source = 'dreaming'"
-            )
-            rows = await cursor.fetchall()
-        except Exception as exc:
-            logger.debug("Relational decay query failed: %s", exc)
-            return 0
-
-        to_prune: list[str] = []
-        for row_id, confidence, updated_at_str in rows:
-            try:
-                updated_at = datetime.fromisoformat(updated_at_str)
-                days = (datetime.now(UTC) - updated_at).total_seconds() / 86400.0
-                decayed = confidence * math.pow(2.0, -days / effective_half_life)
-                if decayed < self._semantic_decay_threshold:
-                    to_prune.append(row_id)
-            except Exception as exc:
-                logger.debug(
-                    "Relational decay: skipping row %s (parse error): %s",
-                    row_id, exc,
-                )
-                continue
-
-        if to_prune:
-            try:
-                placeholders = ",".join("?" * len(to_prune))
-                await self._db.execute(
-                    f"DELETE FROM relational_entries WHERE id IN ({placeholders})",
-                    to_prune,
-                )
-                await self._db.commit()
-            except Exception as exc:
-                logger.debug("Relational decay delete failed: %s", exc)
-                return 0
-
-        return len(to_prune)
 
     # ------------------------------------------------------------------
     # Audit logging
