@@ -24,11 +24,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 
+from loom.core.memory.classifier import infer_domain
 from loom.core.memory.contradiction import (
     ContradictionDetector,
     Resolution,
 )
 from loom.core.memory.health import MemoryHealthTracker
+from loom.core.memory.ontology import DEFAULT_DOMAIN
 from loom.core.memory.semantic import SemanticEntry, classify_source
 
 if TYPE_CHECKING:
@@ -153,6 +155,15 @@ class MemoryGovernor:
         # (but don't lower an explicitly-set high confidence)
         adjusted = max(entry.confidence, tier_confidence)
         entry.confidence = adjusted
+
+        # Memory Ontology v0.1 (issue #281): if domain is the safe default,
+        # try to upgrade it via the heuristic classifier. We only override
+        # when the classifier finds a more specific axis — explicit
+        # ``knowledge`` from the caller is preserved as-is.
+        if entry.domain == DEFAULT_DOMAIN:
+            inferred = infer_domain(entry.key)
+            if inferred != DEFAULT_DOMAIN:
+                entry.domain = inferred
 
         # Contradiction check
         contradictions = await self._detector.detect(entry)

@@ -40,6 +40,29 @@ def _sanitize_fts(query: str) -> str:
     return " ".join(f'"{t}"' for t in query.replace('"', " ").split() if t)
 
 
+def _axis_filter_sql(
+    domain: str | None,
+    temporal: str | None,
+    prefix: str = "",
+) -> tuple[str, tuple[str, ...]]:
+    """Build a SQL fragment + params for optional (domain, temporal) filters.
+
+    Returns ``("", ())`` when both axes are None — callers can splice the
+    fragment after an existing ``WHERE`` clause without needing to branch
+    on whether any filter was supplied. ``prefix`` is prepended to the
+    column names for queries that join multiple tables (e.g. ``"e."``).
+    """
+    parts: list[str] = []
+    params: list[str] = []
+    if domain:
+        parts.append(f"AND {prefix}domain = ?")
+        params.append(domain)
+    if temporal:
+        parts.append(f"AND {prefix}temporal = ?")
+        params.append(temporal)
+    return (" " + " ".join(parts) if parts else ""), tuple(params)
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -95,6 +118,8 @@ class MemorySearch:
         query: str,
         type: MemoryType = "all",
         limit: int = 5,
+        domain: str | None = None,
+        temporal: str | None = None,
     ) -> list[MemorySearchResult]:
         """
         Return the top-*limit* memory entries most relevant to *query*.
@@ -106,9 +131,13 @@ class MemorySearch:
 
         Parameters
         ----------
-        query:  Natural-language search query.
-        type:   Which memory store(s) to search: "semantic", "skill", or "all".
-        limit:  Maximum number of results to return (across all types).
+        query:    Natural-language search query.
+        type:     Which memory store(s) to search: "semantic", "skill", or "all".
+        limit:    Maximum number of results to return (across all types).
+        domain:   Optional Memory-Ontology axis filter (issue #281). When set,
+                  only semantic entries with this domain are returned. Skills
+                  are unaffected — domain/temporal apply to facts, not skills.
+        temporal: Optional temporal axis filter (same semantics as ``domain``).
         """
         if not query.strip():
             return []
@@ -118,15 +147,20 @@ class MemorySearch:
         # configured.  Any exception (network, API error) falls through to BM25.
         if self._semantic.has_embeddings and type in ("semantic", "all"):
             try:
-                emb_results = await self._search_semantic_embedding(query, limit)
+                emb_results = await self._search_semantic_embedding(
+                    query, limit, domain=domain, temporal=temporal,
+                )
                 if emb_results:
                     # Skills are not embedding-indexed; mix in BM25 skill results
                     if type == "all":
                         skill_results = await self._search_skills(query, limit)
                         combined = emb_results + skill_results
                         combined.sort(key=lambda r: r.score, reverse=True)
-                        return combined[:limit]
-                    return emb_results
+                        ranked = combined[:limit]
+                    else:
+                        ranked = emb_results
+                    await self._mark_accessed(ranked)
+                    return ranked
             except Exception as exc:
                 logger.warning(
                     "Embedding search failed, degrading to BM25: %s", exc,
@@ -137,7 +171,11 @@ class MemorySearch:
         # ── Tier 2: BM25 keyword search ───────────────────────────────────────
         results: list[MemorySearchResult] = []
         if type in ("semantic", "all"):
-            results.extend(await self._search_semantic(query, limit))
+            results.extend(
+                await self._search_semantic(
+                    query, limit, domain=domain, temporal=temporal,
+                )
+            )
         if type in ("skill", "all"):
             results.extend(await self._search_skills(query, limit))
 
@@ -148,10 +186,19 @@ class MemorySearch:
         if not ranked:
             ranked = await self._recent_fallback(type, limit)
 
+        await self._mark_accessed(ranked)
         return ranked
 
+    async def _mark_accessed(self, results: list[MemorySearchResult]) -> None:
+        """Bump last_accessed_at for semantic hits (Memory Ontology v0.1)."""
+        keys = [r.key for r in results if r.type == "semantic"]
+        if keys:
+            await self._semantic.mark_accessed(keys)
+
     async def _search_semantic_embedding(
-        self, query: str, limit: int
+        self, query: str, limit: int,
+        domain: str | None = None,
+        temporal: str | None = None,
     ) -> list[MemorySearchResult]:
         """Rank semantic entries by cosine similarity using sqlite-vec."""
         provider = self._semantic._embeddings
@@ -163,16 +210,17 @@ class MemorySearch:
             return []
         query_vec = query_vectors[0]
 
+        where, axis_params = _axis_filter_sql(domain, temporal)
         cursor = await self._semantic._db.execute(
-            """
+            f"""
             SELECT id, key, value, confidence, source, metadata, created_at, updated_at,
                    1.0 - vec_distance_cosine(embedding, ?) AS score
             FROM semantic_entries
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL{where}
             ORDER BY vec_distance_cosine(embedding, ?) ASC
             LIMIT ?
             """,
-            (json.dumps(query_vec), json.dumps(query_vec), limit)
+            (json.dumps(query_vec), *axis_params, json.dumps(query_vec), limit)
         )
         rows = await cursor.fetchall()
         
@@ -246,28 +294,33 @@ class MemorySearch:
 
     # ------------------------------------------------------------------
 
-    async def _search_semantic(self, query: str, limit: int) -> list[MemorySearchResult]:
+    async def _search_semantic(
+        self, query: str, limit: int,
+        domain: str | None = None,
+        temporal: str | None = None,
+    ) -> list[MemorySearchResult]:
         if not query.strip():
             return []
-            
+
         safe_query = _sanitize_fts(query)
         if not safe_query:
             return []
 
+        where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
         # FTS5 returns negative scores for bm25 by default, smaller = better.
         # We order by rank and return absolute values for positive compatibility.
         cursor = await self._semantic._db.execute(
-            """
+            f"""
             SELECT
                 e.id, e.key, e.value, e.confidence, e.source, e.metadata, e.created_at, e.updated_at,
                 bm25(semantic_fts) AS fts_score
             FROM semantic_fts
             JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
-            WHERE semantic_fts MATCH ?
+            WHERE semantic_fts MATCH ?{where}
             ORDER BY rank
             LIMIT ?
             """,
-            (safe_query, limit)
+            (safe_query, *axis_params, limit)
         )
         rows = await cursor.fetchall()
 

@@ -27,15 +27,20 @@ CREATE TABLE IF NOT EXISTS episodic_entries (
 );
 
 CREATE TABLE IF NOT EXISTS semantic_entries (
-    id          TEXT PRIMARY KEY,
-    key         TEXT UNIQUE NOT NULL,
-    value       TEXT NOT NULL,
-    confidence  REAL NOT NULL DEFAULT 1.0,
-    source      TEXT,
-    metadata    TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    embedding   TEXT            -- JSON float array; NULL until first embed
+    id              TEXT PRIMARY KEY,
+    key             TEXT UNIQUE NOT NULL,
+    value           TEXT NOT NULL,
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    source          TEXT,
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    embedding       TEXT,                                              -- JSON float array; NULL until first embed
+    -- Memory Ontology v0.1 (issue #281): three-axis classification.
+    -- See loom/core/memory/ontology.py for canonical values.
+    domain          TEXT NOT NULL DEFAULT 'knowledge',
+    temporal        TEXT NOT NULL DEFAULT 'recent',
+    last_accessed_at TEXT                                              -- ISO timestamp; updated on recall hit
 );
 
 CREATE TABLE IF NOT EXISTS skill_genomes (
@@ -66,15 +71,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE TABLE IF NOT EXISTS relational_entries (
-    id          TEXT PRIMARY KEY,
-    subject     TEXT NOT NULL,
-    predicate   TEXT NOT NULL,
-    object      TEXT NOT NULL,
-    confidence  REAL NOT NULL DEFAULT 1.0,
-    source      TEXT NOT NULL DEFAULT 'agent',
-    metadata    TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
+    id              TEXT PRIMARY KEY,
+    subject         TEXT NOT NULL,
+    predicate       TEXT NOT NULL,
+    object          TEXT NOT NULL,
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    source          TEXT NOT NULL DEFAULT 'agent',
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    -- Memory Ontology v0.1 (issue #281): three-axis classification.
+    domain          TEXT NOT NULL DEFAULT 'knowledge',
+    temporal        TEXT NOT NULL DEFAULT 'recent',
+    last_accessed_at TEXT,
     UNIQUE(subject, predicate)
 );
 
@@ -262,6 +271,14 @@ class SQLiteStore:
                 # Issue #120 PR 4: fast-track flag bypasses shadow phase when Grader
                 # proves ≥20% pass-rate improvement over the previous version.
                 "ALTER TABLE skill_candidates ADD COLUMN fast_track INTEGER NOT NULL DEFAULT 0",
+                # Memory Ontology v0.1 (issue #281): three-axis classification on
+                # semantic + relational facts. See loom/core/memory/ontology.py.
+                "ALTER TABLE semantic_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
+                "ALTER TABLE semantic_entries ADD COLUMN temporal TEXT NOT NULL DEFAULT 'recent'",
+                "ALTER TABLE semantic_entries ADD COLUMN last_accessed_at TEXT",
+                "ALTER TABLE relational_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
+                "ALTER TABLE relational_entries ADD COLUMN temporal TEXT NOT NULL DEFAULT 'recent'",
+                "ALTER TABLE relational_entries ADD COLUMN last_accessed_at TEXT",
             ]:
                 try:
                     await db.execute(_migration)
@@ -273,6 +290,12 @@ class SQLiteStore:
                 "CREATE INDEX IF NOT EXISTS idx_session_log_role ON session_log(session_id, role)",
                 "CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed "
                 "ON episodic_entries(session_id) WHERE compressed_at IS NULL",
+                # Memory Ontology v0.1 (issue #281): filter by (domain, temporal)
+                # is the primary recall path for axis-aware queries.
+                "CREATE INDEX IF NOT EXISTS idx_semantic_domain_temporal "
+                "ON semantic_entries(domain, temporal)",
+                "CREATE INDEX IF NOT EXISTS idx_relational_domain_temporal "
+                "ON relational_entries(domain, temporal)",
             ]:
                 try:
                     await db.execute(_index_sql)

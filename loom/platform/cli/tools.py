@@ -858,10 +858,14 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     The tool performs BM25-ranked retrieval across semantic facts and
     skills via :meth:`MemoryFacade.search`.
     """
+    from loom.core.memory.ontology import DOMAINS, TEMPORALS
+
     async def _recall(call: ToolCall) -> ToolResult:
         query = call.args.get("query", "").strip()
         mem_type = call.args.get("type", "all")
         limit = min(max(int(call.args.get("limit", 5)), 1), 10)
+        domain = (call.args.get("domain") or "").strip().lower() or None
+        temporal = (call.args.get("temporal") or "").strip().lower() or None
 
         if not query:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -869,8 +873,17 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
 
         if mem_type not in ("semantic", "skill", "all"):
             mem_type = "all"
+        # Drop unknown axis filters silently rather than 400 — keeps the
+        # recall hot path forgiving.
+        if domain and domain not in DOMAINS:
+            domain = None
+        if temporal and temporal not in TEMPORALS:
+            temporal = None
 
-        results = await memory.search(query, kind=mem_type, limit=limit)  # type: ignore[arg-type]
+        results = await memory.search(  # type: ignore[arg-type]
+            query, kind=mem_type, limit=limit,
+            domain=domain, temporal=temporal,
+        )
 
         if not results:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -911,6 +924,22 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     "type": "integer",
                     "description": "Max results to return (1–10, default 5)",
                 },
+                "domain": {
+                    "type": "string",
+                    "enum": ["self", "user", "project", "knowledge"],
+                    "description": (
+                        "Optional Memory-Ontology axis filter — return only "
+                        "facts in this domain. Skills are unaffected."
+                    ),
+                },
+                "temporal": {
+                    "type": "string",
+                    "enum": ["ephemeral", "recent", "milestone", "archived"],
+                    "description": (
+                        "Optional temporal filter — e.g. 'milestone' to find "
+                        "permanent anchors only."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -944,6 +973,11 @@ def make_memorize_tool(
         stay silent (PR-C4 design: governor only speaks when it stops
         something).
     """
+    from loom.core.memory.ontology import (
+        DEFAULT_TEMPORAL,
+        normalize_domain,
+        normalize_temporal,
+    )
     from loom.core.memory.semantic import SemanticEntry
 
     async def _memorize(call: ToolCall) -> ToolResult:
@@ -951,12 +985,24 @@ def make_memorize_tool(
         value = call.args.get("value", "").strip()
         confidence = float(call.args.get("confidence", 0.8))
         confidence = max(0.0, min(1.0, confidence))
+        # Memory Ontology v0.1 (issue #281): three-axis classification.
+        # `domain` is optional in the schema — if missing, governor will
+        # apply the heuristic classifier (loom/core/memory/classifier.py).
+        domain_raw = (call.args.get("domain") or "").strip().lower() or None
+        temporal_raw = (call.args.get("temporal") or DEFAULT_TEMPORAL).strip().lower()
 
         if not key or not value:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="Both 'key' and 'value' are required")
 
-        entry = SemanticEntry(key=key, value=value, confidence=confidence, source="memorize")
+        entry = SemanticEntry(
+            key=key,
+            value=value,
+            confidence=confidence,
+            source="memorize",
+            domain=normalize_domain(domain_raw),
+            temporal=normalize_temporal(temporal_raw),
+        )
         gov_result = await memory.memorize(entry)
 
         if not gov_result.written:
@@ -1051,6 +1097,25 @@ def make_memorize_tool(
                 "confidence": {
                     "type": "number",
                     "description": "Confidence score 0–1 (default 0.8)",
+                },
+                "domain": {
+                    "type": "string",
+                    "enum": ["self", "user", "project", "knowledge"],
+                    "description": (
+                        "Semantic territory of the fact: 'self' (agent identity / "
+                        "principles), 'user' (preferences / relationship), 'project' "
+                        "(architecture / config / workflow), 'knowledge' (external "
+                        "facts / tool usage). Optional — if omitted, inferred from key."
+                    ),
+                },
+                "temporal": {
+                    "type": "string",
+                    "enum": ["ephemeral", "recent", "milestone", "archived"],
+                    "description": (
+                        "Lifecycle state: 'ephemeral' (session-scoped), 'recent' "
+                        "(default — active within ~7d), 'milestone' (permanent "
+                        "anchor; use sparingly), 'archived' (rare on write)."
+                    ),
                 },
             },
             "required": ["key", "value"],
