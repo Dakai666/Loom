@@ -20,12 +20,19 @@ disagreement is a strict comparison.
 
 from __future__ import annotations
 
+import json
+import logging
+import time
+
 from loom.core.memory.ontology import (
     DOMAIN_KNOWLEDGE,
     DOMAIN_PROJECT,
     DOMAIN_SELF,
     DOMAIN_USER,
+    DOMAINS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Lower-cased key prefix → domain.  Order matters only for documentation;
@@ -74,16 +81,6 @@ def infer_domain(key: str | None) -> str:
 # (MiniMax-M2.7 by default). Live `governed_upsert` writes still go through
 # the heuristic ``infer_domain`` above for zero per-write LLM cost.
 # ---------------------------------------------------------------------------
-
-import json
-import logging
-import time
-from typing import Callable
-
-from loom.core.memory.ontology import DOMAINS
-
-logger = logging.getLogger(__name__)
-
 
 _LLM_SYSTEM = """You classify Loom memory facts along the `domain` axis of \
 Memory Ontology v0.1. Return one label per fact from this closed set:
