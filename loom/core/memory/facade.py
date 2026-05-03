@@ -77,6 +77,8 @@ class MemoryFacade:
         query: str,
         kind: Literal["semantic", "skill", "all"] = "all",
         limit: int = 5,
+        domain: str | None = None,
+        temporal: str | None = None,
     ) -> list["MemorySearchResult"]:
         """BM25 + embedding ranked retrieval across semantic + procedural memory.
 
@@ -88,8 +90,14 @@ class MemoryFacade:
         backend to hit: ``"semantic"`` facts only, ``"skill"`` for
         procedural skills only, or ``"all"`` (default).  Renamed to
         avoid shadowing the ``type`` builtin.
+
+        ``domain`` and ``temporal`` are optional Memory-Ontology filters
+        (issue #281) — see :meth:`MemorySearch.recall` for semantics.
         """
-        return await self.search_index.recall(query, type=kind, limit=limit)
+        return await self.search_index.recall(
+            query, type=kind, limit=limit,
+            domain=domain, temporal=temporal,
+        )
 
     async def get_fact(self, key: str) -> "SemanticEntry | None":
         """Direct semantic-memory lookup by exact key."""

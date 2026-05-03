@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 import aiosqlite
 
+from loom.core.memory.ontology import (
+    DEFAULT_DOMAIN,
+    DEFAULT_TEMPORAL,
+    normalize_domain,
+    normalize_temporal,
+)
+
 if TYPE_CHECKING:
     from loom.core.memory.embeddings import EmbeddingProvider
 
@@ -109,10 +116,41 @@ class SemanticEntry:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # Memory Ontology v0.1 (issue #281)
+    domain: str = DEFAULT_DOMAIN
+    temporal: str = DEFAULT_TEMPORAL
+    last_accessed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.domain = normalize_domain(self.domain)
+        self.temporal = normalize_temporal(self.temporal)
 
     def effective_confidence(self, half_life_days: float = _DEFAULT_HALF_LIFE_DAYS) -> float:
         """Time-decayed confidence score."""
         return _effective_confidence(self.confidence, self.updated_at, half_life_days)
+
+
+_SELECT_COLS = (
+    "id, key, value, confidence, source, metadata, created_at, updated_at, "
+    "domain, temporal, last_accessed_at"
+)
+
+
+def _row_to_entry(row: tuple) -> SemanticEntry:
+    """Build a SemanticEntry from a row that follows ``_SELECT_COLS`` ordering."""
+    return SemanticEntry(
+        id=row[0],
+        key=row[1],
+        value=row[2],
+        confidence=row[3],
+        source=row[4],
+        metadata=json.loads(row[5]),
+        created_at=datetime.fromisoformat(row[6]),
+        updated_at=datetime.fromisoformat(row[7]),
+        domain=row[8],
+        temporal=row[9],
+        last_accessed_at=datetime.fromisoformat(row[10]) if row[10] else None,
+    )
 
 
 class SemanticMemory:
@@ -166,14 +204,17 @@ class SemanticMemory:
         await self._db.execute(
             """
             INSERT INTO semantic_entries
-                (id, key, value, confidence, source, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, key, value, confidence, source, metadata, created_at, updated_at,
+                 domain, temporal, last_accessed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value      = excluded.value,
                 confidence = excluded.confidence,
                 source     = excluded.source,
                 metadata   = excluded.metadata,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                domain     = excluded.domain,
+                temporal   = excluded.temporal
             """,
             (
                 entry.id,
@@ -184,6 +225,9 @@ class SemanticMemory:
                 json.dumps(merged_metadata, ensure_ascii=False),
                 entry.created_at.isoformat(),
                 now,
+                entry.domain,
+                entry.temporal,
+                entry.last_accessed_at.isoformat() if entry.last_accessed_at else None,
             ),
         )
         await self._db.commit()
@@ -228,36 +272,20 @@ class SemanticMemory:
 
     async def get(self, key: str) -> SemanticEntry | None:
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
-            "FROM semantic_entries WHERE key = ?",
+            f"SELECT {_SELECT_COLS} FROM semantic_entries WHERE key = ?",
             (key,),
         )
         row = await cursor.fetchone()
-        if not row:
-            return None
-        return SemanticEntry(
-            id=row[0], key=row[1], value=row[2], confidence=row[3],
-            source=row[4], metadata=json.loads(row[5]),
-            created_at=datetime.fromisoformat(row[6]),
-            updated_at=datetime.fromisoformat(row[7]),
-        )
+        return _row_to_entry(row) if row else None
 
     async def list_recent(self, limit: int = 20) -> list[SemanticEntry]:
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
-            "FROM semantic_entries ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT {_SELECT_COLS} FROM semantic_entries "
+            "ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
-        return [
-            SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            for r in rows
-        ]
+        return [_row_to_entry(r) for r in rows]
 
     async def get_random(self, limit: int = 15) -> list[SemanticEntry]:
         """
@@ -268,20 +296,11 @@ class SemanticMemory:
         for typical Loom memory sizes (< 50k rows).
         """
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
-            "FROM semantic_entries ORDER BY RANDOM() LIMIT ?",
+            f"SELECT {_SELECT_COLS} FROM semantic_entries ORDER BY RANDOM() LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
-        return [
-            SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            for r in rows
-        ]
+        return [_row_to_entry(r) for r in rows]
 
     async def list_with_embeddings(
         self, limit: int = 500
@@ -292,41 +311,27 @@ class SemanticMemory:
         Used by MemorySearch for cosine-similarity ranking.
         """
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, "
-            "created_at, updated_at, embedding "
-            "FROM semantic_entries ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT {_SELECT_COLS}, embedding FROM semantic_entries "
+            "ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
         result: list[tuple[SemanticEntry, list[float] | None]] = []
         for r in rows:
-            entry = SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            vector: list[float] | None = json.loads(r[8]) if r[8] else None
+            entry = _row_to_entry(r[:11])
+            vector: list[float] | None = json.loads(r[11]) if r[11] else None
             result.append((entry, vector))
         return result
 
     async def search(self, query: str, limit: int = 10) -> list[SemanticEntry]:
         """Simple substring search — full-text search can be added later."""
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
-            "FROM semantic_entries WHERE value LIKE ? ORDER BY confidence DESC LIMIT ?",
+            f"SELECT {_SELECT_COLS} FROM semantic_entries "
+            "WHERE value LIKE ? ORDER BY confidence DESC LIMIT ?",
             (f"%{query}%", limit),
         )
         rows = await cursor.fetchall()
-        return [
-            SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            for r in rows
-        ]
+        return [_row_to_entry(r) for r in rows]
 
     async def list_by_prefix(self, prefix: str, limit: int = 10) -> list[SemanticEntry]:
         """Return entries whose key starts with *prefix*, newest first.
@@ -335,20 +340,12 @@ class SemanticMemory:
         ``skill:<name>:evolution_hint:*`` without full-text search overhead.
         """
         cursor = await self._db.execute(
-            "SELECT id, key, value, confidence, source, metadata, created_at, updated_at "
-            "FROM semantic_entries WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?",
+            f"SELECT {_SELECT_COLS} FROM semantic_entries "
+            "WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?",
             (f"{prefix}%", limit),
         )
         rows = await cursor.fetchall()
-        return [
-            SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            for r in rows
-        ]
+        return [_row_to_entry(r) for r in rows]
 
     async def prune_decayed(
         self,
@@ -420,4 +417,23 @@ class SemanticMemory:
         )
         await self._db.commit()
         return (cursor.rowcount or 0) > 0
+
+    async def mark_accessed(self, keys: list[str]) -> None:
+        """Bump ``last_accessed_at`` for the given keys (Memory Ontology v0.1).
+
+        Called by :class:`MemorySearch` after a successful recall so the
+        decay cycle can distinguish facts that are still in active use from
+        those drifting toward archived state. Silent no-op for empty keys
+        list — recall hot path stays cheap.
+        """
+        if not keys:
+            return
+        now = datetime.now(UTC).isoformat()
+        placeholders = ",".join("?" * len(keys))
+        await self._db.execute(
+            f"UPDATE semantic_entries SET last_accessed_at = ? "
+            f"WHERE key IN ({placeholders})",
+            (now, *keys),
+        )
+        await self._db.commit()
 

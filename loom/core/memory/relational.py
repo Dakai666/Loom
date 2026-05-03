@@ -25,6 +25,13 @@ from typing import Any
 
 import aiosqlite
 
+from loom.core.memory.ontology import (
+    DEFAULT_DOMAIN,
+    DEFAULT_TEMPORAL,
+    normalize_domain,
+    normalize_temporal,
+)
+
 
 # ---------------------------------------------------------------------------
 # Data class
@@ -42,6 +49,20 @@ class RelationalEntry:
     id:        str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # Memory Ontology v0.1 (issue #281)
+    domain:    str = DEFAULT_DOMAIN
+    temporal:  str = DEFAULT_TEMPORAL
+    last_accessed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        self.domain = normalize_domain(self.domain)
+        self.temporal = normalize_temporal(self.temporal)
+
+
+_SELECT_COLS = (
+    "id, subject, predicate, object, confidence, source, metadata, "
+    "created_at, updated_at, domain, temporal, last_accessed_at"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -66,14 +87,16 @@ class RelationalMemory:
             """
             INSERT INTO relational_entries
                 (id, subject, predicate, object, confidence, source, metadata,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, updated_at, domain, temporal, last_accessed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(subject, predicate) DO UPDATE SET
                 object     = excluded.object,
                 confidence = excluded.confidence,
                 source     = excluded.source,
                 metadata   = excluded.metadata,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                domain     = excluded.domain,
+                temporal   = excluded.temporal
             """,
             (
                 entry.id,
@@ -85,6 +108,9 @@ class RelationalMemory:
                 json.dumps(entry.metadata, ensure_ascii=False),
                 entry.created_at.isoformat(),
                 now,
+                entry.domain,
+                entry.temporal,
+                entry.last_accessed_at.isoformat() if entry.last_accessed_at else None,
             ),
         )
         await self._db.commit()
@@ -92,9 +118,8 @@ class RelationalMemory:
     async def get(self, subject: str, predicate: str) -> RelationalEntry | None:
         """Return the entry for (subject, predicate), or None."""
         cursor = await self._db.execute(
-            "SELECT id, subject, predicate, object, confidence, source, metadata, "
-            "created_at, updated_at "
-            "FROM relational_entries WHERE subject = ? AND predicate = ?",
+            f"SELECT {_SELECT_COLS} FROM relational_entries "
+            "WHERE subject = ? AND predicate = ?",
             (subject, predicate),
         )
         row = await cursor.fetchone()
@@ -113,32 +138,19 @@ class RelationalMemory:
         Pass both for an exact lookup (same as ``get()`` but returns a list).
         Pass neither to return all entries.
         """
+        base = f"SELECT {_SELECT_COLS} FROM relational_entries"
+        params: tuple[str, ...]
         if subject and predicate:
-            sql = (
-                "SELECT id, subject, predicate, object, confidence, source, metadata, "
-                "created_at, updated_at FROM relational_entries "
-                "WHERE subject = ? AND predicate = ? ORDER BY updated_at DESC"
-            )
+            sql = f"{base} WHERE subject = ? AND predicate = ? ORDER BY updated_at DESC"
             params = (subject, predicate)
         elif subject:
-            sql = (
-                "SELECT id, subject, predicate, object, confidence, source, metadata, "
-                "created_at, updated_at FROM relational_entries "
-                "WHERE subject = ? ORDER BY updated_at DESC"
-            )
+            sql = f"{base} WHERE subject = ? ORDER BY updated_at DESC"
             params = (subject,)
         elif predicate:
-            sql = (
-                "SELECT id, subject, predicate, object, confidence, source, metadata, "
-                "created_at, updated_at FROM relational_entries "
-                "WHERE predicate = ? ORDER BY updated_at DESC"
-            )
+            sql = f"{base} WHERE predicate = ? ORDER BY updated_at DESC"
             params = (predicate,)
         else:
-            sql = (
-                "SELECT id, subject, predicate, object, confidence, source, metadata, "
-                "created_at, updated_at FROM relational_entries ORDER BY updated_at DESC"
-            )
+            sql = f"{base} ORDER BY updated_at DESC"
             params = ()
 
         cursor = await self._db.execute(sql, params)
@@ -171,4 +183,7 @@ class RelationalMemory:
             metadata=json.loads(row[6]),
             created_at=datetime.fromisoformat(row[7]),
             updated_at=datetime.fromisoformat(row[8]),
+            domain=row[9],
+            temporal=row[10],
+            last_accessed_at=datetime.fromisoformat(row[11]) if row[11] else None,
         )
