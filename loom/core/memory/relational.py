@@ -139,9 +139,10 @@ class RelationalMemory:
         Pass neither to return all entries.
         """
         base = f"SELECT {_SELECT_COLS} FROM relational_entries"
+        params: tuple[str, ...]
         if subject and predicate:
             sql = f"{base} WHERE subject = ? AND predicate = ? ORDER BY updated_at DESC"
-            params: tuple = (subject, predicate)
+            params = (subject, predicate)
         elif subject:
             sql = f"{base} WHERE subject = ? ORDER BY updated_at DESC"
             params = (subject,)

@@ -31,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 from loom.core.memory.embeddings import cosine_similarity
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.semantic import SemanticMemory
+from loom.core.memory.semantic import (
+    SemanticMemory,
+    _SELECT_COLS as _SEMANTIC_SELECT_COLS,
+    _row_to_entry as _semantic_row_to_entry,
+)
 
 
 def _sanitize_fts(query: str) -> str:
@@ -213,7 +217,7 @@ class MemorySearch:
         where, axis_params = _axis_filter_sql(domain, temporal)
         cursor = await self._semantic._db.execute(
             f"""
-            SELECT id, key, value, confidence, source, metadata, created_at, updated_at,
+            SELECT {_SEMANTIC_SELECT_COLS},
                    1.0 - vec_distance_cosine(embedding, ?) AS score
             FROM semantic_entries
             WHERE embedding IS NOT NULL{where}
@@ -223,18 +227,12 @@ class MemorySearch:
             (json.dumps(query_vec), *axis_params, json.dumps(query_vec), limit)
         )
         rows = await cursor.fetchall()
-        
-        from loom.core.memory.semantic import SemanticEntry
 
         results: list[MemorySearchResult] = []
         for r in rows:
-            entry = SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
-            score = r[8]
+            # _SELECT_COLS produces 11 columns; index 11 holds the score.
+            entry = _semantic_row_to_entry(r[:11])
+            score = r[11]
             if score > 0.0:
                 results.append(
                     MemorySearchResult(
@@ -307,12 +305,16 @@ class MemorySearch:
             return []
 
         where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
+        # SELECT mirrors _SEMANTIC_SELECT_COLS aliased onto the joined table
+        # so _semantic_row_to_entry can parse rows uniformly with the
+        # embedding path.
+        select_cols = ", ".join(f"e.{c.strip()}" for c in _SEMANTIC_SELECT_COLS.split(","))
         # FTS5 returns negative scores for bm25 by default, smaller = better.
         # We order by rank and return absolute values for positive compatibility.
         cursor = await self._semantic._db.execute(
             f"""
             SELECT
-                e.id, e.key, e.value, e.confidence, e.source, e.metadata, e.created_at, e.updated_at,
+                {select_cols},
                 bm25(semantic_fts) AS fts_score
             FROM semantic_fts
             JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
@@ -324,17 +326,11 @@ class MemorySearch:
         )
         rows = await cursor.fetchall()
 
-        from loom.core.memory.semantic import SemanticEntry
         results: list[MemorySearchResult] = []
         for r in rows:
-            entry = SemanticEntry(
-                id=r[0], key=r[1], value=r[2], confidence=r[3],
-                source=r[4], metadata=json.loads(r[5]),
-                created_at=datetime.fromisoformat(r[6]),
-                updated_at=datetime.fromisoformat(r[7]),
-            )
+            entry = _semantic_row_to_entry(r[:11])
             # Convert negative rank to positive score
-            score = abs(r[8]) if r[8] else 0.0
+            score = abs(r[11]) if r[11] else 0.0
             results.append(
                 MemorySearchResult(
                     type="semantic",
