@@ -58,6 +58,22 @@ class RelationalEntry:
         self.domain = normalize_domain(self.domain)
         self.temporal = normalize_temporal(self.temporal)
 
+    def effective_confidence(self) -> float:
+        """Time-decayed confidence using the (domain, temporal) half-life.
+
+        Issue #299 — relational triples now decay across all sources, not
+        just ``source='dreaming'``. See :mod:`loom.core.memory.lifecycle`
+        for the half-life table.
+        """
+        from loom.core.memory.lifecycle import effective_confidence
+        return effective_confidence(
+            confidence=self.confidence,
+            updated_at=self.updated_at,
+            last_accessed_at=self.last_accessed_at,
+            domain=self.domain,
+            temporal=self.temporal,
+        )
+
 
 _SELECT_COLS = (
     "id, subject, predicate, object, confidence, source, metadata, "
