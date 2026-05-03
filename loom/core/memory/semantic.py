@@ -372,16 +372,9 @@ class SemanticMemory:
         from loom.core.memory.lifecycle import MemoryLifecycle
 
         cycle = MemoryLifecycle(self._db, threshold=threshold)
-        # Run only the semantic side. Implementation invokes both private
-        # methods on the semantic_entries table — keeps relational decay
-        # owned by MemoryGovernor.run_decay_cycle.
-        examined_d, deleted = await cycle._process_table_delete(
+        examined, archived, deleted = await cycle.run_for_table(
             "semantic_entries", dry_run=dry_run,
         )
-        examined_a, archived = await cycle._process_table_demote(
-            "semantic_entries", dry_run=dry_run,
-        )
-        examined = examined_d + examined_a
         pruned = archived + deleted
 
         return {

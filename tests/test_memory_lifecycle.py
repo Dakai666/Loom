@@ -196,6 +196,35 @@ class TestSemanticTransitions:
         assert (await semantic.get("doomed")) is None
 
     @pytest.mark.asyncio
+    async def test_knowledge_milestone_demotes_when_truly_stale(
+        self, db_conn, memories,
+    ):
+        """B1 from PR #304 review: knowledge/milestone has 365d half-life,
+        so a *very* old knowledge/milestone fact must eventually transition
+        through archived → deleted via the normal pipeline. Earlier code
+        excluded ALL milestones from demote, breaking this design intent."""
+        semantic, *_ = memories
+        # 5000d is enough for 365d half-life to drop confidence well below
+        # the 0.1 threshold (1.0 * 2^(-5000/365) ≈ 1e-4).
+        ancient = (datetime.now(UTC) - timedelta(days=5000)).isoformat()
+        await db_conn.execute(
+            "INSERT INTO semantic_entries (id, key, value, confidence, source, "
+            "metadata, created_at, updated_at, domain, temporal) "
+            "VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)",
+            ("kmile", "stale_external", "outdated knowledge", 1.0, "manual",
+             ancient, ancient, DOMAIN_KNOWLEDGE, TEMPORAL_MILESTONE),
+        )
+        await db_conn.commit()
+
+        result = await MemoryLifecycle(db_conn).run()
+        assert result.semantic_archived == 1, (
+            "knowledge/milestone with 365d half-life MUST be demotable "
+            "once eff_conf < threshold — otherwise the 365d entry in "
+            "_HALF_LIFE_TABLE is meaningless"
+        )
+        assert (await semantic.get("stale_external")).temporal == TEMPORAL_ARCHIVED
+
+    @pytest.mark.asyncio
     async def test_milestone_self_survives_extreme_age(self, db_conn, memories):
         semantic, *_ = memories
         ancient = (datetime.now(UTC) - timedelta(days=10_000)).isoformat()

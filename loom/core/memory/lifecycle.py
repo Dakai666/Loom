@@ -56,18 +56,19 @@ logger = logging.getLogger(__name__)
 # was 60d, raised to 90d so legacy LLM-classified rows don't decay aggressively
 # while we wait for explicit re-classification on touch.
 
-_INF = math.inf
-
 _HALF_LIFE_TABLE: dict[tuple[str, str], float] = {
     # recent — actively used facts
     (DOMAIN_SELF,      TEMPORAL_RECENT):    180.0,
     (DOMAIN_USER,      TEMPORAL_RECENT):     90.0,
     (DOMAIN_PROJECT,   TEMPORAL_RECENT):     90.0,
     (DOMAIN_KNOWLEDGE, TEMPORAL_RECENT):     90.0,  # was 60 — N1 concession
-    # milestone — permanent anchors; only knowledge can ever expire
-    (DOMAIN_SELF,      TEMPORAL_MILESTONE): _INF,
-    (DOMAIN_USER,      TEMPORAL_MILESTONE): _INF,
-    (DOMAIN_PROJECT,   TEMPORAL_MILESTONE): _INF,
+    # milestone — permanent anchors. self/user/project never expire (inf
+    # half-life ⇒ effective_confidence stays at original value forever).
+    # knowledge/milestone has 365d so an outdated external fact eventually
+    # transitions through archived → deleted via the normal threshold path.
+    (DOMAIN_SELF,      TEMPORAL_MILESTONE): math.inf,
+    (DOMAIN_USER,      TEMPORAL_MILESTONE): math.inf,
+    (DOMAIN_PROJECT,   TEMPORAL_MILESTONE): math.inf,
     (DOMAIN_KNOWLEDGE, TEMPORAL_MILESTONE): 365.0,
     # archived — second-chance state; shorter half-lives so unused rows
     # progress to delete in a reasonable window
@@ -91,6 +92,14 @@ def half_life_for(domain: str, temporal: str) -> float:
     return _HALF_LIFE_TABLE.get((domain, temporal), _FALLBACK_HALF_LIFE)
 
 
+def _decay_factor(half_life: float, days: float) -> float:
+    """Standalone helper for tests/auditing — exposes the math separately
+    from the time-anchor logic in :func:`effective_confidence`."""
+    if half_life == math.inf:
+        return 1.0
+    return math.pow(2.0, -days / half_life)
+
+
 def effective_confidence(
     confidence: float,
     updated_at: datetime,
@@ -106,13 +115,13 @@ def effective_confidence(
     visible to audits.
     """
     half = half_life_for(domain, temporal)
-    if half == _INF:
+    if half == math.inf:
         return confidence
     anchor = updated_at
     if last_accessed_at is not None and last_accessed_at > anchor:
         anchor = last_accessed_at
     days = (datetime.now(UTC) - anchor).total_seconds() / 86400.0
-    decayed = confidence * math.pow(2.0, -days / half)
+    decayed = confidence * _decay_factor(half, days)
     return max(0.01, round(decayed, 4))
 
 
@@ -160,6 +169,27 @@ class MemoryLifecycle:
     ) -> None:
         self._db = db
         self._threshold = threshold
+
+    async def run_for_table(
+        self,
+        table: str,
+        dry_run: bool = False,
+        key_col: str = "key",
+    ) -> tuple[int, int, int]:
+        """Run delete + demote on a single table. Public entry point used
+        by :meth:`SemanticMemory.prune_decayed` so the legacy ``memory_prune``
+        CLI tool stays narrowly-scoped to one table without reaching into
+        ``MemoryLifecycle``'s private helpers.
+
+        Returns ``(examined, archived, deleted)``.
+        """
+        examined_d, deleted = await self._process_table_delete(
+            table, dry_run=dry_run, key_col=key_col,
+        )
+        examined_a, archived = await self._process_table_demote(
+            table, dry_run=dry_run, key_col=key_col,
+        )
+        return examined_d + examined_a, archived, deleted
 
     async def run(self, dry_run: bool = False) -> LifecycleResult:
         """Run one full lifecycle cycle. Returns counts; never raises."""
@@ -246,10 +276,14 @@ class MemoryLifecycle:
         dry_run: bool,
         key_col: str = "key",
     ) -> tuple[int, int]:
-        """Demote recent rows whose effective_confidence has fallen below
-        threshold to ``temporal='archived'``. Milestone rows are skipped
-        because their half-life is infinity (or 365d for knowledge —
-        which delays the demote rather than skipping it).
+        """Demote rows whose effective_confidence has fallen below threshold
+        to ``temporal='archived'``. Both ``recent`` and ``milestone`` rows
+        are examined — but ``effective_confidence`` returns the original
+        confidence unchanged for self/user/project milestone (inf half-life),
+        so they never cross the threshold and never get demoted. Only
+        ``knowledge/milestone`` (365d half-life) can eventually demote,
+        which is the design intent — outdated external knowledge expires
+        through the normal pipeline instead of accumulating forever.
 
         Returns (examined, demoted)."""
         cursor = await self._db.execute(
@@ -277,9 +311,7 @@ class MemoryLifecycle:
             except Exception as exc:
                 logger.debug("lifecycle: skip %s row %r (%s)", table, row[0], exc)
                 continue
-            # Milestone rows demote only if knowledge — others have inf half-life
-            # so eff stays at original confidence (well above threshold).
-            if eff < self._threshold and row[5] != TEMPORAL_MILESTONE:
+            if eff < self._threshold:
                 to_demote.append(row[0])
 
         if to_demote and not dry_run:
