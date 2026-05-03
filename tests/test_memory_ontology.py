@@ -13,7 +13,11 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from loom.core.memory.classifier import infer_domain
+from loom.core.memory.classifier import (
+    LLMDomainClassifier,
+    _parse_llm_response,
+    infer_domain,
+)
 from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.ontology import (
@@ -113,6 +117,91 @@ class TestClassifier:
     def test_infer_domain_is_case_insensitive(self):
         assert infer_domain("USER:prefers:bar") == DOMAIN_USER
         assert infer_domain("Project:Loom:Foo") == DOMAIN_PROJECT
+
+
+class TestLLMResponseParsing:
+    def test_clean_json(self):
+        raw = '{"results": [{"i": 0, "d": "self"}, {"i": 1, "d": "user"}]}'
+        assert _parse_llm_response(raw, 2) == [DOMAIN_SELF, DOMAIN_USER]
+
+    def test_strips_markdown_fences(self):
+        raw = '```json\n{"results": [{"i": 0, "d": "project"}]}\n```'
+        assert _parse_llm_response(raw, 1) == [DOMAIN_PROJECT]
+
+    def test_recovers_from_leading_prose(self):
+        raw = 'Here you go: {"results": [{"i": 0, "d": "user"}]}'
+        assert _parse_llm_response(raw, 1) == [DOMAIN_USER]
+
+    def test_invalid_json_falls_back_to_default(self):
+        raw = "this is not json"
+        assert _parse_llm_response(raw, 3) == [DOMAIN_KNOWLEDGE] * 3
+
+    def test_empty_response_falls_back(self):
+        assert _parse_llm_response("", 2) == [DOMAIN_KNOWLEDGE] * 2
+
+    def test_partial_results_filled_with_default(self):
+        # Model answered for index 0 only, index 1 should stay default
+        raw = '{"results": [{"i": 0, "d": "self"}]}'
+        assert _parse_llm_response(raw, 2) == [DOMAIN_SELF, DOMAIN_KNOWLEDGE]
+
+    def test_unknown_domain_in_response_dropped(self):
+        raw = '{"results": [{"i": 0, "d": "garbage"}, {"i": 1, "d": "self"}]}'
+        assert _parse_llm_response(raw, 2) == [DOMAIN_KNOWLEDGE, DOMAIN_SELF]
+
+    def test_out_of_range_index_ignored(self):
+        # Model invented index 99 — must not crash, must not mutate
+        raw = '{"results": [{"i": 99, "d": "self"}, {"i": 0, "d": "user"}]}'
+        assert _parse_llm_response(raw, 2) == [DOMAIN_USER, DOMAIN_KNOWLEDGE]
+
+
+class TestLLMClassifierBatching:
+    """Verify the classifier orchestrates router calls and concurrency
+    correctly without actually hitting an LLM."""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_caps_in_flight_calls(self):
+        import asyncio
+
+        max_in_flight = 0
+        in_flight = 0
+
+        class FakeRouter:
+            async def chat(self, model, messages, max_tokens):
+                nonlocal max_in_flight, in_flight
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+                await asyncio.sleep(0.05)
+                in_flight -= 1
+
+                class R:
+                    text = '{"results": [{"i": 0, "d": "self"}]}'
+                return R()
+
+        clf = LLMDomainClassifier(FakeRouter(), batch_size=1, concurrency=3)
+        items = [(f"k{i}", f"v{i}") for i in range(10)]
+        out = await clf.classify_batch(items)
+        assert len(out) == 10
+        assert max_in_flight <= 3
+
+    @pytest.mark.asyncio
+    async def test_chunk_failure_falls_back_to_default(self):
+        class FailingRouter:
+            calls = 0
+
+            async def chat(self, model, messages, max_tokens):
+                FailingRouter.calls += 1
+                if FailingRouter.calls == 1:
+                    raise RuntimeError("simulated network blip")
+
+                class R:
+                    text = '{"results": [{"i": 0, "d": "self"}]}'
+                return R()
+
+        clf = LLMDomainClassifier(FailingRouter(), batch_size=1, concurrency=1)
+        items = [("k1", "v1"), ("k2", "v2")]
+        out = await clf.classify_batch(items)
+        # First chunk fell back to DEFAULT_DOMAIN, second succeeded
+        assert out == [DOMAIN_KNOWLEDGE, DOMAIN_SELF]
 
 
 class TestDataclassNormalization:
