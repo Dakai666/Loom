@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     import aiosqlite
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.procedural import ProceduralMemory
+    from loom.core.memory.pulse import MemoryPulse
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.semantic import SemanticMemory
 
@@ -152,6 +153,15 @@ class MemoryGovernor:
         # Issue #133: memory health tracking for agent self-observability
         self.health = MemoryHealthTracker(db, session_id=session_id)
 
+        # Issue #281 P3 Hook A — late-bound by LoomSession.start() once the
+        # MemoryPulse is constructed (depends on _pending_pulses buffer).
+        # Optional: governor stays usable in tests / non-session contexts.
+        self._pulse: "MemoryPulse | None" = None
+
+    def set_pulse(self, pulse: "MemoryPulse | None") -> None:
+        """Wire the MemoryPulse for Hook A contradiction notices."""
+        self._pulse = pulse
+
     # ------------------------------------------------------------------
     # 1. Governed upsert
     # ------------------------------------------------------------------
@@ -191,6 +201,12 @@ class MemoryGovernor:
             # Process the most significant contradiction (highest similarity)
             main = max(contradictions, key=lambda c: c.similarity_score)
             result = self._detector.resolve(main)
+
+            # Issue #281 P3 Hook A — fire once per (key × session) regardless
+            # of resolution: even when the existing fact wins (KEEP), the
+            # agent benefits from knowing a contradicting attempt happened.
+            if self._pulse is not None:
+                await self._pulse.contradiction_inject(main)
 
             if result.resolution == Resolution.KEEP:
                 # Existing entry wins — don't write proposed

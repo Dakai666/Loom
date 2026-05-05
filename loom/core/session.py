@@ -730,6 +730,9 @@ class LoomSession:
         # Verdicts produced async land here; drained as <system-reminder>
         # at the start of the next stream_turn.
         self._pending_verdicts: list[str] = []
+        # Issue #281 P3 Hook G/A — MemoryPulse appends here, drained as
+        # <system-reminder> alongside verdicts in stream_turn.
+        self._pending_pulses: list[str] = []
         # In-flight judge background tasks — kept so stop() can cancel them
         # cleanly and so a single turn can't fire judge twice.
         self._judge_tasks: set[asyncio.Task] = set()
@@ -1384,6 +1387,20 @@ class LoomSession:
                     f.name, f.summary, f.detail,
                 )
 
+        # Issue #281 P3 — MemoryPulse: build now (db + memory ready), wire
+        # into governor for Hook A, then run Hook G so the brief lands in
+        # _pending_pulses before the agent's first turn drains the buffer.
+        from loom.core.memory.pulse import MemoryPulse
+        self._pulse = MemoryPulse(
+            db=self._db,
+            semantic=self._memory.semantic,
+            session_id=self.session_id,
+            session_started_at=datetime.now(UTC),
+            pending_buffer=self._pending_pulses,
+        )
+        self._governor.set_pulse(self._pulse)
+        await self._pulse.session_brief()
+
     # ------------------------------------------------------------------
     # HITL pause / resume / cancel
     # ------------------------------------------------------------------
@@ -1661,6 +1678,15 @@ class LoomSession:
                         "content": f"<system-reminder>\n{body}\n</system-reminder>",
                     })
                 self._pending_verdicts.clear()
+
+            # Issue #281 P3 — drain MemoryPulse hooks (G/A) the same way.
+            if self._pending_pulses:
+                for body in self._pending_pulses:
+                    self.messages.append({
+                        "role": "user",
+                        "content": f"<system-reminder>\n{body}\n</system-reminder>",
+                    })
+                self._pending_pulses.clear()
 
             await self._memory.episodic.write(
                 EpisodicEntry(
