@@ -290,18 +290,36 @@ class SemanticMemory:
         rows = await cursor.fetchall()
         return [_row_to_entry(r) for r in rows]
 
-    async def get_random(self, limit: int = 15) -> list[SemanticEntry]:
+    async def get_random(
+        self,
+        limit: int = 15,
+        domain: str | None = None,
+    ) -> list[SemanticEntry]:
         """
-        Return up to *limit* entries chosen at random from all semantic facts.
+        Return up to *limit* entries chosen at random from semantic facts.
 
         Used by the dreaming cycle so each dream surfaces a varied, non-recency-
         biased sample of the knowledge base.  SQLite's ORDER BY RANDOM() is fine
         for typical Loom memory sizes (< 50k rows).
+
+        Issue #281 P3-D — when ``domain`` is set, sampling is constrained to
+        that ontology axis (themed dream); ``None`` keeps original
+        cross-domain behaviour (free dream). Empty result for an unknown
+        domain is returned silently — caller should not validate the enum
+        here, the closed enum is enforced at write time.
         """
-        cursor = await self._db.execute(
-            f"SELECT {_SELECT_COLS} FROM semantic_entries ORDER BY RANDOM() LIMIT ?",
-            (limit,),
-        )
+        if domain is None:
+            cursor = await self._db.execute(
+                f"SELECT {_SELECT_COLS} FROM semantic_entries "
+                "ORDER BY RANDOM() LIMIT ?",
+                (limit,),
+            )
+        else:
+            cursor = await self._db.execute(
+                f"SELECT {_SELECT_COLS} FROM semantic_entries "
+                "WHERE domain = ? ORDER BY RANDOM() LIMIT ?",
+                (domain, limit),
+            )
         rows = await cursor.fetchall()
         return [_row_to_entry(r) for r in rows]
 

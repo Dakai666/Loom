@@ -1124,6 +1124,7 @@ class LoomSession:
         self.registry.register(
             make_dream_cycle_tool(
                 self._memory.semantic, self._memory.relational, _dream_llm_fn,
+                db=self._db,
             )
         )
         self.registry.register(make_memory_prune_tool(self._memory.semantic))
