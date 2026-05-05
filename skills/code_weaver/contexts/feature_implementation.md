@@ -16,27 +16,38 @@
 
 ### 階段 1：理解意圖
 
-目標：搞清楚要什麼。
+目標：搞清楚要什麼，同時用圖譜找到正確的改動位置。
 
 - 取得 issue 內容（URL → fetch_url；本地 → read_file）
-- 識別 issue type：
-  - `bug` — 有錯誤行為，修復它
-  - `enhancement` — 改善現有行為
-  - `refactor` — 重構，不改行為
-  - `feature` — 新增功能
-- 識別 scope：哪些 modules 需要動？
+- 識別 issue type：`bug` / `enhancement` / `refactor` / `feature`
+- **用圖譜快速定位**：
+  ```
+  mcp__gitnexus__query(query="<issue 的核心概念或症狀>",
+                       task_context="<issue 標題>")
+  → 找到相關執行流程，確認要動哪些符號
+  ```
 - 識別 constraint：有沒有破壞性變更（breaking change）？
 
-產出：一段「意圖說明書」（不超過 50 字）
+產出：一段「意圖說明書」（不超過 50 字）+ 圖譜找到的候選符號清單
 
 ### 階段 2：Scope 確認（必經！）
 
-目標：讓使用者在實作前確認範圍。
+目標：讓使用者在實作前確認範圍，**並用 impact 自動驗證 scope 是否完整**。
 
 **在這個階段之前絕對不動手。**
 
+```
+mcp__gitnexus__impact(target="<主要改動的符號>",
+                      direction="upstream", maxDepth=2)
+→ 自動列出 d=1（WILL BREAK）和 d=2（LIKELY AFFECTED）
+→ 若 risk = HIGH/CRITICAL，scope 必須包含 d=1 的所有項目
+```
+
+對照 **Loom 高風險 hub**（`permissions.py`/`registry.py`/`procedural.py`）：
+若改動涉及這些，主動告知使用者影響面廣，確認後才進入。
+
 說清楚：
-1. 我要改哪些檔案
+1. 我要改哪些檔案（從 impact 結果確認）
 2. 我不改哪些（即使它看起來也有問題）
 3. 這個改動的邊界在哪裡
 
@@ -93,13 +104,20 @@
 3. 確認沒有破壞其他功能（必要時跑全套）
 4. UI / display 改動：寫死 sample input 跑一次，眼睛看輸出長相
 5. 確認所有 linter 通過（`ruff` / `ruff format`）
-6. 確認類型檢查通過（如有的話）
+6. **圖譜收尾確認**：
+   ```
+   mcp__gitnexus__detect_changes()
+   → 確認 git diff 影響的符號與 Stage 2 的 scope 一致
+   → 若有意外的符號出現，重新評估是否超出範圍
+   ```
 
 驗證沒過 → **停下來修**，不是假裝看不見繼續前進。
 
 ### 階段 6：產出
 
 目標：讓使用者可以立即行動。
+
+> **GitNexus 自動更新**：commit 完成後 `.git/hooks/post-commit` 會在背景靜默執行 `gitnexus analyze`，索引自動保持新鮮，無需手動觸發。
 
 **PR / commit 模式：**
 ```markdown

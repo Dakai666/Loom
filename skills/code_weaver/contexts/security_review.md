@@ -19,11 +19,27 @@
 
 ### 第一步：識別攻擊面
 
-觀察：
-- 對外暴露的介面（API endpoints、CLI 命令、file I/O）
-- 認證與授權機制
-- 輸入驗證點（所有外部輸入來源）
+**先用圖譜一次性定位所有外部入口**，再手動驗證：
+
+```
+mcp__gitnexus__query(query="外部輸入 API endpoint fetch user input")
+→ 找到所有對外暴露的執行流程
+
+mcp__gitnexus__cypher(query=
+  "MATCH (n:Route) RETURN n.filePath, n.method, n.path LIMIT 20")
+→ 列出所有 Route 節點（API endpoints）
+
+mcp__gitnexus__cypher(query=
+  "MATCH (n:Function) WHERE n.name CONTAINS 'fetch' OR n.name CONTAINS 'request'
+   OR n.name CONTAINS 'input' OR n.name CONTAINS 'parse'
+   RETURN n.name, n.filePath LIMIT 30")
+→ 快速找到輸入處理函數
+```
+
+補充人工確認：
+- 認證與授權機制（`TrustLevel` / `ScopeGrant` 相關路徑）
 - 敏感資料處理（密碼、token、個資、檔案）
+- Loom 特有：`run_bash` / `fetch_url` 的 trust_level 傳遞路徑
 
 ### 第二步：對應 CWE 檢查清單
 
