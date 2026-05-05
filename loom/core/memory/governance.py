@@ -139,6 +139,10 @@ class MemoryGovernor:
         self._admission_threshold: float = cfg.get("admission_threshold", 0.5)
         self._episodic_ttl_days: int = cfg.get("episodic_ttl_days", 30)
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
+        # Issue #281 P3: lifecycle throttle. Cross-caller gate so daemon-cron
+        # and session.stop() paths skip when the previous run was recent.
+        # Read from [memory.lifecycle] in session wiring; 0.0 disables.
+        self._lifecycle_min_gap_minutes: float = cfg.get("lifecycle_min_gap_minutes", 0.0)
         # Note: ``relational_decay_factor`` is no longer used — Memory
         # Lifecycle (issue #281 P2) computes per-domain half-lives directly.
         # Config key stays accepted (and ignored) for backward compatibility
@@ -356,7 +360,9 @@ class MemoryGovernor:
         from loom.core.memory.lifecycle import MemoryLifecycle
 
         cycle = MemoryLifecycle(self._db, threshold=self._semantic_decay_threshold)
-        lifecycle_result = await cycle.run()
+        lifecycle_result = await cycle.run(
+            min_gap_minutes=self._lifecycle_min_gap_minutes,
+        )
 
         # ── Episodic TTL (still a flat age check, not lifecycle-managed) ──
         episodic_pruned = await self._prune_episodic_ttl()

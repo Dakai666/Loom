@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
+from loom.autonomy.maintenance import MaintenanceLoop
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
 from loom.core.infra import AbortController, wait_aborted
@@ -376,8 +377,18 @@ class AutonomyDaemon:
             self._evaluator.run_forever(poll_interval=poll_interval)
         )
         abort_task = asyncio.ensure_future(wait_aborted(self._abort.signal))
+
+        # Issue #281 P3: parallel memory maintenance sweep. Runs alongside
+        # the trigger evaluator on the daemon's abort signal so shutdown
+        # is single-source. Only started when [memory.lifecycle].enabled
+        # is true and a session/db is wired.
+        wait_set = [run_task, abort_task]
+        maint_task = self._maybe_start_maintenance()
+        if maint_task is not None:
+            wait_set.append(maint_task)
+
         done, pending = await asyncio.wait(
-            [run_task, abort_task], return_when=asyncio.FIRST_COMPLETED
+            wait_set, return_when=asyncio.FIRST_COMPLETED
         )
         for t in pending:
             t.cancel()
@@ -385,6 +396,38 @@ class AutonomyDaemon:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+
+    def _maybe_start_maintenance(self) -> asyncio.Task | None:
+        """Read [memory.lifecycle] and launch MaintenanceLoop if enabled.
+        Returns None when disabled or when no db is wired."""
+        db = getattr(self._session, "_db", None) if self._session else None
+        if db is None:
+            return None
+        try:
+            from loom.core.session import _load_loom_config  # local import: lazy
+            _mem = _load_loom_config().get("memory", {})
+            cfg = _mem.get("lifecycle", {})
+            gov_cfg = _mem.get("governance", {})
+        except Exception as exc:
+            logger.debug("[autonomy] lifecycle config load failed: %s", exc)
+            return None
+        if not cfg.get("enabled", True):
+            return None
+        loop = MaintenanceLoop(
+            db=db,
+            abort=self._abort,
+            interval_hours=float(cfg.get("interval_hours", 24.0)),
+            threshold=float(
+                cfg.get("threshold", gov_cfg.get("semantic_decay_threshold", 0.1))
+            ),
+            min_gap_minutes=float(cfg.get("min_gap_minutes", 30.0)),
+        )
+        logger.info(
+            "[autonomy] memory maintenance loop started "
+            "(interval=%.1fh, throttle=%.1fmin)",
+            loop._interval_seconds / 3600.0, loop._min_gap_minutes,
+        )
+        return asyncio.ensure_future(loop.run_forever())
 
     def stop(self) -> None:
         """Signal the daemon to stop — aborts any in-flight stream_turn() and exits the loop."""

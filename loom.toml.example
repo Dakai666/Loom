@@ -124,6 +124,36 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Memory lifecycle (Issue #281 P3)
+# ─────────────────────────────────────────────
+# Drives the (domain × temporal) decay cycle that demotes recent → archived
+# and deletes archived → ∅ once effective_confidence drops below threshold.
+#
+# Two callers invoke ``MemoryLifecycle.run()``:
+#   1. Autonomy daemon — periodic background sweep (interval_hours)
+#   2. session.stop()  — opportunistic sweep when each session ends
+#
+# Both honour ``min_gap_minutes`` so back-to-back invocations don't
+# re-scan the table within that window. Persisted in the ``memory_meta``
+# kv table — survives process restarts so a fresh CLI session right
+# after a daemon run skips correctly.
+
+[memory.lifecycle]
+enabled         = true   # set false to disable the daemon sweep entirely
+interval_hours  = 24     # daemon-cron cadence
+min_gap_minutes = 30     # cross-caller throttle (0 = always run)
+threshold       = 0.1    # reserved — currently inherited from [memory.governance].semantic_decay_threshold
+
+# Optional half-life override table. Keys are "<domain>.<temporal>"
+# (closed enums in loom.core.memory.ontology). Values are days; use
+# -1 for "never decays" (math.inf). Omitted pairs fall back to the
+# defaults in lifecycle._HALF_LIFE_TABLE.
+#
+# [memory.lifecycle.half_life_overrides]
+# "knowledge.recent"    = 90
+# "knowledge.milestone" = 365
+
+# ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
 # ─────────────────────────────────────────────
 # When a skill is activated via ``load_skill`` and the turn completes,
