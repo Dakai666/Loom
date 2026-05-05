@@ -22,6 +22,7 @@ from loom.core.harness.permissions import TrustLevel
 from loom.core.harness.registry import ToolDefinition
 
 if TYPE_CHECKING:
+    import aiosqlite
     from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.semantic import SemanticMemory
 
@@ -33,6 +34,7 @@ def make_dream_cycle_tool(
     semantic: "SemanticMemory",
     relational: "RelationalMemory",
     llm_fn: LLMFn,
+    db: "aiosqlite.Connection | None" = None,
 ) -> ToolDefinition:
     """Build the ``dream_cycle`` ToolDefinition.
 
@@ -45,12 +47,32 @@ def make_dream_cycle_tool(
         Async callable that takes an OpenAI-style messages list and returns
         the assistant's text. ``LoomSession.start()`` wires this to its
         configured router + model.
+    db:
+        Optional aiosqlite connection — required only when the agent
+        invokes the tool with ``themed=true`` (round-robin theme picker
+        reads/writes ``memory_meta``). Falls back to free dream when
+        absent. Issue #281 P3-D.
     """
     from loom.core.cognition.dreaming import dream_cycle
+    from loom.core.memory.ontology import (
+        DOMAIN_KNOWLEDGE, DOMAIN_PROJECT, DOMAIN_SELF, DOMAIN_USER,
+    )
+
+    _ALLOWED_DOMAINS = {DOMAIN_SELF, DOMAIN_USER, DOMAIN_PROJECT, DOMAIN_KNOWLEDGE}
 
     async def _executor(call) -> ToolResult:
         sample = int(call.args.get("sample_size", 15))
         dry_run = bool(call.args.get("dry_run", False))
+        themed = bool(call.args.get("themed", False))
+        domain = call.args.get("domain")
+        if domain is not None and domain not in _ALLOWED_DOMAINS:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                output=(
+                    f"Invalid domain={domain!r}. Allowed: "
+                    f"{sorted(_ALLOWED_DOMAINS)} or omit for free dream."
+                ),
+            )
 
         result = await dream_cycle(
             semantic=semantic,
@@ -58,10 +80,15 @@ def make_dream_cycle_tool(
             llm_fn=llm_fn,
             sample_size=sample,
             dry_run=dry_run,
+            domain=domain,
+            themed=themed,
+            db=db,
         )
 
         lines = [
             "Dream cycle complete",
+            f"  Mode         : {'themed' if result.get('domain') else 'free'}"
+            + (f" (domain={result['domain']})" if result.get("domain") else ""),
             f"  Facts sampled: {result['facts_sampled']}",
             f"  Triples found: {result['triples_found']}",
             f"  Triples written: {result['triples_written']}",
@@ -82,8 +109,10 @@ def make_dream_cycle_tool(
             "Run an offline dreaming cycle: sample random semantic facts, "
             "discover non-obvious connections via the LLM, and store the "
             "resulting insights as Relational triples (source='dreaming'). "
-            "Use this when the autonomy scheduler triggers a background "
-            "synthesis task."
+            "Default is a free cross-domain dream. Pass themed=true to "
+            "round-robin through ontology domains (self → user → project "
+            "→ knowledge), or domain='<name>' to pin one. Use this when "
+            "the autonomy scheduler triggers a background synthesis task."
         ),
         input_schema={
             "type": "object",
@@ -96,6 +125,23 @@ def make_dream_cycle_tool(
                 "dry_run": {
                     "type": "boolean",
                     "description": "If true, run the full cycle but skip writing to the DB.",
+                    "default": False,
+                },
+                "domain": {
+                    "type": "string",
+                    "enum": ["self", "user", "project", "knowledge"],
+                    "description": (
+                        "Pin the sample to one ontology domain. Mutually "
+                        "exclusive with themed (themed wins)."
+                    ),
+                },
+                "themed": {
+                    "type": "boolean",
+                    "description": (
+                        "Round-robin the next domain (cycles self → user → "
+                        "project → knowledge). Ignores domain when both are "
+                        "set; falls back to free dream if no DB is wired."
+                    ),
                     "default": False,
                 },
             },
