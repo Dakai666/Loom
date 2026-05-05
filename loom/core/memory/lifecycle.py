@@ -246,7 +246,13 @@ class MemoryLifecycle:
         result.relational_archived = rel_a
 
         if not dry_run:
-            await self._write_last_run_at()
+            # B1: throttle bookkeeping must not break the never-raises contract
+            # — DB lock / closed connection here would otherwise propagate up
+            # through governance.run_decay_cycle() into session.stop() cleanup.
+            try:
+                await self._write_last_run_at()
+            except Exception as exc:
+                logger.debug("lifecycle: failed to write last_run_at: %s", exc)
 
         return result
 

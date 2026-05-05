@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 class MaintenanceLoop:
     """Drives MemoryLifecycle on a fixed interval until aborted."""
 
+    # First sweep delay — short enough that a daemon restart (after a long
+    # idle gap where session.stop also didn't run) gets a sweep within minutes,
+    # long enough that startup work doesn't compete for the DB lock. The
+    # throttle inside run() still skips if session.stop just ran one.
+    _FIRST_SWEEP_DELAY_SECONDS = 300.0
+
     def __init__(
         self,
         db: "aiosqlite.Connection",
@@ -51,16 +57,19 @@ class MaintenanceLoop:
         self._min_gap_minutes = min_gap_minutes
 
     async def run_forever(self) -> None:
-        """Sleep ``interval_hours``, run one cycle, repeat. Returns when
-        the abort signal fires (daemon shutdown)."""
-        # First sweep is delayed by the full interval — startup is busy,
-        # and the throttle inside ``run()`` handles the case where another
-        # caller (session.stop) just ran.
+        """Run a sweep ``_FIRST_SWEEP_DELAY_SECONDS`` after start, then every
+        ``interval_hours``. Returns when the abort signal fires (shutdown)."""
+        first_iter = True
         while not self._abort.signal.is_set():
+            timeout = (
+                self._FIRST_SWEEP_DELAY_SECONDS if first_iter
+                else self._interval_seconds
+            )
+            first_iter = False
             try:
                 await asyncio.wait_for(
                     wait_aborted(self._abort.signal),
-                    timeout=self._interval_seconds,
+                    timeout=timeout,
                 )
                 # wait_aborted returned cleanly → signal set → exit
                 return

@@ -140,9 +140,9 @@ episodic_compress_threshold = 30
 
 [memory.lifecycle]
 enabled         = true   # set false to disable the daemon sweep entirely
-interval_hours  = 24     # daemon-cron cadence
+interval_hours  = 24     # daemon-cron cadence (first sweep ~5min after start)
 min_gap_minutes = 30     # cross-caller throttle (0 = always run)
-threshold       = 0.1    # reserved — currently inherited from [memory.governance].semantic_decay_threshold
+threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshold when set
 
 # Optional half-life override table. Keys are "<domain>.<temporal>"
 # (closed enums in loom.core.memory.ontology). Values are days; use
