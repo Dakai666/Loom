@@ -21,11 +21,35 @@ gh pr diff {number} --repo {owner}/{repo}
 gh pr view {number} --repo {owner}/{repo} --json number,title,state,body,files,additions,deletions
 ```
 
+取得 diff 後立刻執行圖譜分析，取代大部分手動追蹤：
+
+```
+mcp__gitnexus__detect_changes()
+→ 把 git diff 的每個 hunk 映射到圖上的符號和執行流程
+→ 直接知道：改動了哪些符號、影響哪些 process、風險等級
+```
+
+```
+對 detect_changes 回傳的高風險符號執行：
+mcp__gitnexus__impact(target="<符號>", direction="upstream", maxDepth=2)
+→ 確認 PR 沒有意外擴散到範圍外的模組
+```
+
+**Loom 架構層快速檢查**（每次 review 必做）：
+```
+mcp__gitnexus__cypher(query=
+  "MATCH (a:File)-[]->(b:File)
+   WHERE a.filePath STARTS WITH 'loom/core/'
+   AND b.filePath STARTS WITH 'loom/autonomy/'
+   RETURN a.filePath, b.filePath")
+→ 結果不應有任何新增的行（除了已知的 task_reflector.py）
+```
+
 ### 第二步：讀取相關程式碼（了解上下文）
 
 不要只看 diff，要讀取變更的相關程式碼了解上下文。
 
-限制：不要超過 15 個檔案。
+限制：**圖譜分析後不超過 5 個檔案**（detect_changes 已標出關鍵位置）。
 
 ### 第二步B：Runtime invariant 檢查（PR 新增工具時必做）
 

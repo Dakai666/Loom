@@ -940,7 +940,16 @@ class LoomSession:
         self._session_log = SessionLog(self._db)
 
         # Issue #43: Memory Governance — always-on
-        _gov_cfg = _load_loom_config().get("memory", {}).get("governance", {})
+        _memory_cfg = _load_loom_config().get("memory", {})
+        _gov_cfg = dict(_memory_cfg.get("governance", {}))
+        # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
+        # but also gates session.stop()'s run_decay_cycle path, so plumb
+        # the value through governor's config dict.
+        _lifecycle_cfg = _memory_cfg.get("lifecycle", {})
+        _gov_cfg.setdefault(
+            "lifecycle_min_gap_minutes",
+            float(_lifecycle_cfg.get("min_gap_minutes", 0.0)),
+        )
         self._governor = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,

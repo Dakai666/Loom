@@ -12,7 +12,33 @@
 
 ---
 
-## 工作流程（四層掃描）
+## 工作流程（圖譜速查 + 四層掃描）
+
+### Layer 0：圖譜速查（**優先執行，可取代 50% 的 read_file**）
+
+目標：30 秒內建立依賴地圖，不需要翻檔案。
+
+```
+1. mcp__gitnexus__query(query="<要理解的模組或概念>")
+   → 找到相關執行流程和符號，直接知道哪些檔案值得深讀
+
+2. mcp__gitnexus__cypher(query=
+     "MATCH (f:File)<-[]-(g:File)
+      WHERE NOT f.filePath STARTS WITH 'tests/'
+      RETURN f.filePath AS hub, count(g) AS fans
+      ORDER BY fans DESC LIMIT 15")
+   → 立刻識別核心 hub 檔案（被最多人 import 的）
+
+3. mcp__gitnexus__cypher(query=
+     "MATCH (a:File)-[]->(b:File)-[]->(a)
+      WHERE NOT a.filePath STARTS WITH 'tests/'
+      RETURN a.filePath, b.filePath")
+   → 檢查循環依賴（有就記下來，是風險訊號）
+```
+
+從圖譜結果決定**哪 3–5 個檔案值得精讀**，其他用圖的結構理解即可。
+
+---
 
 ### 第一層：結構探測（list_dir）
 
@@ -28,21 +54,22 @@
 命名 convention 觀察：全小寫 kebab？駝峰？層次分明？
 目錄深度：淺=可能簡單好維護；深=可能職責分離良好或過度工程
 
-### 第二層：依賴解析（read_file 重點）
+### 第二層：依賴解析（圖譜優先，read_file 補充）
 
 目標：識別核心資料結構與模組之間的依賴方向。
 
-掃描重點：
-- 主要的 class / struct / type 定義
-- `import` / `use` / `require` 語句（第三方 library 使用方式）
-- 枚舉全域搜尋（`enum`/`const`/`DATABASE`/`CONFIG`）
-- 主要函數簽名（看簽名就好，不要讀 body）
+**優先用 Layer 0 的圖譜結果**，只對 hub 檔案或流程關鍵節點做 read_file。
 
-畫出心智模型：
-- 誰是核心（被最多其他模組 import 的）？
-- 誰是邊緣？
-- 有沒有循環依賴？
-- 第三方 library 的選擇透露什麼？
+補充掃描重點（圖譜無法覆蓋的部分）：
+- 第三方 library 使用方式（看 `import` 語句）
+- 枚舉與全域常數（`enum`/`CONFIG`）
+- 關鍵函數簽名（看簽名就好，不要讀 body）
+
+心智模型確認清單：
+- 誰是核心（Layer 0 的 hub 查詢已告訴你）？
+- 有沒有循環依賴（Layer 0 的 cypher 已掃過）？
+- 架構層規則有沒有被違反（`core/` → `autonomy/` 是禁區）？
+- 第三方 library 的選擇透露什麼設計決策？
 
 ### 第三層：行為模式
 
@@ -117,5 +144,5 @@
 - 不要試圖讀懂每一行 code，重點是理解整體設計邏輯
 - 不要幫忙實作或重構（那是另一個情境）
 - 分析結論要敢說「我確定的」vs「我推測的」，不確定就說不知道
-- 嚴格控制 read_file 數量：不要超過 15 個檔案
+- 嚴格控制 read_file 數量：**Layer 0 後不超過 5 個檔案**（圖譜已給依賴結構，不需要讀全部）
 - 如果資訊不足（封閉原始碼、缺少文件），誠實說「無法完整評估」

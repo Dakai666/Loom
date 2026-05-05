@@ -139,6 +139,7 @@ class LifecycleResult:
     relational_archived: int = 0
     relational_deleted:  int = 0
     dry_run: bool = False
+    skipped: bool = False  # throttle short-circuit (last run within min_gap_minutes)
 
     @property
     def total_archived(self) -> int:
@@ -191,9 +192,33 @@ class MemoryLifecycle:
         )
         return examined_d + examined_a, archived, deleted
 
-    async def run(self, dry_run: bool = False) -> LifecycleResult:
-        """Run one full lifecycle cycle. Returns counts; never raises."""
+    async def run(
+        self,
+        dry_run: bool = False,
+        min_gap_minutes: float = 0.0,
+    ) -> LifecycleResult:
+        """Run one full lifecycle cycle. Returns counts; never raises.
+
+        ``min_gap_minutes`` enables cross-caller throttling — if the previous
+        run completed within that window, returns immediately with
+        ``skipped=True``. Persisted in ``memory_meta`` so daemon-cron and
+        ``session.stop()`` paths both honour the same throttle. Set 0 to
+        always run (default; preserves test/legacy behaviour).
+        ``dry_run`` short-circuits the throttle so previews never touch state.
+        """
         result = LifecycleResult(dry_run=dry_run)
+
+        if min_gap_minutes > 0 and not dry_run:
+            last_run = await self._read_last_run_at()
+            if last_run is not None:
+                gap_min = (datetime.now(UTC) - last_run).total_seconds() / 60.0
+                if gap_min < min_gap_minutes:
+                    logger.debug(
+                        "lifecycle: skip — last run %.1fmin ago (< %.1fmin gap)",
+                        gap_min, min_gap_minutes,
+                    )
+                    result.skipped = True
+                    return result
 
         # Order matters: deletes (already-archived rows still decayed)
         # run BEFORE demotes (recent rows newly below threshold). This
@@ -220,7 +245,43 @@ class MemoryLifecycle:
         result.relational_deleted = rel_d
         result.relational_archived = rel_a
 
+        if not dry_run:
+            # B1: throttle bookkeeping must not break the never-raises contract
+            # — DB lock / closed connection here would otherwise propagate up
+            # through governance.run_decay_cycle() into session.stop() cleanup.
+            try:
+                await self._write_last_run_at()
+            except Exception as exc:
+                logger.debug("lifecycle: failed to write last_run_at: %s", exc)
+
         return result
+
+    # -- meta kv (throttle bookkeeping) --------------------------------------
+
+    _META_KEY_LAST_RUN = "lifecycle.last_run_at"
+
+    async def _read_last_run_at(self) -> datetime | None:
+        cursor = await self._db.execute(
+            "SELECT value FROM memory_meta WHERE key = ?",
+            (self._META_KEY_LAST_RUN,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(row[0])
+        except ValueError:
+            return None
+
+    async def _write_last_run_at(self) -> None:
+        now = datetime.now(UTC).isoformat()
+        await self._db.execute(
+            "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (self._META_KEY_LAST_RUN, now, now),
+        )
+        await self._db.commit()
 
     # -- private --------------------------------------------------------------
 

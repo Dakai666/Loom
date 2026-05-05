@@ -196,6 +196,13 @@ CREATE TABLE IF NOT EXISTS agent_telemetry (
 
 CREATE INDEX IF NOT EXISTS idx_agent_telemetry_updated ON agent_telemetry(updated_at DESC);
 
+-- Issue #281 P3: Memory subsystem meta kv (lifecycle.last_run_at, …)
+CREATE TABLE IF NOT EXISTS memory_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- FTS5 Virtual Tables & Sync Triggers
 
 CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
