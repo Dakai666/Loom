@@ -26,6 +26,7 @@ have run two weeks and noise is measurable.
 from __future__ import annotations
 
 import logging
+import textwrap
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
@@ -81,6 +82,9 @@ class MemoryPulse:
                 return
             _, prev_started_at = prev
 
+            # COALESCE: fall back to updated_at for facts never recalled
+            # (last_accessed_at is NULL) — a fact written but never read in
+            # the prior session is still relevant continuity.
             cursor = await self._db.execute(
                 "SELECT key, value, confidence FROM semantic_entries "
                 "WHERE domain = ? AND temporal = ? "
@@ -166,6 +170,11 @@ class MemoryPulse:
             "updated_at = excluded.updated_at",
             (_GATE_KEY_PREFIX + key, self._session_id, now),
         )
+        # Deliberate early commit: gate persistence must survive the rest
+        # of governed_upsert's path so a re-entrant write within the same
+        # turn doesn't bypass the once-per-(key × session) check. Caller
+        # (governance.governed_upsert) holds no other un-committed writes
+        # at this point — do not introduce any before this hook fires.
         await self._db.commit()
 
     # ------------------------------------------------------------------
@@ -174,5 +183,10 @@ class MemoryPulse:
 
     @staticmethod
     def _truncate(value: str, limit: int = 160) -> str:
+        # textwrap.shorten is whitespace-aware so CJK / mixed-script values
+        # don't get sliced mid-grapheme on the byte boundary. Falls back to
+        # raw value if already short, since shorten() collapses whitespace.
         v = value.strip().replace("\n", " ")
-        return v if len(v) <= limit else v[: limit - 1] + "…"
+        if len(v) <= limit:
+            return v
+        return textwrap.shorten(v, width=limit, placeholder="…")

@@ -1667,26 +1667,17 @@ class LoomSession:
             self.messages.append({"role": "user", "content": annotated})
             asyncio.ensure_future(self._log_message("user", annotated, turn_index=self._turn_index))
 
-            # Issue #196 Phase 2: drain any async judge verdicts produced after
-            # the previous turn ended. Inject as separate <system-reminder>
-            # entries so the agent sees them alongside the new user input on
-            # this turn's first LLM call.
-            if self._pending_verdicts:
-                for body in self._pending_verdicts:
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"<system-reminder>\n{body}\n</system-reminder>",
-                    })
-                self._pending_verdicts.clear()
-
-            # Issue #281 P3 — drain MemoryPulse hooks (G/A) the same way.
-            if self._pending_pulses:
-                for body in self._pending_pulses:
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"<system-reminder>\n{body}\n</system-reminder>",
-                    })
-                self._pending_pulses.clear()
+            # Issue #196 Phase 2 + #281 P3 — drain async-produced reminders
+            # (judge verdicts and MemoryPulse hooks) before the agent's next
+            # LLM call. Order is incidental: both render as identical
+            # <system-reminder> blocks, indistinguishable to the model.
+            for body in (*self._pending_verdicts, *self._pending_pulses):
+                self.messages.append({
+                    "role": "user",
+                    "content": f"<system-reminder>\n{body}\n</system-reminder>",
+                })
+            self._pending_verdicts.clear()
+            self._pending_pulses.clear()
 
             await self._memory.episodic.write(
                 EpisodicEntry(
