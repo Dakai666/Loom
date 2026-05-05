@@ -131,16 +131,17 @@ def make_dream_cycle_tool(
                     "type": "string",
                     "enum": ["self", "user", "project", "knowledge"],
                     "description": (
-                        "Pin the sample to one ontology domain. Mutually "
-                        "exclusive with themed (themed wins)."
+                        "Pin the sample to one ontology domain. When set "
+                        "alongside themed=true, domain wins (explicit name "
+                        "is stronger than rotation)."
                     ),
                 },
                 "themed": {
                     "type": "boolean",
                     "description": (
                         "Round-robin the next domain (cycles self → user → "
-                        "project → knowledge). Ignores domain when both are "
-                        "set; falls back to free dream if no DB is wired."
+                        "project → knowledge). Skipped when domain is also "
+                        "set, or falls back to free dream if no DB is wired."
                     ),
                     "default": False,
                 },

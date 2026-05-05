@@ -95,6 +95,10 @@ async def next_themed_domain(db: "aiosqlite.Connection") -> str:
         "updated_at = excluded.updated_at",
         (_META_KEY_LAST_THEME, next_theme, now),
     )
+    # Same boundary effect note as pulse._mark_notified (#307 B1):
+    # this commits whatever else is pending on the connection. Caller
+    # (dream_cycle) holds no other un-committed writes at this point —
+    # do not introduce any before next_themed_domain() returns.
     await db.commit()
     return next_theme
 

@@ -33,20 +33,25 @@ def test_dream_cycle_definition_shape():
     assert tool.name == "dream_cycle"
     assert tool.trust_level == TrustLevel.SAFE
     props = tool.input_schema["properties"]
-    assert set(props) == {"sample_size", "dry_run"}
+    assert set(props) == {"sample_size", "dry_run", "domain", "themed"}
     assert props["sample_size"]["default"] == 15
     assert props["dry_run"]["default"] is False
+    assert props["themed"]["default"] is False
+    assert set(props["domain"]["enum"]) == {"self", "user", "project", "knowledge"}
 
 
 async def test_dream_cycle_executor_passes_args_through(monkeypatch):
     captured = {}
 
-    async def fake_dream_cycle(*, semantic, relational, llm_fn, sample_size, dry_run):
+    async def fake_dream_cycle(*, semantic, relational, llm_fn, sample_size, dry_run, **kwargs):
         captured["sample_size"] = sample_size
         captured["dry_run"] = dry_run
+        captured.update({k: kwargs[k] for k in ("domain", "themed") if k in kwargs})
         return {
             "facts_sampled": 7, "triples_found": 3,
-            "triples_written": 0 if dry_run else 3, "errors": [],
+            "triples_written": 0 if dry_run else 3,
+            "domain": kwargs.get("domain"),
+            "errors": [],
         }
 
     monkeypatch.setattr(
@@ -57,7 +62,9 @@ async def test_dream_cycle_executor_passes_args_through(monkeypatch):
     res = await tool.executor(_call("dream_cycle", {"sample_size": 7, "dry_run": True}))
 
     assert res.success
-    assert captured == {"sample_size": 7, "dry_run": True}
+    assert captured == {
+        "sample_size": 7, "dry_run": True, "domain": None, "themed": False,
+    }
     assert "Facts sampled: 7" in res.output
     assert "dry-run" in res.output  # dry_run banner appears
 
