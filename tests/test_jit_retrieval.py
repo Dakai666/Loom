@@ -36,7 +36,11 @@ def _make_registry(*tools: ToolDefinition) -> ToolRegistry:
     return reg
 
 
-def _make_tool(name: str, *, inline_only: bool = False) -> ToolDefinition:
+def _make_tool(
+    name: str, *,
+    inline_only: bool = False,
+    spill_threshold_chars: int | None = None,
+) -> ToolDefinition:
     async def _executor(call: ToolCall) -> ToolResult:
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
@@ -46,6 +50,7 @@ def _make_tool(name: str, *, inline_only: bool = False) -> ToolDefinition:
         name=name, description="", input_schema={},
         executor=_executor, trust_level=TrustLevel.SAFE,
         inline_only=inline_only,
+        spill_threshold_chars=spill_threshold_chars,
     )
 
 
@@ -114,6 +119,65 @@ class TestJITRetrievalThreshold:
 
         assert result.output == big_output
         assert scratchpad.list_refs() == []
+
+
+class TestJITPerToolSpillThreshold:
+    """Issue #302 F1: ToolDefinition.spill_threshold_chars overrides the
+    pipeline-wide threshold for a specific tool. Used by read_file so that
+    mid-size source files (8K–24K chars) stay inline."""
+
+    async def test_per_tool_threshold_raises_inline_budget(self) -> None:
+        scratchpad = Scratchpad()
+        registry = _make_registry(
+            _make_tool("read_file", spill_threshold_chars=24000)
+        )
+        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
+
+        # 17K chars — would spill under default 100, must stay inline at 24000.
+        body = "x" * 17_000
+        result = await _run(jit, _call("read_file"), output=body)
+
+        assert result.output == body
+        assert "jit_spilled" not in result.metadata
+        assert scratchpad.list_refs() == []
+
+    async def test_per_tool_threshold_still_spills_above_override(self) -> None:
+        scratchpad = Scratchpad()
+        registry = _make_registry(
+            _make_tool("read_file", spill_threshold_chars=24000)
+        )
+        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
+
+        # 30K chars exceeds the override → still spills.
+        body = "y" * 30_000
+        result = await _run(jit, _call("read_file"), output=body)
+
+        assert "spilled to scratchpad" in result.output
+        assert result.metadata["jit_spilled"] is True
+
+    async def test_per_tool_threshold_zero_disables_spill(self) -> None:
+        """spill_threshold_chars=0 acts like inline_only — never spills."""
+        scratchpad = Scratchpad()
+        registry = _make_registry(
+            _make_tool("never_spill", spill_threshold_chars=0)
+        )
+        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
+
+        body = "z" * 100_000
+        result = await _run(jit, _call("never_spill"), output=body)
+
+        assert result.output == body
+        assert "jit_spilled" not in result.metadata
+
+    async def test_default_none_falls_back_to_global(self) -> None:
+        """spill_threshold_chars=None → uses pipeline-wide threshold."""
+        scratchpad = Scratchpad()
+        registry = _make_registry(_make_tool("plain"))  # default: None
+        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
+
+        result = await _run(jit, _call("plain"), output="q" * 5000)
+
+        assert result.metadata["jit_spilled"] is True
 
 
 class TestJITInlineOnlyOptOut:

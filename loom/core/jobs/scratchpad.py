@@ -92,7 +92,10 @@ def _apply_section(text: str, section: str) -> str:
     Supported:
       - "head"     → first 50 lines
       - "tail"     → last 50 lines
-      - "N-M"      → lines N..M inclusive (1-indexed)
+      - "N-M"      → lines N..M inclusive (1-indexed). N is clamped to 1
+                     if a caller passes 0 (Issue #302 F2 — previously this
+                     silently fell through to keyword search and returned
+                     an empty string for huge files).
       - any other  → treat as keyword; return lines containing it
     """
     lines = text.splitlines()
@@ -101,12 +104,23 @@ def _apply_section(text: str, section: str) -> str:
     if section == "tail":
         return "\n".join(lines[-50:])
     if "-" in section:
+        lo_s, hi_s = section.split("-", 1)
         try:
-            lo, hi = section.split("-", 1)
-            i, j = int(lo), int(hi)
-            if i >= 1 and j >= i:
-                return "\n".join(lines[i - 1:j])
+            i, j = int(lo_s), int(hi_s)
         except ValueError:
-            pass
+            # Not a numeric range — fall through to keyword search.
+            i = j = None  # type: ignore[assignment]
+        if i is not None and j is not None:
+            # Both halves parsed as ints → treat as a line range. Clamp
+            # i to 1 (caller-friendly: "0-500" reads as "from start"),
+            # require j >= i. Out-of-range j is harmless thanks to
+            # Python slice semantics.
+            if i < 1:
+                i = 1
+            if j >= i:
+                return "\n".join(lines[i - 1:j])
+            # Inverted range (j < i) is almost certainly a typo, not a
+            # keyword — return empty rather than misleading keyword hits.
+            return ""
     matches = [line for line in lines if section in line]
     return "\n".join(matches)

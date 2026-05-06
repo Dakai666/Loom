@@ -250,9 +250,18 @@ class JITRetrievalMiddleware(Middleware):
         if tool_def is not None and getattr(tool_def, "inline_only", False):
             return result
 
+        # Per-tool override — see ToolDefinition.spill_threshold_chars (#302).
+        threshold = self._threshold_chars
+        if tool_def is not None:
+            override = getattr(tool_def, "spill_threshold_chars", None)
+            if override is not None:
+                if override <= 0:
+                    return result
+                threshold = override
+
         output_str = "" if result.output is None else str(result.output)
         size = len(output_str)
-        if size <= self._threshold_chars:
+        if size <= threshold:
             return result
 
         # Generate a stable, agent-readable ref. uuid suffix avoids
@@ -1588,17 +1597,31 @@ class LifecycleMiddleware(Middleware):
                     # Previously this branch silently committed a "success"
                     # result — the failure signal was lost. Now we surface
                     # semantic_failure so the model can self-correct.
+                    # Issue #298: keep the original output in `error` too —
+                    # session rendering only shows `error` on failure, so
+                    # dropping output here means the agent can't see what
+                    # actually happened (traceback text, test output, etc.)
+                    # and has no signal to act on beyond the reason string.
+                    original_output = result.output
+                    if original_output:
+                        full_error = (
+                            f"{reason}\n\n"
+                            f"--- captured output ---\n{original_output}"
+                        )
+                    else:
+                        full_error = reason
                     result = ToolResult(
                         call_id=result.call_id,
                         tool_name=result.tool_name,
                         success=False,
-                        error=reason,
+                        error=full_error,
                         failure_type="semantic_failure",
                         duration_ms=result.duration_ms,
                         metadata={
                             **result.metadata,
                             "verifier_signal": verdict.signal,
-                            "original_output": result.output,
+                            "verifier_reason": reason,
+                            "original_output": original_output,
                         },
                     )
                     record.result = result
