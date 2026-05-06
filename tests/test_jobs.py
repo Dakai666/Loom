@@ -108,6 +108,34 @@ class TestScratchpad:
         pad.write("log", "apple\nbanana\napricot\ncarrot")
         assert pad.read("log", section="ap") == "apple\napricot"
 
+    def test_section_range_zero_lower_bound_clamps_to_one(self):
+        """Issue #302 F2: section="0-N" used to fall through to keyword
+        search (matching nothing → empty result) on huge files. Now it
+        clamps to 1 and reads from the start as the caller obviously
+        intended."""
+        pad = Scratchpad()
+        body = "\n".join(f"line-{i}" for i in range(1, 21))  # 20 lines
+        pad.write("log", body)
+        result = pad.read("log", section="0-5")
+        assert result.splitlines() == [f"line-{i}" for i in range(1, 6)]
+
+    def test_section_range_past_end_returns_remaining(self):
+        """Asking for lines past EOF returns what exists — Python slice
+        semantics. No empty-result surprise on big files."""
+        pad = Scratchpad()
+        body = "\n".join(f"line-{i}" for i in range(1, 11))  # 10 lines
+        pad.write("log", body)
+        result = pad.read("log", section="8-9999")
+        assert result.splitlines() == [f"line-{i}" for i in range(8, 11)]
+
+    def test_section_range_inverted_returns_empty_not_keyword(self):
+        """Inverted range like '5-2' is a typo, not a keyword. Don't
+        silently search for the literal '5-2'."""
+        pad = Scratchpad()
+        pad.write("log", "alpha\n5-2 is here\nbeta")
+        # Bug-era behavior would have matched the line containing "5-2".
+        assert pad.read("log", section="5-2") == ""
+
     def test_max_bytes_truncates_with_notice(self):
         pad = Scratchpad()
         pad.write("big", "x" * 1000)

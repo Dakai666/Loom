@@ -819,6 +819,61 @@ class TestSemanticFailureSurfacing:
         assert result.metadata.get("verifier_signal") == "mismatch"
 
     @pytest.mark.asyncio
+    async def test_verifier_failure_preserves_original_output_in_error(self):
+        """Issue #298: when a verifier flags semantic_failure on a tool with
+        no rollback (e.g. run_bash detecting a Python traceback in stdout),
+        the captured output must remain visible to the agent — not just the
+        reason string. Session rendering only shows `error` on failure, so
+        the original output is appended there."""
+
+        captured_output = (
+            "shop ready\n"
+            "Traceback (most recent call last):\n"
+            '  File "pet.py", line 42, in run\n'
+            "    raise ValueError('out of stock')\n"
+            "ValueError: out of stock\n"
+            "(handled at top level)\n"
+        )
+
+        async def handler(call):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=True, output=captured_output,
+            )
+
+        async def validator(call, result):
+            return VerifierResult(
+                passed=False,
+                reason="Command exit=0 but Python traceback detected",
+                signal="python_traceback",
+            )
+
+        tool = ToolDefinition(
+            name="ran", description="",
+            input_schema={}, executor=handler,
+            trust_level=TrustLevel.SAFE,
+            post_validator=validator,
+        )
+        reg = _make_registry(tool)
+        pipeline = _build_pipeline(reg)
+        call = _make_call("ran")
+
+        result = await pipeline.execute(call, handler)
+        assert result.success is False
+        assert result.failure_type == "semantic_failure"
+        # Reason still surfaces.
+        assert "Python traceback detected" in (result.error or "")
+        # And — the bug fix — original output is recoverable from `error`.
+        assert "ValueError: out of stock" in (result.error or "")
+        assert "out of stock" in (result.error or "")
+        # Structured copy still in metadata for telemetry / programmatic use.
+        assert result.metadata.get("verifier_signal") == "python_traceback"
+        assert result.metadata.get("verifier_reason") == (
+            "Command exit=0 but Python traceback detected"
+        )
+        assert result.metadata.get("original_output") == captured_output
+
+    @pytest.mark.asyncio
     async def test_legacy_bool_true_still_works(self):
         """Backward compat: returning True is coerced to VerifierResult(passed=True)."""
 

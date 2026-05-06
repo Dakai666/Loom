@@ -93,6 +93,20 @@ class ToolDefinition:
     ``task_write`` (structured short responses).
     """
 
+    spill_threshold_chars: int | None = None
+    """
+    Per-tool override for ``JITRetrievalMiddleware`` spill threshold (Issue #302).
+
+    When set, the JIT spill is gated by this value instead of the pipeline-wide
+    default (8000 chars). Use a higher value for tools whose output the agent
+    nearly always wants inline — e.g. ``read_file`` returning a few hundred
+    lines of source: spilling those forces an extra ``scratchpad_read`` round
+    trip with no token savings worth the friction.
+
+    ``None`` (default) means "use the global threshold". ``0`` disables spill
+    entirely (equivalent to ``inline_only=True``).
+    """
+
     # --- Scope-aware permission (Issue #45 Phase A) ---
     scope_descriptions: list[str] = field(default_factory=list)
     """

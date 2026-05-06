@@ -428,6 +428,11 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             executor=_read_file,
             tags=["filesystem", "read"],
             impact_scope="filesystem",
+            # Issue #302 F1: source files in the 8K–24K char range are
+            # nearly always wanted inline (mid-size Python modules, configs).
+            # Spilling them forces a redundant scratchpad_read round trip.
+            # 24K ≈ ~6K tokens — still safely under typical attention budgets.
+            spill_threshold_chars=24000,
         ),
         ToolDefinition(
             name="write_file",
