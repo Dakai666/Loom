@@ -125,7 +125,19 @@ async def start(self) -> None:
     # 8. 初始化 TaskList（平坦清單，認知外骨骼）
     self._tasklist = tasklist_module.TaskList()
 
-    # 9. 初始化 Autonomy 整合（若已配置）
+    # 9. 實例化 MemoryPulse（Issue #281 P3-B Hook G/A）
+    from loom.core.memory.pulse import MemoryPulse
+    self._pulse = MemoryPulse(
+        db=self._db,
+        semantic=self._semantic,
+        session_id=self._session_id,
+        session_started_at=self._started_at,
+        pending_buffer=self._pending_pulses,
+    )
+    self._governor.set_pulse(self._pulse)
+    await self._pulse.session_brief()          # Hook G — 讀上一 session milestone facts
+
+    # 10. 初始化 Autonomy 整合（若已配置）
     if self._autonomy_daemon:
         self._autonomy_daemon.set_session(self)
 ```
@@ -165,7 +177,14 @@ async def stream_turn(
         result = await self._pipeline.process(call, self._execute_tool)
         results.append(result)
 
-    # Phase 5: end_turn — TaskList self-check + Jobs update
+    # Phase 5: Drain MemoryPulse pulses（<system-reminder> blocks）
+    # Issue #281 P3 — 與 _pending_verdicts 一起 drain，每次 turn 只出現一次
+    for body in (*self._pending_verdicts, *self._pending_pulses):
+        self._inject_reminder(body)
+    self._pending_verdicts.clear()
+    self._pending_pulses.clear()
+
+    # Phase 6: end_turn — TaskList self-check + Jobs update
     await self._end_turn()
 ```
 
@@ -309,6 +328,8 @@ LoomSession
   ├─ _episodic   → EpisodicMemory（Session Log，turn-by-turn）
   ├─ _procedural → ProceduralMemory（SkillGenome，skills/）
   ├─ _relational → RelationalMemory（三元組，偏好/關係）
+  ├─ _governor   → MemoryGovernor + _pulse（Hook A contradiction notice）
+  ├─ _pending_pulses → list[str]（pulse buffer，drain 至 system-reminder）
   ├─ _jobstore   → JobStore（背景 IO 任務）
   └─ _scratchpad → Scratchpad（過程產物，session-scoped）
 ```
