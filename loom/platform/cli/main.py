@@ -92,6 +92,9 @@ logger = logging.getLogger(__name__)
 
 
 @click.group()
+    # ==============================================================
+    # SECTION 1 — CLI ENTRY POINT (cli)
+    # ==============================================================
 def cli() -> None:
     """Loom — harness-first agent framework."""
 
@@ -106,6 +109,9 @@ def cli() -> None:
               help="Set a title on the new (or resumed) session for easier identification.")
 def chat(model: str, db: str, tui: bool, resume: bool, resume_id: str | None,
          name: str | None) -> None:
+    # ==============================================================
+    # SECTION 2 — CHAT (chat, _chat)
+    # ==============================================================
     """Start an interactive agent session."""
     asyncio.run(_resolve_and_chat(model, db, tui, resume, resume_id, name))
 
@@ -1089,6 +1095,9 @@ class LoomChatApp:
     """
     Subclass of LoomApp that wires a live LoomSession to the Textual component
     tree.  Instantiated lazily to avoid importing Textual at module load time
+    # ==============================================================
+    # SECTION 3 — CHAT TUI (LoomChatApp)
+    # ==============================================================
     (keeps `loom chat` startup fast for users without the TUI).
     """
 
@@ -2293,6 +2302,9 @@ def sessions() -> None:
 
 @sessions.command("list")
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
+    # ==============================================================
+    # SECTION 4 — SESSION MGMT (sessions)
+    # ==============================================================
 @click.option("--limit", default=20, show_default=True)
 def sessions_list(db: str, limit: int) -> None:
     """List recent sessions."""
@@ -2403,6 +2415,9 @@ def memory() -> None:
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--limit", default=20, show_default=True)
 def memory_list(db: str, limit: int) -> None:
+    # ==============================================================
+    # SECTION 5 — MEMORY (memory, reflect)
+    # ==============================================================
     """Show recent semantic memories."""
     asyncio.run(_memory_list(db, limit))
 
@@ -2498,6 +2513,9 @@ def diagnostic() -> None:
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 def diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
     """Show recent TaskDiagnostic entries from semantic memory."""
+    # ==============================================================
+    # SECTION 6 — DIAGNOSTICS (diagnostic)
+    # ==============================================================
     asyncio.run(_diagnostic_recent(skill, limit, db))
 
 
@@ -2571,6 +2589,9 @@ def skill() -> None:
                   ["generated", "shadow", "promoted", "deprecated", "rolled_back"],
                   case_sensitive=False,
               ),
+    # ==============================================================
+    # SECTION 7 — SKILL TOOLS (skill, import)
+    # ==============================================================
               help="Filter by candidate status.")
 @click.option("--limit", default=20, show_default=True, type=int)
 @click.option("--show-body", is_flag=True, default=False,
@@ -2973,6 +2994,9 @@ async def _import(
     db: str,
     dry_run: bool,
 ) -> None:
+    # ==============================================================
+    # SECTION 8 — AUTONOMY (autonomy)
+    # ==============================================================
     import json as _json
     from loom.extensibility import (
         LensRegistry, HermesLens, OpenAIToolsLens,
@@ -3264,6 +3288,9 @@ def api_start(host: str, port: int, db: str, reload: bool) -> None:
     except ImportError:
         console.print(
             "[loom.error]FastAPI not installed.[/loom.error] "
+    # ==============================================================
+    # SECTION 9 — API / DISCORD / MCP (api, discord_bot, mcp_cmd)
+    # ==============================================================
             "Run:  [bold]pip install loom[api][/bold]"
         )
         raise SystemExit(1)

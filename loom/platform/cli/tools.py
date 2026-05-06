@@ -1,3 +1,6 @@
+    # ==============================================================
+    # SECTION 1 — HELPERS (imports / _race_abort)
+    # ==============================================================
 """
 Built-in tools registered for the CLI platform.
 
@@ -292,6 +295,9 @@ def _spawn_agent_resolver(call: ToolCall) -> ScopeRequest:
 
 def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
     """Return read_file, write_file, list_dir tools bound to *workspace*."""
+    # ==============================================================
+    # SECTION 2 — FILESYSTEM TOOLS (make_filesystem_tools, make_run_bash_tool)
+    # ==============================================================
 
     async def _read_file(call: ToolCall) -> ToolResult:
         raw = call.args.get("path", "")
@@ -860,6 +866,9 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
     Create a SAFE ``recall`` tool bound to the given MemoryFacade.
 
+    # ==============================================================
+    # SECTION 3 — MEMORY TOOLS (make_recall, make_memorize, make_memory_health, make_agent_health, make_probe_file, make_relate, make_query_relations)
+    # ==============================================================
     The tool performs BM25-ranked retrieval across semantic facts and
     skills via :meth:`MemoryFacade.search`.
     """
@@ -1426,6 +1435,9 @@ def make_load_skill_tool(
     outcome_tracker: "SkillOutcomeTracker | None" = None,
     semantic: "SemanticMemory | None" = None,
     turn_index_fn: "Callable[[], int] | None" = None,
+    # ==============================================================
+    # SECTION 4 — SKILL TOOLS (make_load_skill, make_unload_skill, make_skill_promote, make_skill_rollback, make_generate_skill_candidate_from_batch, make_set_skill_maturity)
+    # ==============================================================
     skill_check_manager: "SkillCheckManager | None" = None,
     relational: "RelationalMemory | None" = None,
     confirm_fn: "Callable | None" = None,
@@ -2290,6 +2302,9 @@ async def _verify_fetch_url(call: ToolCall, result: ToolResult) -> VerifierResul
     actually error-page templates, CDN challenge pages, or suspiciously
     thin cleaned content. This validator inspects the Title-prefixed HTML
     output format produced by _html_to_text and flags known error-page
+    # ==============================================================
+    # SECTION 5 — VERIFICATION (verify_run_bash, verify_fetch_url, verify_spawn_agent)
+    # ==============================================================
     shapes.
 
     Non-HTML responses (JSON APIs, plain text) are passed through unchecked
@@ -2371,6 +2386,9 @@ def make_fetch_url_tool(
     available, the fetch is submitted as a background Job; the tool
     returns a job_id immediately and the body lands in Scratchpad.
     """
+    # ==============================================================
+    # SECTION 6 — WEB TOOLS (make_fetch_url_tool, make_web_search_tool, make_spawn_agent_tool)
+    # ==============================================================
 
     async def _fetch_url(call: ToolCall) -> ToolResult:
         url = call.args.get("url", "").strip()
@@ -2767,6 +2785,9 @@ def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
             )
         try:
             summary = manager.write(todos)
+    # ==============================================================
+    # SECTION 7 — JOBS TOOLS (make_task_write_tool, make_jobs_*_tool, make_scratchpad_read_tool)
+    # ==============================================================
         except ValueError as exc:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -3158,6 +3179,9 @@ def make_request_model_tier_tool(session: Any) -> ToolDefinition:
     surfaces alongside other stream events without bespoke plumbing.
 
     Reason is **mandatory** because each tier switch should leave a
+    # ==============================================================
+    # SECTION 8 — COGNITION TOOLS (make_request_model_tier_tool, make_clear_model_tier_tool)
+    # ==============================================================
     decision-trace in the envelope log — useful for graphify analysis
     of when 絲絲 self-escalates, and what triggered the call.
 

@@ -1,6 +1,6 @@
-# SKILL.md 格式規範（增量更新）
+# SKILL.md 格式規範
 
-> 對 [doc/10-Skill-Genome.md](doc/10-Skill-Genome.md) 的增量更新，補充完整 frontmatter schema 與 SKILL.md 目錄結構。
+> v0.3.6.0+ 對應：`loom_engineer` + `systematic_code_analyst` → `code_weaver` 合併（Issue #225）
 
 ---
 
@@ -10,14 +10,14 @@
 
 ```yaml
 ---
-name: systematic_code_analyst
-description: "系統化程式碼分析技能..."
-tags: [core, planning, tracking]
+name: code_weaver
+description: "系統化程式碼分析、工程實作、PR 審查與資安審查..."
+tags: [core, code, review, security]
 precondition_checks:
   - ref: checks.reject_write_operations
     applies_to: [write_file]
     description: "分析技能為唯讀模式，禁止寫入任何檔案"
-maturity_tag: mature  #  optional
+maturity_tag: mature  # optional
 ---
 ```
 
@@ -25,10 +25,10 @@ maturity_tag: mature  #  optional
 
 | 欄位 | 類型 | 說明 |
 |------|------|------|
-| `name` | str | 技能名稱（通常與目錄名相同）|
+| `name` | str | 技能名稱（與目錄名相同）|
 | `description` | str | 一句話觸發描述 |
-| `tags` | list[str] | 技能分類標籤（無需嚴格管理）|
-| `precondition_checks` | list[dict] | **Issue #64**：技能聲明的執行前置條件 |
+| `tags` | list[str] | 技能分類標籤 |
+| `precondition_checks` | list[dict] | Issue #64：技能聲明的執行前置條件 |
 | `maturity_tag` | str | 成熟度標籤（`mature` / `needs_improvement` / null）|
 
 ### precondition_checks 格式（Issue #64 Phase B）
@@ -40,38 +40,36 @@ precondition_checks:
     description: "為何這個檢查必要"
 ```
 
-`applies_to` 內的工具，在 `load_skill()` 時會動態將 `precondition_checks` 附加到對應的 `ToolDefinition`。
-
 ---
 
-## 完整 Skills 目錄結構
+## Skills 目錄結構
 
 ```
 skills/
+├── code_weaver/              ← loom_engineer + systematic_code_analyst 合併（v0.3.6.0）
 ├── task_list/
-│   └── SKILL.md            ← 純 frontmatter + Markdown 內容
-├── systematic_code_analyst/
-│   └── SKILL.md            ← 含 precondition_checks
-├── loom_engineer/
-├── meta-skill-engineer/
 ├── memory_hygiene/
+├── meta-skill-engineer/
 ├── async_jobs/
 ├── audio_transcriber/
 ├── deep_researcher/
-├── github_cli/
+├── github_cli/               ← deprecated，見 opencli
 ├── opencli/
 ├── pdf/
 ├── pet-cat/
 ├── remotion/
 ├── security_assessment/
-├── silky_minimax_draw/
-├── silky_tts/
-├── sisi_mood_tarot/
-│   └── SKILL.md            ← 含 mood_frontmatter，觸發 Mood Tarot
-└── suno_music_creator/
+├── silky_chatgpt_draw/       ← 新增（GPT-Image-1 web 繪圖）
+├── silky_hyperframes/        ← 新增（HTML + GSAP 影片創作）
+├── silky_minimax_draw/       ← 新增（MiniMax 雲端圖像）
+├── silky_tts/                ← 新增（TTS 語音合成）
+├── sisi_mood_tarot/          ← 含 mood_frontmatter，觸發 Mood Tarot
+├── suno_music_creator/
+├── news-aggregator/          ← 新增
+└── skill_novel_writer.md     ← 單檔（非目錄）
 ```
 
-技能本身是**純文字**：frontmatter 結構化 + Markdown 內容。沒有附屬 Python 檔案必要。
+> `loom_engineer` 與 `systematic_code_analyst` 已於 v0.3.6.0 合併為 `code_weaver`（PR #225）。
 
 ---
 
@@ -113,4 +111,4 @@ class SkillOutcome:
 
 ---
 
-*增量更新 | 2026-04-26 03:21 Asia/Taipei*
+*v0.3.6.2 | 2026-05-06*
