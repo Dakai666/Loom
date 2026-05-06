@@ -353,7 +353,7 @@ class TestWidgetRender:
             body="run_bash 'ls /tmp'",
             options=[("Yes", "yes", "y"), ("No", "no", "n")],
             cursor=0,
-            future=asyncio.Future(),
+            
         )
         text = _flat_text(app._render_confirm())
         assert "Allow tool" in text
@@ -366,7 +366,7 @@ class TestWidgetRender:
         app._confirm_state = _ConfirmState(
             title="Pick", body="",
             options=[("A", "a", None), ("B", "b", None)],
-            cursor=1, future=asyncio.Future(),
+            cursor=1, 
         )
         text = _flat_text(app._render_confirm())
         # The cursor glyph is ``▸`` per _render_confirm
@@ -387,7 +387,7 @@ class TestWidgetRender:
                 ("Redirect", "redirect", "d"),
             ],
             cursor=0,
-            future=asyncio.Future(),
+            
         )
         text = _flat_text(app._render_pause())
         assert "Resume" in text
