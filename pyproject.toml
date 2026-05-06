@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loom"
-version = "0.3.6.1"
+version = "0.3.6.2"
 description = "Harness-first, memory-native, self-directing agent framework"
 requires-python = ">=3.11"
 dependencies = [
