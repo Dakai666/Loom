@@ -250,10 +250,7 @@ class JITRetrievalMiddleware(Middleware):
         if tool_def is not None and getattr(tool_def, "inline_only", False):
             return result
 
-        # Per-tool override (Issue #302): tools that benefit from a larger
-        # inline budget — read_file, etc. — declare spill_threshold_chars.
-        # 0 means "never spill" (same as inline_only). None falls back to the
-        # pipeline-wide default.
+        # Per-tool override — see ToolDefinition.spill_threshold_chars (#302).
         threshold = self._threshold_chars
         if tool_def is not None:
             override = getattr(tool_def, "spill_threshold_chars", None)
