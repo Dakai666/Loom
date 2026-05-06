@@ -608,6 +608,28 @@ def build_router() -> LLMRouter:
 
 
 class LoomSession:
+    """Top-level session orchestrator.
+
+    Section index (grep ``# SECTION N`` to jump):
+
+      SECTION 1  — INIT & PERSONALITY
+      SECTION 2  — BOOTSTRAP / start()
+      SECTION 3  — LIFECYCLE (pause / resume / cancel / stop)
+      SECTION 4  — TURN ORCHESTRATION (stream_turn)
+      SECTION 5  — JUDGE / TURN HOOKS
+      SECTION 6  — PLUGIN / SKILL LOADING
+      SECTION 7  — HISTORY SANITIZATION
+      SECTION 8  — TIER / TELEMETRY
+      SECTION 9  — DISPATCH / TRACE / EVENTS
+      SECTION 10 — HITL / SCOPE / GRANTS
+      SECTION 11 — PARALLEL DISPATCH
+      SECTION 12 — MEMORY INDEX / COMPACT
+      SECTION 13 — ACCESSORS
+    """
+
+    # =========================================================================
+    # SECTION 1 — INIT & PERSONALITY
+    # =========================================================================
     def __init__(
         self,
         model: str,
@@ -925,6 +947,9 @@ class LoomSession:
     def current_personality(self) -> str | None:
         return self._stack.current_personality
 
+    # =========================================================================
+    # SECTION 2 — BOOTSTRAP / start()
+    # =========================================================================
     async def start(self) -> None:
         await self._store.initialize()
         self._db_ctx = self._store.connect()
@@ -1406,6 +1431,9 @@ class LoomSession:
     # HITL pause / resume / cancel
     # ------------------------------------------------------------------
 
+    # =========================================================================
+    # SECTION 3 — LIFECYCLE (pause / resume / cancel / stop)
+    # =========================================================================
     def pause(self) -> None:
         """Request a pause at the next tool-batch boundary in stream_turn()."""
         self._pause_requested = True
@@ -1613,6 +1641,9 @@ class LoomSession:
     # Streaming agent loop
     # ------------------------------------------------------------------
 
+    # =========================================================================
+    # SECTION 4 — TURN ORCHESTRATION (stream_turn)
+    # =========================================================================
     async def stream_turn(
         self,
         user_input: str,
@@ -2378,6 +2409,9 @@ class LoomSession:
     # Issue #120 PR1: Diagnostic subscriber plumbing
     # ------------------------------------------------------------------
 
+    # =========================================================================
+    # SECTION 5 — JUDGE / TURN HOOKS
+    # =========================================================================
     def subscribe_diagnostic(
         self, callback: "Callable[[TaskDiagnostic], Awaitable[None]]",
     ) -> None:
@@ -2514,6 +2548,9 @@ class LoomSession:
     # Issue #56: Auto-import skills from SKILL.md files
     # ------------------------------------------------------------------
 
+    # =========================================================================
+    # SECTION 6 — PLUGIN / SKILL LOADING
+    # =========================================================================
     async def _auto_import_skills(self) -> list["SkillCatalogEntry"]:
         """
         Scan skills/ directories for SKILL.md files and auto-import them
@@ -2732,6 +2769,9 @@ class LoomSession:
     # Helpers
     # ------------------------------------------------------------------
 
+    # =========================================================================
+    # SECTION 7 — HISTORY SANITIZATION
+    # =========================================================================
     def _apply_observation_masking(self) -> None:
         """Fold stale tool observations into scratchpad references (Issue #197 Phase 2).
 
@@ -3006,6 +3046,9 @@ class LoomSession:
                 except Exception:
                     pass
 
+    # =========================================================================
+    # SECTION 8 — TIER / TELEMETRY
+    # =========================================================================
     def _telemetry_record_tool(
         self,
         tool_name: str,
@@ -3159,6 +3202,9 @@ class LoomSession:
             and self._consecutive_max_tokens < _MAX_REASONING_CONTINUATIONS
         )
 
+    # =========================================================================
+    # SECTION 9 — DISPATCH / TRACE / EVENTS
+    # =========================================================================
     async def _log_message(
         self, role: str, content: str, metadata: dict | None = None,
         raw_json: str | None = None, turn_index: int | None = None,
@@ -3452,6 +3498,9 @@ class LoomSession:
             nodes=nodes,
         )
 
+    # =========================================================================
+    # SECTION 10 — HITL / SCOPE / GRANTS
+    # =========================================================================
     def _build_grants_snapshot(self) -> GrantsSnapshot:
         """Build a GrantsSnapshot from current PermissionContext (#108, #112)."""
         import hashlib
@@ -3725,6 +3774,9 @@ class LoomSession:
                 return False
         return True
 
+    # =========================================================================
+    # SECTION 11 — PARALLEL DISPATCH
+    # =========================================================================
     async def _dispatch_parallel(self, tool_uses: list) -> list[tuple]:
         """
         Dispatch multiple independent tool calls concurrently via asyncio.gather.
@@ -3773,6 +3825,9 @@ class LoomSession:
                 for tu in tool_uses
             ]
 
+    # =========================================================================
+    # SECTION 12 — MEMORY INDEX / COMPACT
+    # =========================================================================
     async def _refresh_memory_index(self) -> None:
         """
         Rebuild MemoryIndex and update the system prompt in-place.
@@ -3966,6 +4021,9 @@ class LoomSession:
             )
 
     @property
+    # =========================================================================
+    # SECTION 13 — ACCESSORS
+    # =========================================================================
     def reflection(self) -> ReflectionAPI:
         return self._reflection
 
