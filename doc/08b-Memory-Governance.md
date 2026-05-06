@@ -1,13 +1,14 @@
-# Memory Governance（v0.2.9.0）
+# Memory Governance
 
 > **「每一筆記憶都帶著來源，來源決定可信度，可信度決定生死。」**
 
-Memory Governance 是 v0.2.9.0 引入的記憶治理層（Issue #43），以 **always-on** 的方式包裹所有語義記憶寫入路徑，提供：
+Memory Governance 是 Loom 的記憶治理層（Issue #43，v0.2.9.0 引入），以 **always-on** 的方式包裹所有語義記憶寫入路徑，提供：
 
 1. **Trust-tier 信任分級** — 每個來源字串映射至 0.5–1.0 的信任等級
 2. **矛盾偵測與自動解決** — 寫入前先比對既有事實，依信任等級決定取捨
 3. **Admission Gate** — Session 壓縮前過濾低品質事實
 4. **Decay Cycle** — Session 結束時清除過期/衰減記憶
+5. **Hook A — Contradiction Notice**（v0.3.6.0+，Issue #281 P3-B）— 矛盾寫入時主動通知 agent
 
 ---
 
@@ -17,7 +18,11 @@ Memory Governance 是 v0.2.9.0 引入的記憶治理層（Issue #43），以 **a
 loom/core/memory/
 ├── governance.py      ← MemoryGovernor（協調層）
 ├── contradiction.py   ← ContradictionDetector（偵測 + 解決）
-└── semantic.py        ← TRUST_TIERS + classify_source()（信任分類）
+├── semantic.py        ← SemanticMemory + TRUST_TIERS + classify_source()
+├── lifecycle.py       ← MemoryLifecycle（domain × temporal decay table）
+├── maintenance.py     ← MaintenanceLoop（daemon-cron decay runner）
+├── pulse.py          ← MemoryPulse（Hook G session preheat + Hook A contradiction notice）
+└── relational.py    ← RelationalMemory（dreaming + decay）
 ```
 
 ---
@@ -61,11 +66,11 @@ governor = MemoryGovernor(
 )
 ```
 
-Governor 在 `LoomSession.start()` 時建立，不需要設定開關，永遠啟用。
+Governor 在 `LoomSession.start()` 時建立，不需要設定開關，永遠啟用。`set_pulse()` 用於串接 `MemoryPulse`（Hook A）。
 
 ---
 
-## 1. Governed Upsert
+## 1. Governed Upsert + Hook A
 
 `governor.governed_upsert(entry)` 包裹所有語義記憶寫入，流程如下：
 
@@ -85,8 +90,14 @@ ContradictionDetector.detect(entry)
     ▼（若有矛盾）
 ContradictionDetector.resolve(contradiction)
     ├─ proposed trust > existing trust  → REPLACE（新值覆蓋）
-    ├─ existing trust > proposed trust  → KEEP（舊值保留，放棄寫入）
+    ├─ existing trust > proposed trust  → KEEP（舊值保留，放開寫入）
     └─ trust 相等                       → SUPERSEDE（新值覆蓋，recency bias）
+    │
+    ▼
+    Hook A（MemoryPulse.contradiction_inject）
+      → 若 self._pulse 不為 None，寫入 _pending_pulses
+      → once-per-key-per-session gate（via memory_meta）
+      → 下一 turn drain 作為 <system-reminder> block
     │
     ▼
 SemanticMemory.upsert() 或跳過
@@ -94,6 +105,8 @@ SemanticMemory.upsert() 或跳過
     ▼
 audit_log 寫入 governance 事件
 ```
+
+**Hook A 設計原則**：矛盾通知的觸發與 resolution 無關——即使舊值勝出（KEEP），agent 仍需知道「有人試圖覆寫」。gate 在 session start 時清除，確保下一 session 看到同一矛盾時仍有通知。
 
 ### 回傳值
 
@@ -133,15 +146,51 @@ admitted_facts = [
 
 ---
 
-## 3. Decay Cycle
+## 3. Decay Cycle — Domain × Temporal Decay Table
 
-`governor.run_decay_cycle()` 在 `session.stop()` 呼叫，清除三類過期記憶：
+v0.3.6.0（Issue #281 P2）起，衰減不再由單一 threshold 決定，而是由 `MemoryLifecycle` 的 `(domain, temporal)` 矩陣定義：
 
-| 記憶類型 | 機制 | 預設參數 |
-|---------|------|---------|
-| **Semantic** | `SemanticMemory.prune_decayed(threshold)` — 刪除 effective_confidence < threshold 的條目 | `semantic_decay_threshold = 0.1` |
-| **Episodic** | 刪除 `created_at` 超過 TTL 的條目 | `episodic_ttl_days = 30` |
-| **Relational** | `source='dreaming'` 的三元組使用加速半衰期（`base_half_life / decay_factor`），confidence 衰減後低於 threshold 即刪除 | `relational_decay_factor = 1.5`（有效半衰期 = 90 / 1.5 = 60 天）|
+| domain | temporal | 觸發條件 |
+|--------|----------|---------|
+| knowledge | recent | 不衰減 |
+| knowledge | archived | 30 天衰減週期 |
+| project | recent | 45 天衰減週期 |
+| project | archived | 14 天衰減週期 |
+| self | any | 永不衰減 |
+| user | any | 永不衰減 |
+
+每個 semantic entry 的 `effective_confidence` 依 90 天半衰期遞減，`last_accessed_at` 作為「最近接觸時間」——被 recall 的 fact 會 refresh 半衰期計時。
+
+**Relational decay**：`source='dreaming'` 的三元組使用 `decay_factor = 1.5`（有效半衰期 60 天 vs. 標準 90 天），其他 relational triples 在 `temporal=archived` 時以 30 天衰減。
+
+### MaintenanceLoop（daemon-cron）
+
+`MaintenanceLoop`（Issue #281 P3-A）是 daemon 程序，以 cron schedule 執行 decay cycle：
+
+```
+* /5 * * * *   # 預設每 5 分鐘檢查一次
+```
+
+設計原則：
+- **`run()` throttle**：每次執行前檢查是否有上一次還在跑的 instance；防止重疊（overlapping）執行
+- 與互動式 session 的 `run_decay_cycle()` 完全獨立，互不干擾
+- 適合伺服器長時間運行時的背景維護
+
+---
+
+## 4. Dream 2.0 — Themed Round-Robin Sampling
+
+v0.3.6.0（Issue #281 P3-C）起，`dream_cycle` 的 sampler 支援 themed sampling。
+
+核心改動：sampler 在每次 call 時輪詢（round-robin）非空 domain，確保 Dream 合成的三元組來自多樣的 fact-types，而非過度集中於單一 domain。
+
+```
+dream_cycle(sample_size=15)
+  → 依序取用 knowledge recent / project recent / knowledge archived / ...
+  → 每輪 call 輪詢到下一個非空 domain
+```
+
+這讓 relational triples 更能捕捉 cross-domain 的關係，而非只是同一個 topic 內部的瑣碎連結。
 
 ---
 
@@ -175,8 +224,7 @@ admitted_facts = [
 SELECT tool_name, error, details, created_at
 FROM audit_log
 WHERE tool_name LIKE 'governance:%'
-ORDER BY created_at DESC
-LIMIT 20;
+ORDER BY created_at DESC LIMIT 20;
 ```
 
 | `tool_name` | 觸發時機 |
@@ -206,8 +254,13 @@ LIMIT 20;
 [memory.governance]
 admission_threshold      = 0.5    # Admission Gate 門檻（0.0–1.0）
 episodic_ttl_days        = 30     # Episodic TTL（天）
-semantic_decay_threshold = 0.1    # Semantic prune 門檻
+semantic_decay_threshold = 0.1    # Semantic prune 門檻（legacy，見 Decay Table）
 relational_decay_factor  = 1.5    # Dreaming triples 加速衰減係數
+
+[memory.maintenance]
+enabled     = true
+cron        = "*/5 * * * *"     # daemon-cron schedule（UTC）
+run_throttle = true              # 防止 overlapping 執行（預設開啟）
 ```
 
 詳見 [37-loom-toml-參考.md](37-loom-toml-參考.md)。
