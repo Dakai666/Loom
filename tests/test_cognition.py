@@ -266,11 +266,11 @@ class TestLLMRouter:
         router = LLMRouter()
         p_openai = self._make_mock_provider("openai")
         router.register(p_openai)
-        assert router.get_provider("gpt-5.2") is p_openai
+        assert router.get_provider("gpt-5.5") is p_openai
         assert router.get_provider("o3") is p_openai
         assert router.get_provider("o3-pro") is p_openai
         assert router.get_provider("o4-mini") is p_openai
-        assert router.get_provider("openai/gpt-5.2") is p_openai
+        assert router.get_provider("openai/gpt-5.5") is p_openai
 
     def test_openai_o_prefix_requires_exact_or_dash(self):
         router = LLMRouter()
@@ -282,8 +282,8 @@ class TestLLMRouter:
         assert router.get_provider("o3anything") is p_default
 
     def test_openai_provider_strips_optional_prefix(self):
-        provider = OpenAIProvider(api_key="test", model="openai/gpt-5.2")
-        assert provider._api_model() == "gpt-5.2"
+        provider = OpenAIProvider(api_key="test", model="openai/gpt-5.5")
+        assert provider._api_model() == "gpt-5.5"
 
     def test_fallback_to_default(self):
         router = LLMRouter()

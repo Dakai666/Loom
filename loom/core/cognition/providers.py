@@ -861,9 +861,9 @@ class OpenAIProvider(_OpenAICompatibleBase):
 
     Usage::
 
-        /model gpt-5.2
+        /model gpt-5.5
         /model o3
-        /model openai/gpt-5.2
+        /model openai/gpt-5.5
 
     Configure in ``.env``::
 
@@ -873,7 +873,7 @@ class OpenAIProvider(_OpenAICompatibleBase):
     name = "openai"
     ROUTING_PREFIX = "openai/"
     DEFAULT_BASE_URL = "https://api.openai.com/v1"
-    DEFAULT_MODEL = "gpt-5.2"
+    DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_TIMEOUT = 180.0
 
 

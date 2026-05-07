@@ -382,7 +382,7 @@ LMSTUDIO_BASE_URL=http://localhost:1234/v1
 loom auth openai                  # Phase 1: Codex CLI login helper + OPENAI_API_KEY setup
 loom chat                          # interactive CLI
 loom chat --tui                    # TUI mode
-loom chat --model gpt-5.2          # OpenAI model
+loom chat --model gpt-5.5          # OpenAI model
 loom chat --model ollama/llama3.2  # local model
 loom discord start --autonomy --channel <id>
 loom autonomy start
