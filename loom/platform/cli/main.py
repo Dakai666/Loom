@@ -2290,7 +2290,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                             dedup_key="ctx_80",
                         )
                     turn_idx = getattr(session, "_turn_index", 0)
-                    if turn_idx in (20, 50, 100):
+                    if turn_idx in {20, 50, 100}:
                         loom_app.show_transient_hint(
                             f"📍 turn {turn_idx} — 考慮 /summarize",
                             severity="info",

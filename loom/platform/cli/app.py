@@ -284,6 +284,12 @@ class LoomApp:
         # toggle from `cli.transient_hints` in loom.toml (default on).
         # The toggle is set by main.py after construction so build_loom_app
         # callers don't need to pass it through.
+        #
+        # Semantics: each key fires at most once per session lifetime —
+        # never cleared. Suits the current signal set (ctx_80, turn_N
+        # milestones) where re-firing would be noise. If a future caller
+        # needs periodic re-emission, use a different mechanism rather
+        # than reusing a dedup key.
         self._seen_hint_keys: set[str] = set()
         self.transient_hints_enabled: bool = True
 
