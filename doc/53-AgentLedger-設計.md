@@ -91,8 +91,12 @@ elif any artifact_emit.size_bytes > 10_000:
 **實作機制**（buffer + turn_end commit-or-discard）：
 
 ```python
-# Session 內部
-self._thought_buffer: dict[event_id, str] = {}  # 暫存 full_text
+# Session 內部 — turn lifecycle 期間維護
+self._thought_buffer: dict[event_id, str] = {}        # 暫存 full_text
+self._thought_capture_signals: list[int] = []          # artifact size 信號累積器
+
+# emit artifact_emit 時，順手累積 capture 信號（避免 turn_end 時 ledger query）
+self._thought_capture_signals.append(artifact.size_bytes)
 
 # 寫 thought 事件時 — ledger 暫不存全文
 ledger.emit(ThoughtEvent(
@@ -100,14 +104,22 @@ ledger.emit(ThoughtEvent(
     text_digest=sha256(text),
     full_text=None,
 ))
-self._thought_buffer["evt_thought_42"] = text  # 內存暫存
+self._thought_buffer["evt_thought_42"] = text         # 內存暫存
 
-# turn_end 時決定
-if should_capture_full_text(verdict, outcome, artifacts):
+# turn_end 時決定 — 全部信號都從 session-level state 取，零 ledger query
+should_capture = (
+    verdict in (FAIL, ERROR)
+    or outcome in (retry, abandoned)
+    or any(s > 10_000 for s in self._thought_capture_signals)
+)
+if should_capture:
     for evt_id, full_text in self._thought_buffer.items():
         ledger.update(evt_id, {"full_text": full_text})  # late-arrival 特例
 self._thought_buffer.clear()
+self._thought_capture_signals.clear()
 ```
+
+**設計原則**：所有 capture 觸發信號應在 emit 時累積進 session-level state，不要在 turn_end 時跨層 query ledger。Session 是 emitter 同時也持有完整 turn-local 信號，是最便宜的 source of truth。
 
 **Buffer cap = 20 thoughts**：先用此值觀察，autonomy 連跑場景實戰調整。
 
@@ -471,16 +483,22 @@ from typing import Any
 
 @dataclass
 class LedgerEvent:
-    """所有 ledger 事件的基底。"""
+    """所有 ledger 事件的基底。
+
+    Field order 注意：non-default 欄位必須全部在 default 欄位前面（Python dataclass 限制）。
+    """
+    # 必填欄位（無 default）— 必須先列
     event_id: str                          # 唯一識別
     session_id: str
     turn_id: str
     correlation_id: str
-    branch_id: str = "main"                # v1 永遠 "main"
-    parent_event_id: str | None = None
     event_type: str                        # see §3.1 taxonomy
-    timestamp: datetime
+    timestamp: datetime                    # UTC Unix epoch (REAL)，見 §9.5
     payload: dict[str, Any]                # event-type-specific
+
+    # 可選欄位（有 default）— 必須後列
+    parent_event_id: str | None = None
+    branch_id: str = "main"                # v1 永遠 "main"
 
     # payload schema_version 慣例（不是 column，是 payload 內 key）
     # payload["schema_version"]: int = 1
@@ -729,6 +747,7 @@ def parse_tool_lifecycle(event):
 | 子類型 / phase | `ALL_CAPS` | `BEGIN` / `STATE_CHANGE` |
 | payload field | `snake_case` | `tool_name` / `predecessor_memory_id` |
 | schema_version | `integer` | `1` / `2` / ...，不用語意化版號 |
+| **時間欄位** | **統一 UTC Unix epoch (REAL)，名稱永遠用 `timestamp`** | 不要混用 `created_at` / `event_time` / `ts` 等別名 |
 
 純文件規定，不做 lint 強制。
 
@@ -789,7 +808,7 @@ Phase 2 實作期間若 schema 演進，於本表追加 v2 行並標 breaking �
 | `branch_id` 欄位 | 永遠 `"main"`，schema 內 comment 標註 v2 fork primitive 會用到 |
 | Maintenance hook | 介面存在（`LedgerStore.maintenance()`），v1 只做 `PRAGMA optimize` + `VACUUM` |
 | Cross-session pull | API 接受 `session_id=None` 但無 UI 暴露 |
-| **External blob storage** | `.loom/ledger_blobs/{turn_id}/{event_id}.txt`（本機檔案系統，未來可置換 S3/object store）。**§3.3：thought_full_text > 50KB 時寫入 blob + digest，path 顯式存 payload，digest 用於 replay 驗證** |
+| **External blob storage** | `.loom/ledger_blobs/{turn_id}/{event_id}.txt`（本機檔案系統，未來可置換 S3/object store）。**§3.3：thought_full_text > `THOUGHT_EXTERNAL_THRESHOLD` (50KB / 50,000 bytes) 時寫入 blob + digest，blob path 顯式存 payload，digest 用於 replay 驗證** |
 
 ---
 
