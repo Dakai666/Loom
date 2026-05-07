@@ -3097,6 +3097,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 },
                 "tools": {
                     "type": ["array", "string", "null"],
+                    "items": {"type": "string"},
                     "description": (
                         "Tool whitelist for the sub-agent. "
                         "List of tool names (e.g. ['read_file', 'web_search']) or comma-separated string. "
