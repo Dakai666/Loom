@@ -1113,6 +1113,7 @@ class LoomSession:
             make_probe_file_tool,
             make_exec_escape_fn,
             make_fetch_url_tool,
+            make_openai_image_generation_tool,
             make_load_skill_tool,
             make_memorize_tool,
             make_memory_health_tool,
@@ -1323,6 +1324,7 @@ class LoomSession:
         brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
         if brave_key:
             self.registry.register(make_web_search_tool(brave_key))
+        self.registry.register(make_openai_image_generation_tool(self.workspace))
 
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))

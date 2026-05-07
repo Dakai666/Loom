@@ -2501,13 +2501,15 @@ def auth() -> None:
               default=None, help="Dotenv file to update (defaults to ./.env).")
 def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | None) -> None:
     """Run Codex CLI login helper and/or store OPENAI_API_KEY for Loom."""
+    from loom.core.cognition.openai_auth import load_codex_oauth_credential
+
     target = env_file or _project_env_path()
     console.print("[loom.muted]OpenAI setup for Loom[/loom.muted]")
     console.print(
-        "[loom.muted]Phase 1 setup: run the official Codex CLI OAuth flow "
-        "(`codex --login`) as a user-friendly first step. Loom does not read "
-        "Codex private credentials; OPENAI_API_KEY remains the portable "
-        "provider credential.[/loom.muted]"
+        "[loom.muted]Run the official Codex CLI OAuth flow (`codex --login`) "
+        "as a user-friendly first step. Loom can use an unexpired Codex "
+        "access token for OpenAI image generation, while OPENAI_API_KEY "
+        "remains the portable fallback credential.[/loom.muted]"
     )
 
     if api_key is None and not skip_codex_login and click.confirm("Run `codex --login` now?", default=True):
@@ -2521,6 +2523,12 @@ def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | No
         else:
             if result.returncode == 0:
                 console.print("[loom.muted]Codex CLI login completed.[/loom.muted]")
+                codex_credential = load_codex_oauth_credential()
+                if codex_credential is not None:
+                    console.print(
+                        "[loom.muted]Found an unexpired Codex OAuth access token "
+                        "for Loom's experimental Codex credential path.[/loom.muted]"
+                    )
             else:
                 console.print(
                     f"[loom.warning]`codex --login` exited with code "

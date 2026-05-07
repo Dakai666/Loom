@@ -62,9 +62,25 @@ loom auth openai --api-key sk-...
 loom auth openai --skip-codex-login
 ```
 
-Phase 1 命令：優先引導官方 Codex CLI OAuth 流程（`codex --login`），再視需要把
-`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。Loom 不會讀取或搬移
-Codex CLI 的私有 token；真正的 Codex OAuth token 整合會另行設計。
+優先引導官方 Codex CLI OAuth 流程（`codex --login`），再視需要把
+`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。OpenAI 圖像工具會優先使用
+未過期的 Codex OAuth access token，並在自動模式下 fallback 到 `OPENAI_API_KEY`。
+
+### `openai__text_to_image`
+
+Agent 可用工具，透過 OpenAI Images API 生成圖片並寫入 workspace：
+
+```json
+{
+  "prompt": "a clean product mockup",
+  "model": "gpt-image-2",
+  "output_path": "outputs/mockup.png",
+  "auth_mode": "auto"
+}
+```
+
+`auth_mode` 可為 `auto`、`codex`、`api_key`。`auto` 會優先使用 `codex --login` 產生的
+Codex OAuth access token，若 API 拒絕且 `.env` 有 `OPENAI_API_KEY`，則 fallback 到 API key。
 
 ---
 

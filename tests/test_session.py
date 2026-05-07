@@ -106,6 +106,7 @@ async def session_plugin_tool(call):
         assert session._pipeline is not None
         assert session._mcp_clients == []
         assert session.registry.get("session_plugin_tool") is not None
+        assert session.registry.get("openai__text_to_image") is not None
 
         await session.stop()
         assert session._db is None

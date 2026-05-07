@@ -379,7 +379,7 @@ LMSTUDIO_BASE_URL=http://localhost:1234/v1
 ```
 
 ```bash
-loom auth openai                  # Phase 1: Codex CLI login helper + OPENAI_API_KEY setup
+loom auth openai                  # Codex CLI login helper + OPENAI_API_KEY setup
 loom chat                          # interactive CLI
 loom chat --tui                    # TUI mode
 loom chat --model gpt-5.5          # OpenAI model
@@ -389,6 +389,10 @@ loom autonomy start
 ```
 
 Model routing works by prefix — `gpt-*`, `o3` / `o3-*` / `o4-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
+
+Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
+and writes a PNG/WebP/JPEG under the workspace. It prefers an unexpired Codex
+OAuth token from `codex --login`, then falls back to `OPENAI_API_KEY`.
 
 ---
 
