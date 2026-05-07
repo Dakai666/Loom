@@ -161,7 +161,7 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
 
 
 def _make_openai_image_scope_resolver(workspace: Path):
-    """Scope resolver for the OpenAI image tool: write one path + connect to api.openai.com."""
+    """Scope resolver for the OpenAI image tool."""
     import os.path
 
     _workspace_resolved = workspace.resolve()
@@ -189,6 +189,13 @@ def _make_openai_image_scope_resolver(workspace: Path):
                     resource="network",
                     action="connect",
                     selector="api.openai.com",
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+                ScopeRequirement(
+                    resource="network",
+                    action="connect",
+                    selector="chatgpt.com",
                     tool_name=call.tool_name,
                     capabilities=call.capabilities,
                 ),
@@ -2647,6 +2654,47 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     )
 
 
+def _extract_image_b64(data: Any) -> str:
+    """Find the newest base64 image field in a Responses payload."""
+
+    found = ""
+
+    def _walk(value: Any) -> None:
+        nonlocal found
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if (
+                    key in {"partial_image_b64", "image_b64", "b64_json"}
+                    and isinstance(child, str)
+                    and child
+                ):
+                    found = child
+                else:
+                    _walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                _walk(child)
+
+    _walk(data)
+    return found
+
+
+async def _decode_openai_image_response(
+    client: httpx.AsyncClient,
+    data: dict[str, Any],
+) -> bytes:
+    """Decode an OpenAI Images API response into image bytes."""
+
+    first = (data.get("data") or [{}])[0]
+    if first.get("b64_json"):
+        return base64.b64decode(first["b64_json"])
+    if first.get("url"):
+        img = await client.get(first["url"])
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError("OpenAI image response did not include b64_json or url.")
+
+
 def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
     """Build an OpenAI GPT Image generation tool."""
 
@@ -2703,17 +2751,18 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             output_path = output_path.with_suffix(".png")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        payload: dict[str, Any] = {
-            "model": str(call.args.get("model", "gpt-image-2")).strip() or "gpt-image-2",
-            "prompt": prompt,
+        image_model = str(call.args.get("model", "gpt-image-2")).strip() or "gpt-image-2"
+        image_options: dict[str, Any] = {
+            "model": image_model,
             "n": int(call.args.get("n", 1) or 1),
         }
         for key in ("size", "quality", "background", "moderation"):
             value = call.args.get(key)
             if isinstance(value, str) and value.strip():
-                payload[key] = value.strip()
+                image_options[key] = value.strip()
 
-        async def _request_image(client: httpx.AsyncClient, bearer: str):
+        async def _request_openai_images(client: httpx.AsyncClient, bearer: str):
+            payload = {"prompt": prompt, **image_options}
             resp = await client.post(
                 "https://api.openai.com/v1/images/generations",
                 headers={"Authorization": f"Bearer {bearer}"},
@@ -2722,41 +2771,96 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             resp.raise_for_status()
             return resp.json()
 
+        async def _request_codex_responses(client: httpx.AsyncClient, bearer: str) -> str:
+            output_format = output_path.suffix.lower().lstrip(".") or "png"
+            if output_format == "jpg":
+                output_format = "jpeg"
+            tool_spec = {
+                "type": "image_generation",
+                "model": image_model,
+                "size": image_options.get("size", "auto"),
+                "quality": image_options.get("quality", "auto"),
+                "output_format": output_format,
+            }
+            for key in ("background", "moderation"):
+                value = image_options.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_spec[key] = value.strip()
+
+            payload = {
+                "model": str(call.args.get("codex_model", "gpt-5.5")).strip() or "gpt-5.5",
+                "instructions": (
+                    "Use image generation to create the requested image. "
+                    "Return no extra text unless needed."
+                ),
+                "input": [{
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }],
+                "tools": [tool_spec],
+                "stream": True,
+                "store": False,
+            }
+            latest_b64 = ""
+            async with client.stream(
+                "POST",
+                "https://chatgpt.com/backend-api/codex/responses",
+                headers={
+                    "Authorization": f"Bearer {bearer}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=payload,
+            ) as resp:
+                resp.raise_for_status()
+                event: str | None = None
+                data_lines: list[str] = []
+                async for line in resp.aiter_lines():
+                    if line.startswith("event: "):
+                        event = line[7:]
+                    elif line.startswith("data: "):
+                        data_lines.append(line[6:])
+                    elif line == "" and event:
+                        raw = "\n".join(data_lines)
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            data = {}
+                        found = _extract_image_b64(data)
+                        if found:
+                            latest_b64 = found
+                        if event in {"response.completed", "response.failed"}:
+                            break
+                        event = None
+                        data_lines = []
+            if not latest_b64:
+                raise RuntimeError("Codex Responses backend did not return an image payload.")
+            return latest_b64
+
         try:
             async with httpx.AsyncClient(timeout=_IMAGE_TIMEOUT) as client:
-                try:
-                    data = await _request_image(client, credential.token)
-                    credential_source = credential.source
-                except httpx.HTTPStatusError as exc:
-                    fallback = resolve_openai_credential(
-                        env,
-                        prefer_codex=False,
-                    )
-                    can_fallback = (
-                        auth_mode == "auto"
-                        and credential.source == "codex_oauth"
-                        and fallback is not None
-                        and fallback.source == "api_key"
-                        and exc.response.status_code in {401, 403}
-                    )
-                    if not can_fallback:
-                        raise
-                    data = await _request_image(client, fallback.token)
-                    credential_source = fallback.source
-                first = (data.get("data") or [{}])[0]
-                if first.get("b64_json"):
-                    image_bytes = base64.b64decode(first["b64_json"])
-                elif first.get("url"):
-                    img = await client.get(first["url"])
-                    img.raise_for_status()
-                    image_bytes = img.content
+                if credential.source == "codex_oauth":
+                    try:
+                        b64_image = await _request_codex_responses(client, credential.token)
+                        image_bytes = base64.b64decode(b64_image)
+                        credential_source = credential.source
+                    except httpx.HTTPStatusError as exc:
+                        fallback = resolve_openai_credential(env, prefer_codex=False)
+                        can_fallback = (
+                            auth_mode == "auto"
+                            and fallback is not None
+                            and fallback.source == "api_key"
+                            and exc.response.status_code in {401, 403}
+                        )
+                        if not can_fallback:
+                            raise
+                        data = await _request_openai_images(client, fallback.token)
+                        image_bytes = await _decode_openai_image_response(client, data)
+                        credential_source = fallback.source
                 else:
-                    return ToolResult(
-                        call_id=call.id,
-                        tool_name=call.tool_name,
-                        success=False,
-                        error="OpenAI image response did not include b64_json or url.",
-                    )
+                    data = await _request_openai_images(client, credential.token)
+                    image_bytes = await _decode_openai_image_response(client, data)
+                    credential_source = credential.source
         except httpx.HTTPStatusError as exc:
             body = exc.response.text[:500] if exc.response is not None else ""
             return ToolResult(
@@ -2784,7 +2888,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             success=True,
             output=json.dumps({
                 "path": display_path,
-                "model": payload["model"],
+                "model": image_model,
                 "credential_source": credential_source,
                 "bytes": len(image_bytes),
             }, ensure_ascii=False),
@@ -2836,7 +2940,8 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
         tags=["image", "openai"],
         impact_scope="network",
         scope_descriptions=[
-            "connects to api.openai.com",
+            "connects to api.openai.com for API-key image generation",
+            "connects to chatgpt.com for Codex OAuth image generation",
             "writes one generated image file under the workspace",
         ],
         scope_resolver=_make_openai_image_scope_resolver(workspace),

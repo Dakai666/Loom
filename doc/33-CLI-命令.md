@@ -68,7 +68,8 @@ loom auth openai --skip-codex-login
 
 ### `openai__text_to_image`
 
-Agent 可用工具，透過 OpenAI Images API 生成圖片並寫入 workspace：
+Agent 可用工具，生成圖片並寫入 workspace。`auth_mode=codex` 走 Codex Responses backend；
+`auth_mode=api_key` 走 OpenAI Images API：
 
 ```json
 {
@@ -80,7 +81,7 @@ Agent 可用工具，透過 OpenAI Images API 生成圖片並寫入 workspace：
 ```
 
 `auth_mode` 可為 `auto`、`codex`、`api_key`。`auto` 會優先使用 `codex login` 產生的
-Codex OAuth access token，若 API 拒絕且 `.env` 有 `OPENAI_API_KEY`，則 fallback 到 API key。
+Codex OAuth access token；若 Codex backend 拒絕且 `.env` 有 `OPENAI_API_KEY`，則 fallback 到 API key。
 
 ---
 

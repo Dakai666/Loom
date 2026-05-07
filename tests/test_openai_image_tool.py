@@ -47,12 +47,62 @@ class _FakeAsyncClient:
 
 
 class _FallbackAsyncClient(_FakeAsyncClient):
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"url": url, "headers": headers, "json": json})
+
+        class _Stream:
+            async def __aenter__(self_inner):
+                request = httpx.Request(method, url)
+                response = httpx.Response(401, request=request, text="bad token")
+                raise httpx.HTTPStatusError("bad token", request=request, response=response)
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Stream()
+
     async def post(self, url, headers=None, json=None):
         self.requests.append({"url": url, "headers": headers, "json": json})
-        if headers and headers.get("Authorization") == "Bearer codex-token":
-            return _FakeResponse({"error": "bad token"}, status_code=401)
         encoded = base64.b64encode(b"fallback-png").decode()
         return _FakeResponse({"data": [{"b64_json": encoded}]})
+
+
+class _CodexStreamAsyncClient(_FakeAsyncClient):
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"url": url, "headers": headers, "json": json})
+        encoded = base64.b64encode(b"codex-png").decode()
+
+        class _Stream:
+            status_code = 200
+
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+            def raise_for_status(self_inner):
+                return None
+
+            async def aiter_lines(self_inner):
+                payload = json_module.dumps({
+                    "type": "response.image_generation_call.partial_image",
+                    "partial_image_b64": encoded,
+                })
+                for line in [
+                    "event: response.image_generation_call.partial_image",
+                    f"data: {payload}",
+                    "",
+                    "event: response.completed",
+                    "data: {\"type\":\"response.completed\"}",
+                    "",
+                ]:
+                    yield line
+
+        return _Stream()
+
+
+json_module = json
 
 
 @pytest.mark.asyncio
@@ -84,6 +134,40 @@ async def test_openai_image_tool_writes_generated_image(tmp_path, monkeypatch):
     assert output["credential_source"] == "api_key"
     assert output["model"] == "gpt-image-2"
     assert _FakeAsyncClient.requests[0]["headers"]["Authorization"] == "Bearer sk-test"
+
+
+@pytest.mark.asyncio
+async def test_openai_image_tool_uses_codex_responses_backend(tmp_path, monkeypatch):
+    from loom.core import session as session_module
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "codex-token"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+    monkeypatch.setattr(cli_tools.httpx, "AsyncClient", _CodexStreamAsyncClient)
+    _CodexStreamAsyncClient.requests = []
+    tool = make_openai_image_generation_tool(tmp_path)
+    call = ToolCall(
+        tool_name=tool.name,
+        args={"prompt": "x", "output_path": "renders/codex.png", "auth_mode": "codex"},
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    result = await tool.executor(call)
+
+    assert result.success
+    assert (tmp_path / "renders" / "codex.png").read_bytes() == b"codex-png"
+    output = json.loads(result.output)
+    assert output["credential_source"] == "codex_oauth"
+    request = _CodexStreamAsyncClient.requests[0]
+    assert request["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert request["json"]["model"] == "gpt-5.5"
+    assert request["json"]["tools"][0]["model"] == "gpt-image-2"
 
 
 @pytest.mark.asyncio

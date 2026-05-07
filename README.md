@@ -391,8 +391,8 @@ loom autonomy start
 Model routing works by prefix — `gpt-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
 
 Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
-and writes a PNG/WebP/JPEG under the workspace. It prefers an unexpired Codex
-OAuth token from `codex login`, then falls back to `OPENAI_API_KEY`.
+and writes a PNG/WebP/JPEG under the workspace. With Codex OAuth it uses the
+Codex Responses backend; with `OPENAI_API_KEY` it uses the OpenAI Images API.
 
 ---
 

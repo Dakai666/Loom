@@ -106,8 +106,8 @@ reminder_after_turns = 10
 # default_model = "gpt-5.5"
 #
 # OpenAI image generation uses the openai__text_to_image tool.
-# It defaults to gpt-image-2 and prefers Codex OAuth from `codex login`,
-# falling back to OPENAI_API_KEY when needed.
+# It defaults to gpt-image-2. Codex OAuth uses the Codex Responses backend;
+# OPENAI_API_KEY uses the OpenAI Images API.
 
 # ─────────────────────────────────────────────
 # Memory
