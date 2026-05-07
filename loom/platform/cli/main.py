@@ -2506,15 +2506,15 @@ def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | No
     target = env_file or _project_env_path()
     console.print("[loom.muted]OpenAI setup for Loom[/loom.muted]")
     console.print(
-        "[loom.muted]Run the official Codex CLI OAuth flow (`codex --login`) "
+        "[loom.muted]Run the official Codex CLI OAuth flow (`codex login`) "
         "as a user-friendly first step. Loom can use an unexpired Codex "
         "access token for OpenAI image generation, while OPENAI_API_KEY "
         "remains the portable fallback credential.[/loom.muted]"
     )
 
-    if api_key is None and not skip_codex_login and click.confirm("Run `codex --login` now?", default=True):
+    if api_key is None and not skip_codex_login and click.confirm("Run `codex login` now?", default=True):
         try:
-            result = subprocess.run(["codex", "--login"], check=False)
+            result = subprocess.run(["codex", "login"], check=False)
         except FileNotFoundError:
             console.print(
                 "[loom.warning]Codex CLI was not found on PATH. Install it or "
@@ -2531,7 +2531,7 @@ def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | No
                     )
             else:
                 console.print(
-                    f"[loom.warning]`codex --login` exited with code "
+                    f"[loom.warning]`codex login` exited with code "
                     f"{result.returncode}; continuing with API-key setup.[/loom.warning]"
                 )
 

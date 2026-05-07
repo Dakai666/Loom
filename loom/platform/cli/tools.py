@@ -2680,9 +2680,9 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
         )
         if credential is None:
             detail = (
-                "Run `codex --login` for Codex OAuth or set OPENAI_API_KEY."
+                "Run `codex login` for Codex OAuth or set OPENAI_API_KEY."
                 if auth_mode == "auto"
-                else "Run `codex --login`; no unexpired Codex OAuth token was found."
+                else "Run `codex login`; no unexpired Codex OAuth token was found."
                 if auth_mode == "codex"
                 else "Set OPENAI_API_KEY in .env or the environment."
             )

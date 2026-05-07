@@ -392,7 +392,7 @@ Model routing works by prefix — `gpt-*`, `openai/<model>`, `claude-*`, `ollama
 
 Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
 and writes a PNG/WebP/JPEG under the workspace. It prefers an unexpired Codex
-OAuth token from `codex --login`, then falls back to `OPENAI_API_KEY`.
+OAuth token from `codex login`, then falls back to `OPENAI_API_KEY`.
 
 ---
 
