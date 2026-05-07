@@ -484,6 +484,11 @@ async def _chat(
     # one turn before refresh" UX issue from #275).
     app.footer.default_tier = session._default_tier if session._tier_models else 0
     app.footer.tier = session._active_tier() if session._tier_models else 0
+    # Issue #284: transient footer hints toggle. Default on; set
+    # ``[cli] transient_hints = false`` in loom.toml to disable.
+    app.transient_hints_enabled = bool(
+        session._loom_config.get("cli", {}).get("transient_hints", True)
+    )
 
     # Wire confirm + pause routing into the session so _confirm_tool_cli
     # and the HITL pause path can render through the app's mode flag
@@ -603,12 +608,13 @@ async def _chat(
 
     async def footer_ticker() -> None:
         """Tick the footer at 2 Hz so live fields (active envelope
-        elapsed, compaction spinner, thinking dots) progress
-        visibly."""
+        elapsed, compaction spinner, thinking dots, transient hint
+        expiry — #284) progress visibly."""
         while not shutdown.is_set():
             if (app.footer.active_envelopes
                     or app.footer.compacting
-                    or app.footer.thinking):
+                    or app.footer.thinking
+                    or app.footer.transient_hint is not None):
                 app.invalidate()
             await asyncio.sleep(0.5)
 
@@ -2062,6 +2068,25 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     loom_app.footer.tier = event.to_tier
                     loom_app.footer.tier_expiry_hint_active = False
                     loom_app.invalidate()
+                    # Issue #284: don't dedup tier moves — each one is a
+                    # rare, deliberate event the user wants to see.
+                    loom_app.show_transient_hint(
+                        f"{arrow} tier T{event.from_tier} → T{event.to_tier} ({event.to_model})",
+                        severity="info",
+                        duration_s=4.0,
+                    )
+
+            elif isinstance(event, CompressDone):
+                # Issue #284: surface compaction as a transient hint
+                # rather than a console line — CompressDone was
+                # previously not displayed in CLI ("too noisy for
+                # inline chat"); a 3-second flash is the right weight.
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.show_transient_hint(
+                        f"🗜 compacted → {event.fact_count} facts",
+                        severity="info",
+                        duration_s=3.0,
+                    )
 
             elif isinstance(event, TierExpiryHint):
                 _flush_streaming(force=True)
@@ -2253,6 +2278,25 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     s.last_turn_elapsed_s = elapsed
                     s.last_turn_tool_count = event.tool_count
                     loom_app.invalidate()
+                    # Issue #284: transient hints for cross-threshold
+                    # signals at TurnDone. Dedup keys ensure each
+                    # threshold fires once per session.
+                    pct = session.budget.usage_fraction * 100
+                    if pct >= 80:
+                        loom_app.show_transient_hint(
+                            f"⚠️ context {pct:.0f}% — auto-compact soon",
+                            severity="warn",
+                            duration_s=4.0,
+                            dedup_key="ctx_80",
+                        )
+                    turn_idx = getattr(session, "_turn_index", 0)
+                    if turn_idx in {20, 50, 100}:
+                        loom_app.show_transient_hint(
+                            f"📍 turn {turn_idx} — 考慮 /summarize",
+                            severity="info",
+                            duration_s=3.0,
+                            dedup_key=f"turn_{turn_idx}",
+                        )
                 else:
                     console.print(
                         status_bar(
