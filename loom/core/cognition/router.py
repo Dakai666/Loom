@@ -9,6 +9,8 @@ Model routing rules
 "MiniMax-*"    → MiniMaxProvider
 "minimax-*"    → MiniMaxProvider
 "claude-*"     → AnthropicProvider
+"gpt-*"        → OpenAIProvider
+"openai/*"     → OpenAIProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
@@ -71,6 +73,7 @@ class LLMRouter:
         ("minimax-",   "minimax"),
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
+        ("openai/",    "openai"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
@@ -87,12 +90,18 @@ class LLMRouter:
             self._default = provider.name
         return self
 
-    def get_provider(self, model: str) -> LLMProvider:
+    def _provider_name_for_model(self, model: str) -> str | None:
         for prefix, provider_name in self._ROUTING:
             if model.startswith(prefix):
-                p = self._providers.get(provider_name)
-                if p:
-                    return p
+                return provider_name
+        return None
+
+    def get_provider(self, model: str) -> LLMProvider:
+        provider_name = self._provider_name_for_model(model)
+        if provider_name:
+            p = self._providers.get(provider_name)
+            if p:
+                return p
         if self._default:
             return self._providers[self._default]
         raise RuntimeError(
@@ -160,13 +169,13 @@ class LLMRouter:
         should surface an error rather than silently applying the name to the
         default provider.
         """
-        for prefix, provider_name in self._ROUTING:
-            if model.startswith(prefix):
-                provider = self._providers.get(provider_name)
-                if provider:
-                    provider.model = model
-                    return True
-                # Provider registered in routing table but not in registry
-                # (e.g. key not set) — still a valid prefix, just unavailable.
-                return False
+        provider_name = self._provider_name_for_model(model)
+        if provider_name:
+            provider = self._providers.get(provider_name)
+            if provider:
+                provider.model = model
+                return True
+            # Provider registered in routing table but not in registry
+            # (e.g. key not set) — still a valid prefix, just unavailable.
+            return False
         return False

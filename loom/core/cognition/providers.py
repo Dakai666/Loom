@@ -7,6 +7,7 @@ a provider SDK directly — it always goes through this interface.
 
 Supported providers
 -------------------
+OpenAIProvider     — api.openai.com/v1 (OpenAI-compatible chat completions)
 AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
 OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
 DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
@@ -625,6 +626,10 @@ class _OpenAICompatibleBase(LLMProvider):
     DEFAULT_BASE_URL: str = ""
     DEFAULT_MODEL: str = ""
     DEFAULT_TIMEOUT: float = 120.0
+    # OpenAI's GPT-5 era models reject `max_tokens` and require
+    # `max_completion_tokens`. OpenRouter / Ollama / LMStudio still accept
+    # the classic name, so subclasses override only when needed.
+    MAX_TOKENS_PARAM: str = "max_tokens"
 
     def __init__(
         self,
@@ -683,7 +688,7 @@ class _OpenAICompatibleBase(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": self._api_model(),
             "messages": messages,
-            "max_tokens": max_tokens,
+            self.MAX_TOKENS_PARAM: max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -848,6 +853,31 @@ class OpenRouterProvider(_OpenAICompatibleBase):
     DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
     DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
     DEFAULT_TIMEOUT = 180.0
+
+
+class OpenAIProvider(_OpenAICompatibleBase):
+    """
+    OpenAI — official OpenAI API via the chat completions endpoint.
+
+    Routing prefixes: ``gpt-*`` and ``openai/``.
+    Default base URL: ``https://api.openai.com/v1``
+
+    Usage::
+
+        /model gpt-5.5
+        /model openai/gpt-5.5
+
+    Configure in ``.env``::
+
+        OPENAI_API_KEY=sk-...
+    """
+
+    name = "openai"
+    ROUTING_PREFIX = "openai/"
+    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+    DEFAULT_MODEL = "gpt-5.5"
+    DEFAULT_TIMEOUT = 180.0
+    MAX_TOKENS_PARAM = "max_completion_tokens"
 
 
 class LMStudioProvider(_OpenAICompatibleBase):

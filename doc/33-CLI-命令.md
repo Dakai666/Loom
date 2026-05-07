@@ -52,6 +52,39 @@ loom chat --tui --session abc123       # TUI + 指定 session
 
 ---
 
+## Provider 認證命令
+
+### `loom auth openai`
+
+```bash
+loom auth openai
+loom auth openai --api-key sk-...
+loom auth openai --skip-codex-login
+```
+
+優先引導官方 Codex CLI OAuth 流程（`codex login`），再視需要把
+`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。OpenAI 圖像工具會優先使用
+未過期的 Codex OAuth access token，並在自動模式下 fallback 到 `OPENAI_API_KEY`。
+
+### `openai__text_to_image`
+
+Agent 可用工具，生成圖片並寫入 workspace。`auth_mode=codex` 走 Codex Responses backend；
+`auth_mode=api_key` 走 OpenAI Images API：
+
+```json
+{
+  "prompt": "a clean product mockup",
+  "model": "gpt-image-2",
+  "output_path": "outputs/mockup.png",
+  "auth_mode": "auto"
+}
+```
+
+`auth_mode` 可為 `auto`、`codex`、`api_key`。`auto` 會優先使用 `codex login` 產生的
+Codex OAuth access token；若 Codex backend 拒絕且 `.env` 有 `OPENAI_API_KEY`，則 fallback 到 API key。
+
+---
+
 ## 對話中 HITL 命令
 
 在 `loom chat` 或 TUI 的輸入框中即時輸入：

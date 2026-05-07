@@ -17,6 +17,7 @@ The actual registration happens in main.py via ToolRegistry.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
 _SEARCH_RESULTS = 5       # default Brave results
+_IMAGE_TIMEOUT = 180.0
 
 
 async def _race_abort(coro, abort_signal):
@@ -156,6 +158,50 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
         # e.g. /etc/passwd → workspace/etc/passwd, C:\Windows → workspace\Windows
         parts = resolved.parts[1:]
         return (workspace / Path(*parts)).resolve()
+
+
+def _make_openai_image_scope_resolver(workspace: Path):
+    """Scope resolver for the OpenAI image tool."""
+    import os.path
+
+    _workspace_resolved = workspace.resolve()
+
+    def _resolve(call: ToolCall) -> ScopeRequest:
+        raw = call.args.get("output_path") or call.args.get("path") or "outputs"
+        p = Path(str(raw))
+        resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
+        try:
+            selector = str(resolved.parent.relative_to(_workspace_resolved))
+        except ValueError:
+            selector = os.path.normpath(str(resolved.parent))
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="path",
+                    action="write",
+                    selector=selector,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+                ScopeRequirement(
+                    resource="network",
+                    action="connect",
+                    selector="api.openai.com",
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+                ScopeRequirement(
+                    resource="network",
+                    action="connect",
+                    selector="chatgpt.com",
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+        )
+    return _resolve
 
 
 # ------------------------------------------------------------------
@@ -2608,6 +2654,300 @@ def make_web_search_tool(brave_api_key: str) -> ToolDefinition:
     )
 
 
+def _extract_image_b64(data: Any) -> str:
+    """Find the newest base64 image field in a Responses payload."""
+
+    found = ""
+
+    def _walk(value: Any) -> None:
+        nonlocal found
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if (
+                    key in {"partial_image_b64", "image_b64", "b64_json"}
+                    and isinstance(child, str)
+                    and child
+                ):
+                    found = child
+                else:
+                    _walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                _walk(child)
+
+    _walk(data)
+    return found
+
+
+async def _decode_openai_image_response(
+    client: httpx.AsyncClient,
+    data: dict[str, Any],
+) -> bytes:
+    """Decode an OpenAI Images API response into image bytes."""
+
+    first = (data.get("data") or [{}])[0]
+    if first.get("b64_json"):
+        return base64.b64decode(first["b64_json"])
+    if first.get("url"):
+        img = await client.get(first["url"])
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError("OpenAI image response did not include b64_json or url.")
+
+
+def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
+    """Build an OpenAI GPT Image generation tool."""
+
+    from loom.core.session import _load_env
+    from loom.core.cognition.openai_auth import resolve_openai_credential
+
+    async def _openai_image(call: ToolCall) -> ToolResult:
+        prompt = str(call.args.get("prompt", "")).strip()
+        if not prompt:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error="Missing required argument: prompt",
+            )
+
+        auth_mode = str(call.args.get("auth_mode", "auto")).strip().lower()
+        if auth_mode not in {"auto", "codex", "api_key"}:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error="auth_mode must be one of: auto, codex, api_key",
+            )
+
+        env = _load_env()
+        credential = resolve_openai_credential(
+            env,
+            prefer_codex=auth_mode != "api_key",
+            require_codex=auth_mode == "codex",
+        )
+        if credential is None:
+            detail = (
+                "Run `codex login` for Codex OAuth or set OPENAI_API_KEY."
+                if auth_mode == "auto"
+                else "Run `codex login`; no unexpired Codex OAuth token was found."
+                if auth_mode == "codex"
+                else "Set OPENAI_API_KEY in .env or the environment."
+            )
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"No usable OpenAI credential. {detail}",
+            )
+
+        raw_output = str(call.args.get("output_path", "")).strip()
+        output_path = (
+            _resolve_workspace_path(raw_output, workspace)
+            if raw_output else
+            workspace / "outputs" / f"openai-image-{uuid.uuid4().hex[:8]}.png"
+        )
+        if output_path.suffix.lower() not in {".png", ".webp", ".jpg", ".jpeg"}:
+            output_path = output_path.with_suffix(".png")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        image_model = str(call.args.get("model", "gpt-image-2")).strip() or "gpt-image-2"
+        image_options: dict[str, Any] = {
+            "model": image_model,
+            "n": int(call.args.get("n", 1) or 1),
+        }
+        for key in ("size", "quality", "background", "moderation"):
+            value = call.args.get(key)
+            if isinstance(value, str) and value.strip():
+                image_options[key] = value.strip()
+
+        async def _request_openai_images(client: httpx.AsyncClient, bearer: str):
+            payload = {"prompt": prompt, **image_options}
+            resp = await client.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {bearer}"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        async def _request_codex_responses(client: httpx.AsyncClient, bearer: str) -> str:
+            output_format = output_path.suffix.lower().lstrip(".") or "png"
+            if output_format == "jpg":
+                output_format = "jpeg"
+            tool_spec = {
+                "type": "image_generation",
+                "model": image_model,
+                "size": image_options.get("size", "auto"),
+                "quality": image_options.get("quality", "auto"),
+                "output_format": output_format,
+            }
+            for key in ("background", "moderation"):
+                value = image_options.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_spec[key] = value.strip()
+
+            payload = {
+                "model": str(call.args.get("codex_model", "gpt-5.5")).strip() or "gpt-5.5",
+                "instructions": (
+                    "Use image generation to create the requested image. "
+                    "Return no extra text unless needed."
+                ),
+                "input": [{
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }],
+                "tools": [tool_spec],
+                "stream": True,
+                "store": False,
+            }
+            latest_b64 = ""
+            async with client.stream(
+                "POST",
+                "https://chatgpt.com/backend-api/codex/responses",
+                headers={
+                    "Authorization": f"Bearer {bearer}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=payload,
+            ) as resp:
+                resp.raise_for_status()
+                event: str | None = None
+                data_lines: list[str] = []
+                async for line in resp.aiter_lines():
+                    if line.startswith("event: "):
+                        event = line[7:]
+                    elif line.startswith("data: "):
+                        data_lines.append(line[6:])
+                    elif line == "" and event:
+                        raw = "\n".join(data_lines)
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            data = {}
+                        found = _extract_image_b64(data)
+                        if found:
+                            latest_b64 = found
+                        if event in {"response.completed", "response.failed"}:
+                            break
+                        event = None
+                        data_lines = []
+            if not latest_b64:
+                raise RuntimeError("Codex Responses backend did not return an image payload.")
+            return latest_b64
+
+        try:
+            async with httpx.AsyncClient(timeout=_IMAGE_TIMEOUT) as client:
+                if credential.source == "codex_oauth":
+                    try:
+                        b64_image = await _request_codex_responses(client, credential.token)
+                        image_bytes = base64.b64decode(b64_image)
+                        credential_source = credential.source
+                    except httpx.HTTPStatusError as exc:
+                        fallback = resolve_openai_credential(env, prefer_codex=False)
+                        can_fallback = (
+                            auth_mode == "auto"
+                            and fallback is not None
+                            and fallback.source == "api_key"
+                            and exc.response.status_code in {401, 403}
+                        )
+                        if not can_fallback:
+                            raise
+                        data = await _request_openai_images(client, fallback.token)
+                        image_bytes = await _decode_openai_image_response(client, data)
+                        credential_source = fallback.source
+                else:
+                    data = await _request_openai_images(client, credential.token)
+                    image_bytes = await _decode_openai_image_response(client, data)
+                    credential_source = credential.source
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"OpenAI image request failed with HTTP {exc.response.status_code}: {body}",
+            )
+        except Exception as exc:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"OpenAI image request failed: {type(exc).__name__}: {exc}",
+            )
+
+        output_path.write_bytes(image_bytes)
+        try:
+            display_path = str(output_path.relative_to(workspace))
+        except ValueError:
+            display_path = str(output_path)
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.tool_name,
+            success=True,
+            output=json.dumps({
+                "path": display_path,
+                "model": image_model,
+                "credential_source": credential_source,
+                "bytes": len(image_bytes),
+            }, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name="openai__text_to_image",
+        description=(
+            "Generate an image with OpenAI GPT Image and save it to a workspace file. "
+            "Uses Codex OAuth first when available, with OPENAI_API_KEY fallback."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.NETWORK | ToolCapability.MUTATES,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Image prompt."},
+                "output_path": {
+                    "type": "string",
+                    "description": "Workspace-relative output path. Defaults to outputs/openai-image-<id>.png.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "OpenAI image model.",
+                    "default": "gpt-image-2",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "Image size supported by the selected model, e.g. auto or 1024x1024.",
+                    "default": "auto",
+                },
+                "quality": {
+                    "type": "string",
+                    "description": "Quality supported by the selected model, e.g. auto, low, medium, high.",
+                    "default": "auto",
+                },
+                "auth_mode": {
+                    "type": "string",
+                    "enum": ["auto", "codex", "api_key"],
+                    "default": "auto",
+                    "description": "auto prefers Codex OAuth and falls back to OPENAI_API_KEY.",
+                },
+                "n": {"type": "integer", "minimum": 1, "maximum": 1, "default": 1},
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
+        },
+        executor=_openai_image,
+        tags=["image", "openai"],
+        impact_scope="network",
+        scope_descriptions=[
+            "connects to api.openai.com for API-key image generation",
+            "connects to chatgpt.com for Codex OAuth image generation",
+            "writes one generated image file under the workspace",
+        ],
+        scope_resolver=_make_openai_image_scope_resolver(workspace),
+    )
+
+
 async def _verify_spawn_agent(call: ToolCall, result: ToolResult) -> VerifierResult:
     """Catch hollow sub-agent successes (Issue #196 Phase 1, PR #198 review).
 
@@ -2757,6 +3097,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 },
                 "tools": {
                     "type": ["array", "string", "null"],
+                    "items": {"type": "string"},
                     "description": (
                         "Tool whitelist for the sub-agent. "
                         "List of tool names (e.g. ['read_file', 'web_search']) or comma-separated string. "

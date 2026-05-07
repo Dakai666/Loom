@@ -451,6 +451,7 @@ def build_router() -> LLMRouter:
     Cloud providers (require API keys in .env):
       MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
       Anthropic  — ANTHROPIC_API_KEY
+      OpenAI     — OPENAI_API_KEY
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
@@ -462,6 +463,7 @@ def build_router() -> LLMRouter:
     from loom.core.cognition.providers import (
         OllamaProvider,
         LMStudioProvider,
+        OpenAIProvider,
         OpenRouterProvider,
     )
 
@@ -503,6 +505,27 @@ def build_router() -> LLMRouter:
     if anthropic_key:
         ant_model = default if default.startswith("claude") else "claude-sonnet-4-6"
         router.register(AnthropicProvider(api_key=anthropic_key, model=ant_model))
+
+    # OpenAI — official OpenAI API. Supports bare OpenAI model names and the
+    # optional "openai/" Loom routing prefix for users who prefer explicitness.
+    openai_key = (
+        env.get("OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY", "")
+    )
+    if openai_key:
+        openai_cfg = cfg.get("providers", {}).get("openai", {})
+        base_url = openai_cfg.get("base_url", "") or OpenAIProvider.DEFAULT_BASE_URL
+        raw_model = openai_cfg.get("default_model", OpenAIProvider.DEFAULT_MODEL)
+        default_is_openai = default.startswith(("gpt-", "openai/"))
+        openai_model = default if default_is_openai else raw_model
+        router.register(
+            OpenAIProvider(
+                base_url=base_url,
+                model=openai_model,
+                api_key=openai_key,
+            ),
+            default=default_is_openai,
+        )
 
     # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
     openrouter_key = (
@@ -596,7 +619,7 @@ def build_router() -> LLMRouter:
     if not router.providers:
         raise RuntimeError(
             "No LLM provider configured. "
-            "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
+            "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
             "or enable a local provider in loom.toml ([providers.ollama] / [providers.lmstudio])."
         )
     return router
@@ -1087,6 +1110,7 @@ class LoomSession:
             make_probe_file_tool,
             make_exec_escape_fn,
             make_fetch_url_tool,
+            make_openai_image_generation_tool,
             make_load_skill_tool,
             make_memorize_tool,
             make_memory_health_tool,
@@ -1297,6 +1321,7 @@ class LoomSession:
         brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
         if brave_key:
             self.registry.register(make_web_search_tool(brave_key))
+        self.registry.register(make_openai_image_generation_tool(self.workspace))
 
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))
