@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Callable, Awaitable, Literal
 
 from prompt_toolkit.application import Application
@@ -79,6 +80,19 @@ class _ActiveEnvelope:
     """A tool envelope currently in flight — for footer summary."""
     name: str
     started_monotonic: float
+
+
+@dataclass
+class _TransientHint:
+    """Issue #284: a footer hint that auto-vanishes after a few seconds.
+
+    Rendered above the input separator (between the TaskList panel and
+    the thinking indicator). Never enters scrollback — pure UI-layer
+    animation, not a message.
+    """
+    text: str
+    severity: str  # "info" | "warn"
+    expires_at: float  # monotonic seconds; render filter checks this
 
 
 @dataclass
@@ -129,6 +143,10 @@ class FooterState:
     default_tier: int = 0
     turns_at_tier: int = 0
     tier_expiry_hint_active: bool = False
+
+    # Issue #284: transient footer hint. None when nothing to show.
+    # Render filter additionally checks expires_at against monotonic().
+    transient_hint: _TransientHint | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +205,10 @@ _APP_STYLE = Style.from_dict(
         "footer.envelope":       PARCHMENT_ACCENT,
         "footer.compaction":     PARCHMENT_WARNING,
         "footer.grant":          PARCHMENT_MUTED,
+        # Issue #284: transient hints (info / warn) — appear briefly
+        # above the input separator then auto-vanish
+        "hint.info":             PARCHMENT_ACCENT,
+        "hint.warn":             PARCHMENT_WARNING,
         # Thinking indicator above the input separator
         "thinking":              PARCHMENT_MUTED,
         "thinking.dot":          PARCHMENT_ACCENT,
@@ -258,6 +280,13 @@ class LoomApp:
         # Footer state
         self.footer = FooterState()
 
+        # Issue #284: dedup keys already shown this session, and a master
+        # toggle from `cli.transient_hints` in loom.toml (default on).
+        # The toggle is set by main.py after construction so build_loom_app
+        # callers don't need to pass it through.
+        self._seen_hint_keys: set[str] = set()
+        self.transient_hints_enabled: bool = True
+
         # Build layout + key bindings + Application
         self._app = self._build_application()
 
@@ -279,6 +308,41 @@ class LoomApp:
 
     def invalidate(self) -> None:
         self._app.invalidate()
+
+    def show_transient_hint(
+        self,
+        text: str,
+        *,
+        severity: str = "info",
+        duration_s: float = 3.0,
+        dedup_key: str | None = None,
+    ) -> None:
+        """Issue #284: flash a hint above the input separator.
+
+        ``severity`` is ``info`` or ``warn`` (drives colour). ``dedup_key``,
+        if given, suppresses repeats within the same session — pass
+        e.g. ``"ctx_80"`` for the context-budget threshold so it fires
+        once instead of every TurnDone past 80%.
+
+        No-op when ``transient_hints_enabled`` is False (config gate).
+        Always returns immediately; the hint expires by itself when
+        the footer ticker re-evaluates the render filter past
+        ``expires_at``.
+        """
+        if not self.transient_hints_enabled:
+            return
+        if dedup_key is not None:
+            if dedup_key in self._seen_hint_keys:
+                return
+            self._seen_hint_keys.add(dedup_key)
+        if severity not in ("info", "warn"):
+            severity = "info"
+        self.footer.transient_hint = _TransientHint(
+            text=text,
+            severity=severity,
+            expires_at=monotonic() + duration_s,
+        )
+        self.invalidate()
 
     async def print_above(self, callback: Callable[[], None]) -> None:
         """Run ``callback`` above the application's bottom region.
@@ -529,9 +593,23 @@ class LoomApp:
             filter=Condition(lambda: self.footer.thinking),
         )
 
+        # Issue #284: transient hint line. Shares the slot above the
+        # separator with the thinking indicator (both can be active —
+        # they stack). Filter checks expiry so the line collapses once
+        # the deadline passes; the ticker re-evaluates at 2 Hz so the
+        # collapse is visible without a render storm.
+        hint_window = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(self._render_hint),
+                height=1,
+            ),
+            filter=Condition(self._hint_visible),
+        )
+
         layout = Layout(
             HSplit([
                 tasklist_window,
+                hint_window,
                 thinking_window,
                 separator_top,
                 input_window,
@@ -652,6 +730,31 @@ class LoomApp:
                 parts.append(("class:footer.stats", " · ".join(stats)))
 
         return FormattedText(parts)
+
+    def _hint_visible(self) -> bool:
+        """Filter for hint_window. Also clears the expired hint so the
+        FooterState doesn't keep a stale reference around (helps tests
+        and keeps the dataclass tidy)."""
+        h = self.footer.transient_hint
+        if h is None:
+            return False
+        if monotonic() >= h.expires_at:
+            self.footer.transient_hint = None
+            return False
+        return True
+
+    def _render_hint(self) -> FormattedText:
+        """Issue #284: render the active transient hint.
+
+        Severity drives the colour class. Returns empty FormattedText if
+        the hint expired between filter check and render (unlikely race
+        but keeps the contract tight).
+        """
+        h = self.footer.transient_hint
+        if h is None:
+            return FormattedText([])
+        cls = "class:hint.warn" if h.severity == "warn" else "class:hint.info"
+        return FormattedText([(cls, f" {h.text} ")])
 
     def _render_thinking(self) -> FormattedText:
         """Animated thinking indicator above the input separator.
