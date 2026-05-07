@@ -22,10 +22,7 @@ _ROUTING: list[tuple[str, str]] = [
     ("MiniMax-",   "minimax"),    # MiniMax-M2.7, MiniMax-Sirius 等
     ("minimax-",   "minimax"),    # 小寫前綴
     ("claude-",    "anthropic"),  # Anthropic claude-3.5-sonnet 等
-    ("gpt-",       "openai"),     # GPT-5.5 等
-    ("o3",         "openai"),     # exact OpenAI reasoning model
-    ("o3-",        "openai"),     # o3-pro 等
-    ("o4-",        "openai"),     # o4-mini 等
+    ("gpt-",       "openai"),     # GPT-5.5、GPT-5.5-pro 等
     ("openai/",    "openai"),     # 明確指定 OpenAI provider
     ("ollama/",    "ollama"),     # 本地 Ollama 模型
     ("lmstudio/",  "lmstudio"),   # 本地 LM Studio 模型

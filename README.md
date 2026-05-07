@@ -388,7 +388,7 @@ loom discord start --autonomy --channel <id>
 loom autonomy start
 ```
 
-Model routing works by prefix — `gpt-*`, `o3` / `o3-*` / `o4-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
+Model routing works by prefix — `gpt-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
 
 Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
 and writes a PNG/WebP/JPEG under the workspace. It prefers an unexpired Codex

@@ -160,8 +160,8 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
         return (workspace / Path(*parts)).resolve()
 
 
-def _make_write_path_resolver(workspace: Path):
-    """Return a scope_resolver for tools that write one output path."""
+def _make_openai_image_scope_resolver(workspace: Path):
+    """Scope resolver for the OpenAI image tool: write one path + connect to api.openai.com."""
     import os.path
 
     _workspace_resolved = workspace.resolve()
@@ -2839,7 +2839,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             "connects to api.openai.com",
             "writes one generated image file under the workspace",
         ],
-        scope_resolver=_make_write_path_resolver(workspace),
+        scope_resolver=_make_openai_image_scope_resolver(workspace),
     )
 
 

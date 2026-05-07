@@ -814,7 +814,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 f"providers: {providers}[/loom.muted]\n"
                 "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
                 "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
-                "[loom.muted]  gpt-* / o3 / o3-* / o4-* requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
+                "[loom.muted]  gpt-*               requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
                 "[loom.muted]  openai/<model>      explicit OpenAI prefix (e.g. openai/gpt-5.5)[/loom.muted]\n"
                 "[loom.muted]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/loom.muted]\n"
@@ -1100,7 +1100,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
                 "    [loom.muted]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
-                "    [loom.muted]gpt-5.5 / o3 / o4-mini → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
+                "    [loom.muted]gpt-5.5 / gpt-5.5-pro   → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
                 "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
                 "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
@@ -1509,7 +1509,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             providers = ", ".join(session.router.providers)
             app.notify(
                 f"Model: {session.model}  |  providers: {providers}\n"
-                "Prefixes: MiniMax-*  claude-*  gpt-*  o3/o3-*/o4-*  openai/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
+                "Prefixes: MiniMax-*  claude-*  gpt-*  openai/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)

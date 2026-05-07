@@ -516,10 +516,7 @@ def build_router() -> LLMRouter:
         openai_cfg = cfg.get("providers", {}).get("openai", {})
         base_url = openai_cfg.get("base_url", "") or OpenAIProvider.DEFAULT_BASE_URL
         raw_model = openai_cfg.get("default_model", OpenAIProvider.DEFAULT_MODEL)
-        default_is_openai = (
-            default in {"o1", "o3"}
-            or default.startswith(("gpt-", "o1-", "o3-", "o4-", "openai/"))
-        )
+        default_is_openai = default.startswith(("gpt-", "openai/"))
         openai_model = default if default_is_openai else raw_model
         router.register(
             OpenAIProvider(

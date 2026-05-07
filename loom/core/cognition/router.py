@@ -10,9 +10,6 @@ Model routing rules
 "minimax-*"    → MiniMaxProvider
 "claude-*"     → AnthropicProvider
 "gpt-*"        → OpenAIProvider
-"o1" / "o1-*"  → OpenAIProvider
-"o3" / "o3-*"  → OpenAIProvider
-"o4-*"         → OpenAIProvider
 "openai/*"     → OpenAIProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
@@ -76,19 +73,12 @@ class LLMRouter:
         ("minimax-",   "minimax"),
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
-        ("o1-",        "openai"),
-        ("o3-",        "openai"),
-        ("o4-",        "openai"),
         ("openai/",    "openai"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
         ("lmstudio/",  "lmstudio"),
     ]
-    _EXACT_ROUTING: dict[str, str] = {
-        "o1": "openai",
-        "o3": "openai",
-    }
 
     def __init__(self) -> None:
         self._providers: dict[str, LLMProvider] = {}
@@ -101,9 +91,6 @@ class LLMRouter:
         return self
 
     def _provider_name_for_model(self, model: str) -> str | None:
-        exact = self._EXACT_ROUTING.get(model)
-        if exact:
-            return exact
         for prefix, provider_name in self._ROUTING:
             if model.startswith(prefix):
                 return provider_name
