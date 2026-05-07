@@ -284,6 +284,19 @@ prefetch_enabled = false
 prefetch_top_n   = 3       # number of memory hits to inject (keep small)
 
 # ─────────────────────────────────────────────
+# CLI  (loom chat / loom chat --tui)
+# ─────────────────────────────────────────────
+
+[cli]
+# Issue #284: transient footer hints. When agent-side signals cross a
+# threshold (context budget ≥80%, tier moved, auto-compact done, turn
+# 20/50/100), a short hint flashes for 3-4 seconds above the input
+# separator then auto-vanishes — never enters scrollback or message
+# log. Each threshold dedups once per session so it doesn't repeat.
+# Set false to disable entirely (the footer chips remain).
+transient_hints = true
+
+# ─────────────────────────────────────────────
 # Timezone  (Issue #124)
 # ─────────────────────────────────────────────
 
