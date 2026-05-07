@@ -9,6 +9,11 @@ Model routing rules
 "MiniMax-*"    → MiniMaxProvider
 "minimax-*"    → MiniMaxProvider
 "claude-*"     → AnthropicProvider
+"gpt-*"        → OpenAIProvider
+"o1*"          → OpenAIProvider
+"o3*"          → OpenAIProvider
+"o4*"          → OpenAIProvider
+"openai/*"     → OpenAIProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
@@ -71,6 +76,10 @@ class LLMRouter:
         ("minimax-",   "minimax"),
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
+        ("o1",         "openai"),
+        ("o3",         "openai"),
+        ("o4",         "openai"),
+        ("openai/",    "openai"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),

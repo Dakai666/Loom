@@ -31,6 +31,23 @@ class TestCoreSessionImport:
         assert CoreSession is CliSession
 
 
+class TestBuildRouter:
+    def test_registers_openai_provider_from_env(self, monkeypatch: pytest.MonkeyPatch):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {
+            "OPENAI_API_KEY": "sk-test",
+        })
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "gpt-4.1"},
+        })
+
+        router = session_module.build_router()
+
+        assert "openai" in router.providers
+        assert router.get_provider("gpt-4.1").name == "openai"
+
+
 class TestLoomSessionStartup:
     @pytest_asyncio.fixture
     async def session_module(self):

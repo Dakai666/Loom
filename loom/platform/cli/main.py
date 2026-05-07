@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import time
 import tomllib
 from pathlib import Path
@@ -85,6 +86,32 @@ console = Console(highlight=False, theme=LOOM_THEME)
 # handlers) can emit without threading a parameter through every call.
 harness = HarnessChannel(console)
 logger = logging.getLogger(__name__)
+
+
+def _project_env_path() -> Path:
+    """Return the .env path Loom should update for CLI onboarding."""
+    return Path.cwd() / ".env"
+
+
+def _set_env_value(path: Path, key: str, value: str) -> None:
+    """Set KEY=value in a dotenv file while preserving unrelated lines."""
+    encoded = f"{key}={value}"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    out: list[str] = []
+    replaced = False
+    prefix = f"{key}="
+    for line in lines:
+        if line.startswith(prefix):
+            if not replaced:
+                out.append(encoded)
+                replaced = True
+            continue
+        out.append(line)
+    if not replaced:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(encoded)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # CLI commands
@@ -787,6 +814,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 f"providers: {providers}[/loom.muted]\n"
                 "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
                 "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
+                "[loom.muted]  gpt-* / o3 / o4-*   requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
+                "[loom.muted]  openai/<model>      explicit OpenAI prefix (e.g. openai/gpt-4.1)[/loom.muted]\n"
                 "[loom.muted]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  ollama/<name>       enable [providers.ollama] in loom.toml[/loom.muted]\n"
@@ -1071,6 +1100,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
                 "    [loom.muted]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
+                "    [loom.muted]gpt-4.1 / gpt-5 / o3    → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
                 "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
                 "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
@@ -1479,7 +1509,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             providers = ", ".join(session.router.providers)
             app.notify(
                 f"Model: {session.model}  |  providers: {providers}\n"
-                "Prefixes: MiniMax-*  claude-*  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
+                "Prefixes: MiniMax-*  claude-*  gpt-*  o3/o4-*  openai/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)
@@ -2453,6 +2483,66 @@ async def _sessions_rm(session_id: str, db: str) -> None:
             return
         await sl.delete_session(session_id)
     console.print(f"[loom.muted]Session [loom.accent]{session_id}[/loom.accent] deleted.[/loom.muted]")
+
+
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def auth() -> None:
+    """Configure provider authentication."""
+
+
+@auth.command("openai")
+@click.option("--api-key", default=None, help="OpenAI API key to write to .env.")
+@click.option("--skip-codex-login", is_flag=True, default=False,
+              help="Do not offer to run the official Codex CLI login flow.")
+@click.option("--env-file", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="Dotenv file to update (defaults to ./.env).")
+def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | None) -> None:
+    """Sign in with Codex CLI and/or store OPENAI_API_KEY for Loom."""
+    target = env_file or _project_env_path()
+    console.print("[loom.muted]OpenAI setup for Loom[/loom.muted]")
+    console.print(
+        "[loom.muted]Recommended first step: run the official Codex CLI "
+        "OAuth flow (`codex --login`). Loom does not read Codex private "
+        "credentials; OPENAI_API_KEY remains the portable fallback.[/loom.muted]"
+    )
+
+    if api_key is None and not skip_codex_login and click.confirm("Run `codex --login` now?", default=True):
+        try:
+            result = subprocess.run(["codex", "--login"], check=False)
+        except FileNotFoundError:
+            console.print(
+                "[loom.warning]Codex CLI was not found on PATH. Install it or "
+                "continue with an API key.[/loom.warning]"
+            )
+        else:
+            if result.returncode == 0:
+                console.print("[loom.muted]Codex CLI login completed.[/loom.muted]")
+            else:
+                console.print(
+                    f"[loom.warning]`codex --login` exited with code "
+                    f"{result.returncode}; continuing with API-key setup.[/loom.warning]"
+                )
+
+    existing = _load_env().get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if api_key is None:
+        if existing and not click.confirm("OPENAI_API_KEY already exists. Replace it?", default=False):
+            console.print("[loom.muted]Keeping existing OPENAI_API_KEY.[/loom.muted]")
+            return
+        if click.confirm("Store an OPENAI_API_KEY for Loom now?", default=not bool(existing)):
+            api_key = click.prompt("OPENAI_API_KEY", hide_input=True).strip()
+
+    if api_key:
+        _set_env_value(target, "OPENAI_API_KEY", api_key.strip())
+        console.print(f"[loom.muted]Saved OPENAI_API_KEY to {target}.[/loom.muted]")
+        console.print("[loom.muted]Try: loom chat --model gpt-4.1[/loom.muted]")
+    else:
+        console.print(
+            "[loom.muted]No API key saved. Codex CLI login is still useful for "
+            "`codex`, but Loom needs OPENAI_API_KEY for OpenAI provider calls.[/loom.muted]"
+        )
 
 
 # ---------------------------------------------------------------------------

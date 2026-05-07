@@ -52,6 +52,21 @@ loom chat --tui --session abc123       # TUI + 指定 session
 
 ---
 
+## Provider 認證命令
+
+### `loom auth openai`
+
+```bash
+loom auth openai
+loom auth openai --api-key sk-...
+loom auth openai --skip-codex-login
+```
+
+優先引導官方 Codex CLI OAuth 流程（`codex --login`），再視需要把
+`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。
+
+---
+
 ## 對話中 HITL 命令
 
 在 `loom chat` 或 TUI 的輸入框中即時輸入：

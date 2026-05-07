@@ -451,6 +451,7 @@ def build_router() -> LLMRouter:
     Cloud providers (require API keys in .env):
       MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
       Anthropic  — ANTHROPIC_API_KEY
+      OpenAI     — OPENAI_API_KEY
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
@@ -462,6 +463,7 @@ def build_router() -> LLMRouter:
     from loom.core.cognition.providers import (
         OllamaProvider,
         LMStudioProvider,
+        OpenAIProvider,
         OpenRouterProvider,
     )
 
@@ -503,6 +505,27 @@ def build_router() -> LLMRouter:
     if anthropic_key:
         ant_model = default if default.startswith("claude") else "claude-sonnet-4-6"
         router.register(AnthropicProvider(api_key=anthropic_key, model=ant_model))
+
+    # OpenAI — official OpenAI API. Supports bare OpenAI model names and the
+    # optional "openai/" Loom routing prefix for users who prefer explicitness.
+    openai_key = (
+        env.get("OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY", "")
+    )
+    if openai_key:
+        openai_cfg = cfg.get("providers", {}).get("openai", {})
+        base_url = openai_cfg.get("base_url", "") or OpenAIProvider.DEFAULT_BASE_URL
+        raw_model = openai_cfg.get("default_model", OpenAIProvider.DEFAULT_MODEL)
+        default_is_openai = default.startswith(("gpt-", "o1", "o3", "o4", "openai/"))
+        openai_model = default if default_is_openai else raw_model
+        router.register(
+            OpenAIProvider(
+                base_url=base_url,
+                model=openai_model,
+                api_key=openai_key,
+            ),
+            default=default_is_openai,
+        )
 
     # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
     openrouter_key = (
@@ -596,7 +619,7 @@ def build_router() -> LLMRouter:
     if not router.providers:
         raise RuntimeError(
             "No LLM provider configured. "
-            "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
+            "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
             "or enable a local provider in loom.toml ([providers.ollama] / [providers.lmstudio])."
         )
     return router

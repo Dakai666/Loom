@@ -370,6 +370,7 @@ pip install -e ".[dev]"
 Create a `.env` in the project root with at least one provider:
 
 ```env
+OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_key_here
 
 # Local providers (no API key needed)
@@ -378,14 +379,16 @@ LMSTUDIO_BASE_URL=http://localhost:1234/v1
 ```
 
 ```bash
+loom auth openai                  # Codex CLI login helper + OPENAI_API_KEY setup
 loom chat                          # interactive CLI
 loom chat --tui                    # TUI mode
+loom chat --model gpt-4.1          # OpenAI model
 loom chat --model ollama/llama3.2  # local model
 loom discord start --autonomy --channel <id>
 loom autonomy start
 ```
 
-Model routing works by prefix — `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
+Model routing works by prefix — `gpt-*`, `o3` / `o4-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
 
 ---
 

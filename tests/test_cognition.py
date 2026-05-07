@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 from loom.core.cognition.context import ContextBudget, estimate_tokens
 from loom.core.cognition.providers import (
     LLMResponse,
+    OpenAIProvider,
     _to_anthropic_messages,
 )
 from loom.core.cognition.router import LLMRouter
@@ -260,6 +261,19 @@ class TestLLMRouter:
         router.register(p_mm)
         router.register(p_ant)
         assert router.get_provider("claude-sonnet-4-6") is p_ant
+
+    def test_routing_by_prefix_openai(self):
+        router = LLMRouter()
+        p_openai = self._make_mock_provider("openai")
+        router.register(p_openai)
+        assert router.get_provider("gpt-4.1") is p_openai
+        assert router.get_provider("o3") is p_openai
+        assert router.get_provider("o4-mini") is p_openai
+        assert router.get_provider("openai/gpt-4.1") is p_openai
+
+    def test_openai_provider_strips_optional_prefix(self):
+        provider = OpenAIProvider(api_key="test", model="openai/gpt-4.1")
+        assert provider._api_model() == "gpt-4.1"
 
     def test_fallback_to_default(self):
         router = LLMRouter()
