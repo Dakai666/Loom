@@ -10,9 +10,9 @@ Model routing rules
 "minimax-*"    → MiniMaxProvider
 "claude-*"     → AnthropicProvider
 "gpt-*"        → OpenAIProvider
-"o1*"          → OpenAIProvider
-"o3*"          → OpenAIProvider
-"o4*"          → OpenAIProvider
+"o1" / "o1-*"  → OpenAIProvider
+"o3" / "o3-*"  → OpenAIProvider
+"o4-*"         → OpenAIProvider
 "openai/*"     → OpenAIProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
@@ -76,15 +76,19 @@ class LLMRouter:
         ("minimax-",   "minimax"),
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
-        ("o1",         "openai"),
-        ("o3",         "openai"),
-        ("o4",         "openai"),
+        ("o1-",        "openai"),
+        ("o3-",        "openai"),
+        ("o4-",        "openai"),
         ("openai/",    "openai"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
         ("lmstudio/",  "lmstudio"),
     ]
+    _EXACT_ROUTING: dict[str, str] = {
+        "o1": "openai",
+        "o3": "openai",
+    }
 
     def __init__(self) -> None:
         self._providers: dict[str, LLMProvider] = {}
@@ -96,12 +100,21 @@ class LLMRouter:
             self._default = provider.name
         return self
 
-    def get_provider(self, model: str) -> LLMProvider:
+    def _provider_name_for_model(self, model: str) -> str | None:
+        exact = self._EXACT_ROUTING.get(model)
+        if exact:
+            return exact
         for prefix, provider_name in self._ROUTING:
             if model.startswith(prefix):
-                p = self._providers.get(provider_name)
-                if p:
-                    return p
+                return provider_name
+        return None
+
+    def get_provider(self, model: str) -> LLMProvider:
+        provider_name = self._provider_name_for_model(model)
+        if provider_name:
+            p = self._providers.get(provider_name)
+            if p:
+                return p
         if self._default:
             return self._providers[self._default]
         raise RuntimeError(
@@ -169,13 +182,13 @@ class LLMRouter:
         should surface an error rather than silently applying the name to the
         default provider.
         """
-        for prefix, provider_name in self._ROUTING:
-            if model.startswith(prefix):
-                provider = self._providers.get(provider_name)
-                if provider:
-                    provider.model = model
-                    return True
-                # Provider registered in routing table but not in registry
-                # (e.g. key not set) — still a valid prefix, just unavailable.
-                return False
+        provider_name = self._provider_name_for_model(model)
+        if provider_name:
+            provider = self._providers.get(provider_name)
+            if provider:
+                provider.model = model
+                return True
+            # Provider registered in routing table but not in registry
+            # (e.g. key not set) — still a valid prefix, just unavailable.
+            return False
         return False

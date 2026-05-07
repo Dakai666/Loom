@@ -814,8 +814,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 f"providers: {providers}[/loom.muted]\n"
                 "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
                 "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
-                "[loom.muted]  gpt-* / o3 / o4-*   requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
-                "[loom.muted]  openai/<model>      explicit OpenAI prefix (e.g. openai/gpt-4.1)[/loom.muted]\n"
+                "[loom.muted]  gpt-* / o3 / o3-* / o4-* requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
+                "[loom.muted]  openai/<model>      explicit OpenAI prefix (e.g. openai/gpt-5.2)[/loom.muted]\n"
                 "[loom.muted]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  ollama/<name>       enable [providers.ollama] in loom.toml[/loom.muted]\n"
@@ -1100,7 +1100,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
                 "    [loom.muted]MiniMax-M2.7            → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
-                "    [loom.muted]gpt-4.1 / gpt-5 / o3    → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
+                "    [loom.muted]gpt-5.2 / o3 / o4-mini → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
                 "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
                 "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
@@ -1509,7 +1509,7 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
             providers = ", ".join(session.router.providers)
             app.notify(
                 f"Model: {session.model}  |  providers: {providers}\n"
-                "Prefixes: MiniMax-*  claude-*  gpt-*  o3/o4-*  openai/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
+                "Prefixes: MiniMax-*  claude-*  gpt-*  o3/o3-*/o4-*  openai/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
             )
         else:
             ok = session.set_model(arg)
@@ -2500,13 +2500,14 @@ def auth() -> None:
 @click.option("--env-file", type=click.Path(dir_okay=False, path_type=Path),
               default=None, help="Dotenv file to update (defaults to ./.env).")
 def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | None) -> None:
-    """Sign in with Codex CLI and/or store OPENAI_API_KEY for Loom."""
+    """Run Codex CLI login helper and/or store OPENAI_API_KEY for Loom."""
     target = env_file or _project_env_path()
     console.print("[loom.muted]OpenAI setup for Loom[/loom.muted]")
     console.print(
-        "[loom.muted]Recommended first step: run the official Codex CLI "
-        "OAuth flow (`codex --login`). Loom does not read Codex private "
-        "credentials; OPENAI_API_KEY remains the portable fallback.[/loom.muted]"
+        "[loom.muted]Phase 1 setup: run the official Codex CLI OAuth flow "
+        "(`codex --login`) as a user-friendly first step. Loom does not read "
+        "Codex private credentials; OPENAI_API_KEY remains the portable "
+        "provider credential.[/loom.muted]"
     )
 
     if api_key is None and not skip_codex_login and click.confirm("Run `codex --login` now?", default=True):
@@ -2537,7 +2538,7 @@ def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | No
     if api_key:
         _set_env_value(target, "OPENAI_API_KEY", api_key.strip())
         console.print(f"[loom.muted]Saved OPENAI_API_KEY to {target}.[/loom.muted]")
-        console.print("[loom.muted]Try: loom chat --model gpt-4.1[/loom.muted]")
+        console.print("[loom.muted]Try: loom chat --model gpt-5.2[/loom.muted]")
     else:
         console.print(
             "[loom.muted]No API key saved. Codex CLI login is still useful for "

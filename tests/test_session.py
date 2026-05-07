@@ -39,13 +39,13 @@ class TestBuildRouter:
             "OPENAI_API_KEY": "sk-test",
         })
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
-            "cognition": {"default_model": "gpt-4.1"},
+            "cognition": {"default_model": "gpt-5.2"},
         })
 
         router = session_module.build_router()
 
         assert "openai" in router.providers
-        assert router.get_provider("gpt-4.1").name == "openai"
+        assert router.get_provider("gpt-5.2").name == "openai"
 
 
 class TestLoomSessionStartup:

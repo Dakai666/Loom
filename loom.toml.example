@@ -32,7 +32,7 @@ personality = ""
 # Supported prefixes:
 #   MiniMax-*               → MiniMax via Anthropic-compatible endpoint  (MINIMAX_API_KEY in .env)
 #   claude-*                → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
-#   gpt-* / o3 / o4-*       → OpenAI official API                        (OPENAI_API_KEY in .env)
+#   gpt-* / o3 / o3-* / o4-* → OpenAI official API                       (OPENAI_API_KEY in .env)
 #   openai/<model>          → OpenAI official API with explicit prefix    (OPENAI_API_KEY in .env)
 #   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
 #   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
@@ -103,7 +103,7 @@ reminder_after_turns = 10
 
 # [providers.openai]
 # base_url      = "https://api.openai.com/v1"
-# default_model = "gpt-4.1"
+# default_model = "gpt-5.2"
 
 # ─────────────────────────────────────────────
 # Memory

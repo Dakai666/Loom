@@ -855,15 +855,15 @@ class OpenAIProvider(_OpenAICompatibleBase):
     """
     OpenAI — official OpenAI API via the chat completions endpoint.
 
-    Routing prefixes: ``gpt-*``, ``o1*``, ``o3*``, ``o4*``, and ``openai/``.
+    Routing prefixes: ``gpt-*``, ``o1`` / ``o1-*``, ``o3`` / ``o3-*``,
+    ``o4-*``, and ``openai/``.
     Default base URL: ``https://api.openai.com/v1``
 
     Usage::
 
-        /model gpt-4.1
-        /model gpt-5
+        /model gpt-5.2
         /model o3
-        /model openai/gpt-4.1
+        /model openai/gpt-5.2
 
     Configure in ``.env``::
 
@@ -873,7 +873,7 @@ class OpenAIProvider(_OpenAICompatibleBase):
     name = "openai"
     ROUTING_PREFIX = "openai/"
     DEFAULT_BASE_URL = "https://api.openai.com/v1"
-    DEFAULT_MODEL = "gpt-4.1"
+    DEFAULT_MODEL = "gpt-5.2"
     DEFAULT_TIMEOUT = 180.0
 
 

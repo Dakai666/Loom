@@ -22,9 +22,10 @@ _ROUTING: list[tuple[str, str]] = [
     ("MiniMax-",   "minimax"),    # MiniMax-M2.7, MiniMax-Sirius 等
     ("minimax-",   "minimax"),    # 小寫前綴
     ("claude-",    "anthropic"),  # Anthropic claude-3.5-sonnet 等
-    ("gpt-",       "openai"),     # GPT-4o 等
-    ("o3",         "openai"),     # OpenAI reasoning models
-    ("o4",         "openai"),     # OpenAI reasoning models
+    ("gpt-",       "openai"),     # GPT-5.2 等
+    ("o3",         "openai"),     # exact OpenAI reasoning model
+    ("o3-",        "openai"),     # o3-pro 等
+    ("o4-",        "openai"),     # o4-mini 等
     ("openai/",    "openai"),     # 明確指定 OpenAI provider
     ("ollama/",    "ollama"),     # 本地 Ollama 模型
     ("lmstudio/",  "lmstudio"),   # 本地 LM Studio 模型
@@ -94,7 +95,7 @@ from loom.core.cognition.providers import (
 router = LLMRouter()
 router.register(MiniMaxProvider(api_key=..., model="MiniMax-M2.7"), default=True)
 router.register(AnthropicProvider(api_key=...))
-router.register(OpenAIProvider(api_key=..., model="gpt-4.1"))
+router.register(OpenAIProvider(api_key=..., model="gpt-5.2"))
 router.register(OllamaProvider(base_url="http://localhost:11434"))
 ```
 

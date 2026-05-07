@@ -62,8 +62,9 @@ loom auth openai --api-key sk-...
 loom auth openai --skip-codex-login
 ```
 
-優先引導官方 Codex CLI OAuth 流程（`codex --login`），再視需要把
-`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。
+Phase 1 命令：優先引導官方 Codex CLI OAuth 流程（`codex --login`），再視需要把
+`OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。Loom 不會讀取或搬移
+Codex CLI 的私有 token；真正的 Codex OAuth token 整合會另行設計。
 
 ---
 
