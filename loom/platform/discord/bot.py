@@ -57,7 +57,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
     import discord
@@ -198,6 +198,32 @@ def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
         lines.append(f"-# {prefix}{'  '.join(level_parts)}")
 
     return "\n".join(lines)
+
+
+def _resolve_active_model_and_tier(session: Any) -> tuple[str, str]:
+    """Return (active_model, tier_badge_suffix) for footer rendering.
+
+    Issue #290: Discord footer used to read ``session.model`` directly,
+    which returns the registered default and silently ignores sticky tier
+    overrides. This mirrors the CLI footer wiring (loom/platform/cli/main.py
+    + loom/platform/cli/app.py): when the tier system is configured, prefer
+    ``_active_model()`` and surface a tier badge only when the active tier
+    differs from the default (matches CLI #276 gating).
+
+    Returns ``("model", "")`` when the tier system isn't configured or the
+    session is on its default tier, so the call site can append the tier
+    suffix unconditionally.
+    """
+    if getattr(session, "_tier_models", None):
+        active_model = session._active_model()
+        active_tier = session._active_tier()
+        tier_badge = (
+            f"  ·  ⇪ Tier {active_tier}"
+            if active_tier != session._default_tier
+            else ""
+        )
+        return active_model, tier_badge
+    return session.model, ""
 
 
 class LoomDiscordBot:
@@ -1186,6 +1212,12 @@ class LoomDiscordBot:
         cache_hit_pct = (_cache_read_tokens / cache_total * 100) if cache_total > 0 else 0.0
         cache_tag = f"  ·  cache {cache_hit_pct:.0f}%" if cache_hit_pct > 0 else ""
 
+        # Issue #290: footer must reflect the *active* model + tier so
+        # users see what actually answered the turn. session.model returns
+        # the registered default and ignores sticky tier overrides — the
+        # helper mirrors CLI footer wiring (#276 gating).
+        active_model, tier_badge = _resolve_active_model_and_tier(session)
+
         # ── Turn summary (if enabled) ─────────────────────────────────────
         if self._summary_mode != "off" and _envelope_count > 0:
             # Grants info
@@ -1210,7 +1242,7 @@ class LoomDiscordBot:
                 if _had_rollback:
                     embed.add_field(name="Rollbacks", value="Yes", inline=True)
                 embed.add_field(name="Grants", value=grants_str, inline=True)
-                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {session.model}{cache_tag}")
+                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {active_model}{cache_tag}{tier_badge}")
                 await message.channel.send(embed=embed)
             else:
                 # Compact one-liner
@@ -1224,11 +1256,10 @@ class LoomDiscordBot:
         # ── Footer: persona / context / model ────────────────────────────
         persona = session.current_personality or "default"
         pct = session.budget.usage_fraction * 100
-        model = session.model
         # Skip footer if detail summary already includes it
         if not (self._summary_mode == "detail" and _envelope_count > 0):
-            await _safe_send(message.channel, 
-                f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {model}"
+            await _safe_send(message.channel,
+                f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {active_model}{tier_badge}"
             )
 
         # ── Mark done (#188 lifecycle reaction) ──────────────────────────
