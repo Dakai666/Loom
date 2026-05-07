@@ -454,3 +454,55 @@ class TestJobsInjectMessage:
         assert "kaboom" in msg
         assert "cancelled" in msg
         assert "unneeded" in msg
+
+
+# --- Issue #312: process-group kill on cancel/timeout ----------------
+
+
+class TestRunBashCancelKillsPipeChildren:
+    """Regression tests for #312.
+
+    `proc.kill()` only signals the shell PID; pipe children keep stdout
+    open and `communicate()` hangs past cancel/timeout. Using
+    `start_new_session=True` + `os.killpg` reaps the whole group.
+
+    The canonical repro is `sleep 30 | cat` — the shell exits quickly but
+    `cat` survives, holding stdout open until `sleep` finishes.
+    """
+
+    async def test_timeout_kills_pipe_child(self, tmp_path: Path):
+        import time
+        tool = make_run_bash_tool(tmp_path)
+        t0 = time.monotonic()
+        result = await tool.executor(_call("run_bash", {
+            "command": "sleep 30 | cat",
+            "justification": "test",
+            "timeout": 1,
+        }))
+        elapsed = time.monotonic() - t0
+        assert result.success is False
+        assert result.failure_type == "timeout"
+        # Pre-fix: the cat child kept stdout open and we hung ~30s. Now
+        # the whole group is reaped, so we return shortly after the
+        # 1s timeout (allow generous margin for CI noise).
+        assert elapsed < 5.0, f"timeout cleanup took {elapsed:.1f}s — pipe child not reaped"
+
+    async def test_cancel_kills_pipe_child(self, tmp_path: Path):
+        import time
+        tool = make_run_bash_tool(tmp_path)
+        task = asyncio.create_task(tool.executor(_call("run_bash", {
+            "command": "sleep 30 | cat",
+            "justification": "test",
+            "timeout": 60,
+        })))
+        # Let the subprocess actually start.
+        await asyncio.sleep(0.3)
+        t0 = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        elapsed = time.monotonic() - t0
+        # Pre-fix: cancel propagated but `cat` kept stdout open and the
+        # finally-block proc.wait() hung. Now killpg + bounded wait
+        # ensures fast cleanup.
+        assert elapsed < 5.0, f"cancel cleanup took {elapsed:.1f}s — pipe child not reaped"

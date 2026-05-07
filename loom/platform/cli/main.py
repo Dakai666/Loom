@@ -454,9 +454,17 @@ async def _chat(
 
         # Abort-on-submit: if a turn is in flight, cancel and queue
         # the new message with the interrupt prefix.
+        #
+        # Issue #312: we used to call only `session.cancel()`, which
+        # sets a soft `_abort` flag checked at LLM-call boundaries —
+        # an in-flight `run_bash` (or any long await) would still run
+        # to completion. Mirror /stop and Escape (action_interrupt) by
+        # also cancelling the worker task, so awaits inside the turn
+        # receive CancelledError immediately.
         in_flight = current_turn_task is not None and not current_turn_task.done()
         if in_flight:
             session.cancel()
+            current_turn_task.cancel()
             harness.inline("⏸ 上一輪已中斷，接收新訊息…", level="info")
             try:
                 await asyncio.wait_for(current_turn_task, timeout=3.0)

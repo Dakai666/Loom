@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -37,6 +39,35 @@ import logging
 _log = logging.getLogger(__name__)
 _self_term_guard = SelfTerminationGuard()
 _cmd_scanner = CommandScanner()
+
+
+def _killpg_quiet(pid: int, sig: int) -> None:
+    """Best-effort process-group signal. Swallows ProcessLookupError and
+    PermissionError so cancellation/timeout cleanup never raises."""
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def _terminate_proc_group(proc: asyncio.subprocess.Process) -> None:
+    """Reap a subprocess that was launched with start_new_session=True.
+
+    SIGTERM the whole process group, give it 2s, then SIGKILL. Bounded
+    waits ensure cancellation/timeout cleanup never hangs even if a
+    pipe child is wedged on a write to a closed fd.
+    """
+    if proc.returncode is not None:
+        return
+    _killpg_quiet(proc.pid, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+    except (asyncio.TimeoutError, BaseException):
+        _killpg_quiet(proc.pid, signal.SIGKILL)
+        try:
+            await proc.wait()
+        except BaseException:
+            pass
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -722,32 +753,32 @@ def make_run_bash_tool(
             )
 
         try:
+            # Issue #312: start_new_session=True puts the shell in its own
+            # process group so killpg can reap pipe children (e.g.
+            # `git log | head`) — proc.kill() alone only signals the shell
+            # PID, leaving children holding stdout fds and communicate()
+            # blocked indefinitely past cancel/timeout.
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,
             )
             try:
                 try:
                     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                    await _terminate_proc_group(proc)
                     return ToolResult(call_id=call.id, tool_name=call.tool_name,
                                       success=False, error=f"Command timed out after {timeout}s",
                                       failure_type="timeout")
             finally:
-                # Issue #222: cancellation (Discord cancel-and-relaunch,
-                # _abort.abort()) bypasses the TimeoutError branch — kill
-                # the subprocess so we don't orphan Playwright / shell
-                # children. returncode is None iff still running.
-                if proc.returncode is None:
-                    proc.kill()
-                    try:
-                        await proc.wait()
-                    except BaseException:
-                        pass
+                # Issue #222 / #312: cancellation (Discord cancel-and-relaunch,
+                # _abort.abort(), CLI /stop) bypasses the TimeoutError branch
+                # — reap the whole process group so pipe children don't keep
+                # the pipe open and stall communicate().
+                await _terminate_proc_group(proc)
 
             output = stdout.decode("utf-8", errors="replace")
             success = proc.returncode == 0
@@ -831,22 +862,18 @@ async def _run_bash_job(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
+            start_new_session=True,  # Issue #312: see _run_bash for rationale
         )
         try:
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await _terminate_proc_group(proc)
                 return None, None, f"Command timed out after {timeout}s"
         finally:
-            # Issue #222: kill on cancellation so async jobs don't orphan.
-            if proc.returncode is None:
-                proc.kill()
-                try:
-                    await proc.wait()
-                except BaseException:
-                    pass
+            # Issue #222 / #312: reap the whole process group on cancellation
+            # so async jobs don't orphan pipe children.
+            await _terminate_proc_group(proc)
         output = stdout.decode("utf-8", errors="replace")
         ref = f"bash_{uuid.uuid4().hex[:8]}"
         scratchpad.write(ref, output)
