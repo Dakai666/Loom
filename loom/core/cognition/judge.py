@@ -316,9 +316,13 @@ async def run_judge(
     router: "LLMRouter",
     model: str,
     digest: str,
-) -> JudgeVerdict:
+) -> tuple[JudgeVerdict, Any]:
     """Single-shot LLM call. Never raises — failures become uncertain
-    verdicts with the error preserved on the result."""
+    verdicts with the error preserved on the result.
+
+    Returns ``(verdict, response)`` where ``response`` is the raw
+    ``ChatResponse`` (``None`` when the call raised). Callers use the
+    response to emit ``model_event`` ledger entries (doc/53 §3.1)."""
     try:
         response = await router.chat(
             model=model,
@@ -328,13 +332,16 @@ async def run_judge(
             ],
             max_tokens=400,
         )
-        return parse_verdict(response.text or "")
+        return parse_verdict(response.text or ""), response
     except Exception as exc:
         logger.warning("Judge call failed: %s", exc, exc_info=True)
-        return JudgeVerdict(
-            verdict=VERDICT_UNCERTAIN,
-            reason="judge call failed; treat as no-signal",
-            error=f"{type(exc).__name__}: {exc}",
+        return (
+            JudgeVerdict(
+                verdict=VERDICT_UNCERTAIN,
+                reason="judge call failed; treat as no-signal",
+                error=f"{type(exc).__name__}: {exc}",
+            ),
+            None,
         )
 
 

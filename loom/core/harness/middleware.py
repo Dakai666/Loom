@@ -1735,6 +1735,56 @@ class LifecycleMiddleware(Middleware):
         body = (result.output or "") + "|" + (result.error or "")
         return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
+    # Producer tools whose successful results materialise external artifacts
+    # (#334 / doc/53 §3.1). Inspection happens in lifecycle END so neither the
+    # tool factory nor the registry needs to know about ledger emit.
+    _ARTIFACT_PRODUCERS: tuple[str, ...] = (
+        "write_file", "openai__text_to_image",
+    )
+
+    async def _maybe_emit_artifact(
+        self, call: "ToolCall", result: "ToolResult", rec: "ActionRecord"
+    ) -> None:
+        if call.tool_name not in self._ARTIFACT_PRODUCERS:
+            return
+        import hashlib
+        import json as _json
+        artifact_type = "unknown"
+        size_bytes = 0
+        location: str | None = None
+        digest_input = b""
+        if call.tool_name == "write_file":
+            artifact_type = "text_file"
+            content = call.args.get("content", "") or ""
+            size_bytes = len(content.encode("utf-8"))
+            digest_input = content.encode("utf-8")
+            meta = result.metadata or {}
+            location = meta.get("_resolved_path") or call.args.get("path")
+        elif call.tool_name == "openai__text_to_image":
+            artifact_type = "image"
+            try:
+                payload = _json.loads(result.output or "{}")
+            except Exception:
+                payload = {}
+            size_bytes = int(payload.get("bytes", 0) or 0)
+            location = payload.get("path")
+            # Image bytes aren't kept on the result; digest the metadata
+            # tuple so replays at least see a stable artifact identity.
+            digest_input = (
+                f"{payload.get('path','')}|{size_bytes}|{payload.get('model','')}"
+            ).encode("utf-8")
+        digest = "sha256:" + hashlib.sha256(digest_input).hexdigest()
+        from loom.core.ledger import ArtifactEmitPayload
+        await self._ledger_emitter.emit_artifact_emit(
+            payload=ArtifactEmitPayload(
+                artifact_type=artifact_type,
+                size_bytes=size_bytes,
+                digest=digest,
+                location=location,
+            ),
+            parent_event_id=f"evt_tool_end_{rec.id[:12]}",
+        )
+
     async def _emit_lifecycle_begin(
         self, call: "ToolCall", record: "ActionRecord"
     ) -> None:
@@ -1797,6 +1847,13 @@ class LifecycleMiddleware(Middleware):
                 )
             except Exception:
                 _log.exception("ledger tool_lifecycle END emit failed; continuing")
+
+            # #334 — emit artifact_emit for known producer tools.
+            if result is not None and result.success and not rolled_back:
+                try:
+                    await self._maybe_emit_artifact(call, result, rec)
+                except Exception:
+                    _log.exception("ledger artifact_emit failed; continuing")
 
             if original is not None:
                 await original(rec)

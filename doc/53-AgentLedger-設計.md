@@ -879,7 +879,7 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 | Event type | Step 2 狀態 | 備註 |
 |---|---|---|
 | `turn_start` | ✅ emit | PromptStack snapshot 含 persona + tool_catalog_size；`memory_layers` / `context_token_count` 未追蹤所以省略（不放 placeholder 誤導 reader） |
-| `turn_end` | ✅ emit | `outcome` 從 `sys.exc_info()` 推導；`token_usage={}` 直到 model_event 落地 |
+| `turn_end` | ✅ emit | `outcome` 從 `sys.exc_info()` 推導；`token_usage` 由 `_emit_ledger_model_event` 累計（#334） |
 | `tool_lifecycle` BEGIN/END | ✅ emit | STATE_CHANGE / ROLLBACK 簡化見 §3.1 註記 |
 | `permission_decision` | ✅ emit | grant / deny；scope 子類型未 emit（需 reason 字串解析，違反 `feedback_avoid_regex_on_llm_output`） |
 | `memory_op` read / write | ✅ emit | search / get_fact / query_relations / memorize / relate 五路徑 |
@@ -888,17 +888,17 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 | `task_mutation` | ✅ emit | operation 簡化見 §3.1 註記 |
 | `env_observation` timer / external / anomaly | ✅ emit | TriggerEvaluator 三類 trigger |
 | `env_observation` notification / contradiction | ⚠️ schema ready, no emitter | MemoryPulse / ContradictionDetector 自己的 commit |
-| `thought` | ❌ deferred | §3.3 buffered full_text capture 需要 stream_turn 內 reasoning loop 整合 |
-| `model_event` | ❌ deferred | 需要 token_usage 在 router.chat / stream_chat 各 call site threading |
-| `judge_verdict` | ❌ deferred | emit 點在 _maybe_run_judge 旁邊 |
-| `artifact_emit` | ❌ deferred | emit 在 code / image / audio 產出位置 |
+| `thought` | ✅ emit（#334） | §3.3 signal accumulator：judge fail/uncertain、outcome abandoned/error、artifact >10KB 任一觸發 commit；inline ≤50KB / blob > 50KB |
+| `model_event` | ✅ emit（#334） | stream_turn 主 loop、`run_judge`（sync + async）、subagent 三條 router 路徑都 emit；`_turn_token_usage` 餵 turn_end |
+| `judge_verdict` | ✅ emit（#334） | `_maybe_run_judge` / `_run_judge_async` 兩條路徑；判定 pass/fail/uncertain → PASS/FAIL/CONCERN，`error` 設值 → ERROR |
+| `artifact_emit` | ✅ emit（#334） | LifecycleMiddleware END 後檢查 `_ARTIFACT_PRODUCERS={write_file, openai__text_to_image}`；rolled_back 或 failed 不 emit |
 
 `三類 exception 自開新 correlation_id`（§4.2）：
 - `env_observation` ✅ 實作（PR #330 commit 4）
 - `memory_op.compact` ⚠️ deferred（無 emitter）
 - `turn_end.outcome=error` ⚠️ schema 就緒；目前 turn_end 用 stream_turn 主 correlation 不另開新 corr — 待 follow-up issue 評估是否要切
 
-Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types，不是替換既有 observability 信號。Follow-up issue 在 Step 2 merge 後另開。
+Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types，不是替換既有 observability 信號。Follow-up issue 在 Step 2 merge 後另開。**#334（feat/ledger-deferred-events）落地後，原本 ❌ 的四個 event types 全部轉 ✅；後續仍 deferred 的是 `memory_op` compact / batch_read 與 `env_observation` notification / contradiction，等對應 caller 出現再 emit。**
 
 **Step 3-5 進度補記**（PR #331 / #332 / Step 5 PR）：
 
