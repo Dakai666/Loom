@@ -7,6 +7,15 @@ blob helper, resolve_memory_id helper, maintenance hook.
 Layered emit (Step 2) and projection contract (Step 3-4) come later.
 """
 
+from loom.core.ledger.correlation import (
+    async_correlation_scope,
+    correlation_scope,
+    current_correlation,
+    new_correlation_id,
+    reset_correlation,
+    set_correlation,
+)
+from loom.core.ledger.emitter import LedgerEmitter
 from loom.core.ledger.schema import (
     DEFAULT_BRANCH,
     LEDGER_BLOB_SUBDIR,
@@ -33,6 +42,7 @@ __all__ = [
     "ArtifactEmitPayload",
     "EnvObservationPayload",
     "JudgeVerdictPayload",
+    "LedgerEmitter",
     "LedgerEvent",
     "LedgerStore",
     "MemoryOpPayload",
@@ -43,4 +53,10 @@ __all__ = [
     "ToolLifecyclePayload",
     "TurnEndPayload",
     "TurnStartPayload",
+    "async_correlation_scope",
+    "correlation_scope",
+    "current_correlation",
+    "new_correlation_id",
+    "reset_correlation",
+    "set_correlation",
 ]
