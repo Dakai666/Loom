@@ -40,6 +40,17 @@ from rich.panel import Panel
 from rich.rule import Rule
 
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
+from loom.core.ledger import (
+    LedgerEmitter,
+    LedgerStore,
+    TurnEndPayload,
+    TurnStartPayload,
+    new_correlation_id,
+    reset_correlation,
+    reset_turn_id,
+    set_correlation,
+    set_turn_id,
+)
 from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
@@ -672,6 +683,12 @@ class LoomSession:
         self.workspace: Path = (workspace or Path.cwd()).resolve()
         self.router = build_router()
 
+        # AgentLedger handles — opened in start(), closed in stop().
+        # Until start() runs, these are None and every subsystem's optional
+        # ledger_emitter wiring is a no-op (existing tests rely on this).
+        self._ledger_store: LedgerStore | None = None
+        self._ledger_emitter: LedgerEmitter | None = None
+
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
         self._stack = PromptStack.from_config(config)
@@ -1017,6 +1034,27 @@ class LoomSession:
         semantic._health = self._governor.health
         self._session_log._health = self._governor.health
 
+        # ── AgentLedger (Quest B) — open ledger.db before any subsystem
+        # is constructed so each one can be wired with the emitter at
+        # construction time. doc/53 §11.1 layered emit; §5.1 independent
+        # ~/.loom/ledger.db. Opt-out via [ledger].enabled = false.
+        _ledger_cfg = _load_loom_config().get("ledger", {})
+        if _ledger_cfg.get("enabled", True):
+            try:
+                self._ledger_store = LedgerStore()
+                await self._ledger_store.open()
+                self._ledger_emitter = LedgerEmitter(
+                    self._ledger_store, session_id=self.session_id
+                )
+            except Exception:
+                logger.exception(
+                    "ledger init failed — proceeding without ledger; "
+                    "existing observability paths (envelope / session_log) "
+                    "remain unchanged"
+                )
+                self._ledger_store = None
+                self._ledger_emitter = None
+
         # Issue #147 Phase C: build the facade up-front so every later step
         # in start() (auto-import, MemoryIndexer, tool registration, etc.)
         # reads memory exclusively through ``self._memory``.
@@ -1029,6 +1067,7 @@ class LoomSession:
             episodic=episodic,
             search=search,
             governor=self._governor,
+            ledger_emitter=self._ledger_emitter,
         )
 
         # Issue #142: agent self-observability. Noise-proportional-to-signal —
@@ -1334,7 +1373,11 @@ class LoomSession:
         from loom.core.tasks.manager import TaskListManager
         from loom.platform.cli.tools import make_task_write_tool
         self._tasklist_manager = TaskListManager(session_id=self.session_id)
-        self.registry.register(make_task_write_tool(self._tasklist_manager))
+        self.registry.register(
+            make_task_write_tool(
+                self._tasklist_manager, ledger_emitter=self._ledger_emitter
+            )
+        )
 
         # Issue #154: async job inspection tools. The JobStore + Scratchpad
         # themselves are created in __init__ so run_bash/fetch_url can close
@@ -1402,6 +1445,7 @@ class LoomSession:
                     registry=self.registry,
                     on_lifecycle=self._on_lifecycle,
                     on_state_change=self._on_state_change,
+                    ledger_emitter=self._ledger_emitter,
                 ),
                 TraceMiddleware(on_trace=self._on_trace),
                 SchemaValidationMiddleware(registry=self.registry),
@@ -1411,6 +1455,7 @@ class LoomSession:
                     confirm_fn=self._confirm_tool_cli,
                     exec_escape_fn=_exec_escape_fn,
                     registry=self.registry,
+                    ledger_emitter=self._ledger_emitter,
                 ),
                 LifecycleGateMiddleware(
                     registry=self.registry,
@@ -1662,6 +1707,16 @@ class LoomSession:
             except Exception as exc:
                 logger.debug("DB close error during shutdown: %s", exc)
 
+            # Close the ledger after the main db so any final emits in
+            # the shutdown chain (memory compaction, etc.) still land.
+            if self._ledger_store is not None:
+                try:
+                    await self._ledger_store.close()
+                except Exception as exc:
+                    logger.debug("ledger close error during shutdown: %s", exc)
+                self._ledger_store = None
+                self._ledger_emitter = None
+
     # ------------------------------------------------------------------
     # Streaming agent loop
     # ------------------------------------------------------------------
@@ -1702,6 +1757,25 @@ class LoomSession:
                 origin,
             )
         await self._turn_lock.acquire()
+        # ── AgentLedger turn scope (Quest B Phase 2 Step 2 commit 6) ──
+        # turn_id is set once per stream_turn invocation and never
+        # rotates within the turn (doc/53 §4.4). correlation_id seeds a
+        # fresh business-action chain; subagents and inner-loop tools
+        # inherit it via contextvar. Tokens are reset in finally.
+        _turn_id_v2 = f"turn_{uuid.uuid4().hex[:12]}"
+        _turn_corr_id = new_correlation_id("turn")
+        _ledger_turn_token: Any = None
+        _ledger_corr_token: Any = None
+        _turn_start_monotonic = time.monotonic()
+        if self._ledger_emitter is not None:
+            _ledger_turn_token = set_turn_id(_turn_id_v2)
+            _ledger_corr_token = set_correlation(_turn_corr_id)
+            try:
+                await self._emit_ledger_turn_start(_turn_id_v2)
+            except Exception:
+                logger.exception(
+                    "ledger turn_start emit failed; continuing"
+                )
         try:
             self._current_origin = origin
 
@@ -2424,6 +2498,31 @@ class LoomSession:
                 stop_reason=_stop_reason,
             )
         finally:
+            # ── AgentLedger turn_end + token reset ────────────────────
+            if self._ledger_emitter is not None and _ledger_turn_token is not None:
+                import sys as _sys
+                _exc_type = _sys.exc_info()[0]
+                if _exc_type is None:
+                    _outcome = "clean"
+                elif isinstance(_exc_type, type) and issubclass(
+                    _exc_type, asyncio.CancelledError
+                ):
+                    _outcome = "abandoned"
+                else:
+                    _outcome = "error"
+                try:
+                    _duration_ms = int(
+                        (time.monotonic() - _turn_start_monotonic) * 1000
+                    )
+                    await self._emit_ledger_turn_end(
+                        _turn_id_v2, _outcome, _duration_ms
+                    )
+                except Exception:
+                    logger.exception(
+                        "ledger turn_end emit failed; continuing"
+                    )
+                reset_turn_id(_ledger_turn_token)
+                reset_correlation(_ledger_corr_token)
             self._turn_lock.release()
 
     # ------------------------------------------------------------------
@@ -3283,6 +3382,67 @@ class LoomSession:
                 self._current_envelope.add(ctx.record)
 
         return result
+
+    # ------------------------------------------------------------------
+    # AgentLedger turn-boundary emit helpers (Quest B Step 2 commit 6)
+    # ------------------------------------------------------------------
+
+    def _prompt_stack_snapshot(self) -> tuple[str, dict]:
+        """Return (sha256-prefixed hash of composed prompt, components dict).
+
+        v1 components carry persona name + tool-catalog size; doc/53 §3.4
+        also lists ``memory_layers`` and ``context_token_count`` but Loom
+        does not yet track those — leaving them out is preferable to
+        emitting placeholder values that would mislead future readers.
+        """
+        import hashlib
+
+        try:
+            composed = self._stack.composed_prompt or ""
+        except Exception:
+            composed = ""
+        digest = "sha256:" + hashlib.sha256(composed.encode("utf-8")).hexdigest()
+        try:
+            persona = self._stack.current_personality
+        except Exception:
+            persona = None
+        try:
+            tool_count = len(self.registry.list())
+        except Exception:
+            tool_count = 0
+        return digest, {
+            "persona": persona,
+            "tool_catalog_size": tool_count,
+        }
+
+    async def _emit_ledger_turn_start(self, turn_id: str) -> None:
+        if self._ledger_emitter is None:
+            return
+        digest, components = self._prompt_stack_snapshot()
+        await self._ledger_emitter.emit_turn_start(
+            turn_id=turn_id,
+            payload=TurnStartPayload(
+                prompt_stack_hash=digest,
+                prompt_stack_components=components,
+            ),
+            event_id=f"evt_turn_start_{turn_id[5:]}",
+        )
+
+    async def _emit_ledger_turn_end(
+        self, turn_id: str, outcome: str, duration_ms: int
+    ) -> None:
+        if self._ledger_emitter is None:
+            return
+        await self._ledger_emitter.emit_turn_end(
+            turn_id=turn_id,
+            payload=TurnEndPayload(
+                outcome=outcome,
+                duration_ms=duration_ms,
+                token_usage={},  # populated when model_event emit lands
+            ),
+            event_id=f"evt_turn_end_{turn_id[5:]}",
+            parent_event_id=f"evt_turn_start_{turn_id[5:]}",
+        )
 
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
         summary = (

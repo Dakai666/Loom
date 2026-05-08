@@ -28,7 +28,14 @@ from loom.core.ledger.schema import (
     ThoughtPayload,
 )
 
-DEFAULT_DB_PATH = Path.home() / ".loom" / "ledger.db"
+def _default_db_path() -> Path:
+    """Resolve ~/.loom/ledger.db at call time, not import time.
+
+    Lazy resolution lets test environments rebind ``HOME`` via
+    monkeypatch and have each LoomSession get an isolated ledger.db,
+    instead of every test sharing the developer's real home directory.
+    """
+    return Path.home() / ".loom" / "ledger.db"
 
 
 def _payload_to_dict(payload: Any) -> dict[str, Any]:
@@ -59,7 +66,7 @@ class LedgerStore:
         db_path: Path | str | None = None,
         blob_dir: Path | str | None = None,
     ) -> None:
-        self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self.db_path = Path(db_path) if db_path else _default_db_path()
         # Default blob_dir sits next to ledger.db: ~/.loom/ledger_blobs/
         self.blob_dir = (
             Path(blob_dir)
