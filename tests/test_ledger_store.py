@@ -195,7 +195,8 @@ async def test_thought_inline_when_under_threshold(store: LedgerStore) -> None:
     )
     assert full_text == text
     assert ext is None
-    assert len(digest) == 64  # sha256 hex
+    assert digest.startswith("sha256:")
+    assert len(digest) == len("sha256:") + 64  # prefix + sha256 hex
 
 
 async def test_thought_external_when_over_threshold(
@@ -210,7 +211,7 @@ async def test_thought_external_when_over_threshold(
     blob = store.blob_dir / ext
     assert blob.exists()
     assert blob.read_text(encoding="utf-8") == text
-    assert len(digest) == 64
+    assert digest.startswith("sha256:")
 
 
 async def test_thought_payload_helper_round_trip(store: LedgerStore) -> None:
@@ -247,9 +248,7 @@ async def test_update_thought_full_text_late_arrival(store: LedgerStore) -> None
     fetched = await store.fetch_event("th1")
     assert fetched.payload["full_text"] == "the actual text"
     assert fetched.payload["external_ref"] is None
-    assert fetched.payload["digest"].startswith(("sha256:",)) or len(
-        fetched.payload["digest"]
-    ) == 64
+    assert fetched.payload["digest"].startswith("sha256:")
 
 
 async def test_update_thought_unknown_event_raises(store: LedgerStore) -> None:

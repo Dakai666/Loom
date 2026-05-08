@@ -56,6 +56,15 @@ ActionRecord / ExecutionEnvelope / SessionLog / TaskList / MemoryWrite / JudgeVe
 
 `tool_lifecycle` **取代既有 `ActionRecord`**，state_history 內嵌進事件 payload，不另存。
 
+> **v0.3 實作簡化**（PR #330 / Phase 2 Step 2）：
+> 4 phase 列舉中 v0.3 只 emit `BEGIN` + `END`：
+> - `STATE_CHANGE` 保留為未來 high-frequency capture 的 phase 值；每 state transition 一筆事件對 v1 太重，且 `state_history` 已在 END payload 內完整保留。
+> - `ROLLBACK` 折疊進 `END.rolled_back=True`；REVERTED 在 memorialize 時已是最終狀態，獨立 ROLLBACK event 對 reader 不增加資訊。
+> 後續若 STATE_CHANGE 真有需求再開 phase emit 即可，schema 已就緒（payload.phase 是 string）。
+
+> **v0.3 task_mutation operation 簡化**（PR #330）：
+> 列舉 `write/done/modify/abandon` 四種 operation 的設計來自 #205 collapse 之前的假設。Post-#205 task_write 是唯一 mutation 入口，done/modify/abandon 都被編碼進 status 欄位、沒有獨立呼叫點。每次 task_write 落 `operation="write"` 並帶完整 `task_state` snapshot，done/modify/abandon 為 reader-side derivable from successive snapshots。
+
 ### 3.2 粒度策略
 
 - **預設中粒度（9 種）**
@@ -751,17 +760,23 @@ def parse_tool_lifecycle(event):
 
 純文件規定，不做 lint 強制。
 
-### 9.6 Schema Versions（待 Phase 2 開始累積）
+### 9.6 Schema Versions
 
-| event_type | v1 | v2 (TBD) |
+| event_type | v1（PR #330 / Phase 2 Step 2） | v2 (TBD) |
 |---|---|---|
-| `turn_start` | §3.4 形式 | — |
-| `turn_end` | §3.1 outcomes 集合 | — |
-| `thought` | §3.3 形式 | — |
-| `tool_lifecycle` | §7.2 形式 | — |
-| ... | ... | — |
+| `turn_start` | `prompt_stack_hash`(sha256:) + `prompt_stack_components`{persona, tool_catalog_size} + `full_text`=None | — |
+| `turn_end` | `outcome` ∈ {clean,abandoned,error}, `duration_ms`, `token_usage`={} placeholder | — |
+| `thought` | (deferred — schema 已定義於 §7.2) | — |
+| `model_event` | (deferred — schema 已定義於 §7.2) | — |
+| `tool_lifecycle` | phase ∈ {BEGIN, END}（見 §3.1 簡化說明）；END 帶完整 state_history | — |
+| `permission_decision` | decision ∈ {grant, deny}；scope 子類型未 emit | — |
+| `memory_op` | operation ∈ {read, write}；compact / batch_read 暫無 emitter | — |
+| `task_mutation` | operation ∈ {write}（見 §3.1 簡化說明）；task_state 帶完整 status_summary snapshot | — |
+| `judge_verdict` | (deferred) | — |
+| `artifact_emit` | (deferred) | — |
+| `env_observation` | observation_type ∈ {timer, external, anomaly}；notification/contradiction 暫無 emitter | — |
 
-Phase 2 實作期間若 schema 演進，於本表追加 v2 行並標 breaking 點。
+所有 v1 payload 帶 `schema_version: 1`。Phase 2 實作期間若 schema 演進，於本表追加 v2 行並標 breaking 點（§9.4 流程）。
 
 ---
 
@@ -855,6 +870,32 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 
 性質：Step 1-4 不影響運行系統；Step 5-6 是切版時刻。
 
+### 11.2.1 Step 2 實作狀態（PR #330 截止）
+
+| Event type | Step 2 狀態 | 備註 |
+|---|---|---|
+| `turn_start` | ✅ emit | PromptStack snapshot 含 persona + tool_catalog_size；`memory_layers` / `context_token_count` 未追蹤所以省略（不放 placeholder 誤導 reader） |
+| `turn_end` | ✅ emit | `outcome` 從 `sys.exc_info()` 推導；`token_usage={}` 直到 model_event 落地 |
+| `tool_lifecycle` BEGIN/END | ✅ emit | STATE_CHANGE / ROLLBACK 簡化見 §3.1 註記 |
+| `permission_decision` | ✅ emit | grant / deny；scope 子類型未 emit（需 reason 字串解析，違反 `feedback_avoid_regex_on_llm_output`） |
+| `memory_op` read / write | ✅ emit | search / get_fact / query_relations / memorize / relate 五路徑 |
+| `memory_op` compact | ⚠️ schema ready, no emitter | Loom v0.3 無 compaction caller；resolve_memory_id store-side helper 已就緒 |
+| `memory_op` batch_read | ⚠️ schema ready, no emitter | MemoryPulse 落地時補 |
+| `task_mutation` | ✅ emit | operation 簡化見 §3.1 註記 |
+| `env_observation` timer / external / anomaly | ✅ emit | TriggerEvaluator 三類 trigger |
+| `env_observation` notification / contradiction | ⚠️ schema ready, no emitter | MemoryPulse / ContradictionDetector 自己的 commit |
+| `thought` | ❌ deferred | §3.3 buffered full_text capture 需要 stream_turn 內 reasoning loop 整合 |
+| `model_event` | ❌ deferred | 需要 token_usage 在 router.chat / stream_chat 各 call site threading |
+| `judge_verdict` | ❌ deferred | emit 點在 _maybe_run_judge 旁邊 |
+| `artifact_emit` | ❌ deferred | emit 在 code / image / audio 產出位置 |
+
+`三類 exception 自開新 correlation_id`（§4.2）：
+- `env_observation` ✅ 實作（PR #330 commit 4）
+- `memory_op.compact` ⚠️ deferred（無 emitter）
+- `turn_end.outcome=error` ⚠️ schema 就緒；目前 turn_end 用 stream_turn 主 correlation 不另開新 corr — 待 follow-up issue 評估是否要切
+
+Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types，不是替換既有 observability 信號。Follow-up issue 在 Step 2 merge 後另開。
+
 ### 11.3 舊資料 — Leave alone
 
 舊 session_log 留 `memory.db`、舊 `ExecutionEnvelope` artifact 留原處；新 session 從 `ledger.db` 開始。
@@ -867,7 +908,8 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 
 ## 12. 文件版本與相關讀物
 
-- **本文件版本**：v1.0（2026-05-08，Phase 1 鎖定版）
+- **本文件版本**：v1.1（2026-05-08，Phase 2 Step 2 實作回填 — PR #330 review feedback）
+  - v1.0（2026-05-08，Phase 1 鎖定版）
 - **共識來源**：#316 Round 1-6 comments
 - **關係文件**：
   - `doc/52-主線與支線.md` §1.4（Quest B 定位）、§3.3（Turn Graph Branching 預留）、§5（開發順序）

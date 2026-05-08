@@ -72,6 +72,7 @@ async def _terminate_proc_group(proc: asyncio.subprocess.Process) -> None:
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from loom.core.ledger import LedgerEmitter
     from loom.core.cognition.skill_gate import SkillGate
     from loom.core.cognition.skill_mutator import SkillMutator
     from loom.core.cognition.skill_promoter import SkillPromoter
@@ -3141,8 +3142,18 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # All real outputs go to disk via write_file; the TaskList only tracks
 # "have I forgotten this step?".
 
-def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
-    """Create the task_write tool — replace-the-whole-list semantics."""
+def make_task_write_tool(
+    manager: "TaskListManager",
+    ledger_emitter: "LedgerEmitter | None" = None,
+) -> ToolDefinition:
+    """Create the task_write tool — replace-the-whole-list semantics.
+
+    When ``ledger_emitter`` is provided, every successful write emits a
+    ``task_mutation`` event (doc/53 §3.1) carrying the full post-write
+    status summary as ``task_state``. Per-task done/modify/abandon are
+    reader-side derivations from successive snapshots, not separate
+    events — post-#205 the write tool is the only mutation entry point.
+    """
 
     async def _task_write(call: ToolCall) -> ToolResult:
         todos = call.args.get("todos")
@@ -3161,6 +3172,29 @@ def make_task_write_tool(manager: "TaskListManager") -> ToolDefinition:
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error=str(exc),
             )
+
+        if ledger_emitter is not None:
+            from loom.core.ledger import TaskMutationPayload
+
+            # NOTE: task_state currently embeds the full status_summary
+            # snapshot per write. For long task lists this duplicates data
+            # across successive events; future revision may switch to a
+            # digest-only payload with a separate snapshot event channel
+            # (consider when median list_length × write_count exceeds the
+            # ledger row budget). v1 keeps full snapshot — readers can
+            # answer "what did the list look like at event N?" with one
+            # row instead of folding diffs.
+            try:
+                await ledger_emitter.emit_task_mutation(
+                    payload=TaskMutationPayload(
+                        operation="write",
+                        task_id=f"tasklist:{manager.session_id}",
+                        task_state=summary,
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                _log.exception("ledger task_mutation emit failed; continuing")
+
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True,
