@@ -21,6 +21,7 @@ from loom.core.ledger.correlation import (
     turn_scope,
 )
 from loom.core.ledger.emitter import LedgerEmitter
+from loom.core.ledger.envelope_view import CallMeta, LedgerEnvelopeProjector
 from loom.core.ledger.pull import EventQuery
 from loom.core.ledger.replay import (
     ArtifactRef,
@@ -58,10 +59,12 @@ __all__ = [
     "THOUGHT_EXTERNAL_THRESHOLD",
     "ArtifactEmitPayload",
     "ArtifactRef",
+    "CallMeta",
     "EnvObservationPayload",
     "EventQuery",
     "JudgeVerdictPayload",
     "LedgerEmitter",
+    "LedgerEnvelopeProjector",
     "LedgerEvent",
     "LedgerReplay",
     "LedgerStore",
