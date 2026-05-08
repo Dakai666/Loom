@@ -874,7 +874,7 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 
 性質：Step 1-4 不影響運行系統；Step 5-6 是切版時刻。
 
-### 11.2.1 Step 2 實作狀態（PR #330 截止）
+### 11.2.1 Phase 2 實作狀態
 
 | Event type | Step 2 狀態 | 備註 |
 |---|---|---|
@@ -900,6 +900,16 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 
 Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types，不是替換既有 observability 信號。Follow-up issue 在 Step 2 merge 後另開。
 
+**Step 3-5 進度補記**（PR #331 / #332 / Step 5 PR）：
+
+| 工作 | 狀態 | 備註 |
+|---|---|---|
+| Step 3 — Replay primitive (events_for_* + TurnSnapshot) | ✅ 完成（#331） | `LedgerStore.replay` lazy property，§8.2 trivial+medium 欄位 reconstruct 全綠 |
+| Step 4 — Push subscriber + Pull fluent + raw SQL | ✅ 完成（#332） | `subscribe(...)` async ctx、`events.where().since().all()` 等、`execute_sql`；`is_live` monotonic 語意（一旦 drop 永久 False，`re-subscribe` 重置） |
+| Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成 | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；`envelope.records` 僅作 transitional bridge 給 `_live_record_for`，view 不再讀；`[ledger].enabled=false` 仍走 legacy fallback |
+| Step 5 — SessionLog 投影 | ⚠️ deferred | SessionLog 存 OpenAI-canonical raw 訊息 text，ledger 沒有對應 raw text 事件（thought event 內嵌邏輯仍 deferred）。完整投影需與 thought event capture 一起實作 |
+| Step 5 — Memory compaction subscribe `turn_end` 觸發 | ⚠️ deferred | 目前 inline trigger 在 stream_turn 內、行為正確；移成 background subscriber 為 architectural improvement，timing 細節需評估，獨立 follow-up issue |
+
 ### 11.3 舊資料 — Leave alone
 
 舊 session_log 留 `memory.db`、舊 `ExecutionEnvelope` artifact 留原處；新 session 從 `ledger.db` 開始。
@@ -912,7 +922,8 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 
 ## 12. 文件版本與相關讀物
 
-- **本文件版本**：v1.2（2026-05-08，Phase 2 Step 4 實作回填 — PR #332 `is_live` monotonic 語意）
+- **本文件版本**：v1.3（2026-05-09，Phase 2 Step 5 cutover 完成 — envelope 投影切換；SessionLog / compaction-subscribe 標 deferred follow-up）
+  - v1.2（2026-05-08，Phase 2 Step 4 實作回填 — PR #332 `is_live` monotonic 語意）
   - v1.1（2026-05-08，Phase 2 Step 2 實作回填 — PR #330 review feedback）
   - v1.0（2026-05-08，Phase 1 鎖定版）
 - **共識來源**：#316 Round 1-6 comments
