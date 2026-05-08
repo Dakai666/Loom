@@ -119,6 +119,75 @@ def _trace_middleware(
     trace.append({"middleware": name, "decision": decision, **extra})
 
 # ---------------------------------------------------------------------------
+# Artifact extraction (#334 / doc/53 §3.1)
+# ---------------------------------------------------------------------------
+#
+# Producer tools whose successful results materialise external artifacts
+# are inspected at lifecycle END so neither the tool factory nor the
+# registry needs to know about ledger emit. The same extractor is used
+# by ``LoomSession._on_trace`` to feed ``_turn_artifact_max_size`` so the
+# §3.3 thought-capture signal (artifact > 10 KB) actually fires.
+#
+# To register a new producer: add an extractor returning the four-tuple
+# below (or ``None`` if the result didn't actually produce an artifact)
+# and drop it into ``_ARTIFACT_EXTRACTORS``. One place, no duplication.
+
+
+def _extract_write_file_artifact(call: "ToolCall", result: "ToolResult") -> dict | None:
+    import hashlib
+    content = call.args.get("content", "") or ""
+    encoded = content.encode("utf-8")
+    meta = result.metadata or {}
+    return {
+        "artifact_type": "text_file",
+        "size_bytes": len(encoded),
+        "digest": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        "location": meta.get("_resolved_path") or call.args.get("path"),
+    }
+
+
+def _extract_openai_image_artifact(
+    call: "ToolCall", result: "ToolResult"
+) -> dict | None:
+    import hashlib
+    import json as _json
+    try:
+        payload = _json.loads(result.output or "{}")
+    except Exception:
+        payload = {}
+    size_bytes = int(payload.get("bytes", 0) or 0)
+    # Image bytes aren't kept on the result; digest the metadata tuple
+    # so replays at least see a stable artifact identity.
+    digest_input = (
+        f"{payload.get('path','')}|{size_bytes}|{payload.get('model','')}"
+    ).encode("utf-8")
+    return {
+        "artifact_type": "image",
+        "size_bytes": size_bytes,
+        "digest": "sha256:" + hashlib.sha256(digest_input).hexdigest(),
+        "location": payload.get("path"),
+    }
+
+
+_ARTIFACT_EXTRACTORS: dict[str, Callable[["ToolCall", "ToolResult"], dict | None]] = {
+    "write_file": _extract_write_file_artifact,
+    "openai__text_to_image": _extract_openai_image_artifact,
+}
+
+
+def extract_artifact_info(call: "ToolCall", result: "ToolResult") -> dict | None:
+    """Return ``{artifact_type, size_bytes, digest, location}`` for known
+    producers, or ``None`` if ``call.tool_name`` doesn't produce artifacts
+    or the result wasn't successful."""
+    if result is None or not result.success:
+        return None
+    fn = _ARTIFACT_EXTRACTORS.get(call.tool_name)
+    if fn is None:
+        return None
+    return fn(call, result)
+
+
+# ---------------------------------------------------------------------------
 # Middleware base
 # ---------------------------------------------------------------------------
 
@@ -1735,52 +1804,19 @@ class LifecycleMiddleware(Middleware):
         body = (result.output or "") + "|" + (result.error or "")
         return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-    # Producer tools whose successful results materialise external artifacts
-    # (#334 / doc/53 §3.1). Inspection happens in lifecycle END so neither the
-    # tool factory nor the registry needs to know about ledger emit.
-    _ARTIFACT_PRODUCERS: tuple[str, ...] = (
-        "write_file", "openai__text_to_image",
-    )
-
     async def _maybe_emit_artifact(
         self, call: "ToolCall", result: "ToolResult", rec: "ActionRecord"
     ) -> None:
-        if call.tool_name not in self._ARTIFACT_PRODUCERS:
+        info = extract_artifact_info(call, result)
+        if info is None:
             return
-        import hashlib
-        import json as _json
-        artifact_type = "unknown"
-        size_bytes = 0
-        location: str | None = None
-        digest_input = b""
-        if call.tool_name == "write_file":
-            artifact_type = "text_file"
-            content = call.args.get("content", "") or ""
-            size_bytes = len(content.encode("utf-8"))
-            digest_input = content.encode("utf-8")
-            meta = result.metadata or {}
-            location = meta.get("_resolved_path") or call.args.get("path")
-        elif call.tool_name == "openai__text_to_image":
-            artifact_type = "image"
-            try:
-                payload = _json.loads(result.output or "{}")
-            except Exception:
-                payload = {}
-            size_bytes = int(payload.get("bytes", 0) or 0)
-            location = payload.get("path")
-            # Image bytes aren't kept on the result; digest the metadata
-            # tuple so replays at least see a stable artifact identity.
-            digest_input = (
-                f"{payload.get('path','')}|{size_bytes}|{payload.get('model','')}"
-            ).encode("utf-8")
-        digest = "sha256:" + hashlib.sha256(digest_input).hexdigest()
         from loom.core.ledger import ArtifactEmitPayload
         await self._ledger_emitter.emit_artifact_emit(
             payload=ArtifactEmitPayload(
-                artifact_type=artifact_type,
-                size_bytes=size_bytes,
-                digest=digest,
-                location=location,
+                artifact_type=info["artifact_type"],
+                size_bytes=info["size_bytes"],
+                digest=info["digest"],
+                location=info["location"],
             ),
             parent_event_id=f"evt_tool_end_{rec.id[:12]}",
         )

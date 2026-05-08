@@ -3643,6 +3643,17 @@ class LoomSession:
             logger.exception("ledger thought emit failed; continuing")
 
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
+        # #334 / doc/53 §3.3 — feed the per-turn artifact size accumulator
+        # so the "artifact > 10 KB" thought capture signal actually fires.
+        # The middleware-side ``extract_artifact_info`` is the single source
+        # of truth for which tools produce artifacts; we reuse it here.
+        from loom.core.harness.middleware import extract_artifact_info
+        info = extract_artifact_info(call, result)
+        if info is not None:
+            size = int(info.get("size_bytes", 0) or 0)
+            if size > self._turn_artifact_max_size:
+                self._turn_artifact_max_size = size
+
         summary = (
             f"Tool '{call.tool_name}' "
             f"({'ok' if result.success else 'failed'}, "

@@ -80,7 +80,14 @@ async def run_subagent(
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
     scratchpad: Any = None,
-    ledger_emitter: Any = None,  # parent session's LedgerEmitter (#334)
+    # parent session's LedgerEmitter (#334). The subagent inherits the
+    # parent's ``turn_id`` via contextvar, so its ``model_event`` events
+    # file under the parent turn during replay. Caveat (#334 review S2):
+    # contextvar propagation only holds within the same async task tree
+    # (asyncio.create_task / gather / await chains). If a future iteration
+    # spawns the subagent in a separate process or thread pool, the caller
+    # must explicitly thread ``turn_id`` instead of relying on this kwarg.
+    ledger_emitter: Any = None,
 ) -> SubAgentResult:
     """
     Run a sub-agent to completion and return a SubAgentResult.

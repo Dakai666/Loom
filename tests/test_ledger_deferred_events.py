@@ -241,6 +241,48 @@ async def test_thought_committed_when_judge_fail_signal(
     assert p["digest"].startswith("sha256:")
 
 
+async def test_thought_committed_on_large_artifact_signal(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Review B1 regression guard — `artifact > 10 KB` must trigger
+    thought capture (doc/53 §3.3)."""
+    s = _make_session_stub(emitter, ledger)
+    s._turn_thought_text = "produced a sizeable file"
+    s._turn_artifact_max_size = 12_345  # > 10 KB threshold
+    async with async_turn_scope("turn_th_artifact"), async_correlation_scope("c1"):
+        await s._commit_or_discard_thought("turn_th_artifact", "clean")
+    rows = [r for r in await ledger.fetch_by_turn("turn_th_artifact")
+            if r.event_type == "thought"]
+    assert len(rows) == 1
+
+
+async def test_extract_artifact_info_dispatch_known_and_unknown(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Review S1 — single dict-dispatch extractor used by both
+    middleware emit and session size accumulator."""
+    from loom.core.harness.middleware import extract_artifact_info
+    ok = ToolResult(
+        call_id="c1", tool_name="write_file", success=True,
+        output="ok", metadata={"_resolved_path": "/x.txt"},
+    )
+    fail = ToolResult(
+        call_id="c2", tool_name="write_file", success=False, error="boom",
+    )
+    info = extract_artifact_info(
+        _make_call("write_file", {"path": "/x.txt", "content": "hi"}), ok,
+    )
+    assert info is not None
+    assert info["artifact_type"] == "text_file"
+    assert info["size_bytes"] == 2
+    assert extract_artifact_info(
+        _make_call("write_file", {"path": "/x.txt", "content": "hi"}), fail,
+    ) is None
+    assert extract_artifact_info(
+        _make_call("read_file", {"path": "/x.txt"}), ok,
+    ) is None
+
+
 async def test_thought_committed_on_abandoned_outcome(
     ledger: LedgerStore, emitter: LedgerEmitter
 ) -> None:
