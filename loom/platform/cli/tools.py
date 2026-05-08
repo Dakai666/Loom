@@ -3020,6 +3020,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 workspace=parent_session.workspace,
                 parent_grants=parent_session.perm.grants,
                 scratchpad=getattr(parent_session, "_scratchpad", None),
+                ledger_emitter=getattr(parent_session, "_ledger_emitter", None),
             )
         except Exception as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,

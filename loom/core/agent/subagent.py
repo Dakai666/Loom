@@ -80,6 +80,14 @@ async def run_subagent(
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
     scratchpad: Any = None,
+    # parent session's LedgerEmitter (#334). The subagent inherits the
+    # parent's ``turn_id`` via contextvar, so its ``model_event`` events
+    # file under the parent turn during replay. Caveat (#334 review S2):
+    # contextvar propagation only holds within the same async task tree
+    # (asyncio.create_task / gather / await chains). If a future iteration
+    # spawns the subagent in a separate process or thread pool, the caller
+    # must explicitly thread ``turn_id`` instead of relying on this kwarg.
+    ledger_emitter: Any = None,
 ) -> SubAgentResult:
     """
     Run a sub-agent to completion and return a SubAgentResult.
@@ -301,6 +309,25 @@ async def run_subagent(
 
         if response is None:
             break
+
+        # #334 — emit model_event for the subagent's LLM call. Subagent
+        # inherits the parent turn_id via contextvar, so the call shows
+        # up under the parent's turn during replay.
+        if ledger_emitter is not None:
+            try:
+                from loom.core.ledger import ModelEventPayload
+                _usage = {
+                    "input_tokens": int(getattr(response, "input_tokens", 0) or 0),
+                    "output_tokens": int(getattr(response, "output_tokens", 0) or 0),
+                }
+                await ledger_emitter.emit_model_event(
+                    payload=ModelEventPayload(
+                        model=config.model, tier=0, token_usage=_usage,
+                    ),
+                )
+            except Exception:
+                # Best-effort — never break the subagent loop on ledger emit.
+                pass
 
         messages.append(response.raw_message)
 

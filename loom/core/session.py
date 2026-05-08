@@ -42,9 +42,12 @@ from rich.rule import Rule
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
 from loom.core.ledger import (
     CallMeta,
+    JudgeVerdictPayload,
     LedgerEmitter,
     LedgerEnvelopeProjector,
     LedgerStore,
+    ModelEventPayload,
+    ThoughtPayload,
     TurnEndPayload,
     TurnStartPayload,
     new_correlation_id,
@@ -704,6 +707,17 @@ class LoomSession:
         self._envelope_projector: LedgerEnvelopeProjector | None = None
         self._call_metadata: dict[str, CallMeta] = {}
         self._envelope_call_ids: list[str] = []
+        # Per-turn ledger aggregators (#334). Reset at every turn_start.
+        # _turn_token_usage feeds turn_end.token_usage so the placeholder
+        # `{}` from Step 2 finally goes away. _thought_buffer holds the
+        # raw reasoning text accumulated during the turn; commit-or-discard
+        # at turn_end follows doc/53 §3.3 signal accumulator rules.
+        self._turn_token_usage: dict[str, int] = {}
+        self._turn_thought_text: str = ""
+        self._turn_thought_started: float | None = None
+        self._turn_tool_calls_in_turn: int = 0
+        self._turn_judge_capture_signal: bool = False
+        self._turn_artifact_max_size: int = 0
 
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
@@ -1788,6 +1802,13 @@ class LoomSession:
         _ledger_turn_token: Any = None
         _ledger_corr_token: Any = None
         _turn_start_monotonic = time.monotonic()
+        # #334 — per-turn ledger aggregator reset.
+        self._turn_token_usage = {}
+        self._turn_thought_text = ""
+        self._turn_thought_started = _turn_start_monotonic
+        self._turn_tool_calls_in_turn = 0
+        self._turn_judge_capture_signal = False
+        self._turn_artifact_max_size = 0
         if self._ledger_emitter is not None:
             _ledger_turn_token = set_turn_id(_turn_id_v2)
             _ledger_corr_token = set_correlation(_turn_corr_id)
@@ -2063,6 +2084,8 @@ class LoomSession:
 
                 # Replace (not accumulate) — input_tokens is the total context this call.
                 self.budget.record_response(response.input_tokens, response.output_tokens)
+                # #334 — emit model_event + accumulate token_usage for turn_end.
+                await self._emit_ledger_model_event(_active_model, response)
                 # Issue #142: feed the authoritative total into the context_layout
                 # dimension so layer attribution reflects real usage, not estimates.
                 if self._telemetry is not None:
@@ -2556,6 +2579,18 @@ class LoomSession:
                     _duration_ms = int(
                         (time.monotonic() - _turn_start_monotonic) * 1000
                     )
+                    # #334 — mirror local accumulators into session state so
+                    # commit-or-discard can run after the try/except scope.
+                    try:
+                        self._turn_thought_text = "".join(_think_parts)
+                    except NameError:
+                        # Exception before _think_parts was declared (rare).
+                        self._turn_thought_text = ""
+                    try:
+                        self._turn_tool_calls_in_turn = tool_count
+                    except NameError:
+                        self._turn_tool_calls_in_turn = 0
+                    await self._commit_or_discard_thought(_turn_id_v2, _outcome)
                     await self._emit_ledger_turn_end(
                         _turn_id_v2, _outcome, _duration_ms
                     )
@@ -2680,8 +2715,11 @@ class LoomSession:
         digest = build_trace_digest(envelopes, final_text)
 
         if is_high_stakes(envelopes):
-            verdict = await run_judge(self.router, self.model, digest)
+            verdict, response = await run_judge(self.router, self.model, digest)
             self._record_verdict_telemetry(verdict, sync=True)
+            if response is not None:
+                await self._emit_ledger_model_event(self.model, response)
+            await self._emit_ledger_judge_verdict(verdict, "turn_final_text")
             if should_inject_reminder(verdict):
                 return format_verdict_reminder(verdict)
             return None
@@ -2696,8 +2734,11 @@ class LoomSession:
         return None
 
     async def _run_judge_async(self, digest: str) -> None:
-        verdict = await run_judge(self.router, self.model, digest)
+        verdict, response = await run_judge(self.router, self.model, digest)
         self._record_verdict_telemetry(verdict, sync=False)
+        if response is not None:
+            await self._emit_ledger_model_event(self.model, response)
+        await self._emit_ledger_judge_verdict(verdict, "turn_final_text")
         if should_inject_reminder(verdict):
             self._pending_verdicts.append(format_verdict_reminder(verdict))
 
@@ -3483,20 +3524,6 @@ class LoomSession:
     async def _emit_ledger_turn_end(
         self, turn_id: str, outcome: str, duration_ms: int
     ) -> None:
-        # NOTE: deferred event types from doc/53 §3.1 — these will land
-        # as a Step 2 follow-up issue. They were kept out of the initial
-        # Step 2 PR (#330) to bound scope; none of them block the Step 5
-        # cutover because they are additive event types, not
-        # replacements for existing observability signals.
-        #
-        #   thought         — §3.3 buffered full_text capture (signal
-        #                     accumulator + turn_end commit-or-discard);
-        #                     emit at each reasoning block in stream_turn
-        #   model_event     — token_usage threading at every router.chat
-        #                     / stream_chat call site; until then,
-        #                     turn_end.token_usage stays {} (placeholder)
-        #   judge_verdict   — emit alongside _maybe_run_judge() result
-        #   artifact_emit   — emit at code/image/audio emission sites
         if self._ledger_emitter is None:
             return
         await self._ledger_emitter.emit_turn_end(
@@ -3504,13 +3531,129 @@ class LoomSession:
             payload=TurnEndPayload(
                 outcome=outcome,
                 duration_ms=duration_ms,
-                token_usage={},  # populated when model_event emit lands (deferred)
+                token_usage=dict(self._turn_token_usage),
             ),
             event_id=f"evt_turn_end_{turn_id[5:]}",
             parent_event_id=f"evt_turn_start_{turn_id[5:]}",
         )
 
+    async def _emit_ledger_model_event(
+        self, model: str, response: Any
+    ) -> None:
+        """Emit ``model_event`` for one router call and aggregate the
+        token usage into ``self._turn_token_usage`` so ``turn_end``
+        carries the per-turn rollup (doc/53 §3.1 / §11.2.1)."""
+        if self._ledger_emitter is None:
+            return
+        usage = {
+            "input_tokens": int(getattr(response, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(response, "output_tokens", 0) or 0),
+        }
+        cache_read = int(getattr(response, "cache_read_input_tokens", 0) or 0)
+        cache_creation = int(
+            getattr(response, "cache_creation_input_tokens", 0) or 0
+        )
+        if cache_read:
+            usage["cache_read_input_tokens"] = cache_read
+        if cache_creation:
+            usage["cache_creation_input_tokens"] = cache_creation
+        for k, v in usage.items():
+            self._turn_token_usage[k] = self._turn_token_usage.get(k, 0) + v
+        try:
+            await self._ledger_emitter.emit_model_event(
+                payload=ModelEventPayload(
+                    model=model,
+                    tier=self._active_tier(),
+                    token_usage=usage,
+                ),
+            )
+        except Exception:
+            logger.exception("ledger model_event emit failed; continuing")
+
+    async def _emit_ledger_judge_verdict(
+        self, verdict: "JudgeVerdict", judged_subject: str
+    ) -> None:
+        """Emit ``judge_verdict`` (doc/53 §3.1) after ``run_judge`` returns.
+        Verdict-driven thought capture: FAIL/UNCERTAIN flips the per-turn
+        signal so the reasoning trail gets persisted at turn_end."""
+        if verdict.verdict in ("fail", "uncertain"):
+            self._turn_judge_capture_signal = True
+        if self._ledger_emitter is None:
+            return
+        # Map judge verdict → schema literal. Judge produces lowercase
+        # pass/fail/uncertain; ledger uses uppercase plus an explicit
+        # ERROR for transport failures.
+        if verdict.error:
+            mapped = "ERROR"
+        else:
+            mapped = {
+                "pass": "PASS",
+                "fail": "FAIL",
+                "uncertain": "CONCERN",
+            }.get(verdict.verdict, "CONCERN")
+        try:
+            await self._ledger_emitter.emit_judge_verdict(
+                payload=JudgeVerdictPayload(
+                    verdict=mapped,
+                    confidence=0.0,  # judge prompt has no confidence axis today
+                    reason=(verdict.reason or "")[:500],
+                    judged_subject=judged_subject,
+                ),
+            )
+        except Exception:
+            logger.exception("ledger judge_verdict emit failed; continuing")
+
+    async def _commit_or_discard_thought(
+        self, turn_id: str, outcome: str
+    ) -> None:
+        """doc/53 §3.3 — commit accumulated reasoning text iff the turn
+        produced a capture signal (judge fail/uncertain, abandoned/error
+        outcome, or a >10KB artifact). Drop otherwise to keep the ledger
+        slim. Inline up to 50KB; spill to blob storage above that."""
+        if self._ledger_emitter is None or not self._turn_thought_text:
+            return
+        signal = (
+            self._turn_judge_capture_signal
+            or outcome in ("abandoned", "error")
+            or self._turn_artifact_max_size > 10_000
+        )
+        if not signal:
+            return
+        store = self._ledger_store
+        if store is None:
+            return
+        eid = f"evt_thought_{turn_id[5:]}"
+        duration_ms = (
+            int((time.monotonic() - self._turn_thought_started) * 1000)
+            if self._turn_thought_started is not None
+            else 0
+        )
+        try:
+            payload = await store.build_thought_payload(
+                self._turn_thought_text,
+                turn_id=turn_id,
+                event_id=eid,
+                duration_ms=duration_ms,
+                produced_tool_calls=self._turn_tool_calls_in_turn,
+            )
+            await self._ledger_emitter.emit_thought(
+                turn_id=turn_id, payload=payload, event_id=eid,
+            )
+        except Exception:
+            logger.exception("ledger thought emit failed; continuing")
+
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
+        # #334 / doc/53 §3.3 — feed the per-turn artifact size accumulator
+        # so the "artifact > 10 KB" thought capture signal actually fires.
+        # The middleware-side ``extract_artifact_info`` is the single source
+        # of truth for which tools produce artifacts; we reuse it here.
+        from loom.core.harness.middleware import extract_artifact_info
+        info = extract_artifact_info(call, result)
+        if info is not None:
+            size = int(info.get("size_bytes", 0) or 0)
+            if size > self._turn_artifact_max_size:
+                self._turn_artifact_max_size = size
+
         summary = (
             f"Tool '{call.tool_name}' "
             f"({'ok' if result.success else 'failed'}, "
