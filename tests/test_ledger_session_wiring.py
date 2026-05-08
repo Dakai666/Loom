@@ -186,3 +186,121 @@ async def test_emit_turn_end_links_to_turn_start(
         assert ends[0].payload["duration_ms"] == 1234
     finally:
         await session.stop()
+
+
+# ---------------------------------------------------------------------------
+# Step 5 cutover — _build_envelope_view delegates to LedgerEnvelopeProjector
+# ---------------------------------------------------------------------------
+
+
+async def test_envelope_view_built_from_ledger_when_projector_wired(
+    monkeypatch, tmp_path, session_module
+):
+    """When ledger is enabled, the view comes from tool_lifecycle events,
+    not from ExecutionEnvelope.records."""
+    import time
+
+    from loom.core.ledger import (
+        CallMeta,
+        ToolLifecyclePayload,
+        set_turn_id,
+        reset_turn_id,
+    )
+
+    session = await _start_session(monkeypatch, tmp_path, session_module)
+    try:
+        assert session._envelope_projector is not None
+
+        # Set the contextvar so _build_envelope_view's
+        # current_turn_id() picks it up.
+        token = set_turn_id("turn_view_test")
+        try:
+            # Register a call_id and metadata (mimics dispatch).
+            session._envelope_call_ids = ["call_v1"]
+            session._call_metadata["call_v1"] = CallMeta(
+                call_id="call_v1",
+                tool_name="run_bash",
+                full_args={"cmd": "echo hi"},
+                args_preview="echo hi",
+            )
+
+            # Emit lifecycle events directly via the session emitter.
+            base = time.time()
+            await session._ledger_emitter.emit(
+                "tool_lifecycle",
+                ToolLifecyclePayload(
+                    phase="BEGIN",
+                    tool_name="run_bash",
+                    tool_call_id="call_v1",
+                    args_digest="sha256:x",
+                ),
+                turn_id="turn_view_test",
+                correlation_id="c1",
+                timestamp=base,
+            )
+            await session._ledger_emitter.emit(
+                "tool_lifecycle",
+                ToolLifecyclePayload(
+                    phase="END",
+                    tool_name="run_bash",
+                    tool_call_id="call_v1",
+                    args_digest="sha256:x",
+                    result_summary="hi",
+                    state_history=[
+                        {"from": "executing", "to": "memorialized", "ts": "x", "reason": None},
+                    ],
+                ),
+                turn_id="turn_view_test",
+                correlation_id="c1",
+                timestamp=base + 0.1,
+            )
+
+            view = await session._build_envelope_view()
+        finally:
+            reset_turn_id(token)
+
+        assert view.node_count == 1
+        assert view.nodes[0].tool_name == "run_bash"
+        assert view.nodes[0].state == "memorialized"
+        assert view.nodes[0].args_preview == "echo hi"
+        assert view.status == "completed"
+    finally:
+        await session.stop()
+
+
+async def test_envelope_view_falls_back_to_legacy_without_ledger(
+    monkeypatch, tmp_path, session_module
+):
+    """[ledger].enabled=false → projector is None → legacy records walk."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(
+        session_module, "_load_loom_config", lambda: {"ledger": {"enabled": False}}
+    )
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+    monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+    from rich.prompt import Confirm
+
+    monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
+
+    from loom.core.session import LoomSession
+
+    session = LoomSession(
+        model="gpt-test",
+        db_path=str(tmp_path / "loom.db"),
+        workspace=workspace,
+    )
+    await session.start()
+    try:
+        assert session._envelope_projector is None
+        # Legacy path returns an empty running envelope when no
+        # current_envelope is set — same behaviour as pre-Step-5.
+        view = await session._build_envelope_view()
+        assert view.status == "running"
+        assert view.node_count == 0
+    finally:
+        await session.stop()

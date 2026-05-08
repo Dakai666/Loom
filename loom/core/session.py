@@ -41,7 +41,9 @@ from rich.rule import Rule
 
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
 from loom.core.ledger import (
+    CallMeta,
     LedgerEmitter,
+    LedgerEnvelopeProjector,
     LedgerStore,
     TurnEndPayload,
     TurnStartPayload,
@@ -688,6 +690,13 @@ class LoomSession:
         # ledger_emitter wiring is a no-op (existing tests rely on this).
         self._ledger_store: LedgerStore | None = None
         self._ledger_emitter: LedgerEmitter | None = None
+        # Step 5 cutover: envelope view projects from ledger instead of
+        # ExecutionEnvelope.records. _call_metadata caches per-call args /
+        # auth bits not stored in the ledger; _envelope_call_ids preserves
+        # dispatch order for the current envelope.
+        self._envelope_projector: LedgerEnvelopeProjector | None = None
+        self._call_metadata: dict[str, CallMeta] = {}
+        self._envelope_call_ids: list[str] = []
 
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
@@ -1046,6 +1055,9 @@ class LoomSession:
                 self._ledger_emitter = LedgerEmitter(
                     self._ledger_store, session_id=self.session_id
                 )
+                self._envelope_projector = LedgerEnvelopeProjector(
+                    self._ledger_store, registry=self.registry
+                )
             except Exception:
                 logger.exception(
                     "ledger init failed — proceeding without ledger; "
@@ -1054,6 +1066,7 @@ class LoomSession:
                 )
                 self._ledger_store = None
                 self._ledger_emitter = None
+                self._envelope_projector = None
 
         # Issue #147 Phase C: build the facade up-front so every later step
         # in start() (auto-import, MemoryIndexer, tool registration, etc.)
@@ -1716,6 +1729,7 @@ class LoomSession:
                     logger.debug("ledger close error during shutdown: %s", exc)
                 self._ledger_store = None
                 self._ledger_emitter = None
+                self._envelope_projector = None
 
     # ------------------------------------------------------------------
     # Streaming agent loop
@@ -2213,10 +2227,31 @@ class LoomSession:
                         turn_index=self._turn_index,
                     )
                     self._current_envelope = envelope
+                    # Step 5: reset per-batch call_id ordering (call_metadata
+                    # itself is turn-scoped and stays). Pre-populate with
+                    # the tool_uses about to dispatch so EnvelopeStarted
+                    # has the same node_count as the legacy path.
+                    self._envelope_call_ids = []
+                    for _tu in response.tool_uses:
+                        self._envelope_call_ids.append(_tu.id)
+                        # Best-effort args_preview from first string arg —
+                        # mirrors the legacy view's args extraction.
+                        _first = next(iter(_tu.args.values()), "") if _tu.args else ""
+                        _preview = (
+                            _first.replace("\n", "↵")[:60]
+                            if isinstance(_first, str)
+                            else ""
+                        )
+                        self._call_metadata[_tu.id] = CallMeta(
+                            call_id=_tu.id,
+                            tool_name=_tu.name,
+                            full_args=dict(_tu.args) if _tu.args else {},
+                            args_preview=_preview,
+                        )
                     _batch_t0 = time.monotonic()
 
                     # Yield EnvelopeStarted *before* ToolBegin events
-                    yield EnvelopeStarted(envelope=self._build_envelope_view(_batch_t0))
+                    yield EnvelopeStarted(envelope=await self._build_envelope_view(_batch_t0))
 
                     if parallel:
                         # Announce all tools, then run concurrently
@@ -2240,7 +2275,7 @@ class LoomSession:
                             while not self._lifecycle_events.empty():
                                 yield self._lifecycle_events.get_nowait()
                             # Issue #106: Yield envelope update after each tool completes
-                            yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
+                            yield EnvelopeUpdated(envelope=await self._build_envelope_view(_batch_t0))
                             # Issue #197 Phase 2: tag for observation masking.
                             # Underscore-prefixed keys are ignored by provider
                             # conversion (verified for OpenAI native + Anthropic
@@ -2298,7 +2333,7 @@ class LoomSession:
                                 now_mono = time.monotonic()
                                 if drained or (now_mono - _last_envelope_yield) > 1.0:
                                     yield EnvelopeUpdated(
-                                        envelope=self._build_envelope_view(_batch_t0)
+                                        envelope=await self._build_envelope_view(_batch_t0)
                                     )
                                     _last_envelope_yield = now_mono
 
@@ -2331,7 +2366,7 @@ class LoomSession:
                             while not self._lifecycle_events.empty():
                                 yield self._lifecycle_events.get_nowait()
                             # Issue #106: Yield envelope update after each tool completes
-                            yield EnvelopeUpdated(envelope=self._build_envelope_view(_batch_t0))
+                            yield EnvelopeUpdated(envelope=await self._build_envelope_view(_batch_t0))
                             # Issue #197 Phase 2: tag for observation masking.
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
@@ -2352,7 +2387,7 @@ class LoomSession:
                     # ── Issue #106: Envelope completed ─────────────────────────
                     if self._current_envelope is not None:
                         self._current_envelope.complete()
-                    _completed_view = self._build_envelope_view(_batch_t0)
+                    _completed_view = await self._build_envelope_view(_batch_t0)
                     yield EnvelopeCompleted(envelope=_completed_view)
                     # Keep last 50 envelopes — covers TUI history display *and*
                     # the Issue #196 turn-boundary judge digest. 10 was enough for
@@ -3374,11 +3409,21 @@ class LoomSession:
         )
         result = await self._pipeline.execute(call, tool_def.executor)
 
-        # Issue #106: link ActionRecord to the envelope (if not already linked
-        # by _on_state_change during execution — see #109 early-add logic).
+        # Step 5 cutover: capture per-call metadata that the ledger does
+        # not store (full args / auth_decision / auth_selector). The
+        # projector joins these with ledger tool_lifecycle events to
+        # build ExecutionEnvelopeView. ``ExecutionEnvelope.records``
+        # mutation is kept as a transitional bridge so
+        # ``_live_record_for`` can surface mid-batch states until
+        # STATE_CHANGE event emits land (doc/53 §3.1 simplification
+        # note). The view itself no longer reads records[] directly.
         ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
-        if ctx is not None and self._current_envelope is not None:
-            if ctx.record not in self._current_envelope.records:
+        if ctx is not None:
+            self._register_call_meta(ctx.record)
+            if (
+                self._current_envelope is not None
+                and ctx.record not in self._current_envelope.records
+            ):
                 self._current_envelope.add(ctx.record)
 
         return result
@@ -3555,10 +3600,18 @@ class LoomSession:
         change so _build_envelope_view() can see ⏳ awaiting_confirm
         while the confirm widget is blocking.
         """
-        # Early-add record to envelope (#109)
-        if self._current_envelope is not None:
-            if record not in self._current_envelope.records:
-                self._current_envelope.add(record)
+        # Step 5: register the call's metadata as soon as we observe it
+        # so the envelope view can render even before the call ends
+        # (#109 early-display while ⏳ awaiting_confirm). envelope.records
+        # mutation is the transitional bridge for _live_record_for
+        # (see _build_envelope_view docstring); the view no longer
+        # reads from records directly.
+        self._register_call_meta(record)
+        if (
+            self._current_envelope is not None
+            and record not in self._current_envelope.records
+        ):
+            self._current_envelope.add(record)
 
         call_id = record.call.id if record.call else ""
         self._lifecycle_events.put_nowait(
@@ -3591,12 +3644,118 @@ class LoomSession:
     # Issue #106: Envelope projection — build read-only view for UI
     # ------------------------------------------------------------------
 
-    def _build_envelope_view(self, batch_t0: float = 0.0) -> ExecutionEnvelopeView:
-        """Build a read-only ``ExecutionEnvelopeView`` from the live envelope.
+    def _register_call_meta(self, record) -> None:
+        """Capture per-call args / auth bits for the envelope projector.
 
-        This is the projection layer described in doc/43 — it only does
-        view shaping, never mutates middleware state.
+        Called from ``_on_state_change`` (early-add path #109) and the
+        post-pipeline link site so the projector sees consistent
+        metadata regardless of which hook fires first. Also appends
+        ``call.id`` to ``_envelope_call_ids`` if not already present —
+        this is how the projector knows which calls belong to the
+        current batch (replaces the pre-Step-5
+        ``ExecutionEnvelope.records[]`` source of truth).
         """
+        call = record.call
+        if call is None:
+            return
+        if call.id not in self._envelope_call_ids:
+            self._envelope_call_ids.append(call.id)
+
+        # Args preview — first string argument truncated to 60 chars,
+        # newlines collapsed for the UI.
+        args_preview = ""
+        if call.args:
+            first_val = next(iter(call.args.values()), "")
+            if isinstance(first_val, str):
+                args_preview = first_val.replace("\n", "↵")[:60]
+
+        # auth_decision / auth_selector come from BlastRadiusMiddleware
+        # writes to call.metadata.
+        auth_decision = call.metadata.get("confirm_decision", "")
+        auth_selector = ""
+        scope_req = call.metadata.get("scope_request")
+        if scope_req is not None:
+            reqs = getattr(scope_req, "requirements", [])
+            if reqs:
+                auth_selector = reqs[0].selector
+
+        self._call_metadata[call.id] = CallMeta(
+            call_id=call.id,
+            tool_name=record.tool_name,
+            full_args=dict(call.args) if call.args else {},
+            args_preview=args_preview,
+            auth_decision=auth_decision,
+            auth_selector=auth_selector,
+        )
+
+    def _live_record_for(self, call_id: str):
+        """Live ActionRecord lookup for the projector.
+
+        Step 5 transitional bridge: until STATE_CHANGE events emit
+        (deferred per doc/53 §3.1 v0.3 simplification note), the
+        ledger only sees BEGIN/END for each call. Mid-batch the
+        projector needs a way to read the current ActionRecord state
+        so parallel-dispatch UIs don't all show "executing" until END.
+        Sourced from ``ExecutionEnvelope.records`` while it remains
+        the live ActionRecord registry; returns None when no record
+        is found for ``call_id`` and the projector falls back to its
+        BEGIN/END heuristic.
+        """
+        env = self._current_envelope
+        if env is None:
+            return None
+        for r in env.records:
+            if r.call and r.call.id == call_id:
+                return r
+        return None
+
+    def _auth_expires_for(self, call_id: str) -> float:
+        """Live lookup of scope-grant expiry for a tool call.
+
+        Reads ``self.perm._effective_grants()`` at view-build time —
+        this is session-level state, not per-call ledger data.
+        """
+        meta = self._call_metadata.get(call_id)
+        if meta is None or meta.auth_decision != "scope":
+            return 0.0
+        for g in self.perm._effective_grants():
+            if hasattr(g, "source") and g.source == "lease" and g.valid_until > 0:
+                return g.valid_until
+        return 0.0
+
+    async def _build_envelope_view(
+        self, batch_t0: float = 0.0
+    ) -> ExecutionEnvelopeView:
+        """Build a read-only ``ExecutionEnvelopeView``.
+
+        Step 5 cutover: when a ledger-backed projector is wired
+        (``self._envelope_projector`` non-None), the view is built by
+        querying ``tool_lifecycle`` events for the call_ids in the
+        current batch. Falls back to the legacy
+        ``ExecutionEnvelope.records[ActionRecord]`` walk when no
+        ledger is wired (tests, ``[ledger].enabled=false`` mode).
+
+        This is the projection layer described in doc/43 — it only
+        does view shaping, never mutates middleware state.
+        """
+        if self._envelope_projector is not None:
+            from loom.core.ledger import current_turn_id
+
+            turn_id = current_turn_id() or "system"
+            return await self._envelope_projector.build_view(
+                envelope_id=f"e{self._envelope_counter}",
+                session_id=self.session_id,
+                turn_id=turn_id,
+                turn_index=self._turn_index,
+                call_ids=list(self._envelope_call_ids),
+                call_meta=self._call_metadata,
+                live_record_lookup=self._live_record_for,
+                auth_expires_lookup=self._auth_expires_for,
+                batch_t0=batch_t0,
+            )
+
+        # Legacy path — kept for no-ledger sessions and the transition
+        # period. Equivalent to pre-Step-5 behaviour.
         env = self._current_envelope
         if env is None:
             return ExecutionEnvelopeView(
