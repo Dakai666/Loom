@@ -694,6 +694,13 @@ class LoomSession:
         # ExecutionEnvelope.records. _call_metadata caches per-call args /
         # auth bits not stored in the ledger; _envelope_call_ids preserves
         # dispatch order for the current envelope.
+        #
+        # Lifecycle: _envelope_call_ids resets at each new envelope (per
+        # tool batch). _call_metadata is turn-scoped — entries from
+        # earlier batches in the same turn stay reachable for cross-
+        # batch correlation. Today's per-turn call counts are small
+        # (< 50); if that assumption ever breaks, switch to a per-batch
+        # eviction policy.
         self._envelope_projector: LedgerEnvelopeProjector | None = None
         self._call_metadata: dict[str, CallMeta] = {}
         self._envelope_call_ids: list[str] = []
@@ -3700,6 +3707,13 @@ class LoomSession:
         the live ActionRecord registry; returns None when no record
         is found for ``call_id`` and the projector falls back to its
         BEGIN/END heuristic.
+
+        .. warning::
+            The returned object is the live, mutable ActionRecord —
+            callers (projector code) MUST treat it as read-only.
+            Any mutation will alter the lifecycle state machine's
+            view of the world. The projector reads ``rec.state.value``
+            only.
         """
         env = self._current_envelope
         if env is None:
@@ -3756,6 +3770,9 @@ class LoomSession:
 
         # Legacy path — kept for no-ledger sessions and the transition
         # period. Equivalent to pre-Step-5 behaviour.
+        # TODO(quest-b): remove this entire branch when STATE_CHANGE
+        # events emit and the _live_record_for / envelope.records
+        # bridge can be deleted (doc/53 §11.2.1 deferred follow-ups).
         env = self._current_envelope
         if env is None:
             return ExecutionEnvelopeView(
