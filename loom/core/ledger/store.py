@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 if TYPE_CHECKING:
+    from loom.core.ledger.pull import EventQuery
     from loom.core.ledger.replay import LedgerReplay
+    from loom.core.ledger.subscriber import (
+        LedgerSubscriber,
+        _SubscribeContextManager,
+    )
 
 from loom.core.ledger.schema import (
     CREATE_EVENTS_TABLE,
@@ -78,6 +83,118 @@ class LedgerStore:
         )
         self._conn: aiosqlite.Connection | None = None
         self._replay: Any = None  # Lazy LedgerReplay binding (see .replay property)
+        # Push API (Step 4) — fan-out subscribers and the lock that
+        # keeps emit + (subscribe replay→register) atomic.
+        self._subscribers: list["LedgerSubscriber"] = []
+        self._emit_lock = asyncio.Lock()
+
+    @property
+    def events(self) -> "EventQuery":
+        """Pull API entry point — returns a fresh fluent query builder.
+
+        Each access returns a new ``EventQuery``; chaining methods are
+        immutable so intermediate references are safe to reuse. See
+        doc/53 §6.2 for supported verbs.
+        """
+        from loom.core.ledger.pull import EventQuery
+
+        return EventQuery(_store=self)
+
+    def subscribe(
+        self,
+        *,
+        event_types: list[str] | None = None,
+        correlation_id: str | None = None,
+        branch_id: str | None = "main",
+        session_id: str | None = None,
+        replay_from: float | None = None,
+        buffer_size: int = 100,
+    ) -> "_SubscribeContextManager":
+        """Push API entry point — async context manager yielding a
+        :class:`LedgerSubscriber`.
+
+        Reference: doc/53 §6.1. Subscribers are read-only observers
+        (§6.5); they cannot block, modify, or cancel emit. Buffer
+        overflow drops the oldest event and flips ``is_live`` to False.
+
+        ``replay_from`` (Unix timestamp or datetime): if provided, the
+        subscriber is pre-loaded with historical events whose
+        ``timestamp >= replay_from`` before being registered for live
+        events. The replay-then-register handoff happens under the
+        emit lock so no event is missed or duplicated at the boundary.
+        """
+        from loom.core.ledger.subscriber import _SubscribeContextManager
+
+        return _SubscribeContextManager(
+            self,
+            buffer_size=buffer_size,
+            event_types=event_types,
+            correlation_id=correlation_id,
+            branch_id=branch_id,
+            session_id=session_id,
+            replay_from=replay_from,
+        )
+
+    async def execute_sql(
+        self, sql: str, params: tuple = ()
+    ) -> list:
+        """Raw SQL escape hatch (doc/53 §6.2).
+
+        Reserved for the few callers that need shapes the fluent API
+        doesn't cover — #314 capability aggregates, Quest D corpus
+        builds, time-bucketed analyses. Returns raw aiosqlite rows;
+        the caller owns interpretation.
+
+        .. warning::
+            Untrusted SQL strings are never safe; this method exists
+            for *internal* analytics callers, not agent-facing tools.
+        """
+        return await self._execute_query(sql, params)
+
+    async def _fetch_since(
+        self, since_ts: float, *, branch_id: str | None = None
+    ) -> list[LedgerEvent]:
+        """Pull events with ``timestamp >= since_ts`` for subscribe() replay.
+
+        ``branch_id`` mirrors the subscriber's filter and is pushed down
+        to SQL so the historical leg doesn't fetch rows the subscriber's
+        ``_matches`` would just discard. ``None`` skips the SQL branch
+        filter — cross-branch subscribers still see every branch.
+        Sorted by timestamp ascending.
+        """
+        if branch_id is None:
+            sql = """
+                SELECT event_id, session_id, turn_id, parent_event_id,
+                       correlation_id, branch_id, event_type, timestamp, payload
+                FROM events
+                WHERE timestamp>=?
+                ORDER BY timestamp ASC
+            """
+            params: tuple = (since_ts,)
+        else:
+            sql = """
+                SELECT event_id, session_id, turn_id, parent_event_id,
+                       correlation_id, branch_id, event_type, timestamp, payload
+                FROM events
+                WHERE branch_id=? AND timestamp>=?
+                ORDER BY timestamp ASC
+            """
+            params = (branch_id, since_ts)
+        rows = await self._execute_query(sql, params)
+        return [
+            LedgerEvent(
+                event_id=r[0],
+                session_id=r[1],
+                turn_id=r[2],
+                parent_event_id=r[3],
+                correlation_id=r[4],
+                branch_id=r[5],
+                event_type=r[6],
+                timestamp=r[7],
+                payload=json.loads(r[8]),
+            )
+            for r in rows
+        ]
 
     @property
     def replay(self) -> "LedgerReplay":
@@ -124,29 +241,64 @@ class LedgerStore:
     # -- emit --------------------------------------------------------------
 
     async def emit(self, event: LedgerEvent) -> None:
-        """Append a single event. Caller owns event_id uniqueness."""
+        """Append a single event. Caller owns event_id uniqueness.
+
+        Holds ``_emit_lock`` for both the DB insert and subscriber
+        fan-out so the (replay-historical → register) handoff in
+        :meth:`subscribe` cannot interleave and miss or duplicate any
+        event at the boundary.
+        """
         conn = self._require_conn()
         payload = _payload_to_dict(event.payload)
-        await conn.execute(
-            """
-            INSERT INTO events (
-                event_id, session_id, turn_id, parent_event_id,
-                correlation_id, branch_id, event_type, timestamp, payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event.event_id,
-                event.session_id,
-                event.turn_id,
-                event.parent_event_id,
-                event.correlation_id,
-                event.branch_id,
-                event.event_type,
-                event.timestamp,
-                json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            ),
-        )
-        await conn.commit()
+        async with self._emit_lock:
+            await conn.execute(
+                """
+                INSERT INTO events (
+                    event_id, session_id, turn_id, parent_event_id,
+                    correlation_id, branch_id, event_type, timestamp, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.session_id,
+                    event.turn_id,
+                    event.parent_event_id,
+                    event.correlation_id,
+                    event.branch_id,
+                    event.event_type,
+                    event.timestamp,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            await conn.commit()
+            # Fan-out is sync per subscriber; never blocks the publisher.
+            # Build a normalized event with dict payload so subscribers
+            # always see the same shape that fetch_* / Pull API returns
+            # (callers may have passed a dataclass payload to emit()).
+            #
+            # Fast path: every emit() going through LedgerEmitter.emit_*
+            # already converts dataclass → dict via asdict() before this
+            # call site, so isinstance(payload, dict) is True and the
+            # original event is reused. The reconstruction branch only
+            # fires when callers bypass LedgerEmitter and hand-build a
+            # LedgerEvent with a dataclass payload — rare in practice.
+            fanout_event = (
+                event
+                if isinstance(event.payload, dict)
+                else LedgerEvent(
+                    event_id=event.event_id,
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    parent_event_id=event.parent_event_id,
+                    correlation_id=event.correlation_id,
+                    branch_id=event.branch_id,
+                    event_type=event.event_type,
+                    timestamp=event.timestamp,
+                    payload=payload,
+                )
+            )
+            for subscriber in self._subscribers:
+                subscriber._push(fanout_event)
 
     async def update_thought_full_text(
         self, event_id: str, full_text: str, *, turn_id: str

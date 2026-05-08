@@ -404,6 +404,10 @@ class LedgerSubscriber:
         # v1 補丁
 ```
 
+> **v0.3 實作決策 — `is_live` monotonic 語意**（PR #332 / Phase 2 Step 4）：
+> 一旦 buffer drop 發生，`is_live` 永久為 False，不會在 buffer 排空後切回 True。理由：drop 是歷史事實，被丟掉的事件無法復原；切回 True 會給 consumer 「我現在是最新的」錯覺，但 stream 已有永久缺口。Consumer 看到 False 就應 re-subscribe（fresh subscriber 的 dropped_total=0、is_live=True）。
+> `lag_events` 是另一個獨立信號 — 純 buffer 長度，consumer 想知道「現在落後多少」可單獨讀。
+
 Platform 自己決定 lag indicator 呈現（TUI 彩色閃爍 / Discord 編輯 card）。
 
 ### 6.2 Pull API — fluent 主 + raw SQL 副
@@ -908,7 +912,8 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 
 ## 12. 文件版本與相關讀物
 
-- **本文件版本**：v1.1（2026-05-08，Phase 2 Step 2 實作回填 — PR #330 review feedback）
+- **本文件版本**：v1.2（2026-05-08，Phase 2 Step 4 實作回填 — PR #332 `is_live` monotonic 語意）
+  - v1.1（2026-05-08，Phase 2 Step 2 實作回填 — PR #330 review feedback）
   - v1.0（2026-05-08，Phase 1 鎖定版）
 - **共識來源**：#316 Round 1-6 comments
 - **關係文件**：

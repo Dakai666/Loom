@@ -21,6 +21,7 @@ from loom.core.ledger.correlation import (
     turn_scope,
 )
 from loom.core.ledger.emitter import LedgerEmitter
+from loom.core.ledger.pull import EventQuery
 from loom.core.ledger.replay import (
     ArtifactRef,
     LedgerReplay,
@@ -31,6 +32,7 @@ from loom.core.ledger.replay import (
     TurnSnapshot,
     reconstruct_tool_calls,
 )
+from loom.core.ledger.subscriber import LedgerSubscriber
 from loom.core.ledger.schema import (
     DEFAULT_BRANCH,
     LEDGER_BLOB_SUBDIR,
@@ -57,11 +59,13 @@ __all__ = [
     "ArtifactEmitPayload",
     "ArtifactRef",
     "EnvObservationPayload",
+    "EventQuery",
     "JudgeVerdictPayload",
     "LedgerEmitter",
     "LedgerEvent",
     "LedgerReplay",
     "LedgerStore",
+    "LedgerSubscriber",
     "MemoryOpPayload",
     "MemoryOpSummary",
     "ModelEventPayload",
