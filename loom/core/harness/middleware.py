@@ -1710,6 +1710,15 @@ class LifecycleMiddleware(Middleware):
 
     @staticmethod
     def _args_digest(args: dict[str, Any]) -> str:
+        # NOTE: ``default=str`` is a survival fallback for args carrying
+        # non-JSON-serialisable objects (Path, datetime, custom dataclasses
+        # without to_dict). Two distinct objects whose ``str()`` repr happens
+        # to collide will produce the same digest. This is acceptable for
+        # tool_lifecycle's purpose — args_digest is used to GROUP events
+        # for the same call across BEGIN/END (where the digest is fixed by
+        # the call.id linkage anyway) and for replay heuristics. It is
+        # NOT a content-addressed dedup primitive; do not rely on it for
+        # safety-critical equality checks.
         import hashlib
         import json as _json
         try:

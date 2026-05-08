@@ -3431,6 +3431,20 @@ class LoomSession:
     async def _emit_ledger_turn_end(
         self, turn_id: str, outcome: str, duration_ms: int
     ) -> None:
+        # NOTE: deferred event types from doc/53 §3.1 — these will land
+        # as a Step 2 follow-up issue. They were kept out of the initial
+        # Step 2 PR (#330) to bound scope; none of them block the Step 5
+        # cutover because they are additive event types, not
+        # replacements for existing observability signals.
+        #
+        #   thought         — §3.3 buffered full_text capture (signal
+        #                     accumulator + turn_end commit-or-discard);
+        #                     emit at each reasoning block in stream_turn
+        #   model_event     — token_usage threading at every router.chat
+        #                     / stream_chat call site; until then,
+        #                     turn_end.token_usage stays {} (placeholder)
+        #   judge_verdict   — emit alongside _maybe_run_judge() result
+        #   artifact_emit   — emit at code/image/audio emission sites
         if self._ledger_emitter is None:
             return
         await self._ledger_emitter.emit_turn_end(
@@ -3438,7 +3452,7 @@ class LoomSession:
             payload=TurnEndPayload(
                 outcome=outcome,
                 duration_ms=duration_ms,
-                token_usage={},  # populated when model_event emit lands
+                token_usage={},  # populated when model_event emit lands (deferred)
             ),
             event_id=f"evt_turn_end_{turn_id[5:]}",
             parent_event_id=f"evt_turn_start_{turn_id[5:]}",
