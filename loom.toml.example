@@ -573,6 +573,20 @@ enabled  = false           # set true to activate daemon
 default_channel = "cli"
 
 # ─────────────────────────────────────────────
+# AgentLedger — Quest B (doc/53)
+# ─────────────────────────────────────────────
+# 統一事件時間線。每個 turn / tool call / memory op / permission decision /
+# autonomy trigger 都 append 進 ~/.loom/ledger.db（獨立於 ~/.loom/memory.db）。
+# Step 5 之後 ExecutionEnvelopeView 從 ledger projection 而來；CLI / Discord
+# 渲染與切換前一致。
+#
+# enabled = true 啟用 ledger（預設）；false 走 legacy fallback path，
+# subsystem 不注入 ledger_emitter，所有 ledger 相關副作用全部 no-op。
+# 切回 false 時舊資料保留在 ~/.loom/ledger.db 不刪除（leave-alone 紀律）。
+[ledger]
+enabled = true
+
+# ─────────────────────────────────────────────
 # MCP (Model Context Protocol) — Issue #9
 # ─────────────────────────────────────────────
 # Requires: pip install loom[mcp]
