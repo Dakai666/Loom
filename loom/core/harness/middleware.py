@@ -645,6 +645,7 @@ class BlastRadiusMiddleware(Middleware):
         confirm_fn: "Callable[[ToolCall], Awaitable[bool | ConfirmDecision]]",
         exec_escape_fn: Callable[[ToolCall], bool] | None = None,
         registry: Any | None = None,
+        ledger_emitter: Any = None,
     ) -> None:
         self._perm = perm_ctx
         self._confirm = confirm_fn
@@ -658,6 +659,9 @@ class BlastRadiusMiddleware(Middleware):
         self._on_lifecycle_event: (
             "Callable[[ToolCall, bool, str], None] | None"
         ) = None
+        # Optional ledger emitter — every _notify_lifecycle call also
+        # emits one permission_decision event when wired (doc/53 §11.1).
+        self._ledger_emitter = ledger_emitter
 
     def _exec_auto_approved(self, call: ToolCall) -> bool:
         """
@@ -745,6 +749,13 @@ class BlastRadiusMiddleware(Middleware):
         if ctx is not None:
             ctx.authorization_result = result
             ctx.authorization_reason = reason
+
+        # Ledger permission_decision emit (doc/53 §11.1). Sync wrapper
+        # because _notify_lifecycle is called from sync contexts; we
+        # schedule the async emit on the running loop. Failure is
+        # swallowed — auth flow must never break on ledger.
+        if self._ledger_emitter is not None:
+            self._schedule_permission_decision_emit(call, result, reason)
         # Issue #212: surface authorization decisions in middleware_trace
         # so an agent inspecting a denied result can see "BlastRadius said
         # X because Y" without cross-referencing the lifecycle ActionRecord.
@@ -762,6 +773,48 @@ class BlastRadiusMiddleware(Middleware):
                 self._on_lifecycle_event(call, result, reason)
             except Exception:
                 pass
+
+    def _schedule_permission_decision_emit(
+        self, call: ToolCall, result: bool, reason: str
+    ) -> None:
+        """Fire-and-forget permission_decision emit from a sync caller.
+
+        ``_notify_lifecycle`` is sync but ledger emit is async; we
+        schedule the coroutine on the running loop so the auth path is
+        not blocked. Errors are logged and swallowed — auth must never
+        be coupled to ledger health.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _log.debug("no running loop — skipping ledger permission_decision emit")
+            return
+
+        async def _emit() -> None:
+            from loom.core.ledger import PermissionDecisionPayload
+
+            decision = "grant" if result else "deny"
+            scope_grant = call.metadata.get("scope_request") or call.metadata.get(
+                "scope_verdict"
+            )
+            try:
+                await self._ledger_emitter.emit_permission_decision(
+                    payload=PermissionDecisionPayload(
+                        decision=decision,
+                        tool_call_id=call.id,
+                        trust_level=str(call.trust_level.value)
+                        if hasattr(call.trust_level, "value")
+                        else str(call.trust_level),
+                        scope_grant=scope_grant if isinstance(scope_grant, dict) else None,
+                        reason=reason,
+                    ),
+                )
+            except Exception:
+                _log.exception(
+                    "ledger permission_decision emit failed; continuing"
+                )
+
+        loop.create_task(_emit())
 
     async def _enter_awaiting_confirm(self, call: ToolCall) -> None:
         """Transition ActionRecord to AWAITING_CONFIRM before prompting user (#109)."""
@@ -1376,6 +1429,7 @@ class LifecycleMiddleware(Middleware):
         registry: Any,
         on_lifecycle: Callable[["ActionRecord"], Awaitable[None]] | None = None,
         on_state_change: Callable[["ActionRecord", str, str], Awaitable[None]] | None = None,
+        ledger_emitter: Any = None,
     ) -> None:
         from .lifecycle import (
             ActionRecord, ActionIntent, ActionState,
@@ -1390,6 +1444,14 @@ class LifecycleMiddleware(Middleware):
         self._ActionState = ActionState
         self._LifecycleContext = LifecycleContext
         self._CTX_KEY = LIFECYCLE_CTX_KEY
+        # Optional ledger emitter (doc/53 §11.1 — Middleware-layer events).
+        # When wired, emits one tool_lifecycle BEGIN at process start and
+        # one tool_lifecycle END at memorialize (terminal). state_history
+        # is bundled into the END payload (§3.1 — "state_history 內嵌進
+        # 事件 payload，不另存"). rolled_back flag distinguishes REVERTED
+        # outcomes; we keep phase="END" rather than a separate ROLLBACK
+        # phase since §7.2 already provides rolled_back as a payload field.
+        self._ledger_emitter = ledger_emitter
 
     @staticmethod
     async def _advance_to(
@@ -1433,13 +1495,22 @@ class LifecycleMiddleware(Middleware):
         # ── DECLARED ──────────────────────────────────────────────────
         record = ActionRecord(call=call, intent=intent)
 
+        # Compose on_lifecycle: ledger END emit runs first, then user hook.
+        on_lifecycle = self._on_lifecycle
+        if self._ledger_emitter is not None:
+            on_lifecycle = self._compose_on_lifecycle(call, record)
+
         # Inject LifecycleContext with shared callbacks
         ctx = self._LifecycleContext(
             record=record,
             _on_state_change=self._on_state_change,
-            _on_lifecycle=self._on_lifecycle,
+            _on_lifecycle=on_lifecycle,
         )
         call.metadata[self._CTX_KEY] = ctx
+
+        # ── ledger BEGIN emit (best-effort; never breaks the call) ────
+        if self._ledger_emitter is not None:
+            await self._emit_lifecycle_begin(call, record)
 
         # ── Run inner pipeline ────────────────────────────────────────
         # The chain: Trace → SchemaValidation → BlastRadius →
@@ -1634,3 +1705,91 @@ class LifecycleMiddleware(Middleware):
         await ctx.memorialize(record.state.value)
 
         return result
+
+    # -- ledger emit helpers (Phase 2 Step 2 commit 5) -------------------
+
+    @staticmethod
+    def _args_digest(args: dict[str, Any]) -> str:
+        import hashlib
+        import json as _json
+        try:
+            blob = _json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            blob = repr(sorted(args.items()))
+        return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _result_digest(result: "ToolResult | None") -> str | None:
+        if result is None:
+            return None
+        import hashlib
+        body = (result.output or "") + "|" + (result.error or "")
+        return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    async def _emit_lifecycle_begin(
+        self, call: "ToolCall", record: "ActionRecord"
+    ) -> None:
+        """Emit tool_lifecycle phase=BEGIN. Failure never breaks the call."""
+        from loom.core.ledger import ToolLifecyclePayload
+
+        try:
+            await self._ledger_emitter.emit_tool_lifecycle(
+                payload=ToolLifecyclePayload(
+                    phase="BEGIN",
+                    tool_name=call.tool_name,
+                    tool_call_id=call.id,
+                    args_digest=self._args_digest(call.args),
+                    args=None,  # full args 留 future debug mode；BEGIN 帶 digest 即可
+                    state_history=[],
+                ),
+                event_id=f"evt_tool_begin_{record.id[:12]}",
+            )
+        except Exception:
+            _log.exception("ledger tool_lifecycle BEGIN emit failed; continuing")
+
+    def _compose_on_lifecycle(
+        self, call: "ToolCall", record: "ActionRecord"
+    ) -> Callable[["ActionRecord"], Awaitable[None]]:
+        """Return a wrapper that emits END to ledger then calls user hook."""
+        from loom.core.ledger import ToolLifecyclePayload
+
+        original = self._on_lifecycle
+        emitter = self._ledger_emitter
+
+        async def wrapped(rec: "ActionRecord") -> None:
+            try:
+                result = rec.result
+                # By the time on_lifecycle fires, state is MEMORIALIZED;
+                # check the history for any REVERTED transition.
+                rolled_back = any(
+                    t.to_state.value == "reverted" for t in rec.state_history
+                )
+                await emitter.emit_tool_lifecycle(
+                    payload=ToolLifecyclePayload(
+                        phase="END",
+                        tool_name=call.tool_name,
+                        tool_call_id=call.id,
+                        args_digest=self._args_digest(call.args),
+                        result_digest=self._result_digest(result),
+                        result_summary=(
+                            (result.output[:200] if result and result.output else None)
+                            if (result and result.success)
+                            else (result.error[:200] if result and result.error else None)
+                        ),
+                        state_history=rec.history_dicts(),
+                        rolled_back=rolled_back,
+                        error=(result.error if result and not result.success else None),
+                        # parent links the END to its sibling BEGIN.
+                        # event_id of BEGIN was deterministically derived
+                        # from record.id; mirror that here.
+                    ),
+                    event_id=f"evt_tool_end_{rec.id[:12]}",
+                    parent_event_id=f"evt_tool_begin_{rec.id[:12]}",
+                )
+            except Exception:
+                _log.exception("ledger tool_lifecycle END emit failed; continuing")
+
+            if original is not None:
+                await original(rec)
+
+        return wrapped
