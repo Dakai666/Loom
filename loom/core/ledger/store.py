@@ -151,19 +151,36 @@ class LedgerStore:
         """
         return await self._execute_query(sql, params)
 
-    async def _fetch_since(self, since_ts: float) -> list[LedgerEvent]:
-        """Pull all events with ``timestamp >= since_ts`` for subscribe()
-        replay handoff. Sorted by timestamp ascending."""
-        rows = await self._execute_query(
+    async def _fetch_since(
+        self, since_ts: float, *, branch_id: str | None = None
+    ) -> list[LedgerEvent]:
+        """Pull events with ``timestamp >= since_ts`` for subscribe() replay.
+
+        ``branch_id`` mirrors the subscriber's filter and is pushed down
+        to SQL so the historical leg doesn't fetch rows the subscriber's
+        ``_matches`` would just discard. ``None`` skips the SQL branch
+        filter — cross-branch subscribers still see every branch.
+        Sorted by timestamp ascending.
+        """
+        if branch_id is None:
+            sql = """
+                SELECT event_id, session_id, turn_id, parent_event_id,
+                       correlation_id, branch_id, event_type, timestamp, payload
+                FROM events
+                WHERE timestamp>=?
+                ORDER BY timestamp ASC
             """
-            SELECT event_id, session_id, turn_id, parent_event_id,
-                   correlation_id, branch_id, event_type, timestamp, payload
-            FROM events
-            WHERE timestamp>=?
-            ORDER BY timestamp ASC
-            """,
-            (since_ts,),
-        )
+            params: tuple = (since_ts,)
+        else:
+            sql = """
+                SELECT event_id, session_id, turn_id, parent_event_id,
+                       correlation_id, branch_id, event_type, timestamp, payload
+                FROM events
+                WHERE branch_id=? AND timestamp>=?
+                ORDER BY timestamp ASC
+            """
+            params = (branch_id, since_ts)
+        rows = await self._execute_query(sql, params)
         return [
             LedgerEvent(
                 event_id=r[0],
@@ -258,6 +275,13 @@ class LedgerStore:
             # Build a normalized event with dict payload so subscribers
             # always see the same shape that fetch_* / Pull API returns
             # (callers may have passed a dataclass payload to emit()).
+            #
+            # Fast path: every emit() going through LedgerEmitter.emit_*
+            # already converts dataclass → dict via asdict() before this
+            # call site, so isinstance(payload, dict) is True and the
+            # original event is reused. The reconstruction branch only
+            # fires when callers bypass LedgerEmitter and hand-build a
+            # LedgerEvent with a dataclass payload — rare in practice.
             fanout_event = (
                 event
                 if isinstance(event.payload, dict)

@@ -187,7 +187,15 @@ class _SubscribeContextManager:
         # or duplicate any event at the boundary.
         async with self._store._emit_lock:
             if self._replay_from is not None:
-                historical = await self._store._fetch_since(self._replay_from)
+                # Push the subscriber's branch_id filter down to SQL so
+                # the historical leg doesn't fetch rows that _matches
+                # would just drop. event_types / correlation_id /
+                # session_id intentionally stay at the _matches stage
+                # (no covering index makes them useful at SQL layer).
+                historical = await self._store._fetch_since(
+                    self._replay_from,
+                    branch_id=sub._branch_id,
+                )
                 for event in historical:
                     sub._push(event)
             self._store._subscribers.append(sub)
