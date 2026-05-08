@@ -13,8 +13,9 @@ with (trigger, context_dict).  The Action Planner is wired in as that callback.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, UTC
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .history import TriggerHistory
 from .triggers import (
@@ -22,7 +23,20 @@ from .triggers import (
     CronTrigger, EventTrigger, ConditionTrigger,
 )
 
+if TYPE_CHECKING:
+    from loom.core.ledger import LedgerEmitter
+
+_log = logging.getLogger(__name__)
+
 FireCallback = Callable[[TriggerDefinition, dict[str, Any]], Awaitable[None]]
+
+
+# doc/53 §3.1 — env_observation subtypes mapped from autonomy trigger kinds.
+_KIND_TO_OBSERVATION = {
+    TriggerKind.CRON: "timer",
+    TriggerKind.EVENT: "external",
+    TriggerKind.CONDITION: "anomaly",
+}
 
 
 class TriggerEvaluator:
@@ -39,12 +53,18 @@ class TriggerEvaluator:
         self,
         on_fire: FireCallback | None = None,
         history: TriggerHistory | None = None,
+        ledger_emitter: "LedgerEmitter | None" = None,
     ) -> None:
         self._triggers: dict[str, TriggerDefinition] = {}
         self._on_fire = on_fire
         self._history = history
         self._fired_this_minute: set[str] = set()
         self._last_minute: int | None = None
+        # When wired, every trigger fire emits one env_observation event
+        # under a fresh correlation_id (doc/53 §4.2 — env_observation is
+        # one of the three event types that does not inherit the parent
+        # correlation; it is the root of a new reaction chain).
+        self._ledger_emitter = ledger_emitter
 
     # ------------------------------------------------------------------
     # Registration
@@ -170,8 +190,43 @@ class TriggerEvaluator:
     async def _fire(
         self, trigger: TriggerDefinition, context: dict[str, Any]
     ) -> None:
-        if self._on_fire is not None:
-            await self._on_fire(trigger, context)
+        if self._ledger_emitter is None:
+            if self._on_fire is not None:
+                await self._on_fire(trigger, context)
+            return
+
+        from loom.core.ledger import (
+            EnvObservationPayload,
+            async_correlation_scope,
+            new_correlation_id,
+        )
+
+        new_corr = new_correlation_id("env")
+        observation_type = _KIND_TO_OBSERVATION.get(trigger.kind, "external")
+
+        try:
+            await self._ledger_emitter.emit_env_observation(
+                turn_id="system",
+                correlation_id=new_corr,
+                payload=EnvObservationPayload(
+                    observation_type=observation_type,
+                    source="autonomy_daemon",
+                    detail={
+                        "trigger_name": trigger.name,
+                        "trigger_kind": trigger.kind.value,
+                        "context": context,
+                    },
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _log.exception("ledger env_observation emit failed; continuing")
+
+        # The reaction chain — planner.handle and any deeper emits — runs
+        # under the fresh correlation, so future ledger queries can pull
+        # the entire post-trigger chain by correlation_id.
+        async with async_correlation_scope(new_corr):
+            if self._on_fire is not None:
+                await self._on_fire(trigger, context)
 
     # ------------------------------------------------------------------
     # Background runner
