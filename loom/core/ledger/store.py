@@ -14,9 +14,12 @@ import hashlib
 import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
+
+if TYPE_CHECKING:
+    from loom.core.ledger.replay import LedgerReplay
 
 from loom.core.ledger.schema import (
     CREATE_EVENTS_TABLE,
@@ -74,6 +77,21 @@ class LedgerStore:
             else self.db_path.parent / LEDGER_BLOB_SUBDIR
         )
         self._conn: aiosqlite.Connection | None = None
+        self._replay: Any = None  # Lazy LedgerReplay binding (see .replay property)
+
+    @property
+    def replay(self) -> "LedgerReplay":
+        """Lazy-bound LedgerReplay accessor.
+
+        Replay primitive (doc/53 §6.3 + §8) — Layer 1 raw event sequences
+        and Layer 2 TurnSnapshot reconstruction. The instance is cached
+        per store; consumers can hold the reference safely.
+        """
+        if self._replay is None:
+            from loom.core.ledger.replay import LedgerReplay
+
+            self._replay = LedgerReplay(self)
+        return self._replay
 
     # -- lifecycle ---------------------------------------------------------
 
