@@ -231,7 +231,6 @@ class LedgerReplay:
     ) -> list[LedgerEvent]:
         import json
 
-        conn = self._store._require_conn()
         sql = f"""
             SELECT event_id, session_id, turn_id, parent_event_id,
                    correlation_id, branch_id, event_type, timestamp, payload
@@ -239,8 +238,7 @@ class LedgerReplay:
             WHERE branch_id=? AND {where_clause}
             ORDER BY timestamp ASC
         """
-        async with conn.execute(sql, (branch_id, *params)) as cur:
-            rows = await cur.fetchall()
+        rows = await self._store._execute_query(sql, (branch_id, *params))
         return [
             LedgerEvent(
                 event_id=r[0],
@@ -265,6 +263,14 @@ class LedgerReplay:
         See doc/53 §8.2 for per-field complexity. trivial fields are
         direct lookups; tool_calls and memory_ops are medium (group +
         sort).
+
+        Note:
+            Assumes a small per-turn event count (typical < 50). Each
+            field-population pass is O(n) over events. Consumers doing
+            bulk replay across many turns should prefer pulling raw
+            events once via ``events_for_*`` and reusing
+            ``reconstruct_tool_calls`` directly rather than calling
+            this method repeatedly on overlapping ranges.
         """
         turn_start = next(
             (e for e in events if e.event_type == "turn_start"), None

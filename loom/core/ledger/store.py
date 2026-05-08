@@ -363,3 +363,20 @@ class LedgerStore:
         if self._conn is None:
             raise RuntimeError("LedgerStore is not open(); call await store.open() first")
         return self._conn
+
+    async def _execute_query(
+        self, sql: str, params: tuple = ()
+    ) -> list:
+        """Package-private query primitive used by LedgerReplay (and future
+        Pull fluent API in Step 4) to read events without reaching into
+        ``self._conn`` directly.
+
+        Abstracting over the connection here means consumers stay stable
+        across future connection-management changes (e.g. pooling, cross-
+        process IPC) — the contract is "give me rows for this SQL", not
+        "give me a connection". Returns raw aiosqlite rows; callers own
+        decoding (typically into LedgerEvent).
+        """
+        conn = self._require_conn()
+        async with conn.execute(sql, params) as cur:
+            return await cur.fetchall()
