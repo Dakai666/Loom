@@ -254,9 +254,12 @@ async def test_permission_decision_grant_emit(
 
     async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, True, "pre-authorized")
-        # Let the scheduled emit task run
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # Step 4 added _emit_lock; poll until the scheduled emit lands.
+        for _ in range(50):
+            events = await _fetch(ledger, "turn_mw", "permission_decision")
+            if events:
+                break
+            await asyncio.sleep(0.01)
 
     events = await _fetch(ledger, "turn_mw", "permission_decision")
     assert len(events) == 1
@@ -280,8 +283,11 @@ async def test_permission_decision_deny_emit(
 
     async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, False, "user denied (deny)")
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        for _ in range(50):
+            events = await _fetch(ledger, "turn_mw", "permission_decision")
+            if events:
+                break
+            await asyncio.sleep(0.01)
 
     events = await _fetch(ledger, "turn_mw", "permission_decision")
     assert len(events) == 1

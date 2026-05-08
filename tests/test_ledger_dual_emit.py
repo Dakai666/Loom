@@ -290,9 +290,14 @@ async def test_permission_decision_matches_call_metadata(
     async with async_turn_scope("turn_dual"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, True, "scope-allow: precondition")
         mw._notify_lifecycle(call, False, "user denied")
-        # let scheduled emit tasks complete
-        for _ in range(3):
-            await asyncio.sleep(0)
+        # Step 4 added _emit_lock that serialises ledger inserts; scheduled
+        # emit tasks now need real I/O ticks to drain. Poll for completion
+        # rather than guess at sleep counts.
+        for _ in range(50):
+            rows = await ledger.fetch_by_turn("turn_dual")
+            if sum(1 for r in rows if r.event_type == "permission_decision") >= 2:
+                break
+            await asyncio.sleep(0.01)
 
     rows = await ledger.fetch_by_turn("turn_dual")
     pds = [r for r in rows if r.event_type == "permission_decision"]
