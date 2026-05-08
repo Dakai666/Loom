@@ -9,6 +9,7 @@ chain walker), §11.2 (six-step roadmap).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import asdict, is_dataclass
@@ -138,7 +139,7 @@ class LedgerStore:
         if row is None:
             raise KeyError(f"unknown event_id: {event_id}")
         payload = json.loads(row[0])
-        full_text, external_ref, digest = self.store_thought_text(
+        full_text, external_ref, digest = await self.store_thought_text(
             full_text, turn_id=turn_id, event_id=event_id
         )
         payload["full_text"] = full_text
@@ -152,7 +153,7 @@ class LedgerStore:
 
     # -- thought blob helper (§3.3) ---------------------------------------
 
-    def store_thought_text(
+    async def store_thought_text(
         self, raw_text: str, *, turn_id: str, event_id: str
     ) -> tuple[str | None, str | None, str]:
         """Return (inline_full_text, external_ref, digest).
@@ -160,6 +161,10 @@ class LedgerStore:
         ≤ THOUGHT_EXTERNAL_THRESHOLD bytes → inline.
         > threshold → write to .loom/ledger_blobs/{turn_id}/{event_id}.txt
                       and return relative path as external_ref.
+
+        Blob writes are dispatched via ``asyncio.to_thread`` so the event
+        loop is not blocked. Today's threshold (50 KB) is small, but this
+        helper may also serve future artifact paths where blobs grow.
         """
         encoded = raw_text.encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
@@ -167,11 +172,15 @@ class LedgerStore:
             return raw_text, None, digest
         rel_path = f"{turn_id}/{event_id}.txt"
         abs_path = self.blob_dir / rel_path
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(raw_text, encoding="utf-8")
+
+        def _write() -> None:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(raw_text, encoding="utf-8")
+
+        await asyncio.to_thread(_write)
         return None, rel_path, digest
 
-    def build_thought_payload(
+    async def build_thought_payload(
         self,
         raw_text: str,
         *,
@@ -180,7 +189,7 @@ class LedgerStore:
         duration_ms: int,
         produced_tool_calls: int,
     ) -> ThoughtPayload:
-        full_text, external_ref, digest = self.store_thought_text(
+        full_text, external_ref, digest = await self.store_thought_text(
             raw_text, turn_id=turn_id, event_id=event_id
         )
         return ThoughtPayload(
@@ -200,6 +209,12 @@ class LedgerStore:
 
         Each compact event stores a single (predecessor → successor) edge.
         We walk forward until no further edge exists.
+
+        Note:
+            Assumes linear write order — when two compact events share a
+            predecessor, the earlier ``timestamp`` wins. Safe under doc/53
+            §2 principle 6 (solo operator, single-writer). If concurrent
+            emit is ever introduced, ordering must be revisited.
         """
         conn = self._require_conn()
         current = mem_id
@@ -300,8 +315,12 @@ class LedgerStore:
     async def explain_query_plan(self, sql: str, params: tuple = ()) -> list[str]:
         """Return the EXPLAIN QUERY PLAN detail strings for `sql`.
 
-        Used by tests to assert that high-frequency queries hit the
-        intended covering index.
+        .. warning::
+            Test-only helper. Accepts raw SQL — do **not** call from
+            production paths. Step 3-4 of doc/53 §11.2 introduces the
+            proper Pull / Replay APIs; this method exists solely to let
+            unit tests assert that high-frequency queries hit the
+            intended covering index.
         """
         conn = self._require_conn()
         async with conn.execute(

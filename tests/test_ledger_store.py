@@ -190,7 +190,7 @@ async def test_schema_version_preserved_through_roundtrip(
 
 async def test_thought_inline_when_under_threshold(store: LedgerStore) -> None:
     text = "small thought"
-    full_text, ext, digest = store.store_thought_text(
+    full_text, ext, digest = await store.store_thought_text(
         text, turn_id="turn_x", event_id="evt_y"
     )
     assert full_text == text
@@ -202,7 +202,7 @@ async def test_thought_external_when_over_threshold(
     store: LedgerStore, tmp_path: Path
 ) -> None:
     text = "x" * (THOUGHT_EXTERNAL_THRESHOLD + 1)
-    full_text, ext, digest = store.store_thought_text(
+    full_text, ext, digest = await store.store_thought_text(
         text, turn_id="turn_x", event_id="evt_y"
     )
     assert full_text is None
@@ -214,7 +214,7 @@ async def test_thought_external_when_over_threshold(
 
 
 async def test_thought_payload_helper_round_trip(store: LedgerStore) -> None:
-    payload = store.build_thought_payload(
+    payload = await store.build_thought_payload(
         "hello",
         turn_id="t1",
         event_id="e1",
