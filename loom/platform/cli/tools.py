@@ -3176,6 +3176,14 @@ def make_task_write_tool(
         if ledger_emitter is not None:
             from loom.core.ledger import TaskMutationPayload
 
+            # NOTE: task_state currently embeds the full status_summary
+            # snapshot per write. For long task lists this duplicates data
+            # across successive events; future revision may switch to a
+            # digest-only payload with a separate snapshot event channel
+            # (consider when median list_length × write_count exceeds the
+            # ledger row budget). v1 keeps full snapshot — readers can
+            # answer "what did the list look like at event N?" with one
+            # row instead of folding diffs.
             try:
                 await ledger_emitter.emit_task_mutation(
                     payload=TaskMutationPayload(

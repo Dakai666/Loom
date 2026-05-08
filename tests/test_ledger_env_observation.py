@@ -48,7 +48,7 @@ def emitter(ledger: LedgerStore) -> LedgerEmitter:
 
 
 async def _all_env_obs(ledger: LedgerStore) -> list:
-    rows = await ledger.fetch_by_turn("system")
+    rows = await ledger.fetch_by_turn("system:autonomy")
     return [r for r in rows if r.event_type == "env_observation"]
 
 
@@ -151,7 +151,7 @@ async def test_reaction_chain_inherits_new_correlation(
         # minted env correlation. Downstream emits inherit it.
         captured.append(current_correlation())
         await emitter.emit_model_event(
-            turn_id="system",
+            turn_id="system:autonomy",
             payload=ModelEventPayload(
                 model="x", tier=1, token_usage={"prompt": 1, "completion": 1}
             ),
@@ -161,7 +161,7 @@ async def test_reaction_chain_inherits_new_correlation(
     evaluator.register(EventTrigger(name="t", intent="x", event_name="ping"))
     await evaluator.emit("ping", {})
 
-    rows = await ledger.fetch_by_turn("system")
+    rows = await ledger.fetch_by_turn("system:autonomy")
     env_evt = next(r for r in rows if r.event_type == "env_observation")
     model_evt = next(r for r in rows if r.event_type == "model_event")
     assert env_evt.correlation_id.startswith("env_")

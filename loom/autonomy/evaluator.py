@@ -38,6 +38,15 @@ _KIND_TO_OBSERVATION = {
     TriggerKind.CONDITION: "anomaly",
 }
 
+# Synthetic turn_id for daemon-originated events (doc/53 §5.2 requires
+# turn_id NOT NULL). Uses a sub-classified bucket so future ledger
+# queries can isolate daemon events with a single prefix filter without
+# losing per-trigger granularity (the trigger name lives in
+# payload.detail.trigger_name). When the planner spawns a real
+# LoomSession in reaction to a fire, that session's turn carries its
+# own real turn_id; only the env_observation root uses this constant.
+_DAEMON_TURN_ID = "system:autonomy"
+
 
 class TriggerEvaluator:
     """
@@ -206,7 +215,7 @@ class TriggerEvaluator:
 
         try:
             await self._ledger_emitter.emit_env_observation(
-                turn_id="system",
+                turn_id=_DAEMON_TURN_ID,
                 correlation_id=new_corr,
                 payload=EnvObservationPayload(
                     observation_type=observation_type,

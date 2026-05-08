@@ -167,7 +167,10 @@ class LedgerStore:
         helper may also serve future artifact paths where blobs grow.
         """
         encoded = raw_text.encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()
+        # Prefixed form ("sha256:...") matches doc/53 §5.6 content_digest
+        # convention; readers can detect the algorithm and future versions
+        # may switch to sha512 / blake3 without ambiguity.
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         if len(encoded) <= THOUGHT_EXTERNAL_THRESHOLD:
             return raw_text, None, digest
         rel_path = f"{turn_id}/{event_id}.txt"
