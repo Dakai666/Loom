@@ -9,11 +9,16 @@ Layered emit (Step 2) and projection contract (Step 3-4) come later.
 
 from loom.core.ledger.correlation import (
     async_correlation_scope,
+    async_turn_scope,
     correlation_scope,
     current_correlation,
+    current_turn_id,
     new_correlation_id,
     reset_correlation,
+    reset_turn_id,
     set_correlation,
+    set_turn_id,
+    turn_scope,
 )
 from loom.core.ledger.emitter import LedgerEmitter
 from loom.core.ledger.schema import (
@@ -54,9 +59,14 @@ __all__ = [
     "TurnEndPayload",
     "TurnStartPayload",
     "async_correlation_scope",
+    "async_turn_scope",
     "correlation_scope",
     "current_correlation",
+    "current_turn_id",
     "new_correlation_id",
     "reset_correlation",
+    "reset_turn_id",
     "set_correlation",
+    "set_turn_id",
+    "turn_scope",
 ]

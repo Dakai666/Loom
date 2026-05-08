@@ -30,6 +30,9 @@ from contextvars import ContextVar, Token
 _current_correlation: ContextVar[str | None] = ContextVar(
     "loom_ledger_correlation_id", default=None
 )
+_current_turn: ContextVar[str | None] = ContextVar(
+    "loom_ledger_turn_id", default=None
+)
 
 
 def new_correlation_id(prefix: str = "corr") -> str:
@@ -69,3 +72,39 @@ async def async_correlation_scope(corr_id: str):
         yield corr_id
     finally:
         _current_correlation.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# turn_id contextvar (companion to correlation_id; turn_id is set once per
+# stream_turn and never rotates within a turn — see doc/53 §4.4).
+# ---------------------------------------------------------------------------
+
+
+def current_turn_id() -> str | None:
+    return _current_turn.get()
+
+
+def set_turn_id(turn_id: str) -> Token:
+    return _current_turn.set(turn_id)
+
+
+def reset_turn_id(token: Token) -> None:
+    _current_turn.reset(token)
+
+
+@contextlib.contextmanager
+def turn_scope(turn_id: str):
+    token = _current_turn.set(turn_id)
+    try:
+        yield turn_id
+    finally:
+        _current_turn.reset(token)
+
+
+@contextlib.asynccontextmanager
+async def async_turn_scope(turn_id: str):
+    token = _current_turn.set(turn_id)
+    try:
+        yield turn_id
+    finally:
+        _current_turn.reset(token)

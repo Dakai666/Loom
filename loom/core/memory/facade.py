@@ -28,10 +28,12 @@ tracked separately on Issue #147.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from loom.core.ledger import LedgerEmitter
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.governance import GovernedWriteResult, MemoryGovernor
     from loom.core.memory.procedural import ProceduralMemory
@@ -41,6 +43,13 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _content_digest(value: str | bytes) -> str:
+    """Stable sha256 digest used by ledger memory_op events (doc/53 §5.6)."""
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
 class MemoryFacade:
@@ -62,6 +71,7 @@ class MemoryFacade:
         episodic: "EpisodicMemory",
         search: "MemorySearch",
         governor: "MemoryGovernor | None" = None,
+        ledger_emitter: "LedgerEmitter | None" = None,
     ) -> None:
         self.semantic = semantic
         self.procedural = procedural
@@ -69,6 +79,10 @@ class MemoryFacade:
         self.episodic = episodic
         self.search_index = search
         self.governor = governor
+        # ledger_emitter is None in the dual-emit transition until
+        # LoomSession.start() wires one (Step 2 commit 6). Tests and
+        # standalone callers may also leave it None — emits are then no-ops.
+        self.ledger_emitter = ledger_emitter
 
     # ── read API ─────────────────────────────────────────────────────────
 
@@ -94,14 +108,28 @@ class MemoryFacade:
         ``domain`` and ``temporal`` are optional Memory-Ontology filters
         (issue #281) — see :meth:`MemorySearch.recall` for semantics.
         """
-        return await self.search_index.recall(
+        results = await self.search_index.recall(
             query, type=kind, limit=limit,
             domain=domain, temporal=temporal,
         )
+        await self._emit_memory_op(
+            operation="read",
+            type_summary=f"search:{kind}",
+            trigger="agent_search",
+            memory_ids=[r.id for r in results if getattr(r, "id", None)] or None,
+        )
+        return results
 
     async def get_fact(self, key: str) -> "SemanticEntry | None":
         """Direct semantic-memory lookup by exact key."""
-        return await self.semantic.get(key)
+        entry = await self.semantic.get(key)
+        await self._emit_memory_op(
+            operation="read",
+            memory_id=getattr(entry, "id", None) if entry else None,
+            type_summary="semantic_fact",
+            trigger="agent_get_fact",
+        )
+        return entry
 
     async def query_relations(
         self,
@@ -115,7 +143,13 @@ class MemoryFacade:
         for an exact lookup; pass neither to return all entries.  Mirrors
         the underlying :meth:`RelationalMemory.query` signature.
         """
-        return await self.relational.query(subject=subject, predicate=predicate)
+        results = await self.relational.query(subject=subject, predicate=predicate)
+        await self._emit_memory_op(
+            operation="read",
+            type_summary="relational_query",
+            trigger="agent_query_relations",
+        )
+        return results
 
     # ── write API ────────────────────────────────────────────────────────
 
@@ -161,6 +195,14 @@ class MemoryFacade:
                 entry.key,
             )
 
+        await self._emit_memory_op(
+            operation="write",
+            memory_id=entry.key,  # SemanticEntry uses key as identity
+            type_summary="semantic_fact",
+            trust_tier=result.trust_tier,
+            content_digest=_content_digest(entry.value),
+            trigger="agent_memorize",
+        )
         return result
 
     async def relate(self, entry: "RelationalEntry") -> None:
@@ -173,6 +215,14 @@ class MemoryFacade:
         one place.
         """
         await self.relational.upsert(entry)
+        triple = f"{entry.subject}|{entry.predicate}|{entry.object}"
+        await self._emit_memory_op(
+            operation="write",
+            memory_id=getattr(entry, "id", None),
+            type_summary="relational_triple",
+            content_digest=_content_digest(triple),
+            trigger="agent_relate",
+        )
 
     async def prune_decayed(
         self,
@@ -189,6 +239,42 @@ class MemoryFacade:
         )
 
     # ── internal helpers ────────────────────────────────────────────────
+
+    async def _emit_memory_op(
+        self,
+        *,
+        operation: str,
+        memory_id: str | None = None,
+        memory_ids: list[str] | None = None,
+        type_summary: str | None = None,
+        trust_tier: str | None = None,
+        content_digest: str | None = None,
+        trigger: str | None = None,
+    ) -> None:
+        """Best-effort memory_op emit. No-op when no emitter is wired.
+
+        ``compact`` operation is not emitted from here — Loom has no
+        compaction caller in v0.3.x; the dedicated compaction emit
+        site lands when memory v2 introduces the merge primitive.
+        """
+        if self.ledger_emitter is None:
+            return
+        from loom.core.ledger import MemoryOpPayload
+
+        try:
+            await self.ledger_emitter.emit_memory_op(
+                payload=MemoryOpPayload(
+                    operation=operation,
+                    memory_id=memory_id,
+                    memory_ids=memory_ids,
+                    type_summary=type_summary,
+                    trust_tier=trust_tier,
+                    content_digest=content_digest,
+                    trigger=trigger,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — ledger must never break memory writes
+            logger.exception("ledger memory_op emit failed; continuing")
 
     def _embedding_failure_count(self) -> int:
         """Read the current ``embedding_write`` failure count from the

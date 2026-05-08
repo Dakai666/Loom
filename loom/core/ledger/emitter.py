@@ -25,7 +25,11 @@ import time
 import uuid
 from typing import Any
 
-from loom.core.ledger.correlation import current_correlation, new_correlation_id
+from loom.core.ledger.correlation import (
+    current_correlation,
+    current_turn_id,
+    new_correlation_id,
+)
 from loom.core.ledger.schema import (
     DEFAULT_BRANCH,
     ArtifactEmitPayload,
@@ -69,7 +73,7 @@ class LedgerEmitter:
         event_type: str,
         payload: Any,
         *,
-        turn_id: str,
+        turn_id: str | None = None,
         correlation_id: str | None = None,
         parent_event_id: str | None = None,
         event_id: str | None = None,
@@ -77,9 +81,21 @@ class LedgerEmitter:
     ) -> str:
         """Append an event. Returns the event_id (auto-generated if not given).
 
-        ``correlation_id`` resolution order:
-            explicit arg → contextvar → fresh new_correlation_id() fallback
+        ``turn_id`` resolution: explicit arg → contextvar → RuntimeError.
+        Emit outside any turn is a programmer error; ledger consumers index
+        by turn_id and a missing value would silently break replay.
+
+        ``correlation_id`` resolution: explicit arg → contextvar → fresh
+        ``new_correlation_id("orphan")`` fallback (logged via name prefix
+        rather than raising — orphans are recoverable, missing turns aren't).
         """
+        if turn_id is None:
+            turn_id = current_turn_id()
+        if turn_id is None:
+            raise RuntimeError(
+                f"emit({event_type!r}) called with no turn_id and no active "
+                "turn_scope; wrap the call site in turn_scope() or pass turn_id explicitly"
+            )
         if correlation_id is None:
             correlation_id = current_correlation() or new_correlation_id("orphan")
         eid = event_id or _new_event_id()
@@ -100,58 +116,58 @@ class LedgerEmitter:
     # -- typed shortcuts (one per event_type in §3.1) ---------------------
 
     async def emit_turn_start(
-        self, *, turn_id: str, payload: TurnStartPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: TurnStartPayload, **kwargs: Any
     ) -> str:
         return await self.emit("turn_start", payload, turn_id=turn_id, **kwargs)
 
     async def emit_turn_end(
-        self, *, turn_id: str, payload: TurnEndPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: TurnEndPayload, **kwargs: Any
     ) -> str:
         return await self.emit("turn_end", payload, turn_id=turn_id, **kwargs)
 
     async def emit_thought(
-        self, *, turn_id: str, payload: ThoughtPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: ThoughtPayload, **kwargs: Any
     ) -> str:
         return await self.emit("thought", payload, turn_id=turn_id, **kwargs)
 
     async def emit_model_event(
-        self, *, turn_id: str, payload: ModelEventPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: ModelEventPayload, **kwargs: Any
     ) -> str:
         return await self.emit("model_event", payload, turn_id=turn_id, **kwargs)
 
     async def emit_tool_lifecycle(
-        self, *, turn_id: str, payload: ToolLifecyclePayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: ToolLifecyclePayload, **kwargs: Any
     ) -> str:
         return await self.emit("tool_lifecycle", payload, turn_id=turn_id, **kwargs)
 
     async def emit_permission_decision(
-        self, *, turn_id: str, payload: PermissionDecisionPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: PermissionDecisionPayload, **kwargs: Any
     ) -> str:
         return await self.emit(
             "permission_decision", payload, turn_id=turn_id, **kwargs
         )
 
     async def emit_memory_op(
-        self, *, turn_id: str, payload: MemoryOpPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: MemoryOpPayload, **kwargs: Any
     ) -> str:
         return await self.emit("memory_op", payload, turn_id=turn_id, **kwargs)
 
     async def emit_task_mutation(
-        self, *, turn_id: str, payload: TaskMutationPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: TaskMutationPayload, **kwargs: Any
     ) -> str:
         return await self.emit("task_mutation", payload, turn_id=turn_id, **kwargs)
 
     async def emit_judge_verdict(
-        self, *, turn_id: str, payload: JudgeVerdictPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: JudgeVerdictPayload, **kwargs: Any
     ) -> str:
         return await self.emit("judge_verdict", payload, turn_id=turn_id, **kwargs)
 
     async def emit_artifact_emit(
-        self, *, turn_id: str, payload: ArtifactEmitPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: ArtifactEmitPayload, **kwargs: Any
     ) -> str:
         return await self.emit("artifact_emit", payload, turn_id=turn_id, **kwargs)
 
     async def emit_env_observation(
-        self, *, turn_id: str, payload: EnvObservationPayload, **kwargs: Any
+        self, *, turn_id: str | None = None, payload: EnvObservationPayload, **kwargs: Any
     ) -> str:
         return await self.emit("env_observation", payload, turn_id=turn_id, **kwargs)
