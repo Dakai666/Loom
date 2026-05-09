@@ -162,12 +162,15 @@ async def test_judge_verdict_pass_emits_and_no_capture_signal(
     s = _make_session_stub(emitter, ledger)
     async with async_turn_scope("turn_j"), async_correlation_scope("c1"):
         await s._emit_ledger_judge_verdict(
-            JudgeVerdict(verdict="pass", reason="ok"), "turn_final_text"
+            JudgeVerdict(verdict="pass", reason="ok", confidence=0.82),
+            "turn_final_text",
         )
     rows = [r for r in await ledger.fetch_by_turn("turn_j")
             if r.event_type == "judge_verdict"]
     assert len(rows) == 1
     assert rows[0].payload["verdict"] == "PASS"
+    # #339 — confidence flows from JudgeVerdict to the ledger payload.
+    assert rows[0].payload["confidence"] == 0.82
     assert s._turn_judge_capture_signal is False
 
 

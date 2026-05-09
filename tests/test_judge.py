@@ -288,6 +288,69 @@ class TestVerdictParsing:
         assert v.verdict == VERDICT_PASS
 
 
+class TestVerdictConfidence:
+    """#339 — confidence axis on JudgeVerdict.
+
+    Format: VERDICT line followed by CONFIDENCE: <0–1> on its own line.
+    """
+
+    def test_confidence_parsed(self):
+        v = parse_verdict(
+            "VERDICT: pass — looks good.\nCONFIDENCE: 0.87"
+        )
+        assert v.verdict == VERDICT_PASS
+        assert v.reason == "looks good."
+        assert v.confidence == 0.87
+
+    def test_confidence_clamped_to_01(self):
+        v_high = parse_verdict("VERDICT: fail — bad.\nCONFIDENCE: 1.7")
+        v_low = parse_verdict("VERDICT: fail — bad.\nCONFIDENCE: -0.4")
+        assert v_high.confidence == 1.0
+        assert v_low.confidence == 0.0
+
+    def test_confidence_default_when_omitted(self):
+        """Pre-#339 prompts didn't ask for confidence; legacy responses
+        get a moderate default rather than 0.0 so downstream readers
+        don't conflate "no answer" with "high uncertainty"."""
+        v = parse_verdict("VERDICT: pass — looks good.")
+        assert v.verdict == VERDICT_PASS
+        assert v.confidence == 0.5
+
+    def test_confidence_default_on_malformed(self):
+        v = parse_verdict("Hmm, no comment.")
+        assert v.error == "malformed_verdict"
+        # Fallback word search → low default, not the parsed-but-missing
+        # default. We're guessing here, signal that to readers.
+        assert v.confidence == 0.3
+
+    def test_confidence_zero_on_empty(self):
+        v = parse_verdict("")
+        assert v.error == "empty_response"
+        assert v.confidence == 0.0
+
+    def test_confidence_with_dot_only_form(self):
+        # Some models like to write ".85" instead of "0.85".
+        v = parse_verdict("VERDICT: pass — ok.\nCONFIDENCE: .85")
+        assert v.confidence == 0.85
+
+    def test_confidence_garbage_falls_back(self):
+        v = parse_verdict("VERDICT: pass — ok.\nCONFIDENCE: very high")
+        assert v.verdict == VERDICT_PASS
+        assert v.confidence == 0.5  # fell back to parsed-default
+
+    def test_multiline_reason_does_not_swallow_confidence(self):
+        v = parse_verdict(
+            "VERDICT: fail — first line of reason\n"
+            "  spilling onto a second line.\n"
+            "CONFIDENCE: 0.92"
+        )
+        assert v.verdict == VERDICT_FAIL
+        assert "first line" in v.reason
+        assert "spilling" in v.reason
+        assert "CONFIDENCE" not in v.reason
+        assert v.confidence == 0.92
+
+
 # ── dispatch policy ─────────────────────────────────────────────────────────
 
 
@@ -394,3 +457,7 @@ def test_judge_system_prompt_describes_format():
     assert "pass" in JUDGE_SYSTEM_PROMPT
     assert "fail" in JUDGE_SYSTEM_PROMPT
     assert "uncertain" in JUDGE_SYSTEM_PROMPT
+    # #339 review S1 — without this guard, removing the CONFIDENCE
+    # line from the prompt would silently fall back to default=0.5
+    # for every verdict, with no test failure to flag the drift.
+    assert "CONFIDENCE:" in JUDGE_SYSTEM_PROMPT
