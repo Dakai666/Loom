@@ -457,3 +457,7 @@ def test_judge_system_prompt_describes_format():
     assert "pass" in JUDGE_SYSTEM_PROMPT
     assert "fail" in JUDGE_SYSTEM_PROMPT
     assert "uncertain" in JUDGE_SYSTEM_PROMPT
+    # #339 review S1 — without this guard, removing the CONFIDENCE
+    # line from the prompt would silently fall back to default=0.5
+    # for every verdict, with no test failure to flag the drift.
+    assert "CONFIDENCE:" in JUDGE_SYSTEM_PROMPT
