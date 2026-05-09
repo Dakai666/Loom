@@ -52,7 +52,15 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 
 def _redact_secrets(text: str | None) -> str | None:
-    """Best-effort redaction of common secret patterns.  Never raises."""
+    """Best-effort redaction of common secret patterns.  Never raises.
+
+    #335 — applied at read time on plain-text values *after* JSON has
+    been parsed (see ``_redact_in_place``); the patterns assume an
+    unstructured string. Running them on a JSON-encoded blob can break
+    syntax (e.g. ``Bearer\\s+\\S{8,}`` greedy-matches through escaped
+    quotes), so callers walking nested structures should redact at the
+    leaf-string level, not on the serialised form.
+    """
     if not text:
         return text
     try:
@@ -61,6 +69,27 @@ def _redact_secrets(text: str | None) -> str | None:
     except Exception as exc:
         logger.debug("Secret redaction regex failed: %s", exc)
     return text
+
+
+def _redact_in_place(node: Any) -> Any:
+    """Walk a parsed-JSON structure and redact every leaf string.
+
+    Returns the same shape with strings filtered through
+    ``_redact_secrets``. Lists and dicts are mutated in place for
+    cheapness; the return value is the same object so callers can use
+    it as an expression.
+    """
+    if isinstance(node, str):
+        return _redact_secrets(node)
+    if isinstance(node, list):
+        for i, v in enumerate(node):
+            node[i] = _redact_in_place(v)
+        return node
+    if isinstance(node, dict):
+        for k, v in node.items():
+            node[k] = _redact_in_place(v)
+        return node
+    return node
 
 
 class SessionLog:
@@ -107,10 +136,12 @@ class SessionLog:
             ``load_messages()`` will prefer this column for assistant-message replay.
         """
         try:
-            # Issue #92: redact secrets before persisting to disk
-            content = _redact_secrets(content)
-            raw_json = _redact_secrets(raw_json)
-
+            # #335 — secret redaction is applied at read time in
+            # ``load_messages``, not here. Keeping the raw text on disk
+            # means future regex tweaks can re-redact accurately; a bad
+            # write-time redaction would have permanently corrupted the
+            # log.  Issue #92's contract (best-effort, never raises) is
+            # preserved on the read path.
             await self._db.execute(
                 """
                 INSERT INTO session_log
@@ -259,6 +290,15 @@ class SessionLog:
         2. ``metadata.format == "raw_message"`` — legacy fallback; ``content`` is
            the full JSON blob (written before the raw_json column existed).
         3. Plain text reconstruction (user / tool messages).
+
+        #335 — secret redaction (Issue #92) is applied here, on the way
+        out, rather than at write time. The raw text on disk is the
+        ground truth; if the redaction regex misses a pattern today,
+        improving it later still lets old rows surface redacted on the
+        next load. Redaction runs on the JSON / content strings before
+        parsing — the patterns were already designed to be JSON-safe so
+        the resulting bytes still parse. Failures are logged at DEBUG
+        and the row falls through to the next priority tier.
         """
         cursor = await self._db.execute(
             """
@@ -277,7 +317,11 @@ class SessionLog:
             # Priority 1: raw_json column (structured, new path)
             if raw_json:
                 try:
-                    result.append(json.loads(raw_json))
+                    parsed = json.loads(raw_json)
+                    # #335 — redact at the leaf level after parse so
+                    # patterns can't accidentally chew through escaped
+                    # quotes and break JSON.
+                    result.append(_redact_in_place(parsed))
                     continue
                 except Exception as parse_exc:
                     logger.debug("raw_json parse failed, falling back: %s", parse_exc)
@@ -286,13 +330,13 @@ class SessionLog:
             if role == "assistant" and meta.get("format") == "raw_message":
                 try:
                     msg = json.loads(content)
-                    result.append(msg)
+                    result.append(_redact_in_place(msg))
                     continue
                 except Exception as legacy_exc:
                     logger.debug("Legacy raw_message parse failed, falling back: %s", legacy_exc)
 
             # Priority 3: plain text
-            msg: dict[str, Any] = {"role": role, "content": content}
+            msg: dict[str, Any] = {"role": role, "content": _redact_secrets(content)}
             # Re-attach tool_call_id for tool messages (required by OpenAI format)
             if role == "tool" and "tool_call_id" in meta:
                 msg["tool_call_id"] = meta["tool_call_id"]
