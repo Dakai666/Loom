@@ -268,10 +268,16 @@ async def test_envelope_view_built_from_ledger_when_projector_wired(
         await session.stop()
 
 
-async def test_envelope_view_falls_back_to_legacy_without_ledger(
+async def test_envelope_view_returns_empty_stub_without_ledger(
     monkeypatch, tmp_path, session_module
 ):
-    """[ledger].enabled=false → projector is None → legacy records walk."""
+    """[ledger].enabled=false → projector is None → empty stub view (#337).
+
+    The pre-#337 legacy walk over ``ExecutionEnvelope.records`` is gone;
+    no-ledger mode is now an explicit graceful degradation, not full UI
+    parity. EnvelopeStarted/Completed still fire with the same shape so
+    consumers don't need a separate code path.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     home = tmp_path / "home"
@@ -297,8 +303,9 @@ async def test_envelope_view_falls_back_to_legacy_without_ledger(
     await session.start()
     try:
         assert session._envelope_projector is None
-        # Legacy path returns an empty running envelope when no
-        # current_envelope is set — same behaviour as pre-Step-5.
+        # No-ledger mode returns an empty stub view (#337) — node_count=0,
+        # parallel_groups=0, status="running"; consumers handle it the
+        # same way as a not-yet-populated envelope.
         view = await session._build_envelope_view()
         assert view.status == "running"
         assert view.node_count == 0

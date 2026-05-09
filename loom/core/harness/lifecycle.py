@@ -340,41 +340,25 @@ class ActionRecord:
 
 @dataclass
 class ExecutionEnvelope:
-    """
-    Groups related ActionRecords from a single tool-use batch.
+    """Thin per-batch lifecycle marker (#337).
 
-    One LLM response may request multiple parallel tool calls — these are
-    wrapped in a single envelope for tracking and observability.
+    Pre-#337 this dataclass owned a mutable ``records: list[ActionRecord]``
+    and was the projector's source of truth for which calls belonged to
+    a tool batch. After Step 5 cutover (#333) the projector reads from
+    the ledger and the per-batch call_id set lives on the session
+    (``_envelope_call_ids``); this class is now just an id + lifecycle
+    timestamps so external callers (e.g. ``loom.core.harness`` re-export
+    consumers) keep a stable import surface.
+
+    No methods walk records anymore — for state aggregation, build a
+    view via ``LedgerEnvelopeProjector`` or read the ledger directly.
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     session_id: str = ""
     turn_index: int = 0
-    records: list[ActionRecord] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
-
-    def add(self, record: ActionRecord) -> None:
-        """Add an ActionRecord to this envelope."""
-        self.records.append(record)
 
     def complete(self) -> None:
         """Mark the envelope as completed."""
         self.completed_at = datetime.now(UTC)
-
-    @property
-    def all_terminal(self) -> bool:
-        """True if every record in the envelope has reached a terminal state."""
-        return all(r.is_terminal for r in self.records) if self.records else False
-
-    def summary(self) -> str:
-        """One-line summary of all records in this envelope."""
-        if not self.records:
-            return "empty envelope"
-        # Count by final state
-        counts: dict[str, int] = {}
-        for r in self.records:
-            key = r.state.value
-            counts[key] = counts.get(key, 0) + 1
-        parts = [f"{v} {k}" for k, v in counts.items()]
-        n = len(self.records)
-        return f"{n} action{'s' if n != 1 else ''}: {', '.join(parts)}"
