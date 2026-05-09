@@ -280,7 +280,12 @@ class TestPermissionContextScope:
         assert verdict == PermissionVerdict.CONFIRM
 
     def test_evaluate_guarded_expand_scope(self):
-        """Grant for /ws/ but request targets /etc/ → SELECTOR_EXPANSION."""
+        """Grant for /ws/ but request targets /etc/ → SELECTOR_EXPANSION.
+
+        Same resource+action (path/write) with different selector triggers
+        selector_expansion → EXPAND_SCOPE, which is a stronger signal than
+        CONFIRM for the UI layer.
+        """
         ctx = PermissionContext(session_id="s1")
         ctx.grant(ScopeGrant(resource="path", action="write", selector="/ws/"))
         req = ScopeRequest(
@@ -321,6 +326,11 @@ class TestPermissionContextScope:
         assert len(diff.missing) == 1
 
     def test_consumable_budget_consumption(self):
+        """Blackbox verification: budget exhaustion observable via verdicts.
+
+        No internal _effective_grants() access — repeated evaluate() calls
+        demonstrate budget counting through external API only.
+        """
         ctx = PermissionContext(session_id="s1")
         ctx.grant(ScopeGrant(
             resource="agent", action="spawn", selector="*",
@@ -336,17 +346,15 @@ class TestPermissionContextScope:
                 ),
             ],
         )
-        v1 = ctx.evaluate(req, TrustLevel.GUARDED)
-        assert v1 == PermissionVerdict.ALLOW
-        effective = ctx._effective_grants()
-        assert effective[0].constraints["remaining_budget"] == 2
-
-        v2 = ctx.evaluate(req, TrustLevel.GUARDED)
-        assert v2 == PermissionVerdict.ALLOW
-        effective2 = ctx._effective_grants()
-        assert effective2[0].constraints["remaining_budget"] == 1
+        # Calls 1–3: budget 3 → 2 → 1, all should ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        assert ctx.evaluate(req, TrustLevel.GUARDED) == PermissionVerdict.ALLOW
+        # Call 4: budget exhausted
+        assert ctx.evaluate(req, TrustLevel.GUARDED) != PermissionVerdict.ALLOW
 
     def test_consumable_budget_exhausted(self):
+        """Single-unit budget consumed in one call."""
         ctx = PermissionContext(session_id="s1")
         ctx.grant(ScopeGrant(
             resource="agent", action="spawn", selector="*",

@@ -139,6 +139,12 @@ class TestToolRegistry:
         assert len(reg.list()) == 3
 
     def test_register_duplicate_overwrites(self):
+        """Duplicate registration replaces silently — by design.
+
+        ToolRegistry uses a plain dict; re-registering the same tool name
+        overwrites the previous definition.  No exception is raised because
+        this is a normal runtime operation (e.g. skill reload, hot-reload).
+        """
         reg = ToolRegistry()
         td1 = self._def("x")
         td2 = self._def("x")
