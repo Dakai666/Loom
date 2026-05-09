@@ -30,11 +30,9 @@ class _StreamResponse:
 
 
 class _FakeAsyncClient:
-    requests = []
-    lines = []
-
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, lines):
+        self.lines = lines
+        self.requests = []
 
     async def __aenter__(self):
         return self
@@ -47,7 +45,7 @@ class _FakeAsyncClient:
 
         class _Ctx:
             async def __aenter__(self_inner):
-                return _StreamResponse(_FakeAsyncClient.lines)
+                return _StreamResponse(self.lines)
 
             async def __aexit__(self_inner, *exc):
                 return False
@@ -71,16 +69,15 @@ def codex_home(tmp_path, monkeypatch):
 async def test_codex_provider_streams_text(monkeypatch, codex_home):
     import httpx
 
-    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
-    _FakeAsyncClient.requests = []
-    _FakeAsyncClient.lines = [
+    fake_client = _FakeAsyncClient([
         "event: response.output_text.delta",
         'data: {"type":"response.output_text.delta","delta":"pong"}',
         "",
         "event: response.completed",
         'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":4}}}',
         "",
-    ]
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
     provider = CodexResponsesProvider(model="codex/gpt-5.5")
 
     response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
@@ -88,7 +85,7 @@ async def test_codex_provider_streams_text(monkeypatch, codex_home):
     assert response.text == "pong"
     assert response.input_tokens == 3
     assert response.output_tokens == 4
-    req = _FakeAsyncClient.requests[0]
+    req = fake_client.requests[0]
     assert req["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert req["json"]["model"] == "gpt-5.5"
     assert req["json"]["store"] is False
@@ -99,16 +96,15 @@ async def test_codex_provider_streams_text(monkeypatch, codex_home):
 async def test_codex_provider_normalizes_tool_call(monkeypatch, codex_home):
     import httpx
 
-    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
-    _FakeAsyncClient.requests = []
-    _FakeAsyncClient.lines = [
+    fake_client = _FakeAsyncClient([
         "event: response.output_item.done",
         'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}',
         "",
         "event: response.completed",
         'data: {"type":"response.completed","response":{"status":"completed"}}',
         "",
-    ]
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
     provider = CodexResponsesProvider(model="codex/gpt-5.5")
 
     response = await provider.chat(
@@ -125,4 +121,4 @@ async def test_codex_provider_normalizes_tool_call(monkeypatch, codex_home):
     assert response.tool_uses[0].name == "read_file"
     assert response.tool_uses[0].args == {"path": "README.md"}
     assert response.raw_message["tool_calls"][0]["function"]["name"] == "read_file"
-    assert _FakeAsyncClient.requests[0]["json"]["tools"][0]["type"] == "function"
+    assert fake_client.requests[0]["json"]["tools"][0]["type"] == "function"

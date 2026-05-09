@@ -1024,6 +1024,8 @@ class CodexResponsesProvider(LLMProvider):
         output_tokens = 0
         response_status = "in_progress"
 
+        # SSE may already have yielded partial output; retrying mid-stream can
+        # duplicate content or tool calls, so failures propagate to the caller.
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream(
                 "POST",

@@ -43,7 +43,7 @@ def _jwt_exp(token: str) -> int | None:
     payload = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
     try:
         data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except (ValueError, json.JSONDecodeError):
+    except Exception:
         return None
     exp = data.get("exp")
     return int(exp) if isinstance(exp, (int, float)) else None
