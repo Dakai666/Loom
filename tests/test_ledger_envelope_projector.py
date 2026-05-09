@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -257,13 +256,21 @@ async def test_parallel_batch_one_running_one_done(
 
 
 # ---------------------------------------------------------------------------
-# Live record fallback for in-flight states
+# In-flight state coarsening (#337 — replaced live_record_lookup)
 # ---------------------------------------------------------------------------
 
 
-async def test_live_record_lookup_overrides_in_flight_state(
+async def test_in_flight_call_reports_executing_state(
     store: LedgerStore, emitter: LedgerEmitter, projector
 ) -> None:
+    """#337 — BEGIN seen, no END yet → state coarsens to 'executing'.
+
+    Replaces the prior live_record_lookup-based test. The bridge that
+    surfaced sub-states (PENDING / AUTHORIZED / awaiting_confirm /
+    EXECUTING) is gone; the projector reads BEGIN / END only and
+    falls back to 'executing' for in-flight calls. Sub-state
+    granularity is not user-visible — see envelope_view.py docstring.
+    """
     base = time.time()
     await emitter.emit(
         "tool_lifecycle",
@@ -278,10 +285,6 @@ async def test_live_record_lookup_overrides_in_flight_state(
         timestamp=base,
     )
 
-    # Mock ActionRecord with a current state of "awaiting_confirm"
-    fake_record = MagicMock()
-    fake_record.state.value = "awaiting_confirm"
-
     view = await projector.build_view(
         envelope_id="e4",
         session_id="sess_proj",
@@ -291,10 +294,10 @@ async def test_live_record_lookup_overrides_in_flight_state(
         call_meta={
             "call_live": CallMeta(call_id="call_live", tool_name="run_bash")
         },
-        live_record_lookup=lambda cid: fake_record if cid == "call_live" else None,
     )
 
-    assert view.nodes[0].state == "awaiting_confirm"
+    assert view.nodes[0].state == "executing"
+    assert view.status == "running"
 
 
 # ---------------------------------------------------------------------------

@@ -13,10 +13,19 @@ What the ledger does not track today:
 - auth_expires (read live from session.perm at view-build time)
 
 Those bits are supplied by the caller via ``CallMeta`` records and
-the ``live_record_lookup`` / ``auth_expires_lookup`` callables. The
-caller (LoomSession) populates them at tool dispatch / state-change
-time. When the deferred STATE_CHANGE event emits land, the live
-lookup can drop in favour of pure ledger projection.
+the ``auth_expires_lookup`` callable. The caller (LoomSession)
+populates them at tool dispatch / state-change time.
+
+Mid-batch state granularity (#337):
+    BEGIN+END are the only ``tool_lifecycle`` phases we emit (doc/53
+    §3.1 v0.3 simplification). For an in-flight call (BEGIN seen, END
+    not yet) the projector reports state ``"executing"`` rather than
+    threading a ``live_record_lookup`` back into ``ExecutionEnvelope``.
+    Sub-state granularity (PENDING / AUTHORIZED / EXECUTING / …) is
+    not user-visible — the UI shows a spinner regardless — so the
+    coarsening removes a transitional bridge without UX loss. Full
+    transition history still lands in ``END.payload.state_history``
+    so post-hoc replay reconstructs every transition.
 """
 
 from __future__ import annotations
@@ -29,7 +38,6 @@ from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
 from loom.core.ledger.replay import reconstruct_tool_calls
 
 if TYPE_CHECKING:
-    from loom.core.harness.lifecycle import ActionRecord
     from loom.core.harness.registry import ToolRegistry
     from loom.core.ledger.store import LedgerStore
 
@@ -89,7 +97,6 @@ class LedgerEnvelopeProjector:
         turn_index: int,
         call_ids: list[str],
         call_meta: dict[str, CallMeta],
-        live_record_lookup: Callable[[str], "ActionRecord | None"] | None = None,
         auth_expires_lookup: Callable[[str], float] | None = None,
         batch_t0: float = 0.0,
     ) -> ExecutionEnvelopeView:
@@ -97,12 +104,8 @@ class LedgerEnvelopeProjector:
 
         ``call_ids`` is the batch's tool_call_id set in dispatch order.
         ``call_meta`` carries args / auth fields the ledger does not
-        store. ``live_record_lookup`` is a fallback for in-flight calls
-        (BEGIN seen, END not yet) where the ledger does not yet have
-        an authoritative state — this lets cutover preserve mid-batch
-        TUI / CLI behaviour during parallel dispatch. When the deferred
-        STATE_CHANGE event emits land (doc/53 §3.1 v0.3 simplification
-        note), the live lookup becomes redundant.
+        store. In-flight calls (BEGIN seen, END not yet) report state
+        ``"executing"`` — see module docstring for rationale.
         """
         events = await self._store.replay.events_for_turn(turn_id)
         # Filter to tool_lifecycle events whose tool_call_id belongs to
@@ -133,9 +136,8 @@ class LedgerEnvelopeProjector:
 
             # Derive current state. Priority:
             #   1) ledger state_transitions last "to" (authoritative when END seen)
-            #   2) live_record_lookup (covers in-flight parallel dispatch)
-            #   3) "executing" (BEGIN seen, no END yet)
-            state = self._derive_state(s, live_record_lookup)
+            #   2) "executing" (BEGIN seen, no END yet)
+            state = self._derive_state(s)
             if state in _TERMINAL_STATES:
                 terminal_count += 1
             if state in _FAILURE_STATES or s.rolled_back:
@@ -224,20 +226,13 @@ class LedgerEnvelopeProjector:
     # -- helpers ---------------------------------------------------------
 
     @staticmethod
-    def _derive_state(
-        summary,
-        live_record_lookup: Callable[[str], "ActionRecord | None"] | None,
-    ) -> str:
+    def _derive_state(summary) -> str:
         # 1) ledger has full transition history (BEGIN+END seen)
         if summary.state_transitions:
             last = summary.state_transitions[-1]
             return last.get("to", "executing")
-        # 2) live ActionRecord — bridges the v0.3 STATE_CHANGE-emit gap
-        if live_record_lookup is not None:
-            rec = live_record_lookup(summary.tool_call_id)
-            if rec is not None:
-                return rec.state.value
-        # 3) BEGIN seen, no END yet → assume executing
+        # 2) BEGIN seen, no END yet → "executing" (sub-state granularity
+        #    is intentionally coarsened — see module docstring).
         return "executing" if "BEGIN" in summary.state_history else "declared"
 
     @staticmethod

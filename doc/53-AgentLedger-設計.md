@@ -56,11 +56,11 @@ ActionRecord / ExecutionEnvelope / SessionLog / TaskList / MemoryWrite / JudgeVe
 
 `tool_lifecycle` **取代既有 `ActionRecord`**，state_history 內嵌進事件 payload，不另存。
 
-> **v0.3 實作簡化**（PR #330 / Phase 2 Step 2）：
+> **v0.3 實作簡化**（PR #330 / Phase 2 Step 2，#337 lock-in）：
 > 4 phase 列舉中 v0.3 只 emit `BEGIN` + `END`：
-> - `STATE_CHANGE` 保留為未來 high-frequency capture 的 phase 值；每 state transition 一筆事件對 v1 太重，且 `state_history` 已在 END payload 內完整保留。
+> - `STATE_CHANGE` **不 emit**。每 state transition 一筆事件對 v1 太重，且 `state_history` 已在 END payload 內完整保留。Mid-flight 中介狀態（PENDING / AUTHORIZED / EXECUTING / awaiting_confirm…）在 view 上一律 coarsen 成 `executing`——因為 sub-state granularity 不是 user-visible（spinner 期間 UI 一視同仁）。projector `_derive_state` tier 2「BEGIN 後沒 END → executing」就是這條規則的單一實作點。Schema 仍保留 `phase` string，未來真有 high-frequency capture 需求再 opt-in。
 > - `ROLLBACK` 折疊進 `END.rolled_back=True`；REVERTED 在 memorialize 時已是最終狀態，獨立 ROLLBACK event 對 reader 不增加資訊。
-> 後續若 STATE_CHANGE 真有需求再開 phase emit 即可，schema 已就緒（payload.phase 是 string）。
+> - #337 同步移除 `LoomSession._live_record_for` / `ExecutionEnvelope.records` 的 transitional bridge——projector 現在純從 ledger 讀取，沒有 live ActionRecord lookup 路徑。`ExecutionEnvelope` 變 thin lifecycle marker（id + 時戳），不再有 records list。
 
 > **v0.3 task_mutation operation 簡化**（PR #330）：
 > 列舉 `write/done/modify/abandon` 四種 operation 的設計來自 #205 collapse 之前的假設。Post-#205 task_write 是唯一 mutation 入口，done/modify/abandon 都被編碼進 status 欄位、沒有獨立呼叫點。每次 task_write 落 `operation="write"` 並帶完整 `task_state` snapshot，done/modify/abandon 為 reader-side derivable from successive snapshots。
@@ -906,7 +906,7 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 |---|---|---|
 | Step 3 — Replay primitive (events_for_* + TurnSnapshot) | ✅ 完成（#331） | `LedgerStore.replay` lazy property，§8.2 trivial+medium 欄位 reconstruct 全綠 |
 | Step 4 — Push subscriber + Pull fluent + raw SQL | ✅ 完成（#332） | `subscribe(...)` async ctx、`events.where().since().all()` 等、`execute_sql`；`is_live` monotonic 語意（一旦 drop 永久 False，`re-subscribe` 重置） |
-| Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成 | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；`envelope.records` 僅作 transitional bridge 給 `_live_record_for`，view 不再讀；`[ledger].enabled=false` 仍走 legacy fallback |
+| Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成（#333 + #337） | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；#337 移除 `_live_record_for` / `envelope.records` transitional bridge — projector 純從 ledger 讀取，`ExecutionEnvelope` 退成 thin marker。`[ledger].enabled=false` 改 graceful empty-view fallback（無 sub-state granularity，但 shape 一致） |
 | Step 5 — SessionLog 投影 | ⚠️ deferred | SessionLog 存 OpenAI-canonical raw 訊息 text，ledger 沒有對應 raw text 事件（thought event 內嵌邏輯仍 deferred）。完整投影需與 thought event capture 一起實作 |
 | Step 5 — Memory compaction subscribe `turn_end` 觸發 | ⚠️ deferred | 目前 inline trigger 在 stream_turn 內、行為正確；移成 background subscriber 為 architectural improvement，timing 細節需評估，獨立 follow-up issue |
 
