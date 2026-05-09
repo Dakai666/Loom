@@ -828,6 +828,19 @@ class LoomSession:
         # In-flight judge background tasks — kept so stop() can cancel them
         # cleanly and so a single turn can't fire judge twice.
         self._judge_tasks: set[asyncio.Task] = set()
+        # #336 — memory compaction subscriber. The inline trigger from
+        # stream_turn is replaced by a background task that subscribes
+        # to ledger ``turn_end`` events. _compaction_lock serialises
+        # concurrent runs (rare but possible when turn_end events
+        # arrive faster than the LLM call inside compress_session can
+        # finish). _pending_compactions buffers CompressDone events
+        # for the next stream_turn to yield; if the session ends
+        # before that yield, the signal is lost — which mirrors the
+        # old inline behaviour when the turn that triggered compaction
+        # was itself the last one.
+        self._compaction_lock: asyncio.Lock = asyncio.Lock()
+        self._pending_compactions: list[CompressDone] = []
+        self._compaction_task: asyncio.Task | None = None
 
         self.registry = ToolRegistry()
         # Issue #154: JobStore + Scratchpad must exist before tools that may
@@ -1092,6 +1105,23 @@ class LoomSession:
                 self._ledger_store = None
                 self._ledger_emitter = None
                 self._envelope_projector = None
+
+        # #336 — start the memory compaction subscriber. Bound to the
+        # ledger; if ledger init failed above, no subscriber spawns and
+        # compaction never fires (which matches Discord-without-ledger
+        # mode's existing behaviour for envelope projection).
+        #
+        # Spawning here (before facade build below) is safe even though
+        # ``_run_compaction_check`` reaches into ``self._memory``: the
+        # subscriber blocks on ``turn_end`` events, which only fire
+        # from inside ``stream_turn``. ``stream_turn`` is only called
+        # after ``start()`` returns, by which point the facade has been
+        # built. (#346 review S1.)
+        if self._ledger_store is not None:
+            self._compaction_task = asyncio.create_task(
+                self._compaction_subscriber_loop(),
+                name=f"memory_compaction:{self.session_id}",
+            )
 
         # Issue #147 Phase C: build the facade up-front so every later step
         # in start() (auto-import, MemoryIndexer, tool registration, etc.)
@@ -1590,6 +1620,23 @@ class LoomSession:
             for _t in list(self._judge_tasks):
                 _t.cancel()
             self._judge_tasks.clear()
+        # #336 — cancel the compaction subscriber loop. Same rationale
+        # as judge tasks: a torn-down router / governor / facade must
+        # not have a background task still trying to call into them.
+        if self._compaction_task is not None:
+            self._compaction_task.cancel()
+            try:
+                await self._compaction_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # Subscriber loop has its own outer except Exception,
+                # so this branch should never fire. If it does, surface
+                # the trace rather than silently swallow. (#346 review N2.)
+                logger.exception(
+                    "memory compaction subscriber raised during shutdown"
+                )
+            self._compaction_task = None
         if hasattr(self, "_scratchpad"):
             self._scratchpad.clear()
         # Issue #64: unmount all skill-declared checks before closing
@@ -1829,6 +1876,15 @@ class LoomSession:
                 )
         try:
             self._current_origin = origin
+
+            # #336 — surface CompressDone events buffered by the
+            # compaction subscriber from the previous turn. Yielded
+            # before any other turn-level events so Discord shows the
+            # status message at the natural turn boundary.
+            if self._pending_compactions:
+                for _ev in self._pending_compactions:
+                    yield _ev
+                self._pending_compactions.clear()
 
             # Issue #131: Reset abort signal from previous turn so the session
             # is not permanently stuck after a circuit-breaker trip.
@@ -2211,30 +2267,13 @@ class LoomSession:
                     # Issue #58: trigger skill self-assessment before TurnDone
                     self._trigger_skill_assessment()
 
-                    # Mid-session episodic compression: configurable via loom.toml
-                    # [memory] episodic_compress_threshold (default 30).
-                    # Count only *uncompressed* rows so soft-deleted entries from
-                    # prior compressions don't keep the threshold permanently
-                    # satisfied (would re-trigger the LLM every turn).
-                    try:
-                        ep_count = await self._memory.episodic.count_session(
-                            self.session_id, uncompressed_only=True,
-                        )
-                        if ep_count >= self._episodic_compress_threshold:
-                            fact_count = await compress_session(
-                                self.session_id,
-                                self._memory.episodic, self._memory.semantic,
-                                self.router, self.model,
-                                governor=self._governor,
-                                telemetry=self._telemetry,
-                            )
-                            if fact_count:
-                                yield CompressDone(fact_count=fact_count)
-                            # Rebuild MemoryIndex so long-running sessions (Discord)
-                            # see updated fact/anti-pattern counts without restarting.
-                            await self._refresh_memory_index()
-                    except Exception:
-                        pass  # never block the turn on compression failure
+                    # #336 — mid-session episodic compaction was previously
+                    # an inline ``ep_count >= threshold`` check here. The
+                    # trigger is now ``_compaction_subscriber_loop``, fed
+                    # by ledger ``turn_end`` events. ``CompressDone`` lands
+                    # in ``self._pending_compactions`` and surfaces at the
+                    # start of the next stream_turn; this turn's TurnDone
+                    # no longer waits on the LLM compaction call.
 
                     self._last_think = "".join(_think_parts).strip()
                     _tier_hint = self._tick_tier_counter()
@@ -3638,6 +3677,85 @@ class LoomSession:
             )
         except Exception:
             logger.exception("ledger thought emit failed; continuing")
+
+    # ------------------------------------------------------------------
+    # #336 — memory compaction subscriber (doc/53 §6.4 push pattern)
+    # ------------------------------------------------------------------
+
+    async def _run_compaction_check(self) -> None:
+        """One pass of the threshold-driven compaction logic.
+
+        Extracted from the prior inline trigger in ``stream_turn``.
+        Behaviour is unchanged: count uncompressed episodic rows, run
+        ``compress_session`` if past threshold, refresh the memory
+        index. The CompressDone signal is appended to
+        ``_pending_compactions`` so the next ``stream_turn`` yields
+        it for Discord/CLI consumers; if no next turn fires, the
+        signal is lost — same as before #336 for late-turn triggers.
+
+        Race contract: a new turn writing fresh episodic entries
+        during this call is safe — ``compress_session`` reads a
+        snapshot up front, marks only that snapshot at the end.
+        Concurrent compaction runs are blocked by ``_compaction_lock``
+        in the subscriber loop.
+        """
+        try:
+            ep_count = await self._memory.episodic.count_session(
+                self.session_id, uncompressed_only=True,
+            )
+            if ep_count < self._episodic_compress_threshold:
+                return
+            fact_count = await compress_session(
+                self.session_id,
+                self._memory.episodic, self._memory.semantic,
+                self.router, self.model,
+                governor=self._governor,
+                telemetry=self._telemetry,
+            )
+            if fact_count:
+                self._pending_compactions.append(
+                    CompressDone(fact_count=fact_count)
+                )
+            # Rebuild MemoryIndex so long-running sessions (Discord)
+            # see updated fact/anti-pattern counts without restarting.
+            await self._refresh_memory_index()
+        except Exception:
+            logger.exception(
+                "memory compaction subscriber: compress_session failed; "
+                "continuing"
+            )
+
+    async def _compaction_subscriber_loop(self) -> None:
+        """Background task: subscribe to ``turn_end`` events for this
+        session and trigger compaction. Runs for the lifetime of the
+        session; cancelled by ``stop()`` alongside other background
+        tasks.
+
+        Subscribing rather than polling means compaction is decoupled
+        from stream_turn's hot path: the turn returns immediately
+        after ``turn_end`` is emitted, and the LLM compaction call
+        happens off the user-visible timeline.
+        """
+        if self._ledger_store is None:
+            return
+        try:
+            async with self._ledger_store.subscribe(
+                event_types=["turn_end"],
+                session_id=self.session_id,
+            ) as subscriber:
+                async for _event in subscriber:
+                    # Serialise concurrent runs. If a turn_end fires
+                    # while the previous compaction is still mid-LLM,
+                    # the second attempt waits rather than running in
+                    # parallel and double-writing semantic facts.
+                    async with self._compaction_lock:
+                        await self._run_compaction_check()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "memory compaction subscriber loop crashed; will not restart"
+            )
 
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
         # #334 / doc/53 §3.3 — feed the per-turn artifact size accumulator

@@ -908,7 +908,7 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 | Step 4 — Push subscriber + Pull fluent + raw SQL | ✅ 完成（#332） | `subscribe(...)` async ctx、`events.where().since().all()` 等、`execute_sql`；`is_live` monotonic 語意（一旦 drop 永久 False，`re-subscribe` 重置） |
 | Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成（#333 + #337） | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；#337 移除 `_live_record_for` / `envelope.records` transitional bridge — projector 純從 ledger 讀取，`ExecutionEnvelope` 退成 thin marker。`[ledger].enabled=false` 改 graceful empty-view fallback：EnvelopeStarted/Completed 仍 fire（shape 一致），但 nodes 為空 — tool detail 改由 `ToolBegin` / `ToolEnd` stream 提供，不保證 full envelope UI parity。把 ledger disable 視為 safety/diagnostic opt-out，不是支援 tier |
 | Step 5 — SessionLog 投影 | ✗ wontfix（#335） | 重新審視後決定不做純投影。理由見下方 §11.2.2。#335 改去處理可獨立分離的痛點：secret redaction 從寫入時搬到讀取時 |
-| Step 5 — Memory compaction subscribe `turn_end` 觸發 | ⚠️ deferred | 目前 inline trigger 在 stream_turn 內、行為正確；移成 background subscriber 為 architectural improvement，timing 細節需評估，獨立 follow-up issue |
+| Step 5 — Memory compaction subscribe `turn_end` 觸發 | ✅ 完成（#336） | `LoomSession._compaction_subscriber_loop` 訂閱 `turn_end` events for own session_id；`_compaction_lock` 序列化並發呼叫；compaction 不再阻塞 turn return，`CompressDone` 從 stream_turn 改為 buffer 在 `_pending_compactions` 由下一個 stream_turn 開頭 yield。Race：新 turn 與 in-flight compaction 並發時，compaction 已在開始時讀過 episodic snapshot，新寫入留待下次觸發；MemoryGovernor 自身的 admission gate 處理並發 semantic upsert |
 
 ### 11.2.2 SessionLog 與 ledger 的邊界（#335 決策）
 
