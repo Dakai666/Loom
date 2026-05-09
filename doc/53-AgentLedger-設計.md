@@ -947,7 +947,15 @@ ledger 設計初衷是「事件流動的東西」（§2 / §3.2），存的是 t
 
 換取的是「regex 可逆、未來改進仍能套用到舊資料」。這個取捨在「私人開發環境、單機使用」假設下成立；若未來 Loom 進入多用戶 / 共用主機 / cloud-synced 場景，需要重新評估。
 
-at-rest 防護現在沒有 first-class 機制，獨立追蹤於 **#342**（候選方案：DB 檔案 chmod 0600 baseline / opt-in retention pruning / SQLCipher）。在 #342 落地前，使用 Loom 應視同把 secret 寫進 `~/.loom/memory.db` plaintext。
+at-rest 防護分三階段在 **#342** 收：
+
+| 階段 | 狀態 | 內容 |
+|---|---|---|
+| Baseline — chmod 0700/0600 | ✅ 已 ship | `~/.loom/` 目錄收 0700、`memory.db` / `ledger.db`（含 WAL/SHM）收 0600；helper 在 `loom/core/infra/file_permissions.py`，`SQLiteStore.initialize` 與 `LedgerStore.open` 接線。Block 同主機其他 user，但**擋不住**檔案被搬走（備份外流、lost laptop） |
+| Retention pruning（opt-in） | ⚠️ deferred | 由 user 在 `loom.toml` 設定 `[session_log] retention_days=N`，超期 row 由背景 prune。處理「老備份外流」場景 |
+| SQLCipher | ⚠️ deferred | 真 at-rest encryption，需要 key management / 額外 dependency；等實際需求訊號 |
+
+在後兩階段落地前，使用 Loom 仍應視同把 secret 寫進 `~/.loom/memory.db` plaintext —— baseline 只擋同機其他 user，不擋備份/實體竊取。
 
 未來真需要把 raw text 也納入事件流時（例如 Quest D 想做 corpus 訓練），開新 event types 而不是改 SessionLog 投影方向；那時 ledger 會明確扮演「事件流 + opt-in raw text 副本」雙角色，而不是把 SessionLog 拆掉。
 

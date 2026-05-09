@@ -251,6 +251,12 @@ class SQLiteStore:
 
     async def initialize(self) -> None:
         """Create tables and indexes if they do not exist."""
+        # #342 — at-rest baseline. Tighten the parent dir before the
+        # first connect so the freshly-created DB inherits a private
+        # directory; tighten the DB + WAL/SHM siblings on the way out
+        # of initialize.
+        from loom.core.infra.file_permissions import tighten_dir, tighten_sqlite_db
+        tighten_dir(self.path.parent)
         async with aiosqlite.connect(self.path) as db:
             # Issue #166: wait up to 5s on a write lock instead of failing
             # immediately with `database is locked`. Pairs with WAL mode set in
@@ -317,6 +323,10 @@ class SQLiteStore:
                 await db.commit()
             except Exception:
                 pass
+
+        # #342 — tighten the DB file + WAL/SHM siblings now that the
+        # connection has been closed and any side files have flushed.
+        tighten_sqlite_db(self.path)
 
     @asynccontextmanager
     async def connect(self):

@@ -217,6 +217,16 @@ class LedgerStore:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.blob_dir.mkdir(parents=True, exist_ok=True)
+        # #342 — at-rest baseline. Tighten parent dir before the first
+        # write so the connection inherits a private directory; tighten
+        # the DB itself plus the blob_dir afterwards. Thought-event blob
+        # files are written via store_thought_text into blob_dir, so
+        # locking down the directory protects them too.
+        from loom.core.infra.file_permissions import (
+            tighten_dir, tighten_sqlite_db,
+        )
+        tighten_dir(self.db_path.parent)
+        tighten_dir(self.blob_dir)
         self._conn = await aiosqlite.connect(self.db_path)
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -225,6 +235,7 @@ class LedgerStore:
         for stmt in CREATE_INDEXES:
             await self._conn.execute(stmt)
         await self._conn.commit()
+        tighten_sqlite_db(self.db_path)
 
     async def close(self) -> None:
         if self._conn is not None:
