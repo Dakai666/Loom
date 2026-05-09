@@ -64,6 +64,28 @@ class TestBuildRouter:
         assert router.get_provider("codex/gpt-5.5").name == "codex"
 
 
+class TestSetModel:
+    def test_lazy_registers_codex_provider_on_switch(self, monkeypatch: pytest.MonkeyPatch):
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        initial_router = MagicMock()
+        initial_router.switch_model.return_value = False
+        codex_router = MagicMock()
+        codex_router.switch_model.return_value = True
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: codex_router)
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = initial_router
+        session._model = "MiniMax-M2.7"
+
+        assert session.set_model("codex/gpt-5.5") is True
+        initial_router.switch_model.assert_called_once_with("codex/gpt-5.5")
+        codex_router.switch_model.assert_called_once_with("codex/gpt-5.5")
+        assert session.router is codex_router
+        assert session.model == "codex/gpt-5.5"
+
+
 class TestLoomSessionStartup:
     @pytest_asyncio.fixture
     async def session_module(self):

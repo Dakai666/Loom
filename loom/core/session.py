@@ -4572,6 +4572,9 @@ class LoomSession:
         and updates the provider's model attribute.  Returns True on success.
         """
         ok = self.router.switch_model(model)
+        if not ok and model.startswith("codex/"):
+            self.router = build_router(active_model=model)
+            ok = self.router.switch_model(model)
         if ok:
             self._model = model
         return ok
