@@ -52,7 +52,15 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 
 def _redact_secrets(text: str | None) -> str | None:
-    """Best-effort redaction of common secret patterns.  Never raises."""
+    """Best-effort redaction of common secret patterns.  Never raises.
+
+    #335 — applied at read time on plain-text values *after* JSON has
+    been parsed (see ``_redact_in_place``); the patterns assume an
+    unstructured string. Running them on a JSON-encoded blob can break
+    syntax (e.g. ``Bearer\\s+\\S{8,}`` greedy-matches through escaped
+    quotes), so callers walking nested structures should redact at the
+    leaf-string level, not on the serialised form.
+    """
     if not text:
         return text
     try:
@@ -61,6 +69,32 @@ def _redact_secrets(text: str | None) -> str | None:
     except Exception as exc:
         logger.debug("Secret redaction regex failed: %s", exc)
     return text
+
+
+def _redact_in_place(node: Any) -> Any:
+    """Walk a parsed-JSON structure and redact every leaf string.
+
+    Returns the same shape with strings filtered through
+    ``_redact_secrets``. Lists and dicts are mutated in place for
+    cheapness; the return value is the same object so callers can use
+    it as an expression.
+
+    Intended for freshly parsed / caller-owned structures — anything
+    sharing the dict will see its strings rewritten. Today's only call
+    site is ``load_messages`` operating on objects it just produced
+    via ``json.loads``.
+    """
+    if isinstance(node, str):
+        return _redact_secrets(node)
+    if isinstance(node, list):
+        for i, v in enumerate(node):
+            node[i] = _redact_in_place(v)
+        return node
+    if isinstance(node, dict):
+        for k, v in node.items():
+            node[k] = _redact_in_place(v)
+        return node
+    return node
 
 
 class SessionLog:
@@ -107,10 +141,18 @@ class SessionLog:
             ``load_messages()`` will prefer this column for assistant-message replay.
         """
         try:
-            # Issue #92: redact secrets before persisting to disk
-            content = _redact_secrets(content)
-            raw_json = _redact_secrets(raw_json)
-
+            # #335 — secret redaction is applied at read time in
+            # ``load_messages``. Keeping the raw text on disk lets
+            # future regex improvements re-redact older rows accurately
+            # (a bad write-time redaction would have been one-shot).
+            #
+            # SECURITY NOTE: this is a deliberate threat-model change
+            # from Issue #92. #92's write-time redaction protected
+            # against at-rest exposure (DB backup leak, lost laptop,
+            # file-permission misconfig); this read-time path only
+            # covers the load_messages presentation boundary. Plaintext
+            # secrets remain in ``~/.loom/memory.db`` on disk. At-rest
+            # mitigation tracked in #342.
             await self._db.execute(
                 """
                 INSERT INTO session_log
@@ -259,6 +301,22 @@ class SessionLog:
         2. ``metadata.format == "raw_message"`` — legacy fallback; ``content`` is
            the full JSON blob (written before the raw_json column existed).
         3. Plain text reconstruction (user / tool messages).
+
+        #335 — secret redaction is applied here, on the way out, rather
+        than at write time. Raw text on disk is the ground truth; if
+        the redaction regex misses a pattern today, improving it later
+        still lets old rows surface redacted on the next load.
+
+        Structured rows (raw_json, legacy raw_message in content) are
+        parsed first, then ``_redact_in_place`` walks the dict / list
+        and redacts every leaf string. Plain content is redacted via
+        ``_redact_secrets`` directly. The leaf-level walk is required
+        because some patterns (e.g. ``Bearer\\s+\\S{8,}``) greedy-match
+        through escaped quotes if applied to a raw JSON blob, breaking
+        syntax.
+
+        SECURITY: this guards the presentation boundary, not at-rest
+        storage — see ``log_message`` SECURITY NOTE and #342.
         """
         cursor = await self._db.execute(
             """
@@ -272,12 +330,26 @@ class SessionLog:
         rows = await cursor.fetchall()
         result: list[dict[str, Any]] = []
         for role, content, raw_json, metadata_raw in rows:
-            meta: dict[str, Any] = json.loads(metadata_raw)
+            # #335 review S2 — best-effort metadata parse; load_messages
+            # contract is "never raises", so a corrupted metadata blob
+            # falls through to empty rather than aborting the whole
+            # replay.
+            try:
+                meta: dict[str, Any] = json.loads(metadata_raw or "{}")
+            except Exception as meta_exc:
+                logger.debug(
+                    "metadata parse failed; using empty: %s", meta_exc,
+                )
+                meta = {}
 
             # Priority 1: raw_json column (structured, new path)
             if raw_json:
                 try:
-                    result.append(json.loads(raw_json))
+                    parsed = json.loads(raw_json)
+                    # #335 — redact at the leaf level after parse so
+                    # patterns can't accidentally chew through escaped
+                    # quotes and break JSON.
+                    result.append(_redact_in_place(parsed))
                     continue
                 except Exception as parse_exc:
                     logger.debug("raw_json parse failed, falling back: %s", parse_exc)
@@ -286,13 +358,13 @@ class SessionLog:
             if role == "assistant" and meta.get("format") == "raw_message":
                 try:
                     msg = json.loads(content)
-                    result.append(msg)
+                    result.append(_redact_in_place(msg))
                     continue
                 except Exception as legacy_exc:
                     logger.debug("Legacy raw_message parse failed, falling back: %s", legacy_exc)
 
             # Priority 3: plain text
-            msg: dict[str, Any] = {"role": role, "content": content}
+            msg: dict[str, Any] = {"role": role, "content": _redact_secrets(content)}
             # Re-attach tool_call_id for tool messages (required by OpenAI format)
             if role == "tool" and "tool_call_id" in meta:
                 msg["tool_call_id"] = meta["tool_call_id"]

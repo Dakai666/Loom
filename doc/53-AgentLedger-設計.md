@@ -907,8 +907,49 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 | Step 3 — Replay primitive (events_for_* + TurnSnapshot) | ✅ 完成（#331） | `LedgerStore.replay` lazy property，§8.2 trivial+medium 欄位 reconstruct 全綠 |
 | Step 4 — Push subscriber + Pull fluent + raw SQL | ✅ 完成（#332） | `subscribe(...)` async ctx、`events.where().since().all()` 等、`execute_sql`；`is_live` monotonic 語意（一旦 drop 永久 False，`re-subscribe` 重置） |
 | Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成（#333 + #337） | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；#337 移除 `_live_record_for` / `envelope.records` transitional bridge — projector 純從 ledger 讀取，`ExecutionEnvelope` 退成 thin marker。`[ledger].enabled=false` 改 graceful empty-view fallback：EnvelopeStarted/Completed 仍 fire（shape 一致），但 nodes 為空 — tool detail 改由 `ToolBegin` / `ToolEnd` stream 提供，不保證 full envelope UI parity。把 ledger disable 視為 safety/diagnostic opt-out，不是支援 tier |
-| Step 5 — SessionLog 投影 | ⚠️ deferred | SessionLog 存 OpenAI-canonical raw 訊息 text，ledger 沒有對應 raw text 事件（thought event 內嵌邏輯仍 deferred）。完整投影需與 thought event capture 一起實作 |
+| Step 5 — SessionLog 投影 | ✗ wontfix（#335） | 重新審視後決定不做純投影。理由見下方 §11.2.2。#335 改去處理可獨立分離的痛點：secret redaction 從寫入時搬到讀取時 |
 | Step 5 — Memory compaction subscribe `turn_end` 觸發 | ⚠️ deferred | 目前 inline trigger 在 stream_turn 內、行為正確；移成 background subscriber 為 architectural improvement，timing 細節需評估，獨立 follow-up issue |
+
+### 11.2.2 SessionLog 與 ledger 的邊界（#335 決策）
+
+#335 原本要把 SessionLog 改寫為 ledger pure projection。survey 完現況後改變決策——**不做投影，劃清邊界**。
+
+**為什麼不做：**
+
+ledger 設計初衷是「事件流動的東西」（§2 / §3.2），存的是 turn / tool / memory / judge / artifact 等 transition 訊號。SessionLog 存的是 OpenAI-canonical raw text（user input、assistant raw_message 含 tool_use blocks、tool result 全文），是**內容性質**，不是事件性質。要讓 ledger 能完整投影 SessionLog，需要：
+
+- 在 `turn_start.payload` 塞 `user_input` 全文 — 違反 §3.4 PromptStack snapshot 的設計（只放 hash，不放原文）
+- 開新 event type `assistant_message`、或讓 `thought` 一律 commit（丟掉 §3.3 capture signal）— 失去 thought 的篩選價值
+- 擴 `tool_lifecycle.END.result_summary` 從 200 字到全文 — 把 high-frequency 事件變成大 blob 容器
+
+每一條都把 ledger 拖向「儲存層」而非「事件層」。Loom 該記錄的內容服務 agent 為主，user 訊息原文沒必要在 ledger 再存一份。
+
+**SessionLog 與 ledger 的職責切分（v0.3 起鎖定）：**
+
+| 用途 | 來源 |
+|---|---|
+| Resume / TUI 重播 / Discord 重連的 message history | SessionLog（`session_log` + `sessions` 兩張表） |
+| 事件流 / replay primitive / TurnSnapshot / 投影出 ExecutionEnvelopeView | AgentLedger |
+| 跨子系統的觀測（judge / memory / task / artifact） | AgentLedger |
+| OpenAI-canonical raw text 持久化 | SessionLog |
+| Secret redaction（API keys、Bearer tokens） | SessionLog 讀取時做（#335）；ledger 端不重複 |
+
+**#335 實際做的事**：把 SessionLog 的 secret redaction 從寫入時搬到讀取時。raw text 在磁碟上保留原貌、未來 regex 改進仍能即時對舊資料生效；同時實作了 `_redact_in_place(node)`，在 parse JSON 後對 leaf string 做 redaction，避開 regex 吞掉 escape quote 破壞 JSON 結構的舊問題（write-time 路徑剛好沒踩到、但 read-time naive 套用會炸）。
+
+**SECURITY — threat model 變更需明確承認**：這不是 Issue #92 的等價實現。#92 處理的是 **at-rest** 洩漏（DB 備份、lost laptop、file permission 設錯），write-time redaction 確保磁碟上看不到 secret。#335 改成 read-time 後：
+
+| 防護面 | #92 write-time | #335 read-time |
+|---|---|---|
+| `load_messages()` 回傳值 | ✅ redacted | ✅ redacted |
+| TUI / Discord / resume 重播 | ✅ redacted | ✅ redacted |
+| `~/.loom/memory.db` 檔案被竊取 | ✅ redacted | ❌ **plaintext** |
+| 跨備份系統洩漏（iCloud / Dropbox sync） | ✅ redacted | ❌ **plaintext** |
+
+換取的是「regex 可逆、未來改進仍能套用到舊資料」。這個取捨在「私人開發環境、單機使用」假設下成立；若未來 Loom 進入多用戶 / 共用主機 / cloud-synced 場景，需要重新評估。
+
+at-rest 防護現在沒有 first-class 機制，獨立追蹤於 **#342**（候選方案：DB 檔案 chmod 0600 baseline / opt-in retention pruning / SQLCipher）。在 #342 落地前，使用 Loom 應視同把 secret 寫進 `~/.loom/memory.db` plaintext。
+
+未來真需要把 raw text 也納入事件流時（例如 Quest D 想做 corpus 訓練），開新 event types 而不是改 SessionLog 投影方向；那時 ledger 會明確扮演「事件流 + opt-in raw text 副本」雙角色，而不是把 SessionLog 拆掉。
 
 ### 11.3 舊資料 — Leave alone
 
