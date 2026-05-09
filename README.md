@@ -383,12 +383,16 @@ loom auth openai                  # Codex CLI login helper + OPENAI_API_KEY setu
 loom chat                          # interactive CLI
 loom chat --tui                    # TUI mode
 loom chat --model gpt-5.5          # OpenAI model
+loom chat --model codex/gpt-5.5    # Codex OAuth backend
 loom chat --model ollama/llama3.2  # local model
 loom discord start --autonomy --channel <id>
 loom autonomy start
 ```
 
-Model routing works by prefix — `gpt-*`, `openai/<model>`, `claude-*`, `ollama/<name>`, `lmstudio/<name>`, `MiniMax-*`. Switch mid-session with `/model`.
+Model routing works by prefix — `gpt-*` and `openai/<model>` use
+`OPENAI_API_KEY`, while `codex/<model>` uses the Codex OAuth token from
+`codex login`. Other prefixes include `claude-*`, `ollama/<name>`,
+`lmstudio/<name>`, and `MiniMax-*`. Switch mid-session with `/model`.
 
 Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
 and writes a PNG/WebP/JPEG under the workspace. With Codex OAuth it uses the

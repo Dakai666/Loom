@@ -11,6 +11,7 @@ Model routing rules
 "claude-*"     → AnthropicProvider
 "gpt-*"        → OpenAIProvider
 "openai/*"     → OpenAIProvider
+"codex/*"      → CodexResponsesProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
@@ -74,6 +75,7 @@ class LLMRouter:
         ("claude-",    "anthropic"),
         ("gpt-",       "openai"),
         ("openai/",    "openai"),
+        ("codex/",     "codex"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
@@ -84,9 +86,14 @@ class LLMRouter:
         self._providers: dict[str, LLMProvider] = {}
         self._default: str | None = None
 
-    def register(self, provider: LLMProvider, default: bool = False) -> "LLMRouter":
+    def register(
+        self,
+        provider: LLMProvider,
+        default: bool = False,
+        fallback: bool = True,
+    ) -> "LLMRouter":
         self._providers[provider.name] = provider
-        if default or self._default is None:
+        if default or (fallback and self._default is None):
             self._default = provider.name
         return self
 

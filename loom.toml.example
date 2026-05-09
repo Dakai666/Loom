@@ -34,6 +34,7 @@ personality = ""
 #   claude-*                → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
 #   gpt-*                   → OpenAI official API (gpt-5.5, gpt-5.5-pro)  (OPENAI_API_KEY in .env)
 #   openai/<model>          → OpenAI official API with explicit prefix    (OPENAI_API_KEY in .env)
+#   codex/<model>           → Codex OAuth backend (e.g. codex/gpt-5.5)     (`codex login`)
 #   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
 #   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
 #   ollama/<name>           → local Ollama server  (enable [providers.ollama] below)
@@ -104,6 +105,11 @@ reminder_after_turns = 10
 # [providers.openai]
 # base_url      = "https://api.openai.com/v1"
 # default_model = "gpt-5.5"
+
+# [providers.codex]
+# enabled       = true                 # optional; explicit --model codex/... also registers it
+# base_url      = "https://chatgpt.com/backend-api/codex/responses"
+# default_model = "gpt-5.5"            # bare model name — no "codex/" prefix here
 #
 # OpenAI image generation uses the openai__text_to_image tool.
 # It defaults to gpt-image-2. Codex OAuth uses the Codex Responses backend;

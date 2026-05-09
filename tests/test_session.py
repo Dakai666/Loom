@@ -47,6 +47,45 @@ class TestBuildRouter:
         assert "openai" in router.providers
         assert router.get_provider("gpt-5.5").name == "openai"
 
+    def test_registers_codex_provider_only_when_requested(self, monkeypatch: pytest.MonkeyPatch):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "MiniMax-M2.7"},
+        })
+
+        with pytest.raises(RuntimeError, match="No LLM provider configured"):
+            session_module.build_router()
+
+        router = session_module.build_router(active_model="codex/gpt-5.5")
+
+        assert "codex" in router.providers
+        assert router.get_provider("codex/gpt-5.5").name == "codex"
+
+
+class TestSetModel:
+    def test_lazy_registers_codex_provider_on_switch(self, monkeypatch: pytest.MonkeyPatch):
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        initial_router = MagicMock()
+        initial_router.switch_model.return_value = False
+        codex_router = MagicMock()
+        codex_router.switch_model.return_value = True
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: codex_router)
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = initial_router
+        session._model = "MiniMax-M2.7"
+
+        assert session.set_model("codex/gpt-5.5") is True
+        initial_router.switch_model.assert_called_once_with("codex/gpt-5.5")
+        codex_router.switch_model.assert_called_once_with("codex/gpt-5.5")
+        assert session.router is codex_router
+        assert session.model == "codex/gpt-5.5"
+        assert session._manual_model_override is True
+
 
 class TestLoomSessionStartup:
     @pytest_asyncio.fixture
@@ -66,7 +105,7 @@ class TestLoomSessionStartup:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -122,7 +161,7 @@ async def session_plugin_tool(call):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {"mcp": {"servers": [{"name": "minimax"}]}})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -401,7 +440,7 @@ class TestProvisionalTitle:
     ):
         from loom.core.session import LoomSession
 
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -419,7 +458,7 @@ class TestProvisionalTitle:
     ):
         from loom.core.session import LoomSession
 
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -438,7 +477,7 @@ class TestProvisionalTitle:
         from loom.core.memory.session_log import SessionLog
         from rich.prompt import Confirm
 
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -472,7 +511,7 @@ class TestProvisionalTitle:
         from loom.core.session import LoomSession
         from rich.prompt import Confirm
 
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)

@@ -86,13 +86,15 @@ LLMRouter.chat(model="ollama/llama3.2", messages=[...])
 
 ```python
 from loom.core.cognition.providers import (
-    MiniMaxProvider, AnthropicProvider, OllamaProvider, LMStudioProvider,
+    MiniMaxProvider, AnthropicProvider, OpenAIProvider, CodexResponsesProvider,
+    OllamaProvider, LMStudioProvider,
 )
 
 router = LLMRouter()
 router.register(MiniMaxProvider(api_key=..., model="MiniMax-M2.7"), default=True)
 router.register(AnthropicProvider(api_key=...))
 router.register(OpenAIProvider(api_key=..., model="gpt-5.5"))
+router.register(CodexResponsesProvider(model="codex/gpt-5.5"), fallback=False)
 router.register(OllamaProvider(base_url="http://localhost:11434"))
 ```
 

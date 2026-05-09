@@ -340,7 +340,7 @@ class TestSessionIntegration:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(session_module, "build_router", lambda: MagicMock(providers=[object()]))
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock(providers=[object()]))
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)

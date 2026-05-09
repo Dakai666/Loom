@@ -456,7 +456,7 @@ def _build_jobs_inject_message(jobstore: Any) -> str | None:
     return "\n".join(lines)
 
 
-def build_router() -> LLMRouter:
+def build_router(active_model: str | None = None) -> LLMRouter:
     """
     Build the LLM router with all available providers registered.
 
@@ -468,6 +468,7 @@ def build_router() -> LLMRouter:
       MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
       Anthropic  — ANTHROPIC_API_KEY
       OpenAI     — OPENAI_API_KEY
+      Codex      — Codex OAuth from `codex login` (explicit codex/<model> prefix)
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
@@ -479,6 +480,7 @@ def build_router() -> LLMRouter:
     from loom.core.cognition.providers import (
         OllamaProvider,
         LMStudioProvider,
+        CodexResponsesProvider,
         OpenAIProvider,
         OpenRouterProvider,
     )
@@ -487,6 +489,7 @@ def build_router() -> LLMRouter:
     cfg = _load_loom_config()
     router = LLMRouter()
     default = get_default_model()
+    requested_model = active_model or default
 
     # MiniMax — Anthropic-compatible endpoint, registered under provider name "minimax"
     # so the routing table ("MiniMax-" → "minimax") and switch_model() continue to work.
@@ -541,6 +544,29 @@ def build_router() -> LLMRouter:
                 api_key=openai_key,
             ),
             default=default_is_openai,
+        )
+
+    # Codex OAuth — explicit opt-in via codex/<model>. This avoids silently
+    # burning OPENAI_API_KEY quota when users expect ChatGPT/Codex billing.
+    codex_cfg = cfg.get("providers", {}).get("codex", {})
+    codex_requested = requested_model.startswith("codex/")
+    codex_default = default.startswith("codex/")
+    codex_enabled = bool(codex_cfg.get("enabled", False))
+    if codex_requested or codex_default or codex_enabled:
+        codex_model = codex_cfg.get("default_model", CodexResponsesProvider.DEFAULT_MODEL)
+        if requested_model.startswith("codex/"):
+            codex_model = requested_model
+        elif default.startswith("codex/"):
+            codex_model = default
+        else:
+            codex_model = f"codex/{codex_model}"
+        router.register(
+            CodexResponsesProvider(
+                model=codex_model,
+                base_url=codex_cfg.get("base_url", "") or CodexResponsesProvider.DEFAULT_BASE_URL,
+            ),
+            default=codex_default or codex_requested,
+            fallback=codex_default or codex_requested,
         )
 
     # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
@@ -686,7 +712,7 @@ class LoomSession:
         self._provisional_title = provisional_title
         # Workspace root — all relative file paths resolve here; defaults to CWD
         self.workspace: Path = (workspace or Path.cwd()).resolve()
-        self.router = build_router()
+        self.router = build_router(self.model)
 
         # AgentLedger handles — opened in start(), closed in stop().
         # Until start() runs, these are None and every subsystem's optional
@@ -785,6 +811,7 @@ class LoomSession:
         )
         # ``None`` = follow ``_default_tier``; integer = sticky override.
         self._sticky_tier: int | None = None
+        self._manual_model_override: bool = False
         # Counts consecutive turns at the *active* tier (sticky or default).
         # Reset on tier change; surfaces in TierExpiryHint after threshold.
         self._turns_at_current_tier: int = 0
@@ -3328,10 +3355,12 @@ class LoomSession:
     def _active_model(self) -> str:
         """Resolve the model name for the active tier.
 
-        Falls back to ``self._model`` (the constructor / ``set_model`` value)
-        when the tier system isn't configured for this tier — preserves
-        backward compatibility with sessions that don't use #276 at all.
+        A manual ``/model`` selection wins until the user or agent explicitly
+        changes tier again. Otherwise, falls back to ``self._model`` when the
+        tier system isn't configured for this tier.
         """
+        if getattr(self, "_manual_model_override", False):
+            return self._model
         tier = self._active_tier()
         return self._tier_models.get(tier, self._model)
 
@@ -3351,6 +3380,7 @@ class LoomSession:
             new_tier = None
         if new_tier == self._sticky_tier:
             return None  # no-op
+        self._manual_model_override = False
         self._sticky_tier = new_tier
         self._turns_at_current_tier = 0
         self._tier_reminder_emitted = False
@@ -4546,8 +4576,12 @@ class LoomSession:
         and updates the provider's model attribute.  Returns True on success.
         """
         ok = self.router.switch_model(model)
+        if not ok and model.startswith("codex/"):
+            self.router = build_router(active_model=model)
+            ok = self.router.switch_model(model)
         if ok:
             self._model = model
+            self._manual_model_override = True
         return ok
 
 

@@ -8,6 +8,7 @@ a provider SDK directly — it always goes through this interface.
 Supported providers
 -------------------
 OpenAIProvider     — api.openai.com/v1 (OpenAI-compatible chat completions)
+CodexResponsesProvider — chatgpt.com/backend-api/codex/responses (Codex OAuth)
 AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
 OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
 DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
@@ -878,6 +879,244 @@ class OpenAIProvider(_OpenAICompatibleBase):
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_TIMEOUT = 180.0
     MAX_TOKENS_PARAM = "max_completion_tokens"
+
+
+class CodexResponsesProvider(LLMProvider):
+    """
+    OpenAI Codex OAuth chat via ChatGPT's Codex Responses backend.
+
+    Routing prefix: ``codex/``. This provider intentionally does not fall back
+    to ``OPENAI_API_KEY`` so users do not accidentally burn API quota when they
+    selected Codex OAuth mode.
+    """
+
+    name = "codex"
+    ROUTING_PREFIX = "codex/"
+    DEFAULT_MODEL = "gpt-5.5"
+    DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
+    DEFAULT_TIMEOUT = 180.0
+
+    def __init__(
+        self,
+        model: str = "",
+        base_url: str = "",
+        timeout: float = 0.0,
+    ) -> None:
+        self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
+        self._base_url = base_url or self.DEFAULT_BASE_URL
+        self._timeout = timeout or self.DEFAULT_TIMEOUT
+
+    def _api_model(self) -> str:
+        return self.model.removeprefix(self.ROUTING_PREFIX)
+
+    def _build_payload(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        instructions: list[str] = []
+        input_items: list[dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "system":
+                if content:
+                    instructions.append(str(content))
+                continue
+            if role == "tool":
+                call_id = msg.get("tool_call_id")
+                if call_id:
+                    input_items.append({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": str(content),
+                    })
+                continue
+            if role == "assistant":
+                if content:
+                    input_items.append({
+                        "role": "assistant",
+                        "content": [{"type": "input_text", "text": str(content)}],
+                    })
+                for tc in msg.get("tool_calls", []) or []:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tc.get("id") or str(uuid.uuid4()),
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "{}"),
+                    })
+                continue
+            input_items.append({
+                "role": "user" if role != "assistant" else "assistant",
+                "content": [{"type": "input_text", "text": str(content)}],
+            })
+
+        payload: dict[str, Any] = {
+            "model": self._api_model(),
+            "instructions": "\n\n".join(instructions) or "You are a helpful assistant.",
+            "input": input_items,
+            "stream": True,
+            "store": False,
+            "max_output_tokens": max_tokens,
+        }
+        if tools:
+            payload["tools"] = self.format_tools(tools)
+        return payload
+
+    def format_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        formatted: list[dict[str, Any]] = []
+        for tool in tools:
+            formatted.append({
+                "type": "function",
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters") or tool.get("input_schema") or {},
+            })
+        return formatted
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 8096,
+    ) -> LLMResponse:
+        text_parts: list[str] = []
+        final: LLMResponse | None = None
+        async for chunk, resp in self.stream_chat(
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        ):
+            if resp is not None:
+                final = resp
+            elif chunk:
+                text_parts.append(chunk)
+        return final or LLMResponse(
+            text="".join(text_parts) or None,
+            tool_uses=[],
+            stop_reason="end_turn",
+        )
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        import httpx
+        from loom.core.cognition.openai_auth import load_codex_oauth_credential
+
+        credential = load_codex_oauth_credential()
+        if credential is None:
+            raise RuntimeError(
+                "No unexpired Codex OAuth token found. Run `codex login` "
+                "or switch to an API-key OpenAI model such as `gpt-5.5`."
+            )
+
+        payload = self._build_payload(messages, tools, max_tokens)
+        full_content = ""
+        output_items: list[dict[str, Any]] = []
+        input_tokens = 0
+        output_tokens = 0
+        response_status = "in_progress"
+
+        # SSE may already have yielded partial output; retrying mid-stream can
+        # duplicate content or tool calls, so failures propagate to the caller.
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream(
+                "POST",
+                self._base_url,
+                headers={
+                    "Authorization": f"Bearer {credential.token}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=payload,
+            ) as resp:
+                resp.raise_for_status()
+                event: str | None = None
+                data_lines: list[str] = []
+                async for line in resp.aiter_lines():
+                    if abort_signal is not None and abort_signal.is_set():
+                        break
+                    if line.startswith("event: "):
+                        event = line[7:]
+                    elif line.startswith("data: "):
+                        data_lines.append(line[6:])
+                    elif line == "" and event:
+                        raw = "\n".join(data_lines)
+                        event = None
+                        data_lines = []
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = data.get("delta")
+                        if isinstance(delta, str):
+                            full_content += delta
+                            yield (delta, None)
+                        item = data.get("item")
+                        if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
+                            output_items.append(item)
+                        response = data.get("response")
+                        if isinstance(response, dict):
+                            response_status = str(response.get("status") or response_status)
+                            usage = response.get("usage") or {}
+                            if isinstance(usage, dict):
+                                input_tokens = int(
+                                    usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
+                                )
+                                output_tokens = int(
+                                    usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
+                                )
+
+        tool_uses: list[ToolUse] = []
+        raw_tool_calls: list[dict[str, Any]] = []
+        for item in output_items:
+            if item.get("type") != "function_call":
+                continue
+            args_raw = item.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw)
+            except (json.JSONDecodeError, ValueError):
+                args = {"_raw": args_raw}
+            call_id = item.get("call_id") or item.get("id") or str(uuid.uuid4())
+            name = item.get("name") or ""
+            tool_uses.append(ToolUse(id=call_id, name=name, args=args))
+            raw_tool_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": args_raw},
+            })
+
+        stop_reason = "tool_use" if tool_uses else "end_turn"
+        if response_status == "incomplete":
+            stop_reason = "max_tokens"
+
+        raw_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+        if raw_tool_calls:
+            raw_message["tool_calls"] = raw_tool_calls
+        yield ("", LLMResponse(
+            text=full_content or None,
+            tool_uses=tool_uses,
+            stop_reason=stop_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            raw_message=raw_message,
+        ))
+
+    def format_tool_result(
+        self, tool_use_id: str, content: str, success: bool = True
+    ) -> dict[str, Any]:
+        return {
+            "role": "tool",
+            "tool_call_id": tool_use_id,
+            "content": content if success else f"Error: {content}",
+        }
 
 
 class LMStudioProvider(_OpenAICompatibleBase):
