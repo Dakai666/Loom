@@ -6,8 +6,9 @@ P3 refactor (Issue #347):
 - Standalone _ConfirmView double avoids importing loom.platform.discord.bot.
 - _make_confirm_fn logic tested via a pure-function fake (no discord imports).
 
-Note: TUI widget tests are kept for regression but TUI is entering
-maintenance mode — CLI/Discord are the primary channels going forward.
+.. note:: TUI widget tests are kept for regression but TUI is in maintenance
+   mode — CLI/Discord are the primary channels going forward.  Formal
+   deprecation notice tracked in issue #XXX (to be created).
 """
 
 from __future__ import annotations
@@ -131,6 +132,17 @@ def _press(widget, button_id: str) -> None:
         widget.on_button_pressed(event)
 
 
+def _assert_result(future: "asyncio.Future[ConfirmDecision]", expected: ConfirmDecision) -> None:
+    """Assert future is done and holds the expected decision.
+
+    Guard against InvalidStateError: if the widget fails to call
+    set_result(), this produces a clear assertion failure instead of a
+    cryptic exception.
+    """
+    assert future.done(), f"Future not resolved; expected {expected}"
+    assert future.result() == expected
+
+
 def _make_call() -> ToolCall:
     return ToolCall(
         tool_name="write_file",
@@ -150,43 +162,49 @@ class TestInlineConfirmWidget:
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
         _press(_make_widget(future), "btn-allow")
-        assert future.result() == ConfirmDecision.ONCE
+        _assert_result(future, ConfirmDecision.ONCE)
         loop.close()
 
     def test_lease_resolves_scope(self):
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
         _press(_make_widget(future), "btn-lease")
-        assert future.result() == ConfirmDecision.SCOPE
+        _assert_result(future, ConfirmDecision.SCOPE)
         loop.close()
 
     def test_auto_resolves_auto(self):
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
         _press(_make_widget(future), "btn-auto")
-        assert future.result() == ConfirmDecision.AUTO
+        _assert_result(future, ConfirmDecision.AUTO)
         loop.close()
 
     def test_deny_resolves_deny(self):
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
         _press(_make_widget(future), "btn-deny")
-        assert future.result() == ConfirmDecision.DENY
+        _assert_result(future, ConfirmDecision.DENY)
         loop.close()
 
     def test_unknown_button_falls_back_to_deny(self):
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
         _press(_make_widget(future), "btn-something-unexpected")
-        assert future.result() == ConfirmDecision.DENY
+        _assert_result(future, ConfirmDecision.DENY)
         loop.close()
 
     def test_second_press_ignored(self):
+        """Second button press on the SAME widget must not overwrite first decision.
+
+        Uses a single widget instance to be explicit that two sequential
+        presses target the same ``_resolved`` flag.
+        """
         loop = asyncio.new_event_loop()
         future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-allow")
-        _press(_make_widget(future), "btn-deny")
-        assert future.result() == ConfirmDecision.ONCE
+        widget = _make_widget(future)
+        _press(widget, "btn-allow")
+        _press(widget, "btn-deny")
+        _assert_result(future, ConfirmDecision.ONCE)
         loop.close()
 
     def test_remove_called_once_on_press(self):
@@ -234,6 +252,11 @@ class TestConfirmView:
         assert await view.wait_decision() == ConfirmDecision.DENY
 
     async def test_wait_decision_without_set_falls_back_to_deny(self):
+        """Simulate edge case: _done is signaled but _decision was never set.
+
+        This mimics what happens when on_timeout() fires after _done was
+        already set by some other path — fallback to DENY.
+        """
         view = _ConfirmView(timeout=60.0)
         view._done.set()
         assert await view.wait_decision() == ConfirmDecision.DENY
@@ -244,13 +267,6 @@ class TestConfirmView:
 # =====================================================================
 
 class TestMakeConfirmFn:
-
-    @staticmethod
-    def _get_channel(channel):
-        def _get(thread_id: int):
-            assert thread_id == 42
-            return channel
-        return _get
 
     async def test_channel_none_returns_deny_no_send(self):
         confirm_fn = await _make_confirm_fn(
