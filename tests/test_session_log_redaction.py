@@ -132,9 +132,50 @@ async def test_disk_content_is_unredacted_so_future_regex_can_fix(sl) -> None:
     assert on_disk == text  # exact byte preservation
 
 
-async def test_redaction_failure_does_not_break_load(sl) -> None:
-    """_redact_secrets contract: best-effort, never raises."""
+async def test_no_secret_passes_through_unchanged(sl) -> None:
     log, _ = sl
     await log.log_message("s1", 0, "user", "ordinary message with no secrets")
     msgs = await log.load_messages("s1")
     assert msgs == [{"role": "user", "content": "ordinary message with no secrets"}]
+
+
+async def test_redaction_failure_falls_through_without_raising(
+    sl, monkeypatch
+) -> None:
+    """_redact_secrets contract is best-effort, never raises. Simulate
+    a regex blowing up and confirm load_messages still returns the row
+    (with the unfiltered content rather than a half-mangled version)."""
+    import re
+
+    from loom.core.memory import session_log as sl_mod
+
+    log, _ = sl
+    await log.log_message("s1", 0, "user", "totally fine text")
+
+    # Patch in a single pattern whose .sub raises.
+    class _Bomb:
+        def sub(self, *_a, **_kw):
+            raise RuntimeError("fake regex failure")
+
+    monkeypatch.setattr(sl_mod, "_SECRET_PATTERNS", [(_Bomb(), "")])
+    msgs = await log.load_messages("s1")
+    # The row should still load — _redact_secrets caught the exception
+    # and returned the original text unchanged.
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "totally fine text"
+
+
+async def test_corrupt_metadata_falls_back_to_empty(sl) -> None:
+    """#335 review S2 — a row with malformed metadata must not abort
+    the whole replay."""
+    log, conn = sl
+    await conn.execute(
+        """
+        INSERT INTO session_log
+            (session_id, turn_index, role, content, raw_json, metadata, created_at)
+        VALUES ('s1', 0, 'user', 'hello', NULL, '{not-json', '2026-05-09T00:00:00')
+        """
+    )
+    await conn.commit()
+    msgs = await log.load_messages("s1")
+    assert msgs == [{"role": "user", "content": "hello"}]

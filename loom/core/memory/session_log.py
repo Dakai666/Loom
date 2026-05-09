@@ -78,6 +78,11 @@ def _redact_in_place(node: Any) -> Any:
     ``_redact_secrets``. Lists and dicts are mutated in place for
     cheapness; the return value is the same object so callers can use
     it as an expression.
+
+    Intended for freshly parsed / caller-owned structures — anything
+    sharing the dict will see its strings rewritten. Today's only call
+    site is ``load_messages`` operating on objects it just produced
+    via ``json.loads``.
     """
     if isinstance(node, str):
         return _redact_secrets(node)
@@ -137,11 +142,17 @@ class SessionLog:
         """
         try:
             # #335 — secret redaction is applied at read time in
-            # ``load_messages``, not here. Keeping the raw text on disk
-            # means future regex tweaks can re-redact accurately; a bad
-            # write-time redaction would have permanently corrupted the
-            # log.  Issue #92's contract (best-effort, never raises) is
-            # preserved on the read path.
+            # ``load_messages``. Keeping the raw text on disk lets
+            # future regex improvements re-redact older rows accurately
+            # (a bad write-time redaction would have been one-shot).
+            #
+            # SECURITY NOTE: this is a deliberate threat-model change
+            # from Issue #92. #92's write-time redaction protected
+            # against at-rest exposure (DB backup leak, lost laptop,
+            # file-permission misconfig); this read-time path only
+            # covers the load_messages presentation boundary. Plaintext
+            # secrets remain in ``~/.loom/memory.db`` on disk. At-rest
+            # mitigation tracked in #342.
             await self._db.execute(
                 """
                 INSERT INTO session_log
@@ -291,14 +302,21 @@ class SessionLog:
            the full JSON blob (written before the raw_json column existed).
         3. Plain text reconstruction (user / tool messages).
 
-        #335 — secret redaction (Issue #92) is applied here, on the way
-        out, rather than at write time. The raw text on disk is the
-        ground truth; if the redaction regex misses a pattern today,
-        improving it later still lets old rows surface redacted on the
-        next load. Redaction runs on the JSON / content strings before
-        parsing — the patterns were already designed to be JSON-safe so
-        the resulting bytes still parse. Failures are logged at DEBUG
-        and the row falls through to the next priority tier.
+        #335 — secret redaction is applied here, on the way out, rather
+        than at write time. Raw text on disk is the ground truth; if
+        the redaction regex misses a pattern today, improving it later
+        still lets old rows surface redacted on the next load.
+
+        Structured rows (raw_json, legacy raw_message in content) are
+        parsed first, then ``_redact_in_place`` walks the dict / list
+        and redacts every leaf string. Plain content is redacted via
+        ``_redact_secrets`` directly. The leaf-level walk is required
+        because some patterns (e.g. ``Bearer\\s+\\S{8,}``) greedy-match
+        through escaped quotes if applied to a raw JSON blob, breaking
+        syntax.
+
+        SECURITY: this guards the presentation boundary, not at-rest
+        storage — see ``log_message`` SECURITY NOTE and #342.
         """
         cursor = await self._db.execute(
             """
@@ -312,7 +330,17 @@ class SessionLog:
         rows = await cursor.fetchall()
         result: list[dict[str, Any]] = []
         for role, content, raw_json, metadata_raw in rows:
-            meta: dict[str, Any] = json.loads(metadata_raw)
+            # #335 review S2 — best-effort metadata parse; load_messages
+            # contract is "never raises", so a corrupted metadata blob
+            # falls through to empty rather than aborting the whole
+            # replay.
+            try:
+                meta: dict[str, Any] = json.loads(metadata_raw or "{}")
+            except Exception as meta_exc:
+                logger.debug(
+                    "metadata parse failed; using empty: %s", meta_exc,
+                )
+                meta = {}
 
             # Priority 1: raw_json column (structured, new path)
             if raw_json:

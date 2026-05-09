@@ -936,6 +936,19 @@ ledger 設計初衷是「事件流動的東西」（§2 / §3.2），存的是 t
 
 **#335 實際做的事**：把 SessionLog 的 secret redaction 從寫入時搬到讀取時。raw text 在磁碟上保留原貌、未來 regex 改進仍能即時對舊資料生效；同時實作了 `_redact_in_place(node)`，在 parse JSON 後對 leaf string 做 redaction，避開 regex 吞掉 escape quote 破壞 JSON 結構的舊問題（write-time 路徑剛好沒踩到、但 read-time naive 套用會炸）。
 
+**SECURITY — threat model 變更需明確承認**：這不是 Issue #92 的等價實現。#92 處理的是 **at-rest** 洩漏（DB 備份、lost laptop、file permission 設錯），write-time redaction 確保磁碟上看不到 secret。#335 改成 read-time 後：
+
+| 防護面 | #92 write-time | #335 read-time |
+|---|---|---|
+| `load_messages()` 回傳值 | ✅ redacted | ✅ redacted |
+| TUI / Discord / resume 重播 | ✅ redacted | ✅ redacted |
+| `~/.loom/memory.db` 檔案被竊取 | ✅ redacted | ❌ **plaintext** |
+| 跨備份系統洩漏（iCloud / Dropbox sync） | ✅ redacted | ❌ **plaintext** |
+
+換取的是「regex 可逆、未來改進仍能套用到舊資料」。這個取捨在「私人開發環境、單機使用」假設下成立；若未來 Loom 進入多用戶 / 共用主機 / cloud-synced 場景，需要重新評估。
+
+at-rest 防護現在沒有 first-class 機制，獨立追蹤於 **#342**（候選方案：DB 檔案 chmod 0600 baseline / opt-in retention pruning / SQLCipher）。在 #342 落地前，使用 Loom 應視同把 secret 寫進 `~/.loom/memory.db` plaintext。
+
 未來真需要把 raw text 也納入事件流時（例如 Quest D 想做 corpus 訓練），開新 event types 而不是改 SessionLog 投影方向；那時 ledger 會明確扮演「事件流 + opt-in raw text 副本」雙角色，而不是把 SessionLog 拆掉。
 
 ### 11.3 舊資料 — Leave alone
