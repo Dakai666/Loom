@@ -84,6 +84,7 @@ class TestSetModel:
         codex_router.switch_model.assert_called_once_with("codex/gpt-5.5")
         assert session.router is codex_router
         assert session.model == "codex/gpt-5.5"
+        assert session._manual_model_override is True
 
 
 class TestLoomSessionStartup:

@@ -157,6 +157,11 @@ class TestActiveTierAndModel:
         assert s._active_tier() == 2
         assert s._active_model() == "deepseek-v4-pro"
 
+    def test_manual_model_override_wins_over_tier(self):
+        s = _mock_session(sticky_tier=2, base_model="codex/gpt-5.5")
+        s._manual_model_override = True
+        assert s._active_model() == "codex/gpt-5.5"
+
     def test_unknown_tier_falls_back_to_base_model(self):
         s = _mock_session(sticky_tier=99)
         # Tier 99 not in config → _active_model falls through to self._model
@@ -204,6 +209,13 @@ class TestSetStickyTier:
         s._set_sticky_tier(2, reason="x", source="skill")
         assert s._turns_at_current_tier == 0
         assert s._tier_reminder_emitted is False
+
+    def test_tier_change_clears_manual_model_override(self):
+        s = _mock_session(sticky_tier=None, base_model="codex/gpt-5.5")
+        s._manual_model_override = True
+        s._set_sticky_tier(2, reason="x", source="user")
+        assert s._manual_model_override is False
+        assert s._active_model() == "deepseek-v4-pro"
 
 
 class TestComputeSkillMaxTier:

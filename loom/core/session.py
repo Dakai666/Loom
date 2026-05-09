@@ -811,6 +811,7 @@ class LoomSession:
         )
         # ``None`` = follow ``_default_tier``; integer = sticky override.
         self._sticky_tier: int | None = None
+        self._manual_model_override: bool = False
         # Counts consecutive turns at the *active* tier (sticky or default).
         # Reset on tier change; surfaces in TierExpiryHint after threshold.
         self._turns_at_current_tier: int = 0
@@ -3354,10 +3355,12 @@ class LoomSession:
     def _active_model(self) -> str:
         """Resolve the model name for the active tier.
 
-        Falls back to ``self._model`` (the constructor / ``set_model`` value)
-        when the tier system isn't configured for this tier — preserves
-        backward compatibility with sessions that don't use #276 at all.
+        A manual ``/model`` selection wins until the user or agent explicitly
+        changes tier again. Otherwise, falls back to ``self._model`` when the
+        tier system isn't configured for this tier.
         """
+        if getattr(self, "_manual_model_override", False):
+            return self._model
         tier = self._active_tier()
         return self._tier_models.get(tier, self._model)
 
@@ -3377,6 +3380,7 @@ class LoomSession:
             new_tier = None
         if new_tier == self._sticky_tier:
             return None  # no-op
+        self._manual_model_override = False
         self._sticky_tier = new_tier
         self._turns_at_current_tier = 0
         self._tier_reminder_emitted = False
@@ -4577,6 +4581,7 @@ class LoomSession:
             ok = self.router.switch_model(model)
         if ok:
             self._model = model
+            self._manual_model_override = True
         return ok
 
 
