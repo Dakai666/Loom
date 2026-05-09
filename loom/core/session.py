@@ -839,7 +839,7 @@ class LoomSession:
         # old inline behaviour when the turn that triggered compaction
         # was itself the last one.
         self._compaction_lock: asyncio.Lock = asyncio.Lock()
-        self._pending_compactions: list[Any] = []
+        self._pending_compactions: list[CompressDone] = []
         self._compaction_task: asyncio.Task | None = None
 
         self.registry = ToolRegistry()
@@ -1110,6 +1110,13 @@ class LoomSession:
         # ledger; if ledger init failed above, no subscriber spawns and
         # compaction never fires (which matches Discord-without-ledger
         # mode's existing behaviour for envelope projection).
+        #
+        # Spawning here (before facade build below) is safe even though
+        # ``_run_compaction_check`` reaches into ``self._memory``: the
+        # subscriber blocks on ``turn_end`` events, which only fire
+        # from inside ``stream_turn``. ``stream_turn`` is only called
+        # after ``start()`` returns, by which point the facade has been
+        # built. (#346 review S1.)
         if self._ledger_store is not None:
             self._compaction_task = asyncio.create_task(
                 self._compaction_subscriber_loop(),
@@ -1616,12 +1623,19 @@ class LoomSession:
         # #336 — cancel the compaction subscriber loop. Same rationale
         # as judge tasks: a torn-down router / governor / facade must
         # not have a background task still trying to call into them.
-        if getattr(self, "_compaction_task", None):
+        if self._compaction_task is not None:
             self._compaction_task.cancel()
             try:
                 await self._compaction_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                # Subscriber loop has its own outer except Exception,
+                # so this branch should never fire. If it does, surface
+                # the trace rather than silently swallow. (#346 review N2.)
+                logger.exception(
+                    "memory compaction subscriber raised during shutdown"
+                )
             self._compaction_task = None
         if hasattr(self, "_scratchpad"):
             self._scratchpad.clear()
