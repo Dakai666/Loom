@@ -18,6 +18,11 @@ This is a baseline, not full at-rest encryption. Cloud-sync leaks
 (iCloud / Dropbox auto-include) and lost-laptop full-disk reads still
 expose plaintext content. Stronger options (SQLCipher, retention
 pruning) tracked in #342.
+
+POSIX limit (#343 review S2): ``0o700`` blocks other local users from
+listing directory contents or reading files, but the home-directory
+owner can always see that ``~/.loom/`` exists. Hiding presence is
+out of scope — that needs containerisation or a relocated store path.
 """
 
 from __future__ import annotations
