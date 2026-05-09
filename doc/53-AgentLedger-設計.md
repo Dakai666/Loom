@@ -906,7 +906,7 @@ Deferred 事件類型不阻擋 Step 5 cutover：它們是 additive event types�
 |---|---|---|
 | Step 3 — Replay primitive (events_for_* + TurnSnapshot) | ✅ 完成（#331） | `LedgerStore.replay` lazy property，§8.2 trivial+medium 欄位 reconstruct 全綠 |
 | Step 4 — Push subscriber + Pull fluent + raw SQL | ✅ 完成（#332） | `subscribe(...)` async ctx、`events.where().since().all()` 等、`execute_sql`；`is_live` monotonic 語意（一旦 drop 永久 False，`re-subscribe` 重置） |
-| Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成（#333 + #337） | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；#337 移除 `_live_record_for` / `envelope.records` transitional bridge — projector 純從 ledger 讀取，`ExecutionEnvelope` 退成 thin marker。`[ledger].enabled=false` 改 graceful empty-view fallback（無 sub-state granularity，但 shape 一致） |
+| Step 5 — ExecutionEnvelope 投影切換 | ✅ 完成（#333 + #337） | `LedgerEnvelopeProjector` + `_build_envelope_view` async 委派；#337 移除 `_live_record_for` / `envelope.records` transitional bridge — projector 純從 ledger 讀取，`ExecutionEnvelope` 退成 thin marker。`[ledger].enabled=false` 改 graceful empty-view fallback：EnvelopeStarted/Completed 仍 fire（shape 一致），但 nodes 為空 — tool detail 改由 `ToolBegin` / `ToolEnd` stream 提供，不保證 full envelope UI parity。把 ledger disable 視為 safety/diagnostic opt-out，不是支援 tier |
 | Step 5 — SessionLog 投影 | ⚠️ deferred | SessionLog 存 OpenAI-canonical raw 訊息 text，ledger 沒有對應 raw text 事件（thought event 內嵌邏輯仍 deferred）。完整投影需與 thought event capture 一起實作 |
 | Step 5 — Memory compaction subscribe `turn_end` 觸發 | ⚠️ deferred | 目前 inline trigger 在 stream_turn 內、行為正確；移成 background subscriber 為 architectural improvement，timing 細節需評估，獨立 follow-up issue |
 

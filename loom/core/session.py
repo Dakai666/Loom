@@ -1813,6 +1813,11 @@ class LoomSession:
         self._turn_tool_calls_in_turn = 0
         self._turn_judge_capture_signal = False
         self._turn_artifact_max_size = 0
+        # #337 review S2 — _call_metadata is turn-scoped per its own
+        # docstring; clear at turn start so long sessions don't leak
+        # full_args (which can be sizeable for write_file / shell tool
+        # batches).
+        self._call_metadata.clear()
         if self._ledger_emitter is not None:
             _ledger_turn_token = set_turn_id(_turn_id_v2)
             _ledger_corr_token = set_correlation(_turn_corr_id)
@@ -3742,15 +3747,13 @@ class LoomSession:
         Called by LifecycleMiddleware on each state transition.
         Also enqueues ActionRolledBack when transitioning to 'reverted'.
 
-        Issue #109: early-add the record to the envelope on first state
-        change so _build_envelope_view() can see ⏳ awaiting_confirm
-        while the confirm widget is blocking.
+        #337 — register the call's metadata on first state change so the
+        ledger projector can render args / auth fields even before the
+        call ends. Mid-flight state itself is intentionally coarsened to
+        ``executing`` (sub-states like ``awaiting_confirm`` no longer
+        surface in EnvelopeView; they still drive the inline confirm
+        widget via the ActionStateChange stream below).
         """
-        # Step 5: register the call's metadata as soon as we observe it
-        # so the envelope view can render even before the call ends
-        # (#109 early-display while ⏳ awaiting_confirm). #337 dropped
-        # the envelope.records mutation — projector derives in-flight
-        # state from BEGIN/END alone.
         self._register_call_meta(record)
 
         call_id = record.call.id if record.call else ""
