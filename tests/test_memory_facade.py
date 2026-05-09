@@ -137,7 +137,7 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(core_session, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(core_session, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(core_session, "_load_loom_config", lambda: {})
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(core_session, "build_embedding_provider", lambda env, cfg: None)
@@ -381,7 +381,7 @@ async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_pa
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(core_session, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(core_session, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(core_session, "_load_loom_config", lambda: {})
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(core_session, "build_embedding_provider", lambda env, cfg: None)

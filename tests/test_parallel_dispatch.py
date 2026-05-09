@@ -53,7 +53,7 @@ async def session(monkeypatch: pytest.MonkeyPatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(core_session, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(core_session, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(core_session, "_load_loom_config", lambda: {})
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(

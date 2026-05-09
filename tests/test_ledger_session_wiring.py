@@ -48,7 +48,7 @@ async def _start_session(monkeypatch, tmp_path: Path, session_module):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
     monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
@@ -120,7 +120,7 @@ async def test_disabled_via_config(monkeypatch, tmp_path, session_module):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(
         session_module, "_load_loom_config", lambda: {"ledger": {"enabled": False}}
     )
@@ -283,7 +283,7 @@ async def test_envelope_view_returns_empty_stub_without_ledger(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(session_module, "build_router", lambda: MagicMock())
+    monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
     monkeypatch.setattr(
         session_module, "_load_loom_config", lambda: {"ledger": {"enabled": False}}
     )

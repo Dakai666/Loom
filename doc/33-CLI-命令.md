@@ -66,6 +66,9 @@ loom auth openai --skip-codex-login
 `OPENAI_API_KEY` 寫入專案 `.env`，供 Loom 的 OpenAI provider 使用。OpenAI 圖像工具會優先使用
 未過期的 Codex OAuth access token，並在自動模式下 fallback 到 `OPENAI_API_KEY`。
 
+聊天模型路由刻意分開：`gpt-*` / `openai/<model>` 走 `OPENAI_API_KEY`，
+`codex/<model>`（例如 `codex/gpt-5.5`）才走 Codex OAuth backend。
+
 ### `openai__text_to_image`
 
 Agent 可用工具，生成圖片並寫入 workspace。`auth_mode=codex` 走 Codex Responses backend；

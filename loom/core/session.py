@@ -456,7 +456,7 @@ def _build_jobs_inject_message(jobstore: Any) -> str | None:
     return "\n".join(lines)
 
 
-def build_router() -> LLMRouter:
+def build_router(active_model: str | None = None) -> LLMRouter:
     """
     Build the LLM router with all available providers registered.
 
@@ -468,6 +468,7 @@ def build_router() -> LLMRouter:
       MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
       Anthropic  — ANTHROPIC_API_KEY
       OpenAI     — OPENAI_API_KEY
+      Codex      — Codex OAuth from `codex login` (explicit codex/<model> prefix)
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
@@ -479,6 +480,7 @@ def build_router() -> LLMRouter:
     from loom.core.cognition.providers import (
         OllamaProvider,
         LMStudioProvider,
+        CodexResponsesProvider,
         OpenAIProvider,
         OpenRouterProvider,
     )
@@ -487,6 +489,7 @@ def build_router() -> LLMRouter:
     cfg = _load_loom_config()
     router = LLMRouter()
     default = get_default_model()
+    requested_model = active_model or default
 
     # MiniMax — Anthropic-compatible endpoint, registered under provider name "minimax"
     # so the routing table ("MiniMax-" → "minimax") and switch_model() continue to work.
@@ -541,6 +544,29 @@ def build_router() -> LLMRouter:
                 api_key=openai_key,
             ),
             default=default_is_openai,
+        )
+
+    # Codex OAuth — explicit opt-in via codex/<model>. This avoids silently
+    # burning OPENAI_API_KEY quota when users expect ChatGPT/Codex billing.
+    codex_cfg = cfg.get("providers", {}).get("codex", {})
+    codex_requested = requested_model.startswith("codex/")
+    codex_default = default.startswith("codex/")
+    codex_enabled = bool(codex_cfg.get("enabled", False))
+    if codex_requested or codex_default or codex_enabled:
+        codex_model = codex_cfg.get("default_model", CodexResponsesProvider.DEFAULT_MODEL)
+        if requested_model.startswith("codex/"):
+            codex_model = requested_model
+        elif default.startswith("codex/"):
+            codex_model = default
+        else:
+            codex_model = f"codex/{codex_model}"
+        router.register(
+            CodexResponsesProvider(
+                model=codex_model,
+                base_url=codex_cfg.get("base_url", "") or CodexResponsesProvider.DEFAULT_BASE_URL,
+            ),
+            default=codex_default or codex_requested,
+            fallback=codex_default or codex_requested,
         )
 
     # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
@@ -686,7 +712,7 @@ class LoomSession:
         self._provisional_title = provisional_title
         # Workspace root — all relative file paths resolve here; defaults to CWD
         self.workspace: Path = (workspace or Path.cwd()).resolve()
-        self.router = build_router()
+        self.router = build_router(self.model)
 
         # AgentLedger handles — opened in start(), closed in stop().
         # Until start() runs, these are None and every subsystem's optional

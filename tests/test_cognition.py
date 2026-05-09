@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 from loom.core.cognition.context import ContextBudget, estimate_tokens
 from loom.core.cognition.providers import (
+    CodexResponsesProvider,
     LLMResponse,
     OpenAIProvider,
     _to_anthropic_messages,
@@ -270,8 +271,21 @@ class TestLLMRouter:
         assert router.get_provider("gpt-5.5-pro") is p_openai
         assert router.get_provider("openai/gpt-5.5") is p_openai
 
+    def test_routing_by_prefix_codex(self):
+        router = LLMRouter()
+        p_default = self._make_mock_provider("minimax")
+        p_codex = self._make_mock_provider("codex")
+        router.register(p_default, default=True)
+        router.register(p_codex, fallback=False)
+        assert router.get_provider("codex/gpt-5.5") is p_codex
+        assert router.get_provider("unknown") is p_default
+
     def test_openai_provider_strips_optional_prefix(self):
         provider = OpenAIProvider(api_key="test", model="openai/gpt-5.5")
+        assert provider._api_model() == "gpt-5.5"
+
+    def test_codex_provider_strips_prefix(self):
+        provider = CodexResponsesProvider(model="codex/gpt-5.5")
         assert provider._api_model() == "gpt-5.5"
 
     def test_fallback_to_default(self):
