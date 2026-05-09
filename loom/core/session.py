@@ -2748,8 +2748,9 @@ class LoomSession:
         """Best-effort log; never raises. Pass verdicts only land here, not
         in the agent's context — keeps the noise floor low."""
         logger.info(
-            "judge.verdict turn=%d sync=%s verdict=%s reason=%r error=%r",
+            "judge.verdict turn=%d sync=%s verdict=%s confidence=%.2f reason=%r error=%r",
             self._turn_index, sync, verdict.verdict,
+            float(getattr(verdict, "confidence", 0.0) or 0.0),
             verdict.reason[:160], verdict.error or "",
         )
 
@@ -3591,7 +3592,7 @@ class LoomSession:
             await self._ledger_emitter.emit_judge_verdict(
                 payload=JudgeVerdictPayload(
                     verdict=mapped,
-                    confidence=0.0,  # judge prompt has no confidence axis today
+                    confidence=float(getattr(verdict, "confidence", 0.0) or 0.0),
                     reason=(verdict.reason or "")[:500],
                     judged_subject=judged_subject,
                 ),
