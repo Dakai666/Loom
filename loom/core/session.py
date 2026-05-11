@@ -3715,6 +3715,35 @@ class LoomSession:
     # #336 — memory compaction subscriber (doc/53 §6.4 push pattern)
     # ------------------------------------------------------------------
 
+    async def _compact_memory(self, *, force: bool = False) -> None:
+        """Run one episodic-to-semantic compaction pass.
+
+        The caller owns ``_compaction_lock``. ``force=True`` skips the
+        configured threshold gate but still avoids a no-op LLM call when
+        there are no uncompressed episodic rows.
+        """
+        ep_count = await self._memory.episodic.count_session(
+            self.session_id, uncompressed_only=True,
+        )
+        if ep_count <= 0:
+            return
+        if not force and ep_count < self._episodic_compress_threshold:
+            return
+        fact_count = await compress_session(
+            self.session_id,
+            self._memory.episodic, self._memory.semantic,
+            self.router, self.model,
+            governor=self._governor,
+            telemetry=self._telemetry,
+        )
+        if fact_count:
+            self._pending_compactions.append(
+                CompressDone(fact_count=fact_count)
+            )
+        # Rebuild MemoryIndex so long-running sessions (Discord)
+        # see updated fact/anti-pattern counts without restarting.
+        await self._refresh_memory_index()
+
     async def _run_compaction_check(self) -> None:
         """One pass of the threshold-driven compaction logic.
 
@@ -3729,33 +3758,31 @@ class LoomSession:
         Race contract: a new turn writing fresh episodic entries
         during this call is safe — ``compress_session`` reads a
         snapshot up front, marks only that snapshot at the end.
-        Concurrent compaction runs are blocked by ``_compaction_lock``
-        in the subscriber loop.
+        Concurrent compaction runs are blocked by ``_compaction_lock``.
         """
         try:
-            ep_count = await self._memory.episodic.count_session(
-                self.session_id, uncompressed_only=True,
-            )
-            if ep_count < self._episodic_compress_threshold:
-                return
-            fact_count = await compress_session(
-                self.session_id,
-                self._memory.episodic, self._memory.semantic,
-                self.router, self.model,
-                governor=self._governor,
-                telemetry=self._telemetry,
-            )
-            if fact_count:
-                self._pending_compactions.append(
-                    CompressDone(fact_count=fact_count)
-                )
-            # Rebuild MemoryIndex so long-running sessions (Discord)
-            # see updated fact/anti-pattern counts without restarting.
-            await self._refresh_memory_index()
+            async with self._compaction_lock:
+                await self._compact_memory(force=False)
         except Exception:
             logger.exception(
                 "memory compaction subscriber: compress_session failed; "
                 "continuing"
+            )
+
+    async def force_compact(self) -> None:
+        """Force one compaction pass, bypassing the episodic count threshold.
+
+        Used by long-running platform frontends as a safety net for idle
+        sessions. The implementation intentionally shares the same lock,
+        compression path, pending ``CompressDone`` buffer, and memory-index
+        refresh as the turn-driven subscriber.
+        """
+        try:
+            async with self._compaction_lock:
+                await self._compact_memory(force=True)
+        except Exception:
+            logger.exception(
+                "memory force_compact: compress_session failed; continuing"
             )
 
     async def _compaction_subscriber_loop(self) -> None:
@@ -3781,8 +3808,7 @@ class LoomSession:
                     # while the previous compaction is still mid-LLM,
                     # the second attempt waits rather than running in
                     # parallel and double-writing semantic facts.
-                    async with self._compaction_lock:
-                        await self._run_compaction_check()
+                    await self._run_compaction_check()
         except asyncio.CancelledError:
             raise
         except Exception:
