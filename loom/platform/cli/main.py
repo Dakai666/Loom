@@ -58,6 +58,7 @@ from loom.core.memory.store import SQLiteStore
 from loom.core.memory.session_log import SessionLog
 from loom.platform.cli.harness_channel import HarnessChannel
 from loom.platform.cli.theme import LOOM_THEME
+from loom.platform.cli.theme_persist import load_preference, save_preference, available_themes
 from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
@@ -942,6 +943,33 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 # the user sees the new context% immediately
                 loom_app.footer.token_pct = session.budget.usage_fraction * 100
                 loom_app.invalidate()
+
+    elif command == "/theme":
+        args_part = parts[1] if len(parts) > 1 else ""
+        active = load_preference()
+        all_themes = available_themes()
+
+        if not args_part.strip():
+            # List available themes with current selection marked
+            harness.inline("[bold]Available themes[/bold]", level="info")
+            for name in all_themes:
+                marker = "  ← currently active" if name == active else ""
+                harness.inline(f"  {name}{marker}", level="info")
+            return
+
+        target = args_part.strip()
+        if target not in all_themes:
+            harness.inline(
+                f"Unknown theme '{target}'. Available: {', '.join(all_themes)}",
+                level="error",
+            )
+            return
+
+        save_preference(target)
+        harness.inline(
+            f"Theme switched to [accent]{target}[/accent]. Restart to apply.",
+            level="info",
+        )
 
     elif command == "/sessions":
         # Issue #260: list recent sessions, let the user pick one by

@@ -1,25 +1,16 @@
 """
-Loom CLI theme — single source of truth for parchment palette.
+Loom CLI theme — pluggable palette registry.
 
-Issue #236 (CLI Refresh, PR-B). Pulls the colour palette already defined
-in the TUI layer (``loom/platform/cli/tui/app.py``) into a Rich-native
-:class:`Theme` so plain CLI surfaces share the same visual language.
+Issue #358 (Theme System). Replaces the single hardcoded PARCHMENT palette
+with a named-registry approach so adding a new theme is one dict entry.
 
 Use semantic tokens at call sites instead of raw colour names so a
 future palette tweak is one-file.
 
-Tokens
-------
-Foreground
-    loom.text     — parchment cream, the default body text
-    loom.muted    — dim/secondary text (replaces the pervasive ``[dim]``)
-    loom.accent   — amber gold, focal highlights and active state
-    loom.success  — sage green, completion / approve / ok
-    loom.warning  — ochre, attention but not failure
-    loom.error    — terracotta, failure or denial
-    loom.border   — subtle frame colour for panels
-Surfaces
-    loom.harness.bg  — dark surface for harness messages (PR-C consumer)
+Semantic tokens (stable ABI):
+    loom.text / loom.muted / loom.accent / loom.success / loom.warning /
+    loom.error / loom.border / loom.harness.bg / loom.harness.signature /
+    loom.agent.guide
 """
 
 from __future__ import annotations
@@ -27,55 +18,97 @@ from __future__ import annotations
 from rich.theme import Theme
 
 # ---------------------------------------------------------------------------
-# Raw palette — sole source of hex values. Mirrors the comment block in
-# loom/platform/cli/tui/app.py so the two layers stay aligned.
+# Raw palettes — sole source of hex values.
 # ---------------------------------------------------------------------------
 
-PARCHMENT_BG       = "#1c1814"  # screen background (very dark warm brown)
-PARCHMENT_SURFACE  = "#242018"  # widget surface
-PARCHMENT_TEXT     = "#e0cfa0"  # primary text (warm cream)
-PARCHMENT_MUTED    = "#8a7a5e"  # muted text
-PARCHMENT_ACCENT   = "#c8a464"  # accent (amber gold)
-PARCHMENT_SUCCESS  = "#7a9e78"  # success (sage green)
-PARCHMENT_WARNING  = "#c8924a"  # warning (ochre)
-PARCHMENT_ERROR    = "#b87060"  # error (terracotta)
-PARCHMENT_BORDER   = "#4a4038"  # border
+PARCHMENT_BG       = "#1c1814"
+PARCHMENT_SURFACE  = "#242018"
+PARCHMENT_TEXT     = "#e0cfa0"
+PARCHMENT_MUTED    = "#8a7a5e"
+PARCHMENT_ACCENT   = "#c8a464"
+PARCHMENT_SUCCESS  = "#7a9e78"
+PARCHMENT_WARNING  = "#c8924a"
+PARCHMENT_ERROR    = "#b87060"
+PARCHMENT_BORDER   = "#4a4038"
 
+SUNRISE_BG         = "#0d1117"
+SUNRISE_SURFACE    = "#161b22"
+SUNRISE_TEXT       = "#e6f0ff"
+SUNRISE_MUTED      = "#6e8898"
+SUNRISE_ACCENT     = "#FFD54F"
+SUNRISE_SUCCESS    = "#81D4FA"
+SUNRISE_WARNING    = "#FFAB40"
+SUNRISE_ERROR      = "#FF8A80"
+SUNRISE_BORDER     = "#2d3748"
 
 # ---------------------------------------------------------------------------
-# Semantic theme — what call sites should reference.
+# Palette registry.
 # ---------------------------------------------------------------------------
 
-LOOM_THEME = Theme(
-    {
-        # Foreground
-        "loom.text":        PARCHMENT_TEXT,
-        "loom.muted":       PARCHMENT_MUTED,
-        "loom.accent":      PARCHMENT_ACCENT,
-        "loom.success":     PARCHMENT_SUCCESS,
-        "loom.warning":     PARCHMENT_WARNING,
-        "loom.error":       PARCHMENT_ERROR,
-        "loom.border":      PARCHMENT_BORDER,
-        # Surfaces
-        "loom.harness.bg":  f"on {PARCHMENT_SURFACE}",
-        # Harness signature — the "⚙ harness ›" prefix on inline harness
-        # messages. Distinct token so PR-D can tweak it without rippling
-        # to every call site.
-        "loom.harness.signature": PARCHMENT_ACCENT,
-        # Loom Agent intro guide — the "Loom ▎" left-edge silk-coloured
-        # marker that opens each turn. Kept distinct from accent in case
-        # we want a different shade later (e.g. silk-pink for personality).
-        "loom.agent.guide":  PARCHMENT_ACCENT,
-        # Convenience composites — emphasis variants used at multiple call
-        # sites. Add sparingly; prefer composing tokens at the call site.
-        "loom.accent.bold": f"bold {PARCHMENT_ACCENT}",
-        "loom.muted.italic": f"italic {PARCHMENT_MUTED}",
+THEMES: dict[str, dict[str, str]] = {
+    "parchment": {
+        "bg":        PARCHMENT_BG,
+        "surface":   PARCHMENT_SURFACE,
+        "text":      PARCHMENT_TEXT,
+        "muted":     PARCHMENT_MUTED,
+        "accent":    PARCHMENT_ACCENT,
+        "success":   PARCHMENT_SUCCESS,
+        "warning":   PARCHMENT_WARNING,
+        "error":     PARCHMENT_ERROR,
+        "border":    PARCHMENT_BORDER,
+    },
+    "sunrise": {
+        "bg":        SUNRISE_BG,
+        "surface":   SUNRISE_SURFACE,
+        "text":      SUNRISE_TEXT,
+        "muted":     SUNRISE_MUTED,
+        "accent":    SUNRISE_ACCENT,
+        "success":   SUNRISE_SUCCESS,
+        "warning":   SUNRISE_WARNING,
+        "error":     SUNRISE_ERROR,
+        "border":    SUNRISE_BORDER,
+    },
+}
+
+
+def _make_tokens(palette: dict[str, str]) -> dict[str, str]:
+    """Build a Rich Theme token dict from a palette dict."""
+    return {
+        "loom.text":               palette["text"],
+        "loom.muted":              palette["muted"],
+        "loom.accent":             palette["accent"],
+        "loom.success":            palette["success"],
+        "loom.warning":            palette["warning"],
+        "loom.error":              palette["error"],
+        "loom.border":             palette["border"],
+        "loom.harness.bg":         f"on {palette['surface']}",
+        "loom.harness.signature":  palette["accent"],
+        "loom.agent.guide":        palette["accent"],
+        # Convenience composites
+        "loom.accent.bold":        f"bold {palette['accent']}",
+        "loom.muted.italic":       f"italic {palette['muted']}",
     }
-)
+
+
+def build_theme(name: str = "parchment") -> Theme:
+    """Build a Rich Theme from a registered palette name."""
+    if name not in THEMES:
+        raise ValueError(f"Unknown theme '{name}'. Available: {list(THEMES.keys())}")
+    return Theme(_make_tokens(THEMES[name]))
+
+
+# ---------------------------------------------------------------------------
+# Default theme (used before any preference is loaded).
+# ---------------------------------------------------------------------------
+
+LOOM_THEME = build_theme("parchment")
 
 
 __all__ = [
+    "THEMES",
+    "build_theme",
     "LOOM_THEME",
+    # Raw parchment constants (kept for TUI layer compatibility)
     "PARCHMENT_BG",
     "PARCHMENT_SURFACE",
     "PARCHMENT_TEXT",
@@ -85,4 +118,14 @@ __all__ = [
     "PARCHMENT_WARNING",
     "PARCHMENT_ERROR",
     "PARCHMENT_BORDER",
+    # Raw sunrise constants
+    "SUNRISE_BG",
+    "SUNRISE_SURFACE",
+    "SUNRISE_TEXT",
+    "SUNRISE_MUTED",
+    "SUNRISE_ACCENT",
+    "SUNRISE_SUCCESS",
+    "SUNRISE_WARNING",
+    "SUNRISE_ERROR",
+    "SUNRISE_BORDER",
 ]
