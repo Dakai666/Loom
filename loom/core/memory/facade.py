@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from loom.core.memory.procedural import ProceduralMemory
     from loom.core.memory.relational import RelationalEntry, RelationalMemory
     from loom.core.memory.search import MemorySearch, MemorySearchResult
+    from loom.core.memory.session_log import SessionLog
     from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 
 
@@ -70,6 +72,7 @@ class MemoryFacade:
         relational: "RelationalMemory",
         episodic: "EpisodicMemory",
         search: "MemorySearch",
+        session_log: "SessionLog | None" = None,
         governor: "MemoryGovernor | None" = None,
         ledger_emitter: "LedgerEmitter | None" = None,
     ) -> None:
@@ -78,6 +81,7 @@ class MemoryFacade:
         self.relational = relational
         self.episodic = episodic
         self.search_index = search
+        self.session_log = session_log
         self.governor = governor
         # ledger_emitter is None in the dual-emit transition until
         # LoomSession.start() wires one (Step 2 commit 6). Tests and
@@ -93,6 +97,8 @@ class MemoryFacade:
         limit: int = 5,
         domain: str | None = None,
         temporal: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list["MemorySearchResult"]:
         """BM25 + embedding ranked retrieval across semantic + procedural memory.
 
@@ -111,6 +117,7 @@ class MemoryFacade:
         results = await self.search_index.recall(
             query, type=kind, limit=limit,
             domain=domain, temporal=temporal,
+            since=since, until=until,
         )
         await self._emit_memory_op(
             operation="read",
@@ -150,6 +157,56 @@ class MemoryFacade:
             trigger="agent_query_relations",
         )
         return results
+
+    async def recall_period(
+        self,
+        *,
+        since: datetime,
+        until: datetime | None = None,
+        session_id: str | None = None,
+        limit: int = 10,
+        include_episodic: bool = True,
+        include_sessions: bool = False,
+    ) -> dict[str, list]:
+        """Return grouped memory evidence for a time window.
+
+        Semantic facts are always included. Episodic events and session
+        metadata are optional so callers can start with distilled facts and
+        deepen only when needed.
+        """
+        capped = min(max(int(limit), 1), 20)
+        semantic = await self.semantic.list_between(
+            since, until, limit=capped,
+        )
+        episodic = (
+            await self.episodic.list_between(
+                since, until, session_id=session_id, limit=capped,
+            )
+            if include_episodic else []
+        )
+        sessions = (
+            await self.session_log.list_sessions_between(
+                since, until, limit=capped,
+            )
+            if include_sessions and self.session_log is not None else []
+        )
+        messages = (
+            await self.session_log.messages_between(
+                since, until, session_id=session_id, limit=capped,
+            )
+            if include_sessions and self.session_log is not None else []
+        )
+        await self._emit_memory_op(
+            operation="read",
+            type_summary="period_recall",
+            trigger="agent_recall_period",
+        )
+        return {
+            "semantic": semantic,
+            "episodic": episodic,
+            "sessions": sessions,
+            "messages": messages,
+        }
 
     # ── write API ────────────────────────────────────────────────────────
 

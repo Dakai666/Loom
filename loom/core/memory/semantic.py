@@ -290,6 +290,29 @@ class SemanticMemory:
         rows = await cursor.fetchall()
         return [_row_to_entry(r) for r in rows]
 
+    async def list_between(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        *,
+        limit: int = 20,
+    ) -> list[SemanticEntry]:
+        """Return entries updated in ``[since, until)`` newest first."""
+        where = ["updated_at >= ?"]
+        params: list[Any] = [since.isoformat()]
+        if until is not None:
+            where.append("updated_at < ?")
+            params.append(until.isoformat())
+        params.append(limit)
+        cursor = await self._db.execute(
+            f"SELECT {_SELECT_COLS} FROM semantic_entries "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY updated_at DESC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_entry(r) for r in rows]
+
     async def get_random(
         self,
         limit: int = 15,
@@ -451,4 +474,3 @@ class SemanticMemory:
             (now, *keys),
         )
         await self._db.commit()
-

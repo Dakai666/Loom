@@ -67,6 +67,23 @@ def _axis_filter_sql(
     return (" " + " ".join(parts) if parts else ""), tuple(params)
 
 
+def _time_filter_sql(
+    since: datetime | None,
+    until: datetime | None,
+    prefix: str = "",
+) -> tuple[str, tuple[str, ...]]:
+    """Build SQL filters for semantic ``updated_at`` time windows."""
+    parts: list[str] = []
+    params: list[str] = []
+    if since is not None:
+        parts.append(f"AND {prefix}updated_at >= ?")
+        params.append(since.isoformat())
+    if until is not None:
+        parts.append(f"AND {prefix}updated_at < ?")
+        params.append(until.isoformat())
+    return (" " + " ".join(parts) if parts else ""), tuple(params)
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -124,6 +141,8 @@ class MemorySearch:
         limit: int = 5,
         domain: str | None = None,
         temporal: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[MemorySearchResult]:
         """
         Return the top-*limit* memory entries most relevant to *query*.
@@ -142,6 +161,8 @@ class MemorySearch:
                   only semantic entries with this domain are returned. Skills
                   are unaffected — domain/temporal apply to facts, not skills.
         temporal: Optional temporal axis filter (same semantics as ``domain``).
+        since:    Optional lower bound on semantic ``updated_at``.
+        until:    Optional exclusive upper bound on semantic ``updated_at``.
         """
         if not query.strip():
             return []
@@ -153,6 +174,7 @@ class MemorySearch:
             try:
                 emb_results = await self._search_semantic_embedding(
                     query, limit, domain=domain, temporal=temporal,
+                    since=since, until=until,
                 )
                 if emb_results:
                     # Skills are not embedding-indexed; mix in BM25 skill results
@@ -178,6 +200,7 @@ class MemorySearch:
             results.extend(
                 await self._search_semantic(
                     query, limit, domain=domain, temporal=temporal,
+                    since=since, until=until,
                 )
             )
         if type in ("skill", "all"):
@@ -188,7 +211,7 @@ class MemorySearch:
 
         # ── Tier 3: recency fallback ──────────────────────────────────────────
         if not ranked:
-            ranked = await self._recent_fallback(type, limit)
+            ranked = await self._recent_fallback(type, limit, since=since, until=until)
 
         await self._mark_accessed(ranked)
         return ranked
@@ -203,6 +226,8 @@ class MemorySearch:
         self, query: str, limit: int,
         domain: str | None = None,
         temporal: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[MemorySearchResult]:
         """Rank semantic entries by cosine similarity using sqlite-vec."""
         provider = self._semantic._embeddings
@@ -214,17 +239,24 @@ class MemorySearch:
             return []
         query_vec = query_vectors[0]
 
-        where, axis_params = _axis_filter_sql(domain, temporal)
+        axis_where, axis_params = _axis_filter_sql(domain, temporal)
+        time_where, time_params = _time_filter_sql(since, until)
         cursor = await self._semantic._db.execute(
             f"""
             SELECT {_SEMANTIC_SELECT_COLS},
                    1.0 - vec_distance_cosine(embedding, ?) AS score
             FROM semantic_entries
-            WHERE embedding IS NOT NULL{where}
+            WHERE embedding IS NOT NULL{axis_where}{time_where}
             ORDER BY vec_distance_cosine(embedding, ?) ASC
             LIMIT ?
             """,
-            (json.dumps(query_vec), *axis_params, json.dumps(query_vec), limit)
+            (
+                json.dumps(query_vec),
+                *axis_params,
+                *time_params,
+                json.dumps(query_vec),
+                limit,
+            )
         )
         rows = await cursor.fetchall()
 
@@ -251,13 +283,22 @@ class MemorySearch:
         return results
 
     async def _recent_fallback(
-        self, type: MemoryType, limit: int
+        self,
+        type: MemoryType,
+        limit: int,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[MemorySearchResult]:
         """Return the most recently updated entries with score=0 (recency order)."""
         results: list[MemorySearchResult] = []
 
         if type in ("semantic", "all"):
-            entries = await self._semantic.list_recent(limit)
+            if since is not None or until is not None:
+                floor = since or datetime.min
+                entries = await self._semantic.list_between(floor, until, limit=limit)
+            else:
+                entries = await self._semantic.list_recent(limit)
             results.extend(
                 MemorySearchResult(
                     type="semantic",
@@ -296,6 +337,8 @@ class MemorySearch:
         self, query: str, limit: int,
         domain: str | None = None,
         temporal: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[MemorySearchResult]:
         if not query.strip():
             return []
@@ -304,7 +347,8 @@ class MemorySearch:
         if not safe_query:
             return []
 
-        where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
+        axis_where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
+        time_where, time_params = _time_filter_sql(since, until, prefix="e.")
         # SELECT mirrors _SEMANTIC_SELECT_COLS aliased onto the joined table
         # so _semantic_row_to_entry can parse rows uniformly with the
         # embedding path.
@@ -318,11 +362,11 @@ class MemorySearch:
                 bm25(semantic_fts) AS fts_score
             FROM semantic_fts
             JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
-            WHERE semantic_fts MATCH ?{where}
+            WHERE semantic_fts MATCH ?{axis_where}{time_where}
             ORDER BY rank
             LIMIT ?
             """,
-            (safe_query, *axis_params, limit)
+            (safe_query, *axis_params, *time_params, limit)
         )
         rows = await cursor.fetchall()
 

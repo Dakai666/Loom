@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -425,6 +426,75 @@ class TestSessionLogTitle:
         # No row added
         rows = await sl.list_sessions()
         assert all(r["session_id"] != "does-not-exist" for r in rows)
+
+    async def test_list_sessions_between_filters_last_active(self, sl_conn):
+        from loom.core.memory.session_log import SessionLog
+
+        sl = SessionLog(sl_conn)
+        await sl.create_session("before", "model", title="Before")
+        await sl.create_session("inside", "model", title="Inside")
+        await sl.create_session("after", "model", title="After")
+        await sl_conn.execute(
+            "UPDATE sessions SET last_active = ? WHERE session_id = ?",
+            (datetime(2026, 5, 9, 23, 59, tzinfo=UTC).isoformat(), "before"),
+        )
+        await sl_conn.execute(
+            "UPDATE sessions SET last_active = ? WHERE session_id = ?",
+            (datetime(2026, 5, 10, 12, 0, tzinfo=UTC).isoformat(), "inside"),
+        )
+        await sl_conn.execute(
+            "UPDATE sessions SET last_active = ? WHERE session_id = ?",
+            (datetime(2026, 5, 11, 0, 0, tzinfo=UTC).isoformat(), "after"),
+        )
+        await sl_conn.commit()
+
+        rows = await sl.list_sessions_between(
+            since=datetime(2026, 5, 10, tzinfo=UTC),
+            until=datetime(2026, 5, 11, tzinfo=UTC),
+        )
+
+        assert [r["session_id"] for r in rows] == ["inside"]
+
+    async def test_messages_between_filters_created_at_and_session(self, tmp_path):
+        from loom.core.memory.session_log import SessionLog
+        from loom.core.memory.store import SQLiteStore
+
+        store = SQLiteStore(str(tmp_path / "messages-between.db"))
+        await store.initialize()
+        async with store.connect() as conn:
+            sl = SessionLog(conn)
+            await sl.create_session("s1", "model")
+            await sl.create_session("s2", "model")
+            await sl.log_message(
+                "s1", 0, "user", "before",
+            )
+            await sl.log_message(
+                "s1", 1, "user", "inside s1",
+            )
+            await sl.log_message(
+                "s2", 1, "user", "inside s2",
+            )
+            await conn.execute(
+                "UPDATE session_log SET created_at = ? WHERE content = ?",
+                (datetime(2026, 5, 9, 23, 59, tzinfo=UTC).isoformat(), "before"),
+            )
+            await conn.execute(
+                "UPDATE session_log SET created_at = ? WHERE content = ?",
+                (datetime(2026, 5, 10, 12, 0, tzinfo=UTC).isoformat(), "inside s1"),
+            )
+            await conn.execute(
+                "UPDATE session_log SET created_at = ? WHERE content = ?",
+                (datetime(2026, 5, 10, 13, 0, tzinfo=UTC).isoformat(), "inside s2"),
+            )
+            await conn.commit()
+
+            rows = await sl.messages_between(
+                since=datetime(2026, 5, 10, tzinfo=UTC),
+                until=datetime(2026, 5, 11, tzinfo=UTC),
+                session_id="s1",
+            )
+
+        assert [r["content"] for r in rows] == ["inside s1"]
 
 
 class TestProvisionalTitle:

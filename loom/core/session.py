@@ -1161,6 +1161,7 @@ class LoomSession:
             relational=relational,
             episodic=episodic,
             search=search,
+            session_log=self._session_log,
             governor=self._governor,
             ledger_emitter=self._ledger_emitter,
         )
@@ -1249,6 +1250,7 @@ class LoomSession:
             make_memorize_tool,
             make_memory_health_tool,
             make_query_relations_tool,
+            make_recall_period_tool,
             make_recall_tool,
             make_skill_promote_tool,
             make_skill_rollback_tool,
@@ -1261,6 +1263,7 @@ class LoomSession:
         # ``self._memory`` was built up-front (right after governor init).
         # See "Issue #147 Phase C: build the facade up-front" above.
         self.registry.register(make_recall_tool(self._memory))
+        self.registry.register(make_recall_period_tool(self._memory))
         # PR-C4: when the governor blocks a write, fire the session-level
         # hook so the platform layer can surface a "governor rejected"
         # harness inline. Accept stays silent.
