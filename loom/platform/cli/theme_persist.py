@@ -24,7 +24,10 @@ def load_preference() -> str:
     try:
         with _THEME_FILE.open("rb") as f:
             data = tomllib.load(f)
-        return data.get("theme", {}).get("name", _DEFAULT_THEME)
+        name = data.get("theme", {}).get("name", _DEFAULT_THEME)
+        if name in available_themes():
+            return name
+        return _DEFAULT_THEME
     except Exception:
         # Corrupt or unreadable — safest to return default
         return _DEFAULT_THEME

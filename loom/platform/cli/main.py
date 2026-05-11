@@ -1133,6 +1133,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "    [loom.muted]codex/gpt-5.5           → Codex OAuth backend (run `codex login`)[/loom.muted]\n"
                 "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
+                "  [loom.warning]/theme[/loom.warning]                    Show available CLI themes\n"
+                "  [loom.warning]/theme[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch CLI theme on next restart\n"
                 "  [loom.warning]/personality[/loom.warning] [loom.muted]<name>[/loom.muted]      Switch cognitive persona\n"
                 "  [loom.warning]/personality off[/loom.warning]           Remove active persona\n"
                 "  [loom.warning]/tier[/loom.warning]                      Show active LLM tier + sticky state (#276)\n"

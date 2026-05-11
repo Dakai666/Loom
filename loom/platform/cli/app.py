@@ -53,18 +53,19 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
 
-from loom.platform.cli.theme import (
-    PARCHMENT_ACCENT,
-    PARCHMENT_BG,
-    PARCHMENT_BORDER,
-    PARCHMENT_ERROR,
-    PARCHMENT_MUTED,
-    PARCHMENT_SUCCESS,
-    PARCHMENT_SURFACE,
-    PARCHMENT_TEXT,
-    PARCHMENT_WARNING,
-)
+from loom.platform.cli.theme import active_palette
 from loom.platform.cli.ui import SLASH_COMMANDS, SlashCompleter
+
+_CLI_PALETTE = active_palette()
+_CLI_BG = _CLI_PALETTE["bg"]
+_CLI_SURFACE = _CLI_PALETTE["surface"]
+_CLI_TEXT = _CLI_PALETTE["text"]
+_CLI_MUTED = _CLI_PALETTE["muted"]
+_CLI_ACCENT = _CLI_PALETTE["accent"]
+_CLI_SUCCESS = _CLI_PALETTE["success"]
+_CLI_WARNING = _CLI_PALETTE["warning"]
+_CLI_ERROR = _CLI_PALETTE["error"]
+_CLI_BORDER = _CLI_PALETTE["border"]
 
 
 Mode = Literal["input", "confirm", "pause", "redirect"]
@@ -192,49 +193,49 @@ class _TaskListState:
 _APP_STYLE = Style.from_dict(
     {
         # Input area — no prompt label; the buffer text is the input
-        "input.text":            PARCHMENT_TEXT,
+        "input.text":            _CLI_TEXT,
         # Footer — transparent background (follows terminal). User
         # feedback after PR-D1 first run: explicit bg felt obtrusive
         # against varied terminal themes
-        "footer":                PARCHMENT_MUTED,
-        "footer.brand":          f"{PARCHMENT_ACCENT} bold",
-        "footer.budget.ok":      PARCHMENT_MUTED,
-        "footer.budget.warn":    PARCHMENT_WARNING,
-        "footer.budget.high":    PARCHMENT_ERROR,
-        "footer.stats":          PARCHMENT_MUTED,
-        "footer.envelope":       PARCHMENT_ACCENT,
-        "footer.compaction":     PARCHMENT_WARNING,
-        "footer.grant":          PARCHMENT_MUTED,
+        "footer":                _CLI_MUTED,
+        "footer.brand":          f"{_CLI_ACCENT} bold",
+        "footer.budget.ok":      _CLI_MUTED,
+        "footer.budget.warn":    _CLI_WARNING,
+        "footer.budget.high":    _CLI_ERROR,
+        "footer.stats":          _CLI_MUTED,
+        "footer.envelope":       _CLI_ACCENT,
+        "footer.compaction":     _CLI_WARNING,
+        "footer.grant":          _CLI_MUTED,
         # Issue #284: transient hints (info / warn) — appear briefly
         # above the input separator then auto-vanish
-        "hint.info":             PARCHMENT_ACCENT,
-        "hint.warn":             PARCHMENT_WARNING,
+        "hint.info":             _CLI_ACCENT,
+        "hint.warn":             _CLI_WARNING,
         # Thinking indicator above the input separator
-        "thinking":              PARCHMENT_MUTED,
-        "thinking.dot":          PARCHMENT_ACCENT,
+        "thinking":              _CLI_MUTED,
+        "thinking.dot":          _CLI_ACCENT,
         # Floating TaskList panel
-        "tasklist.frame":        PARCHMENT_BORDER,
-        "tasklist.title":        f"{PARCHMENT_ACCENT} bold",
-        "tasklist.done":         PARCHMENT_SUCCESS,
-        "tasklist.active":       PARCHMENT_ACCENT,
-        "tasklist.pending":      PARCHMENT_MUTED,
-        "tasklist.collapsed":    PARCHMENT_SUCCESS,
+        "tasklist.frame":        _CLI_BORDER,
+        "tasklist.title":        f"{_CLI_ACCENT} bold",
+        "tasklist.done":         _CLI_SUCCESS,
+        "tasklist.active":       _CLI_ACCENT,
+        "tasklist.pending":      _CLI_MUTED,
+        "tasklist.collapsed":    _CLI_SUCCESS,
         # Confirm / Pause widget — also no bg, blend with terminal
-        "widget.title":          PARCHMENT_TEXT,
-        "widget.body":           PARCHMENT_MUTED,
-        "widget.option":         PARCHMENT_TEXT,
-        "widget.option.cursor":  f"bold {PARCHMENT_ACCENT}",
-        "widget.shortcut":       PARCHMENT_MUTED,
-        "widget.footer":         f"italic {PARCHMENT_MUTED}",
+        "widget.title":          _CLI_TEXT,
+        "widget.body":           _CLI_MUTED,
+        "widget.option":         _CLI_TEXT,
+        "widget.option.cursor":  f"bold {_CLI_ACCENT}",
+        "widget.shortcut":       _CLI_MUTED,
+        "widget.footer":         f"italic {_CLI_MUTED}",
         # Auto-suggestion ghost text
-        "auto-suggestion":       PARCHMENT_BORDER,
+        "auto-suggestion":       _CLI_BORDER,
         # Completion menu — keep subtle bg; this is dropdown UI not
         # ambient surface. Dropdowns benefit from contrast
-        "completion-menu":                         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
-        "completion-menu.completion":              f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
-        "completion-menu.completion.current":      f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG} bold",
-        "completion-menu.meta.completion":         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_MUTED}",
-        "completion-menu.meta.completion.current": f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG}",
+        "completion-menu":                         f"bg:{_CLI_SURFACE} {_CLI_TEXT}",
+        "completion-menu.completion":              f"bg:{_CLI_SURFACE} {_CLI_TEXT}",
+        "completion-menu.completion.current":      f"bg:{_CLI_ACCENT} {_CLI_BG} bold",
+        "completion-menu.meta.completion":         f"bg:{_CLI_SURFACE} {_CLI_MUTED}",
+        "completion-menu.meta.completion.current": f"bg:{_CLI_ACCENT} {_CLI_BG}",
     }
 )
 
@@ -564,12 +565,12 @@ class LoomApp:
         separator_top = Window(
             char="─",
             height=1,
-            style=f"fg:{PARCHMENT_BORDER}",
+            style=f"fg:{_CLI_BORDER}",
         )
         separator_bottom = Window(
             char="─",
             height=1,
-            style=f"fg:{PARCHMENT_BORDER}",
+            style=f"fg:{_CLI_BORDER}",
         )
 
         # Floating TaskList panel — sits above the thinking indicator

@@ -100,6 +100,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/scope revoke",               "revoke a specific grant by index"),
     ("/sessions",                   "browse and switch sessions"),
     ("/stop",                       "interrupt a running turn (CLI: Ctrl+C)"),
+    ("/theme",                      "show available CLI themes"),
+    ("/theme parchment",            "switch to Parchment theme on next restart"),
+    ("/theme sunrise",              "switch to Sunrise theme on next restart"),
     ("/think",                      "view last turn's reasoning chain"),
     ("/tier",                       "show active LLM tier + sticky state (#276)"),
     ("/tier 1",                     "switch to Tier 1 (daily reasoning)"),
@@ -139,30 +142,30 @@ class SlashCompleter(Completer):
 # prompt_toolkit session factory
 # ---------------------------------------------------------------------------
 
-from loom.platform.cli.theme import (
-    PARCHMENT_ACCENT,
-    PARCHMENT_BG,
-    PARCHMENT_BORDER,
-    PARCHMENT_ERROR,
-    PARCHMENT_MUTED,
-    PARCHMENT_SUCCESS,
-    PARCHMENT_SURFACE,
-    PARCHMENT_TEXT,
-)
+from loom.platform.cli.theme import active_palette
 
-# prompt_toolkit's Style.from_dict can't read from a Rich Theme — it has
-# its own colour vocabulary. Reference PARCHMENT_* constants so the two
-# layers stay aligned without manually duplicating hex codes.
+_CLI_PALETTE = active_palette()
+_CLI_BG = _CLI_PALETTE["bg"]
+_CLI_SURFACE = _CLI_PALETTE["surface"]
+_CLI_TEXT = _CLI_PALETTE["text"]
+_CLI_MUTED = _CLI_PALETTE["muted"]
+_CLI_ACCENT = _CLI_PALETTE["accent"]
+_CLI_SUCCESS = _CLI_PALETTE["success"]
+_CLI_ERROR = _CLI_PALETTE["error"]
+_CLI_BORDER = _CLI_PALETTE["border"]
+
+# prompt_toolkit's Style.from_dict can't read from a Rich Theme, so build
+# from the active palette registry instead.
 _PT_STYLE = Style.from_dict(
     {
-        "prompt": f"bold {PARCHMENT_ACCENT}",
-        "prompt.continuation": PARCHMENT_MUTED,
-        "auto-suggestion": PARCHMENT_BORDER,
-        "completion-menu":                         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
-        "completion-menu.completion":              f"bg:{PARCHMENT_SURFACE} {PARCHMENT_TEXT}",
-        "completion-menu.completion.current":      f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG} bold",
-        "completion-menu.meta.completion":         f"bg:{PARCHMENT_SURFACE} {PARCHMENT_MUTED}",
-        "completion-menu.meta.completion.current": f"bg:{PARCHMENT_ACCENT} {PARCHMENT_BG}",
+        "prompt": f"bold {_CLI_ACCENT}",
+        "prompt.continuation": _CLI_MUTED,
+        "auto-suggestion": _CLI_BORDER,
+        "completion-menu":                         f"bg:{_CLI_SURFACE} {_CLI_TEXT}",
+        "completion-menu.completion":              f"bg:{_CLI_SURFACE} {_CLI_TEXT}",
+        "completion-menu.completion.current":      f"bg:{_CLI_ACCENT} {_CLI_BG} bold",
+        "completion-menu.meta.completion":         f"bg:{_CLI_SURFACE} {_CLI_MUTED}",
+        "completion-menu.meta.completion.current": f"bg:{_CLI_ACCENT} {_CLI_BG}",
         "": "",
     }
 )
@@ -285,15 +288,15 @@ class SelectOption:
 
 _SELECT_STYLE = Style.from_dict(
     {
-        "select.title":         PARCHMENT_TEXT,
-        "select.body":          PARCHMENT_MUTED,
-        "select.subtle":        PARCHMENT_MUTED,
-        "select.option":        PARCHMENT_TEXT,
-        "select.option.cursor": f"bold {PARCHMENT_ACCENT}",
-        "select.shortcut":      PARCHMENT_MUTED,
-        "select.footer":        f"{PARCHMENT_MUTED} italic",
-        "select.deny":          PARCHMENT_ERROR,
-        "select.approve":       PARCHMENT_SUCCESS,
+        "select.title":         _CLI_TEXT,
+        "select.body":          _CLI_MUTED,
+        "select.subtle":        _CLI_MUTED,
+        "select.option":        _CLI_TEXT,
+        "select.option.cursor": f"bold {_CLI_ACCENT}",
+        "select.shortcut":      _CLI_MUTED,
+        "select.footer":        f"{_CLI_MUTED} italic",
+        "select.deny":          _CLI_ERROR,
+        "select.approve":       _CLI_SUCCESS,
     }
 )
 

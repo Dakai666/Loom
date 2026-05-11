@@ -97,15 +97,31 @@ def build_theme(name: str = "parchment") -> Theme:
     return Theme(_make_tokens(THEMES[name]))
 
 
+def _active_theme_name() -> str:
+    """Return the persisted theme preference, falling back to parchment."""
+    try:
+        from loom.platform.cli.theme_persist import load_preference
+
+        return load_preference()
+    except Exception:
+        return "parchment"
+
+
+def active_palette() -> dict[str, str]:
+    """Return a copy of the palette selected by persisted preference."""
+    return dict(THEMES[_active_theme_name()])
+
+
 # ---------------------------------------------------------------------------
 # Default theme (used before any preference is loaded).
 # ---------------------------------------------------------------------------
 
-LOOM_THEME = build_theme("parchment")
+LOOM_THEME = build_theme(_active_theme_name())
 
 
 __all__ = [
     "THEMES",
+    "active_palette",
     "build_theme",
     "LOOM_THEME",
     # Raw parchment constants (kept for TUI layer compatibility)
