@@ -585,7 +585,7 @@ class LoomDiscordBot:
         session.subscribe_promotion(_discord_promotion)
 
         self._sessions[thread_id] = session
-        await self._force_compact_active_sessions(reason="resume")
+        await self._force_compact_session(thread_id, session, reason="resume")
         return session
 
     async def _close_session(self, thread_id: int) -> None:
@@ -603,14 +603,20 @@ class LoomDiscordBot:
     async def _force_compact_active_sessions(self, *, reason: str) -> None:
         """Best-effort forced compaction over currently loaded sessions."""
         for thread_id, session in list(self._sessions.items()):
-            try:
-                await session.force_compact()
-            except Exception:
-                logger.exception(
-                    "Discord %s memory compaction failed for thread %s",
-                    reason,
-                    thread_id,
-                )
+            await self._force_compact_session(thread_id, session, reason=reason)
+
+    async def _force_compact_session(
+        self, thread_id: int, session: "LoomSession", *, reason: str
+    ) -> None:
+        """Best-effort forced compaction for one loaded Discord session."""
+        try:
+            await session.force_compact()
+        except Exception:
+            logger.exception(
+                "Discord %s memory compaction failed for thread %s",
+                reason,
+                thread_id,
+            )
 
     # ------------------------------------------------------------------
     # Slash commands
@@ -1367,6 +1373,8 @@ class LoomDiscordBot:
 
     async def close(self) -> None:
         """Stop all sessions and disconnect."""
+        # A crashed discord.ext.tasks loop reports not-running; cancel only
+        # when this instance still owns an active daily compaction loop.
         if self._daily_compaction_loop.is_running():
             self._daily_compaction_loop.cancel()
         for tid in list(self._sessions):

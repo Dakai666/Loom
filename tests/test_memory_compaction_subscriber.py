@@ -162,6 +162,7 @@ async def test_zero_facts_no_compress_done_emitted(monkeypatch) -> None:
 async def test_force_compact_bypasses_threshold_and_buffers_done(
     monkeypatch,
 ) -> None:
+    # Deliberately below threshold; force_compact must skip that gate.
     s = _make_stub(ep_count=5, threshold=30, fact_count=6)
     monkeypatch.setattr(s._session_module, "compress_session", s._fake_compress)
     await s.force_compact()
