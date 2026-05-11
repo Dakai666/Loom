@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 import tempfile
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from loom.core.memory.store import SQLiteStore
@@ -273,6 +274,39 @@ class TestEpisodicMemory:
         em = EpisodicMemory(db_conn)
         assert await em.mark_compressed([]) == 0
 
+    @pytest.mark.asyncio
+    async def test_list_between_filters_created_at_and_session(self, db_conn):
+        em = EpisodicMemory(db_conn)
+        before = datetime(2026, 5, 9, 23, 59, tzinfo=UTC)
+        inside_old = datetime(2026, 5, 10, 1, 0, tzinfo=UTC)
+        inside_new = datetime(2026, 5, 10, 2, 0, tzinfo=UTC)
+        after = datetime(2026, 5, 11, 0, 0, tzinfo=UTC)
+
+        await em.write(EpisodicEntry(
+            session_id="s1", event_type="message", content="before",
+            created_at=before,
+        ))
+        await em.write(EpisodicEntry(
+            session_id="s1", event_type="message", content="inside s1",
+            created_at=inside_old,
+        ))
+        await em.write(EpisodicEntry(
+            session_id="s2", event_type="message", content="inside s2",
+            created_at=inside_new,
+        ))
+        await em.write(EpisodicEntry(
+            session_id="s1", event_type="message", content="after",
+            created_at=after,
+        ))
+
+        results = await em.list_between(
+            since=datetime(2026, 5, 10, tzinfo=UTC),
+            until=datetime(2026, 5, 11, tzinfo=UTC),
+            session_id="s1",
+        )
+
+        assert [e.content for e in results] == ["inside s1"]
+
 
 # ---------------------------------------------------------------------------
 # SemanticMemory
@@ -331,6 +365,39 @@ class TestSemanticMemory:
             await sm.upsert(SemanticEntry(key=f"key:{i}", value=f"fact {i}"))
         results = await sm.list_recent(limit=5)
         assert len(results) == 5
+
+    @pytest.mark.asyncio
+    async def test_list_between_filters_updated_at(self, db_conn):
+        sm = SemanticMemory(db_conn)
+        await sm.upsert(SemanticEntry(key="before", value="loom before"))
+        await sm.upsert(SemanticEntry(key="inside:old", value="loom old"))
+        await sm.upsert(SemanticEntry(key="inside:new", value="loom new"))
+        await sm.upsert(SemanticEntry(key="after", value="loom after"))
+
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 9, 23, 59, tzinfo=UTC).isoformat(), "before"),
+        )
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 10, 1, 0, tzinfo=UTC).isoformat(), "inside:old"),
+        )
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 10, 2, 0, tzinfo=UTC).isoformat(), "inside:new"),
+        )
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 11, 0, 0, tzinfo=UTC).isoformat(), "after"),
+        )
+        await db_conn.commit()
+
+        results = await sm.list_between(
+            since=datetime(2026, 5, 10, tzinfo=UTC),
+            until=datetime(2026, 5, 11, tzinfo=UTC),
+        )
+
+        assert [e.key for e in results] == ["inside:new", "inside:old"]
 
     @pytest.mark.asyncio
     async def test_metadata_round_trips(self, db_conn):

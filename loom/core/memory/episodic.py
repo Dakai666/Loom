@@ -85,6 +85,51 @@ class EpisodicMemory:
             for r in rows
         ]
 
+    async def list_between(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> list[EpisodicEntry]:
+        """Read episodic entries created in ``[since, until)``.
+
+        ``session_id`` narrows the range query when the caller already knows
+        which conversation to inspect. Without it, this is the time-window
+        entry point that ``read_session`` cannot express.
+        """
+        where = ["created_at >= ?"]
+        params: list[Any] = [since.isoformat()]
+        if until is not None:
+            where.append("created_at < ?")
+            params.append(until.isoformat())
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        params.append(limit)
+        cursor = await self._db.execute(
+            "SELECT id, session_id, event_type, content, metadata, "
+            "created_at, compressed_at "
+            "FROM episodic_entries "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY created_at ASC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [
+            EpisodicEntry(
+                id=r[0],
+                session_id=r[1],
+                event_type=r[2],
+                content=r[3],
+                metadata=json.loads(r[4]),
+                created_at=datetime.fromisoformat(r[5]),
+                compressed_at=datetime.fromisoformat(r[6]) if r[6] else None,
+            )
+            for r in rows
+        ]
+
     async def count_session(
         self,
         session_id: str,

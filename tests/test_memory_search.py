@@ -33,6 +33,8 @@ make_memorize_tool (integration)
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -47,7 +49,11 @@ from loom.core.memory.search import MemorySearch, MemorySearchResult
 from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
-from loom.platform.cli.tools import make_recall_tool, make_memorize_tool
+from loom.platform.cli.tools import (
+    make_recall_period_tool,
+    make_recall_tool,
+    make_memorize_tool,
+)
 
 
 def _facade(
@@ -193,6 +199,29 @@ class TestMemorySearch:
         assert r.value == "my fact value"
         assert r.score > 0.0
         assert r.metadata["confidence"] == 0.9
+
+    async def test_recall_filters_by_updated_at_range(self, db_conn, semantic, procedural):
+        await semantic.upsert(SemanticEntry(key="outside", value="loom outside"))
+        await semantic.upsert(SemanticEntry(key="inside", value="loom inside"))
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 9, 23, 0, tzinfo=UTC).isoformat(), "outside"),
+        )
+        await db_conn.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            (datetime(2026, 5, 10, 12, 0, tzinfo=UTC).isoformat(), "inside"),
+        )
+        await db_conn.commit()
+
+        search = MemorySearch(semantic, procedural)
+        results = await search.recall(
+            "loom",
+            type="semantic",
+            since=datetime(2026, 5, 10, tzinfo=UTC),
+            until=datetime(2026, 5, 11, tzinfo=UTC),
+        )
+
+        assert [r.key for r in results] == ["inside"]
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +379,46 @@ class TestRecallTool:
         result = await tool.executor(call)
         assert result.success is True
 
+    async def test_time_filters_forwarded(self):
+        facade = MagicMock()
+        facade.search = AsyncMock(return_value=[
+            MemorySearchResult(
+                type="semantic",
+                key="k",
+                value="loom fact",
+                score=1.0,
+            )
+        ])
+        tool = make_recall_tool(facade)
+        call = _make_call("recall", {
+            "query": "loom",
+            "type": "semantic",
+            "since": "2026-05-10",
+            "until": "2026-05-11",
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is True
+        kwargs = facade.search.await_args.kwargs
+        assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
+        assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
+
+    async def test_until_without_since_returns_error(self):
+        facade = MagicMock()
+        facade.search = AsyncMock(return_value=[])
+        tool = make_recall_tool(facade)
+        call = _make_call("recall", {
+            "query": "loom",
+            "until": "2026-05-11",
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is False
+        assert "since" in result.error
+        facade.search.assert_not_awaited()
+
     def test_tool_is_safe_trust_level(self):
         # Metadata-only check; facade handles can be mocks.
         tool = make_recall_tool(MagicMock())
@@ -360,6 +429,77 @@ class TestRecallTool:
         tool = make_recall_tool(MagicMock())
         assert "query" in tool.input_schema["properties"]
         assert "query" in tool.input_schema["required"]
+
+
+class TestRecallPeriodTool:
+    async def test_success_returns_grouped_output(self):
+        facade = MagicMock()
+        facade.recall_period = AsyncMock(return_value={
+            "semantic": [
+                SemanticEntry(
+                    key="k",
+                    value="Loom discussed time-aware recall",
+                    updated_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
+                )
+            ],
+            "episodic": [
+                EpisodicEntry(
+                    session_id="s1",
+                    event_type="message",
+                    content="User asked about yesterday",
+                    created_at=datetime(2026, 5, 10, 13, 0, tzinfo=UTC),
+                )
+            ],
+            "sessions": [
+                {
+                    "session_id": "s1",
+                    "title": "Memory chat",
+                    "last_active": datetime(2026, 5, 10, 14, 0, tzinfo=UTC).isoformat(),
+                    "turn_count": 2,
+                }
+            ],
+            "messages": [
+                {
+                    "session_id": "s1",
+                    "turn_index": 0,
+                    "role": "user",
+                    "content": "raw session message",
+                    "created_at": datetime(2026, 5, 10, 14, 30, tzinfo=UTC).isoformat(),
+                }
+            ],
+        })
+        tool = make_recall_period_tool(facade)
+        call = _make_call("recall_period", {
+            "since": "2026-05-10",
+            "until": "2026-05-11",
+            "include_episodic": True,
+            "include_sessions": True,
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is True
+        assert "Semantic facts" in result.output
+        assert "Episodic events" in result.output
+        assert "Sessions" in result.output
+        assert "Session messages" in result.output
+        kwargs = facade.recall_period.await_args.kwargs
+        assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
+        assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
+
+    async def test_until_without_since_returns_error(self):
+        facade = MagicMock()
+        facade.recall_period = AsyncMock(return_value={})
+        tool = make_recall_period_tool(facade)
+        call = _make_call("recall_period", {
+            "until": "2026-05-11",
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is False
+        assert "since" in result.error
+        facade.recall_period.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

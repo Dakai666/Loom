@@ -271,6 +271,38 @@ class SessionLog:
             for r in rows
         ]
 
+    async def list_sessions_between(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return sessions whose ``last_active`` falls in ``[since, until)``."""
+        where = ["last_active >= ?"]
+        params: list[Any] = [since.isoformat()]
+        if until is not None:
+            where.append("last_active < ?")
+            params.append(until.isoformat())
+        params.append(limit)
+        cursor = await self._db.execute(
+            "SELECT session_id, model, title, started_at, last_active, turn_count "
+            f"FROM sessions WHERE {' AND '.join(where)} "
+            "ORDER BY last_active DESC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "session_id": r[0],
+                "model": r[1],
+                "title": r[2],
+                "started_at": r[3],
+                "last_active": r[4],
+                "turn_count": r[5],
+            }
+            for r in rows
+        ]
+
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """Return session metadata for one session, or None if not found."""
         cursor = await self._db.execute(
@@ -289,6 +321,53 @@ class SessionLog:
             "last_active": row[4],
             "turn_count": row[5],
         }
+
+    async def messages_between(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        *,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return raw message rows created in ``[since, until)``.
+
+        This intentionally returns rows rather than reconstructed chat
+        messages. It is a diary/forensics primitive for time-window recall,
+        while ``load_messages`` remains the replay API.
+        """
+        where = ["created_at >= ?", "role != 'system'"]
+        params: list[Any] = [since.isoformat()]
+        if until is not None:
+            where.append("created_at < ?")
+            params.append(until.isoformat())
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        params.append(limit)
+        cursor = await self._db.execute(
+            "SELECT session_id, turn_index, role, content, raw_json, metadata, created_at "
+            f"FROM session_log WHERE {' AND '.join(where)} "
+            "ORDER BY created_at ASC, id ASC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                metadata: dict[str, Any] = json.loads(r[5] or "{}")
+            except Exception:
+                metadata = {}
+            result.append({
+                "session_id": r[0],
+                "turn_index": r[1],
+                "role": r[2],
+                "content": _redact_secrets(r[3]) or "",
+                "raw_json": r[4],
+                "metadata": metadata,
+                "created_at": r[6],
+            })
+        return result
 
     async def load_messages(self, session_id: str) -> list[dict[str, Any]]:
         """Return all non-system messages in replay order (turn_index ASC, id ASC).

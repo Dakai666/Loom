@@ -10,19 +10,21 @@ handle identity so ``LoomSession`` callers that still reach through
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import logging
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
-from loom.core.memory.episodic import EpisodicMemory
+from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.governance import GovernedWriteResult, MemoryGovernor
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.relational import RelationalEntry, RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
+from loom.core.memory.session_log import SessionLog
 from loom.core.memory.store import SQLiteStore
 
 
@@ -36,9 +38,11 @@ async def facade(tmp_path):
         relational = RelationalMemory(db)
         episodic = EpisodicMemory(db)
         search = MemorySearch(semantic, procedural)
+        session_log = SessionLog(db)
         yield MemoryFacade(
             semantic=semantic, procedural=procedural,
             relational=relational, episodic=episodic, search=search,
+            session_log=session_log,
         )
 
 
@@ -111,6 +115,52 @@ async def test_search_delegates_to_search_index(facade):
     results = await facade.search("memory framework", kind="semantic", limit=5)
     assert results, "facade.search should hit the BM25 index for matching content"
     assert any("loom is a memory-native" in r.value for r in results)
+
+
+@pytest.mark.asyncio
+async def test_recall_period_returns_grouped_memory_layers(facade):
+    await facade.semantic.upsert(SemanticEntry(
+        key="inside:fact", value="Loom discussed time-aware recall",
+        confidence=0.9, source="memorize",
+    ))
+    await facade.semantic.upsert(SemanticEntry(
+        key="outside:fact", value="Outside range", confidence=0.9,
+    ))
+    await facade.semantic._db.execute(
+        "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+        (datetime(2026, 5, 10, 12, 0, tzinfo=UTC).isoformat(), "inside:fact"),
+    )
+    await facade.semantic._db.execute(
+        "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+        (datetime(2026, 5, 9, 12, 0, tzinfo=UTC).isoformat(), "outside:fact"),
+    )
+    await facade.episodic.write(EpisodicEntry(
+        session_id="s1", event_type="message", content="User asked about yesterday",
+        created_at=datetime(2026, 5, 10, 13, 0, tzinfo=UTC),
+    ))
+    await facade.session_log.create_session("s1", "model", title="Memory chat")
+    await facade.session_log.update_session(
+        "s1", 1, datetime(2026, 5, 10, 14, 0, tzinfo=UTC).isoformat(), None,
+    )
+    await facade.session_log.log_message("s1", 0, "user", "raw session message")
+    await facade.session_log._db.execute(
+        "UPDATE session_log SET created_at = ? WHERE content = ?",
+        (datetime(2026, 5, 10, 14, 30, tzinfo=UTC).isoformat(), "raw session message"),
+    )
+    await facade.semantic._db.commit()
+
+    result = await facade.recall_period(
+        since=datetime(2026, 5, 10, tzinfo=UTC),
+        until=datetime(2026, 5, 11, tzinfo=UTC),
+        include_episodic=True,
+        include_sessions=True,
+        limit=5,
+    )
+
+    assert [e.key for e in result["semantic"]] == ["inside:fact"]
+    assert [e.content for e in result["episodic"]] == ["User asked about yesterday"]
+    assert [s["session_id"] for s in result["sessions"]] == ["s1"]
+    assert [m["content"] for m in result["messages"]] == ["raw session message"]
 
 
 # ── session integration ────────────────────────────────────────────────────

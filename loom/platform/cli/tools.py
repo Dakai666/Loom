@@ -24,6 +24,7 @@ import re
 import signal
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -936,6 +937,24 @@ async def _run_bash_job(
 # Close over live memory store instances; call from LoomSession.start().
 # ------------------------------------------------------------------
 
+def _parse_memory_datetime(value: str | None) -> datetime | None:
+    """Parse a tool-facing date/datetime string into an aware UTC datetime."""
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            return datetime.fromisoformat(raw).replace(tzinfo=UTC)
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid datetime {value!r}; use YYYY-MM-DD or ISO datetime") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
     Create a SAFE ``recall`` tool bound to the given MemoryFacade.
@@ -954,10 +973,22 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         limit = min(max(int(call.args.get("limit", 5)), 1), 10)
         domain = (call.args.get("domain") or "").strip().lower() or None
         temporal = (call.args.get("temporal") or "").strip().lower() or None
+        try:
+            since = _parse_memory_datetime(call.args.get("since"))
+            until = _parse_memory_datetime(call.args.get("until"))
+        except ValueError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
 
         if not query:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'query' argument is required")
+        if since is None and until is not None:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'since' is required when 'until' is provided")
+        if since is not None and until is not None and until <= since:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'until' must be after 'since'")
 
         if mem_type not in ("semantic", "skill", "all"):
             mem_type = "all"
@@ -971,6 +1002,7 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         results = await memory.search(  # type: ignore[arg-type]
             query, kind=mem_type, limit=limit,
             domain=domain, temporal=temporal,
+            since=since, until=until,
         )
 
         if not results:
@@ -1028,11 +1060,154 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                         "permanent anchors only."
                     ),
                 },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Optional lower bound for semantic updated_at "
+                        "(YYYY-MM-DD or ISO datetime)."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional exclusive upper bound for semantic updated_at "
+                        "(YYYY-MM-DD or ISO datetime)."
+                    ),
+                },
             },
             "required": ["query"],
         },
         executor=_recall,
         tags=["memory", "search", "recall"],
+        impact_scope="memory",
+    )
+
+
+def _format_period_results(groups: dict[str, list]) -> str:
+    """Format grouped period recall evidence for the agent."""
+    sections: list[str] = []
+    semantic = groups.get("semantic", [])
+    if semantic:
+        lines = ["Semantic facts"]
+        for entry in semantic:
+            stamp = entry.updated_at.isoformat()[:10] if entry.updated_at else ""
+            lines.append(f"- [{stamp}] {entry.key}: {entry.value[:240]}")
+        sections.append("\n".join(lines))
+
+    episodic = groups.get("episodic", [])
+    if episodic:
+        lines = ["Episodic events"]
+        for entry in episodic:
+            stamp = entry.created_at.isoformat()[:16] if entry.created_at else ""
+            lines.append(
+                f"- [{stamp}] {entry.session_id} {entry.event_type}: "
+                f"{entry.content[:240]}"
+            )
+        sections.append("\n".join(lines))
+
+    sessions = groups.get("sessions", [])
+    if sessions:
+        lines = ["Sessions"]
+        for session in sessions:
+            title = session.get("title") or "(untitled)"
+            lines.append(
+                f"- [{session.get('last_active', '')[:16]}] "
+                f"{session.get('session_id')}: {title} "
+                f"({session.get('turn_count', 0)} turns)"
+            )
+        sections.append("\n".join(lines))
+
+    messages = groups.get("messages", [])
+    if messages:
+        lines = ["Session messages"]
+        for message in messages:
+            lines.append(
+                f"- [{message.get('created_at', '')[:16]}] "
+                f"{message.get('session_id')} {message.get('role')}: "
+                f"{str(message.get('content') or '')[:240]}"
+            )
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections) if sections else "No memories found for this period."
+
+
+def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
+    """Create a SAFE period recall tool across memory layers."""
+
+    async def _recall_period(call: ToolCall) -> ToolResult:
+        try:
+            since = _parse_memory_datetime(call.args.get("since"))
+            until = _parse_memory_datetime(call.args.get("until"))
+        except ValueError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+        if since is None:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'since' argument is required")
+        if until is not None and until <= since:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'until' must be after 'since'")
+
+        limit = min(max(int(call.args.get("limit", 10)), 1), 20)
+        include_episodic = bool(call.args.get("include_episodic", True))
+        include_sessions = bool(call.args.get("include_sessions", False))
+        session_id = (call.args.get("session_id") or "").strip() or None
+
+        groups = await memory.recall_period(
+            since=since,
+            until=until,
+            session_id=session_id,
+            limit=limit,
+            include_episodic=include_episodic,
+            include_sessions=include_sessions,
+        )
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.tool_name,
+            success=True,
+            output=_format_period_results(groups),
+        )
+
+    return ToolDefinition(
+        name="recall_period",
+        description=(
+            "Retrieve time-window memory evidence. Use for questions like "
+            "'what did we discuss yesterday?' Start with semantic facts and "
+            "include episodic/session evidence when deeper recall is needed."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "Required lower bound (YYYY-MM-DD or ISO datetime).",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Optional exclusive upper bound (YYYY-MM-DD or ISO datetime).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results per layer (1-20, default 10).",
+                },
+                "include_episodic": {
+                    "type": "boolean",
+                    "description": "Include episodic events (default true).",
+                },
+                "include_sessions": {
+                    "type": "boolean",
+                    "description": "Include matching session metadata (default false).",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional session scope for episodic events.",
+                },
+            },
+            "required": ["since"],
+        },
+        executor=_recall_period,
+        tags=["memory", "search", "recall", "period"],
         impact_scope="memory",
     )
 
