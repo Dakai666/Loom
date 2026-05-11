@@ -967,7 +967,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
         save_preference(target)
         harness.inline(
-            f"Theme switched to [accent]{target}[/accent]. Restart to apply.",
+            f"Theme switched to [loom.accent]{target}[/loom.accent]. Restart to apply.",
             level="info",
         )
 

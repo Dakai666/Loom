@@ -104,5 +104,5 @@ async def test_theme_command_persists_valid_theme(monkeypatch) -> None:
 
     assert saved == ["sunrise"]
     assert captured == [
-        ("Theme switched to [accent]sunrise[/accent]. Restart to apply.", "info")
+        ("Theme switched to [loom.accent]sunrise[/loom.accent]. Restart to apply.", "info")
     ]
