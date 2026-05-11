@@ -983,6 +983,9 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         if not query:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'query' argument is required")
+        if since is None and until is not None:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error="'since' is required when 'until' is provided")
         if since is not None and until is not None and until <= since:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'until' must be after 'since'")

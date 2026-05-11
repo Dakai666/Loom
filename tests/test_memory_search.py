@@ -404,6 +404,21 @@ class TestRecallTool:
         assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
         assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
 
+    async def test_until_without_since_returns_error(self):
+        facade = MagicMock()
+        facade.search = AsyncMock(return_value=[])
+        tool = make_recall_tool(facade)
+        call = _make_call("recall", {
+            "query": "loom",
+            "until": "2026-05-11",
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is False
+        assert "since" in result.error
+        facade.search.assert_not_awaited()
+
     def test_tool_is_safe_trust_level(self):
         # Metadata-only check; facade handles can be mocks.
         tool = make_recall_tool(MagicMock())
@@ -471,6 +486,20 @@ class TestRecallPeriodTool:
         kwargs = facade.recall_period.await_args.kwargs
         assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
         assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
+
+    async def test_until_without_since_returns_error(self):
+        facade = MagicMock()
+        facade.recall_period = AsyncMock(return_value={})
+        tool = make_recall_period_tool(facade)
+        call = _make_call("recall_period", {
+            "until": "2026-05-11",
+        })
+
+        result = await tool.executor(call)
+
+        assert result.success is False
+        assert "since" in result.error
+        facade.recall_period.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

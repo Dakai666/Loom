@@ -57,6 +57,8 @@ Output groups entries by source layer:
 
 Each line includes timestamp, key or session id, and a short value. The tool does not summarize with an LLM; it returns traceable evidence that the agent can use to answer naturally.
 
+`Session messages` are forensic rows from `session_log`, not reconstructed chat replay messages. They preserve the stored `session_id`, `turn_index`, `role`, redacted `content`, and `created_at` for diary-style investigation.
+
 ## Data Flow
 
 For "what did we talk about yesterday?":
@@ -71,6 +73,7 @@ For "what did we talk about yesterday?":
 
 - Invalid dates return a tool error with a concise message.
 - Missing `since` returns a tool error.
+- Providing `until` without `since` returns a tool error at the tool boundary.
 - `until <= since` returns a tool error.
 - Empty ranges return success with "No memories found for this period."
 - Limits are clamped to a small maximum to protect context.
