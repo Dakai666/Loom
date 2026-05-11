@@ -53,14 +53,17 @@ showing the TTL or grant scope.
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 import os
 import time
+from datetime import datetime, time as datetime_time, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 try:
     import discord
+    from discord.ext import tasks
     from discord import ButtonStyle, Interaction, app_commands
     from discord.ui import Button, View
 except ImportError as exc:  # pragma: no cover
@@ -87,6 +90,8 @@ from loom.platform.discord.tools import (
     make_send_discord_select_tool,
 )
 from loom.platform.discord.reactions import REACTION
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from loom.core.session import LoomSession
@@ -271,6 +276,11 @@ class LoomDiscordBot:
         # Turn summary display mode: "off" | "on" | "detail"
         self._summary_mode: str = "on"
 
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        self._daily_compaction_loop = tasks.loop(
+            time=datetime_time(hour=5, minute=0, tzinfo=local_tz),
+        )(self._run_daily_compaction)
+
         # Persistent thread → session_id mapping so existing threads resume
         # their context after a bot restart.
         # Stored at ~/.loom/discord_threads.json as {str(thread_id): session_id}
@@ -304,6 +314,8 @@ class LoomDiscordBot:
                 print(f"[Loom Discord] Accepting messages from user IDs: {bot._allowed_users}")
             if bot._allowed_channels:
                 print(f"[Loom Discord] Operating in channels: {bot._allowed_channels}")
+            if not bot._daily_compaction_loop.is_running():
+                bot._daily_compaction_loop.start()
 
             # Sync slash commands. LOOM_DISCORD_DEV_GUILD_ID makes iteration
             # bearable (per-guild syncs are instant; the global tree takes up
@@ -573,6 +585,7 @@ class LoomDiscordBot:
         session.subscribe_promotion(_discord_promotion)
 
         self._sessions[thread_id] = session
+        await self._force_compact_active_sessions(reason="resume")
         return session
 
     async def _close_session(self, thread_id: int) -> None:
@@ -582,6 +595,22 @@ class LoomDiscordBot:
                 await session.stop()
             except Exception:
                 pass
+
+    async def _run_daily_compaction(self) -> None:
+        """Scheduled Discord safety net for idle in-memory sessions."""
+        await self._force_compact_active_sessions(reason="daily")
+
+    async def _force_compact_active_sessions(self, *, reason: str) -> None:
+        """Best-effort forced compaction over currently loaded sessions."""
+        for thread_id, session in list(self._sessions.items()):
+            try:
+                await session.force_compact()
+            except Exception:
+                logger.exception(
+                    "Discord %s memory compaction failed for thread %s",
+                    reason,
+                    thread_id,
+                )
 
     # ------------------------------------------------------------------
     # Slash commands
@@ -1338,6 +1367,8 @@ class LoomDiscordBot:
 
     async def close(self) -> None:
         """Stop all sessions and disconnect."""
+        if self._daily_compaction_loop.is_running():
+            self._daily_compaction_loop.cancel()
         for tid in list(self._sessions):
             await self._close_session(tid)
         await self._client.close()

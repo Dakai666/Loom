@@ -112,7 +112,9 @@ def _make_stub(
     s._fake_refresh = _fake_refresh
     s._session_module = session_module
 
+    s._compact_memory = LoomSession._compact_memory.__get__(s)
     s._run_compaction_check = LoomSession._run_compaction_check.__get__(s)
+    s.force_compact = LoomSession.force_compact.__get__(s)
     s._refresh_memory_index = _fake_refresh
     s._compaction_subscriber_loop = (
         LoomSession._compaction_subscriber_loop.__get__(s)
@@ -157,6 +159,19 @@ async def test_zero_facts_no_compress_done_emitted(monkeypatch) -> None:
     assert s._pending_compactions == []  # 0 facts → no signal
 
 
+async def test_force_compact_bypasses_threshold_and_buffers_done(
+    monkeypatch,
+) -> None:
+    s = _make_stub(ep_count=5, threshold=30, fact_count=6)
+    monkeypatch.setattr(s._session_module, "compress_session", s._fake_compress)
+    await s.force_compact()
+    assert s.compress_called == 1
+    assert s.refresh_called == 1
+    assert len(s._pending_compactions) == 1
+    assert isinstance(s._pending_compactions[0], CompressDone)
+    assert s._pending_compactions[0].fact_count == 6
+
+
 async def test_compress_failure_swallowed_no_pending_compaction(
     monkeypatch,
 ) -> None:
@@ -195,11 +210,29 @@ async def test_lock_serialises_concurrent_compactions(monkeypatch) -> None:
 
     monkeypatch.setattr(s._session_module, "compress_session", _slow_compress)
 
-    async def _gated() -> None:
-        async with s._compaction_lock:
-            await s._run_compaction_check()
+    await asyncio.gather(s._run_compaction_check(), s._run_compaction_check())
+    assert max_in_flight == 1  # never two parallel compress calls
 
-    await asyncio.gather(_gated(), _gated())
+
+async def test_force_and_threshold_checks_share_compaction_lock(
+    monkeypatch,
+) -> None:
+    s = _make_stub(ep_count=30, threshold=30, fact_count=2)
+
+    in_flight = 0
+    max_in_flight = 0
+
+    async def _slow_compress(*_a, **_kw):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        return 2
+
+    monkeypatch.setattr(s._session_module, "compress_session", _slow_compress)
+
+    await asyncio.gather(s.force_compact(), s._run_compaction_check())
     assert max_in_flight == 1  # never two parallel compress calls
 
 
