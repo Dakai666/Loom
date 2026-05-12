@@ -122,6 +122,28 @@ def _make_stub(
     return s
 
 
+def _signal_subscriber_ready(ledger: LedgerStore, monkeypatch) -> asyncio.Event:
+    ready = asyncio.Event()
+    original_subscribe = ledger.subscribe
+
+    def _subscribe_and_signal(*args, **kwargs):
+        context_manager = original_subscribe(*args, **kwargs)
+
+        class _ReadyContextManager:
+            async def __aenter__(self):
+                subscriber = await context_manager.__aenter__()
+                ready.set()
+                return subscriber
+
+            async def __aexit__(self, *exc):
+                return await context_manager.__aexit__(*exc)
+
+        return _ReadyContextManager()
+
+    monkeypatch.setattr(ledger, "subscribe", _subscribe_and_signal)
+    return ready
+
+
 # ---------------------------------------------------------------------------
 # _run_compaction_check — threshold gate
 # ---------------------------------------------------------------------------
@@ -247,12 +269,18 @@ async def test_subscriber_triggers_on_turn_end_event(
 ) -> None:
     s = _make_stub(ep_count=40, threshold=30, fact_count=3)
     s._ledger_store = ledger
+    subscriber_ready = _signal_subscriber_ready(ledger, monkeypatch)
+    compressed = asyncio.Event()
 
-    monkeypatch.setattr(s._session_module, "compress_session", s._fake_compress)
+    async def _compress_and_signal(*args, **kwargs):
+        result = await s._fake_compress(*args, **kwargs)
+        compressed.set()
+        return result
+
+    monkeypatch.setattr(s._session_module, "compress_session", _compress_and_signal)
 
     task = asyncio.create_task(s._compaction_subscriber_loop())
-    # Give the subscriber a chance to register.
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(subscriber_ready.wait(), timeout=1.0)
 
     async with async_turn_scope("turn_sub"), async_correlation_scope("c1"):
         await emitter.emit_turn_end(
@@ -262,11 +290,7 @@ async def test_subscriber_triggers_on_turn_end_event(
             ),
         )
 
-    # Wait for the subscriber to drain and run compaction.
-    for _ in range(50):
-        if s.compress_called >= 1:
-            break
-        await asyncio.sleep(0.02)
+    await asyncio.wait_for(compressed.wait(), timeout=1.0)
 
     task.cancel()
     try:
@@ -285,11 +309,18 @@ async def test_subscriber_ignores_other_event_types(
     events must not trigger compaction."""
     s = _make_stub(ep_count=40, threshold=30, fact_count=3)
     s._ledger_store = ledger
+    subscriber_ready = _signal_subscriber_ready(ledger, monkeypatch)
+    compressed = asyncio.Event()
 
-    monkeypatch.setattr(s._session_module, "compress_session", s._fake_compress)
+    async def _compress_and_signal(*args, **kwargs):
+        result = await s._fake_compress(*args, **kwargs)
+        compressed.set()
+        return result
+
+    monkeypatch.setattr(s._session_module, "compress_session", _compress_and_signal)
 
     task = asyncio.create_task(s._compaction_subscriber_loop())
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(subscriber_ready.wait(), timeout=1.0)
 
     from loom.core.ledger import TurnStartPayload
 
@@ -301,7 +332,13 @@ async def test_subscriber_ignores_other_event_types(
             ),
         )
 
-    await asyncio.sleep(0.1)
+    try:
+        await asyncio.wait_for(compressed.wait(), timeout=0.05)
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("turn_start unexpectedly triggered compaction")
+
     task.cancel()
     try:
         await task

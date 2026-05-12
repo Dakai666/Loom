@@ -58,7 +58,6 @@ def test_signal_from_another_controller_is_independent():
 async def test_wait_aborted_resolves_when_aborted():
     controller = AbortController()
     task = asyncio.create_task(wait_aborted(controller.signal))
-    await asyncio.sleep(0)  # yield to let the task start waiting
     controller.abort()
     await task
     assert True  # no exception raised
@@ -81,7 +80,6 @@ async def test_bind_produces_bound_abort():
     controller = AbortController()
     cb = controller.bind()
     assert callable(cb)
-    await asyncio.sleep(0)
     cb()
     assert controller.aborted
 
@@ -90,7 +88,6 @@ async def test_bind_produces_bound_abort():
 async def test_abort_bound_factory():
     controller = AbortController()
     cb = abort_bound(controller)
-    await asyncio.sleep(0)
     cb()
     assert controller.aborted
 
@@ -221,7 +218,7 @@ async def test_race_abort_signal_already_set():
     signal.set()
 
     async def _work():
-        await asyncio.sleep(10)  # would block forever without abort
+        await asyncio.Event().wait()
         return 42
 
     result, aborted = await _race_abort(_work(), signal)
@@ -234,16 +231,18 @@ async def test_race_abort_signal_fires_during_coro():
     from loom.platform.cli.tools import _race_abort
 
     signal = asyncio.Event()
+    work_started = asyncio.Event()
 
     async def _slow():
-        await asyncio.sleep(5)
+        work_started.set()
+        await asyncio.Event().wait()
         return 99
 
-    async def _fire_after_yield():
-        await asyncio.sleep(0)
+    async def _fire_after_work_starts():
+        await work_started.wait()
         signal.set()
 
-    asyncio.ensure_future(_fire_after_yield())
+    asyncio.ensure_future(_fire_after_work_starts())
     result, aborted = await _race_abort(_slow(), signal)
     assert aborted
     assert result is None
@@ -280,8 +279,7 @@ async def test_daemon_stop_exits_start():
     daemon = AutonomyDaemon(notify_router=notify, confirm_flow=confirm)
 
     start_task = asyncio.ensure_future(daemon.start(poll_interval=60.0))
-    await asyncio.sleep(0)  # let start() reach asyncio.wait()
-    daemon.stop()
+    asyncio.get_running_loop().call_soon(daemon.stop)
     await asyncio.wait_for(start_task, timeout=1.0)  # must not hang
 
 

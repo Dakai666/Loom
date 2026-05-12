@@ -146,11 +146,13 @@ class TestRunBashCancelKill:
         from loom.platform.cli import tools as _tools
 
         captured: dict = {}
+        spawned = _asyncio.Event()
         real_create = _asyncio.create_subprocess_shell
 
         async def _spy_create(*args, **kwargs):
             proc = await real_create(*args, **kwargs)
             captured["proc"] = proc
+            spawned.set()
             return proc
 
         monkeypatch.setattr(_tools.asyncio, "create_subprocess_shell", _spy_create)
@@ -161,22 +163,13 @@ class TestRunBashCancelKill:
             "justification": "test cancel",
             "timeout": 60,
         })))
-        # Let the subprocess actually spawn before cancelling.
-        for _ in range(50):
-            if "proc" in captured:
-                break
-            await _asyncio.sleep(0.02)
-        assert "proc" in captured, "subprocess never spawned"
+        await _asyncio.wait_for(spawned.wait(), timeout=1.0)
 
         task.cancel()
         with pytest.raises(_asyncio.CancelledError):
             await task
 
-        # Give the finally block a tick to run proc.wait().
-        for _ in range(50):
-            if captured["proc"].returncode is not None:
-                break
-            await _asyncio.sleep(0.02)
+        await _asyncio.wait_for(captured["proc"].wait(), timeout=1.0)
         assert captured["proc"].returncode is not None, "subprocess was orphaned"
 
 
@@ -211,9 +204,12 @@ class TestJobsTools:
 
     async def test_jobs_list_filter_active(self):
         store = JobStore()
+        slow_started = asyncio.Event()
+        slow_gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            slow_started.set()
+            await slow_gate.wait()
             return None, None, None
 
         async def quick():
@@ -222,6 +218,7 @@ class TestJobsTools:
         s_id = store.submit("slow", {}, slow)
         q_id = store.submit("quick", {}, quick)
         await store.await_jobs([q_id], timeout=1.0)
+        await asyncio.wait_for(slow_started.wait(), timeout=1.0)
 
         tool = make_jobs_list_tool(store)
         result = await tool.executor(_call("jobs_list", {"state": "active"}))
@@ -241,12 +238,16 @@ class TestJobsTools:
 
     async def test_jobs_await_timeout(self):
         store = JobStore()
+        started = asyncio.Event()
+        gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            started.set()
+            await gate.wait()
             return None, None, None
 
         job_id = store.submit("slow", {}, slow)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
         tool = make_jobs_await_tool(store)
 
         r = await tool.executor(_call("jobs_await", {
@@ -418,13 +419,16 @@ class TestJobsInjectMessage:
 
     async def test_reports_running(self):
         store = JobStore()
+        started = asyncio.Event()
+        gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            started.set()
+            await gate.wait()
             return None, None, None
 
         job_id = store.submit("slow_fn", {}, slow)
-        await asyncio.sleep(0.02)  # let RUNNING transition happen
+        await asyncio.wait_for(started.wait(), timeout=1.0)
 
         msg = _build_jobs_inject_message(store)
         assert msg is not None
@@ -436,17 +440,21 @@ class TestJobsInjectMessage:
 
     async def test_reports_failure_and_cancellation(self):
         store = JobStore()
+        slow_started = asyncio.Event()
+        slow_gate = asyncio.Event()
 
         async def boom():
             return None, None, "kaboom"
 
         async def slow():
-            await asyncio.sleep(5)
+            slow_started.set()
+            await slow_gate.wait()
             return None, None, None
 
         f_id = store.submit("f", {}, boom)
         s_id = store.submit("s", {}, slow)
         await store.await_jobs([f_id], timeout=1.0)
+        await asyncio.wait_for(slow_started.wait(), timeout=1.0)
         store.cancel(s_id, reason="unneeded")
 
         msg = _build_jobs_inject_message(store)
@@ -487,16 +495,27 @@ class TestRunBashCancelKillsPipeChildren:
         # 1s timeout (allow generous margin for CI noise).
         assert elapsed < 5.0, f"timeout cleanup took {elapsed:.1f}s — pipe child not reaped"
 
-    async def test_cancel_kills_pipe_child(self, tmp_path: Path):
+    async def test_cancel_kills_pipe_child(self, tmp_path: Path, monkeypatch):
         import time
+        from loom.platform.cli import tools as _tools
+
+        spawned = asyncio.Event()
+        real_create = asyncio.create_subprocess_shell
+
+        async def _spy_create(*args, **kwargs):
+            proc = await real_create(*args, **kwargs)
+            spawned.set()
+            return proc
+
+        monkeypatch.setattr(_tools.asyncio, "create_subprocess_shell", _spy_create)
+
         tool = make_run_bash_tool(tmp_path)
         task = asyncio.create_task(tool.executor(_call("run_bash", {
             "command": "sleep 30 | cat",
             "justification": "test",
             "timeout": 60,
         })))
-        # Let the subprocess actually start.
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(spawned.wait(), timeout=1.0)
         t0 = time.monotonic()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

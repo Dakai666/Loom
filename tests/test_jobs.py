@@ -9,6 +9,14 @@ import pytest
 from loom.core.jobs import Job, JobState, JobStore, Scratchpad
 
 
+async def _await_terminal(store: JobStore, job_id: str, timeout: float = 1.0) -> Job:
+    await store.await_jobs([job_id], timeout=timeout)
+    job = store.get(job_id)
+    assert job is not None
+    assert job.is_terminal
+    return job
+
+
 # --- Scratchpad ------------------------------------------------------
 
 
@@ -170,14 +178,7 @@ class TestJobStoreSubmit:
         job_id = store.submit("fake_fn", {"a": 1}, run)
         assert job_id.startswith("job_")
 
-        # Give the task a chance to run
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
-
-        job = store.get(job_id)
-        assert job is not None
+        job = await _await_terminal(store, job_id)
         assert job.state == JobState.DONE
         assert job.result_ref == "ref_done"
         assert job.result_summary == "42 bytes"
@@ -192,12 +193,8 @@ class TestJobStoreSubmit:
             raise RuntimeError("kapow")
 
         job_id = store.submit("fake_fn", {}, boom)
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
 
-        job = store.get(job_id)
+        job = await _await_terminal(store, job_id)
         assert job.state == JobState.FAILED
         assert "kapow" in job.error
 
@@ -209,12 +206,8 @@ class TestJobStoreSubmit:
             return None, None, "permission denied"
 
         job_id = store.submit("fake_fn", {}, soft_fail)
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
 
-        job = store.get(job_id)
+        job = await _await_terminal(store, job_id)
         assert job.state == JobState.FAILED
         assert job.error == "permission denied"
 
@@ -230,10 +223,7 @@ class TestJobStoreReap:
             return "r", "done", None
 
         job_id = store.submit("fake", {}, quick)
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        await _await_terminal(store, job_id)
 
         new, running = store.reap_since_last()
         assert [j.id for j in new] == [job_id]
@@ -246,25 +236,23 @@ class TestJobStoreReap:
 
     async def test_reap_reports_running(self):
         store = JobStore()
+        started = asyncio.Event()
         gate = asyncio.Event()
 
         async def slow():
+            started.set()
             await gate.wait()
             return "r", "done", None
 
         job_id = store.submit("slow", {}, slow)
-        # Let it enter RUNNING
-        await asyncio.sleep(0.02)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
 
         new, running = store.reap_since_last()
         assert new == []
         assert [j.id for j in running] == [job_id]
 
         gate.set()
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        await _await_terminal(store, job_id)
 
         new, running = store.reap_since_last()
         assert [j.id for j in new] == [job_id]
@@ -276,17 +264,19 @@ class TestJobStoreReap:
         async def quick():
             return None, "ok", None
 
+        slow_started = asyncio.Event()
+        slow_gate = asyncio.Event()
+
         async def slow():
-            await asyncio.sleep(5)
+            slow_started.set()
+            await slow_gate.wait()
             return None, "nope", None
 
         q = store.submit("q", {}, quick)
         s = store.submit("s", {}, slow)
 
-        for _ in range(20):
-            if store.get(q).is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        await _await_terminal(store, q)
+        await asyncio.wait_for(slow_started.wait(), timeout=1.0)
 
         active_ids = [j.id for j in store.list_active()]
         assert q not in active_ids
@@ -311,13 +301,16 @@ class TestJobStoreCancel:
 
     async def test_cancel_preserves_trace(self):
         store = JobStore()
+        started = asyncio.Event()
+        gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            started.set()
+            await gate.wait()
             return None, None, None
 
         job_id = store.submit("s", {}, slow)
-        await asyncio.sleep(0.02)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
 
         store.cancel(job_id, reason="user_abort")
 
@@ -336,10 +329,7 @@ class TestJobStoreCancel:
             return None, None, None
 
         job_id = store.submit("q", {}, quick)
-        for _ in range(20):
-            if store.get(job_id).is_terminal:
-                break
-            await asyncio.sleep(0.01)
+        await _await_terminal(store, job_id)
 
         # Already DONE — cancel should be silent
         store.cancel(job_id, reason="too_late")
@@ -353,13 +343,20 @@ class TestJobStoreCancel:
 
     async def test_cancel_all(self):
         store = JobStore()
+        started_count = 0
+        all_started = asyncio.Event()
+        gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            nonlocal started_count
+            started_count += 1
+            if started_count == 3:
+                all_started.set()
+            await gate.wait()
             return None, None, None
 
         ids = [store.submit(f"s{i}", {}, slow) for i in range(3)]
-        await asyncio.sleep(0.02)
+        await asyncio.wait_for(all_started.wait(), timeout=1.0)
 
         await store.cancel_all(reason="session_ended")
 
@@ -382,7 +379,6 @@ class TestJobStoreAwait:
         store = JobStore()
 
         async def quick():
-            await asyncio.sleep(0.01)
             return None, "ok", None
 
         ids = [store.submit("q", {}, quick) for _ in range(3)]
@@ -392,12 +388,16 @@ class TestJobStoreAwait:
 
     async def test_await_timeout_returns_running(self):
         store = JobStore()
+        started = asyncio.Event()
+        gate = asyncio.Event()
 
         async def slow():
-            await asyncio.sleep(5)
+            started.set()
+            await gate.wait()
             return None, None, None
 
         job_id = store.submit("s", {}, slow)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
         finished, running = await store.await_jobs([job_id], timeout=0.05)
         assert finished == []
         assert [j.id for j in running] == [job_id]

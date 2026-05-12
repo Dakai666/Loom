@@ -92,6 +92,23 @@ async def _fetch(ledger: LedgerStore, turn_id: str, evt_type: str) -> list:
     return [r for r in rows if r.event_type == evt_type]
 
 
+def _signal_permission_emits(emitter: LedgerEmitter, monkeypatch, *, count: int = 1):
+    emitted = 0
+    done = asyncio.Event()
+    original_emit = emitter.emit_permission_decision
+
+    async def _emit_and_signal(*args, **kwargs):
+        nonlocal emitted
+        result = await original_emit(*args, **kwargs)
+        emitted += 1
+        if emitted >= count:
+            done.set()
+        return result
+
+    monkeypatch.setattr(emitter, "emit_permission_decision", _emit_and_signal)
+    return done
+
+
 # ---------------------------------------------------------------------------
 # tool_lifecycle BEGIN + END
 # ---------------------------------------------------------------------------
@@ -239,8 +256,9 @@ async def test_user_on_lifecycle_still_fires(
 
 
 async def test_permission_decision_grant_emit(
-    ledger: LedgerStore, emitter: LedgerEmitter
+    ledger: LedgerStore, emitter: LedgerEmitter, monkeypatch
 ) -> None:
+    emitted = _signal_permission_emits(emitter, monkeypatch)
     perm_ctx = MagicMock()
     perm_ctx.exec_auto = False
     confirm_fn = AsyncMock(return_value=True)
@@ -254,12 +272,7 @@ async def test_permission_decision_grant_emit(
 
     async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, True, "pre-authorized")
-        # Step 4 added _emit_lock; poll until the scheduled emit lands.
-        for _ in range(50):
-            events = await _fetch(ledger, "turn_mw", "permission_decision")
-            if events:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(emitted.wait(), timeout=1.0)
 
     events = await _fetch(ledger, "turn_mw", "permission_decision")
     assert len(events) == 1
@@ -270,8 +283,9 @@ async def test_permission_decision_grant_emit(
 
 
 async def test_permission_decision_deny_emit(
-    ledger: LedgerStore, emitter: LedgerEmitter
+    ledger: LedgerStore, emitter: LedgerEmitter, monkeypatch
 ) -> None:
+    emitted = _signal_permission_emits(emitter, monkeypatch)
     perm_ctx = MagicMock()
     confirm_fn = AsyncMock(return_value=False)
     mw = BlastRadiusMiddleware(
@@ -283,11 +297,7 @@ async def test_permission_decision_deny_emit(
 
     async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, False, "user denied (deny)")
-        for _ in range(50):
-            events = await _fetch(ledger, "turn_mw", "permission_decision")
-            if events:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(emitted.wait(), timeout=1.0)
 
     events = await _fetch(ledger, "turn_mw", "permission_decision")
     assert len(events) == 1

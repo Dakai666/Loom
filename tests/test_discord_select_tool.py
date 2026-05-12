@@ -147,14 +147,24 @@ def _patch_select_view(monkeypatch):
     """Replace `discord.ui.Select` and `discord.ui.View` with stand-ins that
     don't try to talk to a real Discord gateway. We capture the callback so
     the test can fire a synthetic interaction."""
-    captured: dict = {}
+    captured: dict = {"callback_ready": asyncio.Event()}
 
     class _FakeSelect:
         def __init__(self, *, placeholder, min_values, max_values, options):
             self.values: list[str] = []
-            self.callback = None
+            self._callback = None
             captured["select"] = self
             captured["max_values"] = max_values
+
+        @property
+        def callback(self):
+            return self._callback
+
+        @callback.setter
+        def callback(self, value):
+            self._callback = value
+            if value is not None:
+                captured["callback_ready"].set()
 
     class _FakeView:
         def __init__(self, *, timeout):
@@ -192,11 +202,7 @@ async def test_executor_returns_selection_after_user_picks(monkeypatch):
     tool = make_send_discord_select_tool(client, 123)
 
     async def _drive_selection():
-        # Wait until the executor wires the callback, then simulate a click.
-        for _ in range(50):
-            if "select" in captured and captured["select"].callback is not None:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(captured["callback_ready"].wait(), timeout=1.0)
         select = captured["select"]
         select.values = ["b"]
         interaction = MagicMock()
@@ -258,10 +264,7 @@ async def test_executor_multi_select_returns_list(monkeypatch):
     tool = make_send_discord_select_tool(client, 123)
 
     async def _drive_selection():
-        for _ in range(50):
-            if "select" in captured and captured["select"].callback is not None:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(captured["callback_ready"].wait(), timeout=1.0)
         select = captured["select"]
         select.values = ["a", "c"]
         interaction = MagicMock()

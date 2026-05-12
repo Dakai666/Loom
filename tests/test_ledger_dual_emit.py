@@ -111,6 +111,23 @@ def _make_call(name: str = "do_thing", args: dict | None = None) -> ToolCall:
     )
 
 
+def _signal_permission_emits(emitter: LedgerEmitter, monkeypatch, *, count: int):
+    emitted = 0
+    done = asyncio.Event()
+    original_emit = emitter.emit_permission_decision
+
+    async def _emit_and_signal(*args, **kwargs):
+        nonlocal emitted
+        result = await original_emit(*args, **kwargs)
+        emitted += 1
+        if emitted >= count:
+            done.set()
+        return result
+
+    monkeypatch.setattr(emitter, "emit_permission_decision", _emit_and_signal)
+    return done
+
+
 # ---------------------------------------------------------------------------
 # Per-tool-call alignment
 # ---------------------------------------------------------------------------
@@ -276,10 +293,11 @@ async def test_multi_call_ordering(
 
 
 async def test_permission_decision_matches_call_metadata(
-    ledger: LedgerStore, emitter: LedgerEmitter
+    ledger: LedgerStore, emitter: LedgerEmitter, monkeypatch
 ) -> None:
     """Every _notify_lifecycle call lands one ledger event matching
     ctx.authorization_result/reason."""
+    emitted = _signal_permission_emits(emitter, monkeypatch, count=2)
     perm_ctx = MagicMock()
     confirm_fn = AsyncMock(return_value=True)
     mw = BlastRadiusMiddleware(
@@ -290,14 +308,7 @@ async def test_permission_decision_matches_call_metadata(
     async with async_turn_scope("turn_dual"), async_correlation_scope("c1"):
         mw._notify_lifecycle(call, True, "scope-allow: precondition")
         mw._notify_lifecycle(call, False, "user denied")
-        # Step 4 added _emit_lock that serialises ledger inserts; scheduled
-        # emit tasks now need real I/O ticks to drain. Poll for completion
-        # rather than guess at sleep counts.
-        for _ in range(50):
-            rows = await ledger.fetch_by_turn("turn_dual")
-            if sum(1 for r in rows if r.event_type == "permission_decision") >= 2:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(emitted.wait(), timeout=1.0)
 
     rows = await ledger.fetch_by_turn("turn_dual")
     pds = [r for r in rows if r.event_type == "permission_decision"]
