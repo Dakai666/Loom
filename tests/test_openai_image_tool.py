@@ -171,6 +171,112 @@ async def test_openai_image_tool_uses_codex_responses_backend(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_openai_image_tool_includes_subject_reference_in_codex_payload(
+    tmp_path,
+    monkeypatch,
+):
+    from loom.core import session as session_module
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "codex-token"}}),
+        encoding="utf-8",
+    )
+    reference = tmp_path / "refs" / "siluyi.png"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference-png")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+    monkeypatch.setattr(cli_tools.httpx, "AsyncClient", _CodexStreamAsyncClient)
+    _CodexStreamAsyncClient.requests = []
+    tool = make_openai_image_generation_tool(tmp_path)
+    call = ToolCall(
+        tool_name=tool.name,
+        args={
+            "prompt": "draw the same character",
+            "output_path": "renders/codex-ref.png",
+            "auth_mode": "codex",
+            "subject_reference": [
+                {"type": "character", "image_file": "refs/siluyi.png"},
+            ],
+        },
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    result = await tool.executor(call)
+
+    assert result.success
+    content = _CodexStreamAsyncClient.requests[0]["json"]["input"][0]["content"]
+    assert content[0] == {"type": "input_text", "text": "draw the same character"}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
+    assert content[1]["image_url"].endswith(base64.b64encode(b"reference-png").decode())
+
+
+@pytest.mark.asyncio
+async def test_openai_image_tool_rejects_subject_reference_on_api_key_path(
+    tmp_path,
+    monkeypatch,
+):
+    from loom.core import session as session_module
+
+    reference = tmp_path / "refs" / "siluyi.png"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference-png")
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {
+        "OPENAI_API_KEY": "sk-test",
+    })
+    monkeypatch.setattr(cli_tools.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.requests = []
+    tool = make_openai_image_generation_tool(tmp_path)
+    call = ToolCall(
+        tool_name=tool.name,
+        args={
+            "prompt": "draw",
+            "auth_mode": "api_key",
+            "subject_reference": [{"image_file": "refs/siluyi.png"}],
+        },
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    result = await tool.executor(call)
+
+    assert not result.success
+    assert "subject_reference currently requires Codex OAuth" in result.error
+    assert _FakeAsyncClient.requests == []
+
+
+def test_openai_image_tool_schema_and_scope_include_subject_reference(tmp_path):
+    tool = make_openai_image_generation_tool(tmp_path)
+    reference = tmp_path / "refs" / "siluyi.png"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference-png")
+    call = ToolCall(
+        tool_name=tool.name,
+        args={
+            "prompt": "draw",
+            "output_path": "renders/out.png",
+            "subject_reference": [{"image_file": "refs/siluyi.png"}],
+        },
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    assert "subject_reference" in tool.input_schema["properties"]
+    scope = tool.scope_resolver(call)
+
+    assert any(
+        req.resource == "path"
+        and req.action == "read"
+        and req.selector == "refs/siluyi.png"
+        for req in scope.requirements
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_image_tool_auto_falls_back_when_codex_token_rejected(
     tmp_path,
     monkeypatch,

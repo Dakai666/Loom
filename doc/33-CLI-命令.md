@@ -79,12 +79,17 @@ Agent 可用工具，生成圖片並寫入 workspace。`auth_mode=codex` 走 Cod
   "prompt": "a clean product mockup",
   "model": "gpt-image-2",
   "output_path": "outputs/mockup.png",
-  "auth_mode": "auto"
+  "auth_mode": "auto",
+  "subject_reference": [
+    {"type": "character", "image_file": "refs/anchor.png"}
+  ]
 }
 ```
 
 `auth_mode` 可為 `auto`、`codex`、`api_key`。`auto` 會優先使用 `codex login` 產生的
 Codex OAuth access token；若 Codex backend 拒絕且 `.env` 有 `OPENAI_API_KEY`，則 fallback 到 API key。
+`subject_reference` 目前支援 Codex OAuth path，會把 workspace 內的參照圖轉成 Codex Responses
+`input_image`，用於角色或主體一致性；API key path 會明確拒絕而非靜默忽略。
 
 ---
 

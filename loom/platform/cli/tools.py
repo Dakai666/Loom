@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import mimetypes
 import os
 import re
 import signal
@@ -176,32 +177,50 @@ def _make_openai_image_scope_resolver(workspace: Path):
             selector = str(resolved.parent.relative_to(_workspace_resolved))
         except ValueError:
             selector = os.path.normpath(str(resolved.parent))
+        requirements = [
+            ScopeRequirement(
+                resource="path",
+                action="write",
+                selector=selector,
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+            ScopeRequirement(
+                resource="network",
+                action="connect",
+                selector="api.openai.com",
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+            ScopeRequirement(
+                resource="network",
+                action="connect",
+                selector="chatgpt.com",
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+        ]
+        for ref in call.args.get("subject_reference") or []:
+            if not isinstance(ref, dict) or not ref.get("image_file"):
+                continue
+            ref_path = _resolve_workspace_path(str(ref["image_file"]), workspace)
+            try:
+                ref_selector = str(ref_path.relative_to(_workspace_resolved))
+            except ValueError:
+                ref_selector = os.path.normpath(str(ref_path))
+            requirements.append(
+                ScopeRequirement(
+                    resource="path",
+                    action="read",
+                    selector=ref_selector,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                )
+            )
         return ScopeRequest(
             tool_name=call.tool_name,
             capabilities=call.capabilities,
-            requirements=[
-                ScopeRequirement(
-                    resource="path",
-                    action="write",
-                    selector=selector,
-                    tool_name=call.tool_name,
-                    capabilities=call.capabilities,
-                ),
-                ScopeRequirement(
-                    resource="network",
-                    action="connect",
-                    selector="api.openai.com",
-                    tool_name=call.tool_name,
-                    capabilities=call.capabilities,
-                ),
-                ScopeRequirement(
-                    resource="network",
-                    action="connect",
-                    selector="chatgpt.com",
-                    tool_name=call.tool_name,
-                    capabilities=call.capabilities,
-                ),
-            ],
+            requirements=requirements,
         )
     return _resolve
 
@@ -2871,6 +2890,40 @@ async def _decode_openai_image_response(
     raise RuntimeError("OpenAI image response did not include b64_json or url.")
 
 
+def _build_openai_subject_reference_content(
+    raw_refs: Any,
+    workspace: Path,
+) -> list[dict[str, Any]]:
+    """Convert subject_reference entries into Codex Responses input_image items."""
+
+    if raw_refs in (None, ""):
+        return []
+    if not isinstance(raw_refs, list):
+        raise ValueError("subject_reference must be an array.")
+
+    content: list[dict[str, Any]] = []
+    for idx, ref in enumerate(raw_refs):
+        if not isinstance(ref, dict):
+            raise ValueError(f"subject_reference[{idx}] must be an object.")
+        image_file = str(ref.get("image_file", "")).strip()
+        if not image_file:
+            raise ValueError(f"subject_reference[{idx}].image_file is required.")
+        image_path = _resolve_workspace_path(image_file, workspace)
+        try:
+            image_bytes = image_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(
+                f"Could not read subject_reference[{idx}].image_file: {image_file}"
+            ) from exc
+        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:{mime_type};base64,{encoded}",
+        })
+    return content
+
+
 def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
     """Build an OpenAI GPT Image generation tool."""
 
@@ -2936,6 +2989,18 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             value = call.args.get(key)
             if isinstance(value, str) and value.strip():
                 image_options[key] = value.strip()
+        try:
+            subject_reference_content = _build_openai_subject_reference_content(
+                call.args.get("subject_reference"),
+                workspace,
+            )
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=str(exc),
+            )
 
         async def _request_openai_images(client: httpx.AsyncClient, bearer: str):
             payload = {"prompt": prompt, **image_options}
@@ -2971,7 +3036,10 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                 ),
                 "input": [{
                     "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        *subject_reference_content,
+                    ],
                 }],
                 "tools": [tool_spec],
                 "stream": True,
@@ -3027,6 +3095,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                             and fallback is not None
                             and fallback.source == "api_key"
                             and exc.response.status_code in {401, 403}
+                            and not subject_reference_content
                         )
                         if not can_fallback:
                             raise
@@ -3034,6 +3103,16 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                         image_bytes = await _decode_openai_image_response(client, data)
                         credential_source = fallback.source
                 else:
+                    if subject_reference_content:
+                        return ToolResult(
+                            call_id=call.id,
+                            tool_name=call.tool_name,
+                            success=False,
+                            error=(
+                                "subject_reference currently requires Codex OAuth "
+                                "(use auth_mode=codex or run `codex login` with auth_mode=auto)."
+                            ),
+                        )
                     data = await _request_openai_images(client, credential.token)
                     image_bytes = await _decode_openai_image_response(client, data)
                     credential_source = credential.source
@@ -3106,6 +3185,29 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                     "enum": ["auto", "codex", "api_key"],
                     "default": "auto",
                     "description": "auto prefers Codex OAuth and falls back to OPENAI_API_KEY.",
+                },
+                "subject_reference": {
+                    "type": "array",
+                    "description": (
+                        "Reference images for subject or character consistency. "
+                        "Currently supported on the Codex OAuth path."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "description": "Reference type, e.g. character.",
+                                "default": "character",
+                            },
+                            "image_file": {
+                                "type": "string",
+                                "description": "Workspace-relative reference image path.",
+                            },
+                        },
+                        "required": ["image_file"],
+                        "additionalProperties": False,
+                    },
                 },
                 "n": {"type": "integer", "minimum": 1, "maximum": 1, "default": 1},
             },
