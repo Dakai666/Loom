@@ -396,7 +396,8 @@ Model routing works by prefix — `gpt-*` and `openai/<model>` use
 
 Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
 and writes a PNG/WebP/JPEG under the workspace. With Codex OAuth it uses the
-Codex Responses backend; with `OPENAI_API_KEY` it uses the OpenAI Images API.
+Codex Responses backend and supports workspace image `subject_reference`
+anchors; with `OPENAI_API_KEY` it uses the OpenAI Images API.
 
 ---
 
