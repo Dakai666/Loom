@@ -216,6 +216,46 @@ async def test_openai_image_tool_includes_subject_reference_in_codex_payload(
 
 
 @pytest.mark.asyncio
+async def test_openai_image_tool_detects_reference_mime_without_extension(
+    tmp_path,
+    monkeypatch,
+):
+    from loom.core import session as session_module
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "codex-token"}}),
+        encoding="utf-8",
+    )
+    reference = tmp_path / "refs" / "portrait"
+    reference.parent.mkdir()
+    reference.write_bytes(b"\xff\xd8\xff\xe0jpeg-bytes")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+    monkeypatch.setattr(cli_tools.httpx, "AsyncClient", _CodexStreamAsyncClient)
+    _CodexStreamAsyncClient.requests = []
+    tool = make_openai_image_generation_tool(tmp_path)
+    call = ToolCall(
+        tool_name=tool.name,
+        args={
+            "prompt": "draw the same character",
+            "output_path": "renders/codex-ref.png",
+            "auth_mode": "codex",
+            "subject_reference": [{"image_file": "refs/portrait"}],
+        },
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    result = await tool.executor(call)
+
+    assert result.success
+    content = _CodexStreamAsyncClient.requests[0]["json"]["input"][0]["content"]
+    assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.asyncio
 async def test_openai_image_tool_rejects_subject_reference_on_api_key_path(
     tmp_path,
     monkeypatch,
@@ -245,6 +285,7 @@ async def test_openai_image_tool_rejects_subject_reference_on_api_key_path(
     result = await tool.executor(call)
 
     assert not result.success
+    assert "You selected auth_mode=api_key" in result.error
     assert "subject_reference currently requires Codex OAuth" in result.error
     assert _FakeAsyncClient.requests == []
 

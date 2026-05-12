@@ -2915,13 +2915,31 @@ def _build_openai_subject_reference_content(
             raise ValueError(
                 f"Could not read subject_reference[{idx}].image_file: {image_file}"
             ) from exc
-        mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
+        mime_type = (
+            mimetypes.guess_type(str(image_path))[0]
+            or _detect_image_mime_type(image_bytes)
+            or "image/png"
+        )
         encoded = base64.b64encode(image_bytes).decode("ascii")
         content.append({
             "type": "input_image",
             "image_url": f"data:{mime_type};base64,{encoded}",
         })
     return content
+
+
+def _detect_image_mime_type(image_bytes: bytes) -> str | None:
+    """Best-effort image MIME detection from magic bytes."""
+
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    return None
 
 
 def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
@@ -3104,12 +3122,16 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                         credential_source = fallback.source
                 else:
                     if subject_reference_content:
+                        reason = (
+                            "You selected auth_mode=api_key, which does not support subject_reference. "
+                            if auth_mode == "api_key" else ""
+                        )
                         return ToolResult(
                             call_id=call.id,
                             tool_name=call.tool_name,
                             success=False,
                             error=(
-                                "subject_reference currently requires Codex OAuth "
+                                f"{reason}subject_reference currently requires Codex OAuth "
                                 "(use auth_mode=codex or run `codex login` with auth_mode=auto)."
                             ),
                         )
