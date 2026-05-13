@@ -151,40 +151,6 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
--- Issue #120 PR 2: Skill candidate pool (pre-promotion revisions)
-CREATE TABLE IF NOT EXISTS skill_candidates (
-    id                 TEXT PRIMARY KEY,
-    parent_skill_name  TEXT NOT NULL,
-    parent_version     INTEGER NOT NULL,
-    candidate_body     TEXT NOT NULL,
-    mutation_strategy  TEXT NOT NULL,
-    diagnostic_keys    TEXT NOT NULL DEFAULT '[]',  -- JSON list of SemanticEntry keys
-    origin_session_id  TEXT,
-    status             TEXT NOT NULL DEFAULT 'generated',
-    pareto_scores      TEXT NOT NULL DEFAULT '{}',  -- JSON dict (task_type → score)
-    notes              TEXT,
-    created_at         TEXT NOT NULL,
-    updated_at         TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_skill_candidates_parent ON skill_candidates(parent_skill_name);
-CREATE INDEX IF NOT EXISTS idx_skill_candidates_status ON skill_candidates(status);
-
--- Issue #120 PR 3: SKILL.md version history (snapshot before each promote/rollback)
-CREATE TABLE IF NOT EXISTS skill_version_history (
-    id                   TEXT PRIMARY KEY,
-    skill_name           TEXT NOT NULL,
-    version              INTEGER NOT NULL,
-    body                 TEXT NOT NULL,
-    reason               TEXT NOT NULL DEFAULT 'promote',  -- 'promote' | 'rollback' | 'manual'
-    source_candidate_id  TEXT,                             -- NULL for rollbacks / manual archives
-    archived_at          TEXT NOT NULL,
-    UNIQUE(skill_name, version, archived_at)
-);
-
-CREATE INDEX IF NOT EXISTS idx_skill_history_name    ON skill_version_history(skill_name);
-CREATE INDEX IF NOT EXISTS idx_skill_history_version ON skill_version_history(skill_name, version);
-
 -- Issue #142: Agent self-observability snapshots (one row per dimension per session)
 CREATE TABLE IF NOT EXISTS agent_telemetry (
     dimension   TEXT NOT NULL,
@@ -279,11 +245,6 @@ class SQLiteStore:
                 # Issue #142 soft-delete: mark compressed entries instead of deleting
                 # them so compression losses can be audited and recovered.
                 "ALTER TABLE episodic_entries ADD COLUMN compressed_at TEXT",
-                # Issue #120 PR 4: maturity tag on skill genomes (mature / needs_improvement)
-                "ALTER TABLE skill_genomes ADD COLUMN maturity_tag TEXT",
-                # Issue #120 PR 4: fast-track flag bypasses shadow phase when Grader
-                # proves ≥20% pass-rate improvement over the previous version.
-                "ALTER TABLE skill_candidates ADD COLUMN fast_track INTEGER NOT NULL DEFAULT 0",
                 # Memory Ontology v0.1 (issue #281): three-axis classification on
                 # semantic + relational facts. See loom/core/memory/ontology.py.
                 "ALTER TABLE semantic_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
