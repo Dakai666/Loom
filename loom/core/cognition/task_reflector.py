@@ -2,8 +2,8 @@
 Task Reflector — structured post-turn diagnosis for skill usage (Issue #120).
 
 Replaces the scalar self-assessment path (``SkillOutcomeTracker.maybe_evaluate``)
-with a full ``TaskDiagnostic`` that captures *what* went right/wrong and *how*
-the SKILL.md could be mutated to improve.
+with a full ``TaskDiagnostic`` that captures *what* went right/wrong and which
+SKILL.md edits might help future operators.
 
 Layering
 --------
@@ -17,7 +17,8 @@ Layering
 Fire-and-forget, same as the old path.  Subscribers receive the completed
 diagnostic via async callbacks — the CLI/TUI/Discord each register one.
 
-See Issue #120 for the full architecture plan (three-PR rollout).
+Issue #365 retired the candidate-generation and promotion lifecycle; this
+module now only diagnoses skill usage and updates confidence.
 """
 
 from __future__ import annotations
@@ -32,8 +33,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
-    from loom.core.cognition.skill_mutator import MutationProposal, SkillMutator
-    from loom.core.cognition.skill_promoter import SkillPromoter
     from loom.core.events import ExecutionEnvelopeView
     from loom.core.memory.facade import MemoryFacade
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
@@ -111,66 +110,6 @@ class TaskDiagnostic:
         )
 
 
-@dataclass
-class BatchDiagnostic:
-    """Aggregate diagnostic produced by meta-skill-engineer's Grader phase.
-
-    Wraps a list of per-test ``TaskDiagnostic`` instances together with the
-    pass rate measured by the Grader.  ``previous_pass_rate`` enables
-    fast-track detection: if ``improvement >= 0.20``, ``SkillMutator``
-    will flag the resulting candidate for direct promotion without the
-    normal shadow N-wins phase.
-    """
-
-    skill_name: str
-    diagnostics: list[TaskDiagnostic]
-    pass_rate: float                     # fraction 0.0–1.0
-    previous_pass_rate: float | None = None
-
-    @property
-    def improvement(self) -> float | None:
-        if self.previous_pass_rate is None:
-            return None
-        return self.pass_rate - self.previous_pass_rate
-
-    @property
-    def avg_quality_score(self) -> float:
-        if not self.diagnostics:
-            return 0.0
-        return sum(d.quality_score for d in self.diagnostics) / len(self.diagnostics)
-
-    @property
-    def aggregated_suggestions(self) -> list[str]:
-        """Deduplicated mutation suggestions across all diagnostics."""
-        return _dedup_flat(d.mutation_suggestions for d in self.diagnostics)
-
-    @property
-    def aggregated_violations(self) -> list[str]:
-        """Deduplicated ``instructions_violated`` across all diagnostics.
-
-        Used by ``SkillMutator.from_batch_diagnostic`` to give the rewrite
-        prompt the same contextual fields that ``propose_candidate`` passes
-        per-turn, so batch rewrites don't lose the "why" behind suggestions.
-        """
-        return _dedup_flat(d.instructions_violated for d in self.diagnostics)
-
-    @property
-    def aggregated_failures(self) -> list[str]:
-        """Deduplicated ``failure_patterns`` across all diagnostics."""
-        return _dedup_flat(d.failure_patterns for d in self.diagnostics)
-
-    def one_line_summary(self) -> str:
-        n = len(self.diagnostics)
-        pct = f"{self.pass_rate * 100:.0f}%"
-        imp = ""
-        if self.improvement is not None and self.improvement > 0:
-            imp = f" (+{self.improvement * 100:.0f}%)"
-        return (
-            f"{self.skill_name} · {n} tests · pass_rate={pct}{imp}"
-            f" · avg_q={self.avg_quality_score:.1f}/5"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
@@ -221,7 +160,6 @@ Rules:
 # ---------------------------------------------------------------------------
 
 DiagnosticSubscriber = Callable[[TaskDiagnostic], Awaitable[None]]
-MutationSubscriber = Callable[["MutationProposal"], Awaitable[None]]
 
 
 class TaskReflector:
@@ -266,8 +204,6 @@ class TaskReflector:
         session_id: str,
         enabled: bool = True,
         visibility: str = "summary",
-        mutator: "SkillMutator | None" = None,
-        promoter: "SkillPromoter | None" = None,
     ) -> None:
         self._router = router
         self._model = model
@@ -279,10 +215,7 @@ class TaskReflector:
         self._session_id = session_id
         self._enabled = enabled
         self._visibility = visibility if visibility in ("off", "summary", "verbose") else "summary"
-        self._mutator = mutator
-        self._promoter = promoter
         self._subscribers: list[DiagnosticSubscriber] = []
-        self._mutation_subscribers: list[MutationSubscriber] = []
 
     # ------------------------------------------------------------------
     # Subscriber API
@@ -291,26 +224,6 @@ class TaskReflector:
     def subscribe(self, callback: DiagnosticSubscriber) -> None:
         """Register a coroutine that receives each completed diagnostic."""
         self._subscribers.append(callback)
-
-    def subscribe_mutation(self, callback: MutationSubscriber) -> None:
-        """Register a coroutine that receives each generated ``MutationProposal``.
-
-        Firing conditions (all must hold):
-          1. A ``SkillMutator`` was passed to the reflector constructor.
-          2. ``SkillMutator.should_propose(diagnostic)`` returned ``True``
-             (enabled, quality_score ≤ ceiling, enough mutation_suggestions).
-          3. The rewrite produced a body that passed ``_looks_like_skill_md``
-             and was successfully inserted into ``skill_candidates``.
-          4. ``visibility != "off"``.
-
-        Subscribers run **after** ``ProceduralMemory.insert_candidate`` so the
-        candidate is already persisted when they fire.  Treat this as a
-        "candidate generated" audit hook, not a UI-blocking event — the
-        diagnostic subscriber chain (``subscribe``) is the primary live
-        notification path; mutation subscribers are fired only on the rare
-        turns that actually produce a candidate.
-        """
-        self._mutation_subscribers.append(callback)
 
     @property
     def enabled(self) -> bool:
@@ -425,12 +338,6 @@ class TaskReflector:
         if self._relational is not None and self._episodic is not None:
             self._schedule_behavioural_triples()
 
-        # Post-hook: skill mutation proposal (Issue #120 PR 2).  Fire-and-forget
-        # so the candidate rewrite doesn't block the turn.  The scheduled task
-        # re-fetches the parent skill so it picks up the EMA-updated version/row.
-        if self._mutator is not None and self._mutator.should_propose(diagnostic):
-            self._schedule_mutation_proposal(diagnostic)
-
         # Notify subscribers (TUI / Discord / CLI).
         await self._notify_subscribers(diagnostic)
 
@@ -509,59 +416,6 @@ class TaskReflector:
         task.add_done_callback(_on_reflect_done)
 
     # ------------------------------------------------------------------
-    # Mutation post-hook (Issue #120 PR 2)
-    # ------------------------------------------------------------------
-
-    def _schedule_mutation_proposal(self, diagnostic: TaskDiagnostic) -> None:
-        """Schedule ``SkillMutator.propose_candidate`` + persist the candidate.
-
-        The scheduled task re-reads the parent skill so its ``version``
-        (and body) reflect the post-EMA row, then asks the mutator for a
-        rewrite and calls ``ProceduralMemory.insert_candidate`` on success.
-        Failures are swallowed to keep reflection non-fatal.
-        """
-        async def _run() -> None:
-            try:
-                parent = await self._procedural.get(diagnostic.skill_name)
-                if parent is None:
-                    return
-                proposal = await self._mutator.propose_candidate(  # type: ignore[union-attr]
-                    parent=parent,
-                    diagnostic=diagnostic,
-                    session_id=self._session_id,
-                )
-                if proposal is None:
-                    return
-                await self._procedural.insert_candidate(proposal.candidate)
-                logger.debug(
-                    "SkillMutator candidate generated: skill=%s parent_version=%d id=%s",
-                    proposal.candidate.parent_skill_name,
-                    proposal.candidate.parent_version,
-                    proposal.candidate.id,
-                )
-                # Issue #120 PR 3: auto-shadow (mode C) — promote generated →
-                # shadow when the promoter says the parent is underperforming.
-                # No-op in modes manual_b / off, or when the confidence gate
-                # declines.
-                if self._promoter is not None:
-                    try:
-                        await self._promoter.maybe_auto_shadow(
-                            proposal.candidate.id,
-                            reason=f"auto_c:diagnostic q={diagnostic.quality_score:.1f}",
-                        )
-                    except Exception as exc:
-                        logger.debug("auto_shadow failed: %s", exc)
-                await self._notify_mutation_subscribers(proposal)
-            except Exception as exc:
-                logger.debug("Mutation post-hook failed: %s", exc)
-
-        task = asyncio.create_task(
-            _run(),
-            name=f"mutation_proposal:{diagnostic.skill_name}:{diagnostic.turn_index}",
-        )
-        task.add_done_callback(_on_reflect_done)
-
-    # ------------------------------------------------------------------
     # Subscriber dispatch
     # ------------------------------------------------------------------
 
@@ -573,15 +427,6 @@ class TaskReflector:
                 await cb(diagnostic)
             except Exception as exc:
                 logger.debug("Diagnostic subscriber failed: %s", exc)
-
-    async def _notify_mutation_subscribers(self, proposal: "MutationProposal") -> None:
-        if self._visibility == "off" or not self._mutation_subscribers:
-            return
-        for cb in list(self._mutation_subscribers):
-            try:
-                await cb(proposal)
-            except Exception as exc:
-                logger.debug("Mutation subscriber failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Envelope formatting
@@ -686,18 +531,6 @@ def _try_load(text: str) -> Any:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
-
-
-def _dedup_flat(lists: "Any") -> list[str]:
-    """Flatten an iterable of string lists, preserving first-seen order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for lst in lists:
-        for item in lst:
-            if item not in seen:
-                seen.add(item)
-                result.append(item)
-    return result
 
 
 def _on_reflect_done(task: asyncio.Task) -> None:

@@ -7,6 +7,12 @@ precondition_checks:
     description: "只能寫入 skills/ 目錄，不可修改框架或使用者程式碼"
 ---
 
+> **DEPRECATED TECHNICAL SURFACE:** Quest D Phase 1.C retired the old
+> `SkillMutator` / `SkillPromoter` / `SkillGate` candidate lifecycle and the
+> `generate_skill_candidate_from_batch` / promote / rollback tools. This skill
+> still documents that retired architecture and must not be used for live skill
+> mutation until issue #366 refreshes it.
+
 # Meta Skill Engineer
 
 系統化建立、評估、迭代改進 Loom 技能的技能。是 Skill Genome 的「評估層」，讓技能從「能用」進化到「用得好」。

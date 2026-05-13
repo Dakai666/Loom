@@ -1,26 +1,22 @@
 """
 Issue #212: framework signal preservation.
 
-These tests pin the contract that any place where the harness used to
-swallow a signal (tool exception, middleware decision, mutator LLM
-failure) now produces structured, queryable output.
+These tests pin the contract that any place where the harness used to swallow
+a signal (tool exception or middleware decision) now produces structured,
+queryable output.
 
-Scope of this file matches the three actionable items left in #212
-after #196/#197/#205 closed the rest:
+Scope of this file keeps the still-live actionable items from #212:
 
 * ``ToolResult.error_context`` — full traceback for tool/middleware
   exceptions, separate from the single-line ``error`` shown to the agent.
 * ``call.metadata["middleware_trace"]`` — append-only list of
   ``{middleware, decision, …}`` entries so a denied/raised result can be
   attributed to the middleware that produced the verdict.
-* ``SkillMutator.last_failure`` — non-None record of the most recent
-  silent LLM failure so the skill-evolution loop is no longer invisible.
 """
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -241,71 +237,3 @@ class TestMiddlewareTrace:
         i_auth = decisions.index(("BlastRadius", "authorize"))
         i_raise = decisions.index(("LifecycleGate", "tool-raised"))
         assert i_auth < i_raise
-
-
-# ---------------------------------------------------------------------------
-# #4 — SkillMutator.last_failure
-# ---------------------------------------------------------------------------
-
-class TestSkillMutatorLastFailure:
-    def test_default_is_none(self) -> None:
-        from loom.core.cognition.skill_mutator import SkillMutator
-        m = SkillMutator(router=AsyncMock(), model="x", enabled=True)
-        assert m.last_failure is None
-
-    @pytest.mark.asyncio
-    async def test_propose_candidate_records_llm_failure(self) -> None:
-        """When the LLM call raises inside ``propose_candidate`` the mutator
-        must (a) still return ``None`` (non-fatal contract preserved) and
-        (b) populate ``last_failure`` so the session can see the silence."""
-        from loom.core.cognition.skill_mutator import SkillMutator
-
-        router = AsyncMock()
-        router.chat.side_effect = RuntimeError("provider 503")
-
-        m = SkillMutator(router=router, model="x", enabled=True, min_suggestions=1)
-
-        parent = SimpleNamespace(name="test-skill", body="# Skill\nbody text", version="v1")
-        diagnostic = SimpleNamespace(
-            mutation_suggestions=["do X"],
-            instructions_violated=[],
-            failure_patterns=[],
-            quality_score=2.0,
-        )
-
-        result = await m.propose_candidate(parent, diagnostic, session_id="s")
-
-        assert result is None
-        assert m.last_failure is not None
-        assert m.last_failure["path"] == "propose_candidate"
-        assert m.last_failure["skill"] == "test-skill"
-        assert m.last_failure["error_type"] == "RuntimeError"
-        assert "503" in m.last_failure["error"]
-        assert isinstance(m.last_failure["timestamp"], float)
-
-    @pytest.mark.asyncio
-    async def test_from_batch_diagnostic_records_llm_failure(self) -> None:
-        """Same contract for the batch path."""
-        from loom.core.cognition.skill_mutator import SkillMutator
-
-        router = AsyncMock()
-        router.chat.side_effect = TimeoutError("router timeout")
-
-        m = SkillMutator(router=router, model="x", enabled=True)
-
-        parent = SimpleNamespace(name="batch-skill", body="# Skill\nbody", version="v1")
-        batch = SimpleNamespace(
-            aggregated_suggestions=["s"],
-            aggregated_violations=[],
-            aggregated_failures=[],
-            improvement=0.05,
-            diagnostics=[],
-        )
-
-        result = await m.from_batch_diagnostic(parent, batch, session_id="s")
-
-        assert result is None
-        assert m.last_failure is not None
-        assert m.last_failure["path"] == "from_batch_diagnostic"
-        assert m.last_failure["skill"] == "batch-skill"
-        assert m.last_failure["error_type"] == "TimeoutError"
