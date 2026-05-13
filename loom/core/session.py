@@ -1437,6 +1437,12 @@ class LoomSession:
             self._skill_check_manager,
         ))
 
+        # doc/54 §4.3 / §5 P0-5: Register skill_review tool — agent's
+        # conversational entry to per-skill ledger history. Read-only;
+        # no-op if the ledger isn't available.
+        from loom.platform.cli.tools import make_skill_review_tool
+        self.registry.register(make_skill_review_tool(self._ledger_store))
+
         # Issue #120 PR 3: promote / rollback lifecycle tools.
         self.registry.register(make_skill_promote_tool(self._skill_promoter))
         self.registry.register(make_skill_rollback_tool(self._skill_promoter))

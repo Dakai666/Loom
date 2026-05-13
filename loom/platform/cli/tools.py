@@ -24,6 +24,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,7 +75,7 @@ async def _terminate_proc_group(proc: asyncio.subprocess.Process) -> None:
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from loom.core.ledger import LedgerEmitter
+    from loom.core.ledger import LedgerEmitter, LedgerStore
     from loom.core.cognition.skill_gate import SkillGate
     from loom.core.cognition.skill_mutator import SkillMutator
     from loom.core.cognition.skill_promoter import SkillPromoter
@@ -2016,6 +2017,111 @@ def make_unload_skill_tool(
         executor=_unload_skill,
         tags=["skill", "memory"],
         impact_scope="memory",
+    )
+
+
+# ------------------------------------------------------------------
+# Skill review tool (doc/54 §4.3, §5 P0-5) — read-only ledger digest
+# ------------------------------------------------------------------
+
+
+def make_skill_review_tool(
+    ledger_store: "LedgerStore | None",
+) -> ToolDefinition:
+    """Create a SAFE ``skill_review`` tool — pull per-skill usage history.
+
+    Conversational entry point for the optimization loop described in
+    doc/54 §4.3: user asks "what happened with skill X recently?", agent
+    calls this, agent reads digest, discusses, edits SKILL.md.
+
+    Read-only. Backed by :func:`query_skill_ledger` — same query layer the
+    weekly worker (doc/54 §4.2) will reuse.
+    """
+    from loom.core.skill_review import query_skill_ledger, render_digest_as_text
+
+    async def _skill_review(call: ToolCall) -> ToolResult:
+        skill_id = (call.args.get("skill_id") or "").strip()
+        if not skill_id:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="skill_id required (the skill name to review)",
+            )
+        if ledger_store is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="Ledger is not available in this session; cannot review.",
+            )
+
+        days = call.args.get("days", 7)
+        try:
+            days_f = float(days)
+        except (TypeError, ValueError):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=f"'days' must be a number; got {days!r}",
+            )
+        if days_f <= 0:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'days' must be positive",
+            )
+
+        max_episodes = int(call.args.get("max_episodes", 30))
+        max_events = int(call.args.get("max_events_per_episode", 30))
+
+        since_ts = time.time() - days_f * 86400.0
+        digest = await query_skill_ledger(
+            ledger_store,
+            skill_id,
+            since_ts=since_ts,
+            max_episodes=max_episodes,
+            max_events_per_episode=max_events,
+        )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=render_digest_as_text(digest),
+        )
+
+    return ToolDefinition(
+        name="skill_review",
+        description=(
+            "Pull a per-skill usage digest from the event ledger over a "
+            "recent time window. Use this when reviewing how a skill has "
+            "been performing, or before discussing SKILL.md updates. "
+            "Read-only — does not modify any skill."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "skill_id": {
+                    "type": "string",
+                    "description": "Skill name to review (e.g. 'code_weaver').",
+                },
+                "days": {
+                    "type": "number",
+                    "description": "Window size in days (default 7).",
+                    "default": 7,
+                },
+                "max_episodes": {
+                    "type": "integer",
+                    "description": "Cap on episodes returned (default 30).",
+                    "default": 30,
+                },
+                "max_events_per_episode": {
+                    "type": "integer",
+                    "description": "Cap on per-episode follow-on events (default 30).",
+                    "default": 30,
+                },
+            },
+            "required": ["skill_id"],
+        },
+        executor=_skill_review,
+        tags=["skill", "review", "read-only"],
+        impact_scope="read-only",
     )
 
 
