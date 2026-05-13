@@ -98,6 +98,10 @@ class ToolLifecyclePayload:
     state_history: list[dict] = field(default_factory=list)
     rolled_back: bool = False
     error: str | None = None
+    # Populated for skill-scoped tools (load_skill / unload_skill) so the
+    # `skill_id` virtual column (doc/54 §5 P0-1) can index per-skill usage.
+    # NULL for all other tools.
+    skill_id: str | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 

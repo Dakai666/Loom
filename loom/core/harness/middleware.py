@@ -1444,6 +1444,24 @@ class LifecycleGateMiddleware(Middleware):
         return result
 
 
+_SKILL_PAYLOAD_TOOL_NAMES = frozenset({"load_skill", "unload_skill"})
+
+
+def _skill_id_from_call(call: "ToolCall") -> str | None:
+    """Return the target skill name for load_skill / unload_skill calls.
+
+    Surfaces it as a top-level `skill_id` payload field so the ledger's
+    `skill_id` virtual column (doc/54 §5 P0-1) indexes per-skill usage.
+    Returns None for all other tools.
+    """
+    if call.tool_name not in _SKILL_PAYLOAD_TOOL_NAMES:
+        return None
+    name = call.args.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
 class LifecycleMiddleware(Middleware):
     """
     Outer lifecycle middleware — ActionRecord bookends and post-execution flow.
@@ -1836,6 +1854,7 @@ class LifecycleMiddleware(Middleware):
                     args_digest=self._args_digest(call.args),
                     args=None,  # full args 留 future debug mode；BEGIN 帶 digest 即可
                     state_history=[],
+                    skill_id=_skill_id_from_call(call),
                 ),
                 event_id=f"evt_tool_begin_{record.id[:12]}",
             )
@@ -1874,6 +1893,7 @@ class LifecycleMiddleware(Middleware):
                         state_history=rec.history_dicts(),
                         rolled_back=rolled_back,
                         error=(result.error if result and not result.success else None),
+                        skill_id=_skill_id_from_call(call),
                         # parent links the END to its sibling BEGIN.
                         # event_id of BEGIN was deterministically derived
                         # from record.id; mirror that here.

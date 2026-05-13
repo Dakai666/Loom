@@ -180,6 +180,79 @@ async def test_args_digest_changes_with_args(
 
 
 # ---------------------------------------------------------------------------
+# skill_id payload (doc/54 §5 P0-1 / P0-2)
+# ---------------------------------------------------------------------------
+
+
+async def test_skill_id_in_payload_for_load_skill(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """load_skill calls must populate skill_id so the virtual column indexes them."""
+    reg = _registry_with(tool_name="load_skill")
+    pipeline = MiddlewarePipeline(
+        [LifecycleMiddleware(registry=reg, ledger_emitter=emitter)]
+    )
+    call = ToolCall(
+        tool_name="load_skill",
+        args={"name": "code_weaver"},
+        trust_level=TrustLevel.SAFE,
+        session_id="sess_mw",
+    )
+
+    async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
+        await pipeline.execute(call, reg.get("load_skill").executor)
+
+    events = await _fetch(ledger, "turn_mw", "tool_lifecycle")
+    assert [e.payload["phase"] for e in events] == ["BEGIN", "END"]
+    assert events[0].payload["skill_id"] == "code_weaver"
+    assert events[1].payload["skill_id"] == "code_weaver"
+
+    # Virtual column should also surface it for queries via the fluent API.
+    via_query = await ledger.events.where(skill_id="code_weaver").all()
+    assert len(via_query) == 2
+    assert all(e.event_type == "tool_lifecycle" for e in via_query)
+
+
+async def test_skill_id_absent_for_non_skill_tool(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    reg = _registry_with()  # default tool_name="echo"
+    pipeline = MiddlewarePipeline(
+        [LifecycleMiddleware(registry=reg, ledger_emitter=emitter)]
+    )
+
+    async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
+        await pipeline.execute(_make_call(), reg.get("echo").executor)
+
+    events = await _fetch(ledger, "turn_mw", "tool_lifecycle")
+    assert events[0].payload["skill_id"] is None
+    assert events[1].payload["skill_id"] is None
+
+
+async def test_skill_id_none_when_name_missing(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """unload_skill with no name (list-mode) must not write a bogus skill_id."""
+    reg = _registry_with(tool_name="unload_skill")
+    pipeline = MiddlewarePipeline(
+        [LifecycleMiddleware(registry=reg, ledger_emitter=emitter)]
+    )
+    call = ToolCall(
+        tool_name="unload_skill",
+        args={},  # list-mode: no skill name
+        trust_level=TrustLevel.SAFE,
+        session_id="sess_mw",
+    )
+
+    async with async_turn_scope("turn_mw"), async_correlation_scope("c1"):
+        await pipeline.execute(call, reg.get("unload_skill").executor)
+
+    events = await _fetch(ledger, "turn_mw", "tool_lifecycle")
+    assert events[0].payload["skill_id"] is None
+    assert events[1].payload["skill_id"] is None
+
+
+# ---------------------------------------------------------------------------
 # rolled_back flag — REVERTED terminal state
 # ---------------------------------------------------------------------------
 
