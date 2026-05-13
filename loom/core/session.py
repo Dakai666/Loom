@@ -1443,13 +1443,20 @@ class LoomSession:
         from loom.platform.cli.tools import make_skill_review_tool
         self.registry.register(make_skill_review_tool(self._ledger_store))
 
-        # Issue #120 PR 3: promote / rollback lifecycle tools.
-        self.registry.register(make_skill_promote_tool(self._skill_promoter))
-        self.registry.register(make_skill_rollback_tool(self._skill_promoter))
+        # doc/54 §3 retirement (Round 1): promote / rollback tools are no
+        # longer exposed to the agent. The underlying SkillPromoter class
+        # stays for now — task_reflector + auto_c shadow flow still hold
+        # references — and disappears in the Phase 1.C deletion PR. The
+        # tools themselves were structurally broken (promote always
+        # returned "Candidate not found" because no candidate creation
+        # path actually persisted rows); pulling them off the surface is
+        # a UX fix as well as a retirement step.
 
         # Issue #120 PR 4: meta-skill-engineer surface — agent-callable
         # equivalents of the Grader → candidate-pool → maturity workflow so
         # the skill can drive the whole cycle without dropping to Python.
+        # NOTE: these tools survive this PR (Phase 1.C will remove them
+        # together with the SkillMutator / candidate-pool subsystem).
         self.registry.register(make_generate_skill_candidate_from_batch_tool(
             self._skill_mutator, self._memory.procedural, session_id=self.session_id,
         ))

@@ -65,19 +65,24 @@ code_weaver 97% 不是靠任何自動框架，是靠：
 
 ## 3. 退役清單（完全刪除）
 
-| 元件 | 檔案 | 處置 |
-|------|------|------|
-| `SkillGate` (shadow_mode auto_c) | `loom/core/cognition/skill_gate.py` | 刪除整檔 |
-| `SkillPromoter` | `loom/core/cognition/skill_promoter.py` | 刪除整檔 |
-| `SkillMutator` | `loom/core/cognition/skill_mutator.py` | 刪除整檔 |
-| `SkillGenome` dataclass + ProceduralMemory candidate 介面 | `loom/core/memory/procedural.py` | 刪除 candidate / genome 相關函式，保留 procedural memory 其他用途 |
-| `loom.db` skill_genomes / skill_candidates / skill_version_history 表 | `loom/core/memory/store.py` | 刪除 DDL；確認 `loom.db` 整個檔案是否還有其他用途，若無則一併移除 |
-| `generate_skill_candidate_from_batch` tool | `loom/platform/cli/tools.py` | 刪除 tool definition + executor |
-| `promote_skill_candidate` tool | 同上 | 刪除 |
-| `set_skill_maturity` tool | 同上 | 刪除 |
-| `loom.toml [mutation]` section | `loom.toml` + parser | 整節移除 |
-| `meta-skill-engineer` 七階段工作流文件 | `.claude/skills/meta-skill-engineer/` 或 `skills/meta-skill-engineer/` | 移除 skill；相關 Grader / Comparator / Analyzer prompt 一併刪 |
-| `outputs/doc/skill_system_evolution_plan_2026-05-02.md` | doc | 標記為「已被 doc/54 取代」並移到 `outputs/doc/archive/` 或直接刪 |
+每一行的「session.py register 行」欄記載**對應 `LoomSession.start()` 中要一併拿掉的註冊呼叫**。Round 1 review（#363）抓到的 dependency ordering 問題：若刪除 module 但留下 register 行，會 ImportError；刪除 register 但留下 module 則該 tool 對 agent 不可見但代碼仍在。**同一個 commit 同時處理才是 atomic**。
+
+| 元件 | 檔案 | 處置 | session.py register 行 |
+|------|------|------|------------------------|
+| `SkillGate` (shadow_mode auto_c) | `loom/core/cognition/skill_gate.py` | 刪除整檔 | `_skill_gate` 欄位 + `make_load_skill_tool(skill_gate=...)` 引用 |
+| `SkillPromoter` | `loom/core/cognition/skill_promoter.py` | 刪除整檔 | `_skill_promoter` 欄位 + `task_reflector` 引用 + `subscribe(_fan_promotion)` |
+| `SkillMutator` | `loom/core/cognition/skill_mutator.py` | 刪除整檔 | `_skill_mutator` 欄位 + `task_reflector(mutator=...)` |
+| `SkillGenome` dataclass + ProceduralMemory candidate 介面 | `loom/core/memory/procedural.py` | 刪除 candidate / genome 相關函式，保留 procedural memory 其他用途 | — |
+| `memory.db` 中的 skill_genomes / skill_candidates / skill_version_history 表 | `loom/core/memory/store.py` (DDL @ lines 46+) | 刪除 DDL；下次 init 時表不再 create。**注意**：實際 host 是 `memory.db` 不是 `loom.db`（後者實際為空，是個 ghost file，可額外刪除） | — |
+| `generate_skill_candidate_from_batch` tool | `loom/platform/cli/tools.py` | 刪除 factory + executor | `make_generate_skill_candidate_from_batch_tool(...)` register (#363 後 session.py:1453) |
+| `promote_skill_candidate` tool | 同上 | 刪除 | **已在 #363 移除** (was session.py:1447) |
+| `skill_rollback` tool | 同上 | 刪除 | **已在 #363 移除** (was session.py:1448) |
+| `set_skill_maturity` tool | 同上 | 刪除 | `make_set_skill_maturity_tool(...)` register (#363 後 session.py:1456) |
+| `loom.toml [mutation]` section | `loom.toml` + parser | 整節移除 | — |
+| `loom review` CLI 子命令（舊版） | `loom/platform/cli/main.py:3041` `cli.command("review")` | 刪除 | — |
+| `meta-skill-engineer` 七階段工作流文件 | `.claude/skills/meta-skill-engineer/` 或 `skills/meta-skill-engineer/` | 移除 skill；相關 Grader / Comparator / Analyzer prompt 一併刪 | — |
+| `~/.loom/loom.db` ghost file | runtime 副作用 | 不用 migration；下次 LoomSession start 不會再寫 | — |
+| `outputs/doc/skill_system_evolution_plan_2026-05-02.md` | doc | 標記為「已被 doc/54 取代」並移到 `outputs/doc/archive/` 或直接刪 | — |
 
 **保留**：
 
@@ -178,11 +183,13 @@ git commit（=版本紀錄，取代 candidate/promote 機制）
 ```python
 skill_review(
     skill_id: str,
-    since: str = "7d",                         # "1d" / "7d" / "30d" / ISO timestamp
-    include: list[str] = ["all"],              # tool_calls / failures / feedback / turns / thoughts
-    max_events: int = 100,                     # cap 回傳體積
+    days: float = 7,                           # window size; numeric for ergonomics
+    max_episodes: int = 30,                    # cap 回傳體積（episodes）
+    max_events_per_episode: int = 30,          # cap 回傳體積（每 episode 內事件）
 ) -> SkillUsageDigest
 ```
+
+> **Round 1 review note (#363)**：原 Round 0 規格寫 `since="7d" / "30d" / ISO timestamp`、`include=[...]`、`max_events=100`。實作（PR #363 `make_skill_review_tool`）採用更扁平的 `days` + 雙層 max — 簡單、ergonomic、不需要 string parsing。`include` 過濾留給 Watch issue #364 收集真實使用反饋後再決定要不要做。本 doc 已對齊實作。
 
 回傳結構（skill-scoped 而非 session-scoped）：
 
@@ -258,7 +265,7 @@ class SkillUsageDigest:
 | P0-5 | 新增 `skill_review` tool（包裝 P0-4） | `loom/platform/cli/tools.py` | S | 通道 C |
 | P0-6 | 新增 weekly worker（呼叫 P0-4 + render markdown） | 新檔 | M | 通道 B |
 | P0-7 | `loom.toml` 新增 `skill_weekly_review` schedule 條目 | `loom.toml` + autonomy schedules parser | S | 通道 B 觸發 |
-| P0-8 | `loom.db` schema init bug **不修**，整個 `loom.db` 一併評估退場 | `loom/core/memory/store.py` | — | 廢除路徑 |
+| P0-8 | `loom.db` 真相確認 — 該檔案實際**完全空白**（no tables），技能表的真實 host 是 `memory.db`。退役工作 = 從 `memory.db` 刪除 skill_genomes / skill_candidates / skill_version_history DDL（Phase 1.C 範圍）；`~/.loom/loom.db` ghost file 不需要 migration | `loom/core/memory/store.py` | — | Phase 1.C |
 
 **今日優先做 P0-1 與 P0-2**：沒有 `skill_id` payload，下游全部沒資料可吃。其他可以分次。
 
