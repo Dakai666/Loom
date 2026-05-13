@@ -15,10 +15,22 @@ from loom.core.skill_review.query import (
     query_skill_ledger,
 )
 from loom.core.skill_review.render import render_digest_as_text
+from loom.core.skill_review.weekly import (
+    SkillAttention,
+    WeeklyReport,
+    compute_attention,
+    generate_weekly_report,
+    render_weekly_markdown,
+)
 
 __all__ = [
     "SkillEpisode",
     "SkillUsageDigest",
     "query_skill_ledger",
     "render_digest_as_text",
+    "SkillAttention",
+    "WeeklyReport",
+    "compute_attention",
+    "generate_weekly_report",
+    "render_weekly_markdown",
 ]
