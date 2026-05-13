@@ -17,7 +17,6 @@ precondition_checks:
   - ref: checks.reject_write_operations
     applies_to: [write_file]
     description: "分析技能為唯讀模式，禁止寫入任何檔案"
-maturity_tag: mature  # optional
 ---
 ```
 
@@ -29,7 +28,6 @@ maturity_tag: mature  # optional
 | `description` | str | 一句話觸發描述 |
 | `tags` | list[str] | 技能分類標籤 |
 | `precondition_checks` | list[dict] | Issue #64：技能聲明的執行前置條件 |
-| `maturity_tag` | str | 成熟度標籤（`mature` / `needs_improvement` / null）|
 
 ### precondition_checks 格式（Issue #64 Phase B）
 
@@ -85,9 +83,10 @@ skills/
 | `deprecation_threshold` | 固定 0.3 |
 | `tags` | frontmatter `tags` |
 | `precondition_check_refs` | frontmatter `precondition_checks` |
-| `maturity_tag` | frontmatter `maturity_tag` |
 
-`body` 包含完整的 frontmatter，這樣 LLM rewrite（SkillMutator）時保有完整上下文。
+> **v0.3.7.3 (Quest D Phase 1.C)**：移除 `maturity_tag` 欄位。原本服務於 SkillMutator/SkillPromoter 的 mature/needs_improvement 標籤已不再被任何邏輯讀取。對應自動演化流程退役，詳見 [doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)。
+
+`body` 包含完整的 frontmatter，作為技能載入後 LLM 自然能讀到的上下文（過去 SkillMutator 自動 rewrite 路徑已退役，現在 SKILL.md 更新走「使用者 + 絲絲對話 → 手動 Edit」通道，見 doc/54 §4.1）。
 
 ---
 

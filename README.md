@@ -262,38 +262,30 @@ Drop a `SKILL.md` into your `skills/` directory — Loom auto-imports it at sess
 
 ### Structured Diagnostic Feedback Loop
 
-After each turn where a skill was used, `TaskReflector` runs a background LLM self-assessment that produces a `TaskDiagnostic` — a structured record of which instructions were followed or violated, failure and success patterns, concrete `mutation_suggestions`, and a `quality_score` (1–5). The score feeds into the skill's `confidence` via EMA (α = 0.15). Skills whose confidence drops below a configurable threshold are deprecated and removed from the Tier 1 catalog.
+After each turn where a skill was used, `TaskReflector` runs a background LLM self-assessment that produces a `TaskDiagnostic` — a structured record of which instructions were followed or violated, failure and success patterns, concrete `skill_edit_suggestions`, and a `quality_score` (1–5). The score feeds into the skill's `confidence` via EMA (α = 0.15). Skills whose confidence drops below a configurable threshold are deprecated and removed from the Tier 1 catalog.
 
-### Skill Evolution Lifecycle
+### Skill Optimization Loop
 
-`TaskDiagnostic` data feeds a full candidate-pool evolution pipeline:
+> v0.3.7.2 (Quest D Phase 1.C): the prior automated candidate-pool pipeline (`SkillMutator` / `SkillPromoter` / `SkillGate` / shadow_mode / fast_track) was retired. Process signals (tool success rate, verdict ratio, shadow delta) are not a credible proxy for skill output quality — without an Evaluator substrate, automated promotion is garbage-in/out. See [doc/54-Skill-Evolution-Arena-設計.md](doc/54-Skill-Evolution-Arena-設計.md).
 
-```
-TaskReflector → TaskDiagnostic
-                      ↓
-              SkillMutator.propose_candidate()   ← single-turn background path
-              SkillMutator.from_batch_diagnostic() ← meta-skill-engineer batch path
-                      ↓
-              SkillCandidate (skill_candidates table)
-                      ↓
-         generated → shadow → promoted   (or deprecated / rolled_back)
-```
+Skills now improve through three observation channels, with **edits made by the user/agent in conversation** — git commits replace the old candidate/promote mechanism:
 
-**Shadow mode** — a promoted candidate serves alongside the parent. `SkillGate` A/B-routes turns to shadow or parent body, accumulating a win record before promotion is confirmed.
+**1. Real-time feedback (in-conversation)**
+- *System layer*: `ToolCallDimension` surfaces tool failure rate + anomalies inline during the turn — the user sees a skill stumbling without having to dig.
+- *Conversation layer*: user observes → tells the agent → agent edits `SKILL.md` directly → `git commit`.
 
-**Fast-track** — when the `meta-skill-engineer` Grader proves ≥ 20% pass-rate improvement over the previous version, the candidate is flagged `fast_track=True` and can be promoted immediately without the shadow N-wins phase — Grader is the ground truth.
-
-**Maturity tag** — `SkillGenome.maturity_tag` (`mature` / `needs_improvement`) is set by the operator after reviewing eval history; visible in `loom review <name>`.
-
-**Version history** — every `promote` and `rollback` snapshots the previous body to `skill_version_history`. Full rollback is always available: `loom skill rollback <name>`.
-
+**2. Weekly worker** — pure SQL + template, no LLM
 ```bash
-loom skill candidates          # browse the candidate pool
-loom skill promote <id>       # promote a shadow candidate
-loom skill rollback <name>    # restore the previous body
-loom skill history <name>     # full version archive
-loom skill review <name>      # one-stop: genome · eval history · candidates · insights
+loom skill weekly                            # writes outputs/self_check/<date>-skill-weekly.md
+loom skill weekly --days 30 --no-write       # print to stdout
 ```
+The worker scans the ledger for the past window and renders a *該關注清單* with five structural codes: `muffled_run` / `undigested_feedback` / `abnormal_outcome` / `stale` / `exists_but_unused`. It does **not** score or rank skills — just surfaces structural observations for the user to act on.
+
+**3. Conversational ledger pull** — `skill_review` agent tool
+- The agent calls `skill_review(skill_id="code_weaver", days=7)` to pull per-skill activation episodes (load events + same-turn tool calls + memory writes + turn outcomes) from the ledger.
+- Typical flow: user asks "回顧一下 X 技能最近的狀況" → agent reads the digest → discussion → agent edits `SKILL.md` based on the conversation.
+
+Behind the scenes, `load_skill` / `unload_skill` calls now carry a `skill_id` on their `tool_lifecycle` ledger events (indexed by `idx_skill`), so per-skill queries are O(log n). The weekly worker and `skill_review` tool share a common query layer (`loom.core.skill_review.query_skill_ledger`).
 
 ### Precondition Checks — Framework-Enforced Safety Rails
 
@@ -413,7 +405,7 @@ The `doc/` directory contains full technical documentation for every subsystem:
 | Trust levels & blast radius | `doc/05-Trust-Level.md` |
 | Scope-aware authorization design | `doc/44-Scope-Aware-Permission-規劃.md` |
 | Memory system & governance | `doc/08-Memory-概述.md`, `doc/08b-Memory-Governance.md` |
-| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`, `doc/10b-Skill-Evolution.md` |
+| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `doc/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
 | Memory Pulse & Lifecycle | `doc/12b-Memory-Health.md` |
 | Execution visualization | `doc/43-Harness-Execution-可視化規劃.md` |
 | Autonomy engine | `doc/19-Autonomy-概述.md`, `doc/21-Action-Planner.md` |

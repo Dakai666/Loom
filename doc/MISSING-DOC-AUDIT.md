@@ -20,9 +20,9 @@ loom/
 │   │                   index.py, maintenance.py, embeddings.py, facade.py, store.py,
 │   │                   session_log.py, skill_outcome.py
 │   ├── cognition/     prompt_stack.py, router.py, providers.py, reflection.py,
-│   │                   task_reflector.py, skill_promoter.py, skill_mutator.py,
-│   │                   skill_gate.py, dreaming.py, counter_factual.py,
-│   │                   context.py, skill_gate.py
+│   │                   task_reflector.py, dreaming.py, counter_factual.py,
+│   │                   context.py
+│   │                   (Quest D Phase 1.C 退役了 skill_promoter / skill_mutator / skill_gate)
 │   ├── agent/         subagent.py
 │   ├── tasks/          manager.py, tasklist.py
 │   ├── jobs/           store.py, scratchpad.py
@@ -124,10 +124,10 @@ loom/
 **舊版 doc**：描述 async `build()` + `AgentPromptGenerator` + `PersonalityLoader`
 **實作**：純同步讀檔、字串組合，runtime 可切換 personality
 
-### 6. Skill Evolution — 缺少 `from_batch_diagnostic()`
+### 6. Skill Evolution — ⚠️ 整節廢棄
 
-**舊版 doc**：只描述 `propose_candidate()`
-**實作**：還有 `from_batch_diagnostic()`（Grader 批量路徑）和 `fast_track` 機制
+**狀態**：Quest D Phase 1.C（PR #367）已退役 `SkillMutator` / `SkillPromoter` / `SkillGate` / `from_batch_diagnostic()` / `fast_track` 整套機制。
+**現行設計**：見 [doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)（三條觀察通道 + `skill_review` agent 工具）。
 
 ---
 
