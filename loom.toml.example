@@ -177,7 +177,7 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 # trajectory.  The diagnostic produces a ``TaskDiagnostic`` with:
 #   - instructions_followed / instructions_violated
 #   - failure_patterns / success_patterns
-#   - mutation_suggestions      (concrete SKILL.md edit proposals)
+#   - skill_edit_suggestions    (concrete SKILL.md edit proposals you/絲絲 read)
 #   - task_type                 (closed label set, see task_reflector.py)
 #   - quality_score             (1.0-5.0, also drives the confidence EMA)
 #
@@ -191,7 +191,7 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 auto_reflect = true
 # "off"     — disables diagnostics entirely (no LLM call, no writes)
 # "summary" — one-line live notification per diagnostic (default)
-# "verbose" — full diagnostic summary + top mutation suggestion
+# "verbose" — full diagnostic summary + top skill_edit_suggestion
 visibility = "summary"
 
 # ─────────────────────────────────────────────

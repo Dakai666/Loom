@@ -79,7 +79,7 @@ class TaskDiagnostic:
     instructions_violated: list[str]
     failure_patterns: list[str]
     success_patterns: list[str]
-    mutation_suggestions: list[str]
+    skill_edit_suggestions: list[str]
     quality_score: float  # 1.0 - 5.0
     envelope_ids: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -92,17 +92,24 @@ class TaskDiagnostic:
 
     @classmethod
     def from_json(cls, raw: str) -> "TaskDiagnostic":
-        """Inverse of ``to_json`` — hydrate a diagnostic from storage."""
+        """Inverse of ``to_json`` — hydrate a diagnostic from storage.
+
+        Backwards-compat: pre-Quest D Phase 1.C diagnostics stored the
+        field as ``mutation_suggestions``. Map it forward so ``loom
+        diagnostic recent`` keeps surfacing historical entries.
+        """
         data = json.loads(raw)
         data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+        if "mutation_suggestions" in data and "skill_edit_suggestions" not in data:
+            data["skill_edit_suggestions"] = data.pop("mutation_suggestions")
         return cls(**data)
 
     def one_line_summary(self) -> str:
         """Compact summary for terminal / status-bar display."""
         suggestion = ""
-        if self.mutation_suggestions:
-            suggestion = self.mutation_suggestions[0][:60]
-            if len(self.mutation_suggestions[0]) > 60:
+        if self.skill_edit_suggestions:
+            suggestion = self.skill_edit_suggestions[0][:60]
+            if len(self.skill_edit_suggestions[0]) > 60:
                 suggestion += "…"
         return (
             f"{self.skill_name} · {self.task_type} · {self.quality_score:.1f}/5"
@@ -144,14 +151,14 @@ Output ONLY a JSON object (no markdown fencing, no explanation):
   "instructions_violated": [strings, each citing a specific SKILL.md instruction you ignored or misinterpreted],
   "failure_patterns": [strings, recurring failure modes observed in this execution],
   "success_patterns": [strings, effective approaches worth distilling],
-  "mutation_suggestions": [strings, each a concrete SKILL.md edit like "add a step X after Y" or "clarify phrase Z to mean W"],
+  "skill_edit_suggestions": [strings, each a concrete SKILL.md edit like "add a step X after Y" or "clarify phrase Z to mean W"],
   "quality_score": float 1.0-5.0 (1=poor, 3=adequate, 5=excellent)
 }}
 
 Rules:
 - Each list item must be under 200 characters.
 - Empty list [] is allowed if nothing applies.
-- "mutation_suggestions" must be directly applicable to the SKILL.md text, not abstract advice.
+- "skill_edit_suggestions" must be directly applicable to the SKILL.md text, not abstract advice.
 """
 
 
@@ -324,7 +331,7 @@ class TaskReflector:
             instructions_violated=parsed["instructions_violated"],
             failure_patterns=parsed["failure_patterns"],
             success_patterns=parsed["success_patterns"],
-            mutation_suggestions=parsed["mutation_suggestions"],
+            skill_edit_suggestions=parsed["skill_edit_suggestions"],
             quality_score=parsed["quality_score"],
             envelope_ids=[e.envelope_id for e in envelopes[-3:]],
         )
@@ -469,7 +476,7 @@ _REQUIRED_FIELDS: tuple[str, ...] = (
     "instructions_violated",
     "failure_patterns",
     "success_patterns",
-    "mutation_suggestions",
+    "skill_edit_suggestions",
     "quality_score",
 )
 
@@ -515,7 +522,10 @@ def _parse_diagnostic(raw: str) -> dict[str, Any] | None:
             "instructions_violated": _list(data.get("instructions_violated")),
             "failure_patterns": _list(data.get("failure_patterns")),
             "success_patterns": _list(data.get("success_patterns")),
-            "mutation_suggestions": _list(data.get("mutation_suggestions")),
+            # Accept the legacy key from older prompts / model habits.
+            "skill_edit_suggestions": _list(
+                data.get("skill_edit_suggestions") or data.get("mutation_suggestions")
+            ),
             "quality_score": _clamp(float(data.get("quality_score", 3.0)), 1.0, 5.0),
         }
     except (TypeError, ValueError):

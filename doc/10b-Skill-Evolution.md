@@ -1,6 +1,21 @@
 # Skill Evolution（更新版）
 
-> 依據實際 `skill_promoter.py` / `skill_mutator.py` 更新。
+> ## ⚠️ RETIRED — Quest D Phase 1.C
+>
+> 本文件描述的整套系統（`SkillMutator` / `SkillPromoter` / `SkillGate` / `skill_candidates` table / shadow_mode auto_c / fast_track promote）**已於 v0.3.7.2 完全退役**（PR #367）。
+>
+> 主因：過程訊號（tool 成功率、verdict ratio、shadow delta）不是「技能成品品質」的可信 proxy。沒有可信 grading substrate，自動 shadow/promote 是 garbage-in / garbage-out。
+>
+> **目前替代設計**：[doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)
+>
+> 三條觀察通道取代七層演化：
+> 1. 即時反饋（`ToolCallDimension` 系統層 + 對話內 `Edit SKILL.md`）
+> 2. Weekly worker（`loom skill weekly`，純 SQL + 模板）
+> 3. 對話內 ledger 調閱（`skill_review` agent tool）
+>
+> 真正的 grading 留給未來 Evaluator Skill milestone（依賴明確可驗證任務目標）。
+>
+> 以下內容**僅作歷史參考**。具體代碼引用全部失效。
 
 ---
 

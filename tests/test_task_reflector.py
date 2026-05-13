@@ -46,7 +46,7 @@ def _make_diagnostic(**overrides) -> TaskDiagnostic:
         instructions_violated=["Skipped step 3"],
         failure_patterns=["Rushed final check"],
         success_patterns=["Used grep before editing"],
-        mutation_suggestions=["Add explicit 'verify with tests' after step 3"],
+        skill_edit_suggestions=["Add explicit 'verify with tests' after step 3"],
         quality_score=3.5,
         envelope_ids=["e1", "e2"],
     )
@@ -91,7 +91,7 @@ def _valid_llm_payload() -> str:
             "instructions_violated": ["Did not run tests"],
             "failure_patterns": ["Skipped verification"],
             "success_patterns": ["Used minimal edits"],
-            "mutation_suggestions": ["Insert 'run pytest' after every edit"],
+            "skill_edit_suggestions": ["Insert 'run pytest' after every edit"],
             "quality_score": 3.5,
         }
     )
@@ -114,21 +114,21 @@ class TestTaskDiagnostic:
         assert rehydrated.timestamp.isoformat() == d.timestamp.isoformat()
 
     def test_one_line_summary_includes_suggestion(self):
-        d = _make_diagnostic(mutation_suggestions=["Add explicit 'verify' step"])
+        d = _make_diagnostic(skill_edit_suggestions=["Add explicit 'verify' step"])
         s = d.one_line_summary()
         assert "test-skill" in s
         assert "3.5" in s
         assert "verify" in s
 
     def test_one_line_summary_without_suggestion(self):
-        d = _make_diagnostic(mutation_suggestions=[])
+        d = _make_diagnostic(skill_edit_suggestions=[])
         s = d.one_line_summary()
         assert "test-skill" in s
         assert "·" in s  # separator present
 
     def test_one_line_summary_truncates_long_suggestion(self):
         long = "x" * 200
-        d = _make_diagnostic(mutation_suggestions=[long])
+        d = _make_diagnostic(skill_edit_suggestions=[long])
         s = d.one_line_summary()
         assert "…" in s
         assert len(s) < 160
@@ -192,17 +192,17 @@ class TestParseDiagnostic:
 
     def test_non_list_fields_coerced_to_empty_list(self):
         bad = json.loads(_valid_llm_payload())
-        bad["mutation_suggestions"] = "not a list"
+        bad["skill_edit_suggestions"] = "not a list"
         parsed = _parse_diagnostic(json.dumps(bad))
         assert parsed is not None
-        assert parsed["mutation_suggestions"] == []
+        assert parsed["skill_edit_suggestions"] == []
 
     def test_list_item_truncation(self):
         bad = json.loads(_valid_llm_payload())
-        bad["mutation_suggestions"] = ["x" * 500]
+        bad["skill_edit_suggestions"] = ["x" * 500]
         parsed = _parse_diagnostic(json.dumps(bad))
         assert parsed is not None
-        assert len(parsed["mutation_suggestions"][0]) == 200
+        assert len(parsed["skill_edit_suggestions"][0]) == 200
 
     def test_garbage_returns_none(self):
         assert _parse_diagnostic("I did a great job!") is None

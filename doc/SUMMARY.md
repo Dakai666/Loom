@@ -34,7 +34,7 @@
 | [08b-Memory-Governance.md](08b-Memory-Governance.md) | Trust Tier 分級、矛盾偵測 + 自動解決、Admission Gate、Decay Cycle |
 | [09-四種記憶詳解.md](09-四種記憶詳解.md) | Episodic / Semantic（含 Trust Tier + Anti-pattern）/ Procedural / Relational |
 | [10-Skill-Genome.md](10-Skill-Genome.md) | EMA confidence 機制與自動廢棄（含 SKILL.md frontmatter schema）|
-| [10b-Skill-Evolution.md](10b-Skill-Evolution.md) | Issue #120：TaskReflector → SkillMutator → SkillPromoter + SkillGate 的三段式進化生命週期 |
+| [10b-Skill-Evolution.md](10b-Skill-Evolution.md) | **⚠️ RETIRED** — Issue #120 七層演化（Quest D Phase 1.C 退役）。現行設計見 [54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md) |
 | [11-Memory-Search.md](11-Memory-Search.md) | Phase 5 向量相似度 → FTS5 BM25 → recency 三層混合搜尋 |
 | [12-Memory-Index.md](12-Memory-Index.md) | 輕量目錄，含 Anti-pattern count 與 Self-Portrait |
 | **[12b-Memory-Health.md](12b-Memory-Health.md)** | MemoryHealthTracker 操作手冊（Issue #133）|

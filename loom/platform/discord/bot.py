@@ -555,12 +555,12 @@ class LoomDiscordBot:
                         lines.append("violated:")
                         for v in diagnostic.instructions_violated[:2]:
                             lines.append(f"• {v[:180]}")
-                    if diagnostic.mutation_suggestions:
+                    if diagnostic.skill_edit_suggestions:
                         lines.append("suggest:")
-                        for s in diagnostic.mutation_suggestions[:2]:
+                        for s in diagnostic.skill_edit_suggestions[:2]:
                             lines.append(f"• {s[:180]}")
-                elif diagnostic.mutation_suggestions:
-                    lines.append(f"› {diagnostic.mutation_suggestions[0][:180]}")
+                elif diagnostic.skill_edit_suggestions:
+                    lines.append(f"› {diagnostic.skill_edit_suggestions[0][:180]}")
                 await _safe_send(thread_ref, "\n".join(lines))
             except Exception:
                 pass

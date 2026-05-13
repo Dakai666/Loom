@@ -239,8 +239,8 @@ async def _chat(
         if vis == "off":
             return
         console.print(f"[loom.muted]  ⇢ diagnosed {diagnostic.one_line_summary()}[/loom.muted]")
-        if vis == "verbose" and diagnostic.mutation_suggestions:
-            for hint in diagnostic.mutation_suggestions[:2]:
+        if vis == "verbose" and diagnostic.skill_edit_suggestions:
+            for hint in diagnostic.skill_edit_suggestions[:2]:
                 console.print(f"[loom.muted]      · {hint}[/loom.muted]")
 
     session.subscribe_diagnostic(_cli_diagnostic)
@@ -1760,10 +1760,10 @@ async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -
             if vis == "off":
                 return
             try:
-                if vis == "verbose" and diagnostic.mutation_suggestions:
+                if vis == "verbose" and diagnostic.skill_edit_suggestions:
                     body = (
                         f"{diagnostic.one_line_summary()}\n"
-                        f"→ {diagnostic.mutation_suggestions[0][:100]}"
+                        f"→ {diagnostic.skill_edit_suggestions[0][:100]}"
                     )
                     app.notify(body, title="Skill diagnostic", timeout=6)
                 else:
@@ -2717,9 +2717,9 @@ async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
         if diag.instructions_violated:
             for v in diag.instructions_violated[:3]:
                 console.print(f"   [loom.error]✗[/loom.error] {v}")
-        if diag.mutation_suggestions:
+        if diag.skill_edit_suggestions:
             console.print("   [bold]→ suggestions:[/bold]")
-            for s in diag.mutation_suggestions[:3]:
+            for s in diag.skill_edit_suggestions[:3]:
                 console.print(f"     • {s}")
         console.print()
 
