@@ -98,6 +98,10 @@ class ToolLifecyclePayload:
     state_history: list[dict] = field(default_factory=list)
     rolled_back: bool = False
     error: str | None = None
+    # Populated for skill-scoped tools (load_skill / unload_skill) so the
+    # `skill_id` virtual column (doc/54 §5 P0-1) can index per-skill usage.
+    # NULL for all other tools.
+    skill_id: str | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
@@ -188,6 +192,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_session_recent ON events (branch_id, session_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_tool           ON events (branch_id, tool_name, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_verdict        ON events (branch_id, verdict, timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_skill          ON events (branch_id, skill_id, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_parent         ON events (parent_event_id)",
     "CREATE INDEX IF NOT EXISTS idx_predecessor    ON events (predecessor_memory_id)",
 ]

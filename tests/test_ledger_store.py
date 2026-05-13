@@ -166,6 +166,15 @@ async def test_predecessor_index_used(store: LedgerStore) -> None:
     assert "idx_predecessor" in " ".join(plan)
 
 
+async def test_skill_index_used(store: LedgerStore) -> None:
+    """doc/54 §5 P0-3 — per-skill queries must hit idx_skill, not table-scan."""
+    plan = await store.explain_query_plan(
+        "SELECT * FROM events WHERE branch_id=? AND skill_id=? ORDER BY timestamp",
+        ("main", "code_weaver"),
+    )
+    assert "idx_skill" in " ".join(plan), " ".join(plan)
+
+
 # ---------------------------------------------------------------------------
 # schema_version preserved
 # ---------------------------------------------------------------------------

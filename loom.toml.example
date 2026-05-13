@@ -547,6 +547,31 @@ enabled  = false           # set true to activate daemon
 # notify        = false
 # notify_thread = 0
 
+# ── Example: weekly skill review (doc/54 §4.2) ──────────────────────────────────
+# Surfaces structural observations about skill usage — *not* a grader.
+# Pure SQL + template (no LLM at the worker level); the agent here just
+# fires `loom skill weekly`, then optionally narrates the report's
+# 該關注清單 section if anything fired.
+#
+# Manual run: `loom skill weekly` writes outputs/self_check/<date>-skill-weekly.md
+#
+# [[autonomy.schedules]]
+# name          = "skill_weekly_review"
+# cron          = "0 2 * * 6"        # 02:00 UTC Saturday = 10:00 Asia/Taipei
+# intent        = """Run the weekly skill review. Execute `loom skill weekly`
+#                    via run_bash, then read outputs/self_check/<today>-skill-weekly.md
+#                    and surface any items in the 該關注清單 section. Do not
+#                    edit skills; just observe and report."""
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0
+# allowed_tools = ["run_bash", "read_file"]
+# scope_grants  = [
+#   { resource = "exec", action = "execute", selector = "workspace" },
+#   { resource = "path", action = "read", selector = "outputs" },
+# ]
+# attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
+
 # ─────────────────────────────────────────────
 # Notifications
 # ─────────────────────────────────────────────
