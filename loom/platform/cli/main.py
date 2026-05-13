@@ -3015,6 +3015,62 @@ async def _skill_set_maturity(skill_name: str, tag: str | None, db: str) -> None
     )
 
 
+# ---------------------------------------------------------------------------
+# loom skill weekly — doc/54 §4.2 / §5 P0-6 weekly worker
+# ---------------------------------------------------------------------------
+
+
+@skill.command("weekly")
+@click.option("--days", default=7, show_default=True, type=int,
+              help="Window size in days.")
+@click.option("--output-dir", default="outputs/self_check",
+              show_default=True, type=click.Path(),
+              help="Where to write the markdown report (omit --no-write to skip).")
+@click.option("--no-write", is_flag=True, default=False,
+              help="Print to stdout instead of writing a file.")
+def skill_weekly(days: int, output_dir: str, no_write: bool) -> None:
+    """Run the weekly skill review worker.
+
+    Pure ledger query + structural analysis — no LLM. Produces a markdown
+    report listing per-skill activity and a "該關注清單" of structural
+    observations (doc/54 §4.4).
+    """
+    asyncio.run(_skill_weekly(days, output_dir, no_write))
+
+
+async def _skill_weekly(days: int, output_dir: str, no_write: bool) -> None:
+    from loom.core.ledger import LedgerStore
+    from loom.core.skill_review import generate_weekly_report
+
+    store = LedgerStore()
+    await store.open()
+    try:
+        workspace = Path.cwd()
+        skills_roots = [
+            workspace / "skills",
+            Path.home() / ".loom" / "skills",
+        ]
+        report = await generate_weekly_report(
+            store,
+            skills_roots=skills_roots,
+            output_dir=None if no_write else Path(output_dir),
+            window_days=days,
+            write_to_disk=not no_write,
+        )
+    finally:
+        await store.close()
+
+    if no_write:
+        console.print(report.markdown)
+    else:
+        console.print(
+            f"Weekly skill review written to: [bold]{report.output_path}[/bold]\n"
+            f"Skills seen: {len(report.skills_seen)} | "
+            f"On disk: {len(report.skills_on_disk)} | "
+            f"Attention items: {len(report.attention)}"
+        )
+
+
 async def _resolve_candidate_id(proc: "ProceduralMemory", prefix: str) -> str | None:
     """Accept either a full uuid or a short prefix (≥4 chars).
 
