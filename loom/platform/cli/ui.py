@@ -68,6 +68,7 @@ from loom.core.events import (  # noqa: E402, F401
     TurnDropped,
     TurnPaused,
 )
+from loom.platform.command_catalog import personality_command_entries
 
 
 # ---------------------------------------------------------------------------
@@ -88,13 +89,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/name",                       "rename the current session"),
     ("/new",                        "start a fresh session"),
     ("/pause",                      "toggle HITL pause after each tool batch"),
-    ("/personality",                "show active persona + available list"),
-    ("/personality off",            "clear active persona"),
-    ("/personality adversarial",    "switch persona → adversarial"),
-    ("/personality architect",      "switch persona → architect"),
-    ("/personality minimalist",     "switch persona → minimalist"),
-    ("/personality operator",       "switch persona → operator"),
-    ("/personality researcher",     "switch persona → researcher"),
+    *personality_command_entries(),
     ("/scope",                      "list active scope grants"),
     ("/scope clear",                "revoke all non-system grants"),
     ("/scope revoke",               "revoke a specific grant by index"),

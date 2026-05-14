@@ -11,6 +11,8 @@ from textual.widget import Widget
 from textual.widgets import OptionList, TextArea
 from textual.widgets.option_list import Option
 
+from loom.platform.command_catalog import personality_slash_commands
+
 
 _NEWLINE_KEYS = ("alt+enter", "shift+enter", "ctrl+j", "ctrl+o")
 
@@ -88,13 +90,7 @@ class InputArea(Widget):
         "/new",
         "/sessions",
         "/model",
-        "/personality",
-        "/personality off",
-        "/personality adversarial",
-        "/personality minimalist",
-        "/personality architect",
-        "/personality researcher",
-        "/personality operator",
+        *personality_slash_commands(),
         "/tier",
         "/tier 1",
         "/tier 2",

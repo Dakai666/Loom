@@ -25,23 +25,15 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from loom.platform.command_catalog import discover_personality_names
+
 if TYPE_CHECKING:
     from loom.platform.discord.bot import LoomDiscordBot
     from loom.core.session import LoomSession
 
 
-# Personalities and summary modes are static enough that hard-coded Choices
-# are clearer than dynamic autocomplete. Models and grant IDs *are* dynamic
-# and use autocomplete callbacks below.
-_PERSONALITY_CHOICES = [
-    app_commands.Choice(name="adversarial", value="adversarial"),
-    app_commands.Choice(name="minimalist", value="minimalist"),
-    app_commands.Choice(name="architect", value="architect"),
-    app_commands.Choice(name="researcher", value="researcher"),
-    app_commands.Choice(name="operator", value="operator"),
-    app_commands.Choice(name="off (clear)", value="off"),
-]
-
+# Summary modes are static enough for hard-coded Choices. Models, grant IDs,
+# and personalities use autocomplete callbacks below.
 _SUMMARY_CHOICES = [
     app_commands.Choice(name="off", value="off"),
     app_commands.Choice(name="on", value="on"),
@@ -191,20 +183,41 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
         )
 
     # ── /loom-personality ─────────────────────────────────────────────
+    async def _personality_autocomplete(
+        interaction: discord.Interaction, current: str,
+    ) -> list[app_commands.Choice[str]]:
+        session = _session_for(bot, interaction)
+        names = (
+            session._stack.available_personalities()
+            if session is not None
+            else discover_personality_names()
+        )
+        # "off" is a command sentinel, not a personality file.
+        choices = [app_commands.Choice(name="off (clear)", value="off")]
+        choices.extend(
+            app_commands.Choice(name=name, value=name)
+            for name in names
+        )
+        current_l = current.lower()
+        return [
+            choice for choice in choices
+            if not current_l or current_l in choice.name.lower()
+        ][:25]
+
     @tree.command(
         name="loom-personality",
         description="Switch cognitive persona, or omit to show the active one.",
     )
     @app_commands.describe(name="Persona to activate. Choose 'off (clear)' to remove.")
-    @app_commands.choices(name=_PERSONALITY_CHOICES)
+    @app_commands.autocomplete(name=_personality_autocomplete)
     async def loom_personality(
         interaction: discord.Interaction,
-        name: app_commands.Choice[str] | None = None,
+        name: str | None = None,
     ) -> None:
         session = await _require_session(bot, interaction)
         if session is None:
             return
-        arg = name.value if name is not None else ""
+        arg = name or ""
         await interaction.response.send_message(
             bot._cmd_personality(session, arg), ephemeral=True,
         )

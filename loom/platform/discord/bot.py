@@ -650,12 +650,21 @@ class LoomDiscordBot:
         "`/help` — Show this message\n\n"
         "Every command is also registered as a native `/loom-*` slash command — "
         "type `/loom` to see them in Discord's autocomplete.\n\n"
-        "Personalities: `adversarial` \xb7 `minimalist` \xb7 `architect` \xb7 `researcher` \xb7 `operator`\n\n"
         "*Send any message in the main channel to start a new session thread.*"
     )
 
     def _cmd_help(self) -> str:
-        return self.HELP_TEXT
+        from loom.platform.command_catalog import discover_personality_names
+
+        names = discover_personality_names()
+        if not names:
+            # Omit the Personalities line when the configured directory is empty.
+            return self.HELP_TEXT
+        rendered = " \xb7 ".join(f"`{name}`" for name in names)
+        return self.HELP_TEXT.replace(
+            "\n*Send any message",
+            f"\nPersonalities: {rendered}\n\n*Send any message",
+        )
 
     async def _cmd_sessions(self, session: "LoomSession") -> str:
         from loom.core.memory.session_log import SessionLog as _SL

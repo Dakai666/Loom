@@ -125,6 +125,17 @@ class PromptStack:
     # Runtime switching
     # ------------------------------------------------------------------
 
+    def _personality_file_for(self, name: str) -> Path | None:
+        """Return the matching personality file, ignoring filename case."""
+        candidate = self._personalities_dir / f"{name}.md"
+        if candidate.exists():
+            return candidate
+        wanted = name.lower()
+        for path in self._personalities_dir.glob("*.md"):
+            if path.is_file() and path.stem.lower() == wanted:
+                return path
+        return None
+
     def switch_personality(self, name: str) -> bool:
         """
         Load a personality by name from the personalities directory.
@@ -135,8 +146,8 @@ class PromptStack:
 
         Returns True if the file was found and loaded; False otherwise.
         """
-        candidate = self._personalities_dir / f"{name}.md"
-        if not candidate.exists():
+        candidate = self._personality_file_for(name)
+        if candidate is None:
             return False
 
         content = candidate.read_text(encoding="utf-8")
@@ -163,7 +174,9 @@ class PromptStack:
         """List personality stem names available in the personalities directory."""
         if not self._personalities_dir.exists():
             return []
-        return sorted(p.stem for p in self._personalities_dir.glob("*.md"))
+        return sorted(
+            {p.stem.lower() for p in self._personalities_dir.glob("*.md") if p.is_file()}
+        )
 
     # ------------------------------------------------------------------
     # Factory

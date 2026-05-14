@@ -189,6 +189,19 @@ class TestSwitchPersonality:
         stack.switch_personality("minimalist")
         assert stack.current_personality == "minimalist"
 
+    def test_switch_matches_filename_case_insensitively(self, tmp_soul, tmp_path):
+        personalities = tmp_path / "personalities"
+        personalities.mkdir()
+        (personalities / "Sisi_Tarot_Mood.md").write_text("tarot lens", encoding="utf-8")
+        stack = PromptStack(soul_path=tmp_soul, personalities_dir=personalities)
+        stack.load()
+
+        ok = stack.switch_personality("sisi_tarot_mood")
+
+        assert ok is True
+        assert "tarot lens" in stack.composed_prompt
+        assert stack.current_personality == "sisi_tarot_mood"
+
     def test_switch_appends_layer_when_none_active(self, tmp_soul, tmp_personalities):
         stack = PromptStack(soul_path=tmp_soul, personalities_dir=tmp_personalities)
         stack.load()
@@ -260,6 +273,15 @@ class TestAvailablePersonalities:
     def test_sorted_alphabetically(self, tmp_personalities):
         avail = PromptStack(personalities_dir=tmp_personalities).available_personalities()
         assert avail == sorted(avail)
+
+    def test_normalizes_filename_case(self, tmp_path):
+        personalities = tmp_path / "personalities"
+        personalities.mkdir()
+        (personalities / "Sisi_Tarot_Mood.md").write_text("tarot", encoding="utf-8")
+
+        avail = PromptStack(personalities_dir=personalities).available_personalities()
+
+        assert avail == ["sisi_tarot_mood"]
 
 
 # ---------------------------------------------------------------------------
