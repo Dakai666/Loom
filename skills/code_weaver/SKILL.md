@@ -1,6 +1,6 @@
 ---
 name: code_weaver
-description: "代碼理解與實作能力的統一入口。統一程式碼分析、工程實作、PR審查與安全審查能力，透過 Layer 1 核心心法驅動，自動識別情境並以正確的姿態處理。當使用者說「分析代碼」、「修bug」、「review PR」、「實作功能」、「資安審查」時使用。"
+description: "代碼理解與實作能力的統一入口。統一程式碼分析、工程實作、PR審查、安全審查與版本發佈能力，透過 Layer 1 核心心法驅動，自動識別情境並以正確的姿態處理。當使用者說「分析代碼」、「修bug」、「review PR」、「實作功能」、「資安審查」、「發佈release」時使用。"
 # Issue #276: coding/review/sec-audit are reasoning-heavy by nature —
 # multi-file context, edge-case enumeration, security threat modeling.
 # Auto-escalate to Tier 2 (deep reasoning) the moment this skill loads.
@@ -102,6 +102,7 @@ Code_Weaver 是 Loom 平台處理「人與程式碼之間互動」的原生技�
 | 功能實作 | 「實作」「修 bug」「幫我寫」 | `contexts/feature_implementation.md` | `impact` 自動驗 Scope，`detect_changes` 收尾驗證 |
 | PR/變更審查 | 「review PR」「審查」「diff」 | `contexts/change_review.md` | `detect_changes` → `impact` → 架構層檢查 |
 | 安全審查 | 「資安」「security」「CWE」 | `contexts/security_review.md` | `query` 快速定位攻擊面 |
+| 發佈流程 | 「release」「發佈」「tag」 | `contexts/release_workflow.md` | `log` + `gh release` |
 
 ---
 
@@ -201,6 +202,7 @@ non-default 欄位必須在所有 default 欄位之前，否則 module 無法 im
 - 功能實作：「實作」「修」「改」「幫我寫」「debug」「功能」「bug」
 - 變更審查：「review」「審查」「PR」「diff」「這個改動」「幫我看 code」
 - 安全審查：「資安」「security」「OWASP」「CWE」「滲透測試」「風險」
+- 發佈流程：「發佈」「release」「tag」「v0.x.x」「整理 changelog」
 
 ---
 
@@ -215,5 +217,5 @@ non-default 欄位必須在所有 default 欄位之前，否則 module 無法 im
 
 ---
 
-*Code_Weaver v2.0 — 2026-05-03*
+*Code_Weaver v2.1 — 2026-05-14*
 *Loom 的原生 coding 能力平台 · GitNexus 圖譜加速層整合*
