@@ -627,7 +627,7 @@ class LoomDiscordBot:
     _SLASH_NEEDS_SESSION = frozenset({
         "/think", "/compact", "/pause", "/stop", "/budget",
         "/auto", "/scope", "/summary", "/title", "/sessions",
-        "/model", "/personality",
+        "/name", "/model", "/personality", "/tier",
     })
 
     HELP_TEXT = (
@@ -635,10 +635,13 @@ class LoomDiscordBot:
         "`/new` — Open a new session thread\n"
         "`/sessions` — List recent sessions\n"
         "`/title <name>` — Set or show the session title\n"
+        "`/name <name>` — Alias for `/title <name>`\n"
         "`/model` — Show current model + registered providers\n"
         "`/model <name>` — Switch model  e.g. `deepseek-v4-pro`  `claude-sonnet-4-6`\n"
         "`/personality [name]` — Switch cognitive persona\n"
         "`/personality off` — Remove active persona\n"
+        "`/tier` — Show active LLM tier\n"
+        "`/tier <N>` — Switch tier (1 = daily · 2 = deep reasoning)\n"
         "`/think` — View last turn's reasoning chain\n"
         "`/compact` — Compress older context\n"
         "`/auto` — Toggle run_bash auto-approve (requires strict_sandbox)\n"
@@ -771,6 +774,35 @@ class LoomDiscordBot:
             await _SL(conn).update_title(session.session_id, arg)
         return f"✅ Session title → **{arg}**"
 
+    def _cmd_tier(self, session: "LoomSession", arg: str) -> str:
+        if not session._tier_models:
+            return "Tier system not configured. Add `[cognition.tiers]` to `loom.toml` to enable."
+        if not arg:
+            active = session._active_tier()
+            sticky = session._sticky_tier
+            model = session._active_model()
+            sticky_str = f"sticky on Tier {sticky}" if sticky is not None else "follows default"
+            lines = [
+                f"Active: **Tier {active}** · `{model}` ({sticky_str}, {session._turns_at_current_tier} turns)"
+            ]
+            for tier in sorted(session._tier_models):
+                marker = " ← active" if tier == active else ""
+                lines.append(f"Tier {tier}: `{session._tier_models[tier]}`{marker}")
+            return "\n".join(lines)
+        try:
+            target_tier = int(arg.split()[0])
+        except (TypeError, ValueError):
+            return f"Invalid tier `{arg}`. Use `/tier` for status or `/tier N` to switch."
+        if target_tier not in session._tier_models:
+            return f"Tier {target_tier} is not configured."
+        new_sticky = None if target_tier == session._default_tier else target_tier
+        ev = session._set_sticky_tier(
+            new_sticky, reason="user /tier", source="user",
+        )
+        if ev is not None:
+            session._lifecycle_events.put_nowait(ev)
+        return f"Tier → **{session._active_tier()}** · `{session._active_model()}`"
+
     def _cmd_summary(self, arg: str) -> str:
         valid_modes = ("off", "on", "detail")
         if not arg:
@@ -898,8 +930,10 @@ class LoomDiscordBot:
             reply = self._cmd_stop(message.channel.id)
         elif command == "/budget":
             reply = self._cmd_budget(session)  # type: ignore[arg-type]
-        elif command == "/title":
+        elif command in ("/title", "/name"):
             reply = await self._cmd_title(session, arg)  # type: ignore[arg-type]
+        elif command == "/tier":
+            reply = self._cmd_tier(session, arg)  # type: ignore[arg-type]
         elif command == "/summary":
             reply = self._cmd_summary(arg)
         elif command == "/scope":

@@ -69,6 +69,17 @@ def _fake_session(
     session.perm.exec_auto = False
     session.perm._usage = {}
     session.perm.revoke_matching = MagicMock()
+    session._tier_models = {
+        1: "MiniMax-M2.7",
+        2: "claude-opus-4-7",
+    }
+    session._default_tier = 1
+    session._sticky_tier = None
+    session._turns_at_current_tier = 0
+    session._active_tier = MagicMock(return_value=1)
+    session._active_model = MagicMock(return_value="MiniMax-M2.7")
+    session._set_sticky_tier = MagicMock(return_value=None)
+    session._lifecycle_events = MagicMock()
     return session
 
 
@@ -81,7 +92,7 @@ def test_help_text_lists_every_command():
     for cmd in (
         "/new", "/sessions", "/title", "/model", "/personality", "/think",
         "/compact", "/auto", "/pause", "/stop", "/budget", "/scope",
-        "/summary", "/help",
+        "/summary", "/tier", "/name", "/help",
     ):
         assert cmd in text
 
@@ -205,6 +216,62 @@ def test_summary_rejects_unknown_mode():
     assert "Unknown mode" in out
 
 
+def test_tier_status_lists_configured_tiers():
+    bot = _bot()
+    sess = _fake_session()
+
+    out = bot._cmd_tier(sess, "")
+
+    assert "Tier 1" in out
+    assert "MiniMax-M2.7" in out
+
+
+def test_tier_switch_sets_sticky_tier():
+    bot = _bot()
+    sess = _fake_session()
+    sess._active_tier.return_value = 2
+    sess._active_model.return_value = "claude-opus-4-7"
+
+    out = bot._cmd_tier(sess, "2")
+
+    sess._set_sticky_tier.assert_called_once_with(
+        2, reason="user /tier", source="user",
+    )
+    assert "Tier" in out
+    assert "claude-opus-4-7" in out
+
+
+@pytest.mark.asyncio
+async def test_text_prefix_tier_dispatches_to_tier_backend(monkeypatch):
+    bot = _bot()
+    sess = _fake_session()
+    message = MagicMock()
+    message.channel = SimpleNamespace(id=123)
+    safe_send = AsyncMock()
+    monkeypatch.setattr("loom.platform.discord.bot._safe_send", safe_send)
+
+    await bot._handle_slash(message, "/tier 2", sess, is_thread=True)
+
+    safe_send.assert_awaited_once()
+    assert "Tier" in safe_send.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_text_prefix_name_alias_uses_title_backend(monkeypatch):
+    bot = _bot()
+    sess = _fake_session()
+    message = MagicMock()
+    message.channel = SimpleNamespace(id=123)
+    bot._cmd_title = AsyncMock(return_value="renamed")
+    safe_send = AsyncMock()
+    monkeypatch.setattr("loom.platform.discord.bot._safe_send", safe_send)
+
+    await bot._handle_slash(message, "/name Field Notes", sess, is_thread=True)
+
+    bot._cmd_title.assert_awaited_once_with(sess, "Field Notes")
+    safe_send.assert_awaited_once_with(message.channel, "renamed")
+
+
 # ── /scope subcommands ───────────────────────────────────────────────
 
 
@@ -268,7 +335,8 @@ def test_every_expected_loom_command_is_registered():
     expected = {
         "loom-help", "loom-new", "loom-sessions", "loom-think", "loom-compact",
         "loom-model", "loom-personality", "loom-auto", "loom-pause",
-        "loom-stop", "loom-budget", "loom-title", "loom-summary", "loom-scope",
+        "loom-stop", "loom-budget", "loom-title", "loom-name", "loom-summary",
+        "loom-scope", "loom-tier",
     }
     missing = expected - registered
     assert not missing, f"missing slash commands: {missing}"

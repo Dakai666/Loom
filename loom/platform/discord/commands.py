@@ -265,6 +265,33 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
         reply = await bot._cmd_title(session, title or "")
         await interaction.response.send_message(reply, ephemeral=True)
 
+    @tree.command(name="loom-name", description="Alias for /loom-title.")
+    @app_commands.describe(name="New title. Omit to display the current one.")
+    async def loom_name(
+        interaction: discord.Interaction,
+        name: str | None = None,
+    ) -> None:
+        session = await _require_session(bot, interaction)
+        if session is None:
+            return
+        reply = await bot._cmd_title(session, name or "")
+        await interaction.response.send_message(reply, ephemeral=True)
+
+    # ── /loom-tier ────────────────────────────────────────────────────
+    @tree.command(name="loom-tier", description="Show or switch the active LLM tier.")
+    @app_commands.describe(tier="Tier number. Omit to show current tier status.")
+    async def loom_tier(
+        interaction: discord.Interaction,
+        tier: int | None = None,
+    ) -> None:
+        session = await _require_session(bot, interaction)
+        if session is None:
+            return
+        await interaction.response.send_message(
+            bot._cmd_tier(session, "" if tier is None else str(tier)),
+            ephemeral=True,
+        )
+
     # ── /loom-summary ─────────────────────────────────────────────────
     @tree.command(
         name="loom-summary",
