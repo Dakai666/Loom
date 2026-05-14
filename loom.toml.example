@@ -506,6 +506,43 @@ enabled  = false           # set true to activate daemon
 # ]
 # attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
 
+# ── Example: chime — schedule wakes an existing Discord thread session (#369) ──
+# Default ``mode = "independent"`` spawns a fresh autonomy session and delivers
+# the result via NotificationRouter. ``mode = "chime"`` instead wakes an
+# already-loaded session in a specific Discord thread, so the agent responds
+# in-context (no separate session, no extra notification — the reply lands in
+# the conversation itself).
+#
+# Requirements:
+#   - Run via ``loom discord start --autonomy`` so the daemon and bot share
+#     one event loop (v1 limitation; cross-process discovery is future work).
+#   - target.id must be a Discord thread that already has a loaded session
+#     (a "cold" thread the user hasn't spoken in is *not* implicitly resumed —
+#     the daemon honours ``target.fallback`` instead).
+#
+# The agent sees the schedule's intent wrapped in
+#   <system_chime schedule="..." fired_at="...">...</system_chime>
+# so it can tell scheduled wakes apart from user messages. Agent.md.example
+# documents the expected handling.
+#
+# [[autonomy.schedules]]
+# name          = "morning_greeting"
+# cron          = "0 1 * * *"        # 01:00 UTC = 09:00 Asia/Taipei
+# intent        = "向 user 主動道早安，提一兩件今天值得留意的事"
+# trust_level   = "safe"
+# mode          = "chime"
+# # allowed_tools / scope_grants apply only for the duration of this chime
+# # turn — same invariant as independent mode, just scoped to the chime task.
+# allowed_tools = ["memorize"]
+#
+#   [autonomy.schedules.target]
+#   type     = "discord_thread"
+#   id       = "1490024181994225744"   # the thread ID to chime into
+#   fallback = "skip"                  # "skip" → drop the chime when target
+#                                      #   isn't loaded (default)
+#                                      # "independent" → fall back to the
+#                                      #   classic spawn-new-session behaviour
+
 # ─────────────────────────────────────────────
 # Notifications
 # ─────────────────────────────────────────────
