@@ -94,9 +94,21 @@ class CronTrigger(TriggerDefinition):
     """Fires on a 5-field cron schedule (minute hour dom month dow)."""
     cron: str = "0 9 * * *"
     timezone: str = "UTC"
+    mode: str = "independent"
+    """``"independent"`` (default) → spawn a fresh autonomy session.
+    ``"chime"`` (issue #369) → wake an already-active session via
+    SessionRegistry + bot.deliver_chime."""
+    target: dict[str, Any] = field(default_factory=dict)
+    """Routing for ``mode="chime"``, e.g.
+    ``{"type": "discord_thread", "id": "<thread_id>", "fallback": "skip"}``.
+    Ignored for independent mode."""
 
     def __post_init__(self):
         _validate_cron(self.cron)
+        if self.mode not in ("independent", "chime"):
+            raise ValueError(
+                f"CronTrigger.mode must be 'independent' or 'chime', got {self.mode!r}"
+            )
 
     @property
     def kind(self) -> TriggerKind:

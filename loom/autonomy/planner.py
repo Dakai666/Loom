@@ -89,6 +89,11 @@ class ActionPlanner:
         context["allowed_tools"] = getattr(trigger, "allowed_tools", [])
         context["scope_grants"] = getattr(trigger, "scope_grants", [])
         context["attach_outputs"] = getattr(trigger, "attach_outputs", [])
+        # Chime routing (issue #369) — propagated so AutonomyDaemon._execute_plan
+        # can branch to chime delivery instead of spawning an independent run.
+        context["mode"] = getattr(trigger, "mode", "independent")
+        context["target"] = getattr(trigger, "target", {}) or {}
+        context["trust_level"] = trigger.trust_level
 
         if self._semantic is not None:
             try:
