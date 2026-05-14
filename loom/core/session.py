@@ -2546,44 +2546,69 @@ class LoomSession:
                 stop_reason=_stop_reason,
             )
         finally:
-            # ── AgentLedger turn_end + token reset ────────────────────
-            if self._ledger_emitter is not None and _ledger_turn_token is not None:
-                import sys as _sys
-                _exc_type = _sys.exc_info()[0]
-                if _exc_type is None:
-                    _outcome = "clean"
-                elif isinstance(_exc_type, type) and issubclass(
-                    _exc_type, asyncio.CancelledError
-                ):
-                    _outcome = "abandoned"
-                else:
-                    _outcome = "error"
-                try:
-                    _duration_ms = int(
-                        (time.monotonic() - _turn_start_monotonic) * 1000
-                    )
-                    # #334 — mirror local accumulators into session state so
-                    # commit-or-discard can run after the try/except scope.
+            try:
+                # ── AgentLedger turn_end + token reset ────────────────
+                if self._ledger_emitter is not None and _ledger_turn_token is not None:
+                    import sys as _sys
+                    _exc_type = _sys.exc_info()[0]
+                    if _exc_type is None:
+                        _outcome = "clean"
+                    elif isinstance(_exc_type, type) and issubclass(
+                        _exc_type, asyncio.CancelledError
+                    ):
+                        _outcome = "abandoned"
+                    else:
+                        _outcome = "error"
                     try:
-                        self._turn_thought_text = "".join(_think_parts)
-                    except NameError:
-                        # Exception before _think_parts was declared (rare).
-                        self._turn_thought_text = ""
+                        _duration_ms = int(
+                            (time.monotonic() - _turn_start_monotonic) * 1000
+                        )
+                        # #334 — mirror local accumulators into session state so
+                        # commit-or-discard can run after the try/except scope.
+                        try:
+                            self._turn_thought_text = "".join(_think_parts)
+                        except NameError:
+                            # Exception before _think_parts was declared (rare).
+                            self._turn_thought_text = ""
+                        try:
+                            self._turn_tool_calls_in_turn = tool_count
+                        except NameError:
+                            self._turn_tool_calls_in_turn = 0
+                        await self._commit_or_discard_thought(_turn_id_v2, _outcome)
+                        await self._emit_ledger_turn_end(
+                            _turn_id_v2, _outcome, _duration_ms
+                        )
+                    except Exception:
+                        logger.exception(
+                            "ledger turn_end emit failed; continuing"
+                        )
+                    # ContextVar.reset() raises ValueError when the token was
+                    # created in a different Context — happens when an async
+                    # generator is closed via aclose() from a cancelling task
+                    # that lives in a different Context than the originating
+                    # iteration. The token will be garbage-collected with the
+                    # frame anyway, so swallowing this is safe; what is NOT
+                    # safe is letting the ValueError escape and shadow the
+                    # turn_lock.release() below — which leaks the lock and
+                    # wedges every subsequent stream_turn on this session.
                     try:
-                        self._turn_tool_calls_in_turn = tool_count
-                    except NameError:
-                        self._turn_tool_calls_in_turn = 0
-                    await self._commit_or_discard_thought(_turn_id_v2, _outcome)
-                    await self._emit_ledger_turn_end(
-                        _turn_id_v2, _outcome, _duration_ms
-                    )
-                except Exception:
-                    logger.exception(
-                        "ledger turn_end emit failed; continuing"
-                    )
-                reset_turn_id(_ledger_turn_token)
-                reset_correlation(_ledger_corr_token)
-            self._turn_lock.release()
+                        reset_turn_id(_ledger_turn_token)
+                    except ValueError:
+                        logger.debug(
+                            "turn_id token reset skipped (different Context)"
+                        )
+                    try:
+                        reset_correlation(_ledger_corr_token)
+                    except ValueError:
+                        logger.debug(
+                            "correlation token reset skipped (different Context)"
+                        )
+            finally:
+                # Lock release is the load-bearing invariant of this finally
+                # block. Keep it in its own try/finally so no failure above
+                # (ledger emit, ContextVar reset, etc.) can ever leak the
+                # turn lock and brick the session.
+                self._turn_lock.release()
 
     # ------------------------------------------------------------------
     # Issue #58: Skill self-assessment trigger

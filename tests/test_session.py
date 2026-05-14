@@ -688,6 +688,75 @@ class TestStreamTurnLock:
         with contextlib.suppress(BaseException):
             await task
 
+    async def test_turn_lock_released_when_contextvar_reset_raises(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Regression for the 2026-05-14 Discord incident.
+
+        Sequence observed in production:
+          14:23:11  Task-3770 raises ``ValueError: <Token …> was created
+                    in a different Context`` from session.py reset_turn_id
+                    while an async-generator GeneratorExit is unwinding.
+          14:23:13  next stream_turn warns "another turn still in flight"
+          14:42:00  same warning — session permanently wedged
+          14:51:04  same warning
+
+        Root cause: the ``finally`` block in ``stream_turn`` called
+        ``reset_turn_id`` BEFORE ``self._turn_lock.release()`` without
+        catching ValueError. When ``aclose()`` unwinds the generator from
+        a different async Context than ``set_turn_id`` was called in,
+        ``ContextVar.reset()`` raises, shadowing the release() on the
+        next line — the lock is leaked and every subsequent turn blocks
+        on ``await self._turn_lock.acquire()`` forever.
+
+        Invariant: even if every cleanup step above ``self._turn_lock.release()``
+        explodes, the lock MUST be released so the session can recover.
+        """
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+
+        # Enable the ledger branch so the finally calls reset_turn_id /
+        # reset_correlation. A bare object() is enough — the emit_turn_*
+        # methods are wrapped in their own try/except inside stream_turn.
+        session._ledger_emitter = object()
+
+        # Simulate the cross-Context ValueError aclose() triggers when
+        # the originating set_turn_id() lived in a different Context.
+        def _raises_cross_context(_token):
+            raise ValueError(
+                "<Token …> was created in a different Context"
+            )
+
+        monkeypatch.setattr(session_module, "reset_turn_id", _raises_cross_context)
+        monkeypatch.setattr(session_module, "reset_correlation", _raises_cross_context)
+
+        async def consume() -> None:
+            async for _ in session.stream_turn("hello"):
+                return
+
+        task = asyncio.create_task(consume())
+        # Let the generator advance past set_turn_id so the finally has
+        # a non-None token to reset (and therefore enters the ValueError
+        # path we are protecting against).
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+        assert not session._turn_lock.locked(), (
+            "turn_lock leaked when ContextVar reset raised ValueError — "
+            "see PR for incident 2026-05-14: the session would be wedged "
+            "and every subsequent stream_turn() would hang forever."
+        )
+
 
 class TestSanitizeHistoryAdjacency:
     """Pass 4 (Issue #218): tool_use ↔ tool_result adjacency repair.

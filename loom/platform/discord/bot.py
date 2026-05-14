@@ -1381,6 +1381,14 @@ async def _safe_edit(
         await message.edit(**kwargs)
     except discord.HTTPException:
         pass
+    except RuntimeError as exc:
+        # aiohttp raises bare RuntimeError("Session is closed") when the
+        # underlying ClientSession is torn down (Ctrl+C / bot shutdown). The
+        # cancel-cleanup path in _run_turn calls _safe_edit *after* the
+        # shutdown has begun, and we don't want that to surface as
+        # "unhandled exception during asyncio.run() shutdown".
+        if "Session is closed" not in str(exc):
+            raise
 
 
 async def _safe_send(
@@ -1410,6 +1418,10 @@ async def _safe_send(
             return await channel.send(**kwargs)
         except discord.HTTPException:
             return None
+        except RuntimeError as exc:
+            if "Session is closed" in str(exc):
+                return None
+            raise
 
     last: "discord.Message | None" = None
     remaining = content
@@ -1417,6 +1429,10 @@ async def _safe_send(
         chunk, remaining = remaining[:_MAX_CHARS], remaining[_MAX_CHARS:]
         try:
             last = await channel.send(chunk, **kwargs)
+        except RuntimeError as exc:
+            if "Session is closed" in str(exc):
+                return last
+            raise
         except discord.HTTPException:
             # Drop this chunk but keep going — partial delivery beats killing
             # the turn loop. The kwargs (view=, allowed_mentions=, …) only
