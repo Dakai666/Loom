@@ -384,6 +384,17 @@ class LoomDiscordBot:
             existing = bot._running_turns.get(key)
             if existing and not existing.done():
                 existing.cancel()
+                # Wait briefly for the cancelled task to finish its cleanup
+                # (finally blocks). Otherwise a chime task's temporary
+                # session.perm grants — revoked in its own finally — would
+                # still be visible when the replacement user turn starts on
+                # the very next event-loop tick (PR #373 re-review).
+                try:
+                    await asyncio.wait_for(existing, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception:
+                    pass
             # Remember this message id so add_discord_reaction has a default
             # target when the agent doesn't pass message_id explicitly (#188).
             bot._last_user_msg[key] = message.id
@@ -683,12 +694,10 @@ class LoomDiscordBot:
             if not pending_now:
                 self._chime_pending.pop(thread_id, None)
 
-            # Apply schedule-scoped permissions for the duration of this
-            # chime, mirroring AutonomyDaemon._run_agent. Revoked in
-            # ``finally`` so chimes never accumulate cross-schedule grants.
-            session = self._sessions.get(thread_id)
-            added_tools, grant_source = self._apply_chime_permissions(req, session)
-
+            # Apply + revoke of schedule-scoped grants happens inside
+            # _run_chime_turn (same task as cancellation), so a user-message
+            # preemption can't observe leaked grants between the chime task
+            # being cancelled and the dispatcher reaching this finally block.
             task = asyncio.ensure_future(self._run_chime_turn(thread_id, req))
             self._running_turns[thread_id] = task
             try:
@@ -707,7 +716,6 @@ class LoomDiscordBot:
             finally:
                 if self._running_turns.get(thread_id) is task:
                     self._running_turns.pop(thread_id, None)
-                self._revoke_chime_permissions(session, added_tools, grant_source)
 
     def _apply_chime_permissions(
         self,
@@ -766,6 +774,13 @@ class LoomDiscordBot:
         single send of the assistant reply. Skips the rich envelope display
         used for user-driven turns; chime turns are typically short and the
         marker already disambiguates them from user replies.
+
+        Schedule-scoped permissions (allowed_tools / scope_grants) are
+        applied here — not in the dispatcher — so that on cancellation the
+        revoke runs as part of this task's finally, before the dispatcher's
+        ``await task`` returns. Combined with on_message awaiting the
+        cancelled task, this closes the window where a preempting user
+        turn could observe leaked chime grants.
         """
         channel = self._client.get_channel(thread_id)
         session = self._sessions.get(thread_id)
@@ -779,35 +794,42 @@ class LoomDiscordBot:
         except Exception:
             stamp = req.fired_at.isoformat()
 
-        await _safe_send(
-            channel,
-            f"-# ⏰ **Chime · {req.schedule_name}** · {stamp}",
-        )
-
-        content = format_chime_content(req)
-        narration_buf = ""
+        added_tools, grant_source = self._apply_chime_permissions(req, session)
         try:
-            async with channel.typing():
-                async for event in session.stream_turn(content, origin="chime"):
-                    if isinstance(event, TextChunk):
-                        narration_buf += event.text
-                    elif isinstance(event, TurnDropped):
-                        await _safe_send(
-                            channel,
-                            f"-# ⚠️ Chime turn dropped: {event.stop_reason}",
-                        )
-        except Exception as exc:
-            await _safe_send(channel, f"❌ Chime error: {exc}")
-            logger.exception(
-                "chime turn raised for thread=%s schedule=%s",
-                thread_id, req.schedule_name,
+            await _safe_send(
+                channel,
+                f"-# ⏰ **Chime · {req.schedule_name}** · {stamp}",
             )
-            return
 
-        final = narration_buf.strip()
-        if final:
-            payload = final if final.startswith("⬥") else f"⬥ {final}"
-            await _safe_send(channel, payload)
+            content = format_chime_content(req)
+            narration_buf = ""
+            try:
+                async with channel.typing():
+                    async for event in session.stream_turn(content, origin="chime"):
+                        if isinstance(event, TextChunk):
+                            narration_buf += event.text
+                        elif isinstance(event, TurnDropped):
+                            await _safe_send(
+                                channel,
+                                f"-# ⚠️ Chime turn dropped: {event.stop_reason}",
+                            )
+            except Exception as exc:
+                await _safe_send(channel, f"❌ Chime error: {exc}")
+                logger.exception(
+                    "chime turn raised for thread=%s schedule=%s",
+                    thread_id, req.schedule_name,
+                )
+                return
+
+            final = narration_buf.strip()
+            if final:
+                payload = final if final.startswith("⬥") else f"⬥ {final}"
+                await _safe_send(channel, payload)
+        finally:
+            # Revoke schedule grants as part of *this* task's unwind, so a
+            # cancellation immediately yields the session back to a clean
+            # permission state before any preempting turn starts.
+            self._revoke_chime_permissions(session, added_tools, grant_source)
 
     async def _run_daily_compaction(self) -> None:
         """Scheduled Discord safety net for idle in-memory sessions."""
