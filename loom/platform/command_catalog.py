@@ -10,7 +10,7 @@ def discover_personality_names(personalities_dir: str | Path = "personalities") 
     root = Path(personalities_dir)
     if not root.exists():
         return []
-    return sorted(p.stem for p in root.glob("*.md") if p.is_file())
+    return sorted({p.stem.lower() for p in root.glob("*.md") if p.is_file()})
 
 
 def personality_slash_commands(

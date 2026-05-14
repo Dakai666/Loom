@@ -192,6 +192,7 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
             if session is not None
             else discover_personality_names()
         )
+        # "off" is a command sentinel, not a personality file.
         choices = [app_commands.Choice(name="off (clear)", value="off")]
         choices.extend(
             app_commands.Choice(name=name, value=name)

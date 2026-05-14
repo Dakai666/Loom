@@ -19,6 +19,20 @@ def test_personality_commands_are_built_from_directory(tmp_path: Path) -> None:
     ]
 
 
+def test_personality_commands_normalize_filename_case(tmp_path: Path) -> None:
+    from loom.platform.command_catalog import personality_slash_commands
+
+    personalities = tmp_path / "personalities"
+    personalities.mkdir()
+    (personalities / "Sisi_Tarot_Mood.md").write_text("tarot", encoding="utf-8")
+
+    assert personality_slash_commands(personalities) == [
+        "/personality",
+        "/personality off",
+        "/personality sisi_tarot_mood",
+    ]
+
+
 def test_cli_slash_catalog_includes_dynamic_personality_files() -> None:
     from loom.platform.cli.ui import SLASH_COMMANDS
 

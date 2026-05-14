@@ -658,6 +658,7 @@ class LoomDiscordBot:
 
         names = discover_personality_names()
         if not names:
+            # Omit the Personalities line when the configured directory is empty.
             return self.HELP_TEXT
         rendered = " \xb7 ".join(f"`{name}`" for name in names)
         return self.HELP_TEXT.replace(
