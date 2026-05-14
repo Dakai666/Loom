@@ -20,6 +20,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from typing import Awaitable, Callable
+
+from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.maintenance import MaintenanceLoop
@@ -29,6 +32,12 @@ from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
 from loom.notify.types import Notification, NotificationType
+
+
+ChimeDelivery = Callable[[ChimeRequest], Awaitable[bool]]
+"""Platform-supplied callback that delivers a chime to its target session.
+Returns True if the chime was accepted (target found & queued), False if the
+caller should fall back per ``target['fallback']``."""
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +159,13 @@ class AutonomyDaemon:
         confirm_flow: ConfirmFlow,
         loom_session=None,   # LoomSession for executing prompts
         db=None,            # open aiosqlite.Connection for trigger_history persistence
+        chime_delivery: ChimeDelivery | None = None,
     ) -> None:
         self._notify = notify_router
         self._confirm = confirm_flow
         self._session = loom_session
         self._abort = AbortController()
+        self._chime_delivery = chime_delivery
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -178,6 +189,25 @@ class AutonomyDaemon:
             return
 
         if plan.decision == ActionDecision.EXECUTE:
+            # Chime mode: wake an existing session via the platform-supplied
+            # delivery callback. Fall back to independent execution only when
+            # explicitly requested (target.fallback == "independent").
+            if plan.context.get("mode") == "chime":
+                accepted = await self._deliver_chime(plan)
+                if accepted:
+                    return
+                fallback = plan.context.get("target", {}).get("fallback", "skip")
+                if fallback != "independent":
+                    logger.info(
+                        "[autonomy] chime trigger=%s — no target session and "
+                        "fallback=%s, skipping",
+                        plan.trigger_name, fallback,
+                    )
+                    return
+                logger.info(
+                    "[autonomy] chime trigger=%s — falling back to independent",
+                    plan.trigger_name,
+                )
             await self._run_agent(plan)
             return
 
@@ -204,6 +234,41 @@ class AutonomyDaemon:
                 body="No response within timeout — action was skipped.",
                 trigger_name=plan.trigger_name,
             ))
+
+    async def _deliver_chime(self, plan: PlannedAction) -> bool:
+        """Route a chime-mode plan to the platform delivery callback.
+        Returns True on accept, False if no callback or target missed."""
+        if self._chime_delivery is None:
+            logger.warning(
+                "[autonomy] chime trigger=%s fired but no delivery callback "
+                "is wired (daemon constructed without chime_delivery)",
+                plan.trigger_name,
+            )
+            return False
+        target = plan.context.get("target") or {}
+        if not target:
+            logger.warning(
+                "[autonomy] chime trigger=%s has no target — cannot route",
+                plan.trigger_name,
+            )
+            return False
+        req = ChimeRequest(
+            schedule_name=plan.trigger_name,
+            intent=plan.prompt,
+            fired_at=datetime.now(UTC),
+            target=dict(target),
+            trust_level=plan.context.get("trust_level"),
+            allowed_tools=tuple(plan.context.get("allowed_tools", [])),
+            scope_grants=tuple(plan.context.get("scope_grants", [])),
+        )
+        try:
+            return bool(await self._chime_delivery(req))
+        except Exception:
+            logger.exception(
+                "[autonomy] chime delivery raised for trigger=%s",
+                plan.trigger_name,
+            )
+            return False
 
     async def _run_agent(self, plan: PlannedAction) -> None:
         if self._session is None:
@@ -331,6 +396,26 @@ class AutonomyDaemon:
 
         count = 0
         for sched in autonomy_cfg.get("schedules", []):
+            mode = sched.get("mode", "independent")
+            target = dict(sched.get("target", {}))
+            if mode == "chime":
+                _t_type = target.get("type")
+                if _t_type != "discord_thread":
+                    logger.warning(
+                        "[autonomy] schedule %r mode=chime requires "
+                        "target.type='discord_thread' (got %r); skipping",
+                        sched["name"], _t_type,
+                    )
+                    continue
+                if "id" not in target:
+                    logger.warning(
+                        "[autonomy] schedule %r mode=chime missing target.id; "
+                        "skipping", sched["name"],
+                    )
+                    continue
+                # Normalise id to string for label matching
+                target["id"] = str(target["id"])
+                target.setdefault("fallback", "skip")
             trigger = CronTrigger(
                 name=sched["name"],
                 intent=sched["intent"],
@@ -344,6 +429,8 @@ class AutonomyDaemon:
                 allowed_tools=sched.get("allowed_tools", []),
                 scope_grants=sched.get("scope_grants", []),
                 attach_outputs=sched.get("attach_outputs", []),
+                mode=mode,
+                target=target,
             )
             self._evaluator.register(trigger)
             count += 1

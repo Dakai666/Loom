@@ -83,6 +83,7 @@ from loom.platform.cli.ui import (
     TierChanged, TierExpiryHint,
     ToolBegin, ToolEnd, TurnDone, TurnDropped, TurnPaused,
 )
+from loom.autonomy.chime import ChimeRequest, format_chime_content
 from loom.platform.discord.tools import (
     make_add_discord_reaction_tool,
     make_send_discord_embed_tool,
@@ -273,6 +274,11 @@ class LoomDiscordBot:
         # target for `add_discord_reaction` when the agent doesn't pass
         # an explicit message_id.
         self._last_user_msg: dict[int, int] = {}
+        # Chime delivery (issue #369). Pending chimes are deduped by
+        # (thread_id, schedule_name): firing the same-named chime twice
+        # before delivery keeps only the latest. One dispatcher per thread.
+        self._chime_pending: dict[int, dict[str, ChimeRequest]] = {}
+        self._chime_dispatcher: dict[int, asyncio.Task] = {}
         # Turn summary display mode: "off" | "on" | "detail"
         self._summary_mode: str = "on"
 
@@ -568,6 +574,14 @@ class LoomDiscordBot:
         session.subscribe_diagnostic(_discord_diagnostic)
 
         self._sessions[thread_id] = session
+        # Register in process-wide registry so the autonomy daemon can find
+        # this session for chime triggers (issue #369).
+        from loom.platform.session_registry import get_registry
+        get_registry().register(
+            session.session_id,
+            session,
+            labels={"discord_thread": str(thread_id)},
+        )
         await self._force_compact_session(thread_id, session, reason="resume")
         return session
 
@@ -575,9 +589,139 @@ class LoomDiscordBot:
         session = self._sessions.pop(thread_id, None)
         if session:
             try:
+                from loom.platform.session_registry import get_registry
+                get_registry().unregister(session.session_id)
+            except Exception:
+                pass
+            try:
                 await session.stop()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Chime delivery (issue #369)
+    # ------------------------------------------------------------------
+
+    async def deliver_chime(self, req: ChimeRequest) -> bool:
+        """Accept a chime from the autonomy daemon, queue it for the target
+        thread, and ensure a dispatcher is draining.
+
+        Returns False when the target can't be resolved (no thread, no
+        session yet started) so the daemon can apply its fallback.
+        """
+        if req.target.get("type") != "discord_thread":
+            return False
+        try:
+            thread_id = int(req.target.get("id", ""))
+        except (TypeError, ValueError):
+            return False
+        # v1: only deliver to threads with an already-loaded session. A
+        # cold thread (bot restarted, user hasn't spoken) is not implicitly
+        # resumed by a chime — the chime would arrive into a freshly
+        # initialized session and surprise the user. Daemon fallback owns
+        # this case.
+        if thread_id not in self._sessions:
+            return False
+
+        # Latest-wins dedupe within one thread, keyed by schedule name.
+        per_thread = self._chime_pending.setdefault(thread_id, {})
+        per_thread[req.schedule_name] = req
+
+        existing = self._chime_dispatcher.get(thread_id)
+        if existing is None or existing.done():
+            task = asyncio.ensure_future(self._chime_dispatcher_loop(thread_id))
+            self._chime_dispatcher[thread_id] = task
+            task.add_done_callback(
+                lambda _t, k=thread_id: self._chime_dispatcher.pop(k, None)
+                if self._chime_dispatcher.get(k) is _t else None
+            )
+        return True
+
+    async def _chime_dispatcher_loop(self, thread_id: int) -> None:
+        """Drain pending chimes for one thread, serialised against user turns."""
+        while True:
+            pending = self._chime_pending.get(thread_id)
+            if not pending:
+                break
+            # Pop one (insertion-order). Latest-wins dedupe already ran at
+            # enqueue time, so each name here represents one to deliver.
+            name = next(iter(pending))
+            req = pending.pop(name)
+            if not pending:
+                self._chime_pending.pop(thread_id, None)
+
+            # Wait for any in-flight user turn to finish before chiming —
+            # don't interrupt a user mid-thought. (We could cancel like the
+            # user-message handler does, but that's the opposite intent.)
+            existing = self._running_turns.get(thread_id)
+            if existing is not None and not existing.done():
+                try:
+                    await existing
+                except Exception:
+                    pass
+
+            task = asyncio.ensure_future(self._run_chime_turn(thread_id, req))
+            self._running_turns[thread_id] = task
+            try:
+                await task
+            except Exception:
+                logger.exception(
+                    "chime dispatcher: turn failed for thread=%s schedule=%s",
+                    thread_id, req.schedule_name,
+                )
+            finally:
+                if self._running_turns.get(thread_id) is task:
+                    self._running_turns.pop(thread_id, None)
+
+    async def _run_chime_turn(self, thread_id: int, req: ChimeRequest) -> None:
+        """Render one chime turn into the target Discord thread.
+
+        Lightweight v1 renderer: marker line → stream_turn(origin="chime") →
+        single send of the assistant reply. Skips the rich envelope display
+        used for user-driven turns; chime turns are typically short and the
+        marker already disambiguates them from user replies.
+        """
+        channel = self._client.get_channel(thread_id)
+        session = self._sessions.get(thread_id)
+        if channel is None or session is None:
+            return
+
+        # Local-time stamp so the marker is human-readable in chat.
+        try:
+            local_dt = req.fired_at.astimezone()
+            stamp = local_dt.strftime("%H:%M %Z").strip()
+        except Exception:
+            stamp = req.fired_at.isoformat()
+
+        await _safe_send(
+            channel,
+            f"-# ⏰ **Chime · {req.schedule_name}** · {stamp}",
+        )
+
+        content = format_chime_content(req)
+        narration_buf = ""
+        try:
+            async with channel.typing():
+                async for event in session.stream_turn(content, origin="chime"):
+                    if isinstance(event, TextChunk):
+                        narration_buf += event.text
+                    elif isinstance(event, TurnDropped):
+                        await _safe_send(
+                            channel,
+                            f"-# ⚠️ Chime turn dropped: {event.stop_reason}",
+                        )
+        except Exception as exc:
+            await _safe_send(channel, f"❌ Chime error: {exc}")
+            logger.exception(
+                "chime turn raised for thread=%s schedule=%s",
+                thread_id, req.schedule_name,
+            )
+            return
+
+        final = narration_buf.strip()
+        if final:
+            payload = final if final.startswith("⬥") else f"⬥ {final}"
+            await _safe_send(channel, payload)
 
     async def _run_daily_compaction(self) -> None:
         """Scheduled Discord safety net for idle in-memory sessions."""

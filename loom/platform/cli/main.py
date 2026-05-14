@@ -3301,6 +3301,7 @@ async def _discord_with_autonomy(
         notify_router=notify_router,
         confirm_flow=confirm_flow,
         loom_session=session,
+        chime_delivery=bot.deliver_chime,
     )
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
