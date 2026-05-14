@@ -638,32 +638,67 @@ class LoomDiscordBot:
         return True
 
     async def _chime_dispatcher_loop(self, thread_id: int) -> None:
-        """Drain pending chimes for one thread, serialised against user turns."""
+        """Drain pending chimes for one thread, serialised against user turns.
+
+        Key invariants (PR #373 review):
+        - Pick a candidate name *before* waiting on the user turn, but pop
+          *after*. That way a same-name chime arriving during the wait
+          still collapses onto the candidate (latest-wins through the
+          wait window).
+        - A cancelled user turn (Discord cancel-and-replace pattern in
+          ``_handle_message``) must not drop the queued chime. Only the
+          dispatcher's own cancellation propagates.
+        """
         while True:
             pending = self._chime_pending.get(thread_id)
             if not pending:
                 break
-            # Pop one (insertion-order). Latest-wins dedupe already ran at
-            # enqueue time, so each name here represents one to deliver.
             name = next(iter(pending))
-            req = pending.pop(name)
-            if not pending:
-                self._chime_pending.pop(thread_id, None)
 
-            # Wait for any in-flight user turn to finish before chiming —
-            # don't interrupt a user mid-thought. (We could cancel like the
-            # user-message handler does, but that's the opposite intent.)
+            # Wait for any in-flight user turn to finish before chiming.
+            # CancelledError on ``existing`` (a new user message cancelled
+            # the previous one) is distinct from our own cancellation —
+            # if we don't differentiate, the popped chime gets dropped.
             existing = self._running_turns.get(thread_id)
             if existing is not None and not existing.done():
+                self_task = asyncio.current_task()
                 try:
                     await existing
+                except asyncio.CancelledError:
+                    if self_task is not None and self_task.cancelling():
+                        raise
+                    # The awaited user turn was cancelled, not us —
+                    # fall through and proceed with the chime.
                 except Exception:
                     pass
+
+            # Pop *now*: a late same-name chime arriving during the wait
+            # has overwritten the entry, so this pop returns the latest
+            # request. An external drain (unregister) may have removed it
+            # entirely — in that case loop and try the next candidate.
+            pending_now = self._chime_pending.get(thread_id)
+            if not pending_now or name not in pending_now:
+                continue
+            req = pending_now.pop(name)
+            if not pending_now:
+                self._chime_pending.pop(thread_id, None)
+
+            # Apply schedule-scoped permissions for the duration of this
+            # chime, mirroring AutonomyDaemon._run_agent. Revoked in
+            # ``finally`` so chimes never accumulate cross-schedule grants.
+            session = self._sessions.get(thread_id)
+            added_tools, grant_source = self._apply_chime_permissions(req, session)
 
             task = asyncio.ensure_future(self._run_chime_turn(thread_id, req))
             self._running_turns[thread_id] = task
             try:
                 await task
+            except asyncio.CancelledError:
+                self_task = asyncio.current_task()
+                if self_task is not None and self_task.cancelling():
+                    raise
+                # Chime turn pre-empted by a new user message — that's
+                # acceptable for a polite, non-blocking nudge.
             except Exception:
                 logger.exception(
                     "chime dispatcher: turn failed for thread=%s schedule=%s",
@@ -672,6 +707,57 @@ class LoomDiscordBot:
             finally:
                 if self._running_turns.get(thread_id) is task:
                     self._running_turns.pop(thread_id, None)
+                self._revoke_chime_permissions(session, added_tools, grant_source)
+
+    def _apply_chime_permissions(
+        self,
+        req: ChimeRequest,
+        session: "LoomSession | None",
+    ) -> tuple[list[str], str | None]:
+        """Pre-authorize tools + scope grants declared on the schedule.
+
+        Returns ``(added_tools, grant_source)`` to be passed to
+        ``_revoke_chime_permissions`` after the chime turn.
+        """
+        if session is None:
+            return [], None
+        from loom.core.harness.scope import ScopeGrant
+
+        added: list[str] = []
+        for tool_name in req.allowed_tools:
+            if tool_name not in session.perm.session_authorized:
+                session.perm.authorize(tool_name)
+                added.append(tool_name)
+
+        source = f"autonomy:{req.schedule_name}" if req.scope_grants else None
+        for g in req.scope_grants:
+            session.perm.grant(ScopeGrant(
+                resource=g["resource"],
+                action=g["action"],
+                selector=g.get("selector", "*"),
+                constraints=g.get("constraints", {}),
+                source=source or f"autonomy:{req.schedule_name}",
+            ))
+        return added, source
+
+    def _revoke_chime_permissions(
+        self,
+        session: "LoomSession | None",
+        added_tools: list[str],
+        grant_source: str | None,
+    ) -> None:
+        if session is None:
+            return
+        for tool_name in added_tools:
+            try:
+                session.perm.revoke(tool_name)
+            except Exception:
+                logger.debug("chime revoke tool %s failed", tool_name, exc_info=True)
+        if grant_source:
+            try:
+                session.perm.revoke_matching(lambda g, s=grant_source: g.source == s)
+            except Exception:
+                logger.debug("chime revoke grants failed", exc_info=True)
 
     async def _run_chime_turn(self, thread_id: int, req: ChimeRequest) -> None:
         """Render one chime turn into the target Discord thread.

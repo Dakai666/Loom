@@ -440,3 +440,203 @@ class TestDeliverChime:
         assert bot._run_chime_turn.await_count == 1
         delivered_req = bot._run_chime_turn.await_args.args[1]
         assert delivered_req.intent == "v3"
+
+
+# ===========================================================================
+# Dispatcher edge cases — regressions from PR #373 review
+# ===========================================================================
+
+
+class TestChimeDispatcherEdgeCases:
+    @pytest.mark.asyncio
+    async def test_chime_survives_user_turn_cancellation(self):
+        """A cancelled in-flight user turn must not silently drop a queued chime.
+
+        Repro of PR #373 review finding #2: ``except Exception`` did not
+        catch ``asyncio.CancelledError`` (Py3.8+ inherits BaseException),
+        so the dispatcher exited after popping the request.
+        """
+        from loom.autonomy.chime import ChimeRequest
+
+        bot = _make_bot_stub()
+        bot._sessions[111] = MagicMock()
+        bot._run_chime_turn = AsyncMock(return_value=None)
+
+        # Stand in for an in-flight user turn that we'll cancel before
+        # the chime dispatcher gets to await it.
+        async def fake_user_turn():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                raise
+        user_task = asyncio.ensure_future(fake_user_turn())
+        bot._running_turns[111] = user_task
+
+        # Deliver the chime — dispatcher picks the name, then awaits user_task.
+        assert await bot.deliver_chime(
+            ChimeRequest(
+                schedule_name="morning",
+                intent="hello",
+                fired_at=datetime.now(timezone.utc),
+                target={"type": "discord_thread", "id": "111"},
+            )
+        )
+
+        # Give the dispatcher a turn to reach the await.
+        await asyncio.sleep(0)
+        # Now cancel the user turn — this is what `_handle_message`'s
+        # cancel-and-replace path does when a new user message arrives.
+        user_task.cancel()
+        try:
+            await user_task
+        except asyncio.CancelledError:
+            pass
+
+        # Dispatcher should still drain.
+        for _ in range(20):
+            if bot._run_chime_turn.await_count >= 1:
+                break
+            await asyncio.sleep(0)
+
+        assert bot._run_chime_turn.await_count == 1, (
+            "chime was silently dropped when the user turn was cancelled"
+        )
+        assert bot._chime_pending.get(111) is None
+
+    @pytest.mark.asyncio
+    async def test_latest_wins_through_user_turn_wait(self):
+        """A same-name chime arriving while the dispatcher is waiting on
+        an in-flight user turn must still collapse onto the original slot.
+
+        Repro of PR #373 review finding #3: the original code popped the
+        request before waiting, so a late same-name chime created a fresh
+        entry that ran on the next loop iteration — both delivered.
+        """
+        from loom.autonomy.chime import ChimeRequest
+
+        bot = _make_bot_stub()
+        bot._sessions[111] = MagicMock()
+        bot._run_chime_turn = AsyncMock(return_value=None)
+
+        # Long in-flight user turn we control.
+        user_done = asyncio.Event()
+
+        async def fake_user_turn():
+            await user_done.wait()
+        user_task = asyncio.ensure_future(fake_user_turn())
+        bot._running_turns[111] = user_task
+
+        # First chime ("old") — gets queued, dispatcher reaches the wait.
+        assert await bot.deliver_chime(
+            ChimeRequest(
+                schedule_name="morning",
+                intent="old",
+                fired_at=datetime.now(timezone.utc),
+                target={"type": "discord_thread", "id": "111"},
+            )
+        )
+        await asyncio.sleep(0)  # let dispatcher reach `await existing`
+
+        # Second chime ("new") for the same schedule — must overwrite.
+        assert await bot.deliver_chime(
+            ChimeRequest(
+                schedule_name="morning",
+                intent="new",
+                fired_at=datetime.now(timezone.utc),
+                target={"type": "discord_thread", "id": "111"},
+            )
+        )
+
+        # Release the user turn so the dispatcher proceeds.
+        user_done.set()
+        await user_task
+        for _ in range(20):
+            if bot._run_chime_turn.await_count >= 1 and not bot._chime_pending:
+                break
+            await asyncio.sleep(0)
+
+        assert bot._run_chime_turn.await_count == 1, (
+            "same-name chime arriving during user-turn wait was not deduped"
+        )
+        delivered_req = bot._run_chime_turn.await_args.args[1]
+        assert delivered_req.intent == "new"
+
+
+# ===========================================================================
+# Chime permission scoping (PR #373 review finding #1)
+# ===========================================================================
+
+
+class TestChimePermissions:
+    @pytest.mark.asyncio
+    async def test_chime_applies_and_revokes_schedule_grants(self):
+        """allowed_tools / scope_grants on the schedule must be pre-authorized
+        before the chime turn and revoked after — same invariant as
+        ``AutonomyDaemon._run_agent`` for independent runs."""
+        from loom.autonomy.chime import ChimeRequest
+
+        bot = _make_bot_stub()
+
+        # Fake session.perm capturing all permission calls.
+        session = MagicMock()
+        session.perm.session_authorized = set()
+        authorized: list[str] = []
+        revoked: list[str] = []
+        granted: list = []
+        revoke_matching_calls: list = []
+
+        def _authorize(name):
+            authorized.append(name)
+            session.perm.session_authorized.add(name)
+        def _revoke(name):
+            revoked.append(name)
+        def _grant(g):
+            granted.append(g)
+        def _revoke_matching(pred):
+            revoke_matching_calls.append(pred)
+
+        session.perm.authorize = MagicMock(side_effect=_authorize)
+        session.perm.revoke = MagicMock(side_effect=_revoke)
+        session.perm.grant = MagicMock(side_effect=_grant)
+        session.perm.revoke_matching = MagicMock(side_effect=_revoke_matching)
+        bot._sessions[111] = session
+
+        applied_during_turn: dict[str, list[str]] = {}
+
+        async def fake_turn(thread_id, req):
+            # Snapshot the state *during* the turn — should reflect grants.
+            applied_during_turn["authorized"] = list(authorized)
+            applied_during_turn["granted_count"] = len(granted)
+        bot._run_chime_turn = AsyncMock(side_effect=fake_turn)
+
+        req = ChimeRequest(
+            schedule_name="morning",
+            intent="hi",
+            fired_at=datetime.now(timezone.utc),
+            target={"type": "discord_thread", "id": "111"},
+            allowed_tools=("write_file", "memorize"),
+            scope_grants=(
+                {"resource": "path", "action": "write", "selector": "news/*"},
+            ),
+        )
+        assert await bot.deliver_chime(req)
+
+        # Wait for dispatcher to fully complete — including the finally
+        # block where revoke happens. The done_callback that clears
+        # _chime_dispatcher fires after the dispatcher coroutine fully
+        # returns, so it's a safe completion signal.
+        for _ in range(50):
+            if not bot._chime_dispatcher and not bot._chime_pending:
+                break
+            await asyncio.sleep(0)
+
+        # Authorized during the turn, revoked after.
+        assert applied_during_turn["authorized"] == ["write_file", "memorize"]
+        assert applied_during_turn["granted_count"] == 1
+        assert sorted(revoked) == ["memorize", "write_file"]
+        assert len(revoke_matching_calls) == 1
+
+        # The scope_grants ScopeGrant should carry an autonomy:<schedule> source
+        # so revoke_matching's predicate can target it.
+        assert granted[0].source == "autonomy:morning"
+        assert revoke_matching_calls[0](granted[0]) is True
