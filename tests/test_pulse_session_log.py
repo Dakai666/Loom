@@ -380,3 +380,77 @@ def test_drain_passes_through_non_contradiction_pulses_unchanged():
     )
     reminders = _simulate_drain([brief])
     assert reminders == [brief.text]
+
+
+def _simulate_full_drain(
+    verdicts: list[str], pulses: list[PulseRecord]
+) -> list[str]:
+    """Mirror the full session.stream_turn drain — verdicts AND pulses.
+
+    Mirrors the source order:
+      1. verdicts (each as own reminder)
+      2. non-contradiction pulses (each as own reminder)
+      3. contradiction pulses (folded into one reminder when N≥2,
+         else each as own reminder)
+    """
+    contradictions = [r for r in pulses
+                       if r.pulse_type == PULSE_TYPE_CONTRADICTION]
+    others = [r for r in pulses
+              if r.pulse_type != PULSE_TYPE_CONTRADICTION]
+    out: list[str] = []
+    out.extend(verdicts)
+    out.extend(r.text for r in others)
+    if len(contradictions) >= 2:
+        out.append(fold_contradiction_pulses(contradictions))
+    else:
+        out.extend(r.text for r in contradictions)
+    return out
+
+
+def test_drain_ordering_verdicts_first_then_others_then_contradictions():
+    """Issue #378 changed the drain shape from "verdicts then pulses (insertion
+    order)" to "verdicts → non-contradiction pulses → contradictions (folded)".
+    Pin the ordering so a future refactor that interleaves these three
+    classes again will trip a test rather than silently change what the
+    agent sees first."""
+    verdict_a = "verdict alpha"
+    verdict_b = "verdict beta"
+    brief = PulseRecord(
+        text="brief preheat", pulse_type=PULSE_TYPE_SESSION_BRIEF,
+        pulse_source="hook_G",
+    )
+    c1 = _make_contradiction_record("k1", "old1", "new1")
+    c2 = _make_contradiction_record("k2", "old2", "new2")
+
+    reminders = _simulate_full_drain(
+        verdicts=[verdict_a, verdict_b], pulses=[c1, brief, c2],
+    )
+
+    # Expect: 2 verdicts → 1 brief → 1 folded contradiction reminder = 4
+    assert len(reminders) == 4
+    assert reminders[0] == verdict_a
+    assert reminders[1] == verdict_b
+    assert reminders[2] == brief.text
+    assert reminders[3].startswith("Memory contradictions —")
+    # Folded reminder carries both contradiction keys.
+    for key in ("k1", "k2"):
+        assert f"- {key}" in reminders[3]
+
+
+def test_drain_ordering_holds_when_only_one_contradiction_unfolded():
+    """N=1 contradiction stays as its own verbose reminder but still lands
+    after verdicts + non-contradiction pulses — ordering invariant must
+    hold whether or not folding kicks in."""
+    brief = PulseRecord(
+        text="brief", pulse_type=PULSE_TYPE_SESSION_BRIEF,
+        pulse_source="hook_G",
+    )
+    c1 = _make_contradiction_record("solo.key", "x", "y")
+
+    reminders = _simulate_full_drain(
+        verdicts=["v1"], pulses=[c1, brief],
+    )
+
+    assert reminders[0] == "v1"
+    assert reminders[1] == brief.text
+    assert reminders[2] == c1.text  # unfolded singular form
