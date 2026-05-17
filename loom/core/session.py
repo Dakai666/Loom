@@ -1371,7 +1371,28 @@ class LoomSession:
         brave_key = env.get("brave_search_key") or env.get("BRAVE_SEARCH_KEY", "")
         if brave_key:
             self.registry.register(make_web_search_tool(brave_key))
-        self.registry.register(make_openai_image_generation_tool(self.workspace))
+        _image_cfg = (_load_loom_config().get("tools", {}).get("image", {}) or {})
+        _image_enabled = bool(_image_cfg.get("enabled", False))
+        _image_provider = str(_image_cfg.get("default_provider", "")).strip().lower()
+        _openai_image_cfg = (_image_cfg.get("openai", {}) or {})
+        _openai_image_enabled = bool(_openai_image_cfg.get("enabled", True))
+        if _image_enabled and _image_provider == "openai" and _openai_image_enabled:
+            self.registry.register(
+                make_openai_image_generation_tool(
+                    self.workspace,
+                    default_model=str(
+                        _openai_image_cfg.get("model", "gpt-image-2")
+                    ).strip() or "gpt-image-2",
+                    default_auth_mode=str(
+                        _openai_image_cfg.get("auth_mode", "auto")
+                    ).strip() or "auto",
+                )
+            )
+        elif _image_enabled and _image_provider and _image_provider != "openai":
+            logger.warning(
+                "[tools.image] provider %r is not supported; skipping image_generate.",
+                _image_provider,
+            )
 
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))

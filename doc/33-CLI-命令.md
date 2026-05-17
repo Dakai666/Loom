@@ -69,10 +69,12 @@ loom auth openai --skip-codex-login
 聊天模型路由刻意分開：`gpt-*` / `openai/<model>` 走 `OPENAI_API_KEY`，
 `codex/<model>`（例如 `codex/gpt-5.5`）才走 Codex OAuth backend。
 
-### `openai__text_to_image`
+### `image_generate`
 
-Agent 可用工具，生成圖片並寫入 workspace。`auth_mode=codex` 走 Codex Responses backend；
-`auth_mode=api_key` 走 OpenAI Images API：
+Agent 可用工具，生成圖片並寫入 workspace。這個工具預設不註冊；在 `loom.toml`
+設定 `[tools.image].enabled = true` 且 `default_provider = "openai"` 後，Loom 會註冊
+canonical `image_generate`，目前背後使用 OpenAI GPT Image。`auth_mode=codex`
+走 Codex Responses backend；`auth_mode=api_key` 走 OpenAI Images API：
 
 ```json
 {
