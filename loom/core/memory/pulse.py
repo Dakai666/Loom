@@ -82,7 +82,7 @@ class MemoryPulse:
         semantic: "SemanticMemory",
         session_id: str,
         session_started_at: datetime,
-        pending_buffer: "list[PulseRecord]",
+        pending_buffer: list[PulseRecord],
     ) -> None:
         self._db = db
         self._semantic = semantic

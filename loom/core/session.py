@@ -118,6 +118,7 @@ from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.index import MemoryIndex, MemoryIndexer, SkillCatalogEntry
 from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.pulse import PulseRecord
 from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -858,8 +859,7 @@ class LoomSession:
         # drained as <system-reminder> alongside verdicts in stream_turn.
         # Records (vs. bare strings) so Issue #377 can persist pulse_type
         # / pulse_source into session_log at drain time.
-        from loom.core.memory.pulse import PulseRecord as _PulseRecord
-        self._pending_pulses: list[_PulseRecord] = []
+        self._pending_pulses: list[PulseRecord] = []
         # In-flight judge background tasks — kept so stop() can cancel them
         # cleanly and so a single turn can't fire judge twice.
         self._judge_tasks: set[asyncio.Task] = set()
@@ -1894,6 +1894,16 @@ class LoomSession:
             # tagged with pulse_type/source so noise-vs-utility analytics
             # can run a straight SELECT instead of guessing from agent
             # behaviour. Verdicts stay log-less for now — separate scope.
+            #
+            # Persistence is best-effort by design: ``_log_message`` is
+            # scheduled fire-and-forget (so a slow DB never stalls the
+            # turn) and ``_pending_pulses.clear()`` runs synchronously
+            # below. If a write fails after clear(), that one inject is
+            # lost from the log — the <system-reminder> still reached
+            # the agent. Analytics is observational, not auditable; a
+            # dropped row skews counts at the margin but doesn't break
+            # any contract. If/when we want at-least-once persistence,
+            # await the tasks before clear() — accept the latency cost.
             for body in self._pending_verdicts:
                 self.messages.append({
                     "role": "user",
