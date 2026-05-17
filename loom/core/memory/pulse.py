@@ -29,7 +29,7 @@ import logging
 import textwrap
 from dataclasses import dataclass
 from datetime import datetime, UTC
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from loom.core.memory.ontology import (
     DOMAIN_PROJECT,
@@ -55,6 +55,24 @@ PULSE_TYPE_CONTRADICTION = "contradiction"
 # Pulse source for Hook G — Hook A uses the contradicting fact key.
 _SOURCE_HOOK_G = "hook_G"
 
+# Issue #378 — fold-display constraints. Folded form caps bullets so a
+# pathological compression batch (50+ contradictions) doesn't blow up the
+# system-reminder. Truncated entries are still individually queryable in
+# session_log (folding only affects the agent-visible inject, not the
+# analytics rows).
+_FOLD_MAX_LINES = 20
+_FOLD_VALUE_LIMIT = 60
+
+
+def _truncate(value: str, limit: int = 160) -> str:
+    """Whitespace-aware shorten so CJK / mixed-script values don't slice
+    mid-grapheme. Used by both Hook A's per-record render and the
+    Issue #378 fold helper."""
+    v = value.strip().replace("\n", " ")
+    if len(v) <= limit:
+        return v
+    return textwrap.shorten(v, width=limit, placeholder="…")
+
 
 @dataclass(frozen=True, slots=True)
 class PulseRecord:
@@ -65,11 +83,54 @@ class PulseRecord:
     and ``pulse_source`` through the drain lets ``session_log`` tag each
     inject so observation queries like "per-hook per-session inject
     counts" become a straight SELECT.
+
+    Issue #378: ``details`` carries structured per-record data (e.g.
+    contradiction key/existing/proposed) so the drain-side fold helper
+    can render a compact bullet form. ``None`` for hooks that don't
+    need structured access (Hook G / session_brief).
     """
 
     text: str
     pulse_type: str
     pulse_source: str
+    details: dict[str, Any] | None = None
+
+
+def fold_contradiction_pulses(records: list[PulseRecord]) -> str:
+    """Render a list of contradiction PulseRecords as one consolidated
+    ``<system-reminder>`` body (Issue #378).
+
+    Callers should only invoke this when ``len(records) >= 2`` — for a
+    single record use ``record.text`` so the original verbose form
+    (multi-line with "Reconcile if…") is preserved. session_log is
+    written separately by the drain caller, so every record here still
+    contributes one row regardless of folding.
+    """
+    if not records:
+        return ""
+    n = len(records)
+    lines = [
+        f"Memory contradictions — {n} stored facts conflict with "
+        f"newly-written values (folded from a single drain):"
+    ]
+    shown = records[:_FOLD_MAX_LINES]
+    for r in shown:
+        d = r.details or {}
+        key = d.get("key", r.pulse_source)
+        resolution = d.get("resolution", "pending")
+        old = _truncate(str(d.get("existing", "?")), limit=_FOLD_VALUE_LIMIT)
+        new = _truncate(str(d.get("proposed", "?")), limit=_FOLD_VALUE_LIMIT)
+        lines.append(
+            f'  - {key} ({resolution}): existing "{old}" → proposed "{new}"'
+        )
+    overflow = n - len(shown)
+    if overflow > 0:
+        lines.append(
+            f"  … +{overflow} more (see session_log role='system' rows "
+            "for the full list)"
+        )
+    lines.append("Reconcile if the new values should override the old.")
+    return "\n".join(lines)
 
 
 class MemoryPulse:
@@ -122,7 +183,7 @@ class MemoryPulse:
             if not rows:
                 return
 
-            lines = [f"- {row[0]}: {self._truncate(row[1])}" for row in rows]
+            lines = [f"- {row[0]}: {_truncate(row[1])}" for row in rows]
             brief = (
                 "Memory preheat — milestone facts active in your previous "
                 "session (top by confidence):\n" + "\n".join(lines)
@@ -163,11 +224,15 @@ class MemoryPulse:
             if await self._already_notified_this_session(key):
                 return
 
-            old = self._truncate(contradiction.existing.value)
-            new = self._truncate(contradiction.proposed.value)
+            old = _truncate(contradiction.existing.value)
+            new = _truncate(contradiction.proposed.value)
+            resolution = (
+                contradiction.resolution.value
+                if contradiction.resolution else "pending"
+            )
             notice = (
                 f"Memory contradiction on key={key!r} (resolution: "
-                f"{contradiction.resolution.value if contradiction.resolution else 'pending'}):\n"
+                f"{resolution}):\n"
                 f"  existing: {old}\n"
                 f"  proposed: {new}\n"
                 f"Reconcile if the new value should override the old."
@@ -176,6 +241,16 @@ class MemoryPulse:
                 text=notice,
                 pulse_type=PULSE_TYPE_CONTRADICTION,
                 pulse_source=key,
+                # Issue #378: structured fields let the drain fold helper
+                # render a compact one-line-per-key form when multiple
+                # contradictions land in the same drain. ``text`` above
+                # stays as the standalone-friendly long form.
+                details={
+                    "key": key,
+                    "existing": old,
+                    "proposed": new,
+                    "resolution": resolution,
+                },
             ))
             await self._mark_notified(key)
         except Exception as exc:
@@ -210,16 +285,3 @@ class MemoryPulse:
         # at this point — do not introduce any before this hook fires.
         await self._db.commit()
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _truncate(value: str, limit: int = 160) -> str:
-        # textwrap.shorten is whitespace-aware so CJK / mixed-script values
-        # don't get sliced mid-grapheme on the byte boundary. Falls back to
-        # raw value if already short, since shorten() collapses whitespace.
-        v = value.strip().replace("\n", " ")
-        if len(v) <= limit:
-            return v
-        return textwrap.shorten(v, width=limit, placeholder="…")
