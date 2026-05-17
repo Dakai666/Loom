@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from loom.core.infra import AbortController, wait_aborted
 from loom.core.memory.lifecycle import MemoryLifecycle
@@ -91,3 +91,61 @@ class MaintenanceLoop:
                     )
             except Exception as exc:  # never let maintenance crash the daemon
                 logger.warning("[maintenance] cycle failed: %s", exc)
+
+
+class DreamLoop:
+    """Drives ``dream_cycle(themed=True)`` on a fixed interval until aborted.
+
+    Issue #376: ``dream_cycle`` shipped as a first-class tool in #149 but had
+    no deterministic trigger — it only ran when the agent remembered to call
+    it, leaving empty days. This loop owns the cadence; theme rotation state
+    lives in ``memory_meta`` (``dream.last_theme``) and survives restarts.
+    """
+
+    # Same rationale as MaintenanceLoop._FIRST_SWEEP_DELAY_SECONDS — defer
+    # the first dream so startup doesn't compete with session bring-up.
+    _FIRST_SWEEP_DELAY_SECONDS = 300.0
+
+    def __init__(
+        self,
+        dream_fn: Callable[[], Awaitable[dict[str, Any]]],
+        abort: AbortController,
+        interval_hours: float = 12.0,
+    ) -> None:
+        self._dream_fn = dream_fn
+        self._abort = abort
+        self._interval_seconds = max(60.0, interval_hours * 3600.0)
+
+    async def run_forever(self) -> None:
+        """Run a dream cycle ``_FIRST_SWEEP_DELAY_SECONDS`` after start, then
+        every ``interval_hours``. Returns when the abort signal fires."""
+        first_iter = True
+        while not self._abort.signal.is_set():
+            timeout = (
+                self._FIRST_SWEEP_DELAY_SECONDS if first_iter
+                else self._interval_seconds
+            )
+            first_iter = False
+            try:
+                await asyncio.wait_for(
+                    wait_aborted(self._abort.signal),
+                    timeout=timeout,
+                )
+                return  # abort signalled
+            except asyncio.TimeoutError:
+                pass  # interval elapsed, run a cycle
+
+            try:
+                result = await self._dream_fn()
+                logger.info(
+                    "[dream] cycle domain=%s sampled=%d found=%d written=%d",
+                    result.get("domain") or "free",
+                    result.get("facts_sampled", 0),
+                    result.get("triples_found", 0),
+                    result.get("triples_written", 0),
+                )
+                errors = result.get("errors") or []
+                if errors:
+                    logger.warning("[dream] warnings: %s", "; ".join(errors))
+            except Exception as exc:  # never let dreaming crash the daemon
+                logger.warning("[dream] cycle failed: %s", exc)

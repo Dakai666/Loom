@@ -185,6 +185,20 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 # "knowledge.milestone" = 365
 
 # ─────────────────────────────────────────────
+# Dream loop (Issue #376) — Themed background synthesis
+# ─────────────────────────────────────────────
+# Runs ``dream_cycle(themed=True)`` on a fixed cadence inside the autonomy
+# daemon, parallel to ``[memory.lifecycle]``. Theme rotation state
+# (self → user → project → knowledge) lives in ``memory_meta`` so it
+# survives restarts. The free-form / single-domain modes remain available
+# via the ``dream_cycle`` tool — this loop only owns the themed schedule.
+
+[memory.dream]
+enabled        = true   # set false to disable scheduled dreams entirely
+interval_hours = 12     # cadence (first dream ~5min after daemon start)
+sample_size    = 15     # facts sampled per cycle (matches tool default)
+
+# ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
 # ─────────────────────────────────────────────
 # When a skill is activated via ``load_skill`` and the turn completes,

@@ -25,7 +25,7 @@ from typing import Awaitable, Callable
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
-from loom.autonomy.maintenance import MaintenanceLoop
+from loom.autonomy.maintenance import DreamLoop, MaintenanceLoop
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
 from loom.core.infra import AbortController, wait_aborted
@@ -473,6 +473,9 @@ class AutonomyDaemon:
         maint_task = self._maybe_start_maintenance()
         if maint_task is not None:
             wait_set.append(maint_task)
+        dream_task = self._maybe_start_dream_loop()
+        if dream_task is not None:
+            wait_set.append(dream_task)
 
         done, pending = await asyncio.wait(
             wait_set, return_when=asyncio.FIRST_COMPLETED
@@ -513,6 +516,62 @@ class AutonomyDaemon:
             "[autonomy] memory maintenance loop started "
             "(interval=%.1fh, throttle=%.1fmin)",
             loop._interval_seconds / 3600.0, loop._min_gap_minutes,
+        )
+        return asyncio.ensure_future(loop.run_forever())
+
+    def _maybe_start_dream_loop(self) -> asyncio.Task | None:
+        """Read [memory.dream] and launch DreamLoop if enabled.
+
+        Issue #376: ``dream_cycle`` only ran when the agent remembered to
+        call its tool form. This loop gives it a deterministic cadence so
+        themed rotation actually fires every day.
+        """
+        session = self._session
+        db = getattr(session, "_db", None) if session else None
+        if session is None or db is None:
+            return None
+        memory = getattr(session, "_memory", None)
+        if memory is None:
+            return None
+        try:
+            from loom.core.session import _load_loom_config  # local import: lazy
+            cfg = _load_loom_config().get("memory", {}).get("dream", {})
+        except Exception as exc:
+            logger.debug("[autonomy] dream config load failed: %s", exc)
+            return None
+        if not cfg.get("enabled", True):
+            return None
+
+        sample_size = int(cfg.get("sample_size", 15))
+        router = session.router
+        model = session.model
+
+        async def _dream_once() -> dict:
+            from loom.core.cognition.dreaming import dream_cycle
+
+            async def _llm_fn(messages: list[dict]) -> str:
+                response = await router.chat(
+                    model=model, messages=messages, max_tokens=2048,
+                )
+                return response.text or ""
+
+            return await dream_cycle(
+                semantic=memory.semantic,
+                relational=memory.relational,
+                llm_fn=_llm_fn,
+                sample_size=sample_size,
+                themed=True,
+                db=db,
+            )
+
+        loop = DreamLoop(
+            dream_fn=_dream_once,
+            abort=self._abort,
+            interval_hours=float(cfg.get("interval_hours", 12.0)),
+        )
+        logger.info(
+            "[autonomy] dream loop started (interval=%.1fh, sample=%d)",
+            loop._interval_seconds / 3600.0, sample_size,
         )
         return asyncio.ensure_future(loop.run_forever())
 
