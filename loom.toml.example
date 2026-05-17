@@ -192,6 +192,14 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 # (self → user → project → knowledge) lives in ``memory_meta`` so it
 # survives restarts. The free-form / single-domain modes remain available
 # via the ``dream_cycle`` tool — this loop only owns the themed schedule.
+#
+# Recommended pairing (the "B plan"):
+#   • Keep ``[memory.dream]`` on — themed rotation runs cheaply (no LLM
+#     intent layer, just direct python call).
+#   • Add an ``[[autonomy.schedules]]`` block for *free* dreams only
+#     (themed=false, cross-domain) — see the dreaming example near the
+#     bottom of this file.
+#   • Do NOT add a second schedule for themed dreams — it would double-fire.
 
 [memory.dream]
 enabled        = true   # set false to disable scheduled dreams entirely
@@ -481,28 +489,29 @@ enabled  = false           # set true to activate daemon
 #   { resource = "exec", action = "execute", selector = "workspace" },
 # ]
 
-# ── Example: offline dreaming (background knowledge synthesis) ─────────────────
-# dream_cycle is a SAFE tool — no allowed_tools needed for it.
-# But relate (writing relational triples) is GUARDED.
+# ── Example: free-dream supplement (pair with [memory.dream]) ──────────────────
+# Themed rotation is owned by ``[memory.dream]`` (daemon-level, no LLM
+# intent). This schedule is the recommended complement: a single daily
+# *free* dream (themed=false) that samples cross-domain instead of
+# pinning one ontology bucket. Together they give you ~2 themed +
+# 1 free dream per day.
 #
-# OVERLAP WARNING: ``[memory.dream]`` above already schedules a themed
-# dream every ``interval_hours`` directly inside the daemon (no LLM
-# intent layer). Use *this* schedule only when you want a *free* dream
-# (themed=false, cross-domain) on top of the themed loop, or when you
-# disable ``[memory.dream]`` and want to drive the whole cadence via
-# the LLM-routed trigger pipeline. Otherwise prefer ``[memory.dream]``
-# — same effect, no token cost on the intent.
+# Do NOT add a second schedule that calls ``dream_cycle`` with themed=true
+# — that would double-fire against ``[memory.dream]``. If you prefer
+# full LLM-routed control (e.g. dynamic sample_size from intent), set
+# ``[memory.dream].enabled = false`` and use schedules exclusively.
 #
 # [[autonomy.schedules]]
-# name          = "offline_dreaming"
-# cron          = "0 3 * * *"        # 03:00 UTC = 11:00 Asia/Taipei
-# intent        = """Run dream_cycle to synthesise insights from semantic memory.
-#                    Call the dream_cycle tool with default settings and report
-#                    how many new relational insights were written."""
+# name          = "offline_dreaming_free"
+# cron          = "0 19 * * *"       # 19:00 UTC = 03:00 Asia/Taipei
+# intent        = """Run a free cross-domain dream. Call dream_cycle with
+#                    themed=false (the default) so the sample spans all
+#                    four ontology domains at random. Report how many
+#                    new relational insights were written."""
 # trust_level   = "safe"
 # notify        = false
 # notify_thread = 0
-# allowed_tools = ["memorize", "relate"]
+# allowed_tools = ["dream_cycle", "memorize"]
 
 # ── Example: weekly memory housekeeping ──────────────────────────────────────────
 # memory_prune is a SAFE tool — no allowed_tools needed.
