@@ -3312,6 +3312,33 @@ def make_pursuit_read_tool(store: "PursuitStore") -> ToolDefinition:
     )
 
 
+def _make_pursuit_write_resolver() -> "Callable[[ToolCall], ScopeRequest]":
+    """Scope resolver for pursuit_write — selector is the pursuit id.
+
+    Granting scope for one pursuit id (e.g. "openai-trial") suppresses
+    re-confirmation on subsequent writes to that same tracker, while
+    leaving other pursuits gated. Invalid/missing id falls back to '*'
+    so the requirement still surfaces to the user (it will fail at
+    executor-level validation anyway).
+    """
+    def _resolve(call: ToolCall) -> ScopeRequest:
+        pid = (call.args.get("id") or "").strip() or "*"
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="pursuit",
+                    action="write",
+                    selector=pid,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+        )
+    return _resolve
+
+
 def make_pursuit_write_tool(store: "PursuitStore") -> ToolDefinition:
     async def _pursuit_write(call: ToolCall) -> ToolResult:
         pid = (call.args.get("id") or "").strip()
@@ -3358,8 +3385,8 @@ def make_pursuit_write_tool(store: "PursuitStore") -> ToolDefinition:
             "'## 累積快照' with dated subsections. To retire a pursuit, "
             "ask the user to delete the file under ~/.loom/pursuits/."
         ),
-        trust_level=TrustLevel.SAFE,
-        capabilities=ToolCapability.NONE,
+        trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.MUTATES,
         input_schema={
             "type": "object",
             "properties": {
@@ -3375,13 +3402,22 @@ def make_pursuit_write_tool(store: "PursuitStore") -> ToolDefinition:
                     "type": "string",
                     "description": "Full markdown content (replaces previous).",
                 },
+                "justification": {
+                    "type": "string",
+                    "description": (
+                        "簡短說明為何在目前的脈絡下寫入/覆蓋這個 pursuit 是合"
+                        "理且必要的（給人類審核看）。"
+                    ),
+                },
             },
-            "required": ["id", "content"],
+            "required": ["id", "content", "justification"],
         },
         executor=_pursuit_write,
         tags=["task", "pursuit"],
-        impact_scope="agent",
+        impact_scope="filesystem",
         inline_only=True,
+        scope_descriptions=["writes/overwrites ~/.loom/pursuits/<id>.md"],
+        scope_resolver=_make_pursuit_write_resolver(),
     )
 
 

@@ -93,10 +93,3 @@ class PursuitStore:
             raise
         return path
 
-    def delete(self, pursuit_id: str) -> bool:
-        """Remove a pursuit. Returns True if a file was removed."""
-        path = self._path(pursuit_id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False

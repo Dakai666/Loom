@@ -169,9 +169,29 @@ def _extract_openai_image_artifact(
     }
 
 
+def _extract_pursuit_write_artifact(
+    call: "ToolCall", result: "ToolResult"
+) -> dict | None:
+    import hashlib
+    import json as _json
+    content = call.args.get("content", "") or ""
+    encoded = content.encode("utf-8")
+    try:
+        payload = _json.loads(result.output or "{}")
+    except Exception:
+        payload = {}
+    return {
+        "artifact_type": "text_file",
+        "size_bytes": len(encoded),
+        "digest": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        "location": payload.get("path"),
+    }
+
+
 _ARTIFACT_EXTRACTORS: dict[str, Callable[["ToolCall", "ToolResult"], dict | None]] = {
     "write_file": _extract_write_file_artifact,
     "openai__text_to_image": _extract_openai_image_artifact,
+    "pursuit_write": _extract_pursuit_write_artifact,
 }
 
 

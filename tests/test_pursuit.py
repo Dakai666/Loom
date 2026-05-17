@@ -12,8 +12,12 @@ import json
 import pytest
 
 from loom.core.tasks.pursuit import PursuitStore, PursuitError
-from loom.core.harness.middleware import ToolCall
-from loom.core.harness.permissions import TrustLevel
+from loom.core.harness.middleware import (
+    ToolCall,
+    ToolResult,
+    _extract_pursuit_write_artifact,
+)
+from loom.core.harness.permissions import TrustLevel, ToolCapability
 from loom.platform.cli.tools import (
     make_pursuit_list_tool,
     make_pursuit_read_tool,
@@ -112,14 +116,6 @@ class TestStoreOperations:
         leftovers = [p for p in store.root.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == []
 
-    def test_delete_returns_true_when_present(self, store):
-        store.write("topic", "x")
-        assert store.delete("topic") is True
-        assert not store.exists("topic")
-
-    def test_delete_returns_false_when_missing(self, store):
-        assert store.delete("ghost") is False
-
     def test_exists(self, store):
         assert store.exists("topic") is False
         store.write("topic", "x")
@@ -184,6 +180,7 @@ class TestPursuitWriteTool:
         result = await tool.executor(_tc("pursuit_write", {
             "id": "openai-trial",
             "content": "# OpenAI 世紀審判\nstatus: active\n",
+            "justification": "user asked to start tracking",
         }))
         assert result.success
         payload = json.loads(result.output)
@@ -194,26 +191,34 @@ class TestPursuitWriteTool:
 
     async def test_overwrite(self, store):
         tool = make_pursuit_write_tool(store)
-        await tool.executor(_tc("pursuit_write", {"id": "t", "content": "v1"}))
-        await tool.executor(_tc("pursuit_write", {"id": "t", "content": "v2"}))
+        await tool.executor(_tc("pursuit_write", {
+            "id": "t", "content": "v1", "justification": "j",
+        }))
+        await tool.executor(_tc("pursuit_write", {
+            "id": "t", "content": "v2", "justification": "j",
+        }))
         assert store.read("t") == "v2"
 
     async def test_missing_id(self, store):
         tool = make_pursuit_write_tool(store)
-        result = await tool.executor(_tc("pursuit_write", {"content": "x"}))
+        result = await tool.executor(_tc("pursuit_write", {
+            "content": "x", "justification": "j",
+        }))
         assert not result.success
         assert "id" in result.error
 
     async def test_missing_content(self, store):
         tool = make_pursuit_write_tool(store)
-        result = await tool.executor(_tc("pursuit_write", {"id": "topic"}))
+        result = await tool.executor(_tc("pursuit_write", {
+            "id": "topic", "justification": "j",
+        }))
         assert not result.success
         assert "content" in result.error
 
     async def test_empty_content_rejected(self, store):
         tool = make_pursuit_write_tool(store)
         result = await tool.executor(_tc("pursuit_write", {
-            "id": "topic", "content": "   \n  ",
+            "id": "topic", "content": "   \n  ", "justification": "j",
         }))
         assert not result.success
         assert "content" in result.error
@@ -221,7 +226,7 @@ class TestPursuitWriteTool:
     async def test_invalid_id(self, store):
         tool = make_pursuit_write_tool(store)
         result = await tool.executor(_tc("pursuit_write", {
-            "id": "Has Caps", "content": "x",
+            "id": "Has Caps", "content": "x", "justification": "j",
         }))
         assert not result.success
         assert "invalid" in result.error
@@ -229,8 +234,92 @@ class TestPursuitWriteTool:
     async def test_path_traversal_blocked(self, store):
         tool = make_pursuit_write_tool(store)
         result = await tool.executor(_tc("pursuit_write", {
-            "id": "../escape", "content": "x",
+            "id": "../escape", "content": "x", "justification": "j",
         }))
         assert not result.success
         # And no file was created outside root
         assert not (store.root.parent / "escape.md").exists()
+
+
+# ── Tool definition guarantees ────────────────────────────────────────
+
+class TestPursuitWriteToolDefinition:
+    """Regression guards: GUARDED + MUTATES + justification required +
+    scope resolver wired. These shape the harness-layer behavior the
+    executor unit tests cannot verify directly."""
+
+    def test_trust_and_capabilities_are_guarded_mutating(self, store):
+        tool = make_pursuit_write_tool(store)
+        assert tool.trust_level == TrustLevel.GUARDED
+        assert tool.capabilities == ToolCapability.MUTATES
+
+    def test_input_schema_requires_justification(self, store):
+        tool = make_pursuit_write_tool(store)
+        required = tool.input_schema["required"]
+        assert "justification" in required
+        assert "id" in required
+        assert "content" in required
+
+    def test_scope_resolver_selector_is_pursuit_id(self, store):
+        tool = make_pursuit_write_tool(store)
+        assert tool.scope_resolver is not None
+        call = _tc("pursuit_write", {
+            "id": "openai-trial", "content": "x", "justification": "j",
+        })
+        req = tool.scope_resolver(call)
+        assert len(req.requirements) == 1
+        r = req.requirements[0]
+        assert r.resource == "pursuit"
+        assert r.action == "write"
+        assert r.selector == "openai-trial"
+
+    def test_scope_resolver_falls_back_to_star_for_missing_id(self, store):
+        tool = make_pursuit_write_tool(store)
+        call = _tc("pursuit_write", {"content": "x", "justification": "j"})
+        req = tool.scope_resolver(call)
+        assert req.requirements[0].selector == "*"
+
+
+# ── Artifact extractor ────────────────────────────────────────────────
+
+class TestPursuitWriteArtifact:
+    def test_extracts_size_and_digest(self):
+        import hashlib
+
+        content = "# Hello\n\ncontent body"
+        encoded = content.encode("utf-8")
+        call = ToolCall(
+            tool_name="pursuit_write",
+            args={"id": "t", "content": content, "justification": "j"},
+            trust_level=TrustLevel.GUARDED, session_id="test",
+        )
+        result = ToolResult(
+            call_id=call.id, tool_name="pursuit_write",
+            success=True,
+            output=json.dumps({
+                "id": "t", "path": "/tmp/pursuits/t.md", "bytes": len(encoded),
+            }),
+        )
+        artifact = _extract_pursuit_write_artifact(call, result)
+        assert artifact == {
+            "artifact_type": "text_file",
+            "size_bytes": len(encoded),
+            "digest": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+            "location": "/tmp/pursuits/t.md",
+        }
+
+    def test_extractor_handles_malformed_output_json(self):
+        call = ToolCall(
+            tool_name="pursuit_write",
+            args={"id": "t", "content": "x", "justification": "j"},
+            trust_level=TrustLevel.GUARDED, session_id="test",
+        )
+        # Output that isn't valid JSON should not raise — location ends None
+        result = ToolResult(
+            call_id=call.id, tool_name="pursuit_write",
+            success=True, output="not-json",
+        )
+        artifact = _extract_pursuit_write_artifact(call, result)
+        assert artifact is not None
+        assert artifact["location"] is None
+        assert artifact["size_bytes"] == 1  # one byte: 'x'
