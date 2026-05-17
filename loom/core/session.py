@@ -1388,6 +1388,11 @@ class LoomSession:
                     ).strip() or "auto",
                 )
             )
+        elif _image_enabled and _image_provider and _image_provider != "openai":
+            logger.warning(
+                "[tools.image] provider %r is not supported; skipping image_generate.",
+                _image_provider,
+            )
 
         # Register sub-agent tool (Phase 5E)
         self.registry.register(make_spawn_agent_tool(self))

@@ -318,10 +318,13 @@ def test_openai_image_tool_schema_and_scope_include_subject_reference(tmp_path):
 
 
 def test_openai_image_tool_registers_as_canonical_image_generate(tmp_path):
-    tool = make_openai_image_generation_tool(tmp_path)
+    tool = make_openai_image_generation_tool(
+        tmp_path, default_model="gpt-image-custom"
+    )
 
     assert tool.name == "image_generate"
     assert tool.tags == ["image", "openai"]
+    assert "gpt-image-custom" in tool.description
 
 
 @pytest.mark.asyncio

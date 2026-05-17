@@ -2850,7 +2850,7 @@ def make_openai_image_generation_tool(
         description=(
             "Generate an image with the configured default image provider and "
             "save it to a workspace file. This installation routes the request "
-            "through OpenAI GPT Image."
+            f"through OpenAI GPT Image model {default_model}."
         ),
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.NETWORK | ToolCapability.MUTATES,

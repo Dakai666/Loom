@@ -196,6 +196,50 @@ async def session_plugin_tool(call):
 
         await session.stop()
 
+    async def test_start_warns_when_configured_image_provider_is_unsupported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        session_module,
+        caplog,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "tools": {
+                "image": {
+                    "enabled": True,
+                    "default_provider": "comfyui-local",
+                },
+            },
+        })
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+        from rich.prompt import Confirm
+        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
+
+        from loom.core.session import LoomSession
+
+        session = LoomSession(
+            model="gpt-test",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+        with caplog.at_level("WARNING", logger="loom.core.session"):
+            await session.start()
+
+        assert session.registry.get("image_generate") is None
+        assert any(
+            "[tools.image] provider 'comfyui-local' is not supported" in r.message
+            for r in caplog.records
+        )
+
+        await session.stop()
+
     async def test_start_loads_mcp_servers_into_session(
         self,
         monkeypatch: pytest.MonkeyPatch,
