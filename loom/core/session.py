@@ -118,7 +118,11 @@ from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.index import MemoryIndex, MemoryIndexer, SkillCatalogEntry
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.pulse import PulseRecord
+from loom.core.memory.pulse import (
+    PULSE_TYPE_CONTRADICTION,
+    PulseRecord,
+    fold_contradiction_pulses,
+)
 from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -1909,11 +1913,29 @@ class LoomSession:
                     "role": "user",
                     "content": f"<system-reminder>\n{body}\n</system-reminder>",
                 })
-            for record in self._pending_pulses:
+
+            # Issue #378: a single session-compression batch can fire
+            # several Hook A contradictions back-to-back (98% of historical
+            # injects, peak 6-in-a-batch). Fold them into one inject so the
+            # agent sees one bullet list instead of N stacked reminders.
+            # session_log keeps one row per record — folding is agent-side
+            # noise reduction only, the analytics granularity is preserved.
+            contradictions = [
+                r for r in self._pending_pulses
+                if r.pulse_type == PULSE_TYPE_CONTRADICTION
+            ]
+            others = [
+                r for r in self._pending_pulses
+                if r.pulse_type != PULSE_TYPE_CONTRADICTION
+            ]
+
+            def _emit_reminder(body: str) -> None:
                 self.messages.append({
                     "role": "user",
-                    "content": f"<system-reminder>\n{record.text}\n</system-reminder>",
+                    "content": f"<system-reminder>\n{body}\n</system-reminder>",
                 })
+
+            def _log_record(record: PulseRecord) -> None:
                 asyncio.ensure_future(self._log_message(
                     "system", record.text,
                     metadata={
@@ -1922,6 +1944,19 @@ class LoomSession:
                     },
                     turn_index=self._turn_index,
                 ))
+
+            for record in others:
+                _emit_reminder(record.text)
+                _log_record(record)
+
+            if len(contradictions) >= 2:
+                _emit_reminder(fold_contradiction_pulses(contradictions))
+                for record in contradictions:
+                    _log_record(record)
+            else:
+                for record in contradictions:
+                    _emit_reminder(record.text)
+                    _log_record(record)
             self._pending_verdicts.clear()
             self._pending_pulses.clear()
 
