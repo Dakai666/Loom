@@ -891,7 +891,7 @@ Step 6. 測試全綠 → merge → 切換 Loom Agent 啟新版開新 session
 | `thought` | ✅ emit（#334） | §3.3 signal accumulator：judge fail/uncertain、outcome abandoned/error、artifact >10KB 任一觸發 commit；inline ≤50KB / blob > 50KB |
 | `model_event` | ✅ emit（#334） | stream_turn 主 loop、`run_judge`（sync + async）、subagent 三條 router 路徑都 emit；`_turn_token_usage` 餵 turn_end |
 | `judge_verdict` | ✅ emit（#334） | `_maybe_run_judge` / `_run_judge_async` 兩條路徑；判定 pass/fail/uncertain → PASS/FAIL/CONCERN，`error` 設值 → ERROR |
-| `artifact_emit` | ✅ emit（#334） | LifecycleMiddleware END 後檢查 `_ARTIFACT_PRODUCERS={write_file, openai__text_to_image}`；rolled_back 或 failed 不 emit |
+| `artifact_emit` | ✅ emit（#334） | LifecycleMiddleware END 後檢查 artifact extractor registry（如 `write_file`, `image_generate`）；rolled_back 或 failed 不 emit |
 
 `三類 exception 自開新 correlation_id`（§4.2）：
 - `env_observation` ✅ 實作（PR #330 commit 4）

@@ -111,9 +111,24 @@ reminder_after_turns = 10
 # base_url      = "https://chatgpt.com/backend-api/codex/responses"
 # default_model = "gpt-5.5"            # bare model name — no "codex/" prefix here
 #
-# OpenAI image generation uses the openai__text_to_image tool.
-# It defaults to gpt-image-2. Codex OAuth uses the Codex Responses backend;
-# OPENAI_API_KEY uses the OpenAI Images API.
+# ─────────────────────────────────────────────
+# Image generation
+# ─────────────────────────────────────────────
+# Disabled by default so agent profiles can choose their preferred drawing
+# provider explicitly. Enable this block to expose the canonical
+# image_generate tool backed by OpenAI GPT Image.
+#
+# [tools.image]
+# enabled = true
+# default_provider = "openai"
+#
+# [tools.image.openai]
+# enabled   = true
+# model     = "gpt-image-2"
+# auth_mode = "auto"  # auto | codex | api_key
+#
+# Codex OAuth uses the Codex Responses backend; OPENAI_API_KEY uses the
+# OpenAI Images API.
 
 # ─────────────────────────────────────────────
 # Memory

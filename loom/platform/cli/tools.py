@@ -163,7 +163,7 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
 
 
 def _make_openai_image_scope_resolver(workspace: Path):
-    """Scope resolver for the OpenAI image tool."""
+    """Scope resolver for the OpenAI-backed image generation tool."""
     import os.path
 
     _workspace_resolved = workspace.resolve()
@@ -2610,8 +2610,14 @@ def _detect_image_mime_type(image_bytes: bytes) -> str | None:
     return None
 
 
-def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
-    """Build an OpenAI GPT Image generation tool."""
+def make_openai_image_generation_tool(
+    workspace: Path,
+    *,
+    tool_name: str = "image_generate",
+    default_model: str = "gpt-image-2",
+    default_auth_mode: str = "auto",
+) -> ToolDefinition:
+    """Build the canonical image_generate tool backed by OpenAI GPT Image."""
 
     from loom.core.session import _load_env
     from loom.core.cognition.openai_auth import resolve_openai_credential
@@ -2626,7 +2632,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                 error="Missing required argument: prompt",
             )
 
-        auth_mode = str(call.args.get("auth_mode", "auto")).strip().lower()
+        auth_mode = str(call.args.get("auth_mode", default_auth_mode)).strip().lower()
         if auth_mode not in {"auto", "codex", "api_key"}:
             return ToolResult(
                 call_id=call.id,
@@ -2666,7 +2672,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
             output_path = output_path.with_suffix(".png")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        image_model = str(call.args.get("model", "gpt-image-2")).strip() or "gpt-image-2"
+        image_model = str(call.args.get("model", default_model)).strip() or default_model
         image_options: dict[str, Any] = {
             "model": image_model,
             "n": int(call.args.get("n", 1) or 1),
@@ -2840,10 +2846,11 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
         )
 
     return ToolDefinition(
-        name="openai__text_to_image",
+        name=tool_name,
         description=(
-            "Generate an image with OpenAI GPT Image and save it to a workspace file. "
-            "Uses Codex OAuth first when available, with OPENAI_API_KEY fallback."
+            "Generate an image with the configured default image provider and "
+            "save it to a workspace file. This installation routes the request "
+            "through OpenAI GPT Image."
         ),
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.NETWORK | ToolCapability.MUTATES,
@@ -2858,7 +2865,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                 "model": {
                     "type": "string",
                     "description": "OpenAI image model.",
-                    "default": "gpt-image-2",
+                    "default": default_model,
                 },
                 "size": {
                     "type": "string",
@@ -2873,7 +2880,7 @@ def make_openai_image_generation_tool(workspace: Path) -> ToolDefinition:
                 "auth_mode": {
                     "type": "string",
                     "enum": ["auto", "codex", "api_key"],
-                    "default": "auto",
+                    "default": default_auth_mode,
                     "description": "auto prefers Codex OAuth and falls back to OPENAI_API_KEY.",
                 },
                 "subject_reference": {

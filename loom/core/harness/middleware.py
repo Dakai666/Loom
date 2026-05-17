@@ -146,7 +146,7 @@ def _extract_write_file_artifact(call: "ToolCall", result: "ToolResult") -> dict
     }
 
 
-def _extract_openai_image_artifact(
+def _extract_image_generate_artifact(
     call: "ToolCall", result: "ToolResult"
 ) -> dict | None:
     import hashlib
@@ -190,7 +190,8 @@ def _extract_pursuit_write_artifact(
 
 _ARTIFACT_EXTRACTORS: dict[str, Callable[["ToolCall", "ToolResult"], dict | None]] = {
     "write_file": _extract_write_file_artifact,
-    "openai__text_to_image": _extract_openai_image_artifact,
+    "image_generate": _extract_image_generate_artifact,
+    "openai__text_to_image": _extract_image_generate_artifact,
     "pursuit_write": _extract_pursuit_write_artifact,
 }
 

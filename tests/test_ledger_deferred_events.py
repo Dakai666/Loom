@@ -368,12 +368,12 @@ async def test_artifact_emit_for_write_file(
     assert p["digest"].startswith("sha256:")
 
 
-async def test_artifact_emit_for_openai_text_to_image(
+async def test_artifact_emit_for_image_generate(
     ledger: LedgerStore, emitter: LedgerEmitter
 ) -> None:
     import json
     reg = _producer_registry(
-        "openai__text_to_image",
+        "image_generate",
         json.dumps({
             "path": "img/out.png", "model": "gpt-image-2",
             "credential_source": "env", "bytes": 4096,
@@ -383,10 +383,10 @@ async def test_artifact_emit_for_openai_text_to_image(
         [LifecycleMiddleware(registry=reg, ledger_emitter=emitter)]
     )
     call = _make_call(
-        "openai__text_to_image", {"prompt": "a cat", "output_path": "img/out.png"},
+        "image_generate", {"prompt": "a cat", "output_path": "img/out.png"},
     )
     async with async_turn_scope("turn_ai"), async_correlation_scope("c1"):
-        await pipeline.execute(call, reg.get("openai__text_to_image").executor)
+        await pipeline.execute(call, reg.get("image_generate").executor)
 
     rows = [r for r in await ledger.fetch_by_turn("turn_ai")
             if r.event_type == "artifact_emit"]

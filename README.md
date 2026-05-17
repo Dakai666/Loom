@@ -386,10 +386,12 @@ Model routing works by prefix — `gpt-*` and `openai/<model>` use
 `codex login`. Other prefixes include `claude-*`, `ollama/<name>`,
 `lmstudio/<name>`, and `MiniMax-*`. Switch mid-session with `/model`.
 
-Image generation includes `openai__text_to_image`, which calls `gpt-image-2`
-and writes a PNG/WebP/JPEG under the workspace. With Codex OAuth it uses the
-Codex Responses backend and supports workspace image `subject_reference`
-anchors; with `OPENAI_API_KEY` it uses the OpenAI Images API.
+Image generation is opt-in via `[tools.image]` in `loom.toml`. When configured
+with `default_provider = "openai"`, Loom exposes the canonical
+`image_generate` tool backed by `gpt-image-2` and writes a PNG/WebP/JPEG under
+the workspace. With Codex OAuth it uses the Codex Responses backend and
+supports workspace image `subject_reference` anchors; with `OPENAI_API_KEY` it
+uses the OpenAI Images API.
 
 ---
 
