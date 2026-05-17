@@ -485,6 +485,14 @@ enabled  = false           # set true to activate daemon
 # dream_cycle is a SAFE tool — no allowed_tools needed for it.
 # But relate (writing relational triples) is GUARDED.
 #
+# OVERLAP WARNING: ``[memory.dream]`` above already schedules a themed
+# dream every ``interval_hours`` directly inside the daemon (no LLM
+# intent layer). Use *this* schedule only when you want a *free* dream
+# (themed=false, cross-domain) on top of the themed loop, or when you
+# disable ``[memory.dream]`` and want to drive the whole cadence via
+# the LLM-routed trigger pipeline. Otherwise prefer ``[memory.dream]``
+# — same effect, no token cost on the intent.
+#
 # [[autonomy.schedules]]
 # name          = "offline_dreaming"
 # cron          = "0 3 * * *"        # 03:00 UTC = 11:00 Asia/Taipei
