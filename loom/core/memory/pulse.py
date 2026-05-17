@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import textwrap
+from dataclasses import dataclass
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,30 @@ logger = logging.getLogger(__name__)
 _BRIEF_TOP_N = 3
 _GATE_KEY_PREFIX = "pulse.contradiction."
 
+# Pulse type labels. Stable strings — used as session_log metadata keys
+# (Issue #377) so renaming requires a migration of any analytics queries.
+PULSE_TYPE_SESSION_BRIEF = "session_brief"
+PULSE_TYPE_CONTRADICTION = "contradiction"
+
+# Pulse source for Hook G — Hook A uses the contradicting fact key.
+_SOURCE_HOOK_G = "hook_G"
+
+
+@dataclass(frozen=True, slots=True)
+class PulseRecord:
+    """One Pulse inject — text + provenance for session_log persistence.
+
+    Issue #377: pulses used to be ``list[str]`` and vanished after drain,
+    leaving no way to measure noise vs. utility. Carrying ``pulse_type``
+    and ``pulse_source`` through the drain lets ``session_log`` tag each
+    inject so observation queries like "per-hook per-session inject
+    counts" become a straight SELECT.
+    """
+
+    text: str
+    pulse_type: str
+    pulse_source: str
+
 
 class MemoryPulse:
     """Owns the two active hooks (G + A). Stateless across calls — all
@@ -57,7 +82,7 @@ class MemoryPulse:
         semantic: "SemanticMemory",
         session_id: str,
         session_started_at: datetime,
-        pending_buffer: list[str],
+        pending_buffer: list[PulseRecord],
     ) -> None:
         self._db = db
         self._semantic = semantic
@@ -102,7 +127,11 @@ class MemoryPulse:
                 "Memory preheat — milestone facts active in your previous "
                 "session (top by confidence):\n" + "\n".join(lines)
             )
-            self._buffer.append(brief)
+            self._buffer.append(PulseRecord(
+                text=brief,
+                pulse_type=PULSE_TYPE_SESSION_BRIEF,
+                pulse_source=_SOURCE_HOOK_G,
+            ))
         except Exception as exc:
             logger.debug("pulse: session_brief failed: %s", exc)
 
@@ -143,7 +172,11 @@ class MemoryPulse:
                 f"  proposed: {new}\n"
                 f"Reconcile if the new value should override the old."
             )
-            self._buffer.append(notice)
+            self._buffer.append(PulseRecord(
+                text=notice,
+                pulse_type=PULSE_TYPE_CONTRADICTION,
+                pulse_source=key,
+            ))
             await self._mark_notified(key)
         except Exception as exc:
             logger.debug("pulse: contradiction_inject failed: %s", exc)
