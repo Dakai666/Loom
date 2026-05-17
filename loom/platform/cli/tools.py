@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
     from loom.core.infra.telemetry import AgentTelemetryTracker
     from loom.core.tasks.manager import TaskListManager
+    from loom.core.tasks.pursuit import PursuitStore
 
 _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
@@ -3219,6 +3220,168 @@ def make_task_write_tool(
         tags=["task", "planning"],
         impact_scope="agent",
         inline_only=True,  # Output is a structured status JSON; #197
+    )
+
+
+# ------------------------------------------------------------------
+# Issue #375: Pursuit tools — long-lived task artifacts (markdown files
+# under ~/.loom/pursuits/). Pursuit ≠ memory: pursuit is task-axis,
+# memory.db is the agent's cognition. Three thin tools wrap PursuitStore;
+# the agent orchestrates `pursuit_read` + web tools + `pursuit_write`
+# herself rather than a monolithic `pursuit_pull` primitive.
+# ------------------------------------------------------------------
+
+
+def make_pursuit_list_tool(store: "PursuitStore") -> ToolDefinition:
+    async def _pursuit_list(call: ToolCall) -> ToolResult:
+        ids = store.list()
+        payload = {"count": len(ids), "pursuits": ids}
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=json.dumps(payload, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name="pursuit_list",
+        description=(
+            "List all active pursuits — long-lived tracking tasks the user "
+            "has asked you to follow (e.g. 'OpenAI 世紀審判'). Returns ids "
+            "you can pass to pursuit_read/pursuit_write. Use this when the "
+            "user asks 'what am I tracking' or before answering 'how's X?' "
+            "without an id in mind."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={"type": "object", "properties": {}},
+        executor=_pursuit_list,
+        tags=["task", "pursuit"],
+        impact_scope="agent",
+        inline_only=True,
+    )
+
+
+def make_pursuit_read_tool(store: "PursuitStore") -> ToolDefinition:
+    async def _pursuit_read(call: ToolCall) -> ToolResult:
+        pid = (call.args.get("id") or "").strip()
+        if not pid:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'id' is required",
+            )
+        try:
+            content = store.read(pid)
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+        payload = {"id": pid, "content": content}
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=json.dumps(payload, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name="pursuit_read",
+        description=(
+            "Read a pursuit's full markdown by id. Returns the dimensions, "
+            "thresholds, and accumulated snapshots the user has been "
+            "tracking. Use when the user asks about a specific tracked "
+            "topic. After reading, you typically run search/fetch tools "
+            "yourself to gather fresh data, then call pursuit_write with "
+            "an appended snapshot section."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Pursuit id (e.g. 'openai-trial').",
+                },
+            },
+            "required": ["id"],
+        },
+        executor=_pursuit_read,
+        tags=["task", "pursuit"],
+        impact_scope="agent",
+        inline_only=True,
+    )
+
+
+def make_pursuit_write_tool(store: "PursuitStore") -> ToolDefinition:
+    async def _pursuit_write(call: ToolCall) -> ToolResult:
+        pid = (call.args.get("id") or "").strip()
+        content = call.args.get("content")
+        if not pid:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'id' is required",
+            )
+        if not isinstance(content, str) or not content.strip():
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'content' is required and must be a non-empty string",
+            )
+        try:
+            path = store.write(pid, content)
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+        payload = {
+            "id": pid,
+            "path": str(path),
+            "bytes": len(content.encode("utf-8")),
+        }
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True,
+            output=json.dumps(payload, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name="pursuit_write",
+        description=(
+            "Write/replace a pursuit's full markdown by id. Pass the FULL "
+            "intended markdown — this overwrites previous content "
+            "(edit-style, per #205/#206). Use for: (a) creating a new "
+            "tracker from a spoken user request, (b) appending a fresh "
+            "snapshot under '## 累積快照' after pulling new data, "
+            "(c) editing dimensions/thresholds. Recommended shape: "
+            "title + status/created/last_pulled metadata + '## 維度' + "
+            "'## 累積快照' with dated subsections. To retire a pursuit, "
+            "ask the user to delete the file under ~/.loom/pursuits/."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "Pursuit id: lowercase letters/digits/hyphens, "
+                        "1-64 chars. Becomes the filename "
+                        "(~/.loom/pursuits/<id>.md)."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full markdown content (replaces previous).",
+                },
+            },
+            "required": ["id", "content"],
+        },
+        executor=_pursuit_write,
+        tags=["task", "pursuit"],
+        impact_scope="agent",
+        inline_only=True,
     )
 
 

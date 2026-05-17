@@ -1390,6 +1390,20 @@ class LoomSession:
             )
         )
 
+        # Issue #375: Pursuit tools — long-lived task artifacts as markdown
+        # under ~/.loom/pursuits/. Cross-session by design (unlike TaskList).
+        # Stateless wrt session so one PursuitStore instance is fine.
+        from loom.core.tasks.pursuit import PursuitStore
+        from loom.platform.cli.tools import (
+            make_pursuit_list_tool,
+            make_pursuit_read_tool,
+            make_pursuit_write_tool,
+        )
+        pursuit_store = PursuitStore()
+        self.registry.register(make_pursuit_list_tool(pursuit_store))
+        self.registry.register(make_pursuit_read_tool(pursuit_store))
+        self.registry.register(make_pursuit_write_tool(pursuit_store))
+
         # Issue #154: async job inspection tools. The JobStore + Scratchpad
         # themselves are created in __init__ so run_bash/fetch_url can close
         # over them; only the inspection tools are registered here.
