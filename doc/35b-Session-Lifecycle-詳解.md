@@ -177,10 +177,31 @@ async def stream_turn(
         result = await self._pipeline.process(call, self._execute_tool)
         results.append(result)
 
-    # Phase 5: Drain MemoryPulse pulses（<system-reminder> blocks）
-    # Issue #281 P3 — 與 _pending_verdicts 一起 drain，每次 turn 只出現一次
-    for body in (*self._pending_verdicts, *self._pending_pulses):
+    # Phase 5: Drain reminders（<system-reminder> blocks），每 turn 只出現一次
+    # Issue #281 P3 + #377/#378 — 三段順序：verdicts → 非 contradiction pulse
+    # → contradiction pulse（N≥2 折成單則，<2 維持原 verbose 形式）
+    # 每筆 pulse 同步寫一筆 session_log(role='system', metadata={pulse_type,
+    # pulse_source}) fire-and-forget，折疊只影響 agent inject 數量，分析粒度
+    # 不變。實際邏輯與細節以 loom/core/session.py stream_turn 為準。
+    for body in self._pending_verdicts:
         self._inject_reminder(body)
+
+    contradictions = [r for r in self._pending_pulses
+                      if r.pulse_type == "contradiction"]
+    others = [r for r in self._pending_pulses
+              if r.pulse_type != "contradiction"]
+    for record in others:
+        self._inject_reminder(record.text)
+        self._log_pulse(record)        # session_log role='system'
+    if len(contradictions) >= 2:
+        self._inject_reminder(fold_contradiction_pulses(contradictions))
+        for record in contradictions:
+            self._log_pulse(record)
+    else:
+        for record in contradictions:
+            self._inject_reminder(record.text)
+            self._log_pulse(record)
+
     self._pending_verdicts.clear()
     self._pending_pulses.clear()
 

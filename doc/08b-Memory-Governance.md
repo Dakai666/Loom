@@ -108,6 +108,24 @@ audit_log 寫入 governance 事件
 
 **Hook A 設計原則**：矛盾通知的觸發與 resolution 無關——即使舊值勝出（KEEP），agent 仍需知道「有人試圖覆寫」。gate 在 session start 時清除，確保下一 session 看到同一矛盾時仍有通知。
 
+#### Hook A follow-up（2026-05-17）
+
+| 動作 | PR | 內容 |
+|------|----|----|
+| Observability | #383 (#377) | 每筆 inject 同步寫一筆 `session_log(role='system', metadata={pulse_type, pulse_source})`。`role='system'` 由 `load_messages` 自動排除，session resume 不會重播。 |
+| Noise folding | #384 (#378) | 同 turn 內 N≥2 個 contradiction 折成單則 `<system-reminder>` bullet list（最多 20 行 + overflow 提示）。session_log 仍每筆一行，分析粒度不變。 |
+
+實務查詢（驗證折疊命中、找熱 key）：
+```sql
+-- 哪些 drain 把 ≥2 條 contradiction 收進一個 inject
+SELECT session_id, turn_index, COUNT(*) AS folded
+FROM session_log
+WHERE role='system' AND json_extract(metadata,'$.pulse_type')='contradiction'
+GROUP BY 1, 2 HAVING folded >= 2;
+```
+
+詳細 SQL 範例與 ship 紀錄見 `doc/52-主線與支線.md §1.5`。
+
 ### 回傳值
 
 ```python
