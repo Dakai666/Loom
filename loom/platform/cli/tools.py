@@ -277,7 +277,9 @@ def _make_write_file_resolver(workspace: Path):
     return _resolve
 
 
-def _make_run_bash_resolver(workspace: Path):
+def _make_run_bash_resolver(
+    workspace: Path, sandbox: SandboxSettings | None = None,
+):
     """
     Return a scope_resolver for run_bash bound to *workspace*.
 
@@ -289,25 +291,66 @@ def _make_run_bash_resolver(workspace: Path):
 
     _SCOPE_UNKNOWN_PATTERNS = re.compile(r'[\|`]|\$\(|\$\{|\$[A-Za-z]|<<|&&|\|\|')
 
+    def _select_profile(command: str, call: ToolCall) -> tuple[str | None, dict]:
+        if sandbox is None or sandbox.backend != "srt" or not sandbox.profiles:
+            return None, {}
+        explicit_profile = (call.args.get("sandbox_profile") or "").strip() or None
+        profile_name = sandbox.select_profile_for_command(
+            command, explicit=explicit_profile,
+        )
+        if not profile_name:
+            return None, {}
+        profile = sandbox.profiles[profile_name]
+        return profile_name, {
+            "allow_read": list(profile.allow_read),
+            "allow_write": list(profile.allow_write),
+            "allowed_domains": list(profile.allowed_domains),
+            "allowed_sockets": list(profile.allowed_sockets),
+        }
+
+    def _profile_requirement(
+        call: ToolCall, profile_name: str | None, constraints: dict,
+    ) -> list[ScopeRequirement]:
+        if not profile_name:
+            return []
+        return [
+            ScopeRequirement(
+                resource="sandbox_profile",
+                action="use",
+                selector=profile_name,
+                constraints=constraints,
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            )
+        ]
+
     def _resolve(call: ToolCall) -> ScopeRequest:
         command = call.args.get("command", "")
+        profile_name, profile_constraints = _select_profile(command, call)
 
         # If command contains patterns we can't analyze, mark scope unknown
         if _SCOPE_UNKNOWN_PATTERNS.search(command):
+            requirements = [
+                ScopeRequirement(
+                    resource="exec",
+                    action="execute",
+                    selector="workspace",
+                    constraints={"scope_unknown": True},
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ]
+            requirements.extend(
+                _profile_requirement(call, profile_name, profile_constraints)
+            )
+            metadata = {"scope_unknown": True}
+            if profile_name:
+                metadata["sandbox_profile"] = profile_name
             return ScopeRequest(
                 tool_name=call.tool_name,
                 capabilities=call.capabilities,
-                requirements=[
-                    ScopeRequirement(
-                        resource="exec",
-                        action="execute",
-                        selector="workspace",
-                        constraints={"scope_unknown": True},
-                        tool_name=call.tool_name,
-                        capabilities=call.capabilities,
-                    ),
-                ],
-                metadata={"scope_unknown": True},
+                requirements=requirements,
+                metadata=metadata,
             )
 
         # Check for absolute paths outside workspace
@@ -323,19 +366,25 @@ def _make_run_bash_resolver(workspace: Path):
                 has_absolute = True
                 break
 
+        requirements = [
+            ScopeRequirement(
+                resource="exec",
+                action="execute",
+                selector="workspace",
+                constraints={"has_absolute_paths": has_absolute},
+                tool_name=call.tool_name,
+                capabilities=call.capabilities,
+            ),
+        ]
+        requirements.extend(
+            _profile_requirement(call, profile_name, profile_constraints)
+        )
+        metadata = {"sandbox_profile": profile_name} if profile_name else {}
         return ScopeRequest(
             tool_name=call.tool_name,
             capabilities=call.capabilities,
-            requirements=[
-                ScopeRequirement(
-                    resource="exec",
-                    action="execute",
-                    selector="workspace",
-                    constraints={"has_absolute_paths": has_absolute},
-                    tool_name=call.tool_name,
-                    capabilities=call.capabilities,
-                ),
-            ],
+            requirements=requirements,
+            metadata=metadata,
         )
     return _resolve
 

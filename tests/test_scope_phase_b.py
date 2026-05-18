@@ -26,6 +26,7 @@ from loom.core.harness.scope import (
     ScopeRequirement,
     ScopeRequest,
 )
+from loom.core.security.sandbox_runtime import SandboxSettings
 from loom.platform.cli.tools import (
     _fetch_url_resolver,
     _make_run_bash_resolver,
@@ -154,6 +155,65 @@ class TestRunBashResolver:
         assert r.selector == "workspace"
         assert not r.constraints.get("has_absolute_paths")
         assert not req.metadata.get("scope_unknown")
+
+
+def _profile_settings():
+    return SandboxSettings.from_config({
+        "backend": "srt",
+        "profiles": {
+            "github": {
+                "match_commands": ["gh"],
+                "allow_read": ["~/.config/gh"],
+                "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                "allowed_domains": ["api.github.com", "github.com"],
+            },
+        },
+    })
+
+
+class TestRunBashSandboxProfileResolver:
+    def test_auto_detects_github_profile(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash", {"command": "gh pr view 387"},
+            caps=ToolCapability.EXEC,
+        )
+        req = resolver(call)
+
+        profile_reqs = [
+            r for r in req.requirements if r.resource == "sandbox_profile"
+        ]
+        assert len(profile_reqs) == 1
+        r = profile_reqs[0]
+        assert r.action == "use"
+        assert r.selector == "github"
+        assert r.constraints["allowed_domains"] == [
+            "api.github.com", "github.com",
+        ]
+        assert req.metadata["sandbox_profile"] == "github"
+
+    def test_explicit_profile_argument_selects_profile(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash",
+            {
+                "command": "npx wrapper gh pr view 387",
+                "sandbox_profile": "github",
+            },
+            caps=ToolCapability.EXEC,
+        )
+        req = resolver(call)
+        assert req.metadata["sandbox_profile"] == "github"
+
+    def test_unknown_explicit_profile_raises(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash",
+            {"command": "gh pr view 387", "sandbox_profile": "missing"},
+            caps=ToolCapability.EXEC,
+        )
+        with pytest.raises(ValueError, match="Unknown sandbox profile"):
+            resolver(call)
 
 
 class TestFetchUrlResolver:

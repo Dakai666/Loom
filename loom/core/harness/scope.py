@@ -300,6 +300,14 @@ class MutationMatcher:
         return grant.selector == requirement.selector
 
 
+class SandboxProfileMatcher:
+    """Exact profile-name matcher for per-session sandbox profile grants."""
+    def covers(self, grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
+        if grant.action != requirement.action:
+            return False
+        return grant.selector == requirement.selector
+
+
 # ---------------------------------------------------------------------------
 # Matcher registry
 # ---------------------------------------------------------------------------
@@ -310,6 +318,7 @@ _MATCHERS: dict[str, ScopeMatcher] = {
     "exec": ExecMatcher(),
     "agent": AgentMatcher(),
     "mutation": MutationMatcher(),
+    "sandbox_profile": SandboxProfileMatcher(),
 }
 
 
