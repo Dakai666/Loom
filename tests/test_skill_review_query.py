@@ -240,3 +240,232 @@ async def test_sessions_distinct_and_sorted(
     digest = await query_skill_ledger(ledger, "code_weaver")
     assert digest.load_count == 2
     assert digest.sessions == ("sess_a", "sess_b")
+
+
+# ── Cross-turn / orphan-load scenarios — agent commonly forgets unload ──
+
+
+async def test_unload_in_later_turn_captures_cross_turn_window(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Skill loaded in turn A and unloaded in turn C must surface all
+    intermediate evidence — agents routinely span turns mid-task."""
+    async with async_turn_scope("turn_A"), async_correlation_scope("c_A"):
+        await _emit_load(emitter, skill="code_weaver", suffix="1")
+    async with async_turn_scope("turn_B"), async_correlation_scope("c_B"):
+        # In-between work that the old per-turn query silently lost.
+        await emitter.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="write_file",
+                tool_call_id="call_w_B",
+                args_digest="sha256:wB",
+                result_digest="sha256:rwB",
+            ),
+            event_id="evt_w_end_B",
+        )
+        await emitter.emit_memory_op(
+            payload=MemoryOpPayload(
+                operation="write",
+                memory_id="mem_feedback_B",
+                trust_tier="user_explicit",
+            ),
+        )
+    async with async_turn_scope("turn_C"), async_correlation_scope("c_C"):
+        await _emit_unload(emitter, skill="code_weaver", suffix="1")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 1
+    assert digest.unload_count == 1
+    assert len(digest.episodes) == 1
+    ep = digest.episodes[0]
+    assert ep.unload_inferred is False
+    assert ep.unload_inferred_reason is None
+    assert ep.unloaded_at is not None and ep.unloaded_at > ep.loaded_at
+    tool_names = [
+        e.payload.get("tool_name") for e in ep.events_after_load
+        if e.event_type == "tool_lifecycle"
+    ]
+    assert "write_file" in tool_names
+    types = [e.event_type for e in ep.events_after_load]
+    assert "memory_op" in types
+
+
+async def test_load_without_unload_marks_inferred_no_boundary(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Loaded but never unloaded within the query window — episode stays
+    open and flags ``no_unload_in_window``. This is the common agent
+    bookend-failure case."""
+    async with async_turn_scope("turn_A"), async_correlation_scope("c_A"):
+        await _emit_load(emitter, skill="code_weaver", suffix="1")
+        await emitter.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="write_file",
+                tool_call_id="call_w_A",
+                args_digest="sha256:wA",
+                result_digest="sha256:rwA",
+            ),
+            event_id="evt_w_end_A",
+        )
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 1
+    assert digest.unload_count == 0
+    ep = digest.episodes[0]
+    assert ep.unload_inferred is True
+    assert ep.unload_inferred_reason == "no_unload_in_window"
+    assert ep.unloaded_at is None
+    # Despite the open window, in-window evidence is still captured.
+    tool_names = [
+        e.payload.get("tool_name") for e in ep.events_after_load
+        if e.event_type == "tool_lifecycle"
+    ]
+    assert "write_file" in tool_names
+
+
+async def test_reload_without_unload_closes_previous_episode(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Re-loading the same skill before unloading the prior activation
+    is treated as an implicit boundary — the prior episode closes at
+    the re-load timestamp and is flagged ``reloaded_without_unload``."""
+    async with async_turn_scope("turn_A"), async_correlation_scope("c_A"):
+        await _emit_load(emitter, skill="code_weaver", suffix="1")
+        await emitter.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="write_file",
+                tool_call_id="call_w_A",
+                args_digest="sha256:wA",
+                result_digest="sha256:rwA",
+            ),
+            event_id="evt_w_end_A",
+        )
+    async with async_turn_scope("turn_B"), async_correlation_scope("c_B"):
+        await _emit_load(emitter, skill="code_weaver", suffix="2")
+        await _emit_unload(emitter, skill="code_weaver", suffix="2")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 2
+    assert digest.unload_count == 1
+    assert len(digest.episodes) == 2
+
+    first, second = digest.episodes
+    assert first.unload_inferred is True
+    assert first.unload_inferred_reason == "reloaded_without_unload"
+    assert first.unloaded_at is not None  # set to the reload timestamp
+    # In-window evidence between first load and the reload boundary.
+    tool_names = [
+        e.payload.get("tool_name") for e in first.events_after_load
+        if e.event_type == "tool_lifecycle"
+    ]
+    assert "write_file" in tool_names
+
+    assert second.unload_inferred is False
+    assert second.unload_inferred_reason is None
+
+
+async def test_cross_session_unload_does_not_close_other_sessions_episode(
+    ledger: LedgerStore,
+) -> None:
+    """Activation windows must stay within the loading session.
+
+    PR #393 review case: sess_A loads code_weaver and never unloads;
+    sess_B later runs unrelated work and unloads code_weaver. The
+    sess_A episode must remain open (inferred boundary) and must NOT
+    pull sess_B's events into events_after_load.
+    """
+    e_a = LedgerEmitter(ledger, session_id="sess_A")
+    e_b = LedgerEmitter(ledger, session_id="sess_B")
+
+    async with async_turn_scope("turn_A1"), async_correlation_scope("c_A1"):
+        await _emit_load(e_a, skill="code_weaver", suffix="A1")
+    async with async_turn_scope("turn_B1"), async_correlation_scope("c_B1"):
+        await e_b.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="write_file",
+                tool_call_id="call_w_B",
+                args_digest="sha256:wB",
+                result_digest="sha256:rwB",
+            ),
+            event_id="evt_w_end_B",
+        )
+        await _emit_unload(e_b, skill="code_weaver", suffix="B1")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 1
+    assert digest.unload_count == 1  # the sess_B unload is still counted globally
+    assert digest.sessions == ("sess_A", "sess_B")
+    assert len(digest.episodes) == 1
+
+    ep = digest.episodes[0]
+    assert ep.session_id == "sess_A"
+    # sess_B's unload must NOT close sess_A's episode.
+    assert ep.unload_inferred is True
+    assert ep.unload_inferred_reason == "no_unload_in_window"
+    assert ep.unloaded_at is None
+    # sess_B's write_file must NOT appear in sess_A's evidence.
+    foreign_session_event_ids = {
+        e.event_id for e in ep.events_after_load if e.session_id != "sess_A"
+    }
+    assert foreign_session_event_ids == set()
+
+
+async def test_cross_session_reload_does_not_close_other_sessions_episode(
+    ledger: LedgerStore,
+) -> None:
+    """A re-load of the same skill in a different session is not an
+    implicit boundary for an open episode in another session."""
+    e_a = LedgerEmitter(ledger, session_id="sess_A")
+    e_b = LedgerEmitter(ledger, session_id="sess_B")
+
+    async with async_turn_scope("turn_A1"), async_correlation_scope("c_A1"):
+        await _emit_load(e_a, skill="code_weaver", suffix="A1")
+    async with async_turn_scope("turn_B1"), async_correlation_scope("c_B1"):
+        await _emit_load(e_b, skill="code_weaver", suffix="B1")
+        await _emit_unload(e_b, skill="code_weaver", suffix="B1")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 2
+    assert len(digest.episodes) == 2
+
+    sess_a_ep = next(ep for ep in digest.episodes if ep.session_id == "sess_A")
+    assert sess_a_ep.unload_inferred is True
+    assert sess_a_ep.unload_inferred_reason == "no_unload_in_window"
+    assert sess_a_ep.unloaded_at is None
+
+    sess_b_ep = next(ep for ep in digest.episodes if ep.session_id == "sess_B")
+    assert sess_b_ep.unload_inferred is False
+
+
+async def test_nested_skills_each_get_own_window(
+    ledger: LedgerStore, emitter: LedgerEmitter
+) -> None:
+    """Loading skill B while skill A is still active is fine — A's
+    activation persists until A is itself unloaded; B's load/unload
+    events naturally appear inside A's events_after_load as evidence."""
+    async with async_turn_scope("turn_A"), async_correlation_scope("c_A"):
+        await _emit_load(emitter, skill="code_weaver", suffix="A1")
+        await _emit_load(emitter, skill="news_aggregator", suffix="B1")
+        await _emit_unload(emitter, skill="news_aggregator", suffix="B1")
+        await _emit_unload(emitter, skill="code_weaver", suffix="A1")
+
+    digest_a = await query_skill_ledger(ledger, "code_weaver")
+    digest_b = await query_skill_ledger(ledger, "news_aggregator")
+
+    assert digest_a.load_count == 1
+    assert digest_a.episodes[0].unload_inferred is False
+    # Inner skill's lifecycle events should appear in A's evidence —
+    # this is what lets a reviewer notice the nesting pattern.
+    inner_tools = {
+        e.payload.get("tool_name") for e in digest_a.episodes[0].events_after_load
+        if e.event_type == "tool_lifecycle"
+        and e.payload.get("skill_id") == "news_aggregator"
+    }
+    assert {"load_skill", "unload_skill"} <= inner_tools
+
+    assert digest_b.load_count == 1
+    assert digest_b.episodes[0].unload_inferred is False

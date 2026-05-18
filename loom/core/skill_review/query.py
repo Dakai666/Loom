@@ -7,12 +7,23 @@ score. The consumer reasons about the evidence.
 Shape choices:
 
 - An *episode* is one load_skill activation. It carries the raw events
-  that followed in the same turn (tool_lifecycle, memory_op, judge_verdict,
-  turn_end), capped to keep payloads bounded.
-- Activation window per turn: from the load_skill END event up to either
-  the matching unload_skill in the same turn or the turn_end, whichever
-  comes first. Most turns have at most one activation; multiple loads
-  in the same turn produce overlapping episodes (no de-dup).
+  that followed (tool_lifecycle, memory_op, judge_verdict, turn_end),
+  capped to keep payloads bounded.
+- Activation window:
+    start = load_skill END timestamp
+    end   = earliest of (explicit unload_skill END for same skill in
+            the same session, next load_skill END for same skill in
+            the same session = implicit re-activation boundary,
+            query window's until_ts when neither exists)
+  The window spans turns deliberately: agents routinely keep a skill
+  loaded across many turns. Per-turn scoping silently lost cross-turn
+  usage and miscounted feedback density. It does NOT span sessions:
+  an unload in a different session must not close this episode and
+  another session's events must not be attributed here.
+- ``unload_inferred`` flags episodes whose window was closed by
+  heuristic (re-load) or remained open (no unload before until_ts);
+  ``unload_inferred_reason`` distinguishes the two. Surfacing these
+  lets reviewers see when the agent's load/unload bookend habit fails.
 - Distinct sessions are surfaced for cross-session reasoning ("this skill
   has been active in 3 different sessions this week").
 - No "health score". doc/54 §1 rules out process-signal grading.
@@ -37,16 +48,21 @@ _DEFAULT_MAX_EPISODES = 100
 
 @dataclass(frozen=True)
 class SkillEpisode:
-    """One load_skill activation and the same-turn events that followed."""
+    """One load_skill activation and the events that followed it."""
 
     load_event_id: str
     session_id: str
-    turn_id: str
+    turn_id: str                          # turn that issued load_skill
     loaded_at: float
-    unloaded_at: float | None
-    turn_outcome: str | None              # from turn_end payload, if present
+    unloaded_at: float | None             # window-end ts, None when still open at until_ts
+    turn_outcome: str | None              # outcome of the loading turn, if it ended
     events_after_load: list[LedgerEvent] = field(default_factory=list)
     truncated: bool = False               # True if events_after_load was capped
+    unload_inferred: bool = False         # True when window closed by heuristic
+    unload_inferred_reason: str | None = None
+    # One of: None (explicit unload), "reloaded_without_unload" (next
+    # load_skill END for same skill closed the window),
+    # "no_unload_in_window" (no boundary found before until_ts).
 
 
 @dataclass(frozen=True)
@@ -120,36 +136,98 @@ async def query_skill_ledger(
     episodes_truncated = load_count > max_episodes
     load_ends_for_episodes = load_ends[-max_episodes:] if episodes_truncated else load_ends
 
-    # Build one episode per load. Same-turn events: fetched by turn_id and
-    # filtered to the activation window. We accept the per-turn fetch cost
-    # because turns are short and the alternative (one giant query then
-    # in-memory bucket) is messier with no payoff at Phase 1 scale.
+    # Build one episode per load. Activation windows span turns within
+    # the loading session: an agent may load a skill in turn N and only
+    # unload it in turn N+k, with plenty of in-between work to attribute.
+    # Closing the window at the loading turn's end (the original
+    # behaviour) silently dropped all that evidence and made feedback
+    # density look zero. Crossing *session* boundaries, however, is
+    # never correct — a load in session A must not be closed by an
+    # unload in session B, and B's events must not appear in A's
+    # episode (see PR #393 review).
     episodes: list[SkillEpisode] = []
-    for load in load_ends_for_episodes:
+    for load_idx, load in enumerate(load_ends_for_episodes):
         loaded_at = load.timestamp
+        load_session_id = load.session_id
 
-        # Find unload_skill END for the same skill in the same turn, if any.
-        turn_unload_ts: float | None = None
-        for un in unload_ends:
-            if un.turn_id == load.turn_id and un.timestamp > loaded_at:
-                turn_unload_ts = un.timestamp
-                break
+        # Earliest explicit unload for this skill in the same session
+        # after loaded_at. unload_ends came from a timestamp-ordered
+        # fetch, so the first session-matching hit is the earliest.
+        explicit_unload_ts: float | None = next(
+            (
+                un.timestamp
+                for un in unload_ends
+                if un.session_id == load_session_id and un.timestamp > loaded_at
+            ),
+            None,
+        )
 
-        turn_events = await ledger.events.where(turn_id=load.turn_id).order_by("timestamp").all()
+        # Earliest subsequent reload of the same skill in the same
+        # session. Reloading is treated as an implicit boundary: the
+        # prior activation is over as soon as the agent declares a new
+        # one in the same session.
+        next_reload_ts: float | None = next(
+            (
+                la.timestamp
+                for la in load_ends
+                if la.session_id == load_session_id and la.timestamp > loaded_at
+            ),
+            None,
+        )
 
-        # Window: (loaded_at, unload_ts or +inf]. Strict > on loaded_at so
-        # we don't re-include the load event itself.
-        window_end = turn_unload_ts if turn_unload_ts is not None else float("inf")
+        # Pick the earliest of the two candidates. Each carries whether
+        # it represents an inferred boundary.
+        boundary_ts: float | None = None
+        unload_inferred = False
+        unload_inferred_reason: str | None = None
+        candidates: list[tuple[float, bool, str | None]] = []
+        if explicit_unload_ts is not None:
+            candidates.append((explicit_unload_ts, False, None))
+        if next_reload_ts is not None:
+            candidates.append((next_reload_ts, True, "reloaded_without_unload"))
+        if candidates:
+            boundary_ts, unload_inferred, unload_inferred_reason = min(
+                candidates, key=lambda c: c[0]
+            )
+        else:
+            # No boundary in the query window — episode stays open through until_ts.
+            unload_inferred = True
+            unload_inferred_reason = "no_unload_in_window"
+
+        window_end = boundary_ts if boundary_ts is not None else until_ts
+
+        # Fetch by time range, scoped to the loading session (cross-turn
+        # within session is the intended span; cross-session would
+        # mis-attribute evidence — see PR #393 review). The cap keeps
+        # the in-memory working set bounded for long-open windows; we
+        # apply it after filtering so the cap reflects the kept events,
+        # not raw fetch size.
+        events_in_window = await (
+            ledger.events
+            .where(session_id=load_session_id)
+            .since(loaded_at)
+            .until(window_end)
+            .order_by("timestamp")
+            .all()
+        )
         in_window = [
-            e for e in turn_events
+            e for e in events_in_window
             if loaded_at < e.timestamp <= window_end
             and e.event_id != load.event_id
         ]
 
-        # turn_outcome from the turn's own turn_end, regardless of window
-        # (a turn either ends or it doesn't).
+        # turn_outcome stays bound to the loading turn (semantic anchor:
+        # "the turn that activated this skill"). Scope by session_id
+        # too — turn_id is not guaranteed globally unique across
+        # sessions (see PR #393 review).
+        load_turn_events = await (
+            ledger.events
+            .where(turn_id=load.turn_id, session_id=load_session_id)
+            .order_by("timestamp")
+            .all()
+        )
         turn_outcome: str | None = None
-        for e in turn_events:
+        for e in load_turn_events:
             if e.event_type == "turn_end":
                 turn_outcome = e.payload.get("outcome")
                 break
@@ -162,10 +240,12 @@ async def query_skill_ledger(
             session_id=load.session_id,
             turn_id=load.turn_id,
             loaded_at=loaded_at,
-            unloaded_at=turn_unload_ts,
+            unloaded_at=boundary_ts,
             turn_outcome=turn_outcome,
             events_after_load=events_kept,
             truncated=truncated,
+            unload_inferred=unload_inferred,
+            unload_inferred_reason=unload_inferred_reason,
         ))
 
     return SkillUsageDigest(
