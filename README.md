@@ -12,7 +12,7 @@
 
 ## Why Loom?
 
-Most agent frameworks treat tools as functions: define → call → done. That works in demos. It falls apart the moment you need audit trails, real authorization logic, long-term memory, or reliable autonomous operation.
+Most agent frameworks treat tools as functions: define → call → done. That works in demos. It falls apart the moment you need audit trails, real authorization logic, OS-level sandboxing, long-term memory, or reliable autonomous operation.
 
 Loom was built from a different premise: **every tool call is a first-class citizen with a lifecycle.**
 
@@ -72,6 +72,7 @@ Large source files are navigable via **`# SECTION N`** banners — run `grep "# 
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
 | **v0.3.6.2** | 2026-05-05 | Fix spurious asyncio.Future() in render-only tests |
 | **v0.3.6.1** | 2026-05-01 | Skill-driven model tier system (Issue #276) |
 | **v0.3.6.0** | 2026-04-29 | LLM-as-judge Phase 2 (verdicts + turn hooks); CLI Refresh E (TaskList floating panel); Envelope three-stage fade |
@@ -172,6 +173,37 @@ write_file(path="doc/design.md")
 ```
 
 Four response modes are available at every confirmation prompt: **approve once**, **scope lease (30-minute TTL)**, **permanent grant**, or **deny**. Active grants and their remaining TTL are always visible in the TUI budget panel or via `/scope` in any frontend.
+
+### OS-Level Sandbox (Optional)
+
+By default, `run_bash` is protected by pattern-based safety checks and confinement to the workspace directory. For projects that want a real isolation boundary — not just a tripwire — Loom can wrap every shell call with **Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (`srt`)**, enforcing filesystem and network restrictions at the OS kernel.
+
+| Default install | With `[security.sandbox] backend = "srt"` |
+|----------------|------------------------------------------|
+| Pattern scan blocks known-dangerous shapes (curl-pipe-bash, `/dev/tcp`, base64 staged exec) | Same scan **plus an OS-level wall** |
+| Shell confined to the workspace cwd | macOS `sandbox-exec` / Linux `bubblewrap` enforces every file write and every network call |
+| Network calls succeed if the agent slips past pattern matching | Network blocked unless the domain is in your allowlist |
+| File writes succeed anywhere the OS user can write | File writes blocked unless the path is in your allowlist |
+
+No Docker required, one-line install:
+
+```bash
+npm install -g @anthropic-ai/sandbox-runtime
+```
+
+Then in `loom.toml`:
+
+```toml
+[security.sandbox]
+backend         = "srt"
+allow_write     = [".", "/private/tmp"]
+deny_read       = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
+```
+
+When enabled, an autonomy run that tries to `curl evil.com` simply cannot reach the network; a runaway script that tries to read `~/.ssh/id_rsa` gets `Operation not permitted` from the kernel. The agent sees the failure in its tool result and can adjust — but the action never reached your filesystem or your router.
+
+Defaults to off so existing installs keep working byte-for-byte. Sessions fail closed at startup if the binary is missing rather than silently downgrading to no protection.
 
 ---
 
@@ -406,6 +438,7 @@ The `doc/` directory contains full technical documentation for every subsystem:
 | Action Lifecycle state machine | `doc/06b-Action-Lifecycle.md` |
 | Trust levels & blast radius | `doc/05-Trust-Level.md` |
 | Scope-aware authorization design | `doc/44-Scope-Aware-Permission-規劃.md` |
+| OS-level sandbox (`srt`) | `doc/55-Sandbox-Runtime.md` |
 | Memory system & governance | `doc/08-Memory-概述.md`, `doc/08b-Memory-Governance.md` |
 | Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `doc/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
 | Memory Pulse & Lifecycle | `doc/12b-Memory-Health.md` |
