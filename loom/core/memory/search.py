@@ -23,9 +23,11 @@ import logging
 import math
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from loom.core.timezone import user_zone
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +104,26 @@ class MemorySearchResult:
     updated_at: str = ""    # ISO timestamp of last update (empty if unknown)
 
     def format(self, max_value_len: int = 300) -> str:
-        """Human-readable one-entry summary with timestamp and effective confidence."""
+        """Human-readable one-entry summary with timestamp and effective confidence.
+
+        The stored ``updated_at`` is a UTC ISO string; the date hint is
+        rendered in the user's configured timezone so it matches the
+        same boundary the rest of the agent-facing surface uses
+        (see issue #388). Naked ISO strings are treated as UTC.
+        """
         truncated = self.value[:max_value_len]
         if len(self.value) > max_value_len:
             truncated += "…"
-        date_hint = f" [{self.updated_at[:10]}]" if self.updated_at else ""
+        date_hint = ""
+        if self.updated_at:
+            try:
+                parsed = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                local_date = parsed.astimezone(user_zone()).strftime("%Y-%m-%d")
+                date_hint = f" [{local_date}]"
+            except ValueError:
+                date_hint = f" [{self.updated_at[:10]}]"
         conf = self.metadata.get("effective_confidence") or self.metadata.get("confidence")
         conf_hint = f" conf={conf:.2f}" if conf is not None else ""
         return f"[{self.type}]{date_hint}{conf_hint} {self.key}\n  {truncated}"

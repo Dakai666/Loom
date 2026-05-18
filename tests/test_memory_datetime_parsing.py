@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 import loom.core.timezone as _tz_module
+from loom.core.memory.search import MemorySearchResult
 from loom.platform.cli.tools import _parse_memory_datetime
 
 
@@ -97,3 +98,66 @@ def test_return_value_is_always_utc(taipei_zone):
     ]:
         result = _parse_memory_datetime(raw)
         assert result.utcoffset() == timedelta(0), raw
+
+
+# ── MemorySearchResult.format() — agent-facing recall hits ────────────
+
+
+def test_recall_format_date_hint_uses_user_zone(taipei_zone):
+    # Fact stored at 16:30 UTC == 00:30 next day in Asia/Taipei.
+    # PR #391 review case: date hint must reflect the local date.
+    result = MemorySearchResult(
+        type="semantic",
+        key="foo",
+        value="bar",
+        score=1.0,
+        updated_at="2026-05-16T16:30:00+00:00",
+    )
+    out = result.format()
+    assert " [2026-05-17] " in out
+
+
+def test_recall_format_date_hint_under_utc():
+    # conftest pins user zone to UTC; date hint matches stored date.
+    result = MemorySearchResult(
+        type="semantic",
+        key="foo",
+        value="bar",
+        score=1.0,
+        updated_at="2026-05-16T16:30:00+00:00",
+    )
+    out = result.format()
+    assert " [2026-05-16] " in out
+
+
+def test_recall_format_naked_timestamp_treated_as_utc(taipei_zone):
+    # Stored strings without offset (legacy rows) are treated as UTC.
+    result = MemorySearchResult(
+        type="semantic",
+        key="foo",
+        value="bar",
+        score=1.0,
+        updated_at="2026-05-16T16:30:00",
+    )
+    out = result.format()
+    assert " [2026-05-17] " in out
+
+
+def test_recall_format_invalid_timestamp_falls_back_to_slice():
+    result = MemorySearchResult(
+        type="semantic",
+        key="foo",
+        value="bar",
+        score=1.0,
+        updated_at="not-an-iso-string",
+    )
+    out = result.format()
+    assert " [not-an-iso" in out
+
+
+def test_recall_format_empty_timestamp_omits_hint():
+    result = MemorySearchResult(
+        type="semantic", key="foo", value="bar", score=1.0, updated_at=""
+    )
+    out = result.format()
+    assert "[" not in out.split("\n")[0].replace("[semantic]", "")
