@@ -2105,6 +2105,237 @@ def make_skill_review_tool(
 
 
 # ------------------------------------------------------------------
+# ledger_recall tool (Issue #385) — narrative recall over AgentLedger
+# ------------------------------------------------------------------
+
+
+_LEDGER_RECALL_EVENT_CAP = 1000
+"""Hard cap on events pulled per ledger_recall call. Renderers truncate
+further per their own semantics (narrative trims to N turn slices, raw
+trims to N events). Prevents runaway queries from drowning the agent."""
+
+
+def make_ledger_recall_tool(
+    ledger_store: "LedgerStore | None",
+    memory: "MemoryFacade | None",
+) -> ToolDefinition:
+    """Create a SAFE ``ledger_recall`` tool — story-form recall over the ledger.
+
+    Wraps the doc/53 §6.2 Pull API (``LedgerStore.events``) and joins
+    against ``memory.session_log`` so each turn's narrative paragraph can
+    quote the user's actual message. Issue #385 design summary:
+    https://github.com/Dakai666/Loom/issues/385#issuecomment-4471257209.
+    """
+    from datetime import datetime, timezone
+
+    from loom.core.ledger.recall import (
+        group_events_by_turn,
+        infer_output_format,
+        render_narrative,
+        render_raw,
+        render_summary,
+    )
+
+    _DIMENSION_KEYS = (
+        "session_id", "correlation_id", "skill_id",
+        "tool_name", "verdict", "since", "until",
+    )
+
+    async def _ledger_recall(call: ToolCall) -> ToolResult:
+        if ledger_store is None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="Ledger is not available in this session; cannot recall.",
+            )
+
+        args = call.args or {}
+        session_id = (args.get("session_id") or "").strip() or None
+        correlation_id = (args.get("correlation_id") or "").strip() or None
+        skill_id = (args.get("skill_id") or "").strip() or None
+        tool_name = (args.get("tool_name") or "").strip() or None
+        verdict = (args.get("verdict") or "").strip() or None
+        explicit_output = (args.get("output") or "").strip() or None
+        verbose = bool(args.get("verbose", False))
+
+        try:
+            limit = int(args.get("limit", 20))
+        except (TypeError, ValueError):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error="'limit' must be an integer",
+            )
+        limit = max(1, min(limit, 100))
+
+        try:
+            since_dt = _parse_memory_datetime(args.get("since"))
+            until_dt = _parse_memory_datetime(args.get("until"))
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+            )
+
+        # Require at least one dimension — refuses unbounded ledger scans.
+        if not any([
+            session_id, correlation_id, skill_id,
+            tool_name, verdict, since_dt, until_dt,
+        ]):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=(
+                    "ledger_recall requires at least one dimension: "
+                    + ", ".join(_DIMENSION_KEYS)
+                ),
+            )
+
+        # Build the EventQuery chain.
+        query = ledger_store.events
+        if session_id:
+            query = query.where(session_id=session_id)
+        if correlation_id:
+            query = query.where(correlation_id=correlation_id)
+        if skill_id:
+            query = query.where(skill_id=skill_id)
+        if tool_name:
+            query = query.where(tool_name=tool_name)
+        if verdict:
+            query = query.where(verdict=verdict)
+        if since_dt is not None:
+            query = query.since(since_dt)
+        if until_dt is not None:
+            query = query.until(until_dt)
+        query = query.order_by("timestamp").limit(_LEDGER_RECALL_EVENT_CAP)
+
+        events = await query.all()
+
+        output_format = infer_output_format(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            skill_id=skill_id,
+            tool_name=tool_name,
+            verdict=verdict,
+            since=args.get("since"),
+            until=args.get("until"),
+            explicit=explicit_output,
+        )
+
+        if output_format == "narrative":
+            slices = group_events_by_turn(events)[:limit]
+            messages_by_turn = await _fetch_user_messages_per_turn(
+                memory, slices,
+            )
+            text = render_narrative(
+                slices, messages_by_turn, verbose=verbose,
+            )
+        elif output_format == "raw":
+            text = render_raw(events, max_events=limit)
+        else:
+            text = render_summary(events)
+
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=text,
+        )
+
+    async def _fetch_user_messages_per_turn(
+        memory: "MemoryFacade | None",
+        slices: list,
+    ) -> dict[str, list[dict]]:
+        """Pull user messages from session_log for each turn's time window.
+
+        Per-turn query rather than a single bulk pull: ledger ``turn_id``
+        and session_log ``turn_index`` are different keys, so we map via
+        the turn's [started_at, ended_at] window. Bounded by the renderer's
+        turn limit (≤100), so per-call query count is small.
+        """
+        if memory is None or memory.session_log is None:
+            return {}
+        out: dict[str, list[dict]] = {}
+        for sl in slices:
+            start_dt = datetime.fromtimestamp(sl.started_at, tz=timezone.utc)
+            # If turn never ended in the result set, take the last event's ts
+            # as a generous upper bound (events are already sorted ASC).
+            end_ts = sl.ended_at if sl.ended_at is not None else (
+                sl.events[-1].timestamp if sl.events else sl.started_at
+            )
+            # +1s slack so an end-aligned message isn't excluded.
+            end_dt = datetime.fromtimestamp(end_ts + 1.0, tz=timezone.utc)
+            try:
+                rows = await memory.session_log.messages_between(
+                    start_dt, end_dt,
+                    session_id=sl.session_id, limit=10,
+                )
+            except Exception:
+                rows = []
+            out[sl.turn_id] = rows
+        return out
+
+    return ToolDefinition(
+        name="ledger_recall",
+        description=(
+            "Recall past activity from the event ledger as story-form "
+            "narrative. Use when you want to remember 'what happened "
+            "in session X' or 'what did I do with skill Y this week'. "
+            "Defaults to per-turn narrative for session/correlation "
+            "queries; aggregate summary for skill/tool/time-range queries. "
+            "Read-only."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "correlation_id": {"type": "string"},
+                "skill_id": {"type": "string"},
+                "tool_name": {"type": "string"},
+                "verdict": {
+                    "type": "string",
+                    "description": "e.g. 'success' / 'error' (from JudgeVerdict).",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Lower bound (YYYY-MM-DD or ISO datetime).",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Exclusive upper bound.",
+                },
+                "output": {
+                    "type": "string",
+                    "enum": ["narrative", "summary", "raw"],
+                    "description": (
+                        "Override the auto-inferred format. Default: "
+                        "narrative for session/correlation; summary otherwise."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "For narrative: max turns. For raw: max events. "
+                        "Ignored for summary. 1–100, default 20."
+                    ),
+                    "default": 20,
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "description": (
+                        "Narrative only — list every tool call instead of "
+                        "compacting when a turn has many actions."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+        executor=_ledger_recall,
+        tags=["memory", "recall", "ledger", "read-only"],
+        impact_scope="read-only",
+    )
+
+
+# ------------------------------------------------------------------
 # Skill lifecycle tools (Issue #120 PR 3)
 # ------------------------------------------------------------------
 

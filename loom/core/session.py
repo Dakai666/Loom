@@ -1368,6 +1368,13 @@ class LoomSession:
         from loom.platform.cli.tools import make_skill_review_tool
         self.registry.register(make_skill_review_tool(self._ledger_store))
 
+        # Issue #385: ledger_recall — story-form recall over the ledger,
+        # joined with session_log so each turn quotes the user's message.
+        from loom.platform.cli.tools import make_ledger_recall_tool
+        self.registry.register(
+            make_ledger_recall_tool(self._ledger_store, self._memory)
+        )
+
 
         # Register web tools (Phase 5D)
         self.registry.register(make_fetch_url_tool(
