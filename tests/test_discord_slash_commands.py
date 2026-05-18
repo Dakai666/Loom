@@ -55,10 +55,17 @@ def _fake_session(
     session.current_personality = personality
     session._stack = MagicMock()
     session._stack.available_personalities = MagicMock(return_value=list(available_personalities))
+    _frac = used / total if total else 0
     session.budget = SimpleNamespace(
-        usage_fraction=used / total if total else 0,
+        usage_fraction=_frac,
         used_tokens=used,
         total_tokens=total,
+        block_count=0,
+        max_blocks=2000,
+        block_fraction=0.0,
+        pressure=_frac,
+        block_bound=False,
+        format_pressure=lambda: f"{_frac * 100:.1f}%",
     )
     session.router = SimpleNamespace(providers=["anthropic", "minimax"])
     session._last_think = last_think

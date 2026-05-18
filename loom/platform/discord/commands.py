@@ -151,10 +151,10 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
         session = await _require_session(bot, interaction)
         if session is None:
             return
-        pct = session.budget.usage_fraction * 100
+        before = session.budget.format_pressure()
         await interaction.response.defer(thinking=True)
         await session._smart_compact()
-        await interaction.followup.send(f"✅ Context compacted (was {pct:.1f}% used).")
+        await interaction.followup.send(f"✅ Context compacted (was {before} used).")
 
     # ── /loom-model ───────────────────────────────────────────────────
     async def _model_autocomplete(

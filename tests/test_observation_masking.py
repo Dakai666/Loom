@@ -30,11 +30,18 @@ def _mock_session(
     scratchpad: Scratchpad | None = None,
 ) -> SimpleNamespace:
     """Build a minimal LoomSession stand-in with just the attrs the method reads."""
+    # Stub budget — masking now resyncs block_count after folding so the
+    # footer % stays aligned with the rewritten messages.
+    budget = SimpleNamespace(
+        record_messages=lambda _msgs: None,
+        update_block_count=lambda _msgs: None,
+    )
     return SimpleNamespace(
         messages=messages,
         _turn_index=turn_index,
         _scratchpad=scratchpad if scratchpad is not None else Scratchpad(),
         _mask_age_turns=mask_age_turns,
+        budget=budget,
     )
 
 
