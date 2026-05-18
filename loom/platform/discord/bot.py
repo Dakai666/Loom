@@ -1014,15 +1014,19 @@ class LoomDiscordBot:
         return "*(nothing is running)*"
 
     def _cmd_budget(self, session: "LoomSession") -> str:
-        pct = session.budget.usage_fraction * 100
-        used = session.budget.used_tokens
-        total = session.budget.total_tokens
-        bar_filled = int(pct / 5)
+        budget = session.budget
+        pct = budget.usage_fraction * 100
+        blk_pct = budget.block_fraction * 100
+        used = budget.used_tokens
+        total = budget.total_tokens
+        bar_filled = int(budget.pressure * 100 / 5)
         bar = "█" * bar_filled + "░" * (20 - bar_filled)
+        bound = " (block-bound)" if budget.block_bound else ""
         return (
-            f"**Context Budget**\n"
-            f"`{bar}` {pct:.1f}%\n"
-            f"`{used:,}` / `{total:,}` tokens"
+            f"**Context Budget**{bound}\n"
+            f"`{bar}` {budget.pressure * 100:.1f}%\n"
+            f"tokens  `{used:,}` / `{total:,}`  ({pct:.1f}%)\n"
+            f"blocks  `{budget.block_count}` / `{budget.max_blocks}`  ({blk_pct:.1f}%)"
         )
 
     async def _cmd_title(self, session: "LoomSession", arg: str) -> str:
@@ -1169,8 +1173,8 @@ class LoomDiscordBot:
 
         if command == "/compact":
             assert session is not None
-            pct = session.budget.usage_fraction * 100
-            msg = await _safe_send(message.channel, f"⏳ Compacting context ({pct:.1f}% used)…")
+            pressure_str = session.budget.format_pressure()
+            msg = await _safe_send(message.channel, f"⏳ Compacting context ({pressure_str} used)…")
             await session._smart_compact()
             await _safe_edit(msg, "✅ Context compacted.")
             return
@@ -1559,7 +1563,7 @@ class LoomDiscordBot:
                 if _had_rollback:
                     embed.add_field(name="Rollbacks", value="Yes", inline=True)
                 embed.add_field(name="Grants", value=grants_str, inline=True)
-                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.usage_fraction * 100:.1f}%  ·  {active_model}{cache_tag}{tier_badge}")
+                embed.set_footer(text=f"{session.current_personality or 'default'}  ·  context {session.budget.format_pressure()}  ·  {active_model}{cache_tag}{tier_badge}")
                 await message.channel.send(embed=embed)
             else:
                 # Compact one-liner
@@ -1572,11 +1576,11 @@ class LoomDiscordBot:
 
         # ── Footer: persona / context / model ────────────────────────────
         persona = session.current_personality or "default"
-        pct = session.budget.usage_fraction * 100
+        pressure_str = session.budget.format_pressure()
         # Skip footer if detail summary already includes it
         if not (self._summary_mode == "detail" and _envelope_count > 0):
             await _safe_send(message.channel,
-                f"-# {persona}  ·  context {pct:.1f}%{cache_tag}  ·  {active_model}{tier_badge}"
+                f"-# {persona}  ·  context {pressure_str}{cache_tag}  ·  {active_model}{tier_badge}"
             )
 
         # ── Mark done (#188 lifecycle reaction) ──────────────────────────

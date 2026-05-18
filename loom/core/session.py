@@ -1997,9 +1997,13 @@ class LoomSession:
             # Compress before the first LLM call if already over threshold.
             # (budget.used_tokens reflects the last response's actual token count,
             # so this check is accurate from turn 2 onward.)
+            # ``should_compress`` is OR over token + block dimensions —
+            # MiniMax's 2013-block wire cap can bite long before the
+            # token budget does, especially on parallel-tool sessions.
+            self.budget.update_block_count(self.messages)
             if self.budget.should_compress():
                 console.print(
-                    f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}% — "
+                    f"[yellow]  Context at {self.budget.format_pressure()} — "
                     f"compressing…[/yellow]"
                 )
                 await self._smart_compact()
@@ -2542,9 +2546,16 @@ class LoomSession:
 
                     # Check budget after tool results are appended — the next LLM
                     # call in this loop will include them and may push over the limit.
+                    # Refresh block_count first: a parallel-tool batch just
+                    # appended N tool_result rows, but ``record_response``
+                    # only updates token totals, so without this resync
+                    # ``should_compress`` would still see the previous turn's
+                    # block reading and miss a wire-cap overrun until the
+                    # next turn boundary.
+                    self.budget.update_block_count(self.messages)
                     if self.budget.should_compress():
                         console.print(
-                            f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}%"
+                            f"[yellow]  Context at {self.budget.format_pressure()}"
                             f" mid-turn — compressing…[/yellow]"
                         )
                         await self._smart_compact()
@@ -3183,6 +3194,13 @@ class LoomSession:
             )
             msg["_masked"] = True
 
+        # Tool-result bodies shrank en masse; recount once at the end so
+        # the footer % reflects the freed wire surface before the next
+        # provider response lands. Block count is the dimension that
+        # actually changed (text shrank but slot count is unchanged) —
+        # token estimate also moves, so do a full record_messages.
+        self.budget.record_messages(self.messages)
+
     def _sanitize_history(self) -> None:
         """Remove incomplete tool_use sequences and fix malformed tool args.
 
@@ -3366,6 +3384,11 @@ class LoomSession:
                     cb(_args_fixed, _msgs_dropped)
                 except Exception:
                     pass
+            # Resync the budget — messages were rewritten, so the
+            # block_count from the last API call no longer matches the
+            # current history. Without this the footer % can stay
+            # stale-high after a sanitize-only turn.
+            self.budget.record_messages(self.messages)
 
     # =========================================================================
     # SECTION 8 — TIER / TELEMETRY
@@ -4496,6 +4519,10 @@ class LoomSession:
             else:
                 # No existing block — append
                 self.messages[0]["content"] += f"\n\n{new_text}"
+            # System prompt size changed — keep budget aligned so the
+            # footer % doesn't drift away from reality until the next
+            # provider response arrives.
+            self.budget.record_messages(self.messages)
         except Exception:
             pass  # never block the session on a MemoryIndex refresh failure
 

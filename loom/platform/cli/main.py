@@ -598,7 +598,11 @@ async def _chat(
             # (per doc/49 decision: TTL refresh on turn edge, not per-
             # second tick — keeps the footer visually stable while the
             # user is reading).
-            app.footer.token_pct = session.budget.usage_fraction * 100
+            # Footer shows the *binding* pressure — token or block,
+            # whichever is fuller — so we don't read "42%" while the
+            # wire is actually one parallel-tool turn away from MiniMax's
+            # 2013-block ceiling.
+            app.footer.token_pct = session.budget.pressure * 100
             app.footer.persona = session.current_personality
             # Belt-and-suspenders for /model: slash handlers update
             # footer.model immediately on switch, but a future code path
@@ -910,7 +914,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             console.print("[loom.muted]No reasoning chain captured for the last turn.[/loom.muted]")
 
     elif command == "/compact":
-        pct = session.budget.usage_fraction * 100
+        pressure_str = session.budget.format_pressure()
         # PR-D4: surface compaction in footer BEFORE the inline message
         # so the spinner is visible from the very first frame; clear
         # immediately after _smart_compact returns so the footer
@@ -919,16 +923,16 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         if loom_app is not None:
             loom_app.footer.compacting = True
             loom_app.invalidate()
-        harness.inline(f"compacting context ({pct:.1f}% used)…", level="info")
+        harness.inline(f"compacting context ({pressure_str} used)…", level="info")
         try:
             await session._smart_compact()
         finally:
             if loom_app is not None:
                 loom_app.footer.compacting = False
                 loom_app.invalidate()
-                # Update token% from the just-finished compaction so
+                # Update pressure% from the just-finished compaction so
                 # the user sees the new context% immediately
-                loom_app.footer.token_pct = session.budget.usage_fraction * 100
+                loom_app.footer.token_pct = session.budget.pressure * 100
                 loom_app.invalidate()
 
     elif command == "/theme":
@@ -1609,8 +1613,8 @@ async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
                 )
 
     elif command == "/compact":
-        pct = session.budget.usage_fraction * 100
-        app.notify(f"Compacting context ({pct:.1f}% used)…")
+        pressure_str = session.budget.format_pressure()
+        app.notify(f"Compacting context ({pressure_str} used)…")
         await session._smart_compact()
         app.notify("Context compacted.")
 
@@ -2312,11 +2316,14 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     loom_app.invalidate()
                     # Issue #284: transient hints for cross-threshold
                     # signals at TurnDone. Dedup keys ensure each
-                    # threshold fires once per session.
-                    pct = session.budget.usage_fraction * 100
+                    # threshold fires once per session. Uses pressure
+                    # (max of token / block) so the warning fires when
+                    # the wire is about to clip, not just on token budget.
+                    pct = session.budget.pressure * 100
                     if pct >= 80:
+                        bound = " (blocks)" if session.budget.block_bound else ""
                         loom_app.show_transient_hint(
-                            f"⚠️ context {pct:.0f}% — auto-compact soon",
+                            f"⚠️ context {pct:.0f}%{bound} — auto-compact soon",
                             severity="warn",
                             duration_s=4.0,
                             dedup_key="ctx_80",
@@ -2332,7 +2339,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 else:
                     console.print(
                         status_bar(
-                            context_fraction=session.budget.usage_fraction,
+                            context_fraction=session.budget.pressure,
                             input_tokens=event.input_tokens,
                             output_tokens=event.output_tokens,
                             elapsed_ms=elapsed * 1000,
