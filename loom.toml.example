@@ -396,9 +396,12 @@ strict_sandbox = false
 #   - On macOS, /tmp is a symlink to /private/tmp — list /private/tmp
 #     in allow_write if you need temp-file writes
 #
-# Filesystem precedence (matches srt):
-#   - allow_write is allow-only (default deny)
-#   - deny_read overrides allow_read (default allow)
+# Filesystem precedence (matches srt upstream):
+#   - Writes (allow-only):   allow_write defaults to []; deny_write
+#                            overrides allow_write.
+#   - Reads  (deny-then-allow): allow_read overrides deny_read — default
+#                            allow everywhere, so list a broad parent in
+#                            deny_read and re-allow specifics in allow_read.
 #
 # Network: empty allowed_domains means NO network at all.
 #

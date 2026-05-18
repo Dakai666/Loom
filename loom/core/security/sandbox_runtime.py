@@ -53,6 +53,36 @@ _SRT_BINARY = "srt"
 _REQUIRED_SECTIONS = ("filesystem", "network", "unixSockets")
 
 
+def _as_path_list(key: str, value: Any) -> list[str]:
+    """Validate that *value* is ``None`` or a ``list[str]`` (PR #387 review).
+
+    Raises ``ValueError`` on a scalar string (the dangerous case — Python
+    would iterate it character-by-character through ``list()``, e.g.
+    ``"/tmp"`` → ``["/", "t", "m", "p"]``, and the lone ``"/"`` entry
+    becomes a filesystem-wide write allowance under srt's allow-only
+    rules) or on a list containing non-string members.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise ValueError(
+            f"[security.sandbox] {key} must be a list of strings, not a "
+            f"bare string. Got {value!r}; wrap it in a list: [{value!r}]."
+        )
+    if not isinstance(value, list):
+        raise ValueError(
+            f"[security.sandbox] {key} must be a list of strings, got "
+            f"{type(value).__name__}: {value!r}."
+        )
+    for i, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(
+                f"[security.sandbox] {key}[{i}] must be a string, got "
+                f"{type(item).__name__}: {item!r}."
+            )
+    return list(value)
+
+
 @dataclass(slots=True)
 class SandboxSettings:
     """Resolved sandbox config for a session.
@@ -80,27 +110,51 @@ class SandboxSettings:
     def from_config(cls, cfg: dict[str, Any] | None) -> "SandboxSettings":
         """Build from the ``[security.sandbox]`` block of loom.toml.
 
-        Unknown ``backend`` values downgrade to ``"none"`` with a warning;
-        missing keys yield empty lists (= maximally restrictive for
+        **Fail-closed validation** (PR #387 review):
+
+        - Unknown ``backend`` values **raise** — silently downgrading to
+          ``"none"`` would let a typo like ``backend = "str"`` disable the
+          sandbox entirely, contradicting the opt-in security intent.
+        - Every list field is validated as ``list[str]``.  Accepting a
+          scalar string would silently iterate it character-by-character
+          (e.g. ``allow_write = "/tmp"`` → ``["/", "t", "m", "p"]``),
+          and the ``"/"`` entry would open writes across the whole
+          filesystem under srt's allow-only rules.
+
+        Missing keys yield empty lists (= maximally restrictive for
         allow-only fields like ``allow_write`` / ``allowed_domains``).
         """
         cfg = cfg or {}
-        backend = str(cfg.get("backend", "none")).lower()
-        if backend not in {"none", "srt"}:
-            _log.warning(
-                "Unknown sandbox backend %r; falling back to 'none'.", backend
-            )
+
+        backend_raw = cfg.get("backend")
+        if backend_raw is None:
             backend = "none"
+        else:
+            backend = str(backend_raw).lower()
+            if backend not in {"none", "srt"}:
+                raise ValueError(
+                    f"[security.sandbox] backend = {backend_raw!r} is not "
+                    f"recognized. Valid options: 'none', 'srt'."
+                )
+
         return cls(
             backend=backend,
-            allow_read=list(cfg.get("allow_read", []) or []),
-            deny_read=list(cfg.get("deny_read", []) or []),
-            allow_write=list(cfg.get("allow_write", []) or []),
-            deny_write=list(cfg.get("deny_write", []) or []),
-            allowed_domains=list(cfg.get("allowed_domains", []) or []),
-            denied_domains=list(cfg.get("denied_domains", []) or []),
-            allowed_sockets=list(cfg.get("allowed_sockets", []) or []),
-            denied_sockets=list(cfg.get("denied_sockets", []) or []),
+            allow_read=_as_path_list("allow_read", cfg.get("allow_read")),
+            deny_read=_as_path_list("deny_read", cfg.get("deny_read")),
+            allow_write=_as_path_list("allow_write", cfg.get("allow_write")),
+            deny_write=_as_path_list("deny_write", cfg.get("deny_write")),
+            allowed_domains=_as_path_list(
+                "allowed_domains", cfg.get("allowed_domains")
+            ),
+            denied_domains=_as_path_list(
+                "denied_domains", cfg.get("denied_domains")
+            ),
+            allowed_sockets=_as_path_list(
+                "allowed_sockets", cfg.get("allowed_sockets")
+            ),
+            denied_sockets=_as_path_list(
+                "denied_sockets", cfg.get("denied_sockets")
+            ),
         )
 
     def to_srt_json(self, workspace: Path | None = None) -> dict[str, Any]:

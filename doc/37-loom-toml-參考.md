@@ -237,10 +237,10 @@ allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
 | 欄位 | 類型 | 預設值 | 說明 |
 |------|------|--------|------|
 | `backend` | string | `"none"` | `"none"` 不啟用；`"srt"` 用 anthropic-experimental/sandbox-runtime |
-| `allow_write` | list[str] | `[]` | 可寫路徑（allow-only），空陣列 = 禁止任何寫入 |
-| `deny_read` | list[str] | `[]` | 禁讀路徑，覆蓋 `allow_read` |
-| `allow_read` | list[str] | `[]` | 例外可讀路徑（僅在 `deny_read` 覆蓋了大範圍時才需要） |
-| `deny_write` | list[str] | `[]` | 寫入黑名單例外（罕用） |
+| `allow_write` | list[str] | `[]` | 可寫路徑（allow-only），空陣列 = 禁止任何寫入；`deny_write` 優先級更高 |
+| `deny_write` | list[str] | `[]` | 寫入黑名單，覆蓋 `allow_write`（在允許區內挖洞，罕用） |
+| `deny_read` | list[str] | `[]` | 禁讀路徑；預設讀取全開，列出大範圍即可 deny |
+| `allow_read` | list[str] | `[]` | 例外可讀路徑，**優先級高於 `deny_read`**（deny-then-allow） |
 | `allowed_domains` | list[str] | `[]` | 網路 allowlist，空陣列 = 全擋 |
 | `denied_domains` | list[str] | `[]` | 額外網路黑名單 |
 | `allowed_sockets` / `denied_sockets` | list[str] | `[]` | Unix socket 控制（macOS 上罕用） |

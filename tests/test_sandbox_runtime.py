@@ -43,10 +43,19 @@ class TestFromConfig:
         s = SandboxSettings.from_config({"backend": "srt"})
         assert s.backend == "srt"
 
-    def test_unknown_backend_downgrades_with_warning(self, caplog):
-        s = SandboxSettings.from_config({"backend": "docker"})
-        assert s.backend == "none"
-        assert any("Unknown sandbox backend" in r.message for r in caplog.records)
+    def test_unknown_backend_raises_fail_closed(self):
+        # PR #387 review: silent downgrade on a typo like backend = "str"
+        # would defeat the opt-in security intent.  Must raise.
+        with pytest.raises(ValueError, match="backend = 'docker'"):
+            SandboxSettings.from_config({"backend": "docker"})
+
+    def test_typo_backend_str_raises(self):
+        with pytest.raises(ValueError, match="backend = 'str'"):
+            SandboxSettings.from_config({"backend": "str"})
+
+    def test_explicit_none_backend_does_not_raise(self):
+        # Distinct from "unknown": explicitly setting "none" is fine.
+        assert SandboxSettings.from_config({"backend": "none"}).backend == "none"
 
     def test_case_insensitive_backend(self):
         assert SandboxSettings.from_config({"backend": "SRT"}).backend == "srt"
@@ -65,6 +74,56 @@ class TestFromConfig:
     def test_none_values_become_empty_lists(self):
         s = SandboxSettings.from_config({"backend": "srt", "allow_write": None})
         assert s.allow_write == []
+
+
+class TestStrictListValidation:
+    """PR #387 review: scalar strings + non-string members must raise."""
+
+    def test_scalar_string_in_allow_write_raises(self):
+        # Without validation, list("/tmp") would yield ["/", "t", "m", "p"]
+        # and the lone "/" entry would open writes filesystem-wide under
+        # srt's allow-only rules.  This is THE bypass footgun.
+        with pytest.raises(ValueError, match="allow_write.*not a bare string"):
+            SandboxSettings.from_config({
+                "backend": "srt", "allow_write": "/tmp",
+            })
+
+    def test_scalar_string_in_deny_read_raises(self):
+        with pytest.raises(ValueError, match="deny_read.*not a bare string"):
+            SandboxSettings.from_config({
+                "backend": "srt", "deny_read": "~/.ssh",
+            })
+
+    def test_scalar_string_in_allowed_domains_raises(self):
+        with pytest.raises(ValueError, match="allowed_domains.*not a bare string"):
+            SandboxSettings.from_config({
+                "backend": "srt", "allowed_domains": "pypi.org",
+            })
+
+    def test_non_list_value_raises(self):
+        with pytest.raises(ValueError, match="must be a list of strings"):
+            SandboxSettings.from_config({
+                "backend": "srt", "allow_write": 42,
+            })
+
+    def test_non_string_member_raises(self):
+        with pytest.raises(ValueError, match=r"allow_write\[1\] must be a string"):
+            SandboxSettings.from_config({
+                "backend": "srt", "allow_write": [".", 42, "/tmp"],
+            })
+
+    def test_dict_member_raises(self):
+        with pytest.raises(ValueError, match=r"deny_read\[0\] must be a string"):
+            SandboxSettings.from_config({
+                "backend": "srt", "deny_read": [{"path": "~/.ssh"}],
+            })
+
+    def test_empty_list_ok(self):
+        s = SandboxSettings.from_config({
+            "backend": "srt", "allow_write": [], "allowed_domains": [],
+        })
+        assert s.allow_write == []
+        assert s.allowed_domains == []
 
 
 # ---------------------------------------------------------------------------
