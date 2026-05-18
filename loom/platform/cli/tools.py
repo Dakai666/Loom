@@ -2190,25 +2190,24 @@ def make_ledger_recall_tool(
                 ),
             )
 
-        # Build the EventQuery chain.
-        query = ledger_store.events
-        if session_id:
-            query = query.where(session_id=session_id)
-        if correlation_id:
-            query = query.where(correlation_id=correlation_id)
-        if skill_id:
-            query = query.where(skill_id=skill_id)
-        if tool_name:
-            query = query.where(tool_name=tool_name)
-        if verdict:
-            query = query.where(verdict=verdict)
-        if since_dt is not None:
-            query = query.since(since_dt)
-        if until_dt is not None:
-            query = query.until(until_dt)
-        query = query.order_by("timestamp").limit(_LEDGER_RECALL_EVENT_CAP)
-
+        # Build the EventQuery chain with all user-supplied filters.
+        # Fetch cap+1 so we can detect truncation atomically (no separate
+        # COUNT query) — anything beyond _LEDGER_RECALL_EVENT_CAP is a
+        # signal that aggregates / chronology may be incomplete.
+        query = _build_query(
+            ledger_store,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            skill_id=skill_id,
+            tool_name=tool_name,
+            verdict=verdict,
+            since_dt=since_dt,
+            until_dt=until_dt,
+        )
         events = await query.all()
+        truncated = len(events) > _LEDGER_RECALL_EVENT_CAP
+        if truncated:
+            events = events[:_LEDGER_RECALL_EVENT_CAP]
 
         output_format = infer_output_format(
             session_id=session_id,
@@ -2222,22 +2221,84 @@ def make_ledger_recall_tool(
         )
 
         if output_format == "narrative":
+            # Narrative needs full turn context (turn_start, user message
+            # window, every tool, turn_end). When narrowing filters
+            # (skill_id / tool_name / verdict) sit on top of a scope
+            # filter, the initial fetch returns only matching events —
+            # turn_start / turn_end / preceding user message get filtered
+            # out, breaking the story. Re-pull events for the matched
+            # turn_ids using scope filters only.
+            has_narrowing = bool(skill_id or tool_name or verdict)
+            has_scope = bool(
+                session_id or correlation_id
+                or since_dt is not None or until_dt is not None
+            )
+            if has_narrowing and has_scope:
+                matching_turn_ids = {e.turn_id for e in events}
+                if matching_turn_ids:
+                    broad_query = _build_query(
+                        ledger_store,
+                        session_id=session_id,
+                        correlation_id=correlation_id,
+                        since_dt=since_dt,
+                        until_dt=until_dt,
+                    )
+                    broad_events = await broad_query.all()
+                    if len(broad_events) > _LEDGER_RECALL_EVENT_CAP:
+                        truncated = True
+                        broad_events = broad_events[:_LEDGER_RECALL_EVENT_CAP]
+                    events = [
+                        e for e in broad_events
+                        if e.turn_id in matching_turn_ids
+                    ]
+
             slices = group_events_by_turn(events)[:limit]
             messages_by_turn = await _fetch_user_messages_per_turn(
                 memory, slices,
             )
             text = render_narrative(
-                slices, messages_by_turn, verbose=verbose,
+                slices, messages_by_turn,
+                verbose=verbose, truncated=truncated,
             )
         elif output_format == "raw":
-            text = render_raw(events, max_events=limit)
+            text = render_raw(
+                events, max_events=limit, truncated=truncated,
+            )
         else:
-            text = render_summary(events)
+            text = render_summary(events, truncated=truncated)
 
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=text,
         )
+
+    def _build_query(
+        store: "LedgerStore",
+        *,
+        session_id: str | None = None,
+        correlation_id: str | None = None,
+        skill_id: str | None = None,
+        tool_name: str | None = None,
+        verdict: str | None = None,
+        since_dt=None,
+        until_dt=None,
+    ):
+        q = store.events
+        if session_id:
+            q = q.where(session_id=session_id)
+        if correlation_id:
+            q = q.where(correlation_id=correlation_id)
+        if skill_id:
+            q = q.where(skill_id=skill_id)
+        if tool_name:
+            q = q.where(tool_name=tool_name)
+        if verdict:
+            q = q.where(verdict=verdict)
+        if since_dt is not None:
+            q = q.since(since_dt)
+        if until_dt is not None:
+            q = q.until(until_dt)
+        return q.order_by("timestamp").limit(_LEDGER_RECALL_EVENT_CAP + 1)
 
     async def _fetch_user_messages_per_turn(
         memory: "MemoryFacade | None",

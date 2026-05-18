@@ -358,3 +358,42 @@ def test_infer_other_dimensions_pick_summary():
 
 def test_infer_ignores_invalid_explicit_value():
     assert infer_output_format(session_id="s", explicit="garbage") == "narrative"
+
+
+# ── truncation warning (PR #386 review fix) ───────────────────────────
+
+
+def test_narrative_prepends_truncation_warning():
+    events = [_tool_end("c1", "tool_a", ts_offset=0.5)]
+    slices = group_events_by_turn(events)
+    out = render_narrative(slices, {}, truncated=True)
+    assert out.startswith("[!]")
+    assert "ledger 查詢上限" in out
+    assert "## session" in out  # body still present
+
+
+def test_narrative_no_warning_when_not_truncated():
+    events = [_tool_end("c1", "tool_a", ts_offset=0.5)]
+    slices = group_events_by_turn(events)
+    out = render_narrative(slices, {})
+    assert not out.startswith("[!]")
+
+
+def test_summary_prepends_truncation_warning():
+    events = [_tool_end("c1", "tool_a", ts_offset=0.5)]
+    out = render_summary(events, truncated=True)
+    assert out.startswith("[!]")
+    assert "## 摘要" in out
+
+
+def test_raw_prepends_truncation_warning():
+    events = [_tool_end("c1", "tool_a", ts_offset=0.5)]
+    out = render_raw(events, truncated=True)
+    assert out.startswith("[!]")
+    assert "Raw events" in out
+
+
+def test_empty_window_still_shows_warning_when_truncated():
+    """Edge case: zero events fetched after truncation slice off cap+1 leftover."""
+    out = render_summary([], truncated=True)
+    assert out.startswith("[!]")

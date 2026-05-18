@@ -356,3 +356,120 @@ async def test_verdict_filter_narrows_results(ledger: LedgerStore):
     result = await tool.executor(_call({"verdict": "PASS"}))
     assert result.success is True
     assert "沒有可回憶" in result.output
+
+
+# ── PR #386 review fixes ──────────────────────────────────────────────
+
+
+async def test_narrative_rehydrates_full_turn_when_narrowing_filter_applied(
+    ledger: LedgerStore,
+):
+    """Bug: session_id + tool_name=X filtered out turn_start / turn_end /
+    user message preceding the first matching tool, leaving narrative
+    without user intent or outcome.
+
+    Fix: when narrative + narrowing + scope, re-pull full turn context
+    for the matching turn_ids using scope filters only.
+    """
+    base = time.time()
+    emitter = LedgerEmitter(ledger, session_id="sess_hydrate")
+    # Turn with: turn_start, two tools (one matched, one not), turn_end
+    # with non-clean outcome.
+    await _seed_turn(
+        emitter,
+        turn_id="turn_h",
+        base_ts=base,
+        tools=[("write_file", None), ("run_bash", None)],
+        outcome="retry",
+    )
+    # A second turn with NO run_bash — must not appear in narrative.
+    await _seed_turn(
+        emitter,
+        turn_id="turn_skip",
+        base_ts=base + 50,
+        tools=[("read_file", None)],
+    )
+
+    # User message is at base + 0.1 — BEFORE the first run_bash tool (at
+    # base + 1.0 in this seed pattern). Without the re-query, narrative
+    # would search session_log from base+1.0 onward and miss the message.
+    user_ts = datetime.fromtimestamp(base + 0.1, tz=timezone.utc).isoformat()
+    fake_log = FakeSessionLog([{
+        "session_id": "sess_hydrate",
+        "turn_index": 0,
+        "role": "user",
+        "content": "請幫我跑測試",
+        "raw_json": None,
+        "metadata": {},
+        "created_at": user_ts,
+    }])
+
+    tool = make_ledger_recall_tool(ledger, FakeMemory(fake_log))
+    result = await tool.executor(_call({
+        "session_id": "sess_hydrate",
+        "tool_name": "run_bash",
+    }))
+
+    assert result.success is True
+    # User message must surface (this is the regression we're fixing).
+    assert "你說：請幫我跑測試" in result.output
+    # Turn outcome must surface.
+    assert "turn 結局 retry" in result.output
+    # The other (non-matching) tool from the same turn becomes visible
+    # because narrative shows full turn context.
+    assert "write_file" in result.output
+    assert "run_bash" in result.output
+    # The non-matching turn must not appear.
+    assert "turn_skip" not in result.output
+    assert "read_file" not in result.output
+
+
+async def test_truncation_warning_in_summary(
+    ledger: LedgerStore, monkeypatch,
+):
+    """When ledger fetch hits the per-query cap, summary prepends a
+    warning so the agent doesn't cite partial totals as authoritative.
+
+    Monkeypatched cap rather than seeding 1000+ real events — same code
+    path, faster test.
+    """
+    import loom.platform.cli.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_LEDGER_RECALL_EVENT_CAP", 3)
+
+    base = time.time()
+    emitter = LedgerEmitter(ledger, session_id="sess_trunc")
+    # 5 tool ENDs > cap of 3
+    for i in range(5):
+        await emitter.emit_tool_lifecycle(
+            turn_id=f"turn_t{i}",
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="run_bash",
+                tool_call_id=f"call_{i}",
+                args_digest=f"sha256:{i}",
+            ),
+            event_id=f"evt_{i}",
+            timestamp=base + i * 0.5,
+        )
+
+    tool = make_ledger_recall_tool(ledger, FakeMemory())
+    result = await tool.executor(_call({"tool_name": "run_bash"}))
+    assert result.success is True
+    assert result.output.startswith("[!]")
+    assert "ledger 查詢上限" in result.output
+    # Still renders the summary body
+    assert "## 摘要" in result.output
+
+
+async def test_no_truncation_warning_when_under_cap(ledger: LedgerStore):
+    """Sanity: with comfortable headroom, warning must NOT appear."""
+    base = time.time()
+    emitter = LedgerEmitter(ledger, session_id="sess_ok")
+    await _seed_turn(
+        emitter, turn_id="turn_ok", base_ts=base,
+        tools=[("run_bash", None)],
+    )
+    tool = make_ledger_recall_tool(ledger, FakeMemory())
+    result = await tool.executor(_call({"tool_name": "run_bash"}))
+    assert result.success is True
+    assert not result.output.startswith("[!]")

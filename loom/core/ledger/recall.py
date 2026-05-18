@@ -37,6 +37,11 @@ _ERR_TEXT_CAP = 60          # error text length in action chain
 _COMPACT_TOOL_THRESHOLD = 8  # actions per turn before we condense
 _RAW_DEFAULT_MAX = 100
 
+_TRUNCATION_WARNING = (
+    "[!] 結果觸及 ledger 查詢上限；以下內容可能不完整，"
+    "請收窄 filter（時間範圍 / session_id / correlation_id）取得完整結果。"
+)
+
 
 # ── Turn grouping ─────────────────────────────────────────────────────
 
@@ -125,6 +130,7 @@ def render_narrative(
     messages_by_turn: dict[str, list[dict[str, Any]]],
     *,
     verbose: bool = False,
+    truncated: bool = False,
 ) -> str:
     """Per-turn paragraph narrative.
 
@@ -134,9 +140,12 @@ def render_narrative(
 
     ``messages_by_turn`` is keyed by ``turn_id`` and holds session_log
     rows shaped like :meth:`SessionLog.messages_between` output.
+
+    ``truncated=True`` prepends a warning so the agent knows the
+    underlying ledger fetch hit the per-query cap.
     """
     if not slices:
-        return _empty_window()
+        return _maybe_prepend_warning(_empty_window(), truncated)
 
     sessions_seen: list[str] = []
     for sl in slices:
@@ -158,7 +167,7 @@ def render_narrative(
                 )
             )
             parts.append("")
-    return "\n".join(parts).rstrip()
+    return _maybe_prepend_warning("\n".join(parts).rstrip(), truncated)
 
 
 def _render_turn(
@@ -243,10 +252,16 @@ def _render_actions(events: list[LedgerEvent], *, verbose: bool) -> str:
 # ── Summary renderer ──────────────────────────────────────────────────
 
 
-def render_summary(events: list[LedgerEvent]) -> str:
-    """Aggregate stats: window, sessions, per-tool success/failure, turn outcomes."""
+def render_summary(
+    events: list[LedgerEvent], *, truncated: bool = False,
+) -> str:
+    """Aggregate stats: window, sessions, per-tool success/failure, turn outcomes.
+
+    ``truncated=True`` prepends a warning so the agent doesn't quote
+    success rates / totals as if they cover the full population.
+    """
     if not events:
-        return _empty_window()
+        return _maybe_prepend_warning(_empty_window(), truncated)
 
     start_ts = min(e.timestamp for e in events)
     end_ts = max(e.timestamp for e in events)
@@ -304,29 +319,37 @@ def render_summary(events: list[LedgerEvent]) -> str:
         ):
             lines.append(f"  - {outcome}: {n}")
 
-    return "\n".join(lines)
+    return _maybe_prepend_warning("\n".join(lines), truncated)
 
 
 # ── Raw renderer (escape hatch) ───────────────────────────────────────
 
 
 def render_raw(
-    events: list[LedgerEvent], *, max_events: int = _RAW_DEFAULT_MAX
+    events: list[LedgerEvent],
+    *,
+    max_events: int = _RAW_DEFAULT_MAX,
+    truncated: bool = False,
 ) -> str:
-    """One-line-per-event timeline. Truncates beyond ``max_events``."""
-    if not events:
-        return _empty_window()
+    """One-line-per-event timeline. Truncates beyond ``max_events``.
 
-    truncated = len(events) > max_events
+    ``truncated=True`` (the fetch-level cap was hit) is distinct from
+    ``max_events`` (the render-level cap shown in the header); both can
+    apply simultaneously and the warning makes the distinction explicit.
+    """
+    if not events:
+        return _maybe_prepend_warning(_empty_window(), truncated)
+
+    cap_hit = len(events) > max_events
     header = f"## Raw events ({len(events)} total"
-    if truncated:
+    if cap_hit:
         header += f", showing first {max_events}"
     header += ")"
 
     lines = [header]
     for e in events[:max_events]:
         lines.append(_render_raw_line(e))
-    return "\n".join(lines)
+    return _maybe_prepend_warning("\n".join(lines), truncated)
 
 
 def _render_raw_line(e: LedgerEvent) -> str:
@@ -378,3 +401,9 @@ def infer_output_format(
 
 def _empty_window() -> str:
     return "(這段時間沒有可回憶的事件)"
+
+
+def _maybe_prepend_warning(body: str, truncated: bool) -> str:
+    if not truncated:
+        return body
+    return f"{_TRUNCATION_WARNING}\n\n{body}"
