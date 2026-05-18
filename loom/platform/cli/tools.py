@@ -824,10 +824,51 @@ def make_run_bash_tool(
             )
         _sandbox_settings_path = _srt_write_settings_file(sandbox, workspace)
 
-    def _maybe_wrap(cmd: str) -> str:
-        if _sandbox_active and _sandbox_settings_path is not None:
-            return _srt_wrap_command(cmd, _sandbox_settings_path)
-        return cmd
+    def _selected_profile_for_call(call: ToolCall) -> str | None:
+        if not _sandbox_active or sandbox is None or not sandbox.profiles:
+            return None
+        command = call.args.get("command", "")
+        explicit = (call.args.get("sandbox_profile") or "").strip() or None
+        return sandbox.select_profile_for_command(command, explicit=explicit)
+
+    def _has_profile_requirement(call: ToolCall, profile_name: str) -> bool:
+        scope_request = call.metadata.get("scope_request")
+        requirements = getattr(scope_request, "requirements", []) or []
+        for req in requirements:
+            if (
+                getattr(req, "resource", None) == "sandbox_profile"
+                and getattr(req, "action", None) == "use"
+                and getattr(req, "selector", None) == profile_name
+            ):
+                return True
+        return False
+
+    def _profile_authorized_for_call(call: ToolCall, profile_name: str) -> bool:
+        if not _has_profile_requirement(call, profile_name):
+            return False
+        verdict = call.metadata.get("scope_verdict")
+        verdict_value = getattr(verdict, "value", verdict)
+        return (
+            call.metadata.get("once_authorized") is True
+            or call.metadata.get("user_decision") is True
+            or verdict_value == "allow"
+        )
+
+    def _maybe_wrap(cmd: str, call: ToolCall) -> tuple[str, str | None]:
+        if not _sandbox_active or _sandbox_settings_path is None:
+            return cmd, None
+        profile_name = _selected_profile_for_call(call)
+        settings_path = _sandbox_settings_path
+        if profile_name:
+            if sandbox is None or not _profile_authorized_for_call(call, profile_name):
+                raise PermissionError(
+                    f"sandbox profile '{profile_name}' requires explicit authorization"
+                )
+            settings_path = _srt_write_settings_file(
+                sandbox.merged_with_profile(profile_name),
+                workspace,
+            )
+        return _srt_wrap_command(cmd, settings_path), profile_name
     async def _run_bash(call: ToolCall) -> ToolResult:
         command = call.args.get("command", "")
         async_mode = bool(call.args.get("async_mode", False))
@@ -882,18 +923,38 @@ def make_run_bash_tool(
 
         timeout = call.args.get("timeout", 30)
         cwd = str(workspace) if strict_sandbox else None
+        try:
+            wrapped_command, sandbox_profile = _maybe_wrap(command, call)
+        except PermissionError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+                failure_type="permission_denied",
+            )
+        except ValueError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False, error=str(exc),
+                failure_type="validation_error",
+            )
 
         if async_mode and jobstore is not None and scratchpad is not None:
+            payload = {"command": command, "timeout": timeout}
+            metadata = {"async": True}
+            if sandbox_profile:
+                payload["sandbox_profile"] = sandbox_profile
+                metadata["sandbox_profile"] = sandbox_profile
             job_id = jobstore.submit(
                 "run_bash",
-                {"command": command, "timeout": timeout},
-                lambda: _run_bash_job(_maybe_wrap(command), cwd, timeout, scratchpad),
+                payload,
+                lambda: _run_bash_job(wrapped_command, cwd, timeout, scratchpad),
             )
+            metadata["job_id"] = job_id
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,
                 output=f"Submitted as {job_id}. Poll with jobs_status or jobs_await.",
-                metadata={"job_id": job_id, "async": True},
+                metadata=metadata,
             )
 
         try:
@@ -903,7 +964,7 @@ def make_run_bash_tool(
             # PID, leaving children holding stdout fds and communicate()
             # blocked indefinitely past cancel/timeout.
             proc = await asyncio.create_subprocess_shell(
-                _maybe_wrap(command),
+                wrapped_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
@@ -951,11 +1012,14 @@ def make_run_bash_tool(
                 marker = f"[Command exited with {proc.returncode}]"
                 output = f"{output}\n{marker}" if output else marker
 
+            metadata = {"exit_code": proc.returncode}
+            if sandbox_profile:
+                metadata["sandbox_profile"] = sandbox_profile
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=success, output=output,
                 error=None if success else f"Exit code {proc.returncode}",
-                metadata={"exit_code": proc.returncode},
+                metadata=metadata,
             )
         except Exception as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -984,6 +1048,7 @@ def make_run_bash_tool(
                 "command": {"type": "string", "description": "Shell command to run"},
                 "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
                 "async_mode": {"type": "boolean", "description": "Run in background; return job_id immediately (default false)."},
+                "sandbox_profile": {"type": "string", "description": "Optional named sandbox profile to request for this command."},
                 "justification": {"type": "string", "description": "簡短說明為何在目前的脈絡下執行此工具是合理且必要的（給人類審核看）。"},
             },
             "required": ["command", "justification"],
@@ -995,7 +1060,7 @@ def make_run_bash_tool(
             "executes shell commands within workspace sandbox",
             "scope unknown for pipes, subshells, or variable expansion",
         ],
-        scope_resolver=_make_run_bash_resolver(workspace),
+        scope_resolver=_make_run_bash_resolver(workspace, sandbox=sandbox),
         post_validator=_verify_run_bash,
     )
 
