@@ -11,12 +11,15 @@ Shape choices:
   capped to keep payloads bounded.
 - Activation window:
     start = load_skill END timestamp
-    end   = earliest of (explicit unload_skill END for same skill,
-            next load_skill END for same skill = implicit re-activation
-            boundary, query window's until_ts when neither exists)
+    end   = earliest of (explicit unload_skill END for same skill in
+            the same session, next load_skill END for same skill in
+            the same session = implicit re-activation boundary,
+            query window's until_ts when neither exists)
   The window spans turns deliberately: agents routinely keep a skill
   loaded across many turns. Per-turn scoping silently lost cross-turn
-  usage and miscounted feedback density.
+  usage and miscounted feedback density. It does NOT span sessions:
+  an unload in a different session must not close this episode and
+  another session's events must not be attributed here.
 - ``unload_inferred`` flags episodes whose window was closed by
   heuristic (re-load) or remained open (no unload before until_ts);
   ``unload_inferred_reason`` distinguishes the two. Surfacing these
@@ -133,28 +136,42 @@ async def query_skill_ledger(
     episodes_truncated = load_count > max_episodes
     load_ends_for_episodes = load_ends[-max_episodes:] if episodes_truncated else load_ends
 
-    # Build one episode per load. Activation windows span turns: an agent
-    # may load a skill in turn N and only unload it in turn N+k, with
-    # plenty of in-between work to attribute. Closing the window at the
-    # loading turn's end (the old behaviour) silently dropped all that
-    # evidence and made feedback density look zero.
+    # Build one episode per load. Activation windows span turns within
+    # the loading session: an agent may load a skill in turn N and only
+    # unload it in turn N+k, with plenty of in-between work to attribute.
+    # Closing the window at the loading turn's end (the original
+    # behaviour) silently dropped all that evidence and made feedback
+    # density look zero. Crossing *session* boundaries, however, is
+    # never correct — a load in session A must not be closed by an
+    # unload in session B, and B's events must not appear in A's
+    # episode (see PR #393 review).
     episodes: list[SkillEpisode] = []
     for load_idx, load in enumerate(load_ends_for_episodes):
         loaded_at = load.timestamp
+        load_session_id = load.session_id
 
-        # Earliest explicit unload for this skill after loaded_at (any turn).
-        # unload_ends came from a timestamp-ordered fetch, so the first
-        # hit is the earliest.
+        # Earliest explicit unload for this skill in the same session
+        # after loaded_at. unload_ends came from a timestamp-ordered
+        # fetch, so the first session-matching hit is the earliest.
         explicit_unload_ts: float | None = next(
-            (un.timestamp for un in unload_ends if un.timestamp > loaded_at),
+            (
+                un.timestamp
+                for un in unload_ends
+                if un.session_id == load_session_id and un.timestamp > loaded_at
+            ),
             None,
         )
 
-        # Earliest subsequent reload of the same skill. Reloading is
-        # treated as an implicit boundary: the prior activation is over
-        # as soon as the agent declares a new one.
+        # Earliest subsequent reload of the same skill in the same
+        # session. Reloading is treated as an implicit boundary: the
+        # prior activation is over as soon as the agent declares a new
+        # one in the same session.
         next_reload_ts: float | None = next(
-            (la.timestamp for la in load_ends if la.timestamp > loaded_at),
+            (
+                la.timestamp
+                for la in load_ends
+                if la.session_id == load_session_id and la.timestamp > loaded_at
+            ),
             None,
         )
 
@@ -179,12 +196,15 @@ async def query_skill_ledger(
 
         window_end = boundary_ts if boundary_ts is not None else until_ts
 
-        # Fetch by time range (cross-turn). The cap keeps the in-memory
-        # working set bounded for long-open windows; we apply it after
-        # filtering so the cap reflects the kept events, not raw fetch
-        # size.
+        # Fetch by time range, scoped to the loading session (cross-turn
+        # within session is the intended span; cross-session would
+        # mis-attribute evidence — see PR #393 review). The cap keeps
+        # the in-memory working set bounded for long-open windows; we
+        # apply it after filtering so the cap reflects the kept events,
+        # not raw fetch size.
         events_in_window = await (
             ledger.events
+            .where(session_id=load_session_id)
             .since(loaded_at)
             .until(window_end)
             .order_by("timestamp")
@@ -197,10 +217,14 @@ async def query_skill_ledger(
         ]
 
         # turn_outcome stays bound to the loading turn (semantic anchor:
-        # "the turn that activated this skill"). For cross-turn windows,
-        # other turn_ends will appear inside events_after_load.
+        # "the turn that activated this skill"). Scope by session_id
+        # too — turn_id is not guaranteed globally unique across
+        # sessions (see PR #393 review).
         load_turn_events = await (
-            ledger.events.where(turn_id=load.turn_id).order_by("timestamp").all()
+            ledger.events
+            .where(turn_id=load.turn_id, session_id=load_session_id)
+            .order_by("timestamp")
+            .all()
         )
         turn_outcome: str | None = None
         for e in load_turn_events:

@@ -367,6 +367,80 @@ async def test_reload_without_unload_closes_previous_episode(
     assert second.unload_inferred_reason is None
 
 
+async def test_cross_session_unload_does_not_close_other_sessions_episode(
+    ledger: LedgerStore,
+) -> None:
+    """Activation windows must stay within the loading session.
+
+    PR #393 review case: sess_A loads code_weaver and never unloads;
+    sess_B later runs unrelated work and unloads code_weaver. The
+    sess_A episode must remain open (inferred boundary) and must NOT
+    pull sess_B's events into events_after_load.
+    """
+    e_a = LedgerEmitter(ledger, session_id="sess_A")
+    e_b = LedgerEmitter(ledger, session_id="sess_B")
+
+    async with async_turn_scope("turn_A1"), async_correlation_scope("c_A1"):
+        await _emit_load(e_a, skill="code_weaver", suffix="A1")
+    async with async_turn_scope("turn_B1"), async_correlation_scope("c_B1"):
+        await e_b.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="write_file",
+                tool_call_id="call_w_B",
+                args_digest="sha256:wB",
+                result_digest="sha256:rwB",
+            ),
+            event_id="evt_w_end_B",
+        )
+        await _emit_unload(e_b, skill="code_weaver", suffix="B1")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 1
+    assert digest.unload_count == 1  # the sess_B unload is still counted globally
+    assert digest.sessions == ("sess_A", "sess_B")
+    assert len(digest.episodes) == 1
+
+    ep = digest.episodes[0]
+    assert ep.session_id == "sess_A"
+    # sess_B's unload must NOT close sess_A's episode.
+    assert ep.unload_inferred is True
+    assert ep.unload_inferred_reason == "no_unload_in_window"
+    assert ep.unloaded_at is None
+    # sess_B's write_file must NOT appear in sess_A's evidence.
+    foreign_session_event_ids = {
+        e.event_id for e in ep.events_after_load if e.session_id != "sess_A"
+    }
+    assert foreign_session_event_ids == set()
+
+
+async def test_cross_session_reload_does_not_close_other_sessions_episode(
+    ledger: LedgerStore,
+) -> None:
+    """A re-load of the same skill in a different session is not an
+    implicit boundary for an open episode in another session."""
+    e_a = LedgerEmitter(ledger, session_id="sess_A")
+    e_b = LedgerEmitter(ledger, session_id="sess_B")
+
+    async with async_turn_scope("turn_A1"), async_correlation_scope("c_A1"):
+        await _emit_load(e_a, skill="code_weaver", suffix="A1")
+    async with async_turn_scope("turn_B1"), async_correlation_scope("c_B1"):
+        await _emit_load(e_b, skill="code_weaver", suffix="B1")
+        await _emit_unload(e_b, skill="code_weaver", suffix="B1")
+
+    digest = await query_skill_ledger(ledger, "code_weaver")
+    assert digest.load_count == 2
+    assert len(digest.episodes) == 2
+
+    sess_a_ep = next(ep for ep in digest.episodes if ep.session_id == "sess_A")
+    assert sess_a_ep.unload_inferred is True
+    assert sess_a_ep.unload_inferred_reason == "no_unload_in_window"
+    assert sess_a_ep.unloaded_at is None
+
+    sess_b_ep = next(ep for ep in digest.episodes if ep.session_id == "sess_B")
+    assert sess_b_ep.unload_inferred is False
+
+
 async def test_nested_skills_each_get_own_window(
     ledger: LedgerStore, emitter: LedgerEmitter
 ) -> None:
