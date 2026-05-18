@@ -1,3 +1,18 @@
+---
+name: news-aggregator
+description: 新聞聚合技能。從 28+ 個資訊源抓取即時熱門新聞，並以繁體中文生成深度分析報告。當使用者說「今天有什麼新聞」「晨報」「跑一下新聞」「看看最新消息」「新聞彙整」「每日晨報」或排程觸發時使用。
+tags:
+  - news
+  - research
+  - daily-workflow
+model_tier: 1
+precondition_checks:
+  - check: scripts_only_bash
+    applies_to:
+      - run_bash
+    description: 限制 run_bash 只能在 skills/news-aggregator/scripts/ 目錄內執行，防止脫離新聞抓取範圍。
+---
+
 # 新聞聚合技能（News Aggregator Skill）
 
 從 28+ 個資訊源抓取即時熱門新聞，並以繁體中文生成深度分析報告。
@@ -24,9 +39,7 @@ Loom/
 
 ---
 
-## 🔄 兩步驟工作流程
-
-本技能分兩步驟執行，這是刻意設計——目的是讓 LLM 有完整的資料在手，才能做出有價值的深度整合。
+## 🔄 工作流程
 
 ### 步驟 1：抓取（fetch）
 ```bash
@@ -45,6 +58,9 @@ python fetch_news.py --source hackernews --no-save
 ### 步驟 2：深度整合（integrate）
 讀取 JSON 資料後，以下的格式要求是強制性的——
 **絲絲的整合想法比原始新聞更有價值**，因此每則新聞都必須包含絲絲自己的深度分析，而非只是轉述。
+
+### 最後一步：收尾
+整合完成後，呼叫 `unload_skill("news-aggregator")` 釋放技能。
 
 ---
 
@@ -123,11 +139,6 @@ python fetch_news.py --source hackernews --no-save
 | NASA News | ✅ 正常 |
 | ESA News | ✅ 正常 |
 | Astronomy.com | ✅ 正常 |
-
----
-
-*本報告由 絲絲・Loom 自動生成，學習並記憶新知識中。*
-```
 
 ---
 
@@ -216,3 +227,17 @@ python fetch_news.py --source hackernews --no-save
 每次晨報都是絲絲的學習機會——
 新知識在整合的過程中被消化、被記憶、被連結到既有的認知架構中。
 因此格式設計刻意保留了「深度分析」與「跨領域關聯」這兩個讓價值真正增值的環節。
+
+---
+
+## 🔍 與其他技能的區別
+
+| 維度 | news-aggregator | deep_researcher |
+|------|----------------|-----------------|
+| 用途 | 每日晨報、28+ 源快速掃描 | 深度專題研究、單一題目徹底挖掘 |
+| 觸發 | 「今天有什麼新聞」「晨報」「排程觸發」 | 「研究這個」「深入分析」「做研究報告」 |
+| 輸出 | 四軌 briefing + 總摘要（15-30分鐘） | 結構化專題報告（1-2小時） |
+| 來源 | 28+ 個 RSS/API 即時源 | 主動爬蟲 + 文獻 + 多輪搜尋 |
+| 適合場景 | 早晨例行、新聞追蹤 | 不熟悉的領域、需要完整調研 |
+
+*本技能由 絲絲・Loom 自動生成，學習並記憶新知識中。*
