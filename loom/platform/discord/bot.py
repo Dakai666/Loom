@@ -57,7 +57,7 @@ import logging
 import json
 import os
 import time
-from datetime import datetime, time as datetime_time, timezone
+from datetime import datetime, time as datetime_time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -73,6 +73,7 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from loom.core.harness.scope import ConfirmDecision
+from loom.core.timezone import user_zone
 from loom.core.events import (
     EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted,
     ExecutionEnvelopeView,
@@ -282,7 +283,7 @@ class LoomDiscordBot:
         # Turn summary display mode: "off" | "on" | "detail"
         self._summary_mode: str = "on"
 
-        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        local_tz = user_zone()
         self._daily_compaction_loop = tasks.loop(
             time=datetime_time(hour=5, minute=0, tzinfo=local_tz),
         )(self._run_daily_compaction)
@@ -788,8 +789,11 @@ class LoomDiscordBot:
             return
 
         # Local-time stamp so the marker is human-readable in chat.
+        # Uses the user's configured zone (loom.toml [timezone].user), not
+        # the bot host's local zone — keeps display consistent regardless
+        # of where the process runs.
         try:
-            local_dt = req.fired_at.astimezone()
+            local_dt = req.fired_at.astimezone(user_zone())
             stamp = local_dt.strftime("%H:%M %Z").strip()
         except Exception:
             stamp = req.fired_at.isoformat()

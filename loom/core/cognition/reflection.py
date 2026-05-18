@@ -9,7 +9,10 @@ Phase 2: query interface over episodic + procedural memory.
 Phase 3: the Autonomy Engine will call this to decide what to do next.
 """
 
+from datetime import UTC
 from typing import TYPE_CHECKING
+
+from loom.core.timezone import user_zone
 
 if TYPE_CHECKING:
     from loom.core.memory.facade import MemoryFacade
@@ -40,11 +43,14 @@ class ReflectionAPI:
         ordered most-recent first.
         """
         entries = await self._episodic.read_session(session_id)
+        zone = user_zone()
         tool_entries = [
             {
                 "content": e.content,
                 "metadata": e.metadata,
-                "timestamp": e.created_at.isoformat(),
+                "timestamp": (
+                    e.created_at if e.created_at.tzinfo else e.created_at.replace(tzinfo=UTC)
+                ).astimezone(zone).isoformat(),
             }
             for e in entries
             if e.event_type == "tool_result"

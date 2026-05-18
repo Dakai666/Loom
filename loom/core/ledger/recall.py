@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from loom.core.timezone import user_zone
 from typing import Any, Literal
 
 from loom.core.ledger.schema import LedgerEvent
@@ -109,15 +111,15 @@ def group_events_by_turn(events: list[LedgerEvent]) -> list[TurnSlice]:
 
 
 def _fmt_date(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ts, tz=user_zone()).strftime("%Y-%m-%d")
 
 
 def _fmt_time(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M")
+    return datetime.fromtimestamp(ts, tz=user_zone()).strftime("%H:%M")
 
 
 def _fmt_full(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+    return datetime.fromtimestamp(ts, tz=user_zone()).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
