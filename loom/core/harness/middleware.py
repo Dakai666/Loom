@@ -1068,8 +1068,7 @@ class BlastRadiusMiddleware(Middleware):
         # Convert request → grants based on user's decision.
         import time as _time
         if decision == ConfirmDecision.ONCE:
-            # Session-permanent grant with tight scope, no TTL
-            self._request_to_grants(scope_request, source="manual_confirm")
+            call.metadata["once_authorized"] = True
         elif decision == ConfirmDecision.SCOPE:
             # Session-scoped lease: grant with TTL
             self._request_to_grants(
