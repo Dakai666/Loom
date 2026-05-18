@@ -218,6 +218,39 @@ require_audit_log   = true
 
 ---
 
+## [security.sandbox]
+
+OS-level sandbox for `run_bash`（Issue #29，doc/55）。預設 `none`，行為與舊版完全一致。啟用前需安裝 srt：
+
+```bash
+npm install -g @anthropic-ai/sandbox-runtime
+```
+
+```toml
+[security.sandbox]
+backend         = "srt"           # "none" | "srt"
+allow_write     = [".", "/private/tmp"]
+deny_read       = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `backend` | string | `"none"` | `"none"` 不啟用；`"srt"` 用 anthropic-experimental/sandbox-runtime |
+| `allow_write` | list[str] | `[]` | 可寫路徑（allow-only），空陣列 = 禁止任何寫入 |
+| `deny_read` | list[str] | `[]` | 禁讀路徑，覆蓋 `allow_read` |
+| `allow_read` | list[str] | `[]` | 例外可讀路徑（僅在 `deny_read` 覆蓋了大範圍時才需要） |
+| `deny_write` | list[str] | `[]` | 寫入黑名單例外（罕用） |
+| `allowed_domains` | list[str] | `[]` | 網路 allowlist，空陣列 = 全擋 |
+| `denied_domains` | list[str] | `[]` | 額外網路黑名單 |
+| `allowed_sockets` / `denied_sockets` | list[str] | `[]` | Unix socket 控制（macOS 上罕用） |
+
+**路徑語意**：`~` 展開為家目錄；`.` 錨定在 session workspace。
+**macOS 特別注意**：`/tmp` 是 `/private/tmp` 的 symlink，要寫 temp file 請列 `/private/tmp`。
+**Fail-closed**：`backend = "srt"` 但找不到 binary 時 session 啟動會失敗並提示安裝指令，避免 silent downgrade。
+
+---
+
 ## [autonomy]
 
 Autonomy Engine 的總開關與時區設定。

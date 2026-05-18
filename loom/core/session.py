@@ -889,12 +889,21 @@ class LoomSession:
         self._jobstore = JobStore()
         self._scratchpad = Scratchpad()
 
+        # Issue #29 / Quest A Phase 4: optional OS-level sandbox via srt.
+        # Defaults to ``backend = "none"`` so behaviour matches pre-#29.
+        from loom.core.security import SandboxSettings
+        _sandbox_settings = SandboxSettings.from_config(
+            (config.get("security") or {}).get("sandbox")
+        )
+        self._sandbox_settings = _sandbox_settings
+
         from loom.platform.cli.tools import make_run_bash_tool, make_filesystem_tools
         _run_bash_tool = make_run_bash_tool(
             self.workspace,
             strict_sandbox=_strict_sandbox,
             jobstore=self._jobstore,
             scratchpad=self._scratchpad,
+            sandbox=_sandbox_settings,
         )
         self.registry.register(_run_bash_tool)
         _fs_tools = make_filesystem_tools(self.workspace)
