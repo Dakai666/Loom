@@ -1,25 +1,53 @@
 """
-Timezone Utilities — Issue #124
+Timezone Utilities — Issues #124, #388
 
-Provides a single source of truth for all user-facing timestamps
-in the Loom framework.
+Single source of truth for user-facing timestamps in the Loom framework.
 
 Architecture
 ------------
 Two clocks:
-  - `utc_now()`     — always UTC; used for logging, DB, cron scheduling
-  - `local_now()`   — user's timezone (from [timezone] config in loom.toml);
-                      used for ALL timestamps that appear in LLM prompts
+  - ``utc_now()``    — always UTC; used for internal logging, DB writes,
+                       cron scheduling
+  - ``local_now()``  — user's configured timezone (from [timezone] config
+                       in loom.toml); used for every timestamp that the
+                       LLM or the user is going to see
+  - ``user_zone()``  — the user's ``ZoneInfo`` itself; use when parsing
+                       agent-supplied date/datetime strings so naked
+                       inputs are interpreted in the same zone the agent
+                       sees in injected prompt timestamps
 
-The [timezone] section in loom.toml:
-  user = "Asia/Taipei"   # user-facing display / LLM context (any IANA tz name)
-  internal = "UTC"        # system timestamps (logging, DB, cron)
+The ``[timezone]`` section in ``loom.toml``::
 
-If ``[timezone].user`` is absent, the framework falls back to UTC — never to
-a hardcoded regional timezone.
+    user     = "Asia/Taipei"   # any IANA tz name; falls back to UTC if absent
+    internal = "UTC"           # system timestamps (logging, DB, cron)
 
-All code that injects timestamps into messages going to the LLM MUST use
-``local_now()`` — never ``datetime.now(UTC)`` directly.
+Boundary cheat sheet
+--------------------
+**User-zone paths** (agent / human visible — always use ``local_now()``
+or ``user_zone()``)::
+
+  - LLM prompt timestamp prefix (``user_timestamp()``)
+  - Memory tool inputs: ``recall`` / ``recall_period`` / ``ledger_recall``
+    parse ``since``/``until`` via ``user_zone()``
+  - Memory tool outputs: ``_format_period_results``, ledger
+    narrative/summary/raw render, ``ReflectionAPI.recent_tool_calls``
+  - Discord chime delivery stamp + daily compaction loop trigger time
+
+**UTC paths** (internal only — keep ``datetime.now(UTC)``)::
+
+  - SQLite memory store columns (``semantic.updated_at``,
+    ``episodic.created_at``, ledger event ``timestamp``); agents read
+    them via the user-zone tools above, never raw
+  - Forensics / dreaming / counter_factual / autonomy audit timestamps
+  - Cron scheduling: ``CronTrigger.should_fire(datetime.now(UTC))``;
+    cron strings in ``loom.toml [[autonomy.schedules]]`` are always
+    written in UTC, the operator hand-converts from local time. The
+    per-schedule ``timezone`` field is currently a no-op — do not rely
+    on it (tracked separately).
+
+When in doubt: if the timestamp is about to enter a tool result, a
+prompt, or chat UI, route through this module. Never inject
+``datetime.now(UTC)`` directly into anything the agent or user reads.
 """
 
 from __future__ import annotations
@@ -113,6 +141,17 @@ def local_now() -> datetime:
 def local_zone_name() -> str:
     """Return the configured user timezone name (e.g. 'Asia/Taipei')."""
     return str(_ensure_user_zone().key)
+
+
+def user_zone() -> zoneinfo.ZoneInfo:
+    """
+    Return the user's configured timezone as a :class:`zoneinfo.ZoneInfo`.
+
+    Use when parsing agent-supplied date/datetime strings — naked inputs
+    should be interpreted in the user's zone, matching what the agent
+    sees in injected prompt timestamps (``user_timestamp()``).
+    """
+    return _ensure_user_zone()
 
 
 def user_timestamp() -> str:

@@ -35,6 +35,7 @@ import httpx
 from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
+from loom.core.timezone import local_zone_name, user_zone
 from loom.core.security.self_termination_guard import SelfTerminationGuard
 from loom.core.security.command_scanner import CommandScanner
 from loom.core.security.sandbox_runtime import (
@@ -991,21 +992,56 @@ async def _run_bash_job(
 # ------------------------------------------------------------------
 
 def _parse_memory_datetime(value: str | None) -> datetime | None:
-    """Parse a tool-facing date/datetime string into an aware UTC datetime."""
+    """Parse a tool-facing date/datetime string into an aware UTC datetime.
+
+    Naked dates (``YYYY-MM-DD``) and naked datetimes (no offset) are
+    interpreted in the user's configured timezone — matching what the
+    agent sees in injected prompt timestamps. Strings with an explicit
+    offset (``+08:00`` / ``Z``) are honored as written. The return value
+    is always normalised to UTC so callers can compare it against DB
+    timestamps directly. See issue #388.
+    """
     if not value:
         return None
     raw = value.strip()
     if not raw:
         return None
+    zone = user_zone()
     try:
         if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
-            return datetime.fromisoformat(raw).replace(tzinfo=UTC)
+            return datetime.fromisoformat(raw).replace(tzinfo=zone).astimezone(UTC)
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"Invalid datetime {value!r}; use YYYY-MM-DD or ISO datetime") from exc
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
+        return parsed.replace(tzinfo=zone).astimezone(UTC)
     return parsed.astimezone(UTC)
+
+
+def _format_local_timestamp(
+    value: datetime | str | None, *, date_only: bool = False
+) -> str:
+    """Format a stored UTC datetime (or ISO string) in the user's zone.
+
+    Agent-facing tool output mirrors the same timezone the agent sees in
+    injected prompt timestamps, so since/until inputs and emitted
+    created_at/updated_at lines match. Returns ``""`` for falsy input.
+    See issue #388.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return ""
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw[:10] if date_only else raw[:16]
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    local = value.astimezone(user_zone())
+    return local.strftime("%Y-%m-%d" if date_only else "%Y-%m-%d %H:%M")
 
 
 def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
@@ -1117,14 +1153,16 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     "type": "string",
                     "description": (
                         "Optional lower bound for semantic updated_at "
-                        "(YYYY-MM-DD or ISO datetime)."
+                        "(YYYY-MM-DD or ISO datetime). Naked values are "
+                        "interpreted in your configured timezone."
                     ),
                 },
                 "until": {
                     "type": "string",
                     "description": (
                         "Optional exclusive upper bound for semantic updated_at "
-                        "(YYYY-MM-DD or ISO datetime)."
+                        "(YYYY-MM-DD or ISO datetime). Naked values are "
+                        "interpreted in your configured timezone."
                     ),
                 },
             },
@@ -1137,21 +1175,27 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
 
 
 def _format_period_results(groups: dict[str, list]) -> str:
-    """Format grouped period recall evidence for the agent."""
+    """Format grouped period recall evidence for the agent.
+
+    Timestamps are converted to the user's configured timezone so they
+    match what the agent sees in injected prompt timestamps and what
+    since/until inputs are parsed against.
+    """
     sections: list[str] = []
+    zone_suffix = f" ({local_zone_name()})"
     semantic = groups.get("semantic", [])
     if semantic:
-        lines = ["Semantic facts"]
+        lines = [f"Semantic facts{zone_suffix}"]
         for entry in semantic:
-            stamp = entry.updated_at.isoformat()[:10] if entry.updated_at else ""
+            stamp = _format_local_timestamp(entry.updated_at, date_only=True)
             lines.append(f"- [{stamp}] {entry.key}: {entry.value[:240]}")
         sections.append("\n".join(lines))
 
     episodic = groups.get("episodic", [])
     if episodic:
-        lines = ["Episodic events"]
+        lines = [f"Episodic events{zone_suffix}"]
         for entry in episodic:
-            stamp = entry.created_at.isoformat()[:16] if entry.created_at else ""
+            stamp = _format_local_timestamp(entry.created_at)
             lines.append(
                 f"- [{stamp}] {entry.session_id} {entry.event_type}: "
                 f"{entry.content[:240]}"
@@ -1160,11 +1204,12 @@ def _format_period_results(groups: dict[str, list]) -> str:
 
     sessions = groups.get("sessions", [])
     if sessions:
-        lines = ["Sessions"]
+        lines = [f"Sessions{zone_suffix}"]
         for session in sessions:
             title = session.get("title") or "(untitled)"
+            stamp = _format_local_timestamp(session.get("last_active"))
             lines.append(
-                f"- [{session.get('last_active', '')[:16]}] "
+                f"- [{stamp}] "
                 f"{session.get('session_id')}: {title} "
                 f"({session.get('turn_count', 0)} turns)"
             )
@@ -1172,10 +1217,11 @@ def _format_period_results(groups: dict[str, list]) -> str:
 
     messages = groups.get("messages", [])
     if messages:
-        lines = ["Session messages"]
+        lines = [f"Session messages{zone_suffix}"]
         for message in messages:
+            stamp = _format_local_timestamp(message.get("created_at"))
             lines.append(
-                f"- [{message.get('created_at', '')[:16]}] "
+                f"- [{stamp}] "
                 f"{message.get('session_id')} {message.get('role')}: "
                 f"{str(message.get('content') or '')[:240]}"
             )
@@ -1234,11 +1280,19 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
             "properties": {
                 "since": {
                     "type": "string",
-                    "description": "Required lower bound (YYYY-MM-DD or ISO datetime).",
+                    "description": (
+                        "Required lower bound (YYYY-MM-DD or ISO datetime). "
+                        "Naked values are interpreted in your configured "
+                        "timezone (same as the prompt timestamp prefix)."
+                    ),
                 },
                 "until": {
                     "type": "string",
-                    "description": "Optional exclusive upper bound (YYYY-MM-DD or ISO datetime).",
+                    "description": (
+                        "Optional exclusive upper bound (YYYY-MM-DD or ISO "
+                        "datetime). Naked values are interpreted in your "
+                        "configured timezone."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -2408,11 +2462,18 @@ def make_ledger_recall_tool(
                 },
                 "since": {
                     "type": "string",
-                    "description": "Lower bound (YYYY-MM-DD or ISO datetime).",
+                    "description": (
+                        "Lower bound (YYYY-MM-DD or ISO datetime). Naked "
+                        "values are interpreted in your configured "
+                        "timezone (same as the prompt timestamp prefix)."
+                    ),
                 },
                 "until": {
                     "type": "string",
-                    "description": "Exclusive upper bound.",
+                    "description": (
+                        "Exclusive upper bound. Naked values are "
+                        "interpreted in your configured timezone."
+                    ),
                 },
                 "output": {
                     "type": "string",
