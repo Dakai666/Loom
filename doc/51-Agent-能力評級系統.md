@@ -3,6 +3,8 @@
 > 目的：用 RPG 角色卡與技能樹的形式，管理 Loom 這個 agent runtime 的能力成熟度、短板、主線任務與升級條件。  
 > 性質：規劃與治理文件，不是前端介面規格。  
 > 建立日期：2026-05-06 Asia/Taipei
+>
+> **現況（2026-05-18）**：本文件保留為**概念與術語參考**，不再追求自動化投影或定期評分。原計畫的 #314「Capability Sheet 自動投影」已關閉——與 #365 同一邏輯：沒有可信 Evaluator（Quest D 預留 milestone）之前，把 process signals（coverage / churn / usage）合成成能力等第只是「用公式包裝 vibe」，會自我催眠卻沒有真正稽核效力。本 sheet 若要再啟動，前提是 Quest D Evaluator 落地後提供可信 grader。在那之前：數值欄位**不是 load-bearing**，主要讀取的是六大屬性的定性描述與 debuff 清單。
 
 ---
 
