@@ -414,6 +414,20 @@ backend = "none"   # "none" | "srt"
 
 # Network allowlist.  Empty = no network.
 # allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
+#
+# Named CLI profiles are additive overlays for tools such as gh/opencli/etc.
+# They do not grant access by themselves.  When run_bash selects a profile
+# by command root or explicit sandbox_profile, the normal permission prompt is
+# still required, with once / scoped lease / session / deny choices.
+#
+# [security.sandbox.profiles.github]
+# match_commands   = ["gh"]
+# allow_read       = ["~/.config/gh", "~/.gitconfig"]
+# allow_write      = [".", "/private/tmp", "~/.cache/gh"]
+# allowed_domains  = ["api.github.com", "github.com"]
+#
+# Then either command root matching or explicit selection can request it:
+#   run_bash(command = "gh pr view 387", sandbox_profile = "github", ...)
 
 # ─────────────────────────────────────────────
 # Autonomy Engine

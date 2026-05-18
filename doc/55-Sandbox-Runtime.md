@@ -45,6 +45,12 @@ backend         = "srt"           # "none" | "srt"
 allow_write     = [".", "/private/tmp"]
 deny_read       = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
 allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
+
+[security.sandbox.profiles.github]
+match_commands  = ["gh"]
+allow_read      = ["~/.config/gh", "~/.gitconfig"]
+allow_write     = [".", "/private/tmp", "~/.cache/gh"]
+allowed_domains = ["api.github.com", "github.com"]
 ```
 
 預設 `backend = "none"` — 不裝 srt、不改設定，行為與舊版完全一致。
@@ -91,6 +97,18 @@ hi
 
 `srt` 內部跑 HTTP proxy + SOCKS5 proxy，sandbox 內所有 TCP 都被導向 proxy；不在 allowlist 內會回 403 / Connection blocked。
 
+## CLI profiles
+
+有些 CLI 需要固定的家目錄設定、cache、socket 或 domain，例如 `gh` 需要 `~/.config/gh` 與 `api.github.com`。把這些能力直接塞進全域 `[security.sandbox]` 會讓每個 `run_bash` 都變寬，所以 Loom 支援 named profile：
+
+- `match_commands = ["gh"]` 會讓 `gh pr view 387` 自動要求 `github` profile。
+- `run_bash` 也可明確傳 `sandbox_profile = "github"`，適合 wrapper 或 command root 不易判斷的 CLI。
+- profile 只是一份 additive overlay；它不會自己授權。
+- 實際使用仍走 scope-aware permission prompt：本次 / 30 分鐘 lease / 本 session / deny。
+- 授權只存在 runtime。重開 session 或重啟後，要重新授權。
+
+Profile 被授權後，該次 `run_bash` 會用 base sandbox settings 加上 profile overlay 產生有效 srt 設定；未授權就 fail closed，不會偷用 profile 的額外路徑或 domain。
+
 ## 層次分工
 
 ```
@@ -128,8 +146,10 @@ SandboxSettings.from_config()     ← loom/core/security/sandbox_runtime.py
 make_run_bash_tool(sandbox=...)   ← loom/platform/cli/tools.py
         │
         ├─ srt_available() check → 缺失就 raise RuntimeError
+        ├─ scope_resolver()       → 需要時加入 sandbox_profile requirement
+        ├─ permission prompt      → once / lease / session / deny
         │
-        ├─ write_settings_file()  → 寫一份 JSON 到 $TMPDIR/loom-srt-<hash>.json
+        ├─ write_settings_file()  → base 或 profile-merged JSON 到 $TMPDIR
         │
         └─ _maybe_wrap(cmd)
               │
@@ -137,7 +157,7 @@ make_run_bash_tool(sandbox=...)   ← loom/platform/cli/tools.py
        "srt -s <settings> -c <cmd>"  → asyncio.create_subprocess_shell
 ```
 
-設定檔以 (workspace, pid) hash 為檔名，**session 內穩定**——不會每 call 散落新 tmp file。
+設定檔以內容 hash 為檔名，base sandbox 與同一個 profile overlay 在 session 內穩定；不會每 call 散落新 tmp file。
 
 ## 不在本期 scope
 
