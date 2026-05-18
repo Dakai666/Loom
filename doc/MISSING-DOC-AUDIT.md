@@ -1,8 +1,11 @@
+<!-- doc-integrity:skip -->
 # Loom Doc 缺口清單與文件草稿
 
 > 絲繹・Loom 執行 | 2026-04-26 03:21 Asia/Taipei
 > 依據：完整原始碼掃描（`loom/`）與現有 48 篇 doc 文件比對
 > 狀態：已完整完成（12/16 缺口已處理）
+>
+> Doc-integrity skip：本文件刻意列舉「不存在的路徑」作為缺口紀錄，整檔豁免 Layer 1 檢查。
 
 ---
 
