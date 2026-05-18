@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 import loom.platform.cli.tools as tools
-from loom.core.harness.middleware import ToolCall
+from loom.core.harness.middleware import BlastRadiusMiddleware, ToolCall
+from loom.core.harness.permissions import PermissionContext
+from loom.core.harness.registry import ToolRegistry
+from loom.core.harness.scope import ConfirmDecision, ScopeGrant
 from loom.core.security.sandbox_runtime import SandboxSettings
 
 
@@ -45,6 +48,20 @@ def _call(tool, command: str, **extra) -> ToolCall:
 def _authorize_profile(tool, call: ToolCall) -> None:
     call.metadata["scope_request"] = tool.scope_resolver(call)
     call.metadata["once_authorized"] = True
+
+
+async def _run_through_scope_middleware(tool, call: ToolCall, perm, confirm_result):
+    async def _confirm(_call):
+        return confirm_result
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    mw = BlastRadiusMiddleware(
+        perm_ctx=perm,
+        confirm_fn=_confirm,
+        registry=registry,
+    )
+    return await mw.process(call, tool.executor)
 
 
 @pytest.fixture
@@ -109,6 +126,62 @@ async def test_run_bash_wraps_detected_profile_after_once_authorization(tmp_path
     assert wrapped == [("gh pr view 387", Path("/tmp/srt-settings-2.json"))]
     assert launched[0][0] == "wrapped:srt-settings-2.json:gh pr view 387"
     assert result.metadata["sandbox_profile"] == "github"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", [ConfirmDecision.SCOPE, ConfirmDecision.AUTO])
+async def test_run_bash_applies_profile_on_scope_or_auto_first_call(
+    tmp_path, srt_fakes, decision,
+):
+    written, _wrapped, launched = srt_fakes
+    tool = tools.make_run_bash_tool(tmp_path, sandbox=_sandbox())
+    call = _call(tool, "gh pr view 387")
+    perm = PermissionContext(session_id="test")
+
+    result = await _run_through_scope_middleware(tool, call, perm, decision)
+
+    assert result.success
+    assert call.metadata["user_decision"] is True
+    assert result.metadata["sandbox_profile"] == "github"
+    assert len(written) == 2
+    assert written[1]["network"]["allowedDomains"] == ["api.github.com", "github.com"]
+    assert launched[0][0] == "wrapped:srt-settings-2.json:gh pr view 387"
+
+
+@pytest.mark.asyncio
+async def test_run_bash_applies_profile_when_existing_grant_covers_scope(
+    tmp_path, srt_fakes,
+):
+    written, _wrapped, launched = srt_fakes
+    tool = tools.make_run_bash_tool(tmp_path, sandbox=_sandbox())
+    call = _call(tool, "gh pr view 387")
+    perm = PermissionContext(session_id="test")
+    perm.grants.extend([
+        ScopeGrant(
+            resource="exec",
+            action="execute",
+            selector="workspace",
+            constraints={"absolute_paths": "deny"},
+            source="test",
+        ),
+        ScopeGrant(
+            resource="sandbox_profile",
+            action="use",
+            selector="github",
+            source="test",
+        ),
+    ])
+
+    result = await _run_through_scope_middleware(
+        tool, call, perm, ConfirmDecision.DENY,
+    )
+
+    assert result.success
+    assert call.metadata["scope_verdict"].value == "allow"
+    assert result.metadata["sandbox_profile"] == "github"
+    assert len(written) == 2
+    assert written[1]["network"]["allowedDomains"] == ["api.github.com", "github.com"]
+    assert launched[0][0] == "wrapped:srt-settings-2.json:gh pr view 387"
 
 
 @pytest.mark.asyncio

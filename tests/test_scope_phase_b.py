@@ -371,6 +371,28 @@ class TestScopeConfirmDurations:
         assert perm.grants == []
         assert call.metadata["confirm_decision"] == "once"
 
+    async def test_once_confirmation_does_not_grant_fetch_url_network_scope(self):
+        perm = PermissionContext(session_id="test")
+        reg = _make_registry(_tool_def(
+            "fetch_url",
+            caps=ToolCapability.NETWORK,
+            scope_resolver=_fetch_url_resolver,
+        ))
+        call = _call(
+            "fetch_url", {"url": "https://example.com"},
+            caps=ToolCapability.NETWORK,
+        )
+
+        result, confirm_fn, handler = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg,
+        )
+
+        assert result.success
+        confirm_fn.assert_called_once()
+        handler.assert_called_once()
+        assert perm.grants == []
+        assert call.metadata["confirm_decision"] == "once"
+
     async def test_scope_confirmation_creates_ttl_grant(self):
         perm = PermissionContext(session_id="test")
         reg = _make_registry(_tool_def(

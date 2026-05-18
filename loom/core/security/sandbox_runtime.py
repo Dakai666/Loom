@@ -31,6 +31,7 @@ Installation::
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -53,7 +54,8 @@ _SRT_BINARY = "srt"
 # with srt's `sandbox-schemas.ts`.
 _REQUIRED_SECTIONS = ("filesystem", "network", "unixSockets")
 
-_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _as_path_list(key: str, value: Any) -> list[str]:
@@ -94,7 +96,7 @@ def _validate_profile_name(name: str) -> str:
     if not isinstance(name, str) or not _PROFILE_NAME_RE.match(name):
         raise ValueError(
             f"[security.sandbox] profile name must match "
-            f"[A-Za-z0-9_.-]+, got {name!r}."
+            f"[A-Za-z0-9][A-Za-z0-9_.-]*, got {name!r}."
         )
     return name
 
@@ -114,10 +116,8 @@ def extract_command_root(command: str) -> str | None:
     except ValueError:
         return None
     for token in tokens:
-        if "=" in token and not token.startswith("="):
-            key, _value = token.split("=", 1)
-            if key and key[0].isalpha() and key.replace("_", "").isalnum():
-                continue
+        if _ENV_ASSIGNMENT_RE.match(token):
+            continue
         return Path(token).name
     return None
 
@@ -246,6 +246,16 @@ class SandboxSettings:
             _validate_profile_name(name): SandboxProfile.from_config(name, value)
             for name, value in raw_profiles.items()
         }
+        command_to_profile: dict[str, str] = {}
+        for profile_name, profile in profiles.items():
+            for command in profile.match_commands:
+                previous = command_to_profile.setdefault(command, profile_name)
+                if previous != profile_name:
+                    raise ValueError(
+                        "[security.sandbox] profiles match_commands must be "
+                        f"unique; command {command!r} is used by both "
+                        f"{previous!r} and {profile_name!r}."
+                    )
 
         return cls(
             backend=backend,
@@ -355,17 +365,18 @@ def write_settings_file(
 ) -> Path:
     """Render *settings* to a JSON file and return its path.
 
-    The path is stable per (workspace, pid) so repeated wraps within a
-    session reuse the same file — avoids littering ``$TMPDIR`` with one
-    file per shell call.  Caller is not required to clean up; the OS
-    reaps tmpfiles on the usual schedule.
+    The path is stable per rendered payload so base and profile-merged
+    settings cannot overwrite each other while repeated equivalent wraps
+    reuse one file. Caller is not required to clean up; the OS reaps
+    tmpfiles on the usual schedule.
     """
     payload = settings.to_srt_json(workspace=workspace)
     base = Path(dir) if dir is not None else Path(tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
-    h = abs(hash((str(workspace), os.getpid()))) % 10**8
+    rendered = json.dumps(payload, indent=2, sort_keys=True)
+    h = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:12]
     path = base / f"loom-srt-{h}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    path.write_text(rendered)
     return path
 
 

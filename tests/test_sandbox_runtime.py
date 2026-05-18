@@ -170,6 +170,23 @@ class TestProfileConfig:
                 "profiles": {"git hub": {"match_commands": ["gh"]}},
             })
 
+    def test_profile_name_must_start_with_alnum(self):
+        with pytest.raises(ValueError, match="profile name"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"-github": {"match_commands": ["gh"]}},
+            })
+
+    def test_profile_match_commands_must_be_unique(self):
+        with pytest.raises(ValueError, match="match_commands.*gh"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {
+                    "github": {"match_commands": ["gh"]},
+                    "github_alt": {"match_commands": ["gh"]},
+                },
+            })
+
 
 class TestProfileSelectionAndMerge:
     def _settings(self):
@@ -190,6 +207,9 @@ class TestProfileSelectionAndMerge:
 
     def test_extract_command_root_skips_env_assignments(self):
         assert extract_command_root("GH_HOST=github.com gh pr view 387") == "gh"
+
+    def test_extract_command_root_skips_leading_underscore_env_assignment(self):
+        assert extract_command_root("_DEBUG=1 gh pr view 387") == "gh"
 
     def test_select_profile_by_command_root(self):
         selected = self._settings().select_profile_for_command("gh pr view 387")
@@ -281,11 +301,27 @@ class TestWriteSettingsFile:
         assert data["filesystem"]["allowWrite"] == [str(tmp_path)]
 
     def test_stable_path_within_session(self, tmp_path):
-        """Repeated writes for the same (workspace, pid) reuse one file."""
+        """Repeated writes for identical content reuse one file."""
         s = SandboxSettings(backend="srt")
         p1 = write_settings_file(s, workspace=tmp_path, dir=tmp_path)
         p2 = write_settings_file(s, workspace=tmp_path, dir=tmp_path)
         assert p1 == p2
+
+    def test_distinct_settings_get_distinct_content_hash_paths(self, tmp_path):
+        base = SandboxSettings(backend="srt")
+        github = SandboxSettings(
+            backend="srt",
+            allowed_domains=["api.github.com"],
+        )
+
+        p1 = write_settings_file(base, workspace=tmp_path, dir=tmp_path)
+        p2 = write_settings_file(github, workspace=tmp_path, dir=tmp_path)
+
+        assert p1 != p2
+        assert json.loads(p1.read_text())["network"]["allowedDomains"] == []
+        assert json.loads(p2.read_text())["network"]["allowedDomains"] == [
+            "api.github.com",
+        ]
 
     def test_creates_target_dir(self, tmp_path):
         target = tmp_path / "nested" / "dir"
