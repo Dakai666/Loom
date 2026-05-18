@@ -6,6 +6,7 @@ Session 是 Loom 的對話上下文容器。每次聊天都是在一個 Session 
 
 ## Session 結構
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/session/models.py
 @dataclass
@@ -37,6 +38,7 @@ class Session:
 
 ## Session 狀態
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/session/models.py
 class SessionStatus(Enum):
@@ -249,6 +251,7 @@ exported = await manager.export("abc123", format="json")
 
 ### Session Manager
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/session/manager.py
 class SessionManager:
@@ -307,6 +310,7 @@ class SessionManager:
 
 ### SQLite 後端
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/session/store.py
 class SQLiteSessionStore:

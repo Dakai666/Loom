@@ -38,7 +38,7 @@ Lens 是工具的「包裝器」。它位於工具和 Harness Layer 之間，用
 ## Lens 結構
 
 ```python
-# loom/core/harness/lens.py
+# loom/extensibility/lens.py
 class BaseLens(ABC):
     """Lens 抽象基類"""
     
@@ -108,7 +108,7 @@ class BaseLens(ABC):
 日誌和追蹤 Lens。
 
 ```python
-# loom/core/harness/lenses/hermes.py
+# loom/extensibility/hermes.py
 class HermesLens(BaseLens):
     """Hermes Lens：日誌和追蹤"""
     
@@ -180,7 +180,7 @@ class HermesLens(BaseLens):
 為 OpenAI 格式的工具調用添加參數驗證。
 
 ```python
-# loom/core/harness/lenses/openai_tools.py
+# loom/extensibility/openai_tools.py
 class OpenAIToolsLens(BaseLens):
     """OpenAI Tools Lens：參數驗證和轉換"""
     

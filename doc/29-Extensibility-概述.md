@@ -64,54 +64,19 @@ Plugin 是功能的「插件」。它允許新增全新的模組：
 
 ---
 
-## 內建模 Plugin（v0.2.5.3 / v0.2.6.1）
+## 內建 Plugin 演變
 
-Loom 框架目前自帶一個內建 Plugin，放在 `loom/extensibility/` 下：
+Loom 目前**沒有**內建的 `LoomPlugin` 實作 —— `loom/extensibility/` 只放抽象與適配器（`adapter.py`、`plugin.py`、`lens.py`、`hermes.py`、`openai_tools.py`、`pipeline.py`、`mcp_client.py`、`mcp_server.py`）。歷史上：
 
-| Plugin | 檔案 | 觸發時機 |
-|--------|------|----------|
-| `DreamingPlugin` | `dreaming_plugin.py` | 由 AutonomyDaemon cron 或手動呼叫 `dream_cycle` |
+- **v0.2.5.3 / v0.2.6.1** 將 `DreamingPlugin` / `SelfReflectionPlugin` 搬到 `loom/extensibility/` 解決架構倒置。
+- **v0.2.6.4 (#172)** 把 `dream_cycle` 邏輯併回 `loom/core/memory/` —— 不再需要 plugin 包裝。
+- **Issue #120 PR 1** 把「反思」合併進 `TaskReflector`（`loom/core/cognition/task_reflector.py`），由它在每次結構化診斷後以 post-hook fire-and-forget 觸發 `run_self_reflection`（仍在 `loom/autonomy/self_reflection.py`）。
 
-### DreamingPlugin
+三種行為三元組樣式（由 `run_self_reflection` 寫入 RelationalMemory）：
 
-```python
-# loom/extensibility/dreaming_plugin.py
-class DreamingPlugin(LoomPlugin):
-    name = "dreaming"
-    version = "1.0"
-
-    def tools(self) -> list[ToolDefinition]:
-        return [dream_cycle_tool]  # SAFE tool
-```
-
-`dream_cycle` 工具（SAFE）實現：
-1. `SemanticMemory.get_random(limit=15)` 隨機抽樣事實
-2. LLM 分析：這些事實之間有什麼非顯而易見的關聯？
-3. 寫入 RelationalMemory 三元組（`source="dreaming"`）
-
-### Self-Reflection（Issue #120 PR 1 重構）
-
-`SelfReflectionPlugin` / `reflect_self` 工具已移除。產生 `loom-self` 三元組的 `run_self_reflection` 保留在 `loom/autonomy/self_reflection.py`，由 `TaskReflector`（`loom/core/cognition/task_reflector.py`）作為 post-hook 在每次結構化診斷完成後 fire-and-forget 呼叫。
-
-```python
-# loom/core/cognition/task_reflector.py（簡化）
-class TaskReflector:
-    def _schedule_behavioural_triples(self) -> None:
-        if self._episodic is None or self._relational is None:
-            return
-        asyncio.create_task(run_self_reflection(
-            episodic=self._episodic,
-            relational=self._relational,
-            llm_fn=self._llm_fn,
-        ))
-```
-
-三種三元組樣式維持不變：
 - `should_avoid:<行為>` — 應避免的重複錯誤
 - `tends_to:<行為>` — 持續的傾向性
 - `discovered:<觀察>` — 新發現
-
-> **v0.2.6.1 → Issue #120 PR 1**：v0.2.6.1 將 DreamingPlugin / SelfReflectionPlugin 搬到 `loom/extensibility/` 解決架構倒置；Issue #120 PR 1 再把「反思」合併進 TaskReflector，讓結構化診斷與行為三元組共用同一條非同步 pipeline。
 
 ---
 
@@ -172,6 +137,9 @@ Model Context Protocol（MCP）提供完整的雙向整合：
 
 ## 擴充載入時機
 
+> 以下 `ExtensionLoader` 是設計示意，實際載入路徑見 `loom/extensibility/{adapter,plugin}.py` + `LoomSession.start()`。
+
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/extensibility/loader.py
 class ExtensionLoader:

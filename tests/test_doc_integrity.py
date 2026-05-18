@@ -3,8 +3,13 @@
 Layer 1 — Reference Check
     Walks `doc/*.md` plus `README.md`. Extracts paths matching
     `loom/.../*.{py,md,toml,json,sql,yaml,yml}` and verifies each one resolves
-    to a file in the repo. Lines inside fenced code blocks are skipped (they
-    are diagrams / examples, not claims about current state).
+    to a file in the repo.
+
+    Fenced code blocks are scanned by default — they routinely carry real
+    state claims (`# loom/foo/bar.py` headers above class bodies). For true
+    tutorial / illustrative snippets that intentionally name non-existent
+    paths, place `<!-- doc-integrity:ignore-block -->` on the line
+    immediately preceding the fence opener; that whole block is then exempt.
 
 Layer 3 — Version Sync
     `pyproject.toml` is the source of truth. The most recent changelog row in
@@ -12,12 +17,15 @@ Layer 3 — Version Sync
     `doc/00-總覽.md` must agree with it.
 
 Opt-out markers
-    File-level: place `<!-- doc-integrity:skip -->` anywhere in a markdown
-                file to skip its Layer 1 check entirely. Use for audit /
-                gap-analysis docs that intentionally name non-existent paths.
-    Line-level: append `<!-- doc-integrity:ignore -->` on the same line as
-                a path reference to ignore that one reference (e.g. retirement
-                records that intentionally name deleted files).
+    File-level:  `<!-- doc-integrity:skip -->` anywhere in a markdown file
+                 exempts the whole file. Use for audit / gap-analysis docs
+                 that intentionally name non-existent paths.
+    Block-level: `<!-- doc-integrity:ignore-block -->` on the line immediately
+                 preceding a ```fence``` opener exempts that whole fenced
+                 block. Use for tutorial / illustrative example code.
+    Line-level:  `<!-- doc-integrity:ignore -->` appended to a single line
+                 exempts that one reference. Use for retirement-list rows
+                 that intentionally name deleted files.
 
 Layer 2 (`已實作` contract tests) is deliberately out of scope here — those
 go into per-feature `tests/test_doc_contract_*.py` modules as drift is
@@ -35,8 +43,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PATH_RE = re.compile(
     r"(?<![.~])\bloom/[A-Za-z0-9_./-]+?\.(?:py|md|toml|json|sql|yaml|yml)\b"
 )
-SKIP_FILE_MARK = "<!-- doc-integrity:skip -->"
-SKIP_LINE_MARK = "<!-- doc-integrity:ignore -->"
+# Substring directives. The trailing `-->` is intentionally not required so
+# authors can append free-form rationale inside the same HTML comment, e.g.
+# `<!-- doc-integrity:ignore-block — see issue #390 -->`.
+SKIP_FILE_MARK = "doc-integrity:skip"
+SKIP_LINE_MARK = "doc-integrity:ignore"
+SKIP_BLOCK_MARK = "doc-integrity:ignore-block"
 
 VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.M)
 README_LATEST_RE = re.compile(r"^\|\s*\*\*v(\d+(?:\.\d+){2,3})\*\*\s*\|", re.M)
@@ -68,13 +80,28 @@ def _check_layer1() -> list[Violation]:
             continue
 
         in_fence = False
+        block_ignored = False
+        prev_nonblank = ""
         for i, line in enumerate(text.splitlines(), start=1):
-            if line.lstrip().startswith("```"):
-                in_fence = not in_fence
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if not in_fence:
+                    block_ignored = SKIP_BLOCK_MARK in prev_nonblank
+                    in_fence = True
+                else:
+                    in_fence = False
+                    block_ignored = False
+                # The fence delimiter line itself carries no path claims.
+                if stripped:
+                    prev_nonblank = stripped
                 continue
-            if in_fence:
+            if in_fence and block_ignored:
+                if stripped:
+                    prev_nonblank = stripped
                 continue
             if SKIP_LINE_MARK in line:
+                if stripped:
+                    prev_nonblank = stripped
                 continue
             for m in PATH_RE.finditer(line):
                 rel = m.group(0)
@@ -86,6 +113,8 @@ def _check_layer1() -> list[Violation]:
                             detail=f"missing path: {rel}",
                         )
                     )
+            if stripped:
+                prev_nonblank = stripped
     return violations
 
 

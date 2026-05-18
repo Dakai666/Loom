@@ -402,6 +402,7 @@ response = await loom.chat(
 
 ### 註冊新人格
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/personalities/registry.py
 class PersonalityRegistry:

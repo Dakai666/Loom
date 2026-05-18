@@ -190,6 +190,7 @@ Bot 接收用戶上傳的檔案時自動處理：
 
 > **尚未實作**（Phase X 規劃）。以下為說明性代碼。
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/notify/adapters/telegram.py  （Phase X，尚未實作）
 class TelegramNotifier(BaseNotifier):
