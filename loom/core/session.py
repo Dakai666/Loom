@@ -2546,9 +2546,16 @@ class LoomSession:
 
                     # Check budget after tool results are appended — the next LLM
                     # call in this loop will include them and may push over the limit.
+                    # Refresh block_count first: a parallel-tool batch just
+                    # appended N tool_result rows, but ``record_response``
+                    # only updates token totals, so without this resync
+                    # ``should_compress`` would still see the previous turn's
+                    # block reading and miss a wire-cap overrun until the
+                    # next turn boundary.
+                    self.budget.update_block_count(self.messages)
                     if self.budget.should_compress():
                         console.print(
-                            f"[yellow]  Context at {self.budget.usage_fraction * 100:.1f}%"
+                            f"[yellow]  Context at {self.budget.format_pressure()}"
                             f" mid-turn — compressing…[/yellow]"
                         )
                         await self._smart_compact()

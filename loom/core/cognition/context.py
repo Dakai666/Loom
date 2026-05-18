@@ -87,8 +87,12 @@ def estimate_block_count(messages: list[dict[str, Any]]) -> int:
       • system            → 1 text block (when content present)
       • user (str)        → 1 text block
       • user (list)       → len(content) blocks (already in block form)
-      • assistant         → 1 text block iff text is present; + one
-                            ``tool_use`` block per entry in tool_calls
+      • assistant         → one ``thinking`` block per ``_thinking_blocks``
+                            entry (Anthropic / MiniMax preserve these on
+                            the wire to keep the reasoning chain across
+                            turns); + 1 text block iff text is present;
+                            + one ``tool_use`` block per entry in
+                            tool_calls
       • tool              → 1 ``tool_result`` block
 
     Consecutive ``tool`` messages become a single wire user message on
@@ -103,6 +107,13 @@ def estimate_block_count(messages: list[dict[str, Any]]) -> int:
         role = m.get("role")
         content = m.get("content")
         if role == "assistant":
+            # Reasoning models (Anthropic thinking, MiniMax M2.x) emit
+            # ``_thinking_blocks`` that ``_to_anthropic_messages`` puts
+            # back on the wire ahead of the text/tool_use blocks. Each
+            # thinking block is its own content block at the API
+            # boundary, so it counts against the 2013 cap too.
+            tbs = m.get("_thinking_blocks") or []
+            n += len(tbs)
             if content:
                 n += 1
             tcs = m.get("tool_calls") or []

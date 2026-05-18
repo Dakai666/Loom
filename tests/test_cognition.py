@@ -232,6 +232,63 @@ class TestEstimateBlockCount:
         ]
         assert estimate_block_count(msgs) == 2
 
+    def test_assistant_thinking_blocks_counted(self):
+        """Reasoning models put _thinking_blocks back on the wire; the
+        estimator must count them or it underreports on Anthropic/MiniMax
+        reasoning-heavy sessions and lets the wire cap blindside us."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "_thinking_blocks": [
+                    {"type": "thinking", "thinking": "step 1"},
+                    {"type": "thinking", "thinking": "step 2"},
+                ],
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+        ]
+        # 2 thinking + 1 text + 1 tool_use = 4
+        assert estimate_block_count(msgs) == 4
+
+    def test_estimator_matches_to_anthropic_messages(self):
+        """The estimator is a model of ``_to_anthropic_messages`` —
+        a regression here means the two paths have drifted and the
+        budget can either over- or under-report wire pressure."""
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "thinking out loud",
+                "_thinking_blocks": [
+                    {"type": "thinking", "thinking": "step 1"},
+                ],
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ok"},
+            {"role": "tool", "tool_call_id": "b", "content": "ok"},
+        ]
+        # _to_anthropic_messages returns (system, body). System lives on
+        # the top-level kwarg, not in messages, so it doesn't count
+        # toward the per-request block budget — compare the *body* for
+        # the contract here. (The estimator does count the system row,
+        # but that one-block delta is noise against the 2013 cap.)
+        _system, wire = _to_anthropic_messages(msgs[1:])
+        wire_blocks = 0
+        for m in wire:
+            c = m.get("content")
+            if isinstance(c, list):
+                wire_blocks += len(c)
+            elif c:
+                wire_blocks += 1
+        body_only_estimate = estimate_block_count(msgs[1:])
+        assert body_only_estimate == wire_blocks
+
 
 class TestContextBudgetBlocks:
     """Block-count dimension — guards against MiniMax 2013 hard cap."""
