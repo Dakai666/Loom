@@ -2,13 +2,25 @@
 
 **觸發後自動載入本檔案。**
 
+適用於明確的新功能、小改動、重構、或已由 `systematic_debugging.md` 確認 root cause 的修復。
+若使用者只是描述 bug/error/failure，先回到 `systematic_debugging.md`，不要直接實作。
+
+---
+
+## 鐵律
+
+```text
+NO SYMBOL EDITS WITHOUT GITNEXUS IMPACT ANALYSIS FIRST
+NO COMMIT OR PR WITHOUT GITNEXUS DETECT-CHANGES
+```
+
 ---
 
 ## 成功定義
 
-- **產出**：乾淨的 git diff + 測試覆蓋 + 可即時行動的 PR 或 commit
-- **品質指標**：最小改動 Scope 精準；pytest --collect-only 先跑；所有相關測試通過
-- **驗收方式**：變更範圍內的功能正常運行，範圍外絲毫未動
+- **產出**：清楚 scope + 最小 git diff + 測試/驗證證據 + 可行動的 commit/PR 草稿
+- **品質指標**：改動只落在約定範圍；每個 symbol 修改前有 impact；完成前通過 verification gate
+- **驗收方式**：使用者能看懂「為什麼改這裡、沒改哪裡、怎麼證明有效」
 
 ---
 
@@ -16,137 +28,139 @@
 
 ### 階段 1：理解意圖
 
-目標：搞清楚要什麼，同時用圖譜找到正確的改動位置。
+目標：確認任務不是 debug investigation，而是可以實作的需求。
 
-- 取得 issue 內容（URL → fetch_url；本地 → read_file）
-- 識別 issue type：`bug` / `enhancement` / `refactor` / `feature`
-- **用圖譜快速定位**：
+- 取得 issue/需求/設計內容。
+- 用一句話重述 intent。
+- 若是 bugfix，確認已有 debug handoff：
+  - root cause
+  - evidence
+  - fix scope
+  - verification target
+- 用 GitNexus 找相關流程：
+  ```bash
+  npx gitnexus query "<需求核心概念>"
   ```
-  mcp__gitnexus__query(query="<issue 的核心概念或症狀>",
-                       task_context="<issue 標題>")
-  → 找到相關執行流程，確認要動哪些符號
-  ```
-- 識別 constraint：有沒有破壞性變更（breaking change）？
 
-產出：一段「意圖說明書」（不超過 50 字）+ 圖譜找到的候選符號清單
+產出：
+```markdown
+## Intent
+[50 字內說清楚使用者要達成什麼]
 
-### 階段 2：Scope 確認（必經！）
-
-目標：讓使用者在實作前確認範圍，**並用 impact 自動驗證 scope 是否完整**。
-
-**在這個階段之前絕對不動手。**
-
-```
-mcp__gitnexus__impact(target="<主要改動的符號>",
-                      direction="upstream", maxDepth=2)
-→ 自動列出 d=1（WILL BREAK）和 d=2（LIKELY AFFECTED）
-→ 若 risk = HIGH/CRITICAL，scope 必須包含 d=1 的所有項目
+## Candidate Symbols
+- [symbol/file/process from GitNexus or code reading]
 ```
 
-對照 **Loom 高風險 hub**（`permissions.py`/`registry.py`/`procedural.py`）：
-若改動涉及這些，主動告知使用者影響面廣，確認後才進入。
+### 階段 2：Scope + Impact（必經）
 
-說清楚：
-1. 我要改哪些檔案（從 impact 結果確認）
-2. 我不改哪些（即使它看起來也有問題）
-3. 這個改動的邊界在哪裡
+目標：修改前先知道爆炸半徑。
 
-使用者閱讀後確認方向，才進入下一階段。
+對每個準備修改的 function/class/method 跑：
+```bash
+npx gitnexus impact <symbol> --direction upstream
+```
+
+向使用者報告：
+```markdown
+## Impact Analysis
+
+**Target:** `<symbol>`
+**Direct callers:** [count/list]
+**Affected processes:** [list]
+**Risk level:** [LOW/MEDIUM/HIGH/CRITICAL]
+```
+
+若 risk = HIGH/CRITICAL，先明確警告使用者並等待確認。
+
+Scope 格式：
+```markdown
+## Scope
+
+**In:**
+- [要改的檔案/符號/行為]
+
+**Out:**
+- [看起來相關但這次不改的項目]
+
+**Stop condition:**
+- [發現什麼情況時要停下來回報]
+```
 
 ### 階段 3：實作計畫
 
-目標：說計畫，不是埋下去就做。
-
-在開始改 code 之前，用以下格式說明：
+開始改檔前，用短計畫說明：
 
 ```markdown
-## 實作計畫：{issue title}
+## Implementation Plan
 
-### 改動策略
-[我要怎麼做，2-3 句話]
+**Strategy:** [2-3 句，說明改法]
 
-### 具體步驟
-1. [step 1 — 具體檔案和修改內容]
-2. [step 2]
-3. [step 3]
+**Steps:**
+1. [具體檔案與修改]
+2. [測試或 fixture]
+3. [驗證]
 
-### 預期效果
-[改完之後，系統會變成什麼樣]
-
-### 潛在風險
-[我担心什麼（如果有的話）]
+**Verification plan:**
+- `pytest --collect-only`
+- `pytest <relevant tests>`
+- `npx gitnexus detect-changes`
 ```
 
-使用者說「方向對，開始」才進入階段 4。
+若使用者已明確授權「直接改」，可以短講計畫後立即執行；若 scope 有風險或不確定，先等確認。
 
 ### 階段 4：實作
 
-目標：按計畫執行，不多不少。
+- 按計畫改，不順手重構。
+- 如有行為變更，優先寫或更新測試。
+- 發現 scope 需要擴大時停下來。
+- 對 generated output 或 UI/display 改動，加入可視化或 sample output 驗證。
 
-- 讀取目標檔案
-- 做指定改動
-- 如有需要，同時寫測試
-- 每個 commit 有一個明確的 change
-- 過程中發現 scope 需要擴大，**停下來回報**
+### 階段 5：Verification Gate
 
-產出：乾淨的 git diff
+交付前讀 `contexts/verification.md`，用 gate function 驗證。
 
-### 階段 5：驗證（硬規則，沒過不進入下一階段）
+最低預設：
+```bash
+pytest --collect-only
+pytest <relevant tests>
+npx gitnexus detect-changes
+git diff --check
+```
 
-目標：確認修乾淨了。
-
-**第一步永遠是 `pytest --collect-only`** — 這條 0.5 秒，只 import + 收集，不跑任何 test 邏輯。
-它擋掉 import-time 級別的炸：dataclass 欄位順序錯、循環 import、模組級 NameError。
-
-完整流程：
-1. `pytest --collect-only` — import sanity（**必跑，必先跑**）
-2. 跑相關測試：`pytest tests/test_<area>.py` 或專案指定的測試腳本
-3. 確認沒有破壞其他功能（必要時跑全套）
-4. UI / display 改動：寫死 sample input 跑一次，眼睛看輸出長相
-5. 確認所有 linter 通過（`ruff` / `ruff format`）
-6. **圖譜收尾確認**：
-   ```
-   mcp__gitnexus__detect_changes()
-   → 確認 git diff 影響的符號與 Stage 2 的 scope 一致
-   → 若有意外的符號出現，重新評估是否超出範圍
-   ```
-
-驗證沒過 → **停下來修**，不是假裝看不見繼續前進。
+若任何命令失敗，不可以說完成；回報失敗證據與下一步。
 
 ### 階段 6：產出
 
-目標：讓使用者可以立即行動。
-
-> **GitNexus 自動更新**：commit 完成後 `.git/hooks/post-commit` 會在背景靜默執行 `gitnexus analyze`，索引自動保持新鮮，無需手動觸發。
-
-**PR / commit 模式：**
 ```markdown
-## {issue title}
+## Result
 
-**Fixes:** #{issue_number}
-**Type:** {bug/enhancement/refactor/feature}
-
-### 改了什麼
-[1-2 句話]
-
-### 怎麼改的
-[具體描述，不只是「優化」或「修復」]
-
-### 測試
-- [測試名稱或描述]
-- 結果：pass / fail
+**Changed:** [改了什麼]
+**Why:** [為什麼這是最小足夠改動]
+**Verification:** [命令 + 結果]
+**Not changed:** [scope 外保留項]
 ```
 
-**直接 commit 模式：**
-直接 commit，並在 commit message 引用 issue。
+PR/commit body：
+```markdown
+## Summary
+- [具體改動]
+- [測試/驗證]
+
+## Verification
+- `[command]` — [result]
+- `npx gitnexus detect-changes` — [scope result]
+```
 
 ---
 
 ## 紀律提醒
 
-- **跳過階段 2（Scope 確認）是最大的浪費時間行為**
-- **Scope 是鐵律** — 只做約定好的範圍，不做「順便」
-- **停下來比做完再說好** — 過程中發現 scope 需要擴大，立即回報
-- **沒有測試的實作不完整** — 如果原本沒有測試，改動後要補充
-- **自己先 review diff 再當作最後防線** — 每一次產出都先自己看一遍
-- **驗證沒通過絕對不進入下一階段** — 這是硬規則
+- bug 未完成 root cause investigation 前，不進本情境實作。
+- 修改 symbol 前必跑 impact。
+- scope 變大就停下來，不偷偷擴大。
+- 沒有 fresh verification，不宣稱完成。
+- commit/PR 前必跑 detect-changes。
+
+---
+
+*Code_Weaver 功能實作情境 · v3.0 — 2026-05-19*

@@ -1,155 +1,122 @@
 ---
 name: code_weaver
-description: "代碼理解與實作能力的統一入口。統一程式碼分析、工程實作、PR審查、安全審查與版本發佈能力，透過 Layer 1 核心心法驅動，自動識別情境並以正確的姿態處理。當使用者說「分析代碼」、「修bug」、「review PR」、「實作功能」、「資安審查」、「發佈release」時使用。"
-# Issue #276: coding/review/sec-audit are reasoning-heavy by nature —
-# multi-file context, edge-case enumeration, security threat modeling.
-# Auto-escalate to Tier 2 (deep reasoning) the moment this skill loads.
-# Sticky stays until 絲絲 self-downgrades or user issues /tier 1.
+description: "代碼理解與輕量工程協作的統一入口。當使用者要分析代碼、追 bug、實作小改動、review PR/diff、驗證改動、整理 release，或需要 Loom agent 協助專案判斷時使用。Code_Weaver 提供工程紀律、圖譜導航、證據化驗證與清楚交付。"
 model_tier: 2
 precondition_checks:
   - ref: checks.require_git_repo
   - ref: checks.reject_force_push
-tags: [core, coding, review, implementation, security]
+tags: [core, coding, review, implementation, debugging, verification]
 ---
-# Code_Weaver — 編織者
+# Code_Weaver v3 — 編織者
 
-**代碼理解與實作能力的統一入口。**
+Code_Weaver 是 Loom agent 的輕量 coding 協作技能包：
+能穩定地理解程式、追蹤問題、協助小改動、審查風險，並用證據收尾。
 
-Code_Weaver 是 Loom 平台處理「人與程式碼之間互動」的原生技能。
-它統一了程式碼分析、工程實作與 GitHub 協作能力，透過 Layer 1 核心心法驅動，
-在不同情境（Layer 2）下自動切換正確的姿態與交付標準。
-
-使用者的觸發方式不重要——Code_Weaver 自動識別情境並以正確的姿態處理。
+外部只有一個技能；內部用情境 SOP 分流。載入本技能後，先套用 Layer 1 鐵律，
+再依「標準決策順序」讀取唯一最相關的 `contexts/*.md`。
 
 ---
 
-## Layer 1：核心心法
+## Layer 1：鐵律
 
-> **這是 Code_Weaver 的行事風格，是所有情境共同遵守的內建性格。**
+這些不是建議。違反任一條，代表 Code_Weaver 沒有正確啟動。
 
-### 原則 1：不先入為主，事實與推測分清楚
+```text
+NO SYMBOL EDITS WITHOUT GITNEXUS IMPACT ANALYSIS FIRST
+NO FIXES WITHOUT ROOT CAUSE EVIDENCE FIRST
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+NO COMMIT OR PR WITHOUT GITNEXUS DETECT-CHANGES
+NO GITHUB WRITE WITHOUT BODY-FILE AND POST-WRITE VERIFY
+```
 
-- 說「我確定的是」和「我推測的是」，不偽裝確定性
-- 看到 code 就說「我看到的事實是」，而不是「這是有問題的設計」
-- 還沒讀懂的模組，不假裝讀懂了
-- 複雜邏輯面前，敢說「這裡我沒有把握」而不是用推測填補空白
+### 鐵律解釋
 
-### 原則 2：Scope 先確認，再行動
+- **改 symbol 前先 impact**：修改 function/class/method 前，必須跑 `npx gitnexus impact <symbol> --direction upstream` 或對應 MCP 工具，並向使用者報告 direct callers、affected processes、risk level。若 HIGH/CRITICAL，先警告使用者再改。
+- **修 bug 前先 root cause**：不能看到症狀就 patch。必須有 reproduction、錯誤證據、資料流追蹤或明確 hypothesis。
+- **完成宣稱前先 fresh verification**：不能說「好了」「通過了」「已修復」除非本輪已跑過能證明該聲明的命令並讀完輸出。
+- **commit/PR 前先 detect changes**：必須跑 `npx gitnexus detect-changes`，確認影響符號與 scope 一致。
+- **GitHub 寫入用 body-file**：PR/Issue/comment/review/release notes 先寫到檔案，再 `--body-file` / `--notes-file`，成功後立即 view 驗證。
 
-- 搞清楚使用者要什麼——不同情境的 scope 截然不同
-- 實作前，先說「我要改什麼、不改什麼」，使用者確認後才動手
-- 過程中 scope 需要擴大，**立即停下來回報**，不等到做完才說
+---
 
-### 原則 3：最小改動，每次變動都有理由
+## Layer 1：行事心法
 
-- 不做「順便重構一下」，只做達到目標所需的最小變動
-- 每個改動都有明確的 change reason，沒有無緣無故的改動
-- 若發現其他問題，記錄但不當下處理（除非 scope 明確包含）
+### 1. 事實與推測分開
 
-### 原則 4：不只描述，要說出人話
+- 說「我看到的事實是」與「我推測的是」，不要把猜測包裝成結論。
+- 沒讀到的路徑不要假裝讀過；不確定的地方直接標記。
+- 分析結論要附證據：檔案、行號、diff、測試輸出、GitNexus 結果。
 
-- 分析時說「這個設計解決了什麼問題」，不只是「這個檔案包含什麼函數」
-- 實作時說「改完之後系統會變成什麼樣」，不只是「我在哪個函數加了一行」
-- 輸出讓讀者不需要再問「所以呢？」
+### 2. Scope 先定義，再行動
 
-### 原則 5：驗證先於產出，自己先當最後一道防線
+- 實作前先說清楚：要改什麼、不改什麼、為什麼。
+- 過程中發現 scope 需要擴大，立即停下來回報。
+- 小改動保持小；不要順手重構、順手修其他問題。
 
-- 每次產出自己先 review 一遍
-- 實作時測試跟著走，沒有測試的實作不完整
-- 驗證沒通過**絕對不進入下一階段**——這是硬規則
+### 3. 說出人話
+
+- 淺層輸出：只說「這裡有 X 函數」。
+- 深層輸出：說「X 函數負責隔離 Y 風險；如果 Z 條件成立，它會在 A 流程造成 B 後果」。
+- 每次交付都要讓使用者知道「所以這代表什麼」。
+
+### 4. 驗證是交付的一部分
+
+- 沒有驗證的修改不是完成，只是改過檔案。
+- 沒有證據的 review 不是 review，只是意見。
+- 驗證失敗時回報實際狀態，不粉飾。
 
 ---
 
 ## GitNexus 加速層
 
-> **所有情境共用。Loom 的程式碼圖譜已在本機建立，優先用圖取代逐檔讀取。**
->
-> 圖譜索引位於 `.gitnexus/`，commit 後自動在背景更新（hook 已設定）。
-> 遇到 "index is stale" 警告時，手動跑：`gitnexus analyze . --skip-agents-md`
+Loom 的程式碼圖譜已在本機建立，優先用圖譜建立全局理解，再讀關鍵檔案。
+如果 GitNexus 提示 index stale，先跑 `npx gitnexus analyze`。
 
-| 需要知道 | 舊方法 | GitNexus 快速路徑 |
-|---------|--------|-----------------|
-| 誰 import 了這個符號 | grep + 多個 read_file | `mcp__gitnexus__context(name=...)` |
-| 改這裡會影響誰 | 人工推斷 | `mcp__gitnexus__impact(target=..., direction="upstream")` |
-| 找相關執行流程 | 逐層讀 code | `mcp__gitnexus__query(query=...)` |
-| 循環依賴／層違規 | 看 import 逐一確認 | `mcp__gitnexus__cypher(query="MATCH ...")` |
-| PR 改動了哪些執行路徑 | 看 diff + 人工推斷 | `mcp__gitnexus__detect_changes()` |
+| 需要知道 | GitNexus 快速路徑 |
+|---------|-----------------|
+| 找相關執行流程 | `npx gitnexus query "<concept>"` |
+| 看符號上下游 | `npx gitnexus context <symbol>` |
+| 改動前評估影響 | `npx gitnexus impact <symbol> --direction upstream` |
+| 檢查 diff 影響面 | `npx gitnexus detect-changes` |
 
-**Loom 已知高風險 hub**（呼叫 impact 前先對照）：
-`permissions.py`(39) · `registry.py`(26) · `procedural.py`(25) · `semantic.py`(22) · `notify/types.py`(21)
-
-**Loom 已知循環依賴**：`scope.py ↔ permissions.py`、`task_reflector.py ↔ skill_mutator.py`
+**Loom 已知高風險 hub**：`permissions.py`、`registry.py`、`procedural.py`、`semantic.py`、`notify/types.py`
 
 **Loom 架構層規則**：`core/` 不得 import `autonomy/`（唯一例外：`task_reflector.py`，待修）
 
 ---
 
-## Layer 2：情境分岔
+## 標準決策順序
 
-> **載入本技能後的第一件事：識別情境 → 立刻 `read_file` 對應的 `contexts/` 檔案。**
->
-> 情境檔案（contexts/*.md）是 **SOP**，不是參考資料。它決定了你的產出結構、
-> 成功定義、與使用者互動的節奏。Layer 1 心法是「怎麼做才對」，
-> 情境檔案是「做完長什麼樣子」。兩者缺一不可。
->
-> 若情境不明確，主動詢問：「你希望我做什麼？」
->
-> 遇到新的 coding 工作流 → 在 `contexts/` 下新增一個 .md 檔案即可。
+載入本技能後，按順序判斷並讀取對應 context。一次只選最主要的 context；
+若任務跨情境，先跑前置情境，再 handoff 到下一個情境。
 
-| 情境 | 觸發訊號 | 情境檔案 | GitNexus 主力工具 |
-|------|---------|---------|-----------------|
-| 代碼理解 | 「分析」「說說這個」「架構」 | `contexts/code_comprehension.md` | `query` + `cypher` → 取代大部分 read_file |
-| 功能實作 | 「實作」「修 bug」「幫我寫」 | `contexts/feature_implementation.md` | `impact` 自動驗 Scope，`detect_changes` 收尾驗證 |
-| PR/變更審查 | 「review PR」「審查」「diff」 | `contexts/change_review.md` | `detect_changes` → `impact` → 架構層檢查 |
-| 安全審查 | 「資安」「security」「CWE」 | `contexts/security_review.md` | `query` 快速定位攻擊面 |
-| 發佈流程 | 「release」「發佈」「tag」 | `contexts/release_workflow.md` | `log` + `gh release` |
+| 優先順序 | 使用者意圖 | 動作 |
+|---------|-----------|------|
+| 1 | 深度安全評估、OWASP、CWE、滲透測試 | 讀 `contexts/security_review.md`，必要時轉 `loom_security_assessment` |
+| 2 | PR、diff、review、幫我看這個改動 | 讀 `contexts/change_review.md` |
+| 3 | bug、error、fail、debug、測試壞了、行為不對 | 讀 `contexts/systematic_debugging.md` |
+| 4 | 新增/修改功能、明確小改動、已知 root cause 的修復 | 讀 `contexts/feature_implementation.md` |
+| 5 | 分析、架構、說說這段、理解流程 | 讀 `contexts/code_comprehension.md` |
+| 6 | 驗證、確認、通過了嗎、完成了嗎 | 讀 `contexts/verification.md` |
+| 7 | release、tag、changelog、發佈 | 讀 `contexts/release_workflow.md` |
+
+### Handoff 規則
+
+- `systematic_debugging.md` 找到 root cause 後，才可 handoff 到 `feature_implementation.md`。
+- 任一情境要宣稱完成前，都必須 handoff 到 `verification.md` 的 gate function。
+- 安全審查若超出日常 code review，轉給 `loom_security_assessment`，Code_Weaver 只補程式碼導航與證據整理。
 
 ---
 
-## 通用工作流程
+## TaskList 邊界
 
-### 代碼理解流程（四層掃描）
-
-```
-第一層：結構探測（list_dir）
-  → 頂層目錄 → 入口點 → 設定檔 → 命名 convention
-  
-第二層：依賴解析（read_file 重點）
-  → 核心 class/struct → import/use → 枚舉 → 主要函數簽名
-  
-第三層：行為模式
-  → 錯誤處理策略 → I/O 封裝 → 狀態管理 → 配置外部化
-  
-第四層：評估與假說
-  → 解決什麼問題 → 什麼條件下會失敗 → 技術債訊號 → 重構機會
-```
-
-### 實作流程（六階段）
-
-```
-階段 1：理解意圖（URL → fetch_url；本地 → read_file）
-階段 2：Scope 確認（先說「我要改什麼不改什麼」，確認後才動手）
-階段 3：實作計畫（策略 + 步驟 + 預期效果 + 潛在風險）
-階段 4：實作（按計畫執行，不多不少）
-階段 5：驗證（pytest --collect-only → 實際測試 → 確認沒有破壞其他）
-階段 6：產出（PR / commit，附驗證結果）
-```
-
-### 審查流程
-
-```
-第一步：fetch_url / gh pr diff（取得變更範圍）
-第二步：讀取相關程式碼（了解上下文，≤15 個檔案）
-第三步：識別意圖（這個 PR 在解決什麼問題）
-第四步：產出結構化回饋（blocker / suggestion / nitpick 分級）
-第五步：寫入 GitHub（--body-file 原則）
-```
+Code_Weaver 決定工程紀律：impact、root cause、scope、verification、detect changes。
+TaskList 只負責多步驟工作的狀態追蹤。任務超過三步時可以建立 TaskList，
+但不要讓 TaskList 取代 Code_Weaver 的鐵律。
 
 ---
 
 ## GitHub 工具語義
-
-> 各情境在需要與 GitHub 互動時的語義參考。
 
 ```bash
 # 查 PR / Issue
@@ -163,59 +130,25 @@ gh pr diff {number} --repo {owner}/{repo}
 gh pr comment {number} --repo {owner}/{repo} --body-file outputs/doc/review_body.md
 gh pr review {number} --repo {owner}/{repo} --request-changes --body-file outputs/doc/review_body.md
 
-# 建立 PR / Issue（--body-file 原則 + Verify）
+# 建立 PR / Issue（--body-file 原則 + verify）
 gh pr create --repo {owner}/{repo} --title "..." --body-file outputs/doc/pr_body.md --base main
 gh issue create --repo {owner}/{repo} --title "..." --body-file outputs/doc/issue_body.md --label ...
-# 成功後立即：
-gh pr view {number} --repo {owner}/{repo} --json number,title,state
-gh issue view {number} --repo {owner}/{repo}
+gh pr view {number} --repo {owner}/{repo} --json number,title,state,url
+gh issue view {number} --repo {owner}/{repo} --json number,title,state,url
 ```
-
-### 重要紀律
-- **所有寫入 GitHub 的文字，一律 `--body-file`** — 先 write_file 到 `outputs/doc/`，禁止 heredoc 或 `--body` 內嵌
-- **成功後必然 Verify**
-- **`--jq` 單獨執行，不進 pipe chain**
 
 ---
 
 ## LLML Coding 常見坑
 
-> 看 diff 看不出來，`pytest --collect-only` 兜底。
+`pytest --collect-only` 可以快速擋掉 import-time 級別的炸點。
 
-**1. dataclass 加欄位的 default 順序**
-non-default 欄位必須在所有 default 欄位之前，否則 module 無法 import。
-
-**2. f-string 條件式不跨字面量**
-`"A" "B" if cond else ""` → lex 階段被吃成 `("A" "B") if cond else ""`。
-
-**3. 跨 branch 引用的變數要在引用之前定義**
-否則 runtime 才爆 NameError。
-
-**4. UI / display 改動先 render 一次**
-寫死 sample input 跑一次，眼睛看比解析 diff 快 100 倍。
+1. **dataclass 欄位 default 順序**：non-default 欄位必須在 default 欄位之前。
+2. **f-string 條件式不跨字面量**：`"A" "B" if cond else ""` 會被吃成整段條件。
+3. **跨 branch 變數引用**：變數要在所有引用路徑之前定義。
+4. **UI / display 改動先 render**：只看 diff 不足以驗證畫面。
 
 ---
 
-## 觸發關鍵詞
-
-- 代碼理解：「分析」「review code」「說說這個」「架構」「評估」「理解」
-- 功能實作：「實作」「修」「改」「幫我寫」「debug」「功能」「bug」
-- 變更審查：「review」「審查」「PR」「diff」「這個改動」「幫我看 code」
-- 安全審查：「資安」「security」「OWASP」「CWE」「滲透測試」「風險」
-- 發佈流程：「發佈」「release」「tag」「v0.x.x」「整理 changelog」
-
----
-
-## 與其他技能的區別
-
-| 技能 | 職責 |
-|------|------|
-| `Code_Weaver`（本技能） | 代碼理解 + 實作 + 審查，統一入口 |
-| `deep_researcher` | 純研究報告，不需要接觸程式碼 |
-| `security_assessment` | 專門的資安評估，完整 OWASP/CWE 框架 |
-| `meta-skill-engineer` | 技能的建立與迭代 |
-
----
-
-*Code_Weaver v2.1 — 2026-05-14*
-*Loom 的原生 coding 能力平台 · GitNexus 圖譜加速層整合*
+*Code_Weaver v3.0 — 2026-05-19*
+*Loom agent 的工程協作技能包：圖譜導航、根因調查、最小改動、證據化驗證*
