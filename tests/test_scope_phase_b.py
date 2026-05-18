@@ -20,12 +20,14 @@ from loom.core.harness.middleware import BlastRadiusMiddleware, ToolCall, ToolRe
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
 from loom.core.harness.scope import (
+    ConfirmDecision,
     DiffReason,
     PermissionVerdict,
     ScopeGrant,
     ScopeRequirement,
     ScopeRequest,
 )
+from loom.core.security.sandbox_runtime import SandboxSettings
 from loom.platform.cli.tools import (
     _fetch_url_resolver,
     _make_run_bash_resolver,
@@ -156,6 +158,65 @@ class TestRunBashResolver:
         assert not req.metadata.get("scope_unknown")
 
 
+def _profile_settings():
+    return SandboxSettings.from_config({
+        "backend": "srt",
+        "profiles": {
+            "github": {
+                "match_commands": ["gh"],
+                "allow_read": ["~/.config/gh"],
+                "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                "allowed_domains": ["api.github.com", "github.com"],
+            },
+        },
+    })
+
+
+class TestRunBashSandboxProfileResolver:
+    def test_auto_detects_github_profile(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash", {"command": "gh pr view 387"},
+            caps=ToolCapability.EXEC,
+        )
+        req = resolver(call)
+
+        profile_reqs = [
+            r for r in req.requirements if r.resource == "sandbox_profile"
+        ]
+        assert len(profile_reqs) == 1
+        r = profile_reqs[0]
+        assert r.action == "use"
+        assert r.selector == "github"
+        assert r.constraints["allowed_domains"] == [
+            "api.github.com", "github.com",
+        ]
+        assert req.metadata["sandbox_profile"] == "github"
+
+    def test_explicit_profile_argument_selects_profile(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash",
+            {
+                "command": "npx wrapper gh pr view 387",
+                "sandbox_profile": "github",
+            },
+            caps=ToolCapability.EXEC,
+        )
+        req = resolver(call)
+        assert req.metadata["sandbox_profile"] == "github"
+
+    def test_unknown_explicit_profile_raises(self):
+        resolver = _make_run_bash_resolver(_WORKSPACE, sandbox=_profile_settings())
+        call = _call(
+            "run_bash",
+            {"command": "gh pr view 387", "sandbox_profile": "missing"},
+            caps=ToolCapability.EXEC,
+        )
+        with pytest.raises(ValueError, match="Unknown sandbox profile"):
+            resolver(call)
+
+
 class TestFetchUrlResolver:
     def test_extracts_domain(self):
         call = _call("fetch_url", {"url": "https://docs.python.org/3/library/pathlib.html"})
@@ -259,21 +320,25 @@ class TestBlastRadiusScopeAware:
     async def test_grants_created_after_confirm(self):
         perm, reg = self._setup()
         call = _call("write_file", {"path": "doc/test.md"}, caps=ToolCapability.MUTATES)
-        await _run_middleware(perm, call, confirm_result=True, registry=reg)
+        await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
+        )
 
         # After confirmation, a grant should have been added
         assert len(perm.grants) >= 1
         g = perm.grants[-1]
         assert g.resource == "path"
         assert g.action == "write"
-        assert g.source == "manual_confirm"
+        assert g.source == "lease"
 
     async def test_second_call_same_scope_auto_allowed(self):
         perm, reg = self._setup()
 
         # First call — needs confirmation
         call1 = _call("write_file", {"path": "doc/a.md"}, caps=ToolCapability.MUTATES)
-        _, confirm1, _ = await _run_middleware(perm, call1, confirm_result=True, registry=reg)
+        _, confirm1, _ = await _run_middleware(
+            perm, call1, confirm_result=ConfirmDecision.SCOPE, registry=reg,
+        )
         confirm1.assert_called_once()
 
         # Second call — same scope, should be auto-allowed
@@ -281,6 +346,94 @@ class TestBlastRadiusScopeAware:
         _, confirm2, handler2 = await _run_middleware(perm, call2, registry=reg)
         confirm2.assert_not_called()
         handler2.assert_called_once()
+
+
+class TestScopeConfirmDurations:
+    async def test_once_confirmation_does_not_create_reusable_scope_grant(self):
+        perm = PermissionContext(session_id="test")
+        reg = _make_registry(_tool_def(
+            "write_file",
+            caps=ToolCapability.MUTATES,
+            scope_resolver=_make_write_file_resolver(_WORKSPACE),
+        ))
+        call = _call(
+            "write_file", {"path": "doc/once.md"},
+            caps=ToolCapability.MUTATES,
+        )
+
+        result, confirm_fn, handler = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg,
+        )
+
+        assert result.success
+        confirm_fn.assert_called_once()
+        handler.assert_called_once()
+        assert perm.grants == []
+        assert call.metadata["confirm_decision"] == "once"
+
+    async def test_once_confirmation_does_not_grant_fetch_url_network_scope(self):
+        perm = PermissionContext(session_id="test")
+        reg = _make_registry(_tool_def(
+            "fetch_url",
+            caps=ToolCapability.NETWORK,
+            scope_resolver=_fetch_url_resolver,
+        ))
+        call = _call(
+            "fetch_url", {"url": "https://example.com"},
+            caps=ToolCapability.NETWORK,
+        )
+
+        result, confirm_fn, handler = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg,
+        )
+
+        assert result.success
+        confirm_fn.assert_called_once()
+        handler.assert_called_once()
+        assert perm.grants == []
+        assert call.metadata["confirm_decision"] == "once"
+
+    async def test_scope_confirmation_creates_ttl_grant(self):
+        perm = PermissionContext(session_id="test")
+        reg = _make_registry(_tool_def(
+            "write_file",
+            caps=ToolCapability.MUTATES,
+            scope_resolver=_make_write_file_resolver(_WORKSPACE),
+        ))
+        call = _call(
+            "write_file", {"path": "doc/lease.md"},
+            caps=ToolCapability.MUTATES,
+        )
+
+        result, _confirm_fn, _handler = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
+        )
+
+        assert result.success
+        assert len(perm.grants) == 1
+        assert perm.grants[0].source == "lease"
+        assert perm.grants[0].valid_until > 0
+
+    async def test_auto_confirmation_creates_session_grant(self):
+        perm = PermissionContext(session_id="test")
+        reg = _make_registry(_tool_def(
+            "write_file",
+            caps=ToolCapability.MUTATES,
+            scope_resolver=_make_write_file_resolver(_WORKSPACE),
+        ))
+        call = _call(
+            "write_file", {"path": "doc/session.md"},
+            caps=ToolCapability.MUTATES,
+        )
+
+        result, _confirm_fn, _handler = await _run_middleware(
+            perm, call, confirm_result=ConfirmDecision.AUTO, registry=reg,
+        )
+
+        assert result.success
+        assert len(perm.grants) == 1
+        assert perm.grants[0].source == "auto_approve"
+        assert perm.grants[0].valid_until == 0
 
 
 # =====================================================================

@@ -232,6 +232,12 @@ backend         = "srt"           # "none" | "srt"
 allow_write     = [".", "/private/tmp"]
 deny_read       = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
 allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
+
+[security.sandbox.profiles.github]
+match_commands  = ["gh"]
+allow_read      = ["~/.config/gh", "~/.gitconfig"]
+allow_write     = [".", "/private/tmp", "~/.cache/gh"]
+allowed_domains = ["api.github.com", "github.com"]
 ```
 
 | 欄位 | 類型 | 預設值 | 說明 |
@@ -244,10 +250,14 @@ allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
 | `allowed_domains` | list[str] | `[]` | 網路 allowlist，空陣列 = 全擋 |
 | `denied_domains` | list[str] | `[]` | 額外網路黑名單 |
 | `allowed_sockets` / `denied_sockets` | list[str] | `[]` | Unix socket 控制（macOS 上罕用） |
+| `profiles.<name>.match_commands` | list[str] | `[]` | 依 command root 自動選 profile，例如 `gh pr view` 選到 `github` |
+| `profiles.<name>.allow_read` / `allow_write` / `allowed_domains` / `allowed_sockets` | list[str] | `[]` | profile 的 additive overlay，只在該次 `run_bash` 經授權後合併進 srt 設定 |
 
 **路徑語意**：`~` 展開為家目錄；`.` 錨定在 session workspace。
 **macOS 特別注意**：`/tmp` 是 `/private/tmp` 的 symlink，要寫 temp file 請列 `/private/tmp`。
 **Fail-closed**：`backend = "srt"` 但找不到 binary 時 session 啟動會失敗並提示安裝指令，避免 silent downgrade。
+
+**CLI profiles**：profile 只是描述可要求的額外沙箱能力，不是永久授權。`run_bash` 可用 command root 自動選擇，或在參數中傳 `sandbox_profile = "github"` 明確指定；實際使用時仍走現有 permission prompt，可選本次 / 30 分鐘 lease / 本 session / deny，重開 session 後需要重新授權。
 
 ---
 

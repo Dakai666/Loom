@@ -17,6 +17,7 @@ import pytest
 
 from loom.core.security.sandbox_runtime import (
     SandboxSettings,
+    extract_command_root,
     srt_available,
     srt_install_hint,
     wrap_command,
@@ -126,6 +127,125 @@ class TestStrictListValidation:
         assert s.allowed_domains == []
 
 
+class TestProfileConfig:
+    def test_profiles_parse_from_config(self):
+        s = SandboxSettings.from_config({
+            "backend": "srt",
+            "allow_write": ["."],
+            "profiles": {
+                "github": {
+                    "match_commands": ["gh", "git"],
+                    "allow_read": ["~/.config/gh", "~/.gitconfig"],
+                    "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                    "allowed_domains": ["api.github.com", "github.com"],
+                },
+            },
+        })
+
+        assert "github" in s.profiles
+        profile = s.profiles["github"]
+        assert profile.match_commands == ["gh", "git"]
+        assert profile.allowed_domains == ["api.github.com", "github.com"]
+
+    def test_profile_list_fields_reject_scalar_strings(self):
+        with pytest.raises(ValueError, match="profiles.github.allow_write"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {
+                    "github": {"match_commands": ["gh"], "allow_write": "/tmp"},
+                },
+            })
+
+    def test_profile_match_commands_requires_list_of_strings(self):
+        with pytest.raises(ValueError, match="profiles.github.match_commands"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"github": {"match_commands": "gh"}},
+            })
+
+    def test_profile_name_must_be_simple_identifier(self):
+        with pytest.raises(ValueError, match="profile name"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"git hub": {"match_commands": ["gh"]}},
+            })
+
+    def test_profile_name_must_start_with_alnum(self):
+        with pytest.raises(ValueError, match="profile name"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"-github": {"match_commands": ["gh"]}},
+            })
+
+    def test_profile_match_commands_must_be_unique(self):
+        with pytest.raises(ValueError, match="match_commands.*gh"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {
+                    "github": {"match_commands": ["gh"]},
+                    "github_alt": {"match_commands": ["gh"]},
+                },
+            })
+
+
+class TestProfileSelectionAndMerge:
+    def _settings(self):
+        return SandboxSettings.from_config({
+            "backend": "srt",
+            "allow_write": ["."],
+            "deny_read": ["~/.ssh"],
+            "allowed_domains": [],
+            "profiles": {
+                "github": {
+                    "match_commands": ["gh", "git"],
+                    "allow_read": ["~/.config/gh"],
+                    "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                    "allowed_domains": ["api.github.com", "github.com"],
+                },
+            },
+        })
+
+    def test_extract_command_root_skips_env_assignments(self):
+        assert extract_command_root("GH_HOST=github.com gh pr view 387") == "gh"
+
+    def test_extract_command_root_skips_leading_underscore_env_assignment(self):
+        assert extract_command_root("_DEBUG=1 gh pr view 387") == "gh"
+
+    def test_select_profile_by_command_root(self):
+        selected = self._settings().select_profile_for_command("gh pr view 387")
+        assert selected == "github"
+
+    def test_explicit_profile_overrides_detection(self):
+        selected = self._settings().select_profile_for_command(
+            "npx wrapper gh pr view 387",
+            explicit="github",
+        )
+        assert selected == "github"
+
+    def test_unknown_explicit_profile_raises(self):
+        with pytest.raises(ValueError, match="Unknown sandbox profile"):
+            self._settings().select_profile_for_command(
+                "gh pr view 387", explicit="missing",
+            )
+
+    def test_merged_with_profile_preserves_base_denies_and_adds_domains(self):
+        effective = self._settings().merged_with_profile("github")
+        payload = effective.to_srt_json(workspace=Path("/repo"))
+        assert payload["filesystem"]["denyRead"] == [
+            str(Path.home() / ".ssh"),
+        ]
+        assert payload["filesystem"]["allowWrite"] == [
+            "/repo",
+            "/private/tmp",
+            str(Path.home() / ".cache/gh"),
+        ]
+        assert payload["network"]["allowedDomains"] == [
+            "api.github.com",
+            "github.com",
+        ]
+        assert effective.profiles == {}
+
+
 # ---------------------------------------------------------------------------
 # to_srt_json — schema fidelity
 # ---------------------------------------------------------------------------
@@ -181,11 +301,27 @@ class TestWriteSettingsFile:
         assert data["filesystem"]["allowWrite"] == [str(tmp_path)]
 
     def test_stable_path_within_session(self, tmp_path):
-        """Repeated writes for the same (workspace, pid) reuse one file."""
+        """Repeated writes for identical content reuse one file."""
         s = SandboxSettings(backend="srt")
         p1 = write_settings_file(s, workspace=tmp_path, dir=tmp_path)
         p2 = write_settings_file(s, workspace=tmp_path, dir=tmp_path)
         assert p1 == p2
+
+    def test_distinct_settings_get_distinct_content_hash_paths(self, tmp_path):
+        base = SandboxSettings(backend="srt")
+        github = SandboxSettings(
+            backend="srt",
+            allowed_domains=["api.github.com"],
+        )
+
+        p1 = write_settings_file(base, workspace=tmp_path, dir=tmp_path)
+        p2 = write_settings_file(github, workspace=tmp_path, dir=tmp_path)
+
+        assert p1 != p2
+        assert json.loads(p1.read_text())["network"]["allowedDomains"] == []
+        assert json.loads(p2.read_text())["network"]["allowedDomains"] == [
+            "api.github.com",
+        ]
 
     def test_creates_target_dir(self, tmp_path):
         target = tmp_path / "nested" / "dir"

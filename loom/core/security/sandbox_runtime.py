@@ -31,8 +31,10 @@ Installation::
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -51,6 +53,9 @@ _SRT_BINARY = "srt"
 # renderer always emits every key — even empty arrays.  Keep this in sync
 # with srt's `sandbox-schemas.ts`.
 _REQUIRED_SECTIONS = ("filesystem", "network", "unixSockets")
+
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _as_path_list(key: str, value: Any) -> list[str]:
@@ -83,6 +88,99 @@ def _as_path_list(key: str, value: Any) -> list[str]:
     return list(value)
 
 
+def _profile_key(profile_name: str, field_name: str) -> str:
+    return f"profiles.{profile_name}.{field_name}"
+
+
+def _validate_profile_name(name: str) -> str:
+    if not isinstance(name, str) or not _PROFILE_NAME_RE.match(name):
+        raise ValueError(
+            f"[security.sandbox] profile name must match "
+            f"[A-Za-z0-9][A-Za-z0-9_.-]*, got {name!r}."
+        )
+    return name
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def extract_command_root(command: str) -> str | None:
+    """Return the first executable token after leading KEY=value assignments."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    for token in tokens:
+        if _ENV_ASSIGNMENT_RE.match(token):
+            continue
+        return Path(token).name
+    return None
+
+
+@dataclass(slots=True)
+class SandboxProfile:
+    """Named per-CLI sandbox expansion, activated only through permission grants."""
+
+    match_commands: list[str] = field(default_factory=list)
+    allow_read: list[str] = field(default_factory=list)
+    deny_read: list[str] = field(default_factory=list)
+    allow_write: list[str] = field(default_factory=list)
+    deny_write: list[str] = field(default_factory=list)
+    allowed_domains: list[str] = field(default_factory=list)
+    denied_domains: list[str] = field(default_factory=list)
+    allowed_sockets: list[str] = field(default_factory=list)
+    denied_sockets: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_config(cls, name: str, cfg: dict[str, Any] | None) -> "SandboxProfile":
+        if cfg is None:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            raise ValueError(
+                f"[security.sandbox] profiles.{name} must be a table, "
+                f"got {type(cfg).__name__}: {cfg!r}."
+            )
+        return cls(
+            match_commands=_as_path_list(
+                _profile_key(name, "match_commands"),
+                cfg.get("match_commands"),
+            ),
+            allow_read=_as_path_list(
+                _profile_key(name, "allow_read"), cfg.get("allow_read"),
+            ),
+            deny_read=_as_path_list(
+                _profile_key(name, "deny_read"), cfg.get("deny_read"),
+            ),
+            allow_write=_as_path_list(
+                _profile_key(name, "allow_write"), cfg.get("allow_write"),
+            ),
+            deny_write=_as_path_list(
+                _profile_key(name, "deny_write"), cfg.get("deny_write"),
+            ),
+            allowed_domains=_as_path_list(
+                _profile_key(name, "allowed_domains"),
+                cfg.get("allowed_domains"),
+            ),
+            denied_domains=_as_path_list(
+                _profile_key(name, "denied_domains"),
+                cfg.get("denied_domains"),
+            ),
+            allowed_sockets=_as_path_list(
+                _profile_key(name, "allowed_sockets"),
+                cfg.get("allowed_sockets"),
+            ),
+            denied_sockets=_as_path_list(
+                _profile_key(name, "denied_sockets"),
+                cfg.get("denied_sockets"),
+            ),
+        )
+
+
 @dataclass(slots=True)
 class SandboxSettings:
     """Resolved sandbox config for a session.
@@ -105,6 +203,7 @@ class SandboxSettings:
     denied_domains: list[str] = field(default_factory=list)
     allowed_sockets: list[str] = field(default_factory=list)
     denied_sockets: list[str] = field(default_factory=list)
+    profiles: dict[str, SandboxProfile] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None) -> "SandboxSettings":
@@ -137,6 +236,27 @@ class SandboxSettings:
                     f"recognized. Valid options: 'none', 'srt'."
                 )
 
+        raw_profiles = cfg.get("profiles", {}) or {}
+        if not isinstance(raw_profiles, dict):
+            raise ValueError(
+                f"[security.sandbox] profiles must be a table, got "
+                f"{type(raw_profiles).__name__}: {raw_profiles!r}."
+            )
+        profiles = {
+            _validate_profile_name(name): SandboxProfile.from_config(name, value)
+            for name, value in raw_profiles.items()
+        }
+        command_to_profile: dict[str, str] = {}
+        for profile_name, profile in profiles.items():
+            for command in profile.match_commands:
+                previous = command_to_profile.setdefault(command, profile_name)
+                if previous != profile_name:
+                    raise ValueError(
+                        "[security.sandbox] profiles match_commands must be "
+                        f"unique; command {command!r} is used by both "
+                        f"{previous!r} and {profile_name!r}."
+                    )
+
         return cls(
             backend=backend,
             allow_read=_as_path_list("allow_read", cfg.get("allow_read")),
@@ -155,6 +275,46 @@ class SandboxSettings:
             denied_sockets=_as_path_list(
                 "denied_sockets", cfg.get("denied_sockets")
             ),
+            profiles=profiles,
+        )
+
+    def select_profile_for_command(
+        self, command: str, *, explicit: str | None = None,
+    ) -> str | None:
+        if explicit:
+            if explicit not in self.profiles:
+                raise ValueError(f"Unknown sandbox profile {explicit!r}.")
+            return explicit
+
+        root = extract_command_root(command)
+        if not root:
+            return None
+        matches = [
+            name for name, profile in self.profiles.items()
+            if root in profile.match_commands
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Command {root!r} matches multiple sandbox profiles: "
+                + ", ".join(sorted(matches))
+            )
+        return matches[0] if matches else None
+
+    def merged_with_profile(self, profile_name: str) -> "SandboxSettings":
+        if profile_name not in self.profiles:
+            raise ValueError(f"Unknown sandbox profile {profile_name!r}.")
+        p = self.profiles[profile_name]
+        return SandboxSettings(
+            backend=self.backend,
+            allow_read=_dedupe(self.allow_read + p.allow_read),
+            deny_read=_dedupe(self.deny_read + p.deny_read),
+            allow_write=_dedupe(self.allow_write + p.allow_write),
+            deny_write=_dedupe(self.deny_write + p.deny_write),
+            allowed_domains=_dedupe(self.allowed_domains + p.allowed_domains),
+            denied_domains=_dedupe(self.denied_domains + p.denied_domains),
+            allowed_sockets=_dedupe(self.allowed_sockets + p.allowed_sockets),
+            denied_sockets=_dedupe(self.denied_sockets + p.denied_sockets),
+            profiles={},
         )
 
     def to_srt_json(self, workspace: Path | None = None) -> dict[str, Any]:
@@ -205,17 +365,18 @@ def write_settings_file(
 ) -> Path:
     """Render *settings* to a JSON file and return its path.
 
-    The path is stable per (workspace, pid) so repeated wraps within a
-    session reuse the same file — avoids littering ``$TMPDIR`` with one
-    file per shell call.  Caller is not required to clean up; the OS
-    reaps tmpfiles on the usual schedule.
+    The path is stable per rendered payload so base and profile-merged
+    settings cannot overwrite each other while repeated equivalent wraps
+    reuse one file. Caller is not required to clean up; the OS reaps
+    tmpfiles on the usual schedule.
     """
     payload = settings.to_srt_json(workspace=workspace)
     base = Path(dir) if dir is not None else Path(tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
-    h = abs(hash((str(workspace), os.getpid()))) % 10**8
+    rendered = json.dumps(payload, indent=2, sort_keys=True)
+    h = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:12]
     path = base / f"loom-srt-{h}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    path.write_text(rendered)
     return path
 
 
