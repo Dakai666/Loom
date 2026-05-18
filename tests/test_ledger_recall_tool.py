@@ -473,3 +473,74 @@ async def test_no_truncation_warning_when_under_cap(ledger: LedgerStore):
     result = await tool.executor(_call({"tool_name": "run_bash"}))
     assert result.success is True
     assert not result.output.startswith("[!]")
+
+
+async def test_narrative_hydrates_matched_turn_past_scope_cap(
+    ledger: LedgerStore, monkeypatch,
+):
+    """PR #386 re-review [P2]: even after the narrowing-filter fix,
+    narrative could lose matched turns when the broad scope re-query
+    hit the cap before reaching them.
+
+    Example: ``ledger_recall(session_id='x', tool_name='rare_tool')``
+    where the matching turn sits after 1000 earlier non-matching
+    events — the narrow query finds the turn_id, but the broad scope
+    re-query only returns the first cap events of the session and
+    the in-memory turn_id filter then drops the match entirely.
+
+    Fix: hydrate by ``turn_id`` directly (the narrow query already
+    pinpointed the matched turns; ``idx_turn`` makes per-turn lookups
+    cheap), rather than scanning the broad scope and filtering.
+    """
+    import loom.platform.cli.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_LEDGER_RECALL_EVENT_CAP", 5)
+
+    base = time.time()
+    emitter = LedgerEmitter(ledger, session_id="sess_late")
+
+    # 8 earlier turns × 2 tools each = 32 events that would saturate any
+    # broad-scope cap of 5 long before reaching the matched turn.
+    for i in range(8):
+        await _seed_turn(
+            emitter, turn_id=f"turn_early_{i}", base_ts=base + i * 10,
+            tools=[("filler_a", None), ("filler_b", None)],
+        )
+
+    # The matched turn lives well beyond the cap window.
+    late_ts = base + 1000
+    await _seed_turn(
+        emitter, turn_id="turn_late", base_ts=late_ts,
+        tools=[("write_file", None), ("rare_tool", None)],
+        outcome="retry",
+    )
+
+    user_ts = datetime.fromtimestamp(
+        late_ts + 0.1, tz=timezone.utc,
+    ).isoformat()
+    fake_log = FakeSessionLog([{
+        "session_id": "sess_late",
+        "turn_index": 8,
+        "role": "user",
+        "content": "找到那個 rare tool 的事",
+        "raw_json": None,
+        "metadata": {},
+        "created_at": user_ts,
+    }])
+
+    tool = make_ledger_recall_tool(ledger, FakeMemory(fake_log))
+    result = await tool.executor(_call({
+        "session_id": "sess_late",
+        "tool_name": "rare_tool",
+    }))
+
+    assert result.success is True
+    # The matched turn must fully hydrate despite living past the cap.
+    assert "你說：找到那個 rare tool 的事" in result.output
+    assert "turn 結局 retry" in result.output
+    # Non-matching tool in the SAME turn must surface (full turn context).
+    assert "write_file" in result.output
+    assert "rare_tool" in result.output
+    # Earlier non-matching turns must NOT pollute the narrative.
+    assert "turn_early" not in result.output
+    assert "filler_a" not in result.output
+    assert "filler_b" not in result.output

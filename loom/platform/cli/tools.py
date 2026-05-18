@@ -2226,31 +2226,47 @@ def make_ledger_recall_tool(
             # (skill_id / tool_name / verdict) sit on top of a scope
             # filter, the initial fetch returns only matching events —
             # turn_start / turn_end / preceding user message get filtered
-            # out, breaking the story. Re-pull events for the matched
-            # turn_ids using scope filters only.
+            # out, breaking the story.
+            #
+            # Hydrate by turn_id directly rather than re-querying scope:
+            # the narrow query already pinpointed the turns we care about,
+            # and `idx_turn` makes per-turn lookups cheap. Re-querying
+            # scope risks losing matched turns whose timestamps fall
+            # outside the broad fetch's _LEDGER_RECALL_EVENT_CAP window
+            # (e.g. matched turn at event #1500 of a long session) — see
+            # PR #386 review.
             has_narrowing = bool(skill_id or tool_name or verdict)
             has_scope = bool(
                 session_id or correlation_id
                 or since_dt is not None or until_dt is not None
             )
             if has_narrowing and has_scope:
-                matching_turn_ids = {e.turn_id for e in events}
-                if matching_turn_ids:
-                    broad_query = _build_query(
-                        ledger_store,
-                        session_id=session_id,
-                        correlation_id=correlation_id,
-                        since_dt=since_dt,
-                        until_dt=until_dt,
+                # Preserve first-seen turn order from the initial query so
+                # `limit` selects the chronologically earliest matches.
+                ordered_turn_ids: list[str] = []
+                seen_turn_ids: set[str] = set()
+                for e in events:
+                    if e.turn_id not in seen_turn_ids:
+                        seen_turn_ids.add(e.turn_id)
+                        ordered_turn_ids.append(e.turn_id)
+                ordered_turn_ids = ordered_turn_ids[:limit]
+
+                hydrated: list = []
+                for tid in ordered_turn_ids:
+                    turn_q = (
+                        ledger_store.events
+                        .where(turn_id=tid)
+                        .order_by("timestamp")
+                        .limit(_LEDGER_RECALL_EVENT_CAP + 1)
                     )
-                    broad_events = await broad_query.all()
-                    if len(broad_events) > _LEDGER_RECALL_EVENT_CAP:
+                    turn_events = await turn_q.all()
+                    if len(turn_events) > _LEDGER_RECALL_EVENT_CAP:
                         truncated = True
-                        broad_events = broad_events[:_LEDGER_RECALL_EVENT_CAP]
-                    events = [
-                        e for e in broad_events
-                        if e.turn_id in matching_turn_ids
-                    ]
+                        turn_events = turn_events[
+                            :_LEDGER_RECALL_EVENT_CAP
+                        ]
+                    hydrated.extend(turn_events)
+                events = hydrated
 
             slices = group_events_by_turn(events)[:limit]
             messages_by_turn = await _fetch_user_messages_per_turn(
