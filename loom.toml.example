@@ -366,8 +366,54 @@ mask_age_turns = 20
 #     are detected and still trigger a confirmation prompt
 #   - /auto off (or session end) reverts to per-call confirmation
 #
-# Does not prevent OS-level container escapes — for full isolation use Docker.
+# Does not prevent OS-level container escapes — for that, enable the
+# [security.sandbox] block below (Issue #29, Quest A Phase 4).
 strict_sandbox = false
+
+# ─────────────────────────────────────────────
+# Security · Sandbox Runtime (Issue #29)
+# ─────────────────────────────────────────────
+#
+# Optional OS-level confinement for run_bash via
+# `anthropic-experimental/sandbox-runtime` (`srt`).  `srt` uses native
+# primitives (macOS `sandbox-exec`, Linux `bubblewrap`) and proxy-based
+# network filtering — no Docker required.
+#
+# Install:
+#     npm install -g @anthropic-ai/sandbox-runtime
+#
+# Layering (see doc/55):
+#   Layer 1  CommandScanner  — tripwire / audit signal (always on)
+#   Layer 2  Sandbox Runtime — actual OS-level wall (opt-in below)
+#
+# Defaults to "none" so behaviour is byte-for-byte identical to a Loom
+# install without this block.  When backend = "srt" and the binary is
+# missing, session startup fails closed with an install hint.
+#
+# Path semantics:
+#   - "~" expands to the user's home directory
+#   - "." is anchored at the session workspace
+#   - On macOS, /tmp is a symlink to /private/tmp — list /private/tmp
+#     in allow_write if you need temp-file writes
+#
+# Filesystem precedence (matches srt upstream):
+#   - Writes (allow-only):   allow_write defaults to []; deny_write
+#                            overrides allow_write.
+#   - Reads  (deny-then-allow): allow_read overrides deny_read — default
+#                            allow everywhere, so list a broad parent in
+#                            deny_read and re-allow specifics in allow_read.
+#
+# Network: empty allowed_domains means NO network at all.
+#
+[security.sandbox]
+backend = "none"   # "none" | "srt"
+
+# Filesystem allowlists.  Empty = maximally restrictive.
+# allow_write = [".", "/private/tmp"]
+# deny_read   = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+
+# Network allowlist.  Empty = no network.
+# allowed_domains = ["pypi.org", "files.pythonhosted.org", "api.github.com"]
 
 # ─────────────────────────────────────────────
 # Autonomy Engine

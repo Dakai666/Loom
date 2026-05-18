@@ -37,6 +37,13 @@ from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
 from loom.core.security.self_termination_guard import SelfTerminationGuard
 from loom.core.security.command_scanner import CommandScanner
+from loom.core.security.sandbox_runtime import (
+    SandboxSettings,
+    srt_available,
+    srt_install_hint,
+    wrap_command as _srt_wrap_command,
+    write_settings_file as _srt_write_settings_file,
+)
 
 import logging
 
@@ -735,6 +742,7 @@ def make_run_bash_tool(
     strict_sandbox: bool = False,
     jobstore: Any = None,
     scratchpad: Any = None,
+    sandbox: SandboxSettings | None = None,
 ) -> ToolDefinition:
     """
     Return the ``run_bash`` tool definition.
@@ -743,13 +751,33 @@ def make_run_bash_tool(
     in loom.toml), the subprocess is launched with ``cwd=workspace`` so that
     relative paths and shell builtins stay inside the project folder.  This
     does not prevent absolute-path escapes at the OS level — for full
-    confinement use an OS sandbox (e.g. Docker).
+    confinement turn on the *sandbox* backend below.
+
+    Issue #29 / Quest A Phase 4: when *sandbox* has ``backend == "srt"``, the
+    final shell command is wrapped with ``srt -s <settings> -c <cmd>`` so the
+    OS kernel enforces filesystem and network restrictions.  Configure via
+    ``[security.sandbox]`` in loom.toml.  Fail-closed: if the binary is
+    missing we raise at startup rather than silently downgrading.
 
     Issue #154: when ``async_mode=True`` is passed in call.args and a jobstore
     is available, the shell invocation is submitted as a background Job and
     the tool returns immediately with ``{"job_id": "..."}``.  Results land in
     the Scratchpad; harness injects status updates at turn boundaries.
     """
+    _sandbox_active = sandbox is not None and sandbox.backend == "srt"
+    _sandbox_settings_path: Path | None = None
+    if _sandbox_active:
+        if not srt_available():
+            raise RuntimeError(
+                "[security.sandbox] backend = \"srt\" is enabled but "
+                + srt_install_hint()
+            )
+        _sandbox_settings_path = _srt_write_settings_file(sandbox, workspace)
+
+    def _maybe_wrap(cmd: str) -> str:
+        if _sandbox_active and _sandbox_settings_path is not None:
+            return _srt_wrap_command(cmd, _sandbox_settings_path)
+        return cmd
     async def _run_bash(call: ToolCall) -> ToolResult:
         command = call.args.get("command", "")
         async_mode = bool(call.args.get("async_mode", False))
@@ -809,7 +837,7 @@ def make_run_bash_tool(
             job_id = jobstore.submit(
                 "run_bash",
                 {"command": command, "timeout": timeout},
-                lambda: _run_bash_job(command, cwd, timeout, scratchpad),
+                lambda: _run_bash_job(_maybe_wrap(command), cwd, timeout, scratchpad),
             )
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -825,7 +853,7 @@ def make_run_bash_tool(
             # PID, leaving children holding stdout fds and communicate()
             # blocked indefinitely past cancel/timeout.
             proc = await asyncio.create_subprocess_shell(
-                command,
+                _maybe_wrap(command),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
@@ -884,6 +912,13 @@ def make_run_bash_tool(
                               success=False, error=str(exc))
 
     sandbox_note = " Shell is confined to the workspace directory." if strict_sandbox else ""
+    if _sandbox_active:
+        sandbox_note += (
+            " OS-level sandbox (srt) is active: filesystem writes and network "
+            "access are restricted to the allowlists in [security.sandbox]; "
+            "unlisted domains and writes outside allowed paths will fail with "
+            "EPERM or 'Connection blocked'."
+        )
     async_note = (
         " Pass async_mode=True to run in the background and receive a job_id; "
         "poll via jobs_status / jobs_await; read output with scratchpad_read."
