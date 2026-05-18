@@ -17,6 +17,7 @@ import pytest
 
 from loom.core.security.sandbox_runtime import (
     SandboxSettings,
+    extract_command_root,
     srt_available,
     srt_install_hint,
     wrap_command,
@@ -124,6 +125,105 @@ class TestStrictListValidation:
         })
         assert s.allow_write == []
         assert s.allowed_domains == []
+
+
+class TestProfileConfig:
+    def test_profiles_parse_from_config(self):
+        s = SandboxSettings.from_config({
+            "backend": "srt",
+            "allow_write": ["."],
+            "profiles": {
+                "github": {
+                    "match_commands": ["gh", "git"],
+                    "allow_read": ["~/.config/gh", "~/.gitconfig"],
+                    "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                    "allowed_domains": ["api.github.com", "github.com"],
+                },
+            },
+        })
+
+        assert "github" in s.profiles
+        profile = s.profiles["github"]
+        assert profile.match_commands == ["gh", "git"]
+        assert profile.allowed_domains == ["api.github.com", "github.com"]
+
+    def test_profile_list_fields_reject_scalar_strings(self):
+        with pytest.raises(ValueError, match="profiles.github.allow_write"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {
+                    "github": {"match_commands": ["gh"], "allow_write": "/tmp"},
+                },
+            })
+
+    def test_profile_match_commands_requires_list_of_strings(self):
+        with pytest.raises(ValueError, match="profiles.github.match_commands"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"github": {"match_commands": "gh"}},
+            })
+
+    def test_profile_name_must_be_simple_identifier(self):
+        with pytest.raises(ValueError, match="profile name"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {"git hub": {"match_commands": ["gh"]}},
+            })
+
+
+class TestProfileSelectionAndMerge:
+    def _settings(self):
+        return SandboxSettings.from_config({
+            "backend": "srt",
+            "allow_write": ["."],
+            "deny_read": ["~/.ssh"],
+            "allowed_domains": [],
+            "profiles": {
+                "github": {
+                    "match_commands": ["gh", "git"],
+                    "allow_read": ["~/.config/gh"],
+                    "allow_write": [".", "/private/tmp", "~/.cache/gh"],
+                    "allowed_domains": ["api.github.com", "github.com"],
+                },
+            },
+        })
+
+    def test_extract_command_root_skips_env_assignments(self):
+        assert extract_command_root("GH_HOST=github.com gh pr view 387") == "gh"
+
+    def test_select_profile_by_command_root(self):
+        selected = self._settings().select_profile_for_command("gh pr view 387")
+        assert selected == "github"
+
+    def test_explicit_profile_overrides_detection(self):
+        selected = self._settings().select_profile_for_command(
+            "npx wrapper gh pr view 387",
+            explicit="github",
+        )
+        assert selected == "github"
+
+    def test_unknown_explicit_profile_raises(self):
+        with pytest.raises(ValueError, match="Unknown sandbox profile"):
+            self._settings().select_profile_for_command(
+                "gh pr view 387", explicit="missing",
+            )
+
+    def test_merged_with_profile_preserves_base_denies_and_adds_domains(self):
+        effective = self._settings().merged_with_profile("github")
+        payload = effective.to_srt_json(workspace=Path("/repo"))
+        assert payload["filesystem"]["denyRead"] == [
+            str(Path.home() / ".ssh"),
+        ]
+        assert payload["filesystem"]["allowWrite"] == [
+            "/repo",
+            "/private/tmp",
+            str(Path.home() / ".cache/gh"),
+        ]
+        assert payload["network"]["allowedDomains"] == [
+            "api.github.com",
+            "github.com",
+        ]
+        assert effective.profiles == {}
 
 
 # ---------------------------------------------------------------------------
