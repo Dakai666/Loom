@@ -34,16 +34,15 @@ Notification Layer 提供統一的介面來發送這些通知。
 │   └──────┬──────┘                                         │
 │          │                                                 │
 │          ▼                                                 │
-│   ┌─────────────┐     ┌─────────────┐                     │
-│   │  Routable   │────▶│  Notifier   │                     │
-│   │             │     │  Registry   │                     │
-│   └─────────────┘     └──────┬──────┘                     │
-│                               │                             │
+│   ┌─────────────┐                                         │
+│   │ BaseNotifier│  router 內部以 channel 註冊              │
+│   └──────┬──────┘                                         │
+│          │                                                 │
 │        ┌──────────┬──────────┬──────────┬──────────┐       │
 │        ▼          ▼          ▼          ▼          ▼       │
-│   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐  │
-│   │   CLI  │ │ Webhook│ │ Telegram│ │Discord │ │  ...  │  │
-│   └────────┘ └────────┘ └────────┘ └────────┘ └────────┘  │
+│   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────────┐         │
+│   │   CLI  │ │ Webhook│ │Discord │ │Discord Bot │         │
+│   └────────┘ └────────┘ └────────┘ └────────────┘         │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -57,47 +56,32 @@ Notification Layer 提供統一的介面來發送這些通知。
 class NotificationType(Enum):
     """通知類型"""
     
-    # 資訊
-    INFO = "info"              # 一般資訊
-    SUCCESS = "success"         # 成功訊息
-    
-    # 警告
-    WARNING = "warning"         # 警告（需要關注）
-    ERROR = "error"             # 錯誤（需要處理）
-    
-    # 確認
-    CONFIRM = "confirm"         # 需要用戶確認
+    INFO    = "info"     # 一般資訊，無需回覆
+    CONFIRM = "confirm"  # yes/no 確認
+    INPUT   = "input"    # 需要自由文字輸入
+    ALERT   = "alert"    # 急迫警示
+    REPORT  = "report"   # 週期性摘要
 ```
 
 ---
 
 ## Notification 結構
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/notification/models.py
+# loom/notify/types.py
 @dataclass
 class Notification:
-    """通知"""
-    
-    type: NotificationType      # 通知類型
-    title: str                 # 標題
-    message: str               # 內容
-    
-    # 來源
-    source: str                # 來源模組（如 "autonomy.daemon"）
-    source_id: str | None      # 來源 ID（如觸發器 ID）
-    
-    # 選項
-    channel: str = "default"   # 發送頻道
-    metadata: dict = field(default_factory=dict)  # 額外資料
-    
-    # 時間
-    created_at: datetime = field(default_factory=datetime.now)
-    
-    # 狀態（用於 CONFIRM 類型）
-    status: NotificationStatus = NotificationStatus.PENDING
-    response: ConfirmResult | None = None
+    type: NotificationType
+    title: str
+    body: str
+    trigger_name: str = ""
+    timeout_seconds: int = 60
+    thread_id: int = 0
+    attachments: list[Path] = field(default_factory=list)
+    inline_image: Path | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 ```
 
 ---
@@ -110,56 +94,25 @@ class Notification:
 # loom/notify/router.py
 class NotificationRouter:
     """通知路由器"""
-    
-    def __init__(
-        self,
-        notifier_registry: NotifierRegistry,
-        confirm_flow_factory: Callable[[], ConfirmFlow],
-    ):
-        self.notifier_registry = notifier_registry
-        self.confirm_flow_factory = confirm_flow_factory
-        self._queue: asyncio.Queue = asyncio.Queue()
-    
-    async def send(
-        self,
-        notification_type: NotificationType,
-        message: str,
-        title: str | None = None,
-        channel: str = "default",
-        **kwargs,
-    ) -> Notification:
-        """
-        發送通知的統一介面
-        """
-        
-        notification = Notification(
-            type=notification_type,
-            title=title or self._default_title(notification_type),
-            message=message,
-            source=kwargs.get("source", "unknown"),
-            source_id=kwargs.get("source_id"),
-            channel=channel,
-            metadata=kwargs,
-        )
-        
-        # CONFIRM 類型需要特殊處理
-        if notification_type == NotificationType.CONFIRM:
-            return await self._send_confirm(notification)
-        
-        # 一般通知加入佇列
-        await self._queue.put(notification)
-        
-        # 異步處理佇列
-        asyncio.create_task(self._process_queue())
-        
-        return notification
-    
-    async def _process_queue(self):
-        """處理通知佇列"""
-        while not self._queue.empty():
-            notification = await self._queue.get()
-            await self._deliver(notification)
-            self._queue.task_done()
+
+    def __init__(self) -> None:
+        self._notifiers: dict[str, BaseNotifier] = {}
+
+    def register(self, notifier: BaseNotifier) -> "NotificationRouter":
+        self._notifiers[notifier.channel] = notifier
+        return self
+
+    async def send(self, notification: Notification) -> dict[str, bool]:
+        """投遞到所有已註冊 notifier，回傳各 channel 成敗。"""
+        tasks = {
+            channel: notifier.send(notification)
+            for channel, notifier in self._notifiers.items()
+        }
+        outcomes = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        return {
+            channel: not isinstance(outcome, Exception)
+            for channel, outcome in zip(tasks.keys(), outcomes)
+        }
 ```
 
 ### 發送到 Notifier
@@ -168,71 +121,20 @@ class NotificationRouter:
 async def _deliver(self, notification: Notification):
     """將通知投遞到所有訂閱的 Notifier"""
     
-    # 根據 channel 找到訂閱的 notifier
-    notifiers = self.notifier_registry.get_for_channel(notification.channel)
-    
-    for notifier in notifiers:
-        try:
-            await notifier.send(notification)
-        except Exception as e:
-            logger.error(f"Failed to send notification via {notifier.name}: {e}")
+    await self.send(notification)
 ```
 
 ---
 
-## NotifierRegistry
+## Notifier 註冊
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
+Loom 沒有獨立 `NotifierRegistry`。`NotificationRouter` 自己保存 `{channel: notifier}`，每個 adapter 透過 `channel` 欄位決定註冊名稱。
+
 ```python
-# loom/core/notification/registry.py
-class NotifierRegistry:
-    """Notifier 註冊表"""
-    
-    def __init__(self):
-        self._notifiers: dict[str, Notifier] = {}
-        self._channel_map: dict[str, list[str]] = defaultdict(list)  # channel -> [notifier_id, ...]
-    
-    def register(self, notifier: Notifier, channels: list[str] | None = None):
-        """註冊 Notifier"""
-        self._notifiers[notifier.name] = notifier
-        
-        # 預設發到所有 channel
-        if channels is None:
-            channels = ["default"]
-        
-        for channel in channels:
-            self._channel_map[channel].append(notifier.name)
-    
-    def unregister(self, notifier_name: str):
-        """取消註冊"""
-        if notifier_name in self._notifiers:
-            del self._notifiers[notifier_name]
-        
-        # 從 channel_map 中移除
-        for channel, names in self._channel_map.items():
-            if notifier_name in names:
-                names.remove(notifier_name)
-    
-    def get(self, name: str) -> Notifier | None:
-        return self._notifiers.get(name)
-    
-    def get_for_channel(self, channel: str) -> list[Notifier]:
-        """根據 channel 獲取 notifier 列表"""
-        notifier_names = self._channel_map.get(channel, ["default"])
-        
-        result = []
-        for name in notifier_names:
-            if name in self._notifiers:
-                result.append(self._notifiers[name])
-        
-        # 如果沒有找到，返回 default
-        if not result and "default" in self._notifiers:
-            result.append(self._notifiers["default"])
-        
-        return result
-    
-    def list_all(self) -> list[Notifier]:
-        return list(self._notifiers.values())
+# loom/notify/router.py
+router = NotificationRouter()
+router.register(CLINotifier(console))
+router.register(WebhookNotifier(url="https://..."))
 ```
 
 ---
@@ -242,30 +144,15 @@ class NotifierRegistry:
 ### 發送確認請求
 
 ```python
-async def _send_confirm(self, notification: Notification) -> Notification:
-    """發送需要確認的通知"""
-    
-    # 創建 ConfirmFlow
-    flow = self.confirm_flow_factory()
-    
-    # 執行確認流程
-    result = await flow.run(
-        prompt=notification.message,
-        timeout=notification.metadata.get("timeout", 300),
-    )
-    
-    # 更新 notification 狀態
-    notification.status = NotificationStatus.RESOLVED
-    notification.response = result
-    
-    # 根據結果回調
-    if notification.metadata.get("on_approve"):
-        await self._handle_callback(
-            notification.metadata["on_approve"],
-            result == ConfirmResult.APPROVED
-        )
-    
-    return notification
+# loom/notify/confirm.py
+flow = ConfirmFlow(send_fn=router.send, wait_fn=cli_notifier.wait_reply)
+result = await flow.ask(Notification(
+    type=NotificationType.CONFIRM,
+    title="Loom autonomy: cleanup_task",
+    body="Do you want to delete all test data?",
+    trigger_name="cleanup_task",
+    timeout_seconds=300,
+))
 ```
 
 詳見 [25-ConfirmFlow.md](25-ConfirmFlow.md)。
@@ -278,70 +165,37 @@ async def _send_confirm(self, notification: Notification) -> Notification:
 
 ```python
 # 簡單通知
-await notification_router.send(
-    NotificationType.INFO,
-    "Task completed successfully",
-    source="task.scheduler"
-)
+await notification_router.send(Notification(
+    type=NotificationType.INFO,
+    title="Task completed",
+    body="Task completed successfully",
+))
 
-# 錯誤通知
-await notification_router.send(
-    NotificationType.ERROR,
-    f"Tool '{tool_name}' execution failed: {error}",
-    source="harness.executor"
-)
+# 警示通知
+await notification_router.send(Notification(
+    type=NotificationType.ALERT,
+    title="Tool failed",
+    body=f"Tool '{tool_name}' execution failed: {error}",
+))
 
 # 需要確認
-await notification_router.send(
-    NotificationType.CONFIRM,
-    "Do you want to delete all test data?",
-    source="autonomy.action_planner",
-    source_id="cleanup_task",
-    timeout=600,
-    on_approve="execute_delete",
-    on_deny="abort"
-)
+result = await confirm_flow.ask(Notification(
+    type=NotificationType.CONFIRM,
+    title="Cleanup task",
+    body="Do you want to delete all test data?",
+    trigger_name="cleanup_task",
+    timeout_seconds=600,
+))
 ```
 
 ### loom.toml 配置
 
 ```toml
-[notification]
-
-# 預設 channel
+[notify]
 default_channel = "cli"
-
-# 佇列設定
-queue_size = 100
-process_interval = 1  # 秒
-
-# 通知設定
-[notification.channels]
-
-# CLI 通知（總是啟用）
-[notification.channels.cli]
-enabled = true
-type = "cli"
-
-# Webhook 通知
-[notification.channels.webhook]
-enabled = true
-type = "webhook"
-url = "https://hooks.example.com/notify"
-
-# Telegram 通知
-[notification.channels.telegram]
-enabled = false
-type = "telegram"
-bot_token = "${TELEGRAM_BOT_TOKEN}"
-chat_id = "${TELEGRAM_CHAT_ID}"
-
-# Discord 通知
-[notification.channels.discord]
-enabled = false
-type = "discord"
-webhook_url = "${DISCORD_WEBHOOK_URL}"
 ```
+
+`default_channel` 目前是 informational；實際 fan-out 由 runtime 註冊了哪些 notifiers 決定（CLI、Webhook、DiscordBotNotifier 等）。
 
 ---
 
@@ -351,10 +205,9 @@ Notification Layer 提供：
 
 | 元件 | 職責 |
 |------|------|
-| NotificationType | 五種通知類型（INFO/SUCCESS/WARNING/ERROR/CONFIRM） |
+| NotificationType | 五種通知類型（INFO/CONFIRM/INPUT/ALERT/REPORT） |
 | Notification | 統一的通知資料結構 |
 | NotificationRouter | 統一的通知入口和路由 |
-| NotifierRegistry | 管理多個 Notifier 適配器 |
 | ConfirmFlow | 確認請求的特殊處理 |
 
-透過 Notification Layer，Loom 的各個模組可以統一地發送通知，而不需要關心底層的發送方式（CLI、Webhook、Telegram 等）。
+透過 Notification Layer，Loom 的各個模組可以統一地發送通知，而不需要關心底層的發送方式（CLI、Webhook、Discord 等）。

@@ -239,17 +239,19 @@ You do...
 
 ### 如何更新 SOUL？
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```bash
-# 編輯 SOUL 文件
-vim loom/core/soul/SOUL.md
+# 編輯 repo 或使用者設定中的 SOUL 文件
+vim SOUL.md
 
-# 測試變更
-loom chat --test-soul
+# 以一般 chat 啟動，PromptStack 會依 loom.toml 的 [identity] 載入
+loom chat
 
-# 驗證語法
-loom validate --soul
+# 若使用自訂位置，設定 loom.toml：
+# [identity]
+# soul = "SOUL.md"
 ```
+
+SOUL 不是核心 package 裡的內建檔；`PromptStack.from_config()` 會從 `loom.toml` 的 `[identity]` 區段解析 `soul` 路徑，預設是目前工作目錄下的 `SOUL.md`。
 
 ---
 
