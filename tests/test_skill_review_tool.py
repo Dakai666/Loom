@@ -106,3 +106,27 @@ async def test_trust_level_safe(ledger: LedgerStore) -> None:
     """Read-only tool must be SAFE — no confirmation prompts."""
     tool = make_skill_review_tool(ledger)
     assert tool.trust_level == TrustLevel.SAFE
+
+
+async def test_render_surfaces_inferred_unload_reason(
+    ledger: LedgerStore,
+) -> None:
+    """When the agent forgets to unload, the rendered output must flag
+    the boundary as inferred so reviewers spot the bookend gap."""
+    emitter = LedgerEmitter(ledger, session_id="sess_test")
+    async with async_turn_scope("turn_A"), async_correlation_scope("c_A"):
+        await emitter.emit_tool_lifecycle(
+            payload=ToolLifecyclePayload(
+                phase="END",
+                tool_name="load_skill",
+                tool_call_id="call_1",
+                args_digest="sha256:1",
+                skill_id="code_weaver",
+            ),
+            event_id="evt_load_end_orphan",
+        )
+
+    tool = make_skill_review_tool(ledger)
+    result = await tool.executor(_call({"skill_id": "code_weaver"}))
+    assert result.success is True
+    assert "inferred: no_unload_in_window" in result.output

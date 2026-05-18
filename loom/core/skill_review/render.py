@@ -5,25 +5,29 @@ the ``skill_review`` tool; the weekly worker can reuse or replace as
 needed for richer markdown.
 
 Format choices:
-- ISO-ish timestamps (UTC) — readable, sortable, no timezone surprises
+- Timestamps in the user's configured timezone (matches the rest of the
+  agent-facing surface; see issue #388 boundary)
 - Per-episode block — agent quotes/cites blocks back during discussion
 - Compact event lines — no syntactic clutter; one event per line
+- Inferred-boundary tag on episodes that lack an explicit unload, so
+  reviewers notice the load/unload bookend gap
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from loom.core.skill_review.query import SkillUsageDigest, SkillEpisode
+from loom.core.timezone import user_zone
 
 
 def _fmt_ts(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(ts, tz=user_zone()).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _fmt_event_line(e) -> str:
     """One-line summary of a single LedgerEvent."""
-    ts = datetime.fromtimestamp(e.timestamp, tz=timezone.utc).strftime("%H:%M:%S")
+    ts = datetime.fromtimestamp(e.timestamp, tz=user_zone()).strftime("%H:%M:%S")
     et = e.event_type
     p = e.payload
 
@@ -61,10 +65,18 @@ def _fmt_event_line(e) -> str:
 
 
 def _render_episode(ep: SkillEpisode, idx: int) -> str:
+    if ep.unloaded_at is None:
+        unload_line = "<no explicit unload>"
+        if ep.unload_inferred:
+            unload_line += f" (inferred: {ep.unload_inferred_reason})"
+    elif ep.unload_inferred:
+        unload_line = f"{_fmt_ts(ep.unloaded_at)} (inferred: {ep.unload_inferred_reason})"
+    else:
+        unload_line = _fmt_ts(ep.unloaded_at)
     lines = [
         f"## Episode {idx} — {ep.session_id} / {ep.turn_id} — {_fmt_ts(ep.loaded_at)}",
         f"loaded_at:   {_fmt_ts(ep.loaded_at)}",
-        f"unloaded_at: {_fmt_ts(ep.unloaded_at) if ep.unloaded_at else '<no explicit unload>'}",
+        f"unloaded_at: {unload_line}",
         f"turn_outcome: {ep.turn_outcome or '<no turn_end>'}",
     ]
     suffix = " (truncated)" if ep.truncated else ""

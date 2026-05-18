@@ -2001,7 +2001,10 @@ def make_load_skill_tool(
         description=(
             "Load a skill's full instructions into context. Call this when a task "
             "matches a skill listed in <available_skills>. The skill's workflow, "
-            "principles, and output format will be returned for you to follow."
+            "principles, and output format will be returned for you to follow. "
+            "When you finish using a skill, call `unload_skill` so the activation "
+            "window closes cleanly — `skill_review` and the weekly report use "
+            "that bookend to attribute tool usage and feedback to the right skill."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -2069,7 +2072,12 @@ def make_unload_skill_tool(
     return ToolDefinition(
         name="unload_skill",
         description=(
-            "Remove a skill's precondition checks from the tool pipeline. "
+            "Close out a previously loaded skill. Call this once you're done "
+            "using a skill — it removes the skill's precondition checks AND "
+            "bookends the activation in the ledger so `skill_review` can "
+            "attribute the in-between tool calls and feedback to the right "
+            "skill. Skipping this leaves the window open until the next "
+            "re-load or the query end, which makes usage analytics unreliable. "
             "Call with no name to list skills with mounted checks."
         ),
         trust_level=TrustLevel.SAFE,
