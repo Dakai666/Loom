@@ -72,6 +72,7 @@ ToolBlock 與 Header 同步顯示 agent 當前動作：
 
 顯示本 session 所有 `write_file` 產出的檔案：
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```
 ✚ loom/core/tasks/scheduler.py    created    2m ago
 ~ loom/core/harness/middleware.py  modified   5m ago

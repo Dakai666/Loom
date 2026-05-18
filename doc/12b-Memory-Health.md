@@ -150,6 +150,7 @@ class OperationHealth:
 
 Agent 可透過 `memory_health` 工具主動查詢健康狀態：
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/cognition/memory_health.py 中的 memory_health tool
 # （實為 MemoryHealthTracker 的 wrapper tool）

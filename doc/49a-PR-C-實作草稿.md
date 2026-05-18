@@ -82,6 +82,7 @@ Loom Agent 的訊息走 `_run_streaming_turn` 既有路徑（TextChunk / Markdow
 
 PR-D 才會做完整的 1 行 live footer。但 PR-C 的「綠燈閃光」、「token budget 浮出」、「grant TTL 倒數」需要一個最小可用的 footer，才能把分流落地。
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/platform/cli/footer.py（新檔）
 

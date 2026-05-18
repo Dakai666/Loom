@@ -53,7 +53,7 @@ Notification Layer 提供統一的介面來發送這些通知。
 ## 五種通知類型
 
 ```python
-# loom/core/notification/types.py
+# loom/notify/types.py
 class NotificationType(Enum):
     """通知類型"""
     
@@ -73,6 +73,7 @@ class NotificationType(Enum):
 
 ## Notification 結構
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/notification/models.py
 @dataclass
@@ -106,7 +107,7 @@ class Notification:
 ### 統一入口
 
 ```python
-# loom/core/notification/router.py
+# loom/notify/router.py
 class NotificationRouter:
     """通知路由器"""
     
@@ -181,6 +182,7 @@ async def _deliver(self, notification: Notification):
 
 ## NotifierRegistry
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/notification/registry.py
 class NotifierRegistry:

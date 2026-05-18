@@ -6,6 +6,7 @@
 
 ## Notifier 結構
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/notification/adapters/base.py
 class Notifier(ABC):
@@ -27,6 +28,7 @@ class Notifier(ABC):
 
 ## 步驟 1：創建 Notifier 類
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/notification/adapters/slack.py
 from dataclasses import dataclass
@@ -161,6 +163,7 @@ loom notify test --notifier slack --message "Test message"
 
 ## 完整範例：Line Notify
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/notification/adapters/line.py
 class LineNotifyNotifier(Notifier):

@@ -56,6 +56,7 @@ Loom 的 Autonomy Engine 讓它「主動」——在滿足特定條件時自動�
 
 當觸發器觸發時，Decision Pipeline 決定「是否要行動」以及「如何行動」：
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
 # loom/core/autonomy/decision.py
 class DecisionPipeline:
@@ -139,7 +140,7 @@ def _evaluate_trust(
 ### 將 Decision 轉換為 Action
 
 ```python
-# loom/core/autonomy/planner.py
+# loom/autonomy/planner.py
 class ActionPlanner:
     """將決策轉換為可執行的行動"""
     
@@ -184,7 +185,7 @@ class ActionPlanner:
 Autonomy Daemon 是 Loom 的後台服務，負責監控觸發條件：
 
 ```python
-# loom/core/autonomy/daemon.py
+# loom/autonomy/daemon.py
 class AutonomyDaemon:
     """Autonomy 常駐程式"""
     

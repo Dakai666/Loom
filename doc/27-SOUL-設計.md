@@ -239,6 +239,7 @@ You do...
 
 ### 如何更新 SOUL？
 
+<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```bash
 # 編輯 SOUL 文件
 vim loom/core/soul/SOUL.md

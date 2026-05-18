@@ -69,9 +69,10 @@ code_weaver 97% 不是靠任何自動框架，是靠：
 
 | 元件 | 檔案 | 處置 | session.py register 行 |
 |------|------|------|------------------------|
-| `SkillGate` (shadow_mode auto_c) | `loom/core/cognition/skill_gate.py` | 刪除整檔 | `_skill_gate` 欄位 + `make_load_skill_tool(skill_gate=...)` 引用 |
-| `SkillPromoter` | `loom/core/cognition/skill_promoter.py` | 刪除整檔 | `_skill_promoter` 欄位 + `task_reflector` 引用 + `subscribe(_fan_promotion)` |
-| `SkillMutator` | `loom/core/cognition/skill_mutator.py` | 刪除整檔 | `_skill_mutator` 欄位 + `task_reflector(mutator=...)` |
+| `SkillGate` (shadow_mode auto_c) | `loom/core/cognition/skill_gate.py` | 刪除整檔 | `_skill_gate` 欄位 + `make_load_skill_tool(skill_gate=...)` 引用 |<!-- doc-integrity:ignore -->
+| `SkillPromoter` | `loom/core/cognition/skill_promoter.py` | 刪除整檔 | `_skill_promoter` 欄位 + `task_reflector` 引用 + `subscribe(_fan_promotion)` |<!-- doc-integrity:ignore -->
+| `SkillMutator` | `loom/core/cognition/skill_mutator.py` | 刪除整檔 | `_skill_mutator` 欄位 + `task_reflector(mutator=...)` |<!-- doc-integrity:ignore -->
+<!-- 上面三行是退役記錄，刻意保留已刪除檔的歷史路徑名稱。 -->
 | `SkillGenome` dataclass + ProceduralMemory candidate 介面 | `loom/core/memory/procedural.py` | 刪除 candidate / genome 相關函式，保留 procedural memory 其他用途 | — |
 | `memory.db` 中的 skill_genomes / skill_candidates / skill_version_history 表 | `loom/core/memory/store.py` (DDL @ lines 46+) | 刪除 DDL；下次 init 時表不再 create。**注意**：實際 host 是 `memory.db` 不是 `loom.db`（後者實際為空，是個 ghost file，可額外刪除） | — |
 | `generate_skill_candidate_from_batch` tool | `loom/platform/cli/tools.py` | 刪除 factory + executor | `make_generate_skill_candidate_from_batch_tool(...)` register (#363 後 session.py:1453) |
