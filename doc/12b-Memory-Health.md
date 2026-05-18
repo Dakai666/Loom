@@ -192,7 +192,3 @@ def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
 [memory]
 health.enabled = true   # 預設 true，關閉 = false
 ```
-
----
-
-*文件草稿 | 2026-04-26 03:21 Asia/Taipei*
