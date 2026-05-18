@@ -873,6 +873,10 @@ class TestSanitizeHistoryAdjacency:
         from loom.core.session import LoomSession
         fake = SimpleNamespace()
         fake.messages = [dict(m) for m in messages]
+        # Stub budget — sanitize now resyncs the budget when it actually
+        # rewrites the history, so the displayed context % matches the
+        # post-sanitize message list.
+        fake.budget = SimpleNamespace(record_messages=lambda _msgs: None)
         LoomSession._sanitize_history(fake)
         return fake.messages
 

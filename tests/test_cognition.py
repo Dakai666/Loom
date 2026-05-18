@@ -10,7 +10,11 @@ import pytest
 import pytest_asyncio
 from unittest.mock import MagicMock
 
-from loom.core.cognition.context import ContextBudget, estimate_tokens
+from loom.core.cognition.context import (
+    ContextBudget,
+    estimate_block_count,
+    estimate_tokens,
+)
 from loom.core.cognition.providers import (
     CodexResponsesProvider,
     LLMResponse,
@@ -58,6 +62,25 @@ class TestEstimateTokens:
     def test_dict_serializes(self):
         obj = {"key": "value", "number": 42}
         assert estimate_tokens(obj) >= 1
+
+    def test_cjk_weighted_heavier_than_ascii(self):
+        """CJK ~1.5 char/token; ASCII ~4. 60 CJK ≈ 40 tokens, 60 ASCII = 15.
+
+        Real-tokenizer numbers vary by model, but the relative weight
+        must be correct or the footer drifts dramatically on Chinese
+        sessions after compaction (the bug this guards)."""
+        ascii_tokens = estimate_tokens("a" * 60)
+        cjk_tokens = estimate_tokens("我" * 60)
+        assert cjk_tokens > ascii_tokens
+        # Within ~30% of the 1.5 char/token target.
+        assert 30 <= cjk_tokens <= 50
+
+    def test_mixed_text_weighted_per_char(self):
+        """A 50/50 mix should sit between the pure-ASCII and pure-CJK
+        estimates, not be dragged down to either extreme."""
+        mixed = ("a" * 60) + ("我" * 60)
+        # 60 ASCII → 15 tokens; 60 CJK → 40 tokens. Expect ~55.
+        assert 45 <= estimate_tokens(mixed) <= 65
 
 
 class TestContextBudget:
@@ -146,6 +169,206 @@ class TestContextBudget:
         s = str(b)
         assert "compress" in s
         assert "850" in s
+
+
+class TestEstimateBlockCount:
+    """Wire content-block estimation — what MiniMax counts against its 2013 cap."""
+
+    def test_simple_user_assistant_pair(self):
+        msgs = [
+            {"role": "system", "content": "you are helpful"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        # 1 system + 1 user + 1 assistant text = 3 blocks
+        assert estimate_block_count(msgs) == 3
+
+    def test_assistant_with_parallel_tool_calls(self):
+        """One assistant turn with N parallel tool calls fans out to
+        1 text block + N tool_use blocks on the wire. This is the
+        exact pattern that pushes the news-thread session over 2013."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "let me check three things",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "run_bash", "arguments": "{}"}},
+                    {"id": "c", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ok"},
+            {"role": "tool", "tool_call_id": "b", "content": "ok"},
+            {"role": "tool", "tool_call_id": "c", "content": "ok"},
+        ]
+        # 1 (assistant text) + 3 (tool_use) + 3 (tool_result) = 7
+        assert estimate_block_count(msgs) == 7
+
+    def test_assistant_tool_call_with_no_text(self):
+        """Assistant message with tool_calls but no text body — Anthropic
+        wire omits the text block, so we should count only tool_uses."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+        ]
+        assert estimate_block_count(msgs) == 1
+
+    def test_user_with_list_content_blocks(self):
+        """Anthropic-canonical user messages with embedded tool_result
+        blocks count each block separately."""
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "a", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "b", "content": "ok"},
+                ],
+            },
+        ]
+        assert estimate_block_count(msgs) == 2
+
+    def test_assistant_thinking_blocks_counted(self):
+        """Reasoning models put _thinking_blocks back on the wire; the
+        estimator must count them or it underreports on Anthropic/MiniMax
+        reasoning-heavy sessions and lets the wire cap blindside us."""
+        msgs = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "_thinking_blocks": [
+                    {"type": "thinking", "thinking": "step 1"},
+                    {"type": "thinking", "thinking": "step 2"},
+                ],
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+        ]
+        # 2 thinking + 1 text + 1 tool_use = 4
+        assert estimate_block_count(msgs) == 4
+
+    def test_estimator_matches_to_anthropic_messages(self):
+        """The estimator is a model of ``_to_anthropic_messages`` —
+        a regression here means the two paths have drifted and the
+        budget can either over- or under-report wire pressure."""
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "thinking out loud",
+                "_thinking_blocks": [
+                    {"type": "thinking", "thinking": "step 1"},
+                ],
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "run_bash", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "run_bash", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ok"},
+            {"role": "tool", "tool_call_id": "b", "content": "ok"},
+        ]
+        # _to_anthropic_messages returns (system, body). System lives on
+        # the top-level kwarg, not in messages, so it doesn't count
+        # toward the per-request block budget — compare the *body* for
+        # the contract here. (The estimator does count the system row,
+        # but that one-block delta is noise against the 2013 cap.)
+        _system, wire = _to_anthropic_messages(msgs[1:])
+        wire_blocks = 0
+        for m in wire:
+            c = m.get("content")
+            if isinstance(c, list):
+                wire_blocks += len(c)
+            elif c:
+                wire_blocks += 1
+        body_only_estimate = estimate_block_count(msgs[1:])
+        assert body_only_estimate == wire_blocks
+
+
+class TestContextBudgetBlocks:
+    """Block-count dimension — guards against MiniMax 2013 hard cap."""
+
+    def test_record_messages_updates_block_count(self):
+        b = ContextBudget(total_tokens=1000)
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        b.record_messages(msgs)
+        assert b.block_count == 3
+
+    def test_block_pressure_triggers_compaction(self):
+        """A session well under the token budget can still need
+        compaction if the wire block count is near MiniMax's cap.
+        This is the failure mode that broke the news thread."""
+        b = ContextBudget(
+            total_tokens=200_000,
+            compression_threshold=0.80,
+            max_blocks=2000,
+            block_threshold=0.85,
+        )
+        b.record_response(input_tokens=50_000, output_tokens=0)   # 25% tokens
+        assert not b.should_compress()
+        # Synthesise 1800 blocks (90% of max) — pure block pressure.
+        b.block_count = 1800
+        assert b.should_compress()
+        assert b.block_bound is True
+
+    def test_token_pressure_alone_still_triggers(self):
+        b = ContextBudget(total_tokens=1000, compression_threshold=0.80, max_blocks=2000)
+        b.record_response(900, 0)
+        b.block_count = 10   # well below cap
+        assert b.should_compress()
+        assert b.block_bound is False
+
+    def test_pressure_returns_max_of_two_dimensions(self):
+        b = ContextBudget(total_tokens=1000, max_blocks=100)
+        b.record_response(300, 0)        # 30% token
+        b.block_count = 70                # 70% block
+        assert b.pressure == pytest.approx(0.70)
+        assert b.block_bound is True
+
+    def test_format_pressure_annotates_block_bound(self):
+        b = ContextBudget(total_tokens=1000, max_blocks=100)
+        b.record_response(200, 0)
+        b.block_count = 90
+        s = b.format_pressure()
+        assert "blocks" in s
+        assert "90" in s
+
+    def test_format_pressure_plain_when_token_bound(self):
+        b = ContextBudget(total_tokens=1000, max_blocks=100)
+        b.record_response(800, 0)
+        b.block_count = 10
+        s = b.format_pressure()
+        assert "blocks" not in s
+        assert "80" in s
+
+    def test_update_block_count_does_not_touch_tokens(self):
+        """sanitize/mask paths use update_block_count to keep block
+        accounting fresh without overwriting the authoritative token
+        reading from the last provider response."""
+        b = ContextBudget(total_tokens=1000)
+        b.record_response(500, 0)
+        before_tokens = b.used_tokens
+        msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        b.update_block_count(msgs)
+        assert b.used_tokens == before_tokens
+        assert b.block_count == 2
+
+    def test_reset_clears_blocks(self):
+        b = ContextBudget(total_tokens=1000)
+        b.record_response(500, 0)
+        b.block_count = 50
+        b.reset()
+        assert b.used_tokens == 0
+        assert b.block_count == 0
 
 
 # ---------------------------------------------------------------------------
