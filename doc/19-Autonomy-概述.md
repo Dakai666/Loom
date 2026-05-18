@@ -50,86 +50,34 @@ Loom 的 Autonomy Engine 讓它「主動」——在滿足特定條件時自動�
 
 ---
 
-## Decision Pipeline
+## 決策與執行路徑
 
-### 決策流程
+### 現行流程
 
-當觸發器觸發時，Decision Pipeline 決定「是否要行動」以及「如何行動」：
+舊版設計把決策拆成 `DecisionPipeline`；現行實作沒有獨立的 core autonomy decision 模組。觸發器 fired 後，流程集中在 `AutonomyDaemon`、`TriggerEvaluator`、`ActionPlanner`：
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/autonomy/decision.py
-class DecisionPipeline:
-    """決策管道"""
-    
-    def __init__(
-        self,
-        trust_level: TrustLevel,
-        memory: MemoryStore,
-        notification_router: NotificationRouter,
-    ):
-        self.trust_level = trust_level
-        self.memory = memory
-        self.notification_router = notification_router
-    
-    async def decide(
-        self,
-        trigger: Trigger,
-        context: dict,
-    ) -> Decision:
-        """
-        根據觸發器和上下文做出決策
-        
-        Returns:
-            Decision: APPROVE / DENY / CONFIRM / DEFER
-        """
-        
-        # 1. 評估信任級別
-        trust_decision = await self._evaluate_trust(trigger, context)
-        
-        if trust_decision == TrustDecision.BLOCK:
-            return Decision.DENY
-        
-        # 2. 評估風險
-        risk = await self._evaluate_risk(trigger, context)
-        
-        if risk > self._risk_threshold:
-            return Decision.CONFIRM  # 需要確認
-        
-        # 3. 評估時機
-        if not await self._is_appropriate_time(trigger):
-            return Decision.DEFER  # 推遲
-        
-        # 4. 做出決定
-        return Decision.APPROVE
+# loom/autonomy/daemon.py
+async def _on_trigger_fire(self, trigger, context):
+    plan = await self._planner.handle(trigger, context)
+    await self._execute_plan(plan)
 ```
+
+`ActionPlanner` 依 trigger 的 `trust_level` 和 context 回傳 `PlannedAction`。daemon 再根據 decision 選擇：
+
+| Decision | daemon 行為 |
+|----------|-------------|
+| `EXECUTE` | 直接執行 agent turn；chime mode 先嘗試投遞到既有 session |
+| `NOTIFY` / `HOLD` | 透過 `ConfirmFlow` 發確認通知 |
+| `SKIP` | 不執行 |
 
 ### Trust Level 映射
 
-```python
-def _evaluate_trust(
-    self,
-    trigger: Trigger,
-    context: dict,
-) -> TrustDecision:
-    """根據 Trust Level 決定是否允許"""
-    
-    if self.trust_level == TrustLevel.SAFE:
-        # SAFE: 只允許純讀取操作
-        if trigger.requires_write:
-            return TrustDecision.BLOCK
-        return TrustDecision.ALLOW
-    
-    elif self.trust_level == TrustLevel.GUARDED:
-        # GUARDED: 允許讀取 + 安全的寫入
-        if trigger.risk_level > RiskLevel.LOW:
-            return TrustDecision.BLOCK
-        return TrustDecision.ALLOW
-    
-    elif self.trust_level == TrustLevel.CRITICAL:
-        # CRITICAL: 允許所有操作（由用戶監督）
-        return TrustDecision.ALLOW
-```
+| Trust level | 語意 |
+|-------------|------|
+| `safe` | 預期只做低風險任務 |
+| `guarded` | 需要通知或確認，並可搭配 `allowed_tools` / `scope_grants` |
+| `critical` | 高影響任務，規劃層會更保守處理 |
 
 詳見 [21-Action-Planner.md](21-Action-Planner.md)。
 

@@ -1,380 +1,203 @@
 # Session 管理
 
-Session 是 Loom 的對話上下文容器。每次聊天都是在一個 Session 中進行的。
+Session 是 Loom 的對話 runtime。實作上沒有 `loom/core/session/` package；權威入口是單檔 `loom/core/session.py` 的 `LoomSession`，持久化歷史則由 `loom/core/memory/session_log.py` 的 `SessionLog` 負責。
 
 ---
 
-## Session 結構
+## 真實模組分工
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
-```python
-# loom/core/session/models.py
-@dataclass
-class Session:
-    """Session 模型"""
-    
-    id: str                           # 唯一 ID
-    created_at: datetime              # 建立時間
-    updated_at: datetime              # 最後更新時間
-    
-    # 配置
-    personality: str                  # 使用的人格
-    model: str | None                 # 使用的模型
-    trust_level: TrustLevel           # 信任級別
-    
-    # 歷史
-    messages: list[Message]           # 訊息歷史
-    
-    # 統計
-    message_count: int                # 訊息數量
-    token_usage: int                  # Token 使用量
-    
-    # 狀態
-    status: SessionStatus             # 狀態
-    metadata: dict                    # 額外資料
-```
+| 模組 | 職責 |
+|------|------|
+| `loom/core/session.py` | `LoomSession` runtime、工具註冊、turn loop、pause/resume/cancel/stop |
+| `loom/core/memory/session_log.py` | SQLite `sessions` / `session_log` 兩張表的讀寫 |
+| `loom/platform/cli/main.py` | `loom chat`、`loom sessions` CLI 與 slash commands |
+| `loom/platform/session_registry.py` | 進程內 active session registry，供 chime / Discord runtime 查找 |
+
+Session 的 runtime 狀態與持久化資料沒有拆成 `models.py`、`manager.py`、`store.py`；這些舊路徑不存在。
 
 ---
 
-## Session 狀態
+## LoomSession
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
+`LoomSession` 是 live agent runtime。它擁有主要 agent loop、permission context、tool registry、memory facade、prompt stack、ledger emitter、notification router 等 session-scoped 物件。
+
 ```python
-# loom/core/session/models.py
-class SessionStatus(Enum):
-    """Session 狀態"""
-    ACTIVE = "active"       # 進行中
-    PAUSED = "paused"       # 暫停
-    COMPLETED = "completed"  # 已完成
-    ARCHIVED = "archived"   # 已歸檔
+# loom/core/session.py
+class LoomSession:
+    def __init__(
+        self,
+        model: str | None = None,
+        db_path: str | None = None,
+        resume_session_id: str | None = None,
+        ...
+    ):
+        self.session_id = resume_session_id or str(uuid.uuid4())[:8]
+        self._resume = resume_session_id is not None
+        self.perm = PermissionContext(session_id=self.session_id)
+        self.registry = ToolRegistry()
 ```
+
+主要生命週期：
+
+| 方法 | 說明 |
+|------|------|
+| `start()` | 載入 config、prompt stack、memory、tools、plugins、ledger、session log |
+| `stream_turn(user_input)` | 執行一輪對話並串流事件 |
+| `pause()` / `resume()` / `resume_with()` / `cancel()` | HITL pause boundary 控制 |
+| `stop()` | flush memory health、compact、更新 session metadata、關閉資源 |
+
+---
+
+## SessionLog
+
+`SessionLog` 是持久化 session metadata 與完整對話歷史的 SQLite gateway。
+
+```python
+# loom/core/memory/session_log.py
+class SessionLog:
+    async def create_session(
+        self, session_id: str, model: str, title: str | None = None
+    ) -> None: ...
+
+    async def log_message(
+        self,
+        session_id: str,
+        turn_index: int,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        raw_json: str | None = None,
+    ) -> None: ...
+
+    async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]: ...
+    async def get_session(self, session_id: str) -> dict[str, Any] | None: ...
+    async def load_messages(self, session_id: str) -> list[dict[str, Any]]: ...
+    async def delete_session(self, session_id: str) -> None: ...
+```
+
+兩張資料表：
+
+| 表 | 用途 |
+|----|------|
+| `sessions` | `session_id`、model、title、started_at、last_active、turn_count |
+| `session_log` | 每個 user / assistant / tool 訊息，包含 raw assistant JSON 以支援 resume |
+
+`create_session()` 使用 `INSERT OR IGNORE`，所以 resume 已存在 session 時不會覆蓋 metadata。`log_message()` 在 hot path 會吞掉例外並記錄 warning，避免 DB 問題阻塞 agent turn。
 
 ---
 
 ## Session 生命週期
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                  Session 生命週期                            │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   create ──▶ active ──▶ complete                           │
-│                │      │                                     │
-│                │      └──▶ archive                          │
-│                │                                            │
-│                └──▶ pause ──▶ resume ──▶ active            │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+new LoomSession
+      │
+      ▼
+start()
+      │
+      ├─ new session: SessionLog.create_session()
+      └─ resume: SessionLog.load_messages() + restore turn_index
+      │
+      ▼
+stream_turn()
+      │
+      ├─ tool batch boundary 可 pause/resume/cancel
+      ├─ 訊息寫入 SessionLog
+      └─ turn metadata 更新
+      │
+      ▼
+stop()
+      ├─ memory health flush
+      ├─ optional compaction
+      └─ SessionLog.update_session()
 ```
 
-### 建立 Session
-
-```bash
-# 建立新 session（chat 命令自動建立）
-loom chat
-
-# 指定 session ID 建立新 session
-loom chat --session new_session_id
-
-# 從範本建立
-loom chat --session new_id --template research
-```
-
-### 恢復 Session
-
-```bash
-# 恢復上次 session
-loom chat --resume
-
-# 恢復特定 session
-loom chat --session abc123
-```
-
-### 完成 Session
-
-```bash
-# 手動標記完成
-loom sessions complete abc123
-
-# 或直接退出 chat（會自動標記）
-```
+Loom 目前沒有 enum 型 `ACTIVE / PAUSED / COMPLETED / ARCHIVED` session status 欄位。CLI 顯示的 session 清單主要依 `last_active` 排序，並用目前載入的 `session_id` 標示 active。
 
 ---
 
-## Session 命令
+## CLI 操作
 
-### `loom sessions list`
-
-列出所有 sessions。
+### 建立或恢復 chat session
 
 ```bash
-loom sessions list [options]
+# 建立新 session
+loom chat
 
-# 選項
---status       按狀態過濾（active/paused/completed/archived）
---limit        最大數量（預設: 20）
---format       輸出格式（text/table/json）
+# 恢復最近 session
+loom chat --resume
+
+# 恢復指定 session
+loom chat --session <session_id>
+
+# 啟動時設定或覆蓋 title
+loom chat --name "Research run"
 ```
 
-**輸出範例**
-
-```
-$ loom sessions list
-
- Sessions
- ─────────────────────────────────────────────────────────
- ID          Status     Messages  Updated            Personality
- ─────────────────────────────────────────────────────────
- abc123      active     12       2 minutes ago     architect
- def456      completed  45       2 days ago        minimalist
- ghi789      archived   23       1 week ago        barista
- ─────────────────────────────────────────────────────────
-```
-
-### `loom sessions show`
-
-查看 Session 詳情。
+TUI 模式在未指定 session 時會自動恢復最近一次 session：
 
 ```bash
-loom sessions show <session_id> [options]
-
-# 選項
---messages      顯示訊息歷史
---stats         顯示統計
---metadata      顯示元資料
+loom chat --tui
+loom chat --tui --session <session_id>
 ```
 
-**輸出範例**
-
-```
-$ loom sessions show abc123
-
- Session: abc123
- ─────────────────────────────────────────────────────────
- Status:       active
- Personality:  architect
- Model:        gpt-4o
- Trust Level:  GUARDED
- ─────────────────────────────────────────────────────────
- Created:      2024-01-15 10:00:00
- Updated:      2024-01-15 10:30:00
- ─────────────────────────────────────────────────────────
- Messages:     12
- Token Usage:  8,234
- ─────────────────────────────────────────────────────────
-```
-
-### `loom sessions resume`
-
-恢復 Session。
+### 管理已保存 sessions
 
 ```bash
-loom sessions resume <session_id>
-loom sessions resume  # 恢復最近一個
+# 列出最近 sessions
+loom sessions list --limit 20
+
+# 顯示完整對話 replay
+loom sessions show <session_id>
+
+# 刪除 session metadata 與訊息
+loom sessions rm <session_id>
 ```
 
-### `loom sessions delete`
-
-刪除 Session。
-
-```bash
-loom sessions delete <session_id> [options]
-
-# 選項
---force         跳過確認
-```
-
-### `loom sessions export`
-
-匯出 Session。
-
-```bash
-loom sessions export <session_id> [options]
-
-# 選項
---format        格式（json/markdown/text）
---output, -o    輸出檔案
---include       包含內容（messages/memory/stats/all）
-```
-
-**範例**
-
-```bash
-# 匯出為 JSON
-loom sessions export abc123 -o session.json
-
-# 匯出為 Markdown
-loom sessions export abc123 --format markdown -o session.md
-```
-
-### `loom sessions archive`
-
-歸檔 Session。
-
-```bash
-loom sessions archive <session_id>
-```
+目前沒有 `sessions complete`、`sessions archive` 或 `sessions export` CLI 子命令；需要匯出時通常從 `SessionLog.load_messages()` 或 DB 查詢層讀出。
 
 ---
 
 ## 程式化操作
 
-### Python API
+建立 runtime session：
 
 ```python
-from loom.core.session.manager import SessionManager
+from loom.core.session import LoomSession
 
-manager = SessionManager()
-
-# 建立新 session
-session = await manager.create(
-    personality="architect",
-    model="gpt-4o",
-    trust_level=TrustLevel.GUARDED,
-)
-
-# 列出 sessions
-sessions = await manager.list(status=SessionStatus.ACTIVE)
-
-# 獲取 session
-session = await manager.get("abc123")
-
-# 更新 session
-await manager.update("abc123", personality="minimalist")
-
-# 刪除 session
-await manager.delete("abc123")
-
-# 匯出 session
-exported = await manager.export("abc123", format="json")
+session = LoomSession(model="claude-sonnet-4-6")
+await session.start()
+async for event in session.stream_turn("幫我整理今天的任務"):
+    ...
+await session.stop()
 ```
 
-### Session Manager
+讀取已保存 session：
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/session/manager.py
-class SessionManager:
-    """Session 管理器"""
-    
-    def __init__(self, store: SessionStore):
-        self.store = store
-    
-    async def create(self, **kwargs) -> Session:
-        """建立新 session"""
-        session = Session(
-            id=self._generate_id(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-            **kwargs
-        )
-        await self.store.save(session)
-        return session
-    
-    async def list(
-        self,
-        status: SessionStatus | None = None,
-        limit: int = 20,
-    ) -> list[Session]:
-        """列出 sessions"""
-        return await self.store.list(status=status, limit=limit)
-    
-    async def get(self, session_id: str) -> Session | None:
-        """獲取 session"""
-        return await self.store.get(session_id)
-    
-    async def update(self, session_id: str, **updates) -> Session:
-        """更新 session"""
-        session = await self.get(session_id)
-        
-        for key, value in updates.items():
-            setattr(session, key, value)
-        
-        session.updated_at = datetime.now()
-        await self.store.save(session)
-        
-        return session
-    
-    async def delete(self, session_id: str):
-        """刪除 session"""
-        await self.store.delete(session_id)
-    
-    async def archive(self, session_id: str):
-        """歸檔 session"""
-        await self.update(session_id, status=SessionStatus.ARCHIVED)
+import aiosqlite
+from loom.core.memory.session_log import SessionLog
+
+async with aiosqlite.connect("~/.loom/memory.db") as conn:
+    log = SessionLog(conn)
+    recent = await log.list_sessions(limit=20)
+    messages = await log.load_messages(recent[0]["session_id"])
 ```
 
 ---
 
-## Session 儲存
+## 與 active registry 的關係
 
-### SQLite 後端
-
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
-```python
-# loom/core/session/store.py
-class SQLiteSessionStore:
-    """SQLite Session 儲存"""
-    
-    def __init__(self, db_path: str):
-        self.db = aiosqlite.connect(db_path)
-        await self._init_tables()
-    
-    async def _init_tables(self):
-        """初始化資料表"""
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                personality TEXT NOT NULL,
-                model TEXT,
-                trust_level TEXT NOT NULL,
-                message_count INTEGER DEFAULT 0,
-                token_usage INTEGER DEFAULT 0,
-                status TEXT NOT NULL,
-                metadata TEXT
-            )
-        """)
-```
-
-### 自動清理
-
-```toml
-[session]
-
-# 自動歸檔設定
-[session.auto_archive]
-enabled = true
-after_days = 30      # 30 天後自動歸檔
-max_active = 10      # 最多 10 個 active sessions
-
-# 自動刪除
-[session.auto_delete]
-enabled = false
-after_days = 90       # 90 天後自動刪除已歸檔的 sessions
-```
+`SessionLog` 保存歷史；`loom/platform/session_registry.py` 只保存目前進程內活著的 `LoomSession` 物件。Discord chime 模式會用 registry 找指定 thread 對應的 active session，找不到時依 trigger 的 `target.fallback` 決定 skip 或開獨立 session。
 
 ---
 
 ## 總結
 
-Session 管理命令：
-
-| 命令 | 功能 |
-|------|------|
-| `loom sessions list` | 列出 sessions |
-| `loom sessions show` | 查看詳情 |
-| `loom sessions resume` | 恢復 session |
-| `loom sessions delete` | 刪除 session |
-| `loom sessions export` | 匯出 session |
-| `loom sessions archive` | 歸檔 session |
-
-Session 狀態：
-
-| 狀態 | 意義 |
-|------|------|
-| ACTIVE | 進行中 |
-| PAUSED | 暫停 |
-| COMPLETED | 已完成 |
-| ARCHIVED | 已歸檔 |
+| 概念 | 現行實作 |
+|------|----------|
+| Live runtime | `LoomSession` |
+| Persistent history | `SessionLog` |
+| Session metadata | SQLite `sessions` table |
+| Message replay | SQLite `session_log` table |
+| CLI list/show/delete | `loom sessions list/show/rm` |
+| In-process lookup | `SessionRegistry` |

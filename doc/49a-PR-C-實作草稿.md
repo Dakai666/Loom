@@ -78,32 +78,24 @@ Loom Agent 的訊息走 `_run_streaming_turn` 既有路徑（TextChunk / Markdow
 
 ---
 
-## 4. 新抽象：`FooterController`（PR-D 完整版的前哨）
+## 4. Footer 現況（PR-D 已落地到 TUI app）
 
-PR-D 才會做完整的 1 行 live footer。但 PR-C 的「綠燈閃光」、「token budget 浮出」、「grant TTL 倒數」需要一個最小可用的 footer，才能把分流落地。
+舊版草稿曾規劃新增獨立 footer controller；現行實作沒有獨立 footer 檔。footer state 與 rendering 已集中在 persistent CLI/TUI application。
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/platform/cli/footer.py（新檔）
+# loom/platform/cli/app.py
+@dataclass
+class FooterState:
+    token_pct: float = 0.0
+    thinking: bool = False
+    active_tools: dict[str, ToolEnvelope] = field(default_factory=dict)
+    compaction: bool = False
+    grant_hint: str | None = None
+    transient_hint: _TransientHint | None = None
 
-class FooterController:
-    """1 行 status footer 的最小實作。
-
-    PR-C 階段：用 Rich Live 在 main_loop 底層維護一行可變狀態。
-    PR-D 階段：合併進 persistent Application 的固定 bottom Window。
-    """
-
-    def __init__(self, console: Console):
-        self._console = console
-        self._status: dict[str, str] = {}
-        self._flash_message: str | None = None
-        self._live: Live | None = None
-
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
-    def set_status(self, key: str, value: str | None) -> None: ...
-    def flash(self, msg: str, duration: float) -> None: ...
-    def _render(self) -> Text: ...
+class LoomApp:
+    def _render_footer(self) -> FormattedText:
+        ...
 ```
 
 **status 欄位順序**（從左到右）：
@@ -268,4 +260,3 @@ PR-C 收斂為 C1-C4。C5 移到 PR-D。
 - Tracking issue：#236
 - 已 merge：PR-A (#237) PR-B (#242)
 - 後續：PR-D (Linear stream + Live Footer)、PR-E (TaskList)
-

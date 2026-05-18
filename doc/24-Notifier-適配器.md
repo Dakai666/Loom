@@ -188,15 +188,13 @@ Bot 接收用戶上傳的檔案時自動處理：
 
 ## Phase X：Telegram Notifier
 
-> **尚未實作**（Phase X 規劃）。以下為說明性代碼。
+> **尚未實作**（Phase X 規劃）。目前 repo 沒有 Telegram adapter；如需實作，建議以自訂 plugin 提供一個 `BaseNotifier` 子類，而不是假設核心已有檔案。
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/notify/adapters/telegram.py  （Phase X，尚未實作）
 class TelegramNotifier(BaseNotifier):
     """Telegram Bot 通知器（Phase X）"""
 
-    name = "telegram"
+    channel = "telegram"
 
     def __init__(
         self,
@@ -211,7 +209,7 @@ class TelegramNotifier(BaseNotifier):
         ...
 ```
 
-loom.toml 中的 `[notification.channels.telegram]` 設定亦屬 Phase X。
+Telegram 的 loom.toml 設定格式屬 Phase X，尚未支援。
 
 ---
 
@@ -245,19 +243,8 @@ class EmailNotifier(BaseNotifier):
 ## 實際已實作的 loom.toml 配置
 
 ```toml
-[notification]
+[notify]
 default_channel = "cli"
-
-[notification.channels.webhook]
-enabled = true
-url = "https://hooks.example.com/notify"
-headers = { Authorization = "Bearer ${WEBHOOK_TOKEN}" }
-timeout = 10.0
-
-[notification.channels.discord]
-enabled = true
-webhook_url = "${DISCORD_WEBHOOK_URL}"
-username = "Loom Bot"
 ```
 
 > Telegram、Email 的 loom.toml 設定格式屬 Phase X 規劃，尚未支援。

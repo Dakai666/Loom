@@ -137,45 +137,24 @@ Model Context Protocol（MCP）提供完整的雙向整合：
 
 ## 擴充載入時機
 
-> 以下 `ExtensionLoader` 是設計示意，實際載入路徑見 `loom/extensibility/{adapter,plugin}.py` + `LoomSession.start()`。
+實際載入路徑見 `loom/extensibility/adapter.py`、`loom/extensibility/plugin.py` 與 `LoomSession.start()`。沒有獨立 `ExtensionLoader` 類別。
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/extensibility/loader.py
-class ExtensionLoader:
-    """擴充載入器"""
-    
-    async def load_all(self):
-        """載入所有擴充"""
-        
-        # 1. 載入 Plugins
-        await self._load_plugins()
-        
-        # 2. 載入 Lenses
-        await self._load_lenses()
-        
-        # 3. 載入 Skills
-        await self._load_skills()
-        
-        # 4. 載入 Personalities
-        await self._load_personalities()
-    
-    async def _load_plugins(self):
-        """載入 plugins"""
-        plugin_dirs = self._discover_plugins()
-        
-        for plugin_dir in plugin_dirs:
-            plugin = await self._load_plugin(plugin_dir)
-            self.plugin_registry.register(plugin)
-    
-    async def _load_lenses(self):
-        """載入 lenses"""
-        lens_configs = self.config.get("lenses", [])
-        
-        for config in lens_configs:
-            lens = self._create_lens(config)
-            self.lens_registry.register(lens)
+# loom/extensibility/plugin.py
+class PluginRegistry:
+    def register(self, plugin: LoomPlugin) -> None: ...
+
+    def install_into(self, session: object) -> dict[str, int]:
+        for plugin in self._plugins:
+            for tool_def in plugin.tools():
+                session.registry.register(tool_def)
+            for notifier in plugin.notifiers():
+                router = getattr(session, "_notifier_router", None)
+                if router is not None:
+                    router.register(notifier)
 ```
+
+`LoomSession.start()` 會建立 live session 所需的 registry、pipeline、notification router 等物件，再安裝內建或外部擴充貢獻的 tools / middleware / notifiers。
 
 ---
 

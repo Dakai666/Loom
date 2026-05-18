@@ -22,64 +22,22 @@ Loom 預設提供 6 種人格：
 ## Personalities 目錄結構
 
 ```
-loom/
-└── core/
-    └── personalities/
-        ├── archetypes.json      # 人格元資料
-        ├── adversarial.md       # 詳細人格定義
-        ├── architect.md
-        ├── barista.md
-        ├── minimalist.md
-        ├── operator.md
-        └── researcher.md
+personalities/
+├── adversarial.md
+├── architect.md
+├── barista.md
+├── minimalist.md
+├── operator.md
+└── researcher.md
 ```
+
+現行實作沒有 `archetypes.json` registry。人格是普通 Markdown 檔，`PromptStack` 透過 `[identity].personality` 或 runtime `switch_personality()` 載入。
 
 ---
 
 ## 人格格式
 
-### archetypes.json
-
-```json
-{
-  "adversarial": {
-    "name": "Adversarial",
-    "description": "喜歡質疑和挑戰的批判性思維者",
-    "strengths": ["安全性", "發現漏洞", "壓力測試"],
-    "tone": "挑戰性、直接、不留情面"
-  },
-  "architect": {
-    "name": "Architect",
-    "description": "結構化思維的系統設計師",
-    "strengths": ["架構設計", "簡潔表達", "邏輯清晰"],
-    "tone": "精準、專業、層次分明"
-  },
-  "barista": {
-    "name": "Barista",
-    "description": "友善輕鬆的咖啡師風格",
-    "strengths": ["日常對話", "情緒支持", "輕鬆氛圍"],
-    "tone": "溫暖、友善、休閒"
-  },
-  "minimalist": {
-    "name": "Minimalist",
-    "description": "極簡主義者，只說必要的",
-    "strengths": ["效率", "不浪費時間", "直接"],
-    "tone": "極簡、直接、零廢話"
-  },
-  "operator": {
-    "name": "Operator",
-    "description": "執行導向的任務執行者",
-    "strengths": ["任務完成", "步驟執行", "可靠性"],
-    "tone": "實用、清晰、面向行動"
-  },
-  "researcher": {
-    "name": "Researcher",
-    "description": "深入分析的研究者",
-    "strengths": ["分析", "評估", "全面性"],
-    "tone": "謹慎、詳細、客觀"
-  }
-}
-```
+每個 Markdown 檔本身就是完整人格定義；檔名 stem 就是 runtime 切換時使用的名稱，例如 `personalities/architect.md` 對應 `architect`。
 
 ---
 
@@ -346,7 +304,7 @@ Let me know if you need anything else! 😊
 
 ```bash
 # 在對話中用命令切換
-/set personality architect
+/personality architect
 
 # 查看當前人格
 /personality
@@ -400,22 +358,16 @@ response = await loom.chat(
 ...
 ```
 
-### 註冊新人格
+### 載入與切換新人格
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/personalities/registry.py
-class PersonalityRegistry:
-    def register(self, personality: Personality):
-        """註冊新人格"""
-        self._personalities[personality.id] = personality
-    
-    def load(self, personality_id: str) -> Personality:
-        """載入人格"""
-        if personality_id not in self._personalities:
-            raise ValueError(f"Unknown personality: {personality_id}")
-        return self._personalities[personality_id]
+# loom/core/cognition/prompt_stack.py
+stack.available_personalities()      # 掃描 personalities_dir 下的 *.md
+stack.switch_personality("analyst")  # 讀取 personalities/analyst.md
+stack.clear_personality()
 ```
+
+沒有獨立 registry class；新增人格就是新增 `.md` 檔，或在 `loom.toml` 的 `[identity]` 指向特定 personality 檔。
 
 ---
 

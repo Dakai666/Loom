@@ -150,13 +150,19 @@ class OperationHealth:
 
 Agent 可透過 `memory_health` 工具主動查詢健康狀態：
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/cognition/memory_health.py 中的 memory_health tool
-# （實為 MemoryHealthTracker 的 wrapper tool）
+# loom/core/memory/health.py
+report = tracker.snapshot()
+summary = report.render_summary()
+agent_context = report.render_agent_context()
+```
 
-result = await memory_health_tool(call)
-# 回傳 HealthReport.render_summary() 的字串
+tool 註冊不是獨立的 `memory_health.py` 模組；`MemoryGovernor` 建立 `MemoryHealthTracker`，`LoomSession.start()` 把相關 memory maintenance tools 註冊進 session registry。工具回傳的是 tracker 產生的健康摘要字串。
+
+```python
+# loom/core/memory/maintenance.py
+def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
+    ...
 ```
 
 平台在 session 啟動時注入 `render_agent_context()` 的內容（如果有 prior issues）。

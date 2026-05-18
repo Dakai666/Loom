@@ -6,52 +6,46 @@
 
 ## Notifier 結構
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
 ```python
-# loom/core/notification/adapters/base.py
-class Notifier(ABC):
-    """Notifier 抽象基類"""
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Notifier 名稱"""
-        pass
-    
-    @abstractmethod
-    async def send(self, notification: Notification) -> bool:
-        """發送通知"""
-        pass
+# loom/notify/router.py
+class BaseNotifier:
+    """Abstract base for all notification adapters."""
+    channel: str
+
+    async def send(self, notification: Notification) -> None:
+        raise NotImplementedError
 ```
 
 ---
 
 ## 步驟 1：創建 Notifier 類
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
-```python
-# loom/core/notification/adapters/slack.py
-from dataclasses import dataclass
-from loom.core.notification.adapters.base import Notifier
-from loom.core.notification.models import Notification, NotificationType
+以下 Slack 範例是自訂 plugin 內的 adapter，不是核心 repo 內建檔案。
 
-class SlackNotifier(Notifier):
+```python
+import aiohttp
+
+from loom.notify.router import BaseNotifier
+from loom.notify.types import Notification, NotificationType
+
+class SlackNotifier(BaseNotifier):
     """Slack 通知器"""
+
+    channel = "slack"
     
     def __init__(
         self,
         webhook_url: str,
-        channel: str | None = None,
+        slack_channel: str | None = None,
         username: str = "Loom Bot",
         icon_emoji: str = ":robot_face:",
     ):
-        self.name = "slack"
         self.webhook_url = webhook_url
-        self.channel = channel
+        self.slack_channel = slack_channel
         self.username = username
         self.icon_emoji = icon_emoji
     
-    async def send(self, notification: Notification) -> bool:
+    async def send(self, notification: Notification) -> None:
         """發送 Slack 通知"""
         
         payload = self._build_payload(notification)
@@ -61,7 +55,7 @@ class SlackNotifier(Notifier):
                 self.webhook_url,
                 json=payload,
             ) as response:
-                return response.status == 200
+                response.raise_for_status()
     
     def _build_payload(self, notification: Notification) -> dict:
         """構建 Slack payload"""
@@ -82,7 +76,7 @@ class SlackNotifier(Notifier):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": notification.message
+                    "text": notification.body
                 }
             }
         ]
@@ -93,8 +87,8 @@ class SlackNotifier(Notifier):
             "blocks": blocks,
         }
         
-        if self.channel:
-            payload["channel"] = self.channel
+        if self.slack_channel:
+            payload["channel"] = self.slack_channel
         
         if color:
             payload["attachments"] = [{
@@ -108,10 +102,10 @@ class SlackNotifier(Notifier):
         """根據類型獲取顏色"""
         return {
             NotificationType.INFO: "#36a5db",
-            NotificationType.SUCCESS: "#2ecc71",
-            NotificationType.WARNING: "#f39c12",
-            NotificationType.ERROR: "#e74c3c",
             NotificationType.CONFIRM: "#9b59b6",
+            NotificationType.INPUT: "#9b59b6",
+            NotificationType.ALERT: "#e74c3c",
+            NotificationType.REPORT: "#2ecc71",
         }.get(notification_type, "#95a5a6")
 ```
 
@@ -122,63 +116,55 @@ class SlackNotifier(Notifier):
 ### 程式化註冊
 
 ```python
-from loom.core.notification.registry import NotifierRegistry
+from loom.notify.router import NotificationRouter
 
 # 創建 Notifier
 slack = SlackNotifier(
     webhook_url="https://hooks.slack.com/services/xxx",
-    channel="#alerts"
+    slack_channel="#alerts"
 )
 
 # 註冊
-registry = NotifierRegistry.get_instance()
-registry.register(slack, channels=["critical", "default"])
+router = NotificationRouter()
+router.register(slack)
 ```
 
 ### loom.toml 配置
 
 ```toml
-[notification.channels]
-
-# Slack
-[notification.channels.slack]
-enabled = true
-type = "slack"
-webhook_url = "${SLACK_WEBHOOK_URL}"
-channel = "#alerts"
-username = "Loom Bot"
-icon_emoji = ":robot_face:"
+[notify]
+default_channel = "cli"
 ```
+
+核心設定目前只定義通知預設 channel。自訂 Slack token、channel 等設定通常由 plugin 自己讀取環境變數或自己的 config 區段。
 
 ---
 
 ## 步驟 3：測試 Notifier
 
-```bash
-# 測試通知發送
-loom notify test --notifier slack --message "Test message"
-```
+目前沒有通用 `loom notify test` CLI。測試自訂 notifier 時，建議在 plugin 單元測試中建立 `Notification` 並呼叫 `send()`，或把 notifier 註冊到 `NotificationRouter` 後用 `router.send(notification)` 做整合測試。
 
 ---
 
 ## 完整範例：Line Notify
 
-<!-- doc-integrity:ignore-block — code-block 中的 `# loom/...` path comment 為示意，與目前實際模組結構不同（待整章重寫）。 -->
+以下同樣是自訂 adapter 範例；核心 repo 尚未內建 Line Notify。
+
 ```python
-# loom/core/notification/adapters/line.py
-class LineNotifyNotifier(Notifier):
+class LineNotifyNotifier(BaseNotifier):
     """Line Notify 通知器"""
+
+    channel = "line_notify"
     
     def __init__(self, token: str):
-        self.name = "line_notify"
         self.token = token
         self.api_url = "https://notify-api.line.me/api/notify"
     
-    async def send(self, notification: Notification) -> bool:
+    async def send(self, notification: Notification) -> None:
         """發送 Line Notify"""
         
         payload = {
-            "message": f"\n{notification.title}\n{notification.message}"
+            "message": f"\n{notification.title}\n{notification.body}"
         }
         
         headers = {
@@ -191,8 +177,7 @@ class LineNotifyNotifier(Notifier):
                 data=payload,
                 headers=headers,
             ) as response:
-                data = await response.json()
-                return data.get("status") == 200
+                response.raise_for_status()
 ```
 
 ---
@@ -202,7 +187,7 @@ class LineNotifyNotifier(Notifier):
 新增 Notifier 的步驟：
 
 1. 創建 Notifier 子類
-2. 實現 `name` 屬性和 `send()` 方法
+2. 實現 `channel` 屬性和 `send()` 方法
 3. 構建通知 payload
-4. 註冊到 NotifierRegistry
-5. 在 loom.toml 配置或測試
+4. 註冊到 `NotificationRouter`，通常由 plugin 的 `notifiers()` 貢獻
+5. 在 plugin/config 中保存必要 token 或 webhook URL
