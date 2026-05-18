@@ -72,10 +72,13 @@ LLM 看的就是 `available_skills` 裡這段 description。不夠具體 → 觸
 - [ ] 依賴特定 repo 結構 → `<repo>/skills/<name>/`
 - [ ] 不確定 → 先放專案 `skills/`，需要再搬
 
-### 8. Bookend 紀律提醒
+### 8. Bookend 紀律（主動檢查，不是被動掃描）
 
-- [ ] SKILL.md 沒有引導 agent「忘記 unload_skill」（如「使用完畢繼續其他工作即可」這種寫法 → 改成「使用完畢呼叫 unload_skill 收尾」）
-- [ ] 工作流程裡如果會 `load_skill` 別的技能，也要記得對應的 `unload_skill`
+skill_review / weekly 報告的 episode window 仰賴 `load_skill` ↔ `unload_skill` 成對。SKILL.md 不只是「沒禁止 bookend」，要**主動引導**。
+
+- [ ] SKILL.md 工作流程的**最後一步**明寫「呼叫 `unload_skill <self>` 收尾」（不是留白讓 LLM 自己想起）
+- [ ] 如果工作流會 `load_skill` 別的技能，每個被載入的技能都有對應 `unload_skill`（順序：後進先出）
+- [ ] 沒有引導「使用完畢繼續其他工作即可」「自然結束即可」這類**鼓勵忘記收尾**的字眼
 
 ### 9. 與其他技能的關係
 
@@ -90,26 +93,28 @@ LLM 看的就是 `available_skills` 裡這段 description。不夠具體 → 觸
 
 ---
 
-## 跑一次 dry-run（強烈建議）
+## 跑一次 dry-run
 
-在 new session 拿這個技能跑一次：
+技能寫完、commit 進 disk 後就會出現在 `available_skills` 裡，**同一個對話 session** 也能立刻測——不需要切新帳號或新 session。
 
-1. 給一個典型觸發 prompt
-2. 看絲絲會不會自己 `load_skill <name>`（若否 → description 觸發訊號不夠強）
-3. 跑完一次 → 看產出是否符合 SKILL.md 寫的成功定義
-4. 不符合 → 回頭改 SKILL.md，**不要靠記憶補**
+理想路徑：
+
+1. commit SKILL.md → 確認 `available_skills` 出現新技能
+2. 用一個典型觸發 prompt（**不是**你剛剛聊過的內容，避開 context 污染）試一次
+3. 看絲絲會不會自己 `load_skill <name>`
+   - 不會 → description 觸發訊號不夠強，回頭改 frontmatter
+4. 載入後對著 SKILL.md 的「成功定義」逐項對照產出
+   - 不符合 → 回頭改 SKILL.md / contexts，**不要靠記憶補**
+5. dry-run 完別忘了 `unload_skill <name>`（bookend）
+
+**沒辦法馬上 dry-run 也別卡住**——commit 進 disk 是上線最低門檻；dry-run 是「下次該技能被觸發時順手做的事」，可以在 PR 描述裡標一行「待 dry-run 驗證」當提醒。
 
 ---
 
 ## 禁用事項
 
-- ❌ 寫完就 commit，沒跑過一次驗證
+- ❌ 寫完就 commit，連自己讀一遍都沒讀過
 - ❌ description 寫成文案而非觸發訊號集合
 - ❌ precondition 「順手加幾條」沒思考阻擋面
 - ❌ 多情境技能 SKILL.md 跟 contexts/ 寫不一致的觸發訊號
-
----
-
-## 觸發訊號回顧
-
-「我剛寫好 X 技能」「幫我看這個 SKILL.md 對不對」「這個技能可以上了嗎」「該不該加 precondition」「這個 description 夠清楚嗎」
+- ❌ dry-run 在剛聊完該技能設計的 session 裡跑（會被 context 污染，LLM 已經知道答案）

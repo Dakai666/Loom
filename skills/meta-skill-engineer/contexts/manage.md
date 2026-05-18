@@ -29,6 +29,8 @@ skill_review(
 
 或對應地對照 weekly 報告：`outputs/self_check/<latest>-skill-weekly.md`。
 
+**深挖某個 episode 時改用 `ledger_recall`**：skill_review 的 digest 把每個 episode 壓成摘要，當你想看「episode 7 那 30 個 tool call 完整序列」「同 turn 內使用者實際說了什麼」時，跳到 `ledger_recall(session_id=..., since=..., until=...)` 看原始事件，比 `skill_review max_events_per_episode` 開太大更精準。
+
 ### 第二步：解讀關鍵訊號
 
 | 訊號 | 在 digest 裡叫什麼 | 解讀 |
@@ -135,9 +137,3 @@ git history = 演化軌跡。不要 candidate / promote。
 - ❌ 看到 `exists_but_unused` 就建議刪 — 先問「這個技能本來預期什麼時候用？」
 - ❌ 改完 SKILL.md 沒 commit
 - ❌ 為了「乾淨」整批退役老技能 — 退役要逐個對話確認
-
----
-
-## 觸發訊號回顧
-
-「跑一下 skill_review」「weekly 顯示 X 技能該關注」「X 技能可以更好」「Y 技能該不該砍」「翻新 Z 技能」「拆 X」「為什麼 X muffled_run」
