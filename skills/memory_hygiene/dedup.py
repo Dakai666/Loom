@@ -272,8 +272,10 @@ async def main() -> int:
                         help="Path to memory.db (default: ~/.loom/memory.db).")
     parser.add_argument("--sample", type=int, default=10,
                         help="How many top clusters to print (default: 10).")
-    parser.add_argument("--cosine", type=float, default=0.95,
-                        help="Pass-2 embedding cosine threshold (default: 0.95).")
+    parser.add_argument("--cosine", type=float, default=0.85,
+                        help="Pass-2 embedding cosine threshold (default: 0.85, "
+                             "matching the live admission gate in PR #409 / #412 — "
+                             "what the gate would reject now is what cleanup deletes).")
     args = parser.parse_args()
 
     if not (args.analyze or args.apply):
