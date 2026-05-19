@@ -11,7 +11,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -376,6 +376,78 @@ class SemanticMemory:
         )
         rows = await cursor.fetchall()
         return [_row_to_entry(r) for r in rows]
+
+    async def find_near_duplicates(
+        self,
+        text: str,
+        *,
+        min_similarity: float = 0.85,
+        within_days: int | None = 7,
+        limit: int = 3,
+        exclude_key: str | None = None,
+    ) -> list[tuple[SemanticEntry, float]]:
+        """Embedding-based near-duplicate detection.
+
+        Returns recent semantic entries whose ``value`` has cosine similarity
+        ``>= min_similarity`` to *text*, ordered by similarity descending.
+        Returns an empty list when no embedding provider is wired or no
+        embedded entries fall in the window — never raises.
+
+        Used by ``memorize`` (cli/tools.py) to surface a hint when the agent
+        is about to write something very similar to a recent entry, per the
+        memory-hygiene reflection in #398.
+        """
+        if self._embeddings is None:
+            return []
+
+        try:
+            query_vectors = await self._embeddings.embed([text])
+        except Exception:
+            # Embedding outages should never block a write; just skip the hint.
+            return []
+        if not query_vectors:
+            return []
+        query_vec = query_vectors[0]
+
+        time_where = ""
+        time_params: tuple = ()
+        if within_days is not None:
+            cutoff = datetime.now(UTC) - timedelta(days=within_days)
+            time_where = " AND updated_at >= ?"
+            time_params = (cutoff.isoformat(),)
+
+        exclude_where = ""
+        exclude_params: tuple = ()
+        if exclude_key:
+            exclude_where = " AND key != ?"
+            exclude_params = (exclude_key,)
+
+        cursor = await self._db.execute(
+            f"""
+            SELECT {_SELECT_COLS},
+                   1.0 - vec_distance_cosine(embedding, ?) AS score
+            FROM semantic_entries
+            WHERE embedding IS NOT NULL{time_where}{exclude_where}
+            ORDER BY vec_distance_cosine(embedding, ?) ASC
+            LIMIT ?
+            """,
+            (
+                json.dumps(query_vec),
+                *time_params,
+                *exclude_params,
+                json.dumps(query_vec),
+                limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+
+        results: list[tuple[SemanticEntry, float]] = []
+        for r in rows:
+            score = r[11]
+            if score is None or score < min_similarity:
+                continue
+            results.append((_row_to_entry(r[:11]), float(score)))
+        return results
 
     async def list_by_prefix(self, prefix: str, limit: int = 10) -> list[SemanticEntry]:
         """Return entries whose key starts with *prefix*, newest first.
