@@ -864,6 +864,12 @@ def make_run_bash_tool(
                 raise PermissionError(
                     f"sandbox profile '{profile_name}' requires explicit authorization"
                 )
+            profile = sandbox.profiles[profile_name]
+            if profile.bypass_sandbox:
+                # Issue #402: profile opts out of srt entirely. Required for
+                # CLIs like `gh` that fail TLS through srt's HTTP CONNECT
+                # proxy. Authorization above still gates activation.
+                return cmd, profile_name
             settings_path = _srt_write_settings_file(
                 sandbox.merged_with_profile(profile_name),
                 workspace,

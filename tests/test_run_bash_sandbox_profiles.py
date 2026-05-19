@@ -230,3 +230,61 @@ def test_run_bash_input_schema_accepts_explicit_sandbox_profile(tmp_path, srt_fa
     props = tool.input_schema["properties"]
 
     assert "sandbox_profile" in props
+
+
+# ---------------------------------------------------------------------------
+# Issue #402 — bypass_sandbox profiles run outside srt entirely (but still
+# require scope authorization).
+# ---------------------------------------------------------------------------
+
+
+def _bypass_sandbox() -> SandboxSettings:
+    return SandboxSettings.from_config({
+        "backend": "srt",
+        "allow_write": ["."],
+        "allowed_domains": [],
+        "profiles": {
+            "github": {
+                "match_commands": ["gh"],
+                "bypass_sandbox": True,
+            },
+        },
+    })
+
+
+@pytest.mark.asyncio
+async def test_run_bash_bypass_profile_skips_srt_wrap_when_authorized(
+    tmp_path, srt_fakes,
+):
+    written, wrapped, launched = srt_fakes
+    tool = tools.make_run_bash_tool(tmp_path, sandbox=_bypass_sandbox())
+    call = _call(tool, "gh pr view 387")
+    _authorize_profile(tool, call)
+
+    result = await tool.executor(call)
+
+    assert result.success
+    assert result.metadata["sandbox_profile"] == "github"
+    # The base settings file is still written (sandbox is active for other
+    # commands in this session), but the matched bypass profile does NOT
+    # write a merged settings file or wrap the command.
+    assert len(written) == 1
+    assert wrapped == []
+    assert launched[0][0] == "gh pr view 387"
+
+
+@pytest.mark.asyncio
+async def test_run_bash_bypass_profile_still_requires_authorization(
+    tmp_path, srt_fakes,
+):
+    written, wrapped, launched = srt_fakes
+    tool = tools.make_run_bash_tool(tmp_path, sandbox=_bypass_sandbox())
+    call = _call(tool, "gh pr view 387")
+
+    result = await tool.executor(call)
+
+    assert not result.success
+    assert result.failure_type == "permission_denied"
+    assert "sandbox profile 'github'" in result.error
+    assert wrapped == []
+    assert launched == []

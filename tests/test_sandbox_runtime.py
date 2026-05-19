@@ -187,6 +187,31 @@ class TestProfileConfig:
                 },
             })
 
+    def test_profile_bypass_sandbox_defaults_to_false(self):
+        s = SandboxSettings.from_config({
+            "backend": "srt",
+            "profiles": {"github": {"match_commands": ["gh"]}},
+        })
+        assert s.profiles["github"].bypass_sandbox is False
+
+    def test_profile_bypass_sandbox_parses_when_set(self):
+        s = SandboxSettings.from_config({
+            "backend": "srt",
+            "profiles": {
+                "github": {"match_commands": ["gh"], "bypass_sandbox": True},
+            },
+        })
+        assert s.profiles["github"].bypass_sandbox is True
+
+    def test_profile_bypass_sandbox_rejects_non_bool(self):
+        with pytest.raises(ValueError, match="bypass_sandbox"):
+            SandboxSettings.from_config({
+                "backend": "srt",
+                "profiles": {
+                    "github": {"match_commands": ["gh"], "bypass_sandbox": "yes"},
+                },
+            })
+
 
 class TestProfileSelectionAndMerge:
     def _settings(self):
