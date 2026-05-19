@@ -1,14 +1,12 @@
 """
-Tests for Issue #104 — TUI/Discord confirm prompt y/s/a/N parity.
+Tests for Issue #104 — Discord confirm prompt y/s/a/N decision contract.
 
 P3 refactor (Issue #347):
-- Removed module-level pytest.skip — widget + view tests always run.
 - Standalone _ConfirmView double avoids importing loom.platform.discord.bot.
 - _make_confirm_fn logic tested via a pure-function fake (no discord imports).
 
-.. note:: TUI widget tests are kept for regression but TUI is in maintenance
-   mode — CLI/Discord are the primary channels going forward.  Formal
-   deprecation notice tracked in issue #XXX (to be created).
+TUI widget half of the parity suite was retired with the TUI subsystem
+itself; the Discord side documents the canonical confirm contract.
 """
 
 from __future__ import annotations
@@ -114,35 +112,6 @@ async def _make_confirm_fn(
 # Helpers
 # =====================================================================
 
-def _make_widget(future: "asyncio.Future[ConfirmDecision]"):
-    from loom.platform.cli.tui.components.interactive_widgets import InlineConfirmWidget
-    widget = object.__new__(InlineConfirmWidget)
-    widget._tool_name = "write_file"
-    widget._trust_label = "GUARDED"
-    widget._args_preview = "path=/tmp/x"
-    widget._future = future
-    widget._resolved = False
-    return widget
-
-
-def _press(widget, button_id: str) -> None:
-    event = MagicMock()
-    event.button.id = button_id
-    with patch.object(widget, "remove"):
-        widget.on_button_pressed(event)
-
-
-def _assert_result(future: "asyncio.Future[ConfirmDecision]", expected: ConfirmDecision) -> None:
-    """Assert future is done and holds the expected decision.
-
-    Guard against InvalidStateError: if the widget fails to call
-    set_result(), this produces a clear assertion failure instead of a
-    cryptic exception.
-    """
-    assert future.done(), f"Future not resolved; expected {expected}"
-    assert future.result() == expected
-
-
 def _make_call() -> ToolCall:
     return ToolCall(
         tool_name="write_file",
@@ -153,75 +122,7 @@ def _make_call() -> ToolCall:
 
 
 # =====================================================================
-# 1–7: TUI — InlineConfirmWidget
-# =====================================================================
-
-class TestInlineConfirmWidget:
-
-    def test_allow_resolves_once(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-allow")
-        _assert_result(future, ConfirmDecision.ONCE)
-        loop.close()
-
-    def test_lease_resolves_scope(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-lease")
-        _assert_result(future, ConfirmDecision.SCOPE)
-        loop.close()
-
-    def test_auto_resolves_auto(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-auto")
-        _assert_result(future, ConfirmDecision.AUTO)
-        loop.close()
-
-    def test_deny_resolves_deny(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-deny")
-        _assert_result(future, ConfirmDecision.DENY)
-        loop.close()
-
-    def test_unknown_button_falls_back_to_deny(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        _press(_make_widget(future), "btn-something-unexpected")
-        _assert_result(future, ConfirmDecision.DENY)
-        loop.close()
-
-    def test_second_press_ignored(self):
-        """Second button press on the SAME widget must not overwrite first decision.
-
-        Uses a single widget instance to be explicit that two sequential
-        presses target the same ``_resolved`` flag.
-        """
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        widget = _make_widget(future)
-        _press(widget, "btn-allow")
-        _press(widget, "btn-deny")
-        _assert_result(future, ConfirmDecision.ONCE)
-        loop.close()
-
-    def test_remove_called_once_on_press(self):
-        loop = asyncio.new_event_loop()
-        future: asyncio.Future[ConfirmDecision] = loop.create_future()
-        widget = _make_widget(future)
-        remove_mock = MagicMock()
-        with patch.object(widget, "remove", remove_mock):
-            event = MagicMock()
-            event.button.id = "btn-allow"
-            widget.on_button_pressed(event)
-        remove_mock.assert_called_once()
-        loop.close()
-
-
-# =====================================================================
-# 8–13: _ConfirmView — standalone decision-state
+# 1–6: _ConfirmView — standalone decision-state
 # =====================================================================
 
 class TestConfirmView:
@@ -263,7 +164,7 @@ class TestConfirmView:
 
 
 # =====================================================================
-# 14–19: _make_confirm_fn — channel routing + follow-up messages
+# 7–12: _make_confirm_fn — channel routing + follow-up messages
 # =====================================================================
 
 class TestMakeConfirmFn:

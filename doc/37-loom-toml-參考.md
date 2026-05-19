@@ -431,7 +431,6 @@ brave_search_key=your_brave_key       # optional
 loom chat
 loom chat --model claude-sonnet-4-6
 loom chat --resume                    # 續接上次 session
-loom chat --tui                       # TUI 介面
 
 # Discord bot（含 Autonomy）
 loom discord start --autonomy --channel <CHANNEL_ID>

@@ -133,13 +133,6 @@ loom chat --session <session_id>
 loom chat --name "Research run"
 ```
 
-TUI 模式在未指定 session 時會自動恢復最近一次 session：
-
-```bash
-loom chat --tui
-loom chat --tui --session <session_id>
-```
-
 ### 管理已保存 sessions
 
 ```bash

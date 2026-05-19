@@ -41,7 +41,7 @@ Loom is organized into seven layers. Every tool call — whether from a human pr
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Platform Layer                          │
-│               CLI · TUI · Discord Bot                        │
+│               CLI · Discord Bot                              │
 ├─────────────────────────────────────────────────────────────┤
 │                     Cognition Layer                          │
 │         LLM Router · Context Budget · Reflection API        │
@@ -172,7 +172,7 @@ write_file(path="doc/design.md")
     └─ on confirmation → grant stored → future calls within scope auto-approve
 ```
 
-Four response modes are available at every confirmation prompt: **approve once**, **scope lease (30-minute TTL)**, **permanent grant**, or **deny**. Active grants and their remaining TTL are always visible in the TUI budget panel or via `/scope` in any frontend.
+Four response modes are available at every confirmation prompt: **approve once**, **scope lease (30-minute TTL)**, **permanent grant**, or **deny**. Active grants and their remaining TTL are always visible via `/scope` in any frontend.
 
 ### OS-Level Sandbox (Optional)
 
@@ -353,19 +353,13 @@ An `ActionPlanner` maps the current trust level and context to a decision path. 
 
 ## Platforms
 
-### CLI & TUI
+### CLI
 
-The classic `loom chat` CLI gives you a full-featured interactive session in your terminal. The TUI (`loom chat --tui`) adds a dual-pane Textual interface with:
-
-- A live **Execution Dashboard** that visualizes the current `ExecutionEnvelope` — which actions are running, which are awaiting authorization, which completed or rolled back, organized by parallel level
-- A **Budget Panel** showing context token usage and all active scope grants with remaining TTL
-- A **Command Palette** (F1) for fuzzy-searching all actions
-- Inline confirmation widgets so authorization decisions never interrupt your flow with modal dialogs
-- History browsing across recent envelopes for post-turn inspection
-
-The CLI was rebuilt in v0.3.6 (Issue #236) with a persistent `LoomApp` instance, linear streaming output, a floating **TaskList panel**, **parallel envelope group panels** for same-turn parallel tool calls, Markdown reblit at turn boundaries, and a model badge footer.
+`loom chat` gives you a full-featured interactive session in your terminal. Rebuilt in v0.3.6 (Issue #236) with a persistent `LoomApp` instance (prompt_toolkit), linear streaming output, a floating **TaskList panel**, **parallel envelope group panels** for same-turn parallel tool calls, Markdown reblit at turn boundaries, and a model badge footer.
 
 `/sessions` launches a session picker with `Enter` to restore and `Escape` to cancel. `/name` and `--name` name the current session for easier resume.
+
+> The earlier Textual TUI (`loom chat --tui`) was retired on 2026-05-19 (PR #404). Source preserved under local `_archive/tui-retired-2026-05-19/`.
 
 ### Discord Bot
 
@@ -378,7 +372,7 @@ The Discord bot (`loom discord start`) turns any channel thread into a persisten
 - Configurable turn summaries (one-line compact or full Discord Embed)
 - Rich embed v2 with expressive emoji reactions; native slash command dispatch alongside text-prefix routing
 
-All three frontends — CLI, TUI, Discord — share full command parity.
+Both frontends — CLI and Discord — share full command parity.
 
 ---
 
@@ -405,7 +399,6 @@ LMSTUDIO_BASE_URL=http://localhost:1234/v1
 ```bash
 loom auth openai                  # Codex CLI login helper + OPENAI_API_KEY setup
 loom chat                          # interactive CLI
-loom chat --tui                    # TUI mode
 loom chat --model gpt-5.5          # OpenAI model
 loom chat --model codex/gpt-5.5    # Codex OAuth backend
 loom chat --model ollama/llama3.2  # local model
