@@ -140,6 +140,19 @@ class MemoryGovernor:
         self._admission_threshold: float = cfg.get("admission_threshold", 0.5)
         self._episodic_ttl_days: int = cfg.get("episodic_ttl_days", 30)
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
+        # Issue #411: time-windowed novelty lookback. Old code used
+        # ``list_recent(limit=50)`` — a position window that pushed yesterday's
+        # facts out of comparison range within hours on a busy session, letting
+        # the same idea sneak through gate after gate. Time window survives
+        # bursty writes; the 500-row cap protects perf on bloated DBs.
+        self._dup_window_days: int = cfg.get("dup_window_days", 7)
+        self._dup_lookback_limit: int = cfg.get("dup_lookback_limit", 500)
+        # Issue #411: embedding cosine threshold for semantic-similar duplicates.
+        # 0.85 matches PR #409's manual-memorize hint default so manual + auto
+        # paths agree on what "near-duplicate" means.
+        self._dup_similarity_threshold: float = cfg.get(
+            "dup_similarity_threshold", 0.85
+        )
         # Issue #281 P3: lifecycle throttle. Cross-caller gate so daemon-cron
         # and session.stop() paths skip when the previous run was recent.
         # Read from [memory.lifecycle] in session wiring; 0.0 disables.
@@ -271,18 +284,44 @@ class MemoryGovernor:
         Scoring criteria (each 0.0–1.0, averaged):
         - **Length score**: too short (<15 chars) = low, optimal 30-300 = high
         - **Info density**: ratio of non-stopword tokens
-        - **Novelty**: inverse of max similarity to existing recent facts
+        - **Novelty**: rejected when either the embedding cosine OR the lexical
+          Jaccard exceeds threshold against any recent fact in the time window.
 
         Facts scoring >= ``admission_threshold`` (default 0.5) are admitted.
+
+        Issue #411: novelty now combines embedding cosine (catches paraphrase)
+        with lexical Jaccard (catches near-exact + acts as fallback when the
+        embedding provider is unavailable). Lookback is a time window so
+        yesterday's facts are still comparable today.
         """
         results: list[AdmissionResult] = []
 
-        # Pre-fetch recent facts for novelty check
-        recent_facts = await self._semantic.list_recent(limit=50)
+        # Pre-fetch recent facts for lexical novelty check.
+        cutoff = datetime.now(UTC) - timedelta(days=self._dup_window_days)
+        recent_facts = await self._semantic.list_between(
+            since=cutoff, limit=self._dup_lookback_limit,
+        )
         recent_values = [f.value.lower() for f in recent_facts]
 
         for fact in candidate_facts:
-            score, reason = self._score_fact(fact, recent_values)
+            # Embedding-based semantic dup check — silently skipped when the
+            # embedding provider is missing or fails (find_near_duplicates
+            # returns [] in either case, so lexical path still runs).
+            semantic_dup = False
+            try:
+                near = await self._semantic.find_near_duplicates(
+                    fact,
+                    min_similarity=self._dup_similarity_threshold,
+                    within_days=self._dup_window_days,
+                    limit=1,
+                )
+                semantic_dup = bool(near)
+            except Exception:
+                pass
+
+            score, reason = self._score_fact(
+                fact, recent_values, semantic_dup=semantic_dup,
+            )
             admitted = score >= self._admission_threshold
             results.append(AdmissionResult(
                 fact=fact,
@@ -313,8 +352,15 @@ class MemoryGovernor:
         self,
         fact: str,
         recent_values: list[str],
+        *,
+        semantic_dup: bool = False,
     ) -> tuple[float, str]:
-        """Score a single candidate fact. Returns (score, reason)."""
+        """Score a single candidate fact. Returns (score, reason).
+
+        ``semantic_dup`` is computed by the caller via embedding cosine and
+        OR-combined with the lexical check below — either one tripping is
+        sufficient to mark the fact as duplicate.
+        """
         scores: dict[str, float] = {}
 
         # ── Length score ────────────────────────────────────────────────
@@ -337,7 +383,10 @@ class MemoryGovernor:
         info_words = [w for w in words if w not in _STOPWORDS and len(w) > 1]
         scores["info_density"] = min(1.0, len(info_words) / max(len(words), 1))
 
-        # ── Novelty (inverse max similarity to recent facts) ───────────
+        # ── Novelty: semantic OR lexical (Issue #411) ──────────────────
+        if semantic_dup:
+            return 0.2, "duplicate_semantic"
+
         fact_lower = fact.lower()
         max_overlap = 0.0
         for existing in recent_values:

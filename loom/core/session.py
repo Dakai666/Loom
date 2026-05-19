@@ -137,9 +137,31 @@ logger = logging.getLogger(__name__)
 
 COMPRESS_PROMPT = """\
 Below are tool calls from an agent session.
-Extract 3-7 concise, reusable facts or learnings that would be valuable in future sessions.
-Format each on its own line starting with "FACT: ".
-Ignore trivial or highly session-specific details.
+Extract 0-7 reusable INSIGHTS that would be valuable in future sessions.
+
+Three tiers of session content — only the middle tier belongs in semantic memory:
+
+  1. OPERATIONAL TRACE (do NOT emit): step-by-step records of what happened
+     this session — "ran tool X with args Y", "called Z before W", "diary
+     write succeeded after list_dir". These are SOPs for *this* run; the
+     episodic log already keeps them.
+
+  2. INSIGHT (EMIT as FACT): durable, reusable knowledge that future sessions
+     would benefit from — non-obvious user preferences, project facts that
+     survive across sessions, lessons learned from failures, conceptual
+     understanding. Should still be true and useful next week.
+
+  3. SNAPSHOT (do NOT emit here): in-progress work state, current TODO,
+     "next we should do X". That belongs in pursuit trackers, not semantic.
+
+Quality bar: if a fact reads like "always do X before Y in this kind of
+operation", that's almost always tier 1 (operational), not tier 2. Insights
+are about *what is true*, not *what procedure to follow*.
+
+It is fine to emit 0 facts if the session contains no genuine insights.
+Do NOT pad to reach a minimum count.
+
+Format each insight on its own line starting with "FACT: ".
 IMPORTANT: Write every FACT in the same language as the session content below.
 
 Session log:
@@ -194,14 +216,17 @@ async def compress_session(
     )
 
     raw = response.text or ""
+    # Issue #411 review: the old "no FACT: prefix → use raw text as one fact"
+    # fallback turned compliant zero-insight responses ("No reusable
+    # insights found.") into admissible semantic facts. With COMPRESS_PROMPT
+    # now explicitly permitting 0 facts, that fallback is actively harmful —
+    # any response without a FACT: prefix is treated as the model declaring
+    # zero insights.
     facts = [
         line[len("FACT:") :].strip()
         for line in raw.splitlines()
         if line.strip().startswith("FACT:")
     ]
-    # Fallback: if the LLM didn't use FACT: prefixes, save the raw text as one fact.
-    if not facts and raw.strip():
-        facts = [raw.strip()[:800]]
 
     # Issue #43: Admission gate — filter facts through governance
     if governor is not None and facts:
@@ -225,12 +250,13 @@ async def compress_session(
         else:
             await semantic.upsert(entry)
 
-    # Soft-delete: mark the rows we read as compressed so they aren't
-    # re-processed on the next trigger, but keep the content on disk for
-    # audit and potential backfill (the admission gate or the LLM may drop
-    # something that later turns out to matter).
-    if facts:
-        await episodic.mark_compressed([e.id for e in entries])
+    # Soft-delete: mark every entry we sent to the LLM as compressed,
+    # regardless of whether facts survived parsing + admission. Previously
+    # this only ran when ``facts`` was non-empty, which meant duplicate-heavy
+    # or zero-insight sessions kept re-paying the LLM cost on every trigger
+    # (issue #411 review). The episodic rows are soft-deleted, not removed,
+    # so audit + recovery still work via TTL-bounded retention.
+    await episodic.mark_compressed([e.id for e in entries])
 
     # Issue #142: record the yield ratio so a silently degrading extractor
     # (facts << entries) surfaces as an anomaly on the next turn boundary.
