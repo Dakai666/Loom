@@ -42,6 +42,10 @@ ALLOWED_EXCEPTIONS: list[tuple[str, str]] = [
     # coupling: those tool factories belong in loom.core.tools and will be
     # migrated in a follow-up (issue #69).
     ("loom.core.session", "loom.platform.cli.tools"),
+    # Same transitional coupling as above — skill tool factories
+    # extracted from cli.tools into cli.skill_tools during audit-B (#399).
+    # Both will move to loom.core.tools together under issue #69.
+    ("loom.core.session", "loom.platform.cli.skill_tools"),
     # PR-A3 (#236): _confirm_tool_cli renders an arrow-key widget defined
     # in loom.platform.cli.ui (select_prompt). Same architectural smell as
     # the cli.tools exception above — interactive UI logic ideally lives
