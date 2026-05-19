@@ -96,12 +96,12 @@ Codex OAuth access token；若 Codex backend 拒絕且 `.env` 有 `OPENAI_API_KE
 
 ## 對話中 HITL 命令
 
-在 `loom chat` 或 TUI 的輸入框中即時輸入：
+在 `loom chat` 的輸入框中即時輸入：
 
 | 命令 | 功能 |
 |------|------|
 | `/pause` | 切換 HITL 模式：agent 在每批工具執行完畢後暫停，等候人類決策再繼續下一個 LLM 回合 |
-| `/stop` | 立即取消當前 turn，不等候邊界；部分輸出保留（相當於 TUI 的 Escape）|
+| `/stop` | 立即取消當前 turn，不等候邊界；部分輸出保留（相當於 Esc）|
 | `/new` | 結束當前 session，開始全新 session |
 | `/think` | 開啟上一回覆的完整推理鏈（ThinkModal）|
 | `/compact` | 手動觸發對話上下文壓縮 |
@@ -366,8 +366,7 @@ loom tool info read_file    # 查看 read_file 詳細資訊
 
 | 命令 | 功能 |
 |------|------|
-| `loom chat` | 互動式聊天（TUI/CLI） |
-| `loom chat --tui` | Textual TUI 介面 |
+| `loom chat` | 互動式 CLI 聊天 |
 | `/pause` | HITL 模式：批次工具執行後暫停等候確認 |
 | `/stop` | 立即取消當前 turn |
 | `/new` | 開始全新 session |
