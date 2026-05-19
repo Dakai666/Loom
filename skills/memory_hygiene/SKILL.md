@@ -86,6 +86,31 @@ Loom 記憶系統的衛生維護技能。作為 memory-native 框架，記憶品
 - **矛盾解決**：呈現矛盾雙方，讓使用者決定保留哪個
 - **技能復健**：低信心技能建議觸發 meta-skill-engineer 重新評估
 
+**Tooling — `dedup.py`**：當 semantic 條目數爬到上千、明顯出現「同句不同寫法」的重複時，這個技能附的 `dedup.py` 是現成工具：
+
+```bash
+# 永遠先備份（precondition check 也會擋）
+cp ~/.loom/memory.db ~/.loom/backups/memory.db.$(date +%Y%m%d).bak
+
+# 看現況（read-only）
+python skills/memory_hygiene/dedup.py --analyze
+
+# 比較不同 threshold 的清理量
+python skills/memory_hygiene/dedup.py --analyze --cosine 0.90
+python skills/memory_hygiene/dedup.py --analyze --cosine 0.95
+
+# 確定後 apply（預設 cosine 0.85，與 PR #409/#412 寫端門檻一致）
+python skills/memory_hygiene/dedup.py --apply --backup-confirmed
+```
+
+策略：
+- 只動 `source LIKE 'session:%'` 的 auto-compress 條目，**不碰 `memorize`**（你顯式 save 的有判斷在）
+- Pass 1：完全相同字串的 dup，保留最舊一筆
+- Pass 2：embedding cosine ≥ threshold 的 dup，older-wins 規則（被刪的條目一定有一條更舊的等價物存在）
+- 走 `SemanticMemory.delete` framework API，不繞過 governance / audit
+
+首次套用紀錄：audit-A r3（2026-05-19），cosine 0.85，6596 → 5688（-908，-13.8%）。報告：`outputs/doc/audit-a-r3-report.md`。
+
 ### 階段 4：報告與建議
 
 **目標：輸出清理報告並給出長期建議**
