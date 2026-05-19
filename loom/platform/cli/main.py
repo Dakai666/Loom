@@ -2,8 +2,8 @@
 Loom CLI — thin platform wrapper.
 
 ``LoomSession`` and all session logic live in ``loom.core.session``.
-This module provides the click command group, TUI integration, and
-Rich-rendered streaming output that are specific to the terminal interface.
+This module provides the click command group and Rich-rendered streaming
+output that are specific to the terminal interface.
 
 Usage
 -----
@@ -130,29 +130,27 @@ def cli() -> None:
 @cli.command()
 @click.option("--model", default=None, show_default=True)
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
-@click.option("--tui", is_flag=True, default=False, help="Use Textual TUI interface.")
 @click.option("--resume", is_flag=True, default=False, help="Resume the most recent session.")
 @click.option("--session", "resume_id", default=None, metavar="ID", help="Resume a specific session by ID.")
 @click.option("--name", "name", default=None, metavar="TITLE",
               help="Set a title on the new (or resumed) session for easier identification.")
-def chat(model: str, db: str, tui: bool, resume: bool, resume_id: str | None,
+def chat(model: str, db: str, resume: bool, resume_id: str | None,
          name: str | None) -> None:
     # ==============================================================
     # SECTION 2 — CHAT (chat, _chat)
     # ==============================================================
     """Start an interactive agent session."""
-    asyncio.run(_resolve_and_chat(model, db, tui, resume, resume_id, name))
+    asyncio.run(_resolve_and_chat(model, db, resume, resume_id, name))
 
 
 async def _resolve_and_chat(
     model: str,
     db: str,
-    tui: bool,
     resume: bool,
     resume_id: str | None,
     name: str | None = None,
 ) -> None:
-    """Resolve --resume / --session flags, then launch the appropriate interface."""
+    """Resolve --resume / --session flags, then launch the CLI chat loop."""
     if model is None:
         from loom.core.cognition.router import get_default_model
         model = get_default_model()
@@ -170,33 +168,30 @@ async def _resolve_and_chat(
         else:
             console.print("[loom.muted]No sessions found — starting a new session.[/loom.muted]")
 
-    if tui:
-        await _chat_tui(model, db, resume_session_id=resolved_id)
-    else:
-        # Issue #260: CLI session switch loop — ``/sessions`` and
-        # ``/new`` set ``session._cli_next_target`` and then exit the
-        # LoomApp. ``_chat`` returns that target string; we restart with
-        # the requested session. ``--name`` is applied only on first
-        # iteration (subsequent switches inherit whatever title is in DB)
-        next_target: str | None = resolved_id
-        init_title: str | None = name
-        while True:
-            switch_to = await _chat(
-                model, db,
-                resume_session_id=next_target,
-                init_title=init_title,
-            )
-            # ``--name`` is intentionally a one-shot: it labels the
-            # session the user just opened, not every session they
-            # might subsequently switch to via ``/sessions``. Each
-            # post-switch session keeps whatever title is in the DB
-            init_title = None
-            if switch_to is None:
-                return
-            if switch_to == "__new__":
-                next_target = None
-            else:
-                next_target = switch_to
+    # Issue #260: CLI session switch loop — ``/sessions`` and ``/new``
+    # set ``session._cli_next_target`` and then exit the LoomApp.
+    # ``_chat`` returns that target string; we restart with the requested
+    # session. ``--name`` is applied only on first iteration (subsequent
+    # switches inherit whatever title is in DB).
+    next_target: str | None = resolved_id
+    init_title: str | None = name
+    while True:
+        switch_to = await _chat(
+            model, db,
+            resume_session_id=next_target,
+            init_title=init_title,
+        )
+        # ``--name`` is intentionally a one-shot: it labels the session
+        # the user just opened, not every session they might subsequently
+        # switch to via ``/sessions``. Each post-switch session keeps
+        # whatever title is in the DB.
+        init_title = None
+        if switch_to is None:
+            return
+        if switch_to == "__new__":
+            next_target = None
+        else:
+            next_target = switch_to
 
 
 async def _chat(
@@ -689,7 +684,7 @@ def _scope_command_core(
     perm: Any, args: str, emit: "Callable[[str], None]",
 ) -> None:
     """
-    Shared /scope logic for CLI and TUI.
+    Shared /scope logic for CLI and Discord.
 
     ``emit`` receives plain-text messages (no Rich markup) — the caller
     is responsible for rendering.
@@ -1035,8 +1030,8 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         console.print(f"[loom.warning]  Invalid choice: {choice!r}[/loom.warning]")
 
     elif command == "/new":
-        # Mirrors TUI's behaviour — start a fresh session. Outer loop
-        # picks up the marker and restarts with no resume_session_id
+        # Start a fresh session — outer loop picks up the sentinel and
+        # restarts with no resume_session_id.
         session._cli_next_target = "__new__"  # type: ignore[attr-defined]
 
     elif command == "/name":
@@ -1152,646 +1147,6 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
     else:
         console.print(f"[loom.muted]Unknown command '{command}'. Type /help for help.[/loom.muted]")
 
-
-# ---------------------------------------------------------------------------
-# Textual TUI integration
-# ---------------------------------------------------------------------------
-
-
-class LoomChatApp:
-    """
-    Subclass of LoomApp that wires a live LoomSession to the Textual component
-    tree.  Instantiated lazily to avoid importing Textual at module load time
-    # ==============================================================
-    # SECTION 3 — CHAT TUI (LoomChatApp)
-    # ==============================================================
-    (keeps `loom chat` startup fast for users without the TUI).
-    """
-
-    @staticmethod
-    def create(session: "LoomSession") -> "Any":
-        """Return a configured LoomApp instance bound to *session*."""
-        from loom.platform.cli.tui import LoomApp
-        from loom.platform.cli.tui.events import (
-            TurnStart,
-            TextChunk as TuiChunk,
-            ToolBegin as TuiToolBegin,
-            ToolEnd as TuiToolEnd,
-            TurnDone as TuiTurnDone,
-            TurnPaused as TuiTurnPaused,
-            ThinkCollapsed as TuiThinkCollapsed,
-            ActionStateChange as TuiActionStateChange,
-            ActionRolledBack as TuiActionRolledBack,
-            EnvelopeStarted as TuiEnvelopeStarted,
-            EnvelopeUpdated as TuiEnvelopeUpdated,
-            EnvelopeCompleted as TuiEnvelopeCompleted,
-            GrantsUpdate as TuiGrantsUpdate,
-            GrantInfo as TuiGrantInfo,
-        )
-        from loom.platform.cli.ui import (
-            TextChunk,
-            ThinkCollapsed,
-            ToolBegin,
-            ToolEnd,
-            TurnDone,
-            TurnPaused,
-            ActionStateChange,
-            ActionRolledBack,
-        )
-        from loom.core.events import (
-            EnvelopeStarted,
-            EnvelopeUpdated,
-            EnvelopeCompleted,
-            GrantsSnapshot,
-            ReasoningContinuation,
-            TierChanged,
-            TierExpiryHint,
-        )
-
-        class _App(LoomApp):
-            def __init__(self) -> None:
-                super().__init__(
-                    model=session.model,
-                    db_path=str(session._store.path),
-                )
-                self._session = session
-                # HITL: the worker awaits this; on_loom_app_hitl_decision sets it
-                self._hitl_event: asyncio.Event = asyncio.Event()
-                self._hitl_decision: str | None = None
-
-            def on_loom_app_hitl_decision(self, msg: Any) -> None:
-                self._hitl_decision = msg.decision
-                self._hitl_event.set()
-
-            from textual import work
-            @work(exclusive=True)
-            async def action_time_travel(self) -> None:
-                async with self._session._store.connect() as conn:
-                    cursor = await conn.execute(
-                        "SELECT turn_index, role, content FROM session_log WHERE session_id = ? ORDER BY turn_index ASC, id ASC",
-                        (self._session.session_id,)
-                    )
-                    rows = await cursor.fetchall()
-
-                from collections import defaultdict
-                turns = defaultdict(list)
-                for t_idx, role, content in rows:
-                    if not content: continue
-                    cont = str(content)
-                    if role == "tool":
-                        cont = f"[tool] {cont[:40]}"
-                    turns[t_idx].append((role, cont.strip()))
-
-                turns_data = []
-                for t_idx, items in sorted(turns.items()):
-                    user_text = ""
-                    agent_texts = []
-                    for r, c in items:
-                        if r == "user":
-                            user_text = c[:80].replace("\n", " ")
-                        else:
-                            agent_texts.append(c[:60].replace("\n", " "))
-                    
-                    sum_text = f"[bold loom.warning]Turn {t_idx}[/] [loom.accent]{user_text}[/]"
-                    if agent_texts:
-                        sum_text += f"\n   [loom.muted]↳ {' | '.join(agent_texts)[:120]}[/]"
-                    
-                    turns_data.append((t_idx, sum_text))
-                
-                if not turns_data:
-                    self.notify("No history to time travel.", severity="information")
-                    return
-
-                from loom.platform.cli.tui.components.minimap_modal import MiniMapModal
-                target_turn = await self.push_screen_wait(MiniMapModal(turns_data))
-                
-                if target_turn is not None:
-                    old_id = self._session.session_id
-                    import uuid
-                    new_id = f"{old_id}-fork-{uuid.uuid4().hex[:6]}"
-                    async with self._session._store.connect() as conn:
-                        from loom.core.memory.session_log import SessionLog
-                        await SessionLog(conn).fork_session(old_id, new_id, target_turn)
-                    
-                    self.workers.cancel_all()
-                    self.exit(new_id)
-
-            async def on_mount(self) -> None:
-                """Replay history on startup and seed the Budget panel."""
-                from loom.platform.cli.tui.components.message_list import (
-                    MessageList,
-                    Role,
-                )
-                from textual.css.query import NoMatches
-
-                # Replay session history if resuming
-                if session._resume and session.messages:
-                    try:
-                        msg_list = self.query_one("#message-list", MessageList)
-                        for msg in session.messages:
-                            role = msg.get("role")
-                            content = msg.get("content", "")
-                            if not content:
-                                continue
-                            if role == "user":
-                                msg_list.add_message(Role.USER, content)
-                            elif role == "assistant":
-                                msg_list.add_message(Role.ASSISTANT, content)
-                    except (NoMatches, Exception):
-                        pass  # TUI not fully composed yet — skip replay
-
-                # Seed Budget panel with current token state
-                try:
-                    from loom.platform.cli.tui.components import WorkspacePanel
-                    frac = session.budget.usage_fraction
-                    used = session.budget.used_tokens
-                    total = session.budget.total_tokens
-                    ws = self.query_one("#workspace-panel", WorkspacePanel)
-                    ws.update_budget(
-                        fraction=frac,
-                        used_tokens=used,
-                        max_tokens=total,
-                        input_tokens=0,
-                        output_tokens=0,
-                    )
-                except Exception:
-                    pass  # budget not ready yet — panel stays at defaults
-
-            async def on_unmount(self) -> None:
-                await self._session.stop()
-
-            def on_input_area_submit(self, event: Any) -> None:
-                """Override LoomApp relay — drive session via Textual worker."""
-                text = event.text.strip()
-                if not text:
-                    return
-                # exclusive=True cancels any in-progress turn; exit_on_error=False
-                # keeps the app alive if _run_turn raises unexpectedly.
-                self.run_worker(
-                    self._run_turn(text),
-                    exclusive=True,
-                    exit_on_error=False,
-                )
-
-            async def _run_turn(self, text: str) -> None:
-                try:
-                    if text.startswith("/"):
-                        await _handle_slash_tui(text, self._session, self)
-                        return
-
-                    await self.dispatch_stream_event(
-                        TurnStart(
-                            user_input=text,
-                            context_pct=self._session.budget.usage_fraction,
-                        )
-                    )
-
-                    # call_id → write path (for artifact tracking)
-                    _pending_writes: dict[str, str] = {}
-                    # call_id → primary arg preview (for ActivityLog args column)
-                    _tool_args_preview: dict[str, str] = {}
-
-                    async for ev in self._session.stream_turn(text):
-                        if isinstance(ev, TextChunk):
-                            await self.dispatch_stream_event(TuiChunk(text=ev.text))
-                        elif isinstance(ev, ThinkCollapsed):
-                            await self.dispatch_stream_event(
-                                TuiThinkCollapsed(summary=ev.summary, full=ev.full)
-                            )
-                        elif isinstance(ev, ToolBegin):
-                            # Capture primary arg for ActivityLog display
-                            _primary_arg = ""
-                            if ev.args:
-                                first_val = next(iter(ev.args.values()), "")
-                                if isinstance(first_val, str):
-                                    _primary_arg = first_val[:40].replace("\n", "↵")
-                            _tool_args_preview[ev.call_id] = _primary_arg
-
-                            await self.dispatch_stream_event(
-                                TuiToolBegin(
-                                    name=ev.name,
-                                    args=ev.args,
-                                    call_id=ev.call_id,
-                                )
-                            )
-                            if ev.name == "write_file":
-                                _pending_writes[ev.call_id] = ev.args.get("path", "")
-                        elif isinstance(ev, ToolEnd):
-                            # Patch args_preview into the ToolEnd event for ActivityLog
-                            _args_preview = _tool_args_preview.pop(ev.call_id, "")
-                            _tui_tool_end = TuiToolEnd(
-                                name=ev.name,
-                                success=ev.success,
-                                output=ev.output,
-                                duration_ms=ev.duration_ms,
-                                call_id=ev.call_id,
-                            )
-                            # Stash preview on the event object so app._on_tool_end can use it
-                            _tui_tool_end._args_preview = _args_preview  # type: ignore[attr-defined]
-                            await self.dispatch_stream_event(_tui_tool_end)
-
-                            if ev.name == "write_file" and ev.success:
-                                from loom.platform.cli.tui.components import ArtifactState
-                                path = _pending_writes.pop(ev.call_id, "")
-                                if path:
-                                    self.add_artifact(path, ArtifactState.MODIFIED)
-                        elif isinstance(ev, TurnPaused):
-                            # Show PauseModal and wait for the user's decision
-                            self._hitl_event.clear()
-                            self._hitl_decision = None
-                            await self.dispatch_stream_event(
-                                TuiTurnPaused(tool_count_so_far=ev.tool_count_so_far)
-                            )
-                            await self._hitl_event.wait()
-                            decision = self._hitl_decision
-                            if decision == "__cancel__":
-                                self._session.cancel()
-                            elif decision:
-                                self._session.resume_with(decision)
-                            else:
-                                self._session.resume()
-                        elif isinstance(ev, TurnDone):
-                            budget = self._session.budget
-                            await self.dispatch_stream_event(
-                                TuiTurnDone(
-                                    tool_count=ev.tool_count,
-                                    input_tokens=ev.input_tokens,
-                                    output_tokens=ev.output_tokens,
-                                    elapsed_ms=ev.elapsed_ms,
-                                    context_pct=budget.usage_fraction,
-                                    used_tokens=budget.used_tokens,
-                                    max_tokens=budget.total_tokens,
-                                    think_text=self._session._last_think,
-                                    stop_reason=ev.stop_reason,
-                                )
-                            )
-                        elif isinstance(ev, ActionStateChange):
-                            await self.dispatch_stream_event(
-                                TuiActionStateChange(
-                                    action_id=ev.action_id,
-                                    tool_name=ev.tool_name,
-                                    call_id=ev.call_id,
-                                    old_state=ev.old_state,
-                                    new_state=ev.new_state,
-                                    reason=ev.reason,
-                                )
-                            )
-                        elif isinstance(ev, ActionRolledBack):
-                            await self.dispatch_stream_event(
-                                TuiActionRolledBack(
-                                    action_id=ev.action_id,
-                                    tool_name=ev.tool_name,
-                                    call_id=ev.call_id,
-                                    rollback_success=ev.rollback_success,
-                                    message=ev.message,
-                                )
-                            )
-                        elif isinstance(ev, EnvelopeStarted):
-                            await self.dispatch_stream_event(
-                                TuiEnvelopeStarted(envelope=ev.envelope)
-                            )
-                        elif isinstance(ev, EnvelopeUpdated):
-                            await self.dispatch_stream_event(
-                                TuiEnvelopeUpdated(envelope=ev.envelope)
-                            )
-                        elif isinstance(ev, EnvelopeCompleted):
-                            await self.dispatch_stream_event(
-                                TuiEnvelopeCompleted(envelope=ev.envelope)
-                            )
-                        elif isinstance(ev, ReasoningContinuation):
-                            # Issue #271: surface as a console line via
-                            # patch_stdout so the user sees the agent
-                            # extending reasoning rather than stalling.
-                            console.print(
-                                f"[dim]🤔 {ev.display_text} "
-                                f"(延伸 {ev.attempt}/{ev.max_attempts})[/dim]"
-                            )
-                        elif isinstance(ev, TierChanged):
-                            # Issue #276: tier moved — refresh footer + log.
-                            arrow = "⇪" if ev.to_tier > ev.from_tier else "⇩"
-                            console.print(
-                                f"[dim]{arrow} Tier {ev.from_tier} → {ev.to_tier} · "
-                                f"{ev.to_model}  ({ev.source}: {ev.reason})[/dim]"
-                            )
-                            self.footer.model = ev.to_model
-                            self.footer.tier = ev.to_tier
-                            self.footer.tier_expiry_hint_active = False
-                            self.invalidate()
-                        elif isinstance(ev, TierExpiryHint):
-                            console.print(
-                                f"[yellow]⏳ Tier {ev.tier} 已跑 "
-                                f"{ev.turns_used} turns；可考慮 /tier 1 降級。[/yellow]"
-                            )
-                            self.footer.tier_expiry_hint_active = True
-                            self.footer.turns_at_tier = ev.turns_used
-                            self.invalidate()
-                        elif isinstance(ev, GrantsSnapshot):
-                            tui_grants = [
-                                TuiGrantInfo(
-                                    grant_id=g.grant_id,
-                                    tool_name=g.tool_name,
-                                    selector=g.selector,
-                                    source=g.source,
-                                    expires_at=g.expires_at,
-                                )
-                                for g in ev.grants
-                            ]
-                            await self.dispatch_stream_event(
-                                TuiGrantsUpdate(
-                                    active_count=ev.active_count,
-                                    next_expiry_secs=ev.next_expiry_secs,
-                                    grants=tui_grants,
-                                )
-                            )
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    import traceback as _tb
-
-                    _log = Path.home() / ".loom" / "tui_error.log"
-                    _log.parent.mkdir(parents=True, exist_ok=True)
-                    with open(_log, "a") as _f:
-                        _f.write(_tb.format_exc())
-                    self.notify(
-                        f"Error: {exc}  (details in ~/.loom/tui_error.log)",
-                        severity="error",
-                        timeout=20,
-                    )
-
-        return _App()
-
-
-async def _handle_slash_tui(cmd: str, session: "LoomSession", app: Any) -> None:
-    """Slash command handler for TUI mode — sends feedback via app.notify()."""
-    parts = cmd.split(maxsplit=1)
-    command = parts[0]
-    arg = parts[1].strip() if len(parts) > 1 else ""
-
-    if command == "/model":
-        if not arg:
-            providers = ", ".join(session.router.providers)
-            app.notify(
-                f"Model: {session.model}  |  providers: {providers}\n"
-                "Prefixes: MiniMax-*  claude-*  gpt-*  openai/<model>  codex/<model>  deepseek-*  openrouter/<vendor>/<model>  ollama/<name>  lmstudio/<name>"
-            )
-        else:
-            ok = session.set_model(arg)
-            if ok:
-                app.notify(f"Model switched to: {arg}")
-                # Mirror the change into the footer badge so the bottom
-                # region stops showing the old model until next turn.
-                app.footer.model = arg
-                app.invalidate()
-            else:
-                app.notify(
-                    f"Cannot switch to '{arg}' — prefix not recognised or provider "
-                    "not registered (check .env key or loom.toml [providers.*]).",
-                    severity="error",
-                )
-
-    elif command == "/tier":
-        # Issue #276: tier system manual control (TUI variant).
-        if not session._tier_models:
-            app.notify(
-                "Tier system not configured. Add [cognition.tiers] to loom.toml.",
-                severity="warning",
-            )
-        elif not arg:
-            active = session._active_tier()
-            model = session._active_model()
-            sticky = session._sticky_tier
-            sticky_str = f"sticky Tier {sticky}" if sticky is not None else "default"
-            tiers = "\n".join(
-                f"  Tier {t}: {session._tier_models[t]}"
-                + (" ← active" if t == active else "")
-                for t in sorted(session._tier_models)
-            )
-            app.notify(
-                f"Active: Tier {active} · {model}  ({sticky_str}, "
-                f"{session._turns_at_current_tier} turns)\n{tiers}"
-            )
-        else:
-            try:
-                target_tier = int(arg.split()[0])
-            except (TypeError, ValueError):
-                app.notify(f"Invalid tier '{arg}'", severity="error")
-            else:
-                if target_tier not in session._tier_models:
-                    app.notify(f"Tier {target_tier} not configured", severity="error")
-                else:
-                    new_sticky = None if target_tier == session._default_tier else target_tier
-                    ev = session._set_sticky_tier(
-                        new_sticky, reason="user /tier", source="user",
-                    )
-                    if ev is not None:
-                        session._lifecycle_events.put_nowait(ev)
-                    app.notify(
-                        f"Tier → {session._active_tier()} · {session._active_model()}"
-                    )
-                    app.footer.model = session._active_model()
-                    app.invalidate()
-
-    elif command == "/personality":
-        if not arg:
-            p = session.current_personality
-            avail = session._stack.available_personalities()
-            app.notify(
-                f"Active: {p or '(none)'}  |  Available: {', '.join(avail) or '(none)'}"
-            )
-        elif arg == "off":
-            session.switch_personality("off")
-            app.notify("Personality cleared.")
-        else:
-            ok = session.switch_personality(arg)
-            if ok:
-                app.notify(f"Personality → {arg}")
-            else:
-                avail = session._stack.available_personalities()
-                app.notify(
-                    f"Unknown personality '{arg}'. Available: {', '.join(avail) or '(none)'}",
-                    severity="error",
-                )
-
-    elif command == "/compact":
-        pressure_str = session.budget.format_pressure()
-        app.notify(f"Compacting context ({pressure_str} used)…")
-        await session._smart_compact()
-        app.notify("Context compacted.")
-
-    elif command == "/auto":
-        if not session._strict_sandbox:
-            app.notify(
-                "/auto requires strict_sandbox = true in loom.toml. "
-                "Without workspace confinement, auto-approving run_bash "
-                "would grant unrestricted shell access.",
-                severity="warning",
-                timeout=6,
-            )
-        else:
-            session.perm.exec_auto = not session.perm.exec_auto
-            state = "on" if session.perm.exec_auto else "off"
-            msg = (
-                f"Exec auto-approve: {state} — run_bash pre-authorized within workspace. "
-                "Absolute paths that escape the workspace still require confirmation."
-                if session.perm.exec_auto
-                else f"Exec auto-approve: {state} — run_bash will confirm every call."
-            )
-            app.notify(msg, timeout=5)
-
-    elif command.startswith("/scope"):
-        _scope_args = command[len("/scope"):].strip()
-        _scope_command_core(
-            session.perm, _scope_args,
-            lambda msg: app.notify(msg, timeout=5),
-        )
-
-    elif command == "/pause":
-        session.hitl_mode = not session.hitl_mode
-        state = "on" if session.hitl_mode else "off"
-        app.notify(
-            f"HITL pause mode: {state}  "
-            + ("— agent will pause after each tool batch." if session.hitl_mode else ""),
-            timeout=3,
-        )
-
-    elif command == "/stop":
-        # Immediate cancel — same as pressing Escape
-        app.action_interrupt()
-
-    elif command == "/new":
-        # Exit with sentinel None so _chat_tui restart loop creates a fresh session.
-        app.exit("__new__")
-
-    elif command == "/sessions":
-        # Show session picker; if a different session is chosen, exit so
-        # _chat_tui() loop can restart with the new session_id.
-        from loom.core.memory.session_log import SessionLog as _SL
-        from loom.platform.cli.tui.components.session_picker import SessionPickerModal
-
-        async def _update_title(sid: str, title: str) -> None:
-            async with session._store.connect() as conn:
-                await _SL(conn).update_title(sid, title)
-
-        async with session._store.connect() as conn:
-            rows = await _SL(conn).list_sessions(limit=20)
-        selected = await app.push_screen_wait(
-            SessionPickerModal(rows, update_title_fn=_update_title)
-        )
-        if selected and selected != session.session_id:
-            app.exit(selected)  # _chat_tui restart loop picks this up
-        elif selected == session.session_id:
-            app.notify("Already in this session.", severity="information")
-
-    elif command == "/help":
-        from loom.platform.cli.tui.components.help_modal import HelpModal
-        await app.push_screen_wait(HelpModal())
-
-    else:
-        app.notify(f"Unknown command '{command}'. Type /help.", severity="warning")
-
-
-async def _chat_tui(model: str, db: str, resume_session_id: str | None = None) -> None:
-    """Launch the Textual TUI chat session.
-
-    If no resume_session_id is given, auto-resume the most recent saved session
-    so users continue where they left off without extra flags.
-    """
-    if model is None:
-        from loom.core.cognition.router import get_default_model
-        model = get_default_model()
-    db_path = str(Path(db).expanduser())
-
-    # Auto-resume last session when no explicit target is given
-    if resume_session_id is None:
-        store = SQLiteStore(db_path)
-        await store.initialize()
-        async with store.connect() as conn:
-            rows = await SessionLog(conn).list_sessions(limit=1)
-        if rows:
-            resume_session_id = rows[0]["session_id"]
-
-    # Session switch loop: /sessions command exits the app with the new session_id.
-    # We restart the whole setup with the requested session.
-    next_session_id: str | None = resume_session_id
-    while True:
-        session = LoomSession(model=model, db_path=db_path,
-                              resume_session_id=next_session_id)
-        await session.start()
-
-        app = LoomChatApp.create(session)
-
-        # Replace BlastRadiusMiddleware's confirm_fn with a TUI-aware version that
-        # shows an inline widget dialog — no terminal suspension needed.
-        from loom.core.harness.middleware import BlastRadiusMiddleware
-        from loom.core.harness.scope import ConfirmDecision
-        from loom.platform.cli.tui.components.interactive_widgets import InlineConfirmWidget
-        import asyncio
-
-        async def _tui_confirm(call: "ToolCall") -> "ConfirmDecision":
-            args_copy = dict(call.args)
-            justification = args_copy.pop("justification", None)
-
-            args_preview = "  ".join(
-                f"{k}={str(v)[:40]}" for k, v in args_copy.items()
-            )[:120]
-
-            msg_list = app.query_one("#message-list")
-            future: asyncio.Future[ConfirmDecision] = asyncio.Future()
-            widget = InlineConfirmWidget(
-                tool_name=call.tool_name,
-                trust_label=call.trust_level.plain,
-                args_preview=args_preview,
-                future=future,
-                justification=str(justification) if justification else None,
-                call_id=call.id,
-            )
-            msg_list.mount(widget)
-            msg_list.scroll_end(animate=False)
-
-            return await future
-
-        for mw in session._pipeline._middlewares:
-            if isinstance(mw, BlastRadiusMiddleware):
-                mw._confirm = _tui_confirm
-                break
-        # Also patch skill check approval so it uses TUI confirm widgets
-        session._confirm_fn = _tui_confirm
-
-        # Issue #120 PR1: surface TaskDiagnostic as a TUI notification so
-        # skill reflections aren't buried in background tasks.
-        async def _tui_diagnostic(diagnostic):
-            vis = session._reflection_visibility
-            if vis == "off":
-                return
-            try:
-                if vis == "verbose" and diagnostic.skill_edit_suggestions:
-                    body = (
-                        f"{diagnostic.one_line_summary()}\n"
-                        f"→ {diagnostic.skill_edit_suggestions[0][:100]}"
-                    )
-                    app.notify(body, title="Skill diagnostic", timeout=6)
-                else:
-                    app.notify(
-                        diagnostic.one_line_summary(),
-                        title="Skill diagnostic",
-                        timeout=4,
-                    )
-            except Exception:
-                pass
-
-        session.subscribe_diagnostic(_tui_diagnostic)
-
-
-        result = await app.run_async()
-        # /sessions exits with a session_id string → resume that session.
-        # /new exits with "__new__" sentinel → start a fresh session (no resume).
-        # Any other exit (Ctrl+C, quit) → done.
-        if result == "__new__":
-            next_session_id = None
-        elif isinstance(result, str):
-            next_session_id = result
-        else:
-            break
 
 
 async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
@@ -2074,8 +1429,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # always landed *below* the response — visually out of
                 # order and crowding the input area. The full chain is
                 # still stored on ``session._last_think`` and accessible
-                # via ``/think``. Other platforms (Discord, TUI) render
-                # ThinkCollapsed in their own way and aren't affected
+                # via ``/think``. Discord renders ThinkCollapsed in its
+                # own way and isn't affected.
                 pass
 
             elif isinstance(event, ReasoningContinuation):
@@ -2089,8 +1444,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
             elif isinstance(event, TierChanged):
                 # Issue #276: tier moved — refresh footer immediately, log
-                # to console. The TUI / Discord paths handle their own
-                # display below; this is the plain CLI mirror.
+                # to console. The Discord path handles its own display
+                # below; this is the plain CLI mirror.
                 _flush_streaming(force=True)
                 arrow = "⇪" if event.to_tier > event.from_tier else "⇩"
                 console.print(

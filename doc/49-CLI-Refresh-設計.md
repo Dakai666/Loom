@@ -109,7 +109,7 @@ Loom 有 Claude Code 沒有的 parallel envelope dispatch（見 `_build_envelope
 
 ## 色彩系統
 
-沿用 TUI 既有羊皮卷 palette（`loom/platform/cli/tui/app.py:7-15`），CLI 端建立 `rich.theme.Theme`：
+沿用早期 TUI（已退役 2026-05-19，原稿在 `_archive/tui-retired-2026-05-19/`）的羊皮卷 palette，CLI 端建立 `rich.theme.Theme`：
 
 ```python
 LOOM_THEME = Theme({

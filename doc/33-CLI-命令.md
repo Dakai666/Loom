@@ -36,8 +36,9 @@ loom chat [options]
 -s, --session <id>         指定 session ID，不指定則新建
 -r, --resume              恢復上次 session（等同 -s @last）
 --model <model>             覆寫預設模型（loom.toml 中的 default_model）
--t, --tui                  啟動 TUI 介面（Textual）
 ```
+
+> TUI 介面（`--tui` flag）已於 2026-05-19 退役，見 [34-TUI-使用指南.md](34-TUI-使用指南.md)。
 
 **範例**
 
@@ -46,8 +47,6 @@ loom chat                              # 新 session，architect 人格
 loom chat -p minimalist                # minimalist 人格
 loom chat -r                           # 恢復上次 session
 loom chat --session abc123             # 指定 session
-loom chat --tui                        # TUI 介面
-loom chat --tui --session abc123       # TUI + 指定 session
 ```
 
 ---

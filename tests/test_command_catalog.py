@@ -41,12 +41,6 @@ def test_cli_slash_catalog_includes_dynamic_personality_files() -> None:
     assert "/personality barista" in commands
 
 
-def test_tui_input_catalog_includes_dynamic_personality_files() -> None:
-    from loom.platform.cli.tui.components.input_area import InputArea
-
-    assert "/personality barista" in InputArea.SLASH_COMMANDS
-
-
 def test_discord_personality_command_uses_autocomplete_not_static_choices() -> None:
     from loom.platform.discord.bot import LoomDiscordBot
 

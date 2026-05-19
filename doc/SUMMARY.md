@@ -85,11 +85,11 @@
 | **[31b-MCP-Server-實作.md](31b-MCP-Server-實作.md)** | MCP Server / Client 雙向實作詳解、tool 前綴、env 擴展 |
 | [32-Skill-Import.md](32-Skill-Import.md) | 技能匯入 Pipeline（三層漸進式披露、SkillOutcomeTracker）|
 
-### 10. Platform（CLI 與 TUI）
+### 10. Platform（CLI 與 Discord）
 | 文件 | 說明 |
 |------|------|
 | [33-CLI-命令.md](33-CLI-命令.md) | loom chat / memory / reflect / autonomy / mcp / discord 指令 |
-| [34-TUI-使用指南.md](34-TUI-使用指南.md) | Textual TUI（HITL /pause+stop、Command Palette、Swarm Dashboard）|
+| [34-TUI-使用指南.md](34-TUI-使用指南.md) | ⚠️ RETIRED 2026-05-19 — TUI 整套退役、原稿在 `_archive/`（見 #403）|
 | [35-Session-管理.md](35-Session-管理.md) | --resume / --session / sessions list/show/rm |
 | [36-Web-Tools.md](36-Web-Tools.md) | fetch_url / web_search（含 post-verifier）+ send_discord_embed 完整 schema |
 | **[36b-Discord-Bot-平台.md](36b-Discord-Bot-平台.md)** | LoomDiscordBot 完整實作、Streaming 策略、TaskWriteDiscordReminderMiddleware |
