@@ -8,13 +8,16 @@ import pytest
 
 
 def test_retired_skill_lifecycle_tool_factories_are_not_exported() -> None:
-    from loom.platform.cli import tools
+    from loom.platform.cli import tools, skill_tools
 
     assert not hasattr(tools, "make_skill_promote_tool")
     assert not hasattr(tools, "make_skill_rollback_tool")
     assert not hasattr(tools, "make_generate_skill_candidate_from_batch_tool")
     assert not hasattr(tools, "make_set_skill_maturity_tool")
-    assert "skill_gate" not in inspect.signature(tools.make_load_skill_tool).parameters
+    # After audit-B (#399) skill factories moved to cli.skill_tools.
+    assert not hasattr(skill_tools, "make_skill_promote_tool")
+    assert not hasattr(skill_tools, "make_skill_rollback_tool")
+    assert "skill_gate" not in inspect.signature(skill_tools.make_load_skill_tool).parameters
 
 
 def test_load_loom_config_warns_about_retired_mutation_section(

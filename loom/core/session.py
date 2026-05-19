@@ -1210,7 +1210,6 @@ class LoomSession:
             make_exec_escape_fn,
             make_fetch_url_tool,
             make_openai_image_generation_tool,
-            make_load_skill_tool,
             make_memorize_tool,
             make_memory_health_tool,
             make_query_relations_tool,
@@ -1220,6 +1219,7 @@ class LoomSession:
             make_spawn_agent_tool,
             make_web_search_tool,
         )
+        from loom.platform.cli.skill_tools import make_load_skill_tool
         # ``self._memory`` was built up-front (right after governor init).
         # See "Issue #147 Phase C: build the facade up-front" above.
         self.registry.register(make_recall_tool(self._memory))
@@ -1345,7 +1345,7 @@ class LoomSession:
             self.registry.register(make_clear_model_tier_tool(self))
 
         # Issue #64 Phase B: Register unload_skill tool
-        from loom.platform.cli.tools import make_unload_skill_tool
+        from loom.platform.cli.skill_tools import make_unload_skill_tool
         self.registry.register(make_unload_skill_tool(
             self._skill_check_manager,
         ))
@@ -1353,7 +1353,7 @@ class LoomSession:
         # doc/54 §4.3 / §5 P0-5: Register skill_review tool — agent's
         # conversational entry to per-skill ledger history. Read-only;
         # no-op if the ledger isn't available.
-        from loom.platform.cli.tools import make_skill_review_tool
+        from loom.platform.cli.skill_tools import make_skill_review_tool
         self.registry.register(make_skill_review_tool(self._ledger_store))
 
         # Issue #385: ledger_recall — story-form recall over the ledger,

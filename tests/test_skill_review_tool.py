@@ -16,7 +16,7 @@ from loom.core.ledger import (
     async_correlation_scope,
     async_turn_scope,
 )
-from loom.platform.cli.tools import make_skill_review_tool
+from loom.platform.cli.skill_tools import make_skill_review_tool
 
 
 @pytest_asyncio.fixture

@@ -366,7 +366,7 @@ LLM 提問：「什麼 pattern 導致了這個失敗？下次應避免什麼？�
 
 由 `TaskReflector`（Issue #120 PR 1）在每次結構化診斷後自動呼叫 `run_self_reflection`，產出 `loom-self` 三元組。
 
-> **變更**：`SelfReflectionPlugin` 與 `reflect_self` 工具已於 Issue #120 PR 1 移除，`run_self_reflection` 核心邏輯保留於 `loom/autonomy/self_reflection.py`。
+> **變更**：`SelfReflectionPlugin` 與 `reflect_self` 工具已於 Issue #120 PR 1 移除，`run_self_reflection` 核心邏輯保留於 `loom/core/cognition/self_reflection.py`（audit-B / #399 從 `loom/autonomy/` 搬位置 — 該函式只依賴 core memory，沒有 autonomy daemon 狀態）。
 
 ---
 
