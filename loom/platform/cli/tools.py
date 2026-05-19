@@ -3649,6 +3649,10 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
 # All real outputs go to disk via write_file; the TaskList only tracks
 # "have I forgotten this step?".
 
+# ==============================================================
+# SECTION 7 — JOBS TOOLS (make_task_write_tool, make_jobs_*_tool, make_scratchpad_read_tool)
+# ==============================================================
+
 def make_task_write_tool(
     manager: "TaskListManager",
     ledger_emitter: "LedgerEmitter | None" = None,
@@ -3671,9 +3675,6 @@ def make_task_write_tool(
             )
         try:
             summary = manager.write(todos)
-    # ==============================================================
-    # SECTION 7 — JOBS TOOLS (make_task_write_tool, make_jobs_*_tool, make_scratchpad_read_tool)
-    # ==============================================================
         except ValueError as exc:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
