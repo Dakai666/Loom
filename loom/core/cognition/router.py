@@ -31,28 +31,11 @@ Usage
 """
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib  # type: ignore[no-redef]
+from loom.core.config import load_loom_config
 
 from .providers import LLMProvider, LLMResponse
-
-
-def _load_loom_config() -> dict:
-    """Load loom.toml from cwd or the package root; return {} on miss."""
-    candidates = [
-        Path.cwd() / "loom.toml",
-        Path(__file__).parents[3] / "loom.toml",
-    ]
-    for path in candidates:
-        if path.exists():
-            with open(path, "rb") as fh:
-                return tomllib.load(fh)
-    return {}
 
 
 def get_default_model() -> str:
@@ -60,7 +43,7 @@ def get_default_model() -> str:
     Return the default model from loom.toml [cognition]default_model,
     falling back to "MiniMax-M2.7".
     """
-    config = _load_loom_config()
+    config = load_loom_config()
     model = config.get("cognition", {}).get("default_model", "")
     return model if model else "MiniMax-M2.7"
 

@@ -27,9 +27,7 @@ import json
 import logging
 import os
 import time
-import tomllib
 import uuid
-import warnings
 from collections.abc import AsyncIterator
 from datetime import datetime, UTC
 from pathlib import Path
@@ -40,6 +38,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+from loom.core.config import load_loom_config as _load_loom_config  # re-exported for tests/diagnostic/cli
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
 from loom.core.ledger import (
     CallMeta,
@@ -275,26 +274,6 @@ def _find_partial_tag_suffix(text: str, tag: str) -> int:
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
-
-
-def _load_loom_config() -> dict:
-    """Load loom.toml from cwd or the package root; return {} on miss."""
-    candidates = [
-        Path.cwd() / "loom.toml",
-        Path(__file__).parents[2] / "loom.toml",
-    ]
-    for path in candidates:
-        if path.exists():
-            with open(path, "rb") as fh:
-                config = tomllib.load(fh)
-            if "mutation" in config:
-                warnings.warn(
-                    "[mutation] is retired by Quest D Phase 1.C and is safe to delete.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            return config
-    return {}
 
 
 # Issue #181: per-model output cap. Different providers have very different
