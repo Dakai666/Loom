@@ -92,7 +92,7 @@ skills/
 
 ## SkillOutcomeTracker（EMA Confidence 追蹤）
 
-舊版 `SkillGenome.record_outcome()` 已 deprecated。現實使用 `SkillOutcomeTracker` 的 quality-gradient 機制：
+舊版 `SkillGenome.record_outcome()` 已移除（audit-A / PR #401）。現實使用 `SkillOutcomeTracker` 的 quality-gradient 機制：
 
 ```python
 @dataclass
