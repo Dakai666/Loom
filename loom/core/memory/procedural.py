@@ -9,7 +9,6 @@ and confidence tracking.
 
 import json
 import uuid
-import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
@@ -60,35 +59,6 @@ class SkillGenome:
         if self.usage_count < self.MIN_SAMPLES_BEFORE_DEPRECATION:
             return False
         return self.confidence <= self.deprecation_threshold
-
-    def record_outcome(self, success: bool) -> None:
-        """Update confidence and success_rate after an observed outcome.
-
-        .. deprecated:: Issue #56
-            Binary success/failure tracking is replaced by quality-gradient
-            self-assessment in ``SkillOutcomeTracker``.  This method is kept
-            for backward compatibility but is no longer called by the core
-            session loop.
-        """
-        warnings.warn(
-            "SkillGenome.record_outcome() is deprecated; "
-            "use SkillOutcomeTracker quality-gradient assessment instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.usage_count += 1
-        outcome = 1.0 if success else 0.0
-        if self.usage_count == 1:
-            # First observation: set baseline directly instead of blending with
-            # the default 1.0 prior, which would misleadingly inflate confidence.
-            self.success_rate = outcome
-            self.confidence = outcome
-        else:
-            # Exponential moving average — recent outcomes weighted more
-            alpha = 0.1
-            self.success_rate = (1 - alpha) * self.success_rate + alpha * outcome
-            self.confidence = self.success_rate
-        self.updated_at = datetime.now(UTC)
 
 
 class ProceduralMemory:
