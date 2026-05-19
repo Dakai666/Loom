@@ -5,15 +5,9 @@ Tests for the Memory Layer:
   - SemanticMemory: upsert, get, search, list_recent, upsert-update
   - ProceduralMemory / SkillGenome: upsert, get, list_active,
                                      SkillOutcomeTracker, deprecation threshold
-
-  Note: SkillGenome.record_outcome() is deprecated (Issue #56) and no longer
-  called by the core session loop.  Its regression tests are preserved with
-  the _deprecated suffix to document the removed behaviour until the method
-  itself is eventually stripped.
 """
 
 import asyncio
-import warnings
 import pytest
 import pytest_asyncio
 import tempfile
@@ -435,56 +429,6 @@ class TestSkillGenome:
         skill = SkillGenome(name="s", body="x", confidence=0.1,
                             deprecation_threshold=0.3, usage_count=2)
         assert skill.is_deprecated is False
-
-    # ------------------------------------------------------------------
-    # Deprecated API — SkillGenome.record_outcome()
-    # Replaced by SkillOutcomeTracker (Issue #56).
-    # These tests are preserved as regression documentation until the
-    # deprecated method itself is eventually removed.
-    # ------------------------------------------------------------------
-
-    def test_record_outcome_deprecated_increments_usage_count(self):
-        """DEPRECATED (Issue #56): SkillGenome.record_outcome() — regression only."""
-        skill = SkillGenome(name="s", body="x")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            skill.record_outcome(True)
-            skill.record_outcome(False)
-        assert skill.usage_count == 2
-
-    def test_record_outcome_deprecated_success_keeps_high_confidence(self):
-        """DEPRECATED (Issue #56): SkillGenome.record_outcome() — regression only."""
-        skill = SkillGenome(name="s", body="x", confidence=1.0, success_rate=1.0)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            for _ in range(10):
-                skill.record_outcome(True)
-        assert skill.confidence > 0.9
-
-    def test_record_outcome_deprecated_failures_lower_confidence(self):
-        """DEPRECATED (Issue #56): SkillGenome.record_outcome() — regression only."""
-        skill = SkillGenome(name="s", body="x", confidence=1.0, success_rate=1.0)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            for _ in range(30):
-                skill.record_outcome(False)
-        assert skill.confidence < 0.5
-
-
-    def test_record_outcome_deprecated_updates_timestamp(self):
-        """DEPRECATED (Issue #56): SkillGenome.record_outcome() — regression only."""
-        skill = SkillGenome(name="s", body="x")
-        ts_before = skill.updated_at
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            skill.record_outcome(True)
-        assert skill.updated_at >= ts_before
-
-    def test_record_outcome_emits_deprecation_warning(self):
-        """DEPRECATED (Issue #56): SkillGenome.record_outcome() emits DeprecationWarning."""
-        skill = SkillGenome(name="s", body="x")
-        with pytest.warns(DeprecationWarning, match="record_outcome\\(\\) is deprecated"):
-            skill.record_outcome(True)
 
 
 class TestProceduralMemory:

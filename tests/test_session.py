@@ -381,7 +381,7 @@ class TestOutputMaxTokensResolution:
 
 class TestParallelDispatch:
     @pytest.mark.asyncio
-    async def test_dispatch_parallel_uses_current_task_graph_api_and_preserves_order(self):
+    async def test_dispatch_parallel_preserves_order(self):
         from loom.core.session import LoomSession
         from loom.core.harness.middleware import ToolResult
 

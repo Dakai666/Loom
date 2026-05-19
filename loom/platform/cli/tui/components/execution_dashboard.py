@@ -15,9 +15,6 @@ Phase C (#113):
 - History mode (h key): browse past envelopes from this session
 - ↑↓ navigate history list, Enter expand, Esc back
 - Read-only detail view for historical envelopes
-
-TODO: SwarmDashboard (swarm_dashboard.py) is preserved for backward
-compatibility.  Remove it once this component is confirmed stable.
 """
 
 from __future__ import annotations
