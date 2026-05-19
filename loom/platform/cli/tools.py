@@ -1498,6 +1498,23 @@ def make_memorize_tool(
             domain=normalize_domain(domain_raw),
             temporal=normalize_temporal(temporal_raw),
         )
+
+        # Near-dup hint: surface recent semantically-similar entries so the
+        # agent can self-correct duplicate writes. Catches operational-record
+        # bloat (memory-hygiene reflection, #398). Never blocks the write;
+        # the agent decides whether the new fact is genuinely distinct.
+        near_dups: list = []
+        try:
+            near_dups = await memory.semantic.find_near_duplicates(
+                value,
+                min_similarity=0.85,
+                within_days=7,
+                limit=3,
+                exclude_key=key,
+            )
+        except Exception:
+            pass  # embedding/db failure must never block memorize
+
         gov_result = await memory.memorize(entry)
 
         if not gov_result.written:
@@ -1522,6 +1539,16 @@ def make_memorize_tool(
             msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
         else:
             msg = f"Memorized: {key!r}"
+
+        if near_dups:
+            dup_lines = []
+            for dup_entry, score in near_dups:
+                snippet = dup_entry.value[:60] + ("…" if len(dup_entry.value) > 60 else "")
+                dup_lines.append(f"  • {dup_entry.key!r} (sim={score:.2f}) — {snippet}")
+            msg += (
+                "\n\n⚠ near-duplicate(s) in last 7d — verify this is a distinct "
+                "insight, not an operational repeat:\n" + "\n".join(dup_lines)
+            )
 
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=msg,

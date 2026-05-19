@@ -718,3 +718,123 @@ class TestMemorySearchEmbeddingTier:
         results = await search.recall("查詢完全不相關", type="semantic", limit=5)
         assert len(results) == 1
         assert results[0].metadata.get("fallback") is True
+
+
+# ---------------------------------------------------------------------------
+# find_near_duplicates + memorize tool near-dup hint (#398 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestFindNearDuplicates:
+    """Embedding-based dedup guard for the memorize path.
+
+    Catches operational-record bloat (絲絲's memory-hygiene reflection):
+    when a value is semantically very close to a recent entry, surface it
+    so the agent can self-correct instead of silently growing semantic.
+    """
+
+    async def test_returns_empty_without_embedding_provider(self, semantic):
+        # ``semantic`` fixture is constructed without a provider.
+        results = await semantic.find_near_duplicates("any text", min_similarity=0.85)
+        assert results == []
+
+    async def test_finds_similar_recent_entry(self, db_conn):
+        provider = AsyncMock()
+        provider.embed.return_value = [[1.0, 0.0, 0.0]]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        await sem.upsert(SemanticEntry(
+            key="diary:list_dir_rule",
+            value="diary write should call list_dir first",
+        ))
+
+        results = await sem.find_near_duplicates(
+            "before diary write, run list_dir", min_similarity=0.85,
+        )
+        assert len(results) == 1
+        entry, score = results[0]
+        assert entry.key == "diary:list_dir_rule"
+        assert score == pytest.approx(1.0)
+
+    async def test_skips_when_below_threshold(self, db_conn):
+        provider = AsyncMock()
+        # Upsert path uses [1,0,0]; query uses [0,1,0] → cosine = 0 → skipped.
+        provider.embed.side_effect = [[[1.0, 0.0, 0.0]], [[0.0, 1.0, 0.0]]]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        await sem.upsert(SemanticEntry(key="alpha", value="alpha"))
+
+        results = await sem.find_near_duplicates("beta", min_similarity=0.85)
+        assert results == []
+
+    async def test_exclude_key_filters_self(self, db_conn):
+        provider = AsyncMock()
+        provider.embed.return_value = [[1.0, 0.0, 0.0]]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        await sem.upsert(SemanticEntry(key="self_key", value="x"))
+
+        results = await sem.find_near_duplicates(
+            "x", min_similarity=0.85, exclude_key="self_key",
+        )
+        assert results == []
+
+    async def test_embedding_failure_returns_empty_not_raises(self, db_conn):
+        provider = AsyncMock()
+        # First call (the test's upsert) succeeds; second call (the dedup
+        # query) blows up. find_near_duplicates must swallow it.
+        provider.embed.side_effect = [
+            [[1.0, 0.0, 0.0]],
+            RuntimeError("embedding API down"),
+        ]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        await sem.upsert(SemanticEntry(key="k", value="seed"))
+
+        results = await sem.find_near_duplicates("anything", min_similarity=0.85)
+        assert results == []
+
+
+class TestMemorizeNearDupHint:
+    """Integration: make_memorize_tool surfaces near-dup hint without blocking write."""
+
+    async def test_hint_appended_to_output_on_near_dup(self, db_conn, procedural):
+        provider = AsyncMock()
+        provider.embed.return_value = [[1.0, 0.0, 0.0]]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        # Seed an existing semantically-identical entry.
+        await sem.upsert(SemanticEntry(
+            key="diary:rule_v1",
+            value="diary writes should list_dir before save",
+            source="memorize",
+        ))
+
+        tool = make_memorize_tool(_facade(semantic=sem, procedural=procedural))
+        call = _make_call("memorize", {
+            "key": "diary:rule_v2",
+            "value": "before diary save call list_dir",
+        })
+        result = await tool.executor(call)
+
+        # Write still succeeds — the hint never blocks the agent.
+        assert result.success is True
+        stored = await sem.get("diary:rule_v2")
+        assert stored is not None
+
+        # The hint surfaces the duplicate so the agent can self-correct.
+        assert "near-duplicate" in result.output.lower()
+        assert "diary:rule_v1" in result.output
+
+    async def test_no_hint_when_no_near_dup(self, db_conn, procedural):
+        provider = AsyncMock()
+        # Orthogonal vectors — every entry looks dissimilar.
+        provider.embed.side_effect = [
+            [[1.0, 0.0, 0.0]],  # seed upsert
+            [[0.0, 1.0, 0.0]],  # query in find_near_duplicates
+            [[0.0, 1.0, 0.0]],  # upsert of new entry
+        ]
+        sem = SemanticMemory(db_conn, embedding_provider=provider)
+        await sem.upsert(SemanticEntry(key="x", value="x", source="memorize"))
+
+        tool = make_memorize_tool(_facade(semantic=sem, procedural=procedural))
+        call = _make_call("memorize", {"key": "y", "value": "y"})
+        result = await tool.executor(call)
+
+        assert result.success is True
+        assert "near-duplicate" not in result.output.lower()
