@@ -20,9 +20,15 @@ def test_retired_skill_lifecycle_tool_factories_are_not_exported() -> None:
     assert "skill_gate" not in inspect.signature(skill_tools.make_load_skill_tool).parameters
 
 
-def test_load_loom_config_warns_about_retired_mutation_section(
+def test_load_loom_config_silently_accepts_legacy_mutation_section(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Legacy [mutation] section is parsed without error (silently ignored).
+
+    The earlier UserWarning was removed in audit-A round 2 (#398) after the
+    section had been retired long enough that anyone with it in their
+    loom.toml would already have seen — and acted on — the warning.
+    """
     from loom.core import session
 
     (tmp_path / "loom.toml").write_text(
@@ -33,7 +39,8 @@ def test_load_loom_config_warns_about_retired_mutation_section(
     )
     monkeypatch.chdir(tmp_path)
 
-    with pytest.warns(UserWarning, match=r"\[mutation\].*retired.*safe to delete"):
-        cfg = session._load_loom_config()
+    cfg = session._load_loom_config()
 
+    # Toml is parsed; the [mutation] section is harmlessly ignored by every
+    # consumer in the current codebase.
     assert cfg["mutation"]["enabled"] is True

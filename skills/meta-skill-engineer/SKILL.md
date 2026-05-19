@@ -5,7 +5,7 @@ precondition_checks:
   - ref: checks.require_skills_dir_target
     applies_to: [write_file]
     description: "只能寫入 skills/ 目錄，不可修改框架或使用者程式碼"
-tags: [meta, skill, create, register, manage, evolution]
+tags: [meta, skill, create, register, manage]
 ---
 
 # Meta Skill Engineer — 元技能工程師
