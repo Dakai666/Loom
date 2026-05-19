@@ -45,7 +45,6 @@ try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
     from mcp.types import (
-        CallToolResult,
         TextContent,
         Tool,
     )
