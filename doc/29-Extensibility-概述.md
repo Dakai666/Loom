@@ -70,7 +70,7 @@ Loom 目前**沒有**內建的 `LoomPlugin` 實作 —— `loom/extensibility/` 
 
 - **v0.2.5.3 / v0.2.6.1** 將 `DreamingPlugin` / `SelfReflectionPlugin` 搬到 `loom/extensibility/` 解決架構倒置。
 - **v0.2.6.4 (#172)** 把 `dream_cycle` 邏輯併回 `loom/core/memory/` —— 不再需要 plugin 包裝。
-- **Issue #120 PR 1** 把「反思」合併進 `TaskReflector`（`loom/core/cognition/task_reflector.py`），由它在每次結構化診斷後以 post-hook fire-and-forget 觸發 `run_self_reflection`（仍在 `loom/autonomy/self_reflection.py`）。
+- **Issue #120 PR 1** 把「反思」合併進 `TaskReflector`（`loom/core/cognition/task_reflector.py`），由它在每次結構化診斷後以 post-hook fire-and-forget 觸發 `run_self_reflection`（位於 `loom/core/cognition/self_reflection.py`；audit-B / #399 從 `loom/autonomy/` 搬到 cognition 修 layer violation）。
 
 三種行為三元組樣式（由 `run_self_reflection` 寫入 RelationalMemory）：
 

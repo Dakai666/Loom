@@ -393,7 +393,7 @@ class TaskReflector:
     def _schedule_behavioural_triples(self) -> None:
         """Schedule ``run_self_reflection`` to write loom-self triples."""
         try:
-            from loom.autonomy.self_reflection import run_self_reflection
+            from loom.core.cognition.self_reflection import run_self_reflection
         except Exception:
             return
 

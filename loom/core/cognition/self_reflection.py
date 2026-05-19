@@ -11,7 +11,7 @@ and ``reflect_self`` tool have been removed.
 
 Usage::
 
-    from loom.autonomy.self_reflection import run_self_reflection
+    from loom.core.cognition.self_reflection import run_self_reflection
     await run_self_reflection(episodic=..., relational=..., llm_fn=...)
 """
 
