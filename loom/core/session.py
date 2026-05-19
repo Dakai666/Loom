@@ -216,14 +216,17 @@ async def compress_session(
     )
 
     raw = response.text or ""
+    # Issue #411 review: the old "no FACT: prefix → use raw text as one fact"
+    # fallback turned compliant zero-insight responses ("No reusable
+    # insights found.") into admissible semantic facts. With COMPRESS_PROMPT
+    # now explicitly permitting 0 facts, that fallback is actively harmful —
+    # any response without a FACT: prefix is treated as the model declaring
+    # zero insights.
     facts = [
         line[len("FACT:") :].strip()
         for line in raw.splitlines()
         if line.strip().startswith("FACT:")
     ]
-    # Fallback: if the LLM didn't use FACT: prefixes, save the raw text as one fact.
-    if not facts and raw.strip():
-        facts = [raw.strip()[:800]]
 
     # Issue #43: Admission gate — filter facts through governance
     if governor is not None and facts:
@@ -247,12 +250,13 @@ async def compress_session(
         else:
             await semantic.upsert(entry)
 
-    # Soft-delete: mark the rows we read as compressed so they aren't
-    # re-processed on the next trigger, but keep the content on disk for
-    # audit and potential backfill (the admission gate or the LLM may drop
-    # something that later turns out to matter).
-    if facts:
-        await episodic.mark_compressed([e.id for e in entries])
+    # Soft-delete: mark every entry we sent to the LLM as compressed,
+    # regardless of whether facts survived parsing + admission. Previously
+    # this only ran when ``facts`` was non-empty, which meant duplicate-heavy
+    # or zero-insight sessions kept re-paying the LLM cost on every trigger
+    # (issue #411 review). The episodic rows are soft-deleted, not removed,
+    # so audit + recovery still work via TTL-bounded retention.
+    await episodic.mark_compressed([e.id for e in entries])
 
     # Issue #142: record the yield ratio so a silently degrading extractor
     # (facts << entries) surfaces as an anomaly on the next turn boundary.

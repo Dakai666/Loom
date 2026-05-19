@@ -787,6 +787,69 @@ class TestCompressWithGovernance:
         # "ok" should be filtered out by admission, so 2 facts instead of 3
         assert count == 2
 
+    @pytest.mark.asyncio
+    async def test_zero_insight_response_writes_nothing(
+        self, db, semantic, episodic
+    ):
+        """Issue #411 review: a compliant zero-insight LLM response (no
+        ``FACT:`` prefix) must NOT pollute semantic memory via the old
+        raw-text fallback. The new COMPRESS_PROMPT permits 0 facts, so
+        responses like "No reusable insights found." must round-trip to
+        zero writes."""
+        from loom.platform.cli.main import compress_session
+
+        session_id = "zero-insight-session"
+        await episodic.write(EpisodicEntry(
+            session_id=session_id,
+            event_type="user",
+            content="trivial operational chatter not worth keeping",
+        ))
+
+        mock_router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "No reusable insights found."
+        mock_router.chat = AsyncMock(return_value=mock_response)
+
+        count = await compress_session(
+            session_id, episodic, semantic, mock_router, "test-model",
+        )
+
+        assert count == 0
+        # Confirm nothing was written under the session-fact key prefix.
+        recent = await semantic.list_recent(limit=20)
+        assert all(not e.key.startswith(f"session:{session_id}:") for e in recent)
+
+    @pytest.mark.asyncio
+    async def test_zero_facts_still_marks_episodic_compressed(
+        self, db, semantic, episodic
+    ):
+        """Issue #411 review: even when zero facts survive parsing /
+        admission, episodic rows we sent to the LLM must be marked
+        compressed. Otherwise duplicate-heavy or zero-insight sessions
+        burn the LLM repeatedly on the same content every trigger."""
+        from loom.platform.cli.main import compress_session
+
+        session_id = "no-fact-session"
+        await episodic.write(EpisodicEntry(
+            session_id=session_id,
+            event_type="user",
+            content="trivial chatter not worth keeping",
+        ))
+
+        mock_router = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = ""  # LLM emits literally nothing
+        mock_router.chat = AsyncMock(return_value=mock_response)
+
+        await compress_session(
+            session_id, episodic, semantic, mock_router, "test-model",
+        )
+
+        # Re-reading the session with uncompressed_only should now return
+        # nothing — the entries were marked compressed despite zero facts.
+        leftover = await episodic.read_session(session_id, uncompressed_only=True)
+        assert leftover == []
+
 
 # ===========================================================================
 # 8. Backward Compatibility
