@@ -22,7 +22,6 @@ import json
 import logging
 import math
 import re
-from collections import Counter
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -31,7 +30,6 @@ from loom.core.timezone import user_zone
 
 logger = logging.getLogger(__name__)
 
-from loom.core.memory.embeddings import cosine_similarity
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import (
     SemanticMemory,
