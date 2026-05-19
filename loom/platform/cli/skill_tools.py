@@ -11,6 +11,7 @@ Registered by ``LoomSession.start()`` alongside the other tool factories.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,8 @@ from typing import TYPE_CHECKING
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
 from loom.core.harness.registry import ToolDefinition
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -537,4 +540,3 @@ def make_skill_review_tool(
         tags=["skill", "review", "read-only"],
         impact_scope="read-only",
     )
-

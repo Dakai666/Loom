@@ -539,3 +539,78 @@ class TestCheckAllSkillsSequential:
         assert count == 1
         # Verify semantic.upsert was called (evolution hint written)
         assert mock_semantic.upsert.called
+
+
+class TestLoadSkillCheckResolutionFailure:
+    """Regression for PR #407 review P2.
+
+    When ``SkillCheckManager.resolve_all`` raises (bad ref, missing file,
+    bad import) the load_skill executor must log a warning and return a
+    successful ToolResult — not blow up. The earlier audit-B extraction
+    forgot to copy ``_log = logging.getLogger(__name__)`` into
+    ``skill_tools.py``, so this path raised ``NameError`` instead of
+    skipping gracefully.
+    """
+
+    async def test_resolve_all_failure_logs_and_returns_success(self, tmp_path, caplog):
+        import logging
+        from loom.platform.cli.skill_tools import make_load_skill_tool
+        from loom.core.harness.middleware import ToolCall
+        from loom.core.harness.permissions import TrustLevel
+        from loom.core.memory.procedural import SkillGenome
+
+        # Skill genome with a bad precondition ref so resolve_all is invoked.
+        bad_skill = SkillGenome(
+            name="probe-skill",
+            body="# probe-skill\n\nbody",
+            precondition_check_refs=[{
+                "ref": "scripts/does_not_exist.py:check",
+                "applies_to": ["run_bash"],
+                "description": "intentionally-broken ref for regression",
+            }],
+        )
+        skill_dir = tmp_path / "probe-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(bad_skill.body)
+
+        mock_procedural = MagicMock()
+        mock_procedural.get = AsyncMock(return_value=bad_skill)
+        mock_procedural.list_active = AsyncMock(return_value=[])
+
+        mock_manager = MagicMock()
+        mock_manager.activate = MagicMock()
+        mock_manager.mount = MagicMock(return_value=[])
+
+        # Pre-approved via RelationalMemory so the approval gate doesn't bail
+        # before reaching SkillCheckManager.resolve_all.
+        mock_rel = MagicMock()
+        approved_entry = MagicMock()
+        approved_entry.object = "true"
+        mock_rel.get = AsyncMock(return_value=approved_entry)
+
+        tool = make_load_skill_tool(
+            procedural=mock_procedural,
+            skills_dirs=[tmp_path],
+            skill_check_manager=mock_manager,
+            relational=mock_rel,
+        )
+
+        call = ToolCall(
+            id="t1",
+            tool_name="load_skill",
+            args={"name": "probe-skill"},
+            trust_level=TrustLevel.SAFE,
+            session_id="test",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="loom.platform.cli.skill_tools"):
+            result = await tool.executor(call)
+
+        # The bug previously raised NameError here. The fix turns it into
+        # a graceful skip + warning.
+        assert result.success is True, f"load_skill must not fail: {result.error!r}"
+        assert "probe-skill" in result.output
+        assert any(
+            "Failed to resolve checks for skill" in rec.message
+            for rec in caplog.records
+        ), "resolution failure must produce a WARNING log entry"
