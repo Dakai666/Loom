@@ -421,13 +421,25 @@ backend = "none"   # "none" | "srt"
 # still required, with once / scoped lease / session / deny choices.
 #
 # [security.sandbox.profiles.github]
-# match_commands   = ["gh"]
+# match_commands   = ["gh", "git"]
 # allow_read       = ["~/.config/gh", "~/.gitconfig"]
 # allow_write      = [".", "/private/tmp", "~/.cache/gh"]
 # allowed_domains  = ["api.github.com", "github.com"]
 #
 # Then either command root matching or explicit selection can request it:
 #   run_bash(command = "gh pr view 387", sandbox_profile = "github", ...)
+#
+# Issue #402 — bypass_sandbox: some CLIs (gh: Go crypto/x509; git HTTPS push)
+# cannot complete TLS through srt's HTTP CONNECT proxy on macOS, and srt's
+# network filter and file sandbox are coupled (unsetting HTTPS_PROXY inside
+# the sandbox breaks DNS too). `bypass_sandbox = true` runs matched commands
+# in the parent environment instead of through srt — the scope grant flow
+# above still gates activation, so it's an authorized opt-out per profile.
+# Adding a new bypass-only CLI is two lines:
+#
+# [security.sandbox.profiles.opencli]
+# match_commands = ["opencli"]
+# bypass_sandbox = true
 
 # ─────────────────────────────────────────────
 # Autonomy Engine

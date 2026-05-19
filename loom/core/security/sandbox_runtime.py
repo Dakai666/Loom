@@ -135,6 +135,12 @@ class SandboxProfile:
     denied_domains: list[str] = field(default_factory=list)
     allowed_sockets: list[str] = field(default_factory=list)
     denied_sockets: list[str] = field(default_factory=list)
+    # Issue #402: when True, matched commands skip the srt wrap entirely and
+    # run in the parent environment. Required for CLIs whose TLS stack is
+    # incompatible with srt's HTTP CONNECT proxy (gh, opencli). The scope
+    # grant flow still gates activation — bypass is opt-in per profile,
+    # not an unauthorized escape hatch.
+    bypass_sandbox: bool = False
 
     @classmethod
     def from_config(cls, name: str, cfg: dict[str, Any] | None) -> "SandboxProfile":
@@ -144,6 +150,12 @@ class SandboxProfile:
             raise ValueError(
                 f"[security.sandbox] profiles.{name} must be a table, "
                 f"got {type(cfg).__name__}: {cfg!r}."
+            )
+        bypass_raw = cfg.get("bypass_sandbox", False)
+        if not isinstance(bypass_raw, bool):
+            raise ValueError(
+                f"[security.sandbox] profiles.{name}.bypass_sandbox must be "
+                f"a boolean, got {type(bypass_raw).__name__}: {bypass_raw!r}."
             )
         return cls(
             match_commands=_as_path_list(
@@ -178,6 +190,7 @@ class SandboxProfile:
                 _profile_key(name, "denied_sockets"),
                 cfg.get("denied_sockets"),
             ),
+            bypass_sandbox=bypass_raw,
         )
 
 
