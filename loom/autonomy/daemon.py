@@ -494,8 +494,8 @@ class AutonomyDaemon:
         if db is None:
             return None
         try:
-            from loom.core.session import _load_loom_config  # local import: lazy
-            _mem = _load_loom_config().get("memory", {})
+            from loom.core.config import load_loom_config  # local import: lazy
+            _mem = load_loom_config().get("memory", {})
             cfg = _mem.get("lifecycle", {})
             gov_cfg = _mem.get("governance", {})
         except Exception as exc:
@@ -534,8 +534,8 @@ class AutonomyDaemon:
         if memory is None:
             return None
         try:
-            from loom.core.session import _load_loom_config  # local import: lazy
-            cfg = _load_loom_config().get("memory", {}).get("dream", {})
+            from loom.core.config import load_loom_config  # local import: lazy
+            cfg = load_loom_config().get("memory", {}).get("dream", {})
         except Exception as exc:
             logger.debug("[autonomy] dream config load failed: %s", exc)
             return None

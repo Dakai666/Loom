@@ -119,7 +119,7 @@ def _make_daemon(session):
 
 def test_maybe_start_dream_loop_skipped_when_disabled(monkeypatch):
     monkeypatch.setattr(
-        "loom.core.session._load_loom_config",
+        "loom.core.config.load_loom_config",
         lambda: {"memory": {"dream": {"enabled": False}}},
     )
     daemon = _make_daemon(_StubSession())
@@ -133,7 +133,7 @@ def test_maybe_start_dream_loop_skipped_without_session(monkeypatch):
 
 def test_maybe_start_dream_loop_skipped_without_db(monkeypatch):
     monkeypatch.setattr(
-        "loom.core.session._load_loom_config",
+        "loom.core.config.load_loom_config",
         lambda: {"memory": {"dream": {"enabled": True}}},
     )
     daemon = _make_daemon(_StubSession(with_db=False))
@@ -143,7 +143,7 @@ def test_maybe_start_dream_loop_skipped_without_db(monkeypatch):
 async def test_maybe_start_dream_loop_launches_and_cancels(monkeypatch):
     monkeypatch.setattr(DreamLoop, "_FIRST_SWEEP_DELAY_SECONDS", 60.0)
     monkeypatch.setattr(
-        "loom.core.session._load_loom_config",
+        "loom.core.config.load_loom_config",
         lambda: {"memory": {"dream": {"enabled": True, "interval_hours": 12}}},
     )
     daemon = _make_daemon(_StubSession())
