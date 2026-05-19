@@ -137,9 +137,31 @@ logger = logging.getLogger(__name__)
 
 COMPRESS_PROMPT = """\
 Below are tool calls from an agent session.
-Extract 3-7 concise, reusable facts or learnings that would be valuable in future sessions.
-Format each on its own line starting with "FACT: ".
-Ignore trivial or highly session-specific details.
+Extract 0-7 reusable INSIGHTS that would be valuable in future sessions.
+
+Three tiers of session content — only the middle tier belongs in semantic memory:
+
+  1. OPERATIONAL TRACE (do NOT emit): step-by-step records of what happened
+     this session — "ran tool X with args Y", "called Z before W", "diary
+     write succeeded after list_dir". These are SOPs for *this* run; the
+     episodic log already keeps them.
+
+  2. INSIGHT (EMIT as FACT): durable, reusable knowledge that future sessions
+     would benefit from — non-obvious user preferences, project facts that
+     survive across sessions, lessons learned from failures, conceptual
+     understanding. Should still be true and useful next week.
+
+  3. SNAPSHOT (do NOT emit here): in-progress work state, current TODO,
+     "next we should do X". That belongs in pursuit trackers, not semantic.
+
+Quality bar: if a fact reads like "always do X before Y in this kind of
+operation", that's almost always tier 1 (operational), not tier 2. Insights
+are about *what is true*, not *what procedure to follow*.
+
+It is fine to emit 0 facts if the session contains no genuine insights.
+Do NOT pad to reach a minimum count.
+
+Format each insight on its own line starting with "FACT: ".
 IMPORTANT: Write every FACT in the same language as the session content below.
 
 Session log:

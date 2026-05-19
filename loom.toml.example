@@ -155,6 +155,31 @@ skill_deprecation_threshold = 0.3
 episodic_compress_threshold = 30
 
 # ─────────────────────────────────────────────
+# Memory governance (Issue #43, dedup hardened in #411)
+# ─────────────────────────────────────────────
+# Admission gate scoring + duplicate suppression for facts the
+# session-end compressor proposes to promote into semantic memory.
+#
+# Novelty check (Issue #411): a candidate is duplicate when EITHER
+#   • embedding cosine to a recent fact ≥ ``dup_similarity_threshold``, OR
+#   • lexical Jaccard word overlap > 0.8
+# The first clause catches paraphrases the lexical clause misses (e.g.
+# "diary writes should list_dir first" vs "before diary save, call list_dir").
+#
+# Lookback is by time, not row count — fixes the bug where bursty traffic
+# pushed yesterday's facts out of a 50-row position window within hours.
+
+[memory.governance]
+admission_threshold       = 0.5    # composite score floor for admission
+episodic_ttl_days         = 30     # episodic rows older than this get pruned
+semantic_decay_threshold  = 0.1    # min effective_confidence to keep a fact
+dup_window_days           = 7      # how far back to look for dups
+dup_lookback_limit        = 500    # per-call row cap for lexical scan (perf)
+dup_similarity_threshold  = 0.85   # embedding cosine cutoff (matches the
+                                   # memorize-tool hint default — manual and
+                                   # auto compress paths agree on "near-dup")
+
+# ─────────────────────────────────────────────
 # Memory lifecycle (Issue #281 P3)
 # ─────────────────────────────────────────────
 # Drives the (domain × temporal) decay cycle that demotes recent → archived

@@ -545,6 +545,146 @@ class TestAdmissionGate:
 
 
 # ===========================================================================
+# 5b. MemoryGovernor — Admission gate, Issue #411 (semantic dup + time window)
+# ===========================================================================
+
+class TestAdmissionSemanticNovelty:
+    """PR for #411: novelty now combines embedding cosine with lexical Jaccard,
+    and the lookback window is by time rather than position."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_semantic_paraphrase(
+        self, db, procedural, relational, episodic,
+    ):
+        """Fact that is *paraphrased* (low lexical overlap, high cosine) is
+        rejected once an embedding provider can see the similarity."""
+        provider = AsyncMock()
+        # Same unit vector for both upsert and dup query → cosine = 1.0.
+        provider.embed.return_value = [[1.0, 0.0, 0.0]]
+        semantic = SemanticMemory(db, embedding_provider=provider)
+        await semantic.upsert(SemanticEntry(
+            key="seed",
+            value="diary writes should list_dir before save",
+            source="memorize",
+        ))
+
+        gov = MemoryGovernor(
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
+            db=db,
+            config={"admission_threshold": 0.5},
+        )
+
+        results = await gov.evaluate_admission(
+            ["before diary save call list_dir"],  # lexically distinct
+            source="session:test",
+        )
+        assert len(results) == 1
+        assert results[0].admitted is False
+        assert results[0].reason == "duplicate_semantic"
+
+    @pytest.mark.asyncio
+    async def test_admits_when_only_lexical_overlap_no_semantic_dup(
+        self, db, procedural, relational, episodic,
+    ):
+        """When the embedding says distinct (orthogonal) and lexical Jaccard
+        stays under 0.8, the fact should still be admitted — avoid over-killing
+        genuinely new facts that happen to share vocabulary with old ones."""
+        provider = AsyncMock()
+        # Seed entry vector vs. query vector are orthogonal → cosine = 0.
+        provider.embed.side_effect = [[[1.0, 0.0, 0.0]], [[0.0, 1.0, 0.0]]]
+        semantic = SemanticMemory(db, embedding_provider=provider)
+        await semantic.upsert(SemanticEntry(
+            key="seed",
+            value="user prefers dark mode in the editor today",
+            source="memorize",
+        ))
+
+        gov = MemoryGovernor(
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
+            db=db,
+            config={"admission_threshold": 0.5},
+        )
+
+        # Shares "user", "the", "in" with the seed but is conceptually different.
+        results = await gov.evaluate_admission(
+            ["user prefers ginger tea in the morning today"],
+            source="session:test",
+        )
+        assert len(results) == 1
+        assert results[0].admitted is True
+
+    @pytest.mark.asyncio
+    async def test_time_window_skips_old_entries(self, governor, semantic, db):
+        """An entry older than ``dup_window_days`` must not count as a
+        duplicate source — fixes the position-window bug where bursty traffic
+        pushed yesterday's fact out of comparison range."""
+        old_iso = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        await db.execute(
+            "INSERT INTO semantic_entries "
+            "(id, key, value, confidence, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                "ancient:fact",
+                "user prefers dark mode themes everywhere",
+                0.8,
+                "session:old",
+                old_iso,
+                old_iso,
+            ),
+        )
+        await db.commit()
+
+        results = await governor.evaluate_admission(
+            ["user prefers dark mode themes everywhere"],
+            source="session:new",
+        )
+        assert len(results) == 1
+        # No embedding provider on this fixture, lexical-only check on a
+        # 30-day-old entry that is now outside the 7-day window → admitted.
+        assert results[0].admitted is True
+        assert results[0].reason != "duplicate"
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_falls_back_to_lexical(
+        self, db, procedural, relational, episodic,
+    ):
+        """If the embedding call raises, lexical check still catches near-
+        exact dups — the gate degrades gracefully."""
+        provider = AsyncMock()
+        provider.embed.side_effect = RuntimeError("embed API down")
+        semantic = SemanticMemory(db, embedding_provider=provider)
+        await semantic.upsert(SemanticEntry(
+            key="seed",
+            value="user prefers dark mode themes",
+            source="memorize",
+        ))
+
+        gov = MemoryGovernor(
+            semantic=semantic,
+            procedural=procedural,
+            relational=relational,
+            episodic=episodic,
+            db=db,
+            config={"admission_threshold": 0.5},
+        )
+
+        results = await gov.evaluate_admission(
+            ["user prefers dark mode themes"],
+            source="session:test",
+        )
+        assert len(results) == 1
+        assert results[0].admitted is False
+        assert results[0].reason == "duplicate"
+
+
+# ===========================================================================
 # 6. MemoryGovernor — Decay Cycle
 # ===========================================================================
 
