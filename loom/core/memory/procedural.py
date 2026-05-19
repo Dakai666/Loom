@@ -1,10 +1,8 @@
 """
 Procedural Memory — persisted metadata for loadable skills.
 
-The retired Quest D skill-evolution lifecycle used this module for candidate
-pools and version history. Phase 1.C removed that lifecycle; ProceduralMemory
-now only keeps the active SkillGenome rows used by skill loading, indexing,
-and confidence tracking.
+Tracks active SkillGenome rows for skill loading, indexing, and confidence
+tracking.
 """
 
 import json

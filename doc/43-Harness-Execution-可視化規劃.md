@@ -1,6 +1,8 @@
 # Harness Execution 可視化規劃
 
-本文件定義 Loom 下一階段在 **TUI** 與 **Discord** 的可視化升級方向。
+> **⚠️ 部分退役 — 2026-05-19**：本文件以「TUI + Discord」雙端為前提。整個 Textual TUI 子系統已於 PR #404 退役（見 [doc/34](34-TUI-使用指南.md)），後續 §241 以後的 TUI 規劃章節保留為**歷史脈絡**，不再驅動實作。Discord 端的可視化敘事仍有效；如需新 envelope/dashboard 設計，請以 Discord 端 + CLI（prompt_toolkit `LoomApp`）為對象重新規劃。
+
+本文件定義 Loom 在 **Discord** 與 **CLI** 的可視化升級方向（原稿涵蓋 TUI，已退役）。
 
 核心目標不是把 agent 畫成「待辦事項 DAG」，而是把 Loom 的 **harness-first engineering** 精神以可觀察、可審計、可理解的方式呈現出來。
 

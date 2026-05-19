@@ -8,7 +8,6 @@ of reaching into private session-module helpers — see #306.
 from __future__ import annotations
 
 import tomllib
-import warnings
 from pathlib import Path
 
 
@@ -21,12 +20,5 @@ def load_loom_config() -> dict:
     for path in candidates:
         if path.exists():
             with open(path, "rb") as fh:
-                config = tomllib.load(fh)
-            if "mutation" in config:
-                warnings.warn(
-                    "[mutation] is retired by Quest D Phase 1.C and is safe to delete.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            return config
+                return tomllib.load(fh)
     return {}
