@@ -448,3 +448,33 @@ async def test_elapsed_ms_from_batch_t0(
         batch_t0=batch_t0,
     )
     assert view.elapsed_ms >= 1000  # at least 1s
+
+
+# ---------------------------------------------------------------------------
+# Interaction-language metadata fields (#417)
+# ---------------------------------------------------------------------------
+
+
+def test_execution_envelope_view_defaults_interaction_metadata() -> None:
+    """Empty outcome must mean unknown, never silently fulfilled.
+
+    The renderer is responsible for inferring from ``status`` when the producer
+    leaves ``outcome`` empty. This default is the contract that protects
+    against accidentally claiming success on a failed envelope.
+    """
+    from loom.core.events import ExecutionEnvelopeView
+    from loom.platform.interaction_language import ParallelReason
+
+    view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=1,
+        parallel_groups=1,
+    )
+
+    assert view.intent == ""
+    assert view.parallel_reason == ParallelReason.UNSPECIFIED.value
+    assert view.outcome == ""
+    assert view.outcome_summary == ""

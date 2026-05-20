@@ -425,6 +425,12 @@ class ExecutionEnvelopeView:
     Built by ``LoomSession._build_envelope_view()`` (projection layer)
     and yielded as part of ``EnvelopeStarted / Updated / Completed``
     stream events.  TUI and Discord both consume this same structure.
+
+    ``intent`` / ``parallel_reason`` / ``outcome`` / ``outcome_summary`` are
+    interaction-language metadata. Empty ``outcome`` means unknown and must
+    be derived by producers or renderers; it never means success. Strings
+    here (rather than enums) keep ``loom.core`` independent of
+    ``loom.platform.interaction_language``.
     """
 
     envelope_id: str       # human-readable, e.g. "e1", "e2"
@@ -436,6 +442,10 @@ class ExecutionEnvelopeView:
     elapsed_ms: float = 0.0
     levels: list[list[str]] = field(default_factory=list)
     nodes: list[ExecutionNodeView] = field(default_factory=list)
+    intent: str = ""
+    parallel_reason: str = "unspecified"
+    outcome: str = ""
+    outcome_summary: str = ""
 
 
 @dataclass
@@ -451,6 +461,10 @@ class EnvelopeStarted:
         TUI     ✓  dispatched as TuiEnvelopeStarted → ExecutionDashboard
         Discord ✓  sends formatted envelope status to status_msg, sets
                     _envelope_active=True to suppress legacy ToolBegin display
+
+    Interaction metadata:
+        envelope.intent and envelope.parallel_reason may be displayed by
+        platform consumers for multi-node envelopes.
     """
 
     envelope: ExecutionEnvelopeView
@@ -485,6 +499,11 @@ class EnvelopeCompleted:
         CLI     ✓  renders final envelope state, clears active indicator
         TUI     ✓  dispatched as TuiEnvelopeCompleted → ExecutionDashboard
         Discord ✓  freezes status_msg as permanent record, opens new placeholder
+
+    Interaction metadata:
+        envelope.outcome and envelope.outcome_summary describe the batch
+        result. Mechanical outcome derivation is added in #421; until then
+        producers leave them at the empty defaults.
     """
 
     envelope: ExecutionEnvelopeView
