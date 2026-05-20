@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from shlex import split as shell_split
 from typing import Any
+
+from loom.core.security.sandbox_runtime import extract_command_root
 
 
 class HeartbeatState(str, Enum):
@@ -78,6 +79,7 @@ _LABELS_ZH_TW: dict[str, tuple[str, ...]] = {
     "ripgrep": ("搜尋",),
     "find": ("列檔",),
     "glob": ("列檔",),
+    "list_dir": ("列出目錄",),
     "gitnexus": ("查詢 GitNexus",),
     "memorize": ("寫入記憶",),
     "governed_write": ("寫入記憶",),
@@ -102,11 +104,11 @@ def _truncate(value: Any, *, max_len: int = 48) -> str:
 
 
 def _command_root(command: str) -> str:
-    try:
-        parts = shell_split(command)
-    except ValueError:
-        parts = command.split()
-    return parts[0] if parts else ""
+    # Reuse sandbox_runtime's parser so heartbeat labels stay aligned with how
+    # the same command would be recognised by the sandbox layer. It skips
+    # leading KEY=value env assignments (e.g. ``GH_HOST=github.com gh ...``)
+    # and returns the executable basename, both of which we want for display.
+    return extract_command_root(command) or ""
 
 
 def _first_string_arg(args: dict[str, Any]) -> str:
@@ -154,6 +156,8 @@ def resolve_tool_action(tool_name: str, args: dict[str, Any] | None = None) -> T
         return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after)
     if tool_name in {"find", "glob"}:
         return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after)
+    if tool_name == "list_dir":
+        return ToolAction(_LABELS_ZH_TW["list_dir"][0], _truncate(args.get("path")), stale_after)
     if tool_name.startswith("gitnexus_"):
         return ToolAction(_LABELS_ZH_TW["gitnexus"][0], tool_name.removeprefix("gitnexus_"), stale_after)
     if tool_name in {"memorize", "governed_write"}:

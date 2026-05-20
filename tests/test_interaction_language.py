@@ -28,6 +28,26 @@ def test_resolve_tool_action_for_run_bash_uses_command_root() -> None:
     assert action.subject == "pytest"
 
 
+def test_resolve_tool_action_for_run_bash_skips_leading_env_assignments() -> None:
+    # Heartbeat label must reflect the actual command, not the env var.
+    # Mirrors sandbox_runtime.extract_command_root semantics (which we reuse).
+    action = resolve_tool_action(
+        "run_bash", {"command": "GH_HOST=github.com gh pr view 425"}
+    )
+    assert action.subject == "gh"
+
+    action = resolve_tool_action(
+        "run_bash", {"command": "_DEBUG=1 gh pr view 425"}
+    )
+    assert action.subject == "gh"
+
+
+def test_resolve_tool_action_for_list_dir_uses_path_subject() -> None:
+    action = resolve_tool_action("list_dir", {"path": "loom/platform"})
+    assert action.label == "列出目錄"
+    assert action.subject == "loom/platform"
+
+
 def test_resolve_tool_action_for_read_file_uses_path_subject() -> None:
     action = resolve_tool_action("read_file", {"path": "loom/platform/cli/app.py"})
     assert action.label == "查詢檔案"
