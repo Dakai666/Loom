@@ -28,6 +28,8 @@ import asyncio
 import pytest
 from prompt_toolkit.history import InMemoryHistory
 
+from loom.core.events import TextChunk
+from loom.platform.cli import main as cli_main
 from loom.platform.cli.app import (
     FooterState,
     LoomApp,
@@ -296,7 +298,10 @@ class TestFooterRender:
         text = _flat_text(app._render_footer())
         assert "still waiting" in text
 
-        app.stop_heartbeat()
+        # ``force=True`` bypasses the min-dwell guard so the test
+        # doesn't need to sleep. The deferred-stop path has its own
+        # dedicated tests below.
+        app.stop_heartbeat(force=True)
         assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
 
     def test_paused_blocking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
@@ -368,6 +373,147 @@ class TestFooterRender:
         app.footer.heartbeat_last_event_monotonic = _t.monotonic()
         text = _flat_text(app._render_footer())
         assert "1234in" not in text
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat min-dwell — fast tools shouldn't flash
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatMinDwell:
+    """Regression: short tool calls (< 1 s) were producing labels that
+    appeared and disappeared before the user could read them. The dwell
+    guard holds the label for at least ``_HEARTBEAT_MIN_DWELL_S`` before
+    a stop is allowed to clear it; an arriving ``start_heartbeat``
+    (next tool, THINKING transition) overrides instantly as the
+    "replaced by next action" case.
+    """
+
+    def test_stop_within_dwell_defers_not_clears(self, app: LoomApp) -> None:
+        # User-visible regression case: a 0.3 s tool used to flash and
+        # disappear. After the fix, the label stays as TOOLING until
+        # the ticker promotes the pending stop.
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+            stale_after_s=90.0,
+        )
+        # Immediate stop simulates a sub-second tool.
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+        assert app.footer.heartbeat_pending_stop is True
+        assert "執行指令" in _flat_text(app._render_footer())
+
+    def test_ticker_finalizes_stop_after_dwell_elapses(self, app: LoomApp) -> None:
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_pending_stop is True
+
+        # Simulate the dwell elapsing by pushing ``min_alive_until``
+        # into the past. ``maybe_finalize_pending_stop`` is what the
+        # footer_ticker calls every 0.5s, so this stands in for the
+        # next tick after the dwell window.
+        app.footer.heartbeat_min_alive_until = _t.monotonic() - 0.01
+        app.maybe_finalize_pending_stop()
+
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+        assert app.footer.heartbeat_label == ""
+
+    def test_next_start_during_dwell_replaces_pending_stop(self, app: LoomApp) -> None:
+        # "Replaced by next action" case — a fast pytest followed by
+        # an immediate read_file should NOT freeze on pytest pending
+        # for a full second; the new label should take over instantly.
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.stop_heartbeat()  # deferred
+        assert app.footer.heartbeat_pending_stop is True
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="查詢檔案",
+            subject="loom/core/session.py",
+        )
+        # New label is live, pending_stop cleared so the dwell guard
+        # restarts on this label rather than carrying forward the
+        # previous one's state.
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+        assert app.footer.heartbeat_label == "查詢檔案"
+        assert app.footer.heartbeat_pending_stop is False
+        text = _flat_text(app._render_footer())
+        assert "查詢檔案" in text
+        assert "pytest" not in text
+
+    def test_force_stop_bypasses_dwell(self, app: LoomApp) -> None:
+        # Safety-net paths (turn_loop's outer finally, tests) need an
+        # immediate clear that doesn't wait for the ticker.
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.stop_heartbeat(force=True)
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+
+    def test_force_stop_clears_existing_pending_dwell(self, app: LoomApp) -> None:
+        # A fast ToolEnd can legitimately enter pending dwell, but later
+        # hard-boundary clears (TurnDone / outer cleanup / first text)
+        # must still be able to release stale runtime truth immediately.
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_pending_stop is True
+
+        app.stop_heartbeat(force=True)
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+        assert app.footer.heartbeat_label == ""
+
+    def test_first_text_hard_boundary_clears_thinking_immediately(self, app: LoomApp) -> None:
+        class _Session:
+            _loom_app = app
+
+            async def stream_turn(self, _user_input: str):
+                yield TextChunk(text="hello")
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+        )
+
+        asyncio.run(cli_main._run_streaming_turn(_Session(), "hi"))
+
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+
+    def test_stop_after_dwell_clears_immediately(self, app: LoomApp) -> None:
+        # When a tool legitimately runs longer than the dwell, stop
+        # should clear right away — no deferral needed.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.footer.heartbeat_min_alive_until = _t.monotonic() - 0.01
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
 
 
 # ---------------------------------------------------------------------------
