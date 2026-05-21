@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from loom.core.envelope_outcome import derive_envelope_outcome
 from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
 from loom.core.ledger.replay import reconstruct_tool_calls
 
@@ -129,6 +130,18 @@ class LedgerEnvelopeProjector:
         nodes: list[ExecutionNodeView] = []
         terminal_count = 0
         failure_count = 0
+        # Outcome-state list mirrors node states but upgrades rolled-back
+        # calls to ``"reverted"`` (#421). ``rolled_back`` is stored on
+        # the summary and feeds the envelope-level failure count above,
+        # but it never changes the node's user-visible state — so without
+        # this remap, a single rolled-back call would derive ``fulfilled``
+        # (node.state is still ``memorialized``) even though the envelope
+        # status correctly reads ``failed``. The renderer's
+        # ``status=="failed"`` fallback only triggers on an empty
+        # outcome, not a fulfilled one, which would leave the user with
+        # no summary glyph on a failed batch. Mapping here keeps the
+        # producer truth straight at the source.
+        outcome_states: list[str] = []
 
         for s in summaries:
             meta = call_meta.get(s.tool_call_id)
@@ -142,6 +155,7 @@ class LedgerEnvelopeProjector:
                 terminal_count += 1
             if state in _FAILURE_STATES or s.rolled_back:
                 failure_count += 1
+            outcome_states.append("reverted" if s.rolled_back else state)
 
             duration_ms = self._batch_duration_ms(batch_events, s.tool_call_id)
             auth_expires = (
@@ -211,6 +225,25 @@ class LedgerEnvelopeProjector:
 
         elapsed_ms = (time.monotonic() - batch_t0) * 1000 if batch_t0 else 0.0
 
+        # Mechanical outcome (#421): only derived when the envelope is
+        # terminal. Running envelopes get the empty string ("unknown"),
+        # because ``derive_envelope_outcome`` returns FULFILLED on an
+        # all-in-flight node set and that would paint a passing glyph
+        # on something still in flight. ``outcome_states`` already
+        # remaps rolled-back nodes to ``"reverted"`` so the helper sees
+        # the failure signal that envelope-status saw.
+        if status in ("completed", "failed"):
+            # Missing placeholder nodes (declared but no BEGIN) get
+            # appended after the summary loop; they're never terminal,
+            # so they only appear in a status="running" branch. Safe to
+            # skip them here.
+            outcome = derive_envelope_outcome(outcome_states)
+        else:
+            outcome = ""
+
+        # ``intent`` and ``parallel_reason`` stay defaulted in this
+        # task — they're authored by the LLM via the prompt contract
+        # landing in #423 and synthesised by the renderer otherwise.
         return ExecutionEnvelopeView(
             envelope_id=envelope_id,
             session_id=session_id,
@@ -221,6 +254,7 @@ class LedgerEnvelopeProjector:
             elapsed_ms=elapsed_ms,
             levels=[[n.node_id for n in nodes]] if nodes else [],
             nodes=nodes,
+            outcome=outcome,
         )
 
     # -- helpers ---------------------------------------------------------

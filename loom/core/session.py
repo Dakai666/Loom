@@ -4117,7 +4117,11 @@ class LoomSession:
 
         # No ledger wired → return an empty stub. The shape stays the
         # same so EnvelopeStarted / EnvelopeCompleted consumers don't
-        # need a separate code path.
+        # need a separate code path. ``outcome=""`` is explicit (and
+        # not just relying on the dataclass default) so the contract
+        # is visible at the call site: empty means unknown, never
+        # fulfilled — UI surfaces infer UNFULFILLED from
+        # ``status=="failed"`` when no producer wrote anything (#421).
         return ExecutionEnvelopeView(
             envelope_id=f"e{self._envelope_counter}",
             session_id=self.session_id,
@@ -4125,6 +4129,7 @@ class LoomSession:
             status="running",
             node_count=0,
             parallel_groups=0,
+            outcome="",
         )
 
     # =========================================================================

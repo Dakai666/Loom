@@ -3,6 +3,7 @@ from __future__ import annotations
 from loom.platform.interaction_language import (
     HeartbeatState,
     _LABELS_ZH_TW,
+    derive_envelope_outcome,
     format_elapsed,
     format_parallel_reason,
     resolve_tool_action,
@@ -87,3 +88,60 @@ def test_synthesize_envelope_intent_uses_parallel_reason_and_dominant_tool() -> 
         tool_names=["pytest", "pytest", "pytest"],
     )
     assert intent == "重複跑同一組 pytest"
+
+
+# ----------------------------------------------------------------------
+# Mechanical envelope outcome derivation (#421)
+# ----------------------------------------------------------------------
+
+
+def test_derive_envelope_outcome_fulfilled_when_all_success_states() -> None:
+    assert derive_envelope_outcome(["memorialized", "committed"]) == "fulfilled"
+
+
+def test_derive_envelope_outcome_partial_when_mixed_success_and_failure() -> None:
+    assert derive_envelope_outcome(["memorialized", "timed_out"]) == "partial"
+
+
+def test_derive_envelope_outcome_unfulfilled_when_all_failed() -> None:
+    assert derive_envelope_outcome(["denied", "timed_out"]) == "unfulfilled"
+
+
+def test_derive_envelope_outcome_aborted_when_abort_alone() -> None:
+    # Aborted is its own category — distinct from generic failure so
+    # the renderer can show 🛑 instead of the generic ⚠ glyph.
+    assert derive_envelope_outcome(["aborted"]) == "aborted"
+
+
+def test_derive_envelope_outcome_aborted_with_failure_degrades_to_unfulfilled() -> None:
+    # When aborted mixes with a real failure the helper falls back to
+    # unfulfilled — user mostly cares that the batch didn't finish
+    # cleanly, not the exact flavour of "didn't finish".
+    assert derive_envelope_outcome(["aborted", "timed_out"]) == "unfulfilled"
+
+
+def test_derive_envelope_outcome_never_mechanically_pivots() -> None:
+    # Pivoted requires LLM-authored judgement; mechanical derivation
+    # must never return it regardless of state combination.
+    for states in (
+        ["memorialized"],
+        ["memorialized", "timed_out"],
+        ["aborted", "memorialized"],
+        ["denied", "aborted"],
+    ):
+        assert derive_envelope_outcome(states) != "pivoted"
+
+
+def test_derive_envelope_outcome_handles_lowercase_normalization() -> None:
+    # Be tolerant of upper-case ActionState.value strings — the ledger
+    # path normalises but legacy producers may still emit raw names.
+    assert derive_envelope_outcome(["MEMORIALIZED", "TIMED_OUT"]) == "partial"
+
+
+def test_derive_envelope_outcome_empty_list_returns_fulfilled_for_callers_to_gate() -> None:
+    # Documents the contract: the helper does not know whether an
+    # envelope is terminal. Callers must only invoke it after the
+    # batch has all-terminal states; in-flight inputs would otherwise
+    # be misread as fulfilled. ``LedgerEnvelopeProjector`` gates on
+    # ``status in ("completed", "failed")``.
+    assert derive_envelope_outcome([]) == "fulfilled"

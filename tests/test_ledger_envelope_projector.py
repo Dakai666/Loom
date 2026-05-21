@@ -155,6 +155,9 @@ async def test_completed_batch_single_call(
 
     assert view.envelope_id == "e1"
     assert view.status == "completed"
+    # #421: producer derives outcome from node states once terminal.
+    # All-memorialized → fulfilled.
+    assert view.outcome == "fulfilled"
     assert view.node_count == 1
     n = view.nodes[0]
     assert n.tool_name == "run_bash"
@@ -199,6 +202,12 @@ async def test_failed_batch_status(
     )
 
     assert view.status == "failed"
+    # #421: a rolled-back call's node state stays "memorialized" at the
+    # node level (rolled_back is recorded separately, see replay.py).
+    # The projector remaps rolled_back → "reverted" when feeding the
+    # outcome helper so a status=failed envelope never reports a
+    # fulfilled outcome.
+    assert view.outcome == "unfulfilled"
     n = view.nodes[0]
     assert n.state == "memorialized"
     # error_snippet truncates at 80
@@ -249,10 +258,59 @@ async def test_parallel_batch_one_running_one_done(
     )
 
     assert view.status == "running"
+    # #421: outcome stays empty while envelope is still running so the
+    # renderer never paints a passing glyph on something in flight.
+    assert view.outcome == ""
     states = {n.tool_name: n.state for n in view.nodes}
     assert states["read_file"] == "memorialized"
     # Call B has only BEGIN → "executing" derivation
     assert states["run_bash"] == "executing"
+
+
+# ---------------------------------------------------------------------------
+# Mixed terminal batch — one success, one rollback → status="failed",
+# outcome="partial" (#421)
+# ---------------------------------------------------------------------------
+
+
+async def test_partial_outcome_when_one_success_one_rollback(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="ok",
+        tool_name="read_file",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.1),
+    )
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="bad",
+        tool_name="run_bash",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.3),
+        rolled_back=True,
+        error="post-validator rejected",
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_mixed",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["ok", "bad"],
+        call_meta={
+            "ok": CallMeta(call_id="ok", tool_name="read_file"),
+            "bad": CallMeta(call_id="bad", tool_name="run_bash"),
+        },
+    )
+
+    assert view.status == "failed"
+    # Success + rolled-back → partial: one node fully succeeded, one
+    # was reverted. The mechanical helper sees ``[memorialized,
+    # reverted]`` after the projector's rolled-back remap.
+    assert view.outcome == "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +477,8 @@ async def test_empty_envelope_running_status(
     assert view.node_count == 0
     assert view.nodes == []
     assert view.levels == []
+    # #421: outcome is gated on terminal status. Running → empty string.
+    assert view.outcome == ""
 
 
 # ---------------------------------------------------------------------------
