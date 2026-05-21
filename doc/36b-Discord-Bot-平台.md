@@ -120,10 +120,30 @@ Discord 有 rate limit（約 5 次編輯/5 秒），LoomDiscordBot 的 streaming
     ↓
 TextChunk 事件 → 累積文字，每 ~0.8s 編輯一次 placeholder
     ↓
-ToolBegin → 在 placeholder 附加狀態行
+EnvelopeStarted → status_msg 開新訊息呈現 active envelope
     ↓
-TurnDone → 編輯為最終文字（超過 2000 字自動分段）
+EnvelopeUpdated → 編輯 status_msg（rate-limit 內 coalesce）
+    ↓
+EnvelopeCompleted → freeze 為永久訊息；status_msg 清空待下個 envelope
+    ↓
+TurnDone → 編輯主訊息為最終文字（超過 2000 字自動分段）
 ```
+
+### Envelope 列渲染（v0.3.8.0）
+
+多 node envelope 顯示：
+
+- **Header** — `▸ <agent intent>`（取自 agent 標記的 `▸ ` 前綴；無則用 `synthesize_envelope_intent` 合成），帶 `· 多次驗證` / `· 並行調查` / `· 多目標處理` 標籤對應 `parallel_reason`
+- **Level list** — 各 node 用 ✓ / ▸ / ○ glyph + tool name；單層 envelope 不顯示 `Ln` 前綴
+- **Outcome row** — non-fulfilled 才出現：✓ fulfilled / ◐ partial / ⚠ unfulfilled / ↪ pivoted / 🛑 aborted；`outcome_summary` 若有就顯示（in-band 由 active model 撰寫），無則 fallback 一句 "envelope did not fulfill its intent"
+- **Completed rows 凍結** — 永久訊息，後續事件不再 mutate；`status_msg` 只追蹤當前 active envelope
+- **Think 摘要** — `ThinkCollapsed` 以獨立持久訊息 post，不擠進 status_msg
+
+設計細節見 `docs/superpowers/specs/2026-05-20-ui-ux-interaction-language-design.md`。
+
+### Stalled-status Proxy（PR #422+#429）
+
+當有未授權的 GUARDED tool 卡在 confirm flow 時，Discord embed 切換到「⏸ 等待授權」狀態並暫停 heartbeat 更新，避免 UI 看起來像 agent thinking 但實際上是 user 該動作。
 
 ---
 
@@ -212,16 +232,21 @@ discord_reminder = true
 
 ```
 🔄 任務進度
-✅ ✅ audit — 審稿
-▶️ → draft — 撰寫初稿到 tmp/draft.md
-⬜ ⬜ scope — 與 user 確認研究範圍
-⬜ ⬜ commit — 寫入最終位置 + 更新記憶
+✅ **audit**: 審稿
+▶️ **draft**: 撰寫初稿到 tmp/draft.md
+　　_done when: tmp/draft.md 存在且過 lint_
+⬜ **scope**: 與 user 確認研究範圍
+　　_done when: —_
+⬜ **commit**: 寫入最終位置 + 更新記憶
+　　_done when: —_
 ```
 
 狀態映射：
-- `completed` → ✅
-- `in_progress` → ▶️
-- `pending` → ⬜
+- `completed` → ✅（隱藏 `done_when`，`✓` 已經是答案）
+- `in_progress` → ▶️（顯示 italic `done when: ...`）
+- `pending` → ⬜（顯示 italic `done when: ...`，空白顯示 `—`）
+
+`done_when` 從 v0.3.8.0（#437 / PR #438）加入，是 agent 自己寫的 acceptance criterion；空值的 `—` 在視覺對比上顯眼，創造 agent 自願補完的壓力（無 validator）。
 
 ---
 

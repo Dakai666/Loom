@@ -162,6 +162,18 @@ admitted_facts = [
 
 預設 `admission_threshold = 0.5`，可在 `loom.toml` 調整。
 
+### v0.3.8.0（PR #411）— Semantic-Dup Detector + Time-Window Admission Gate
+
+純 word-overlap 抓不到「同義不同字」的近重複（e.g. 「絲絲喜歡咖啡」vs「Sisi prefers coffee」word overlap 接近 0）。v0.3.8.0 在 Governor 的 admission path 額外加：
+
+1. **Embedding cosine 近重複偵測** — 候選事實先過 embedding lookup，跟最近 N 條 semantic facts 算 cosine；超過閾值（預設 0.85）就視為 duplicate 拒絕
+2. **Time-window admission gate** — 短時間窗（預設 30 秒）內，同一條 source 對相同主題的重複寫入會被 throttle，避免 LLM 在多輪 reasoning 連續產出 near-dup
+3. **三層 prompt** — 寫入時若偵測到 near-dup，給 agent 三種選項：merge / replace / skip，而不是直接靜默 drop（讓 agent 有決策視野）
+
+實作配合的 `memorize` 工具也在寫入時自動 surface near-duplicate hint（PR #409），同時 `skills/memory_hygiene/` 提供批次 dedup 入口（PR #410+#413）。
+
+設計討論見 issue #411；存量 dedup 跑過後 semantic facts 從 6.6k 降到 5.7k（-13.8%）。
+
 ---
 
 ## 3. Decay Cycle — Domain × Temporal Decay Table

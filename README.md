@@ -240,12 +240,16 @@ Every write to semantic memory passes through the `MemoryGovernor`:
 write request
   ├─ classify_source()      → trust tier (user_explicit 1.0 → external 0.5)
   ├─ confidence floor       = max(entry.confidence, tier_floor)
+  ├─ semantic-dup detect    → embedding cosine ≥ 0.85 vs recent facts → 3-way prompt (merge / replace / skip)
+  ├─ time-window gate       → same source × topic within ~30s → throttle near-dup writes
   ├─ ContradictionDetector  → REPLACE / KEEP / SUPERSEDE based on trust comparison
   └─ upsert or reject
 
 session end
   └─ Decay Cycle: episodic TTL prune · semantic low-confidence prune · relational dreaming decay
 ```
+
+Semantic-dup detection and the time-window admission gate landed in v0.3.8.0 (PR #411); the existing `memorize` tool also surfaces near-duplicate hints at write time. Batch dedup is available through the `skills/memory_hygiene/` skill — running the cleanup against existing stores brought semantic fact counts down 6.6k → 5.7k (-13.8%).
 
 Trust tiers (highest → lowest): `user_explicit` → `tool_verified` → `agent_memorize` → `session_compress` → `counter_factual` → `agent_inferred` → `skill_evolution` → `dreaming` → `external`
 
@@ -354,26 +358,23 @@ An `ActionPlanner` maps the current trust level and context to a decision path. 
 
 ## Platforms
 
+Loom has two first-party frontends with command parity. The earlier Textual TUI was retired on 2026-05-19 (PR #404).
+
 ### CLI
 
-`loom chat` gives you a full-featured interactive session in your terminal. Rebuilt in v0.3.6 (Issue #236) with a persistent `LoomApp` instance (prompt_toolkit), linear streaming output, a floating **TaskList panel**, **parallel envelope group panels** for same-turn parallel tool calls, Markdown reblit at turn boundaries, and a model badge footer.
+`loom chat` opens an interactive session backed by a single persistent `prompt_toolkit` `LoomApp`. Linear streaming output, a floating **TaskList panel** with per-row `done_when` acceptance criteria, a runtime **heartbeat footer** that responds in real time as tools begin / stall / complete, and tool **justification prose** that surfaces *why* the agent is calling each tool.
 
-`/sessions` launches a session picker with `Enter` to restore and `Escape` to cancel. `/name` and `--name` name the current session for easier resume.
-
-> The earlier Textual TUI (`loom chat --tui`) was retired on 2026-05-19 (PR #404). Source preserved under local `_archive/tui-retired-2026-05-19/`.
+`/sessions`, `/name`, `/model`, `/scope`, `/think`, `/compact` and friends are inline. `--resume` and `--session <id>` pick up where you left off.
 
 ### Discord Bot
 
-The Discord bot (`loom discord start`) turns any channel thread into a persistent Loom session — useful for mobile access and 24/7 autonomous operation:
+`loom discord start` turns any channel thread into a persistent Loom session — built for mobile access and 24/7 autonomous operation. Each thread maps to one session and survives bot restart.
 
-- Each thread is a persistent session restored automatically after bot restart
-- Per-turn **Envelope Trail**: completed envelopes freeze as permanent messages, building an audit trail in the thread history
-- Four-button confirmation flow (Allow / Lease / Auto / Deny) with automatic follow-up messages explaining grant scope and TTL
-- `/scope`, `/summary`, `/model`, `/think`, `/compact` and all other slash commands
-- Configurable turn summaries (one-line compact or full Discord Embed)
-- Rich embed v2 with expressive emoji reactions; native slash command dispatch alongside text-prefix routing
-
-Both frontends — CLI and Discord — share full command parity.
+- **Envelope Trail** — every completed multi-tool batch freezes as a permanent message: agent-authored `▸ <intent>` header, per-node ✓/▸/○ glyphs, outcome row (`✓ fulfilled` / `◐ partial` / `⚠ unfulfilled` / `↪ pivoted` / `🛑 aborted`) with summary line
+- **TaskList Reminder Embed** — italic `done when: ⋯` sub-line under each non-completed row; empty values render as `—`
+- **Stalled-status proxy** — when a GUARDED tool is awaiting authorization the embed switches to `⏸ 等待授權` and suppresses heartbeat updates, so the UI never looks like agent thinking while it's actually waiting on the user
+- **Confirm flow** — four buttons (Allow / Lease / Auto / Deny) with follow-up messages explaining grant scope and TTL
+- **Slash commands** — `/scope`, `/summary`, `/model`, `/think`, `/compact` etc. land natively alongside text-prefix routing
 
 ---
 

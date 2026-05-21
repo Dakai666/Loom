@@ -78,6 +78,31 @@ Moon Mood tarot 的 `personalities/sisi.md` 內容結構：
 
 ---
 
+## Interaction Language Layer（v0.3.8.0，PR #423+#430）
+
+除了 SOUL / Agent / Personality 三層之外，v0.3.8.0 引入一個**獨立 contract layer**：
+
+```python
+INTERACTION_LANGUAGE_INSTRUCTIONS = (
+    "When you dispatch a multi-tool batch, provide a one-line intent "
+    "before the batch starting with '▸ '. After the batch completes, "
+    "start your outcome judgement line with one glyph: '✓' fulfilled, "
+    "'◐' partial, '⚠' unfulfilled, '↪' pivoted, or '🛑' aborted. "
+    "Single-tool calls do not need an intent header."
+)
+```
+
+定義在 `loom/core/envelope_outcome.py`、由 PromptStack 在 build 時併入 system prompt（位置在 personality 之後）。
+
+這個層的作用是教 agent 用 marker 標記 envelope intent / outcome，給 CLI + Discord 的 envelope renderer 可解析的訊號：
+
+- `▸ <intent>` → 抽進 `envelope.intent`，渲染為 envelope header
+- `✓ ◐ ⚠ ↪ 🛑` 開頭的 line → 抽進 `envelope.outcome` + `outcome_summary`，渲染為 outcome row（marker scan 掃多行，不限第一行）
+
+producer-side wiring 細節見 PR #431 + `docs/superpowers/specs/2026-05-20-ui-ux-interaction-language-design.md`。
+
+---
+
 ## 與舊版文件的關係
 
 舊版 `doc/26` 描述的 SOUL/Agent/Personality 層級概念**仍然正確**，但實作方式是同步讀取靜態檔案。動態生成（`AgentPromptGenerator`）並未實作。Agent context 的動態部分目前由 Session 在每次 turn 注入具體資訊，而非在 Prompt Stack 層處理。

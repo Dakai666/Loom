@@ -4,8 +4,9 @@
 > - v0.3.2（#128）：DAG 執行層，後因從未被接線而退回（#152 stall 根因）
 > - v0.3.2.1（#153）：5 個 task_* 工具的「認知外骨骼」
 > - v0.3.3（#205）：收斂為單一 `task_write`，廢除 `task_done` 的「動詞」語意造成的假完成幻覺
+> - v0.3.8.0（#437 / PR #438）：加入可選 `done_when` 欄位作為 acceptance criterion，CLI/Discord 渲染對非 completed row 顯示「done when: ⋯ / —」（參見「TaskList as attention relay」設計筆記）
 >
-> 本文件描述 v0.3.3。先前版本見 git history。
+> 本文件描述當前狀態（v0.3.8.0）。先前版本見 git history。
 
 ---
 
@@ -51,12 +52,13 @@ class TaskNode:
     id: str
     content: str
     status: TaskStatus = TaskStatus.PENDING
+    done_when: str = ""   # optional acceptance criterion (#437)
 
     @property
     def is_active(self) -> bool: ...   # PENDING or IN_PROGRESS
 ```
 
-只有 `id`、`content`、`status`。沒有 `result`、沒有 `depends_on`、沒有 `error`、沒有 `metadata`。
+`id` / `content` / `status` 是核心三欄；`done_when` 是 agent 自己寫的驗收標準（可選，空白渲染為 `—`）。沒有 `result`、沒有 `depends_on`、沒有 `error`、沒有 `metadata` — 實際產出走檔案系統（見 §File-as-State）。
 
 ### TaskStatus
 
@@ -74,12 +76,12 @@ class TaskStatus(Enum):
 ```python
 class TaskList:
     def replace(self, todos: list[dict]) -> None:
-        """Replace entire list. todos = [{id, content, status?}]."""
+        """Replace entire list. todos = [{id, content, status?, done_when?}]."""
 
     @property
     def nodes(self) -> list[TaskNode]: ...
     def active(self) -> list[TaskNode]: ...
-    def status_summary(self) -> dict: ...
+    def status_summary(self) -> dict: ...   # includes done_when per todo
 ```
 
 只有 replace 語意——沒有 add / remove / update / get_ready。每次 agent 想改就傳完整意圖狀態，框架負責 mirror。
@@ -89,11 +91,15 @@ class TaskList:
 ## 工作流程（agent 視角）
 
 ```python
-# 1. 開始任務 — 建立清單
+# 1. 開始任務 — 建立清單（done_when 可選，鼓勵但不強制）
 task_write(todos=[
-    {"id": "research", "content": "蒐集論文", "status": "pending"},
-    {"id": "draft",    "content": "寫初稿到 tmp/draft.md", "status": "pending"},
-    {"id": "audit",    "content": "審核", "status": "pending"},
+    {"id": "research", "content": "蒐集論文",
+     "status": "pending",
+     "done_when": "至少 5 篇 peer-reviewed，主題覆蓋 X/Y/Z"},
+    {"id": "draft",    "content": "寫初稿到 tmp/draft.md",
+     "status": "pending",
+     "done_when": "tmp/draft.md 存在且過 lint"},
+    {"id": "audit",    "content": "審核", "status": "pending"},  # 還沒想清楚就先留空
 ])
 
 # 2. 開始第一個節點 — 重寫清單把 status 改 in_progress
@@ -115,6 +121,21 @@ task_write(todos=[
 ```
 
 **沒有 `next_ready` 自動推進**——agent 自己看清單決定下一步。
+
+---
+
+## `done_when` — Acceptance Criterion 通道（v0.3.8.0）
+
+`done_when` 是 agent 自己寫的「這步做完的證據是什麼」短句。設計重點：
+
+- **Schema always-present、預設空字串** — agent 不能用「不選」迴避，但也不會 validator 強制
+- **Render 對比創造壓力** — 非 completed row 一定顯示 `done when: <text>` 或 `done when: —`；`—` 在視覺上顯眼，自然驅動 agent 補完
+- **Completed row 隱藏** — `✓` 已經是答案，retroactively shame 沒寫的人是噪音
+- **Self-check message 同步 surface** — 任務被 nudge 時 acceptance criterion 一起回到視野
+
+更深的角色：**TaskList 是 acceptance criteria 的 attention relay**。skill 載入時 criteria 在 golden attention zone；agent 寫進 `done_when` 把 criteria 「轉錄」到 TaskList；skill 之後被 unload / compact，criteria 仍循環。低成本 attention re-injection 通道（參見「TaskList as attention relay」設計筆記）。
+
+設計討論記錄見 issue #437、實作 PR #438。
 
 ---
 
