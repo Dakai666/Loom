@@ -130,17 +130,20 @@ class LedgerEnvelopeProjector:
         nodes: list[ExecutionNodeView] = []
         terminal_count = 0
         failure_count = 0
-        # Outcome-state list mirrors node states but upgrades rolled-back
-        # calls to ``"reverted"`` (#421). ``rolled_back`` is stored on
-        # the summary and feeds the envelope-level failure count above,
-        # but it never changes the node's user-visible state — so without
-        # this remap, a single rolled-back call would derive ``fulfilled``
-        # (node.state is still ``memorialized``) even though the envelope
-        # status correctly reads ``failed``. The renderer's
-        # ``status=="failed"`` fallback only triggers on an empty
-        # outcome, not a fulfilled one, which would leave the user with
-        # no summary glyph on a failed batch. Mapping here keeps the
-        # producer truth straight at the source.
+        # Outcome-state list mirrors node states but upgrades failures
+        # the way the lifecycle hides them (#421 + codex review of #428).
+        #
+        # The Loom lifecycle memorialises every terminal call — including
+        # ``denied`` / ``timed_out`` / ``aborted`` — so ``_derive_state``
+        # always returns ``"memorialized"`` for terminated calls regardless
+        # of whether they succeeded or failed. The real failure signal
+        # lives in ``state_transitions`` (mid-history) and on the
+        # ``rolled_back`` flag. Without scanning the full history, a
+        # ``timed_out → memorialized`` call gets fed to the outcome helper
+        # as ``"memorialized"`` and derives ``fulfilled`` — wrong; both
+        # the envelope status and the outcome glyph would lie. This loop
+        # consults the full history for both signals so producer truth
+        # stays straight at the source.
         outcome_states: list[str] = []
 
         for s in summaries:
@@ -151,11 +154,26 @@ class LedgerEnvelopeProjector:
             #   1) ledger state_transitions last "to" (authoritative when END seen)
             #   2) "executing" (BEGIN seen, no END yet)
             state = self._derive_state(s)
+            failure_in_history = self._failure_state_in_history(s.state_transitions)
             if state in _TERMINAL_STATES:
                 terminal_count += 1
-            if state in _FAILURE_STATES or s.rolled_back:
+            if (
+                state in _FAILURE_STATES
+                or s.rolled_back
+                or failure_in_history is not None
+            ):
                 failure_count += 1
-            outcome_states.append("reverted" if s.rolled_back else state)
+            # Precedence: rollback flag > history failure > current state.
+            # Rollback is the most user-meaningful signal (something was
+            # accepted then undone), then the specific failure mid-history
+            # (denied / timed_out / aborted preserved for the outcome
+            # glyph), and finally the surface state for plain success.
+            if s.rolled_back:
+                outcome_states.append("reverted")
+            elif failure_in_history is not None:
+                outcome_states.append(failure_in_history)
+            else:
+                outcome_states.append(state)
 
             duration_ms = self._batch_duration_ms(batch_events, s.tool_call_id)
             auth_expires = (
@@ -258,6 +276,24 @@ class LedgerEnvelopeProjector:
         )
 
     # -- helpers ---------------------------------------------------------
+
+    @staticmethod
+    def _failure_state_in_history(transitions: list[dict]) -> str | None:
+        """Find the first failure-state transition in lifecycle history.
+
+        The Loom lifecycle terminates every call by transitioning to
+        ``memorialized`` — even denied / timed_out / aborted ones. The
+        actual failure signal lives mid-history. Returning the first
+        such transition preserves the most user-meaningful failure
+        category (``aborted`` distinct from generic failure) for the
+        outcome glyph. Returns ``None`` for clean histories so callers
+        can fall back to the current state.
+        """
+        for t in transitions:
+            to = (t.get("to") or "").lower()
+            if to in _FAILURE_STATES:
+                return to
+        return None
 
     @staticmethod
     def _derive_state(summary) -> str:

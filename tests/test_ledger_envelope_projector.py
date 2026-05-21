@@ -57,7 +57,20 @@ async def _emit_lifecycle_pair(
     rolled_back: bool = False,
     error: str | None = None,
     result_summary: str | None = "ok",
+    failure_state: str | None = None,
 ) -> None:
+    """Emit a BEGIN/END pair for a tool call.
+
+    ``failure_state`` mirrors the Loom lifecycle for non-rollback
+    failure paths (denied / timed_out / aborted): the call transitions
+    ``executing → <failure_state> → memorialized``. Final terminal
+    state stays ``memorialized`` because the lifecycle memorialises
+    every call regardless of how it ended — the failure signal lives
+    in the middle of the history. Pass either ``rolled_back=True`` for
+    the post-validator-reverted path or ``failure_state="..."`` for
+    the lifecycle-failure paths, but not both (the projector treats
+    rollback as the more specific signal).
+    """
     begin_ts, end_ts = timestamps
     await emitter.emit(
         "tool_lifecycle",
@@ -71,26 +84,42 @@ async def _emit_lifecycle_pair(
         correlation_id="c1",
         timestamp=begin_ts,
     )
-    state_transitions = (
-        [
+    if rolled_back:
+        tail = [
+            {"from": "validated", "to": "reverting", "ts": "x", "reason": None},
+            {"from": "reverting", "to": "reverted", "ts": "x", "reason": None},
+            {"from": "reverted", "to": "memorialized", "ts": "x", "reason": None},
+        ]
+        head = [
             {"from": "declared", "to": "authorized", "ts": "x", "reason": None},
             {"from": "authorized", "to": "executing", "ts": "x", "reason": None},
             {"from": "executing", "to": "observed", "ts": "x", "reason": None},
             {"from": "observed", "to": "validated", "ts": "x", "reason": None},
         ]
-        + (
-            [
-                {"from": "validated", "to": "reverting", "ts": "x", "reason": None},
-                {"from": "reverting", "to": "reverted", "ts": "x", "reason": None},
-                {"from": "reverted", "to": "memorialized", "ts": "x", "reason": None},
-            ]
-            if rolled_back
-            else [
-                {"from": "validated", "to": "committed", "ts": "x", "reason": None},
-                {"from": "committed", "to": "memorialized", "ts": "x", "reason": None},
-            ]
-        )
-    )
+    elif failure_state is not None:
+        # denied / aborted / timed_out path: executing → failure_state →
+        # memorialized. No validate/commit step because the call never
+        # produced an observation worth validating.
+        head = [
+            {"from": "declared", "to": "authorized", "ts": "x", "reason": None},
+            {"from": "authorized", "to": "executing", "ts": "x", "reason": None},
+        ]
+        tail = [
+            {"from": "executing", "to": failure_state, "ts": "x", "reason": None},
+            {"from": failure_state, "to": "memorialized", "ts": "x", "reason": None},
+        ]
+    else:
+        head = [
+            {"from": "declared", "to": "authorized", "ts": "x", "reason": None},
+            {"from": "authorized", "to": "executing", "ts": "x", "reason": None},
+            {"from": "executing", "to": "observed", "ts": "x", "reason": None},
+            {"from": "observed", "to": "validated", "ts": "x", "reason": None},
+        ]
+        tail = [
+            {"from": "validated", "to": "committed", "ts": "x", "reason": None},
+            {"from": "committed", "to": "memorialized", "ts": "x", "reason": None},
+        ]
+    state_transitions = head + tail
     await emitter.emit(
         "tool_lifecycle",
         ToolLifecyclePayload(
@@ -265,6 +294,151 @@ async def test_parallel_batch_one_running_one_done(
     assert states["read_file"] == "memorialized"
     # Call B has only BEGIN → "executing" derivation
     assert states["run_bash"] == "executing"
+
+
+# ---------------------------------------------------------------------------
+# Hidden-failure paths — denied / timed_out / aborted all terminate in
+# ``memorialized``, so ``state in _FAILURE_STATES`` checks against the
+# last transition would miss them. The projector scans the full history
+# (#421 codex-review fix) so envelope status and outcome stay honest.
+# ---------------------------------------------------------------------------
+
+
+async def test_denied_path_marks_envelope_failed_and_unfulfilled(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="d",
+        tool_name="run_bash",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.1),
+        failure_state="denied",
+        result_summary=None,
+        error="permission denied",
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_denied",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["d"],
+        call_meta={"d": CallMeta(call_id="d", tool_name="run_bash")},
+    )
+
+    # Node still terminates in memorialized (Loom lifecycle invariant) —
+    # the failure signal lives mid-history.
+    assert view.nodes[0].state == "memorialized"
+    assert view.status == "failed"
+    assert view.outcome == "unfulfilled"
+
+
+async def test_timed_out_path_marks_envelope_failed_and_unfulfilled(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="t",
+        tool_name="run_bash",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.2),
+        failure_state="timed_out",
+        result_summary=None,
+        error="exceeded 30s",
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_timeout",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["t"],
+        call_meta={"t": CallMeta(call_id="t", tool_name="run_bash")},
+    )
+
+    assert view.nodes[0].state == "memorialized"
+    assert view.status == "failed"
+    assert view.outcome == "unfulfilled"
+
+
+async def test_aborted_path_keeps_aborted_outcome_glyph_distinct(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    # Aborted gets its own outcome category (🛑) instead of the generic
+    # ⚠ that denied/timed_out land on — the user explicitly bailed,
+    # which is meaningfully different from "the tool failed". The
+    # projector preserves this distinction by surfacing the mid-history
+    # ``aborted`` transition to the outcome helper rather than lumping
+    # all failures under ``unfulfilled``.
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="a",
+        tool_name="run_bash",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.1),
+        failure_state="aborted",
+        result_summary=None,
+        error="cancelled by user",
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_aborted",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["a"],
+        call_meta={"a": CallMeta(call_id="a", tool_name="run_bash")},
+    )
+
+    assert view.nodes[0].state == "memorialized"
+    assert view.status == "failed"
+    assert view.outcome == "aborted"
+
+
+async def test_mixed_success_and_hidden_failure_yields_partial(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    # Success node + a timed_out-then-memorialized node should derive
+    # "partial" — the helper sees ``[memorialized, timed_out]`` after
+    # the projector's history scan, where it would have seen
+    # ``[memorialized, memorialized]`` before the fix.
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="ok",
+        tool_name="read_file",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.1),
+    )
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="slow",
+        tool_name="run_bash",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.3),
+        failure_state="timed_out",
+        result_summary=None,
+        error="exceeded 30s",
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_mixed_hidden",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["ok", "slow"],
+        call_meta={
+            "ok": CallMeta(call_id="ok", tool_name="read_file"),
+            "slow": CallMeta(call_id="slow", tool_name="run_bash"),
+        },
+    )
+
+    assert view.status == "failed"
+    assert view.outcome == "partial"
 
 
 # ---------------------------------------------------------------------------
