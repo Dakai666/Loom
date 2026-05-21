@@ -1,6 +1,6 @@
 # PR-D 實作草稿 — Linear Stream + Live Footer + Solidification
 
-本文件是 `doc/49-CLI-Refresh-設計.md` PR-D 的詳細實作藍圖。是 **整個 CLI Refresh milestone 工作量最大的一刀**——核心是把 PR-A 的「每輪 `prompt_async` + 短暫 widget Application」模型砍掉，換成「單一 persistent Application + 固定 bottom 區（input + footer）」。前 PR 為了快速落地引入的支點全部要拆。
+本文件是 `docs/designs/49-CLI-Refresh-設計.md` PR-D 的詳細實作藍圖。是 **整個 CLI Refresh milestone 工作量最大的一刀**——核心是把 PR-A 的「每輪 `prompt_async` + 短暫 widget Application」模型砍掉，換成「單一 persistent Application + 固定 bottom 區（input + footer）」。前 PR 為了快速落地引入的支點全部要拆。
 
 ---
 
@@ -755,7 +755,7 @@ $ loom chat
 
 ## 20. 出處與相依
 
-- 設計母文件：`doc/49-CLI-Refresh-設計.md`
+- 設計母文件：`docs/designs/49-CLI-Refresh-設計.md`
 - 已合併：PR-A (#237) PR-B (#242) PR-C (#244)
 - Tracking issue：#236
 - 後續：PR-E (TaskList 浮動面板)

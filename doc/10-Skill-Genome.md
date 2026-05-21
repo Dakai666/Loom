@@ -84,9 +84,9 @@ skills/
 | `tags` | frontmatter `tags` |
 | `precondition_check_refs` | frontmatter `precondition_checks` |
 
-> **v0.3.7.3 (Quest D Phase 1.C)**：移除 `maturity_tag` 欄位。原本服務於 SkillMutator/SkillPromoter 的 mature/needs_improvement 標籤已不再被任何邏輯讀取。對應自動演化流程退役，詳見 [doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)。
+> **v0.3.7.3 (Quest D Phase 1.C)**：移除 `maturity_tag` 欄位。原本服務於 SkillMutator/SkillPromoter 的 mature/needs_improvement 標籤已不再被任何邏輯讀取。對應自動演化流程退役，詳見 [docs/designs/54-Skill-Evolution-Arena-設計.md](../docs/designs/54-Skill-Evolution-Arena-設計.md)。
 
-`body` 包含完整的 frontmatter，作為技能載入後 LLM 自然能讀到的上下文（過去 SkillMutator 自動 rewrite 路徑已退役，現在 SKILL.md 更新走「使用者 + 絲絲對話 → 手動 Edit」通道，見 doc/54 §4.1）。
+`body` 包含完整的 frontmatter，作為技能載入後 LLM 自然能讀到的上下文（過去 SkillMutator 自動 rewrite 路徑已退役，現在 SKILL.md 更新走「使用者 + 絲絲對話 → 手動 Edit」通道，見 `docs/designs/54-Skill-Evolution-Arena-設計.md` §4.1）。
 
 ---
 

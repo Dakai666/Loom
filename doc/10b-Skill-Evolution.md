@@ -6,7 +6,7 @@
 >
 > 主因：過程訊號（tool 成功率、verdict ratio、shadow delta）不是「技能成品品質」的可信 proxy。沒有可信 grading substrate，自動 shadow/promote 是 garbage-in / garbage-out。
 >
-> **目前替代設計**：[doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)
+> **目前替代設計**：[docs/designs/54-Skill-Evolution-Arena-設計.md](../docs/designs/54-Skill-Evolution-Arena-設計.md)
 >
 > 三條觀察通道取代七層演化：
 > 1. 即時反饋（`ToolCallDimension` 系統層 + 對話內 `Edit SKILL.md`）

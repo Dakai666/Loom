@@ -2,7 +2,7 @@
 
 本文件記錄 **Loom CLI 介面重構** 的動機、設計哲學、訊息分流策略與 PR 拆分計畫。
 
-替代目標：完成後將取代 `34-TUI-使用指南.md`（屆時 Dashboard 模式淘汰，本文成為 CLI 互動的權威說明）。
+替代目標：完成後將取代 `doc/34-TUI-使用指南.md`（屆時 Dashboard 模式淘汰，本文成為 CLI 互動的權威說明）。
 
 關聯：原始討論起點為 issue #160（已關閉，改開新 issue 追蹤本計畫）。
 
@@ -292,5 +292,5 @@ PR-D 也要在 testing note 裡明確覆蓋：
 ## 參考
 
 - 原始討論：issue #160（已關）→ 新 issue（CLI Refresh tracking）
-- 既有相關文件：`43-Harness-Execution-可視化規劃.md`、`45-AbortController.md`
-- 將取代：`34-TUI-使用指南.md`（PR-D 完成後廢除）
+- 既有相關文件：`docs/designs/43-Harness-Execution-可視化規劃.md`、`doc/45-AbortController.md`
+- 將取代：`doc/34-TUI-使用指南.md`（PR-D 完成後廢除）

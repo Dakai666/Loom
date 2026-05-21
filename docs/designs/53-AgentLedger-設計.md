@@ -978,8 +978,8 @@ at-rest 防護分三階段在 **#342** 收：
 - **共識來源**：#316 Round 1-6 comments
 - **關係文件**：
   - `doc/52-主線與支線.md` §1.4（Quest B 定位）、§3.3（Turn Graph Branching 預留）、§5（開發順序）
-  - `doc/50-未來改善路線圖.md` §AgentLedger 統一事件流（顧問版啟發來源）
-  - `doc/51-Agent-能力評級系統.md`（#314 Capability Sheet 自動投影下游需求）
+  - `docs/designs/50-未來改善路線圖.md` §AgentLedger 統一事件流（顧問版啟發來源）
+  - `docs/designs/51-Agent-能力評級系統.md`（#314 Capability Sheet 自動投影下游需求）
 - **memory references**：
   - `feedback_vibe_coding_code_style`（agent-friendly 設計判準）
   - `project_memory_system_v2`（Memory v2 emit 下游）

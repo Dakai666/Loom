@@ -317,10 +317,10 @@ class SkillUsageDigest:
 
 ## 9. 與其他文件的關係
 
-- `doc/50-未來改善路線圖.md` — 顧問版 Quest D 出處
-- `doc/51-Agent-能力評級系統.md` — capability sheet 將來吃 Evaluator 訊號（不是本文件）
+- `docs/designs/50-未來改善路線圖.md` — 顧問版 Quest D 出處
+- `docs/designs/51-Agent-能力評級系統.md` — capability sheet 將來吃 Evaluator 訊號（不是本文件）
 - `doc/52-主線與支線.md §1.3` — Loom 自家 Quest D 願景，本文件只接住 Phase 1
-- `doc/53-AgentLedger-設計.md` — ledger schema；本文件不擴充 event_type
+- `docs/designs/53-AgentLedger-設計.md` — ledger schema；本文件不擴充 event_type
 - `issue #362` — 原始七層 → 兩觸發點提案，本文件進一步收斂為「觀察 + 退役」
 - `outputs/self_check/2026-05-13-skill-closed-loop-report.md` — 觸發本文件的閉環報告
 - `outputs/doc/skill_system_evolution_plan_2026-05-02.md` — **舊版規劃，本文件 §3 列入退役**

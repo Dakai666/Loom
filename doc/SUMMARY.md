@@ -108,58 +108,45 @@
 | [40-新增Notifier.md](40-新增Notifier.md) | 如何實作新的通知適配器 |
 | [41-新增人格.md](41-新增人格.md) | 如何建立新 personality markdown |
 | [42-測試指南.md](42-測試指南.md) | pytest 執行方式與測試覆蓋 |
-| [43-Harness-Execution-可視化規劃.md](43-Harness-Execution-可視化規劃.md) | TUI / Discord 的 execution graph、control surface 與 phased rollout 規劃 |
-| [44-Scope-Aware-Permission-規劃.md](44-Scope-Aware-Permission-規劃.md) | Issue #45 的底層 permission substrate 規劃 |
 | [45-AbortController.md](45-AbortController.md) | 標準取消訊號、memory-leak safety、asyncio.Event API |
 | [46-CommandScanner.md](46-CommandScanner.md) | Shell 注入掃描、BLOCK/WARN pattern、Layering 策略 |
 | **[45b-Security-Module.md](45b-Security-Module.md)** | Security 模組完整說明：CommandScanner + SelfTerminationGuard 分工 |
+| [48-Agent-Telemetry.md](48-Agent-Telemetry.md) | Issue #142：三維度自我觀測、DimensionTracker、agent_health 工具 |
+| [55-Sandbox-Runtime.md](55-Sandbox-Runtime.md) | Quest A Phase 4 — `srt` OS-level wall、sandbox profile flag、bypass_sandbox 設定 |
+| [52-主線與支線.md](52-主線與支線.md) | Loom 自家視角的 Quest 結構說明（主線 A–E + 支線 + milestone 對照） |
 
 ### 附錄
 | 文件 | 說明 |
 |------|------|
-| [47-Legitimacy-Heuristics-規劃.md](47-Legitimacy-Heuristics-規劃.md) | Issue #47 的 Intent Declaration、軌跡守衛、污染熔斷設計 |
-| [48-Agent-Telemetry.md](48-Agent-Telemetry.md) | Issue #142：三維度自我觀測、DimensionTracker、agent_health 工具 |
 | [99-功能人工確認清單.md](99-功能人工確認清單.md) | 透過對話逐一驗證架構行為與設計一致性 |
 | [MISSING-DOC-AUDIT.md](MISSING-DOC-AUDIT.md) | 本次 doc 缺口清單與版本比對記錄（2026-04-26）|
 
+> 設計與規劃文件（43 / 44 / 47 / 49 / 49a / 49b / 50 / 51 / 53 / 54）已移到 [`docs/designs/`](../docs/designs/) — `doc/` 收斂為純架構說明，設計層獨立追蹤。
+
 ---
 
-## 版本對照（v0.2.5.1 → v0.2.9.4 新功能）
+## 版本對照（近期主線）
+
+完整 changelog 見 [`doc/releases/`](releases/)。
 
 | 版本 | 主要新功能 |
 |------|-----------|
-| v0.2.5.1 | AbortController、Counter-factual Reflection |
-| v0.2.5.2 | SchemaValidationMiddleware、SQLite FTS5、Discord 多媒體 |
-| v0.2.5.3 | Offline Dreaming、SelfReflectionPlugin（→ TaskReflector）、Session Log 結構化 |
-| v0.2.6.0 | MCP 整合（Server + Client）、Predictive Memory Pre-fetcher |
-| v0.2.6.1 | Plugin 架構修復、`skills/` 目錄命名 |
-| v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing；移除 `/verbose` F3（Issue #63） |
-| v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE/KEEP/SUPERSEDE）；Admission Gate；Decay Cycle |
+| v0.3.8.0 | Interaction Language UI/UX 翻新（envelope intent/outcome render、CLI runtime heartbeat、stalled-status proxy）；TaskList v2 `done_when` acceptance criterion；semantic-dup admission gate；三輪系統審計收尾；Textual TUI 子系統退役 |
+| v0.3.7.5 | OS-level sandbox（`srt`）— `run_bash` opt-in kernel-level filesystem + network confinement（Quest A · Issue #29） |
+| v0.3.6.0 | LLM-as-judge Phase 2、CLI Refresh E（TaskList floating panel）、Envelope three-stage fade |
+| v0.3.4.0 | `MemoryFacade` Phase A–C、`TaskReflector`、SubAgent structured failure codes、startup diagnostic suite |
 | v0.2.9.4 | Unified Pipeline（Issues #83–#86）：`ToolCall.origin`；MCP/autonomy/sub-agent 全經同一 Pipeline；`allowed_tools` + `scope_grants` + `attach_outputs`；Config tamper detection（Issue #91） |
+| v0.2.9.0 | Advanced Memory Governance（Issue #43）：Trust Tier 信任分級（10 層）；`ContradictionDetector`（REPLACE/KEEP/SUPERSEDE）；Admission Gate；Decay Cycle |
+| v0.2.8.0 | Control-first Action Lifecycle（Issue #50）：`LifecycleMiddleware` + `LifecycleGateMiddleware`；`precondition_checks[]`；abort signal racing |
 
 ---
 
-## ✅ 文件撰寫狀態
+## 文件分工
 
-**57 個文件已完整！**
-
-| 區塊 | 數量 |
-|------|------|
-| 0. 總覽與概念 | 2 |
-| 1. 架構導讀 | 2 |
-| 2. Harness Layer | 5 |
-| 3. Memory Layer | 7（含 12b）|
-| 4. Cognition Layer | 4 |
-| 5. Task Engine | 2 |
-| 6. Autonomy Engine | 4 |
-| 7. Notification Layer | 4（含 24b）|
-| 8. Prompt Stack | 3 |
-| 9. Extensibility | 5（含 31b）|
-| 10. Platform | 6（含 35b、36b）|
-| 11. 設定與配置 | 2 |
-| 12. 開發者指南 | 8（含 45、45b、46）|
-| 附錄 | 3（含 MISSING-DOC-AUDIT）|
+`doc/` 收純架構說明（v0.3.8.0 之後 53 個檔案，含 release changelogs）。
+`docs/designs/` 收 Loom 自家中文設計/規劃文件（10 個檔案）。
+`docs/superpowers/` 收 superpowers 風格英文 plan+spec 配對。
 
 ---
 
-> 📚 Loom 文檔 v0.2.9.4 同步完成！| 2026-04-26 03:21 Asia/Taipei
+> 📚 Loom 文檔 v0.3.8.0 reorg 完成 | 2026-05-21 Asia/Taipei

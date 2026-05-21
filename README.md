@@ -72,6 +72,7 @@ Large source files are navigable via **`# SECTION N`** banners — run `grep "# 
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
 | **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
 | **v0.3.6.2** | 2026-05-05 | Fix spurious asyncio.Future() in render-only tests |
 | **v0.3.6.1** | 2026-05-01 | Skill-driven model tier system (Issue #276) |
@@ -298,7 +299,7 @@ After each turn where a skill was used, `TaskReflector` runs a background LLM se
 
 ### Skill Optimization Loop
 
-> v0.3.7.2 (Quest D Phase 1.C): the prior automated candidate-pool pipeline (`SkillMutator` / `SkillPromoter` / `SkillGate` / shadow_mode / fast_track) was retired. Process signals (tool success rate, verdict ratio, shadow delta) are not a credible proxy for skill output quality — without an Evaluator substrate, automated promotion is garbage-in/out. See [doc/54-Skill-Evolution-Arena-設計.md](doc/54-Skill-Evolution-Arena-設計.md).
+> v0.3.7.2 (Quest D Phase 1.C): the prior automated candidate-pool pipeline (`SkillMutator` / `SkillPromoter` / `SkillGate` / shadow_mode / fast_track) was retired. Process signals (tool success rate, verdict ratio, shadow delta) are not a credible proxy for skill output quality — without an Evaluator substrate, automated promotion is garbage-in/out. See [docs/designs/54-Skill-Evolution-Arena-設計.md](docs/designs/54-Skill-Evolution-Arena-設計.md).
 
 Skills now improve through three observation channels, with **edits made by the user/agent in conversation** — git commits replace the old candidate/promote mechanism:
 
@@ -430,12 +431,12 @@ The `doc/` directory contains full technical documentation for every subsystem:
 | Harness & middleware deep-dive | `doc/04-Harness-概述.md`, `doc/06-Middleware-詳解.md` |
 | Action Lifecycle state machine | `doc/06b-Action-Lifecycle.md` |
 | Trust levels & blast radius | `doc/05-Trust-Level.md` |
-| Scope-aware authorization design | `doc/44-Scope-Aware-Permission-規劃.md` |
+| Scope-aware authorization design | `docs/designs/44-Scope-Aware-Permission-規劃.md` |
 | OS-level sandbox (`srt`) | `doc/55-Sandbox-Runtime.md` |
 | Memory system & governance | `doc/08-Memory-概述.md`, `doc/08b-Memory-Governance.md` |
-| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `doc/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
+| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `docs/designs/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
 | Memory Pulse & Lifecycle | `doc/12b-Memory-Health.md` |
-| Execution visualization | `doc/43-Harness-Execution-可視化規劃.md` |
+| Execution visualization | `docs/designs/43-Harness-Execution-可視化規劃.md` |
 | Autonomy engine | `doc/19-Autonomy-概述.md`, `doc/21-Action-Planner.md` |
 | Extensibility & plugins | `doc/29-Extensibility-概述.md`, `doc/31-Plugin-系統.md` |
 | Full config reference | `doc/37-loom-toml-參考.md` |
