@@ -377,3 +377,78 @@ def test_long_sequential_dispatch_eventually_triggers_stalled() -> None:
         threshold_s=90.0,
         already_emitted=False,
     ), "watchdog must fire after 90s of no-op envelope ticks"
+
+
+def test_no_op_envelope_update_skips_entire_branch_to_preserve_overlay() -> None:
+    """Regression for the codex P2 v2 finding (PR #429 re-review).
+
+    Sequence:
+    1. Long ``run_bash`` starts → ``EnvelopeStarted`` → ``tool_buf`` is set
+       to the running-envelope render, ``status_msg`` displays it.
+    2. ~90s of no-op fallback ``EnvelopeUpdated`` ticks land. The
+       clock-gate (codex P2 v1 fix) means none of them reset the
+       stall clock, so the watchdog eventually fires and edits
+       ``status_msg`` to ``tool_buf + still waiting · 90s``.
+    3. Another fallback ``EnvelopeUpdated`` arrives — same render.
+       Pre-fix: the ``elif EnvelopeUpdated`` branch would call
+       ``_safe_edit(status_msg, tool_buf.lstrip())``, overwriting
+       the watchdog's overlay. Post-fix: the top-of-loop
+       ``continue`` skips the entire branch.
+
+    This test pins the WIRING GUARANTEE: ``_event_resets_stall_clock``
+    returns ``False`` for the no-op envelope update, which is what
+    causes ``_run_turn`` to ``continue`` past the if-elif chain and
+    leave the watchdog's overlay intact. If a refactor ever splits
+    the clock gate from the branch gate, this test still asserts
+    the helper-level invariant — but the comment above is the
+    canonical record of the wiring contract.
+    """
+    envelope = _running_envelope("e1", "run_bash")
+    rendered = _format_envelope_status(envelope)
+
+    # Step 1: initial envelope render is cached.
+    last_envelope_render = rendered
+
+    # Step 2: simulated watchdog fire — latch is now True. (The
+    # watchdog runs on a separate task in production; we just record
+    # its post-condition here for clarity.)
+    stalled_emitted = True
+
+    # Step 3: no-op fallback EnvelopeUpdated arrives. The wiring
+    # contract requires _event_resets_stall_clock to return False so
+    # the main loop continues past the branch.
+    no_op = EnvelopeUpdated(envelope=envelope)
+    assert _event_resets_stall_clock(no_op, last_envelope_render) is False
+
+    # And the watchdog must still consider itself emitted — no new
+    # progress event has reset the latch.
+    assert _should_emit_stalled_status(
+        now=200.0,
+        last_event_at=0.0,
+        threshold_s=90.0,
+        already_emitted=stalled_emitted,
+    ) is False
+
+
+def test_real_progress_envelope_update_resets_latch_and_reenables_stalled() -> None:
+    """Mirror of the above: when REAL progress lands after a stalled
+    emit, the helper says reset, the main loop runs the branch and
+    re-renders status_msg with the new content (which naturally lacks
+    the stalled overlay — and that's correct, because we're no longer
+    stalled). Pins that the contract distinguishes real-progress from
+    no-op updates correctly.
+    """
+    previous_render = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    progress_view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="completed",  # tool finished
+        node_count=1,
+        parallel_groups=1,
+        levels=[["n1"]],
+        nodes=[_node("n1", "run_bash", state="memorialized")],
+    )
+    progress = EnvelopeUpdated(envelope=progress_view)
+
+    assert _event_resets_stall_clock(progress, previous_render) is True

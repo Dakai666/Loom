@@ -1425,22 +1425,32 @@ class LoomDiscordBot:
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
-                    # Heartbeat for the watchdog — only reset on events
-                    # that represent VISIBLE progress (#422 codex review).
-                    # Blanket-resetting starves the watchdog for long
-                    # sequential tools because session.stream_turn fires
-                    # ~1Hz fallback ``EnvelopeUpdated`` ticks. The helper
-                    # gates EnvelopeUpdated on a render comparison and
-                    # drops ActionStateChange (silent in Discord by
-                    # design). Other events are always real activity.
-                    if _event_resets_stall_clock(event, _last_envelope_render):
-                        _last_runtime_event_at = time.monotonic()
-                        _stalled_emitted = False
+                    # ── Heartbeat + branch gate (#422 codex review v2) ──
+                    # The same decision controls TWO things: whether
+                    # the stall-clock resets AND whether the per-event
+                    # branch runs. Both must be skipped for no-op
+                    # events, otherwise the per-branch ``_safe_edit``
+                    # would overwrite the watchdog's "still waiting"
+                    # overlay with a render-without-overlay even though
+                    # nothing visible changed.
+                    #
+                    # ``_event_resets_stall_clock`` returns False for
+                    # synthetic 1Hz ``EnvelopeUpdated`` fallbacks (no
+                    # render change vs ``_last_envelope_render``) and
+                    # for ``ActionStateChange`` (silent in Discord by
+                    # design). Continue past the whole if-elif chain
+                    # so the message stays exactly as the watchdog
+                    # painted it.
+                    if not _event_resets_stall_clock(
+                        event, _last_envelope_render
+                    ):
+                        continue
+                    _last_runtime_event_at = time.monotonic()
+                    _stalled_emitted = False
                     # Keep the cached render fresh for the next event's
-                    # comparison. Updated unconditionally on envelope
-                    # events so fallback ticks compare against the most
-                    # recently observed state, not against a stale
-                    # debounce-skipped frame.
+                    # comparison. Updated whenever a progress-bearing
+                    # envelope event lands so subsequent fallback ticks
+                    # compare against the most recently observed state.
                     if isinstance(
                         event,
                         (EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted),
@@ -1637,8 +1647,10 @@ class LoomDiscordBot:
                             tool_buf += f" — {event.message[:80]}"
                         await _safe_edit(status_msg, tool_buf.lstrip())
 
-                    elif isinstance(event, ActionStateChange):
-                        pass  # too granular for Discord display
+                    # ``ActionStateChange`` is intentionally not handled
+                    # here — it's a no-op for Discord display by design
+                    # and the loop's top-level guard skips it via
+                    # ``_event_resets_stall_clock`` returning False.
 
                     elif isinstance(event, TurnDone):
                         _cache_read_tokens = event.cache_read_input_tokens
