@@ -119,6 +119,37 @@ class TestTaskList:
         assert "completed" in summary["by_status"]
         assert len(summary["todos"]) == 2
 
+    def test_done_when_round_trips(self):
+        # Issue #437: optional acceptance criterion threads through
+        # replace() → TaskNode → status_summary() unchanged.
+        lst = TaskList()
+        lst.replace([
+            {
+                "id": "a",
+                "content": "Review PR #435",
+                "done_when": "P0–P3 findings each have file/line/evidence",
+            },
+            {"id": "b", "content": "Quick check"},
+        ])
+        assert lst.nodes[0].done_when == (
+            "P0–P3 findings each have file/line/evidence"
+        )
+        assert lst.nodes[1].done_when == ""
+        summary = lst.status_summary()
+        assert summary["todos"][0]["done_when"] == (
+            "P0–P3 findings each have file/line/evidence"
+        )
+        assert summary["todos"][1]["done_when"] == ""
+
+    def test_done_when_strips_whitespace(self):
+        # Whitespace-only done_when collapses to empty (renders as —)
+        # so the agent can't sneak past the visible gap with a space.
+        lst = TaskList()
+        lst.replace([
+            {"id": "a", "content": "A", "done_when": "   "},
+        ])
+        assert lst.nodes[0].done_when == ""
+
 
 # ── TaskListManager ────────────────────────────────────────────────────
 
@@ -185,6 +216,22 @@ class TestTaskListManager:
         assert "[b]" in msg
         assert "task_write" in msg
 
+    def test_self_check_surfaces_done_when(self, mgr):
+        # Issue #437: nudge shows acceptance criterion (or "—" gap)
+        # so the agent re-reads its own definition of done.
+        mgr.write([
+            {
+                "id": "a",
+                "content": "Audit security review",
+                "done_when": "all findings ranked, evidence linked",
+            },
+            {"id": "b", "content": "Quick smoke test"},
+        ])
+        msg = mgr.build_self_check_message()
+        assert msg is not None
+        assert "done when: all findings ranked, evidence linked" in msg
+        assert "done when: —" in msg
+
     def test_on_change_fires(self, mgr):
         calls = []
         mgr.on_change = lambda s: calls.append(s)
@@ -238,3 +285,22 @@ class TestTaskWriteTool:
         assert result.success
         data = json.loads(result.output)
         assert data["total"] == 0
+
+    async def test_done_when_round_trips_through_tool(self, tool):
+        # Issue #437: tool layer accepts done_when without schema
+        # rewrite at the call site; absent done_when stays empty.
+        call = _tc("task_write", {"todos": [
+            {
+                "id": "a",
+                "content": "A",
+                "done_when": "tests pass and reviewer signs off",
+            },
+            {"id": "b", "content": "B"},
+        ]})
+        result = await tool.executor(call)
+        assert result.success
+        data = json.loads(result.output)
+        assert data["todos"][0]["done_when"] == (
+            "tests pass and reviewer signs off"
+        )
+        assert data["todos"][1]["done_when"] == ""

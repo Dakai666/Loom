@@ -913,6 +913,19 @@ class LoomApp:
             else:
                 glyph, cls = "○", "class:tasklist.pending"
             parts.append((cls, f"   {glyph} {content}\n"))
+            # done_when sub-line (Issue #437). Always rendered for
+            # uncompleted items so the visible "—" creates social
+            # pressure to fill in the criterion. Completed items skip
+            # the line — the ✓ already says the agent considered it
+            # done, retroactively shaming a missing criterion is noise.
+            if status != "completed":
+                criterion = (t.get("done_when") or "").strip()
+                if len(criterion) > 60:
+                    criterion = criterion[:59] + "…"
+                parts.append((
+                    "class:tasklist.pending",
+                    f"       done when: {criterion or '—'}\n",
+                ))
         return FormattedText(parts)
 
     def _render_confirm(self) -> FormattedText:

@@ -3245,13 +3245,22 @@ def make_task_write_tool(
         description=(
             "Maintain your todo list for multi-step work. Pass the FULL "
             "intended list every time — this replaces the previous list. "
-            "Each todo is {id, content, status} where status is "
+            "Each todo is {id, content, status, done_when} where status is "
             "'pending' | 'in_progress' | 'completed'. To 'complete' a "
             "step, rewrite the list with that item's status changed.\n\n"
             "This is your sticky-note board — a reminder of what's left, "
             "not a state container. Real outputs (reports, code, data) "
             "MUST go to files via write_file. The todo list never holds "
             "the result itself, only the fact that the step exists.\n\n"
+            "'done_when' is your own acceptance criterion for the step — "
+            "one short phrase describing the evidence that would prove "
+            "the step is finished (e.g. 'P0–P3 findings each have "
+            "file/line/evidence', 'embed renders correctly in Discord'). "
+            "Writing it forces you to define done before you act, and "
+            "you re-read it every time you update the list. Leave it "
+            "empty when you genuinely cannot yet say what done looks "
+            "like — empty values render as '—' so the gap stays visible "
+            "and you can fill it on a later edit.\n\n"
             "Use it when a goal has 3+ coordinated steps and forgetting "
             "one would be costly. Skip it for trivial single-turn work. "
             "Pass an empty list to clear."
@@ -3279,6 +3288,15 @@ def make_task_write_tool(
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
                                 "description": "Current status. Defaults to 'pending'.",
+                            },
+                            "done_when": {
+                                "type": "string",
+                                "description": (
+                                    "Acceptance criterion — one short "
+                                    "phrase describing the evidence that "
+                                    "proves this step is finished. "
+                                    "Optional; empty renders as '—'."
+                                ),
                             },
                         },
                         "required": ["id", "content"],

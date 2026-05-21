@@ -67,6 +67,53 @@ async def test_middleware_sends_embed_on_success():
         channel.send.assert_called_once()
 
 @pytest.mark.asyncio
+async def test_middleware_renders_done_when_criterion():
+    # Issue #437: Discord embed shows done_when as an italic sub-line
+    # under each non-completed row; "—" when the criterion is empty.
+    client = MockDiscordClient()
+    channel = MockDiscordChannel()
+    client.get_channel.return_value = channel
+
+    session = MockLoomSession({"task_write": {"discord_reminder": True}})
+    middleware = TaskWriteDiscordReminderMiddleware(client, 12345, session)
+
+    call = ToolCall(
+        tool_name="task_write",
+        trust_level=TrustLevel.SAFE,
+        session_id="test",
+        args={
+            "todos": [
+                {
+                    "id": "task1",
+                    "content": "First task",
+                    "status": "in_progress",
+                    "done_when": "tests pass and reviewer signs off",
+                },
+                {"id": "task2", "content": "Second task", "status": "pending"},
+                {
+                    "id": "task3",
+                    "content": "Third task",
+                    "status": "completed",
+                    "done_when": "shipped",
+                },
+            ]
+        },
+    )
+
+    async def mock_handler(c: ToolCall) -> ToolResult:
+        return ToolResult(call_id=c.id, tool_name=c.tool_name, success=True)
+
+    with patch("loom.platform.discord.middleware.discord.Embed") as MockEmbed:
+        await middleware.process(call, mock_handler)
+
+        desc = MockEmbed.call_args.kwargs.get("description", "")
+        assert "_done when: tests pass and reviewer signs off_" in desc
+        assert "_done when: —_" in desc
+        # Completed row hides the criterion — completion is the answer.
+        assert "_done when: shipped_" not in desc
+
+
+@pytest.mark.asyncio
 async def test_middleware_skips_when_config_false():
     client = MockDiscordClient()
     channel = MockDiscordChannel()

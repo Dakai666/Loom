@@ -57,6 +57,7 @@ class TaskWriteDiscordReminderMiddleware(Middleware):
             status = t.get("status", "pending")
             content_str = t.get("content", "").strip()
             id_str = t.get("id", "").strip()
+            criterion = (t.get("done_when") or "").strip()
 
             if id_str and content_str:
                 display_text = f"**{id_str}**: {content_str}"
@@ -65,12 +66,20 @@ class TaskWriteDiscordReminderMiddleware(Middleware):
             else:
                 display_text = id_str
 
+            # done_when sub-line (Issue #437). Shown for non-completed
+            # rows so the visible "—" creates social pressure to fill
+            # the criterion. Completed rows skip it for the same reason
+            # the CLI panel does.
             if status == "completed":
                 completed.append(f"✅ {display_text}")
-            elif status == "in_progress":
-                in_progress.append(f"▶️ {display_text}")
             else:
-                pending.append(f"⬜ {display_text}")
+                line = "▶️" if status == "in_progress" else "⬜"
+                rendered_criterion = criterion or "—"
+                entry = f"{line} {display_text}\n　　_done when: {rendered_criterion}_"
+                if status == "in_progress":
+                    in_progress.append(entry)
+                else:
+                    pending.append(entry)
 
         # Construct embed description
         desc_lines = []

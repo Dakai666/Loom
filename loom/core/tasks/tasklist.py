@@ -34,6 +34,11 @@ class TaskNode:
     id: str
     content: str
     status: TaskStatus = TaskStatus.PENDING
+    # Optional TDD-style acceptance criterion. Visible in both CLI and
+    # Discord renders; empty values render as ``—`` so absence is loud
+    # rather than silent (Issue #437). No validator: the discipline comes
+    # from re-reading what you wrote, not from a gatekeeper.
+    done_when: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -64,6 +69,7 @@ class TaskList:
             tid = (spec.get("id") or "").strip()
             content = (spec.get("content") or "").strip()
             status_str = (spec.get("status") or "pending").strip().lower()
+            done_when = (spec.get("done_when") or "").strip()
             if not tid:
                 raise ValueError(f"todo at index {i} is missing 'id'")
             if not content:
@@ -78,7 +84,9 @@ class TaskList:
                     f"todo {tid!r} has unknown status {status_str!r} "
                     f"(expected one of: pending, in_progress, completed)"
                 ) from None
-            new_nodes[tid] = TaskNode(id=tid, content=content, status=status)
+            new_nodes[tid] = TaskNode(
+                id=tid, content=content, status=status, done_when=done_when,
+            )
         self._nodes = new_nodes
 
     @property
@@ -96,7 +104,12 @@ class TaskList:
             "total": len(self._nodes),
             "by_status": by_status,
             "todos": [
-                {"id": n.id, "content": n.content, "status": n.status.value}
+                {
+                    "id": n.id,
+                    "content": n.content,
+                    "status": n.status.value,
+                    "done_when": n.done_when,
+                }
                 for n in self._nodes.values()
             ],
         }
