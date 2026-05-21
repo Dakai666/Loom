@@ -296,6 +296,104 @@ async def test_parallel_batch_one_running_one_done(
     assert states["run_bash"] == "executing"
 
 
+async def test_parallel_reason_classifies_replicas_multi_target_and_independent(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    base = time.time()
+    for call_id, tool_name in (
+        ("a", "read_file"),
+        ("b", "read_file"),
+        ("c", "run_bash"),
+    ):
+        await _emit_lifecycle_pair(
+            emitter,
+            call_id=call_id,
+            tool_name=tool_name,
+            turn_id="turn_p",
+            timestamps=(base, base + 0.1),
+        )
+
+    replicas = await projector.build_view(
+        envelope_id="e_replicas",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["a", "b"],
+        call_meta={
+            "a": CallMeta(call_id="a", tool_name="read_file", full_args={"path": "x"}),
+            "b": CallMeta(call_id="b", tool_name="read_file", full_args={"path": "x"}),
+        },
+    )
+    multi_target = await projector.build_view(
+        envelope_id="e_multi_target",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["a", "b"],
+        call_meta={
+            "a": CallMeta(call_id="a", tool_name="read_file", full_args={"path": "x"}),
+            "b": CallMeta(call_id="b", tool_name="read_file", full_args={"path": "y"}),
+        },
+    )
+    independent = await projector.build_view(
+        envelope_id="e_independent",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["a", "c"],
+        call_meta={
+            "a": CallMeta(call_id="a", tool_name="read_file", full_args={"path": "x"}),
+            "c": CallMeta(call_id="c", tool_name="run_bash", full_args={"command": "pytest"}),
+        },
+    )
+
+    assert replicas.parallel_reason == "fan_out_replicas"
+    assert multi_target.parallel_reason == "multi_target"
+    assert independent.parallel_reason == "fan_out_independent"
+
+
+async def test_projector_accepts_agent_authored_envelope_metadata(
+    store: LedgerStore, emitter: LedgerEmitter, projector
+) -> None:
+    base = time.time()
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="a",
+        tool_name="pytest",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.1),
+    )
+    await _emit_lifecycle_pair(
+        emitter,
+        call_id="b",
+        tool_name="pytest",
+        turn_id="turn_p",
+        timestamps=(base, base + 0.2),
+        failure_state="timed_out",
+        error="timeout",
+        result_summary=None,
+    )
+
+    view = await projector.build_view(
+        envelope_id="e_meta",
+        session_id="sess_proj",
+        turn_id="turn_p",
+        turn_index=0,
+        call_ids=["a", "b"],
+        call_meta={
+            "a": CallMeta(call_id="a", tool_name="pytest", full_args={"path": "tests"}),
+            "b": CallMeta(call_id="b", tool_name="pytest", full_args={"path": "tests"}),
+        },
+        intent="重複跑測試確認穩定性",
+        outcome_summary="其中一組測試逾時，需要重跑",
+    )
+
+    assert view.intent == "重複跑測試確認穩定性"
+    assert view.parallel_reason == "fan_out_replicas"
+    assert view.outcome == "partial"
+    assert view.outcome_summary == "其中一組測試逾時，需要重跑"
+
+
 # ---------------------------------------------------------------------------
 # Hidden-failure paths — denied / timed_out / aborted all terminate in
 # ``memorialized``, so ``state in _FAILURE_STATES`` checks against the

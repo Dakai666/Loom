@@ -428,6 +428,95 @@ class TestParallelDispatch:
         assert "Internal dispatch error: boom" in (result.error or "")
 
 
+class TestEnvelopeMetadataCapture:
+    def test_intent_and_outcome_markers_parse_display_lines(self):
+        from loom.core.session import (
+            _extract_envelope_intent_marker,
+            _extract_envelope_outcome_marker,
+        )
+
+        assert (
+            _extract_envelope_intent_marker("▸ 重複跑測試確認穩定性\n")
+            == "重複跑測試確認穩定性"
+        )
+        assert (
+            _extract_envelope_intent_marker(
+                "我先讀這幾個檔案釐清架構。\n▸ 並行讀取 4 個 session 檔案"
+            )
+            == "並行讀取 4 個 session 檔案"
+        )
+        assert _extract_envelope_intent_marker("我先確認一下") == ""
+        assert _extract_envelope_outcome_marker("⚠ 其中一組測試逾時，需要重跑") == (
+            "unfulfilled",
+            "其中一組測試逾時，需要重跑",
+        )
+        assert _extract_envelope_outcome_marker(
+            "整理完剛剛的結果。\n⚠️ 其中一組測試逾時，需要重跑"
+        ) == (
+            "unfulfilled",
+            "其中一組測試逾時，需要重跑",
+        )
+
+    @pytest.mark.asyncio
+    async def test_author_envelope_outcome_summary_uses_active_model(self):
+        from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
+        from loom.core.session import LoomSession
+
+        class FakeRouter:
+            async def chat(self, *, model, messages, tools, max_tokens):
+                assert model == "fake-model"
+                assert tools is None
+                assert max_tokens == 80
+                assert "unfulfilled" in messages[1]["content"]
+                return SimpleNamespace(text="其中一組測試逾時，需要重跑")
+
+        session = object.__new__(LoomSession)
+        session.router = FakeRouter()
+        session._envelope_metadata = {}
+
+        view = ExecutionEnvelopeView(
+            envelope_id="e1",
+            session_id="sess",
+            turn_index=0,
+            status="failed",
+            node_count=2,
+            parallel_groups=1,
+            nodes=[
+                ExecutionNodeView(
+                    node_id="a",
+                    call_id="a",
+                    action_id="a",
+                    tool_name="pytest",
+                    level=0,
+                    state="memorialized",
+                    trust_level="SAFE",
+                ),
+                ExecutionNodeView(
+                    node_id="b",
+                    call_id="b",
+                    action_id="b",
+                    tool_name="pytest",
+                    level=0,
+                    state="memorialized",
+                    trust_level="SAFE",
+                    error_snippet="timeout",
+                ),
+            ],
+            outcome="unfulfilled",
+        )
+
+        updated = await LoomSession._author_envelope_outcome_summary(
+            session,
+            view,
+            model="fake-model",
+        )
+
+        assert updated.outcome_summary == "其中一組測試逾時，需要重跑"
+        assert session._envelope_metadata["e1"]["outcome_summary"] == (
+            "其中一組測試逾時，需要重跑"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Issue #126 — session title tests (L1 provisional + L2 editable)
 # ─────────────────────────────────────────────────────────────────────────────

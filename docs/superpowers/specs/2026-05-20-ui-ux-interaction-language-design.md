@@ -591,22 +591,28 @@ implementation that locks it in so future-spec readers can find the seam.
     means the agent changed strategy on purpose — only LLM-authored
     judgement can claim it. The helper falls back to
     ``fulfilled / partial / unfulfilled / aborted`` (#421).
+11. **Envelope metadata producer wiring — hybrid v1.** ``parallel_reason`` is
+    dispatch-classified from the batch shape: identical repeated calls become
+    ``fan_out_replicas``, same tool with different args becomes
+    ``multi_target``, and mixed tools become ``fan_out_independent``. Agent
+    intent uses a lightweight ``▸ `` marker in the text immediately before a
+    multi-tool batch. For terminal multi-node envelopes whose mechanical
+    outcome is not ``fulfilled`` or ``aborted``, the session asks the active
+    model for one bounded Traditional Chinese outcome line before emitting
+    ``EnvelopeCompleted`` (#431). Post-batch outcome glyph markers in the
+    agent's normal follow-up are also captured for recent-envelope memory, but
+    the user-visible completed row is produced before that follow-up exists.
 
 ## Deferred From First Implementation
 
 Slice 1 intentionally narrowed scope on these items. Tracked separately so
 the chain becomes complete in subsequent work.
 
-- **Producer-side capture for envelope metadata — #431** (slice 2).
-  ``view.intent`` / ``view.outcome_summary`` / ``view.parallel_reason`` all
-  have consumer-side wiring (#420) and ``outcome`` has a mechanical fallback
-  (#421), but no producer ever writes the first three today. Sisi-on-Discord
-  manual verification (post-#430) confirmed that multi-tool batches always
-  render the ``▸ 執行 <tool>`` fallback from ``synthesize_envelope_intent``
-  because both intent and parallel_reason stay defaulted. Issue #431 holds
-  the mechanism choice (marker parser vs structured tool call) for intent
-  and outcome_summary, plus a deterministic classifier for parallel_reason
-  in the dispatch layer.
+- **Producer-side capture for envelope metadata — #431** (slice 2, landed).
+  ``view.parallel_reason`` is now dispatch-classified, ``view.intent`` is
+  captured from the agent's ``▸ `` marker before multi-tool batches, and
+  ``view.outcome_summary`` is populated by a bounded active-model summary for
+  non-fulfilled multi-node envelopes before Discord freezes the completed row.
 - **``PermissionLeaseGranted`` event.** Not in slice 1. The footer's
   ``🔑 N·M:SS`` badge stays the durable display for active grants; the
   timeline-level lease event lands after heartbeat is settled.
