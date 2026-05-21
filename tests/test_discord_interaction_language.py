@@ -254,3 +254,126 @@ def test_stalled_status_suppression_takes_precedence_over_already_emitted() -> N
         already_emitted=True,
         suppressed=True,
     )
+
+
+# ----------------------------------------------------------------------
+# Stall-clock heartbeat gating (#422 codex review)
+# ----------------------------------------------------------------------
+
+
+from loom.core.events import (
+    ActionStateChange,
+    EnvelopeStarted,
+    EnvelopeUpdated,
+    TextChunk,
+)
+from loom.platform.discord.bot import _event_resets_stall_clock
+
+
+def _running_envelope(envelope_id: str, tool_name: str) -> ExecutionEnvelopeView:
+    """Single-node running envelope — what a long sequential ``run_bash``
+    looks like to the Discord consumer between ``EnvelopeStarted`` and
+    ``EnvelopeCompleted``."""
+    return ExecutionEnvelopeView(
+        envelope_id=envelope_id,
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=1,
+        parallel_groups=1,
+        levels=[["n1"]],
+        nodes=[_node("n1", tool_name)],
+    )
+
+
+def test_envelope_started_always_resets_stall_clock() -> None:
+    event = EnvelopeStarted(envelope=_running_envelope("e1", "run_bash"))
+    assert _event_resets_stall_clock(event, last_envelope_render="") is True
+
+
+def test_envelope_updated_with_no_render_change_does_not_reset_clock() -> None:
+    # The pathological case codex caught: ``LoomSession.stream_turn``
+    # emits a synthetic ``EnvelopeUpdated`` every ~1s while a tool is
+    # running. If those reset the clock, a long sequential ``run_bash``
+    # never reaches the 90s threshold.
+    envelope = _running_envelope("e1", "run_bash")
+    rendered = _format_envelope_status(envelope)
+    event = EnvelopeUpdated(envelope=envelope)
+    assert _event_resets_stall_clock(event, last_envelope_render=rendered) is False
+
+
+def test_envelope_updated_with_state_change_resets_clock() -> None:
+    # When a node transitions (e.g., one of N parallel tools just
+    # finished), the rendered status differs from the previous view —
+    # that's real progress and must reset the clock.
+    previous = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    new_view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=2,
+        parallel_groups=1,
+        levels=[["n1", "n2"]],
+        nodes=[_node("n1", "run_bash"), _node("n2", "pytest")],
+    )
+    event = EnvelopeUpdated(envelope=new_view)
+    assert _event_resets_stall_clock(event, last_envelope_render=previous) is True
+
+
+def test_action_state_change_never_resets_clock() -> None:
+    # Silent in Discord display by design (#422). User sees no edit,
+    # so 90s of state-machine churn still warrants a stalled message.
+    event = ActionStateChange(
+        action_id="n1",
+        tool_name="run_bash",
+        call_id="n1",
+        old_state="executing",
+        new_state="observed",
+    )
+    assert _event_resets_stall_clock(event, last_envelope_render="anything") is False
+
+
+def test_text_chunk_always_resets_clock() -> None:
+    event = TextChunk(text="hello")
+    assert _event_resets_stall_clock(event, last_envelope_render="") is True
+
+
+def test_long_sequential_dispatch_eventually_triggers_stalled() -> None:
+    """End-to-end shape: simulate the codex-described scenario.
+
+    A single long ``run_bash`` produces ``EnvelopeStarted`` followed by
+    ~90 fallback ``EnvelopeUpdated`` ticks at 1s intervals before the
+    user-visible state changes. With the unconditional heartbeat (pre
+    codex fix) the clock would reset every tick and the watchdog would
+    never fire. With the render-gated heartbeat, after 90s of identical
+    fallback ticks the threshold is crossed and a single stalled emit
+    must be allowed.
+    """
+    envelope = _running_envelope("e1", "run_bash")
+    rendered = _format_envelope_status(envelope)
+
+    started = EnvelopeStarted(envelope=envelope)
+    last_event_at = 0.0
+    if _event_resets_stall_clock(started, last_envelope_render=""):
+        last_event_at = 0.0  # turn start
+    last_envelope_render = rendered
+
+    # 90 fallback updates at 1s intervals — none change the rendered
+    # status, so none reset the clock.
+    for tick in range(1, 91):
+        now = float(tick)
+        ev = EnvelopeUpdated(envelope=envelope)
+        if _event_resets_stall_clock(ev, last_envelope_render):
+            last_event_at = now
+        # Outer loop would also keep ``last_envelope_render`` fresh; it
+        # never actually changes here so the assignment is a no-op.
+        last_envelope_render = _format_envelope_status(ev.envelope)
+
+    now = 90.5  # half a watchdog poll-tick past the threshold boundary
+    assert _should_emit_stalled_status(
+        now=now,
+        last_event_at=last_event_at,
+        threshold_s=90.0,
+        already_emitted=False,
+    ), "watchdog must fire after 90s of no-op envelope ticks"

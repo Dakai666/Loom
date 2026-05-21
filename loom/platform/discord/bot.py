@@ -183,6 +183,39 @@ _OUTCOME_GLYPHS: dict[str, str] = {
 }
 
 
+def _event_resets_stall_clock(event: Any, last_envelope_render: str) -> bool:
+    """Decide whether ``event`` is real activity for the stalled watchdog.
+
+    Most stream events are genuine signs the runtime is alive, but two
+    cases are noise:
+
+    1. ``LoomSession.stream_turn()`` emits a synthetic ``EnvelopeUpdated``
+       roughly once per second while a tool is in flight (see the
+       ``while not dispatch_task.done()`` loop in session.py around
+       L2475), even when nothing observable changed. For a long
+       sequential ``run_bash``, blanket-resetting the clock on every
+       event would prevent the watchdog from ever reaching its 90s
+       threshold — exactly the case the watchdog is meant to cover.
+       Codex caught this on the PR #429 review.
+
+    2. ``ActionStateChange`` is silent in the Discord display by design
+       (too granular). If 90s of state-machine churn passes without any
+       visible update, the user is still owed a "still waiting" line.
+
+    For ``EnvelopeUpdated``, the helper compares the new render against
+    ``last_envelope_render`` — the most recently OBSERVED render, not
+    what's currently DISPLAYED. The two diverge when the display edit
+    is suppressed by debounce; tracking the observed render separately
+    avoids false positives where a debounced gap makes a no-op fallback
+    look like new progress relative to the stale display.
+    """
+    if isinstance(event, ActionStateChange):
+        return False
+    if isinstance(event, EnvelopeUpdated):
+        return _format_envelope_status(event.envelope) != last_envelope_render
+    return True
+
+
 def _should_emit_stalled_status(
     *,
     now: float,
@@ -1360,6 +1393,11 @@ class LoomDiscordBot:
         _active_stale_threshold_s = 90.0
         _turn_done = False
         _stall_watchdog_suppressed = False
+        # Cached envelope render for the watchdog. Stays in sync with
+        # the most-recently OBSERVED envelope view (not the displayed
+        # one — debounce skips would otherwise let synthetic 1Hz
+        # fallback ``EnvelopeUpdated`` ticks look like new progress).
+        _last_envelope_render = ""
 
         async def _stall_watchdog() -> None:
             nonlocal _stalled_emitted
@@ -1387,13 +1425,27 @@ class LoomDiscordBot:
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
-                    # Heartbeat for the watchdog — any observed event
-                    # counts as "agent is alive". TurnPaused will flip
-                    # suppression on its own; we still reset here so the
-                    # post-resume window restarts from "fresh" rather
-                    # than carrying over the pre-pause quiet time.
-                    _last_runtime_event_at = time.monotonic()
-                    _stalled_emitted = False
+                    # Heartbeat for the watchdog — only reset on events
+                    # that represent VISIBLE progress (#422 codex review).
+                    # Blanket-resetting starves the watchdog for long
+                    # sequential tools because session.stream_turn fires
+                    # ~1Hz fallback ``EnvelopeUpdated`` ticks. The helper
+                    # gates EnvelopeUpdated on a render comparison and
+                    # drops ActionStateChange (silent in Discord by
+                    # design). Other events are always real activity.
+                    if _event_resets_stall_clock(event, _last_envelope_render):
+                        _last_runtime_event_at = time.monotonic()
+                        _stalled_emitted = False
+                    # Keep the cached render fresh for the next event's
+                    # comparison. Updated unconditionally on envelope
+                    # events so fallback ticks compare against the most
+                    # recently observed state, not against a stale
+                    # debounce-skipped frame.
+                    if isinstance(
+                        event,
+                        (EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted),
+                    ):
+                        _last_envelope_render = _format_envelope_status(event.envelope)
                     if isinstance(event, TextChunk):
                         narration_buf += event.text
 
