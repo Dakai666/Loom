@@ -71,6 +71,14 @@ _CLI_BORDER = _CLI_PALETTE["border"]
 Mode = Literal["input", "confirm", "pause", "redirect"]
 
 
+# Minimum time a heartbeat label must stay visible before ``stop_heartbeat``
+# is allowed to clear it. Fast tools (<1 s) were producing flashes that the
+# user couldn't read; the dwell guard holds the label long enough to read
+# while still allowing an arriving ``start_heartbeat`` (next tool / THINKING)
+# to override instantly, which feels like a clean "replaced" transition.
+_HEARTBEAT_MIN_DWELL_S = 1.0
+
+
 # ---------------------------------------------------------------------------
 # Footer state
 # ---------------------------------------------------------------------------
@@ -121,6 +129,15 @@ class FooterState:
     heartbeat_started_monotonic: float = 0.0
     heartbeat_last_event_monotonic: float = 0.0
     heartbeat_stale_after_s: float = 30.0
+    # Minimum-visible-dwell guard. Fast tools (< 1s) were flashing the
+    # heartbeat label too briefly to read. ``heartbeat_min_alive_until``
+    # records the monotonic time before which a ``stop_heartbeat()``
+    # call gets deferred (recorded via ``heartbeat_pending_stop``) and
+    # finalized later by the footer ticker. A subsequent
+    # ``start_heartbeat()`` clears both fields so "replaced by the next
+    # action" still feels instant.
+    heartbeat_min_alive_until: float = 0.0
+    heartbeat_pending_stop: bool = False
     # Number of active scope grants and seconds until the nearest one
     # expires. Refreshed at turn boundaries (per doc/49 decision —
     # don't tick every second). 0 grants → both fields 0
@@ -337,6 +354,13 @@ class LoomApp:
         self.footer.heartbeat_started_monotonic = now
         self.footer.heartbeat_last_event_monotonic = now
         self.footer.heartbeat_stale_after_s = stale_after_s
+        # Min-dwell guard: a stop within the next _HEARTBEAT_MIN_DWELL_S
+        # seconds is held back so the user can actually see this label.
+        # A new ``start_heartbeat`` arriving inside the dwell window
+        # naturally overwrites these fields — that's the "replaced by
+        # the next action" case which should feel instant.
+        self.footer.heartbeat_min_alive_until = now + _HEARTBEAT_MIN_DWELL_S
+        self.footer.heartbeat_pending_stop = False
         self.invalidate()
 
     def touch_heartbeat(self) -> None:
@@ -344,13 +368,43 @@ class LoomApp:
             self.footer.heartbeat_last_event_monotonic = monotonic()
             self.invalidate()
 
-    def stop_heartbeat(self) -> None:
+    def stop_heartbeat(self, *, force: bool = False) -> None:
+        """Clear the heartbeat. By default respects ``_HEARTBEAT_MIN_DWELL_S``
+        so fast tools don't flash. Pass ``force=True`` to bypass the dwell
+        (e.g., for tests that don't want to sleep, or for safety-net
+        cleanup paths where instant clear is the right behaviour).
+        """
+        if self.footer.heartbeat_state == "idle":
+            return
+        now = monotonic()
+        if not force and now < self.footer.heartbeat_min_alive_until:
+            # Defer the actual clear; the ticker will call us back via
+            # ``_maybe_finalize_pending_stop`` once the dwell elapses.
+            self.footer.heartbeat_pending_stop = True
+            self.invalidate()
+            return
+        self._finalize_stop()
+
+    def _finalize_stop(self) -> None:
         self.footer.heartbeat_state = "idle"
         self.footer.heartbeat_label = ""
         self.footer.heartbeat_subject = ""
         self.footer.heartbeat_started_monotonic = 0.0
         self.footer.heartbeat_last_event_monotonic = 0.0
+        self.footer.heartbeat_min_alive_until = 0.0
+        self.footer.heartbeat_pending_stop = False
         self.invalidate()
+
+    def maybe_finalize_pending_stop(self) -> None:
+        """Called by the footer ticker. Promotes a deferred stop to a
+        real clear once the min-dwell window has elapsed. Safe to call
+        every tick — no-ops when nothing is pending.
+        """
+        if not self.footer.heartbeat_pending_stop:
+            return
+        if monotonic() < self.footer.heartbeat_min_alive_until:
+            return
+        self._finalize_stop()
 
     def show_transient_hint(
         self,

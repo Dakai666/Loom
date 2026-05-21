@@ -626,8 +626,11 @@ async def _chat(
     async def footer_ticker() -> None:
         """Tick the footer at 2 Hz so live fields (heartbeat elapsed,
         compaction spinner, transient hint expiry — #284) progress
-        visibly."""
+        visibly. Also promotes deferred heartbeat stops once the
+        min-dwell window elapses so short-lived tool labels finish
+        their reading time before fading."""
         while not shutdown.is_set():
+            app.maybe_finalize_pending_stop()
             if (app.footer.heartbeat_state != "idle"
                     or app.footer.compacting
                     or app.footer.transient_hint is not None):
