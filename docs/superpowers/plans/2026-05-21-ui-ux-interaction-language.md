@@ -1,5 +1,17 @@
 # UI/UX Interaction Language Implementation Plan
 
+> **Status — COMPLETED (slice 1, 2026-05-21):** all nine plan tasks landed across
+> PRs #425 (#416 + #417), #426 (#418 + #419), #427 (#420), #428 (#421),
+> #429 (#422), #430 (#423). Final docs closure is this PR (#424).
+> Decisions settled during implementation are captured in the spec's
+> _Decisions Closed For First Implementation_ section. Producer-side wiring
+> for ``view.intent`` / ``view.outcome_summary`` / ``view.parallel_reason``
+> is the one remaining seam — deferred to **#431** under milestone
+> _UI Interaction Language — slice 2_. Plan checkboxes below are left in
+> their original ``- [ ]`` state to preserve the original execution
+> record; treat the spec + the linked PRs as the authoritative
+> "what shipped" reference.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement Loom's shared interaction language foundation, starting with runtime heartbeat, envelope intent/outcome metadata, and CLI/Discord rendering alignment.
