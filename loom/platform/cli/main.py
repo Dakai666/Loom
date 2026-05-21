@@ -590,7 +590,7 @@ async def _chat(
                 harness.inline(f"turn error: {exc}", level="error")
             finally:
                 current_turn_task = None
-                app.stop_heartbeat()
+                app.stop_heartbeat(force=True)
 
             # Update footer token budget + grants at each turn boundary
             # (per doc/49 decision: TTL refresh on turn edge, not per-
@@ -1436,7 +1436,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         _thinking_cleared = True
         loom_app = getattr(session, "_loom_app", None)
         if loom_app is not None and loom_app.footer.heartbeat_state == "thinking":
-            loom_app.stop_heartbeat()
+            loom_app.stop_heartbeat(force=True)
 
     try:
         async for event in session.stream_turn(user_input):
@@ -1652,7 +1652,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # Decision made — release the PAUSED_BLOCKING heartbeat.
                 # The next event (TextChunk / ToolBegin) will repaint it.
                 if loom_app is not None:
-                    loom_app.stop_heartbeat()
+                    loom_app.stop_heartbeat(force=True)
 
                 if choice == _PAUSE_CANCEL:
                     session.cancel()
@@ -1687,7 +1687,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # write last-turn stats. The finally on the outer turn
                 # loop is belt-and-suspenders.
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
-                    loom_app.stop_heartbeat()
+                    loom_app.stop_heartbeat(force=True)
                 # Cancel any pending freeze before we touch the
                 # cursor — markdown reblit will move it past the
                 # frozen target row anyway

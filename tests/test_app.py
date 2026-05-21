@@ -28,6 +28,8 @@ import asyncio
 import pytest
 from prompt_toolkit.history import InMemoryHistory
 
+from loom.core.events import TextChunk
+from loom.platform.cli import main as cli_main
 from loom.platform.cli.app import (
     FooterState,
     LoomApp,
@@ -461,6 +463,40 @@ class TestHeartbeatMinDwell:
             subject="pytest",
         )
         app.stop_heartbeat(force=True)
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+
+    def test_force_stop_clears_existing_pending_dwell(self, app: LoomApp) -> None:
+        # A fast ToolEnd can legitimately enter pending dwell, but later
+        # hard-boundary clears (TurnDone / outer cleanup / first text)
+        # must still be able to release stale runtime truth immediately.
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+        )
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_pending_stop is True
+
+        app.stop_heartbeat(force=True)
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_pending_stop is False
+        assert app.footer.heartbeat_label == ""
+
+    def test_first_text_hard_boundary_clears_thinking_immediately(self, app: LoomApp) -> None:
+        class _Session:
+            _loom_app = app
+
+            async def stream_turn(self, _user_input: str):
+                yield TextChunk(text="hello")
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+        )
+
+        asyncio.run(cli_main._run_streaming_turn(_Session(), "hi"))
+
         assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
         assert app.footer.heartbeat_pending_stop is False
 
