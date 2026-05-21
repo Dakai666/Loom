@@ -12,9 +12,9 @@ need a TTY and a working renderer). Instead they exercise:
 - the mode flag transitions around ``request_confirm`` / ``request_pause``
   / ``request_redirect_text`` (launched as tasks, completed by directly
   resolving the future the helper awaits)
-- the render callbacks (``_render_footer`` / ``_render_thinking`` /
-  ``_render_tasklist`` / ``_render_confirm`` / ``_render_pause``) under
-  the various FooterState shapes documented in the issue
+- the render callbacks (``_render_footer`` / ``_render_tasklist`` /
+  ``_render_confirm`` / ``_render_pause``) under the various
+  FooterState shapes documented in the issue
 - the TaskList state mutations (``update_tasklist`` collapse logic) and
   Markdown reblit infrastructure shared with #248
 
@@ -31,12 +31,12 @@ from prompt_toolkit.history import InMemoryHistory
 from loom.platform.cli.app import (
     FooterState,
     LoomApp,
-    _ActiveEnvelope,
     _ConfirmState,
     _PauseState,
     _TaskListState,
     build_loom_app,
 )
+from loom.platform.interaction_language import HeartbeatState
 
 
 def _flat_text(formatted) -> str:
@@ -64,10 +64,11 @@ class TestConstruction:
 
     def test_footer_starts_empty(self, app: LoomApp) -> None:
         assert app.footer.token_pct == 0.0
-        assert app.footer.thinking is False
         assert app.footer.compacting is False
         assert app.footer.grants_active == 0
-        assert app.footer.active_envelopes == []
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_label == ""
+        assert app.footer.heartbeat_subject == ""
 
     def test_factory_returns_loomapp(self) -> None:
         app = build_loom_app()
@@ -229,59 +230,144 @@ class TestFooterRender:
         text = _flat_text(app._render_footer())
         assert "🔑 3·∞" in text
 
-    def test_active_envelope_shown_with_elapsed(self, app: LoomApp) -> None:
+    def test_heartbeat_replaces_active_envelope_label(self, app: LoomApp) -> None:
+        # Heartbeat is the system-driven liveness signal that replaced the
+        # raw ``▸ run_bash · 1.5s`` envelope label. Now the footer reads
+        # the action-language label written by interaction_language.
         import time as _t
-        app.footer.active_envelopes.append(
-            _ActiveEnvelope(name="run_bash", started_monotonic=_t.monotonic() - 1.5)
+
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "pytest"
+        app.footer.heartbeat_started_monotonic = _t.monotonic() - 8
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic()
+
+        text = _flat_text(app._render_footer())
+
+        assert "執行指令" in text
+        assert "pytest" in text
+        # Old raw glyph + tool name format must not leak back in
+        assert "▸ run_bash" not in text
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+
+    def test_stalled_heartbeat_uses_warning_copy(self, app: LoomApp) -> None:
+        # When the tool has been quiet past its stale_after_s the footer
+        # tells the user we're still waiting. Only tooling states are
+        # eligible — thinking / paused are waiting on someone else and
+        # should never render this prefix (covered by other tests).
+        import time as _t
+
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "pytest"
+        app.footer.heartbeat_started_monotonic = _t.monotonic() - 95
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 95
+        app.footer.heartbeat_stale_after_s = 90.0
+
+        text = _flat_text(app._render_footer())
+
+        assert "still waiting" in text
+        assert "執行指令" in text
+
+    def test_heartbeat_state_sequence_thinking_tooling_stalled_idle(self, app: LoomApp) -> None:
+        # Sanity-check the full state machine the stream loop drives:
+        # turn-start → THINKING; first ToolBegin → TOOLING; quiet past
+        # stale_after_s → stalled prefix; turn-done → IDLE.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+            stale_after_s=30.0,
         )
-        text = _flat_text(app._render_footer())
-        assert "▸ run_bash" in text
-        # Elapsed format — at least the seconds suffix is fixed
-        assert "s" in text.split("▸ run_bash")[1]
+        assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
 
-    def test_multiple_envelopes_show_count_prefix(self, app: LoomApp) -> None:
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+            stale_after_s=90.0,
+        )
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+        assert "執行指令" in _flat_text(app._render_footer())
+
+        # Force the tool to look quiet past stale_after_s.
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 91
+        text = _flat_text(app._render_footer())
+        assert "still waiting" in text
+
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+
+    def test_paused_blocking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
+        # The PAUSED_BLOCKING state is waiting on the user, not on a
+        # tool, so the footer must never call it "still waiting"
+        # regardless of how long the human takes to decide.
         import time as _t
-        for name in ("read_file", "list_dir", "grep"):
-            app.footer.active_envelopes.append(
-                _ActiveEnvelope(name=name, started_monotonic=_t.monotonic())
-            )
-        text = _flat_text(app._render_footer())
-        # ``Nx ▸ <latest> · <elapsed>`` — count visible, latest one named
-        assert "3×" in text
-        assert "grep" in text  # most recent
 
-    def test_last_turn_stats_only_when_no_active_envelope(self, app: LoomApp) -> None:
+        app.start_heartbeat(
+            state=HeartbeatState.PAUSED_BLOCKING.value,
+            label="等待你的決定",
+            stale_after_s=30.0,
+        )
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 120
+
+        text = _flat_text(app._render_footer())
+        assert "等待你的決定" in text
+        assert "still waiting" not in text
+
+    def test_transient_hint_does_not_disturb_active_heartbeat(self, app: LoomApp) -> None:
+        # Regression for the codex review of PR #426: a CompressDone
+        # event lands at the start of a turn before the LLM call (see
+        # ``LoomSession.stream_turn`` draining ``_pending_compactions``).
+        # The CLI fires a transient hint for it, but the heartbeat
+        # must keep showing THINKING because the agent round-trip is
+        # still pending. Any future helper that does both "show hint"
+        # and "clear heartbeat" would break this invariant — this test
+        # pins the contract so the regression can't slip back in.
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+        )
+        app.show_transient_hint("🗜 compacted → 42 facts", severity="info")
+        assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
+        assert app.footer.heartbeat_label == "Loom is thinking"
+
+    def test_thinking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
+        # Mirror of the paused case: THINKING is waiting on the agent
+        # (LLM round-trip). A slow first token is not "still waiting"
+        # on a tool, so the stalled prefix must stay off.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+            stale_after_s=30.0,
+        )
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 95
+
+        text = _flat_text(app._render_footer())
+        assert "Loom is thinking" in text
+        assert "still waiting" not in text
+
+    def test_last_turn_stats_hidden_while_heartbeat_active(self, app: LoomApp) -> None:
         # Stats from the previous turn surface only when nothing is in
-        # flight — otherwise the active envelope owns the middle column
+        # flight — otherwise the heartbeat owns the middle column.
         app.footer.last_turn_input_tokens = 1234
         app.footer.last_turn_output_tokens = 567
         app.footer.last_turn_elapsed_s = 2.3
         text = _flat_text(app._render_footer())
         assert "1234in / 567out" in text
 
-        # Now add an active envelope — stats should disappear
+        # Now light up the heartbeat — stats should disappear.
         import time as _t
-        app.footer.active_envelopes.append(
-            _ActiveEnvelope(name="x", started_monotonic=_t.monotonic())
-        )
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "x"
+        app.footer.heartbeat_started_monotonic = _t.monotonic()
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic()
         text = _flat_text(app._render_footer())
         assert "1234in" not in text
-
-
-# ---------------------------------------------------------------------------
-# Thinking indicator
-# ---------------------------------------------------------------------------
-
-
-class TestThinkingIndicator:
-    def test_render_thinking_contains_loom_marker(self, app: LoomApp) -> None:
-        text = _flat_text(app._render_thinking())
-        assert "Loom is thinking" in text
-
-    def test_thinking_flag_default_off(self, app: LoomApp) -> None:
-        # ConditionalContainer reads ``footer.thinking`` directly; the
-        # render only fires when True, but the flag default matters
-        assert app.footer.thinking is False
 
 
 # ---------------------------------------------------------------------------

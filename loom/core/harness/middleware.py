@@ -1069,6 +1069,7 @@ class BlastRadiusMiddleware(Middleware):
         import time as _time
         if decision == ConfirmDecision.ONCE:
             call.metadata["once_authorized"] = True
+            self._request_to_grants(scope_request, source="manual_confirm")
         elif decision == ConfirmDecision.SCOPE:
             # Session-scoped lease: grant with TTL
             self._request_to_grants(
