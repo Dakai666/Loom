@@ -647,7 +647,53 @@ def tool_begin_line(
     name: str, args: dict[str, Any], width: int | None = None
 ) -> Text:
     """Rich Text for a tool-call-in-progress line (alias for compatibility)."""
-    return tool_spinner_line(name, args, 0, width=width)
+    raw_justification = args.get("justification")
+    justification = (
+        str(raw_justification).replace("\n", " ").strip()
+        if raw_justification is not None
+        else ""
+    )
+    if not justification:
+        return tool_spinner_line(name, args, 0, width=width)
+
+    display_args = {
+        key: value
+        for key, value in args.items()
+        if key != "justification"
+    }
+    justification = _smart_truncate(justification, 80)
+    args_preview = _format_args(display_args)
+    body_plain = f"{name}{f'({args_preview})' if args_preview else ''}"
+    prefix_visual = "  [-] "
+    indent = " " * len(prefix_visual)
+
+    out = Text()
+    out.append("  [", style="loom.muted")
+    out.append("-", style="loom.warning")
+    out.append("] ", style="loom.muted")
+    out.append(justification, style="loom.text")
+    out.append("\n")
+
+    if width is None:
+        # Justified tool begins intentionally stay two-line even
+        # without width-aware wrapping: why first, mechanical call below.
+        out.append(indent, style="loom.muted")
+        out.append(name, style="loom.warning")
+        if args_preview:
+            out.append(f"({args_preview})")
+        return out
+
+    body_width = max(20, width - len(indent))
+    wrapped = _wrap_args_body(body_plain, body_width)
+    first = wrapped[0]
+    out.append(indent, style="loom.muted")
+    assert first.startswith(name)
+    out.append(name, style="loom.warning")
+    out.append(first[len(name):])
+    for cont in wrapped[1:]:
+        out.append("\n")
+        out.append(indent + cont)
+    return out
 
 
 def tool_running_line(name: str, frame_index: int = 0) -> Text:
