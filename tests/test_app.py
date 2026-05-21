@@ -572,6 +572,39 @@ class TestTaskListPanel:
         # Truncate cap is 56 in the source; allow some slack but no full 200
         assert "x" * 60 not in text
 
+    def test_done_when_renders_dash_when_empty(self, app: LoomApp) -> None:
+        # Issue #437: pending/in_progress rows always show the
+        # criterion sub-line; "—" makes the absence visible.
+        app.update_tasklist([
+            {"id": "a", "content": "research", "status": "pending"},
+        ])
+        text = _flat_text(app._render_tasklist())
+        assert "done when: —" in text
+
+    def test_done_when_renders_text_when_filled(self, app: LoomApp) -> None:
+        app.update_tasklist([
+            {
+                "id": "a",
+                "content": "review",
+                "status": "in_progress",
+                "done_when": "P0–P3 findings each have file/line",
+            },
+        ])
+        text = _flat_text(app._render_tasklist())
+        assert "done when: P0–P3 findings each have file/line" in text
+
+    def test_done_when_hidden_for_completed_rows(self, app: LoomApp) -> None:
+        # Once completed, the ✓ is the answer — don't shame a missing
+        # criterion retroactively. Mixed list: completed row hides
+        # done_when, pending row still shows it.
+        app.update_tasklist([
+            {"id": "a", "content": "ship", "status": "completed"},
+            {"id": "b", "content": "next", "status": "pending"},
+        ])
+        text = _flat_text(app._render_tasklist())
+        # Exactly one "done when:" line — for the pending row only.
+        assert text.count("done when:") == 1
+
 
 # ---------------------------------------------------------------------------
 # Confirm + Pause widget rendering

@@ -82,6 +82,11 @@ class TaskListManager:
         ]
         for n in active:
             lines.append(f"  - [{n.id}] {n.content[:80]} — {n.status.value}")
+            # Re-surface the agent's own acceptance criterion. Empty
+            # done_when shows as ``—`` so the agent notices the gap and
+            # can fill it on the next task_write (Issue #437).
+            criterion = n.done_when.strip() if n.done_when else ""
+            lines.append(f"      done when: {criterion or '—'}")
         lines.append("")
         lines.append(
             "Either continue executing now, or — if the work is no longer "
