@@ -1,6 +1,6 @@
 # PR-C 實作草稿 — Harness vs Loom Agent 視覺切分
 
-本文件是 `doc/49-CLI-Refresh-設計.md` 中 **PR-C** 的詳細實作藍圖。完成後內容會折回 issue #236 PR-C 的 PR body 與相關 follow-up。
+本文件是 `docs/designs/49-CLI-Refresh-設計.md` 中 **PR-C** 的詳細實作藍圖。完成後內容會折回 issue #236 PR-C 的 PR body 與相關 follow-up。
 
 ---
 
@@ -256,7 +256,7 @@ PR-C 收斂為 C1-C4。C5 移到 PR-D。
 
 ## 12. 出處與相依
 
-- 設計母文件：`doc/49-CLI-Refresh-設計.md`
+- 設計母文件：`docs/designs/49-CLI-Refresh-設計.md`
 - Tracking issue：#236
 - 已 merge：PR-A (#237) PR-B (#242)
 - 後續：PR-D (Linear stream + Live Footer)、PR-E (TaskList)

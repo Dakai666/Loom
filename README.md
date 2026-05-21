@@ -72,6 +72,7 @@ Large source files are navigable via **`# SECTION N`** banners — run `grep "# 
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
 | **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
 | **v0.3.6.2** | 2026-05-05 | Fix spurious asyncio.Future() in render-only tests |
 | **v0.3.6.1** | 2026-05-01 | Skill-driven model tier system (Issue #276) |
@@ -239,12 +240,16 @@ Every write to semantic memory passes through the `MemoryGovernor`:
 write request
   ├─ classify_source()      → trust tier (user_explicit 1.0 → external 0.5)
   ├─ confidence floor       = max(entry.confidence, tier_floor)
+  ├─ semantic-dup detect    → embedding cosine ≥ 0.85 vs recent facts → 3-way prompt (merge / replace / skip)
+  ├─ time-window gate       → same source × topic within ~30s → throttle near-dup writes
   ├─ ContradictionDetector  → REPLACE / KEEP / SUPERSEDE based on trust comparison
   └─ upsert or reject
 
 session end
   └─ Decay Cycle: episodic TTL prune · semantic low-confidence prune · relational dreaming decay
 ```
+
+Semantic-dup detection and the time-window admission gate landed in v0.3.8.0 (PR #411); the existing `memorize` tool also surfaces near-duplicate hints at write time. Batch dedup is available through the `skills/memory_hygiene/` skill — running the cleanup against existing stores brought semantic fact counts down 6.6k → 5.7k (-13.8%).
 
 Trust tiers (highest → lowest): `user_explicit` → `tool_verified` → `agent_memorize` → `session_compress` → `counter_factual` → `agent_inferred` → `skill_evolution` → `dreaming` → `external`
 
@@ -298,7 +303,7 @@ After each turn where a skill was used, `TaskReflector` runs a background LLM se
 
 ### Skill Optimization Loop
 
-> v0.3.7.2 (Quest D Phase 1.C): the prior automated candidate-pool pipeline (`SkillMutator` / `SkillPromoter` / `SkillGate` / shadow_mode / fast_track) was retired. Process signals (tool success rate, verdict ratio, shadow delta) are not a credible proxy for skill output quality — without an Evaluator substrate, automated promotion is garbage-in/out. See [doc/54-Skill-Evolution-Arena-設計.md](doc/54-Skill-Evolution-Arena-設計.md).
+> v0.3.7.2 (Quest D Phase 1.C): the prior automated candidate-pool pipeline (`SkillMutator` / `SkillPromoter` / `SkillGate` / shadow_mode / fast_track) was retired. Process signals (tool success rate, verdict ratio, shadow delta) are not a credible proxy for skill output quality — without an Evaluator substrate, automated promotion is garbage-in/out. See [docs/designs/54-Skill-Evolution-Arena-設計.md](docs/designs/54-Skill-Evolution-Arena-設計.md).
 
 Skills now improve through three observation channels, with **edits made by the user/agent in conversation** — git commits replace the old candidate/promote mechanism:
 
@@ -353,26 +358,23 @@ An `ActionPlanner` maps the current trust level and context to a decision path. 
 
 ## Platforms
 
+Loom has two first-party frontends with command parity. The earlier Textual TUI was retired on 2026-05-19 (PR #404).
+
 ### CLI
 
-`loom chat` gives you a full-featured interactive session in your terminal. Rebuilt in v0.3.6 (Issue #236) with a persistent `LoomApp` instance (prompt_toolkit), linear streaming output, a floating **TaskList panel**, **parallel envelope group panels** for same-turn parallel tool calls, Markdown reblit at turn boundaries, and a model badge footer.
+`loom chat` opens an interactive session backed by a single persistent `prompt_toolkit` `LoomApp`. Linear streaming output, a floating **TaskList panel** with per-row `done_when` acceptance criteria, a runtime **heartbeat footer** that responds in real time as tools begin / stall / complete, and tool **justification prose** that surfaces *why* the agent is calling each tool.
 
-`/sessions` launches a session picker with `Enter` to restore and `Escape` to cancel. `/name` and `--name` name the current session for easier resume.
-
-> The earlier Textual TUI (`loom chat --tui`) was retired on 2026-05-19 (PR #404). Source preserved under local `_archive/tui-retired-2026-05-19/`.
+`/sessions`, `/name`, `/model`, `/scope`, `/think`, `/compact` and friends are inline. `--resume` and `--session <id>` pick up where you left off.
 
 ### Discord Bot
 
-The Discord bot (`loom discord start`) turns any channel thread into a persistent Loom session — useful for mobile access and 24/7 autonomous operation:
+`loom discord start` turns any channel thread into a persistent Loom session — built for mobile access and 24/7 autonomous operation. Each thread maps to one session and survives bot restart.
 
-- Each thread is a persistent session restored automatically after bot restart
-- Per-turn **Envelope Trail**: completed envelopes freeze as permanent messages, building an audit trail in the thread history
-- Four-button confirmation flow (Allow / Lease / Auto / Deny) with automatic follow-up messages explaining grant scope and TTL
-- `/scope`, `/summary`, `/model`, `/think`, `/compact` and all other slash commands
-- Configurable turn summaries (one-line compact or full Discord Embed)
-- Rich embed v2 with expressive emoji reactions; native slash command dispatch alongside text-prefix routing
-
-Both frontends — CLI and Discord — share full command parity.
+- **Envelope Trail** — every completed multi-tool batch freezes as a permanent message: agent-authored `▸ <intent>` header, per-node ✓/▸/○ glyphs, outcome row (`✓ fulfilled` / `◐ partial` / `⚠ unfulfilled` / `↪ pivoted` / `🛑 aborted`) with summary line
+- **TaskList Reminder Embed** — italic `done when: ⋯` sub-line under each non-completed row; empty values render as `—`
+- **Stalled-status proxy** — when a GUARDED tool is awaiting authorization the embed switches to `⏸ 等待授權` and suppresses heartbeat updates, so the UI never looks like agent thinking while it's actually waiting on the user
+- **Confirm flow** — four buttons (Allow / Lease / Auto / Deny) with follow-up messages explaining grant scope and TTL
+- **Slash commands** — `/scope`, `/summary`, `/model`, `/think`, `/compact` etc. land natively alongside text-prefix routing
 
 ---
 
@@ -430,12 +432,12 @@ The `doc/` directory contains full technical documentation for every subsystem:
 | Harness & middleware deep-dive | `doc/04-Harness-概述.md`, `doc/06-Middleware-詳解.md` |
 | Action Lifecycle state machine | `doc/06b-Action-Lifecycle.md` |
 | Trust levels & blast radius | `doc/05-Trust-Level.md` |
-| Scope-aware authorization design | `doc/44-Scope-Aware-Permission-規劃.md` |
+| Scope-aware authorization design | `docs/designs/44-Scope-Aware-Permission-規劃.md` |
 | OS-level sandbox (`srt`) | `doc/55-Sandbox-Runtime.md` |
 | Memory system & governance | `doc/08-Memory-概述.md`, `doc/08b-Memory-Governance.md` |
-| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `doc/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
+| Skill Genome & self-assessment | `doc/10-Skill-Genome.md`; `docs/designs/54-Skill-Evolution-Arena-設計.md` (current). `doc/10b-Skill-Evolution.md` retired by Phase 1.C |
 | Memory Pulse & Lifecycle | `doc/12b-Memory-Health.md` |
-| Execution visualization | `doc/43-Harness-Execution-可視化規劃.md` |
+| Execution visualization | `docs/designs/43-Harness-Execution-可視化規劃.md` |
 | Autonomy engine | `doc/19-Autonomy-概述.md`, `doc/21-Action-Planner.md` |
 | Extensibility & plugins | `doc/29-Extensibility-概述.md`, `doc/31-Plugin-系統.md` |
 | Full config reference | `doc/37-loom-toml-參考.md` |

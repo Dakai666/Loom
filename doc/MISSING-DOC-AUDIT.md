@@ -130,7 +130,7 @@ loom/
 ### 6. Skill Evolution — ⚠️ 整節廢棄
 
 **狀態**：Quest D Phase 1.C（PR #367）已退役 `SkillMutator` / `SkillPromoter` / `SkillGate` / `from_batch_diagnostic()` / `fast_track` 整套機制。
-**現行設計**：見 [doc/54-Skill-Evolution-Arena-設計.md](54-Skill-Evolution-Arena-設計.md)（三條觀察通道 + `skill_review` agent 工具）。
+**現行設計**：見 [docs/designs/54-Skill-Evolution-Arena-設計.md](../docs/designs/54-Skill-Evolution-Arena-設計.md)（三條觀察通道 + `skill_review` agent 工具）。
 
 ---
 

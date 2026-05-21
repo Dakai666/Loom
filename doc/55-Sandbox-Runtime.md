@@ -109,6 +109,18 @@ hi
 
 Profile 被授權後，該次 `run_bash` 會用 base sandbox settings 加上 profile overlay 產生有效 srt 設定；未授權就 fail closed，不會偷用 profile 的額外路徑或 domain。
 
+### `bypass_sandbox` flag（v0.3.7.5 / PR #402+#405）
+
+某些 CLI 跟 srt 的 TLS proxy 路徑不相容（典型例子：與 Loom 互動的 codex 子程序、部分需要原生 socket 的 gRPC client）。這類 profile 可在 `loom.toml` 標註：
+
+```toml
+[security.sandbox.profiles.codex]
+match_commands = ["codex"]
+bypass_sandbox = true   # 整個 run_bash 跳過 srt，回到無 sandbox 路徑
+```
+
+`bypass_sandbox = true` 不是「放寬 sandbox」而是「整個跳過 sandbox layer」— 授權 prompt 也會明白告訴 user 這個 profile 不在 srt wall 後面。設計重點是讓 TLS-incompatible CLI 在 Loom 內仍可運行，而不是默默降級 sandbox 安全性。實作見 issue #402 / PR #405。
+
 ## 層次分工
 
 ```
