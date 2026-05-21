@@ -316,6 +316,23 @@ class TestFooterRender:
         assert "等待你的決定" in text
         assert "still waiting" not in text
 
+    def test_transient_hint_does_not_disturb_active_heartbeat(self, app: LoomApp) -> None:
+        # Regression for the codex review of PR #426: a CompressDone
+        # event lands at the start of a turn before the LLM call (see
+        # ``LoomSession.stream_turn`` draining ``_pending_compactions``).
+        # The CLI fires a transient hint for it, but the heartbeat
+        # must keep showing THINKING because the agent round-trip is
+        # still pending. Any future helper that does both "show hint"
+        # and "clear heartbeat" would break this invariant — this test
+        # pins the contract so the regression can't slip back in.
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+        )
+        app.show_transient_hint("🗜 compacted → 42 facts", severity="info")
+        assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
+        assert app.footer.heartbeat_label == "Loom is thinking"
+
     def test_thinking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
         # Mirror of the paused case: THINKING is waiting on the agent
         # (LLM round-trip). A slow first token is not "still waiting"

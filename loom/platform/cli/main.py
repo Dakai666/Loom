@@ -1417,16 +1417,16 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             # cursor manipulation can fail under terminal resize, etc.
             pass
 
-    # PR-D4: clear the "thinking" footer indicator on the first
-    # observable event of the turn. After that, the active envelope
-    # / streaming output / turn stats take over the footer's middle.
-    # Heartbeat (#418/#419) is THINKING from turn dispatch. The first
-    # observable event clears it; subsequent ToolBegin/etc handlers
-    # transition into TOOLING themselves. Guarded so plain TextChunk
-    # streaming doesn't keep stomping the heartbeat to idle.
+    # Heartbeat (#418/#419) is THINKING from turn dispatch. We only
+    # transition it OUT of THINKING when the agent actually produces
+    # visible output (text or tool) — never on system-only boundary
+    # events like CompressDone or TierExpiryHint, because the LLM
+    # round-trip is still pending across those. ToolBegin / TurnPaused
+    # / TurnDone branches drive their own heartbeat transitions, so
+    # only TextChunk needs the explicit "first chunk wins" clear.
     _thinking_cleared = False
 
-    def _clear_thinking_heartbeat() -> None:
+    def _clear_thinking_on_first_text() -> None:
         nonlocal _thinking_cleared
         if _thinking_cleared:
             return
@@ -1437,8 +1437,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
     try:
         async for event in session.stream_turn(user_input):
-            _clear_thinking_heartbeat()
             if isinstance(event, TextChunk):
+                _clear_thinking_on_first_text()
                 _bump_output_seq()
                 _stream_pending += event.text
                 text_buffer += event.text
@@ -1496,12 +1496,18 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # rather than a console line — CompressDone was
                 # previously not displayed in CLI ("too noisy for
                 # inline chat"); a 3-second flash is the right weight.
+                #
+                # Heartbeat is intentionally untouched here. ``stream_turn``
+                # drains ``_pending_compactions`` before the LLM call
+                # (session.py around line 1885), so CompressDone is
+                # often the FIRST event of a turn with the LLM round-
+                # trip still pending. Stopping the heartbeat here would
+                # blank the footer for the rest of the turn even though
+                # the agent is still working — codex review caught this
+                # on PR #426. If the heartbeat happens to be in a stale
+                # TOOLING from elsewhere, that's a bug to fix at the
+                # source, not by laundering through CompressDone.
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
-                    # Heartbeat may still hold a stale THINKING/TOOLING
-                    # from before the compact gate fired; clear it so
-                    # the transient hint isn't competing with a
-                    # phantom "still waiting" warning.
-                    loom_app.stop_heartbeat()
                     loom_app.show_transient_hint(
                         f"🗜 compacted → {event.fact_count} facts",
                         severity="info",
