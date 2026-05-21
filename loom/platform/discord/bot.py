@@ -216,6 +216,31 @@ def _event_resets_stall_clock(event: Any, last_envelope_render: str) -> bool:
     return True
 
 
+def _envelope_edit_would_clobber_overlay(
+    *,
+    new_render: str,
+    displayed_render: str,
+    stalled_emitted: bool,
+) -> bool:
+    """True when re-editing ``status_msg`` would erase the watchdog
+    overlay without adding any new information.
+
+    The EnvelopeUpdated branch's edit gate uses this helper. The
+    comparison is against ``displayed_render`` (what's actually painted
+    in ``status_msg``), NOT against ``last_envelope_render`` (the most
+    recent observation). Codex review v3 (#422) caught that conflating
+    the two breaks debounce-suppressed catch-up: a real-progress
+    update can land inside the 0.5s debounce window and update the
+    observed render without ever painting; if a later identical
+    fallback then sees observed == new, it would mistakenly skip the
+    catch-up edit. Comparing against displayed instead lets the
+    fallback run the edit and refresh the display, while still
+    skipping when the display is already in sync AND the overlay is
+    up.
+    """
+    return new_render == displayed_render and stalled_emitted
+
+
 def _should_emit_stalled_status(
     *,
     now: float,
@@ -1425,32 +1450,18 @@ class LoomDiscordBot:
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
-                    # ── Heartbeat + branch gate (#422 codex review v2) ──
-                    # The same decision controls TWO things: whether
-                    # the stall-clock resets AND whether the per-event
-                    # branch runs. Both must be skipped for no-op
-                    # events, otherwise the per-branch ``_safe_edit``
-                    # would overwrite the watchdog's "still waiting"
-                    # overlay with a render-without-overlay even though
-                    # nothing visible changed.
-                    #
-                    # ``_event_resets_stall_clock`` returns False for
-                    # synthetic 1Hz ``EnvelopeUpdated`` fallbacks (no
-                    # render change vs ``_last_envelope_render``) and
-                    # for ``ActionStateChange`` (silent in Discord by
-                    # design). Continue past the whole if-elif chain
-                    # so the message stays exactly as the watchdog
-                    # painted it.
-                    if not _event_resets_stall_clock(
-                        event, _last_envelope_render
-                    ):
-                        continue
-                    _last_runtime_event_at = time.monotonic()
-                    _stalled_emitted = False
-                    # Keep the cached render fresh for the next event's
-                    # comparison. Updated whenever a progress-bearing
-                    # envelope event lands so subsequent fallback ticks
-                    # compare against the most recently observed state.
+                    # ── Stall-clock heartbeat (#422 codex review v1) ──
+                    # Gated on OBSERVED progress — see helper docstring.
+                    # Synthetic fallback ``EnvelopeUpdated`` ticks and
+                    # ``ActionStateChange`` don't reset the clock; all
+                    # other events do.
+                    if _event_resets_stall_clock(event, _last_envelope_render):
+                        _last_runtime_event_at = time.monotonic()
+                        _stalled_emitted = False
+                    # Keep the OBSERVED render fresh for the next clock
+                    # comparison. Updated unconditionally on envelope
+                    # events — even when the branch's debounce later
+                    # suppresses the display edit, observation moves on.
                     if isinstance(
                         event,
                         (EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted),
@@ -1480,9 +1491,21 @@ class LoomDiscordBot:
                         _last_envelope_view = event.envelope
                         now = time.monotonic()
                         if now - _last_envelope_edit >= _ENVELOPE_DEBOUNCE_S:
-                            tool_buf = _format_envelope_status(event.envelope)
-                            await _safe_edit(status_msg, tool_buf.lstrip())
-                            _last_envelope_edit = now
+                            new_render = _format_envelope_status(event.envelope)
+                            # Overlay-aware edit skip (#422 codex review v3).
+                            # See helper docstring for why this uses
+                            # displayed (``tool_buf``) rather than observed
+                            # (``_last_envelope_render``) state.
+                            if _envelope_edit_would_clobber_overlay(
+                                new_render=new_render,
+                                displayed_render=tool_buf,
+                                stalled_emitted=_stalled_emitted,
+                            ):
+                                pass  # preserve watchdog overlay
+                            else:
+                                tool_buf = new_render
+                                await _safe_edit(status_msg, tool_buf.lstrip())
+                                _last_envelope_edit = now
 
                     elif isinstance(event, EnvelopeCompleted):
                         _last_envelope_view = event.envelope
@@ -1647,10 +1670,8 @@ class LoomDiscordBot:
                             tool_buf += f" — {event.message[:80]}"
                         await _safe_edit(status_msg, tool_buf.lstrip())
 
-                    # ``ActionStateChange`` is intentionally not handled
-                    # here — it's a no-op for Discord display by design
-                    # and the loop's top-level guard skips it via
-                    # ``_event_resets_stall_clock`` returning False.
+                    elif isinstance(event, ActionStateChange):
+                        pass  # too granular for Discord display
 
                     elif isinstance(event, TurnDone):
                         _cache_read_tokens = event.cache_read_input_tokens

@@ -267,7 +267,10 @@ from loom.core.events import (
     EnvelopeUpdated,
     TextChunk,
 )
-from loom.platform.discord.bot import _event_resets_stall_clock
+from loom.platform.discord.bot import (
+    _envelope_edit_would_clobber_overlay,
+    _event_resets_stall_clock,
+)
 
 
 def _running_envelope(envelope_id: str, tool_name: str) -> ExecutionEnvelopeView:
@@ -379,76 +382,149 @@ def test_long_sequential_dispatch_eventually_triggers_stalled() -> None:
     ), "watchdog must fire after 90s of no-op envelope ticks"
 
 
-def test_no_op_envelope_update_skips_entire_branch_to_preserve_overlay() -> None:
-    """Regression for the codex P2 v2 finding (PR #429 re-review).
+# ----------------------------------------------------------------------
+# Overlay-aware envelope edit gating (#422 codex review v3)
+# ----------------------------------------------------------------------
+# v1 fixed the stall-clock starvation by gating clock reset on observed
+# render. v2 then tried to unify clock-gate and branch-skip into a
+# single ``continue`` at the loop top — but that conflated observed
+# state with displayed state and broke debounce-suppressed catch-up.
+# v3 splits them back apart:
+#
+# - ``_event_resets_stall_clock`` (clock) compares OBSERVED render.
+# - ``_envelope_edit_would_clobber_overlay`` (edit) compares DISPLAYED
+#   render. The displayed timeline lags the observed one whenever an
+#   earlier update lost its edit to debounce, which is the exact case
+#   v2 broke.
+#
+# Tests below pin both contracts so future refactors can't re-merge.
 
-    Sequence:
-    1. Long ``run_bash`` starts → ``EnvelopeStarted`` → ``tool_buf`` is set
-       to the running-envelope render, ``status_msg`` displays it.
-    2. ~90s of no-op fallback ``EnvelopeUpdated`` ticks land. The
-       clock-gate (codex P2 v1 fix) means none of them reset the
-       stall clock, so the watchdog eventually fires and edits
-       ``status_msg`` to ``tool_buf + still waiting · 90s``.
-    3. Another fallback ``EnvelopeUpdated`` arrives — same render.
-       Pre-fix: the ``elif EnvelopeUpdated`` branch would call
-       ``_safe_edit(status_msg, tool_buf.lstrip())``, overwriting
-       the watchdog's overlay. Post-fix: the top-of-loop
-       ``continue`` skips the entire branch.
 
-    This test pins the WIRING GUARANTEE: ``_event_resets_stall_clock``
-    returns ``False`` for the no-op envelope update, which is what
-    causes ``_run_turn`` to ``continue`` past the if-elif chain and
-    leave the watchdog's overlay intact. If a refactor ever splits
-    the clock gate from the branch gate, this test still asserts
-    the helper-level invariant — but the comment above is the
-    canonical record of the wiring contract.
-    """
-    envelope = _running_envelope("e1", "run_bash")
-    rendered = _format_envelope_status(envelope)
+def test_edit_skip_preserves_overlay_on_identical_displayed_render() -> None:
+    # The v2-class case: watchdog overlay is up, display matches
+    # observation, and a no-op fallback arrives. Skipping the edit
+    # preserves the ``still waiting`` overlay.
+    rendered = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    assert _envelope_edit_would_clobber_overlay(
+        new_render=rendered,
+        displayed_render=rendered,
+        stalled_emitted=True,
+    ) is True
 
-    # Step 1: initial envelope render is cached.
-    last_envelope_render = rendered
 
-    # Step 2: simulated watchdog fire — latch is now True. (The
-    # watchdog runs on a separate task in production; we just record
-    # its post-condition here for clarity.)
-    stalled_emitted = True
-
-    # Step 3: no-op fallback EnvelopeUpdated arrives. The wiring
-    # contract requires _event_resets_stall_clock to return False so
-    # the main loop continues past the branch.
-    no_op = EnvelopeUpdated(envelope=envelope)
-    assert _event_resets_stall_clock(no_op, last_envelope_render) is False
-
-    # And the watchdog must still consider itself emitted — no new
-    # progress event has reset the latch.
-    assert _should_emit_stalled_status(
-        now=200.0,
-        last_event_at=0.0,
-        threshold_s=90.0,
-        already_emitted=stalled_emitted,
+def test_edit_runs_when_no_overlay_to_preserve() -> None:
+    # Without an active overlay there's nothing to clobber, so even
+    # identical renders should re-edit. This is the load-bearing case
+    # for v3: a debounce-suppressed real-progress update means the
+    # observed render moved on but the displayed render didn't. The
+    # next identical fallback finds ``new_render != tool_buf`` (because
+    # tool_buf is the stale pre-progress render) — but the helper
+    # also has to allow re-edit when ``new_render == tool_buf`` if
+    # stalled isn't set, in case a later refactor relies on idempotent
+    # re-edits to refresh the display.
+    rendered = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    assert _envelope_edit_would_clobber_overlay(
+        new_render=rendered,
+        displayed_render=rendered,
+        stalled_emitted=False,
     ) is False
 
 
-def test_real_progress_envelope_update_resets_latch_and_reenables_stalled() -> None:
-    """Mirror of the above: when REAL progress lands after a stalled
-    emit, the helper says reset, the main loop runs the branch and
-    re-renders status_msg with the new content (which naturally lacks
-    the stalled overlay — and that's correct, because we're no longer
-    stalled). Pins that the contract distinguishes real-progress from
-    no-op updates correctly.
+def test_edit_runs_when_render_differs_even_with_overlay() -> None:
+    # Real progress overrides the overlay: the new render reflects new
+    # state, the user is no longer stalled, the overlay shouldn't
+    # survive. ``new_render != tool_buf`` is the catch-up case where
+    # the displayed render was suppressed by debounce earlier.
+    old = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    new = _format_envelope_status(
+        ExecutionEnvelopeView(
+            envelope_id="e1",
+            session_id="s1",
+            turn_index=1,
+            status="completed",
+            node_count=1,
+            parallel_groups=1,
+            levels=[["n1"]],
+            nodes=[_node("n1", "run_bash", state="memorialized")],
+        )
+    )
+    assert _envelope_edit_would_clobber_overlay(
+        new_render=new,
+        displayed_render=old,
+        stalled_emitted=True,
+    ) is False
+
+
+def test_debounce_suppressed_progress_catches_up_via_later_fallback() -> None:
+    """Regression for the codex P2 v3 finding (PR #429 third review).
+
+    Sequence:
+    1. T=0   ``EnvelopeStarted`` render A → ``tool_buf = A``,
+       displayed = A, ``_last_envelope_edit = 0``.
+    2. T=0.3 ``EnvelopeUpdated`` render B (real progress). Top
+       guard: B != A, clock resets, ``_last_envelope_render = B``.
+       Branch: debounce blocks (0.3 < 0.5s), ``tool_buf`` stays A.
+       Observation moved on, display did not.
+    3. T=1.3 fallback ``EnvelopeUpdated`` render B (no further
+       state change). Top guard: B == B, clock unchanged. Branch:
+       debounce passes (1.0 > 0.5s).
+
+    The wiring guarantee at step 3:
+
+    - v2 (bug): the loop's top ``continue`` skipped the branch
+      entirely because observed == new. Display stayed at A forever.
+    - v3 (fix): the loop runs the branch. The branch's
+      overlay-aware skip compares against DISPLAYED, finds
+      ``new_render (B) != tool_buf (A)``, runs the edit. Display
+      catches up to B.
+
+    This test exercises the helper at step 3 with the exact arguments
+    the production branch would supply.
     """
-    previous_render = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    rendered_a = _format_envelope_status(_running_envelope("e1", "run_bash"))
     progress_view = ExecutionEnvelopeView(
         envelope_id="e1",
         session_id="s1",
         turn_index=1,
-        status="completed",  # tool finished
+        status="completed",
         node_count=1,
         parallel_groups=1,
         levels=[["n1"]],
         nodes=[_node("n1", "run_bash", state="memorialized")],
     )
-    progress = EnvelopeUpdated(envelope=progress_view)
+    rendered_b = _format_envelope_status(progress_view)
 
-    assert _event_resets_stall_clock(progress, previous_render) is True
+    # tool_buf stale at A; new render is B; no overlay (real progress
+    # at T=0.3 reset _stalled_emitted on the clock gate).
+    assert _envelope_edit_would_clobber_overlay(
+        new_render=rendered_b,
+        displayed_render=rendered_a,
+        stalled_emitted=False,
+    ) is False  # → branch will run the edit → display catches up
+
+    # Also confirm the clock-gate side: observed (B) == observed (B)
+    # so a redundant fallback after we already observed B does NOT
+    # reset the clock. Two timelines, two gates.
+    fallback = EnvelopeUpdated(envelope=progress_view)
+    assert _event_resets_stall_clock(fallback, rendered_b) is False
+
+
+def test_no_op_envelope_update_with_stalled_overlay_preserves_message() -> None:
+    """v2 case restated against the v3 mechanism.
+
+    After the watchdog has fired and ``_stalled_emitted = True``, a
+    fallback envelope update with identical displayed render must skip
+    the edit. The v3 mechanism still pins this — the helper returns
+    True for ``displayed == new AND stalled`` and the branch responds
+    with ``pass``.
+    """
+    rendered = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    assert _envelope_edit_would_clobber_overlay(
+        new_render=rendered,
+        displayed_render=rendered,
+        stalled_emitted=True,
+    ) is True
+    # The clock-gate side also still returns False for this case so
+    # the latch doesn't accidentally reset.
+    no_op = EnvelopeUpdated(envelope=_running_envelope("e1", "run_bash"))
+    assert _event_resets_stall_clock(no_op, rendered) is False
