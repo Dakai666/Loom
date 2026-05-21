@@ -621,11 +621,11 @@ async def _chat(
             app.invalidate()
 
     async def footer_ticker() -> None:
-        """Tick the footer at 2 Hz so live fields (active envelope
-        elapsed, compaction spinner, thinking dots, transient hint
-        expiry — #284) progress visibly."""
+        """Tick the footer at 2 Hz so live fields (heartbeat elapsed,
+        compaction spinner, thinking dots, transient hint expiry —
+        #284) progress visibly."""
         while not shutdown.is_set():
-            if (app.footer.active_envelopes
+            if (app.footer.heartbeat_state != "idle"
                     or app.footer.compacting
                     or app.footer.thinking
                     or app.footer.transient_hint is not None):
@@ -1515,15 +1515,10 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 )
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
-                # PR-D4: track in footer for live ▸ <tool> · <elapsed>
-                loom_app = getattr(session, "_loom_app", None)
-                if loom_app is not None:
-                    from loom.platform.cli.app import _ActiveEnvelope
-                    import time as _t
-                    loom_app.footer.active_envelopes.append(
-                        _ActiveEnvelope(name=event.name, started_monotonic=_t.monotonic())
-                    )
-                    loom_app.invalidate()
+                # Heartbeat wiring lands in #419 (Task 4 of the
+                # interaction-language plan). #418 removed the raw
+                # active-envelope push; the footer reads heartbeat
+                # state instead, but nothing writes that state yet.
 
             elif isinstance(event, ToolEnd):
                 _bump_output_seq()
@@ -1544,15 +1539,8 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     _freeze_envelope(_output_seq, event.name,
                                      event.success, event.duration_ms)
                 )
-                # PR-D4: drop matching envelope from footer
-                loom_app = getattr(session, "_loom_app", None)
-                if loom_app is not None:
-                    envs = loom_app.footer.active_envelopes
-                    for i in range(len(envs) - 1, -1, -1):
-                        if envs[i].name == event.name:
-                            envs.pop(i)
-                            break
-                    loom_app.invalidate()
+                # Heartbeat clear lands in #419 (Task 4 of the
+                # interaction-language plan).
 
             elif isinstance(event, TurnPaused):
                 _bump_output_seq()

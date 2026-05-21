@@ -77,13 +77,6 @@ Mode = Literal["input", "confirm", "pause", "redirect"]
 
 
 @dataclass
-class _ActiveEnvelope:
-    """A tool envelope currently in flight — for footer summary."""
-    name: str
-    started_monotonic: float
-
-
-@dataclass
 class _TransientHint:
     """Issue #284: a footer hint that auto-vanishes after a few seconds.
 
@@ -109,9 +102,6 @@ class FooterState:
     persona: str | None = None
     # Context window utilisation — surfaces in footer when >60%
     token_pct: float = 0.0
-    # Tools currently running. footer shows the most recent one's
-    # name + elapsed; if multiple, prefix with ``Nx`` count
-    active_envelopes: list[_ActiveEnvelope] = field(default_factory=list)
     # Compaction in progress — when True, footer hides everything
     # else and shows ``⚡ 壓縮中…`` so the long pause doesn't look
     # like a hang
@@ -120,6 +110,21 @@ class FooterState:
     # Surfaces as a soft animated indicator above the input separator
     # so the user knows their input is being chewed on
     thinking: bool = False
+    # Runtime heartbeat — single liveness signal that replaced the raw
+    # ``▸ run_bash`` envelope label (#418). States: idle / thinking /
+    # tooling / long_tooling / stalled / paused_blocking. Written by
+    # stream-event handlers via ``LoomApp.start_heartbeat`` and friends.
+    # ``heartbeat_last_event_monotonic`` is touched on every observable
+    # stream event; ``stale_after_s`` controls when the footer adds the
+    # ``still waiting · …`` warning prefix. Only tooling states are
+    # eligible for the stalled prefix — thinking/paused are waiting on
+    # someone else, so silence there is not stallness.
+    heartbeat_state: str = "idle"
+    heartbeat_label: str = ""
+    heartbeat_subject: str = ""
+    heartbeat_started_monotonic: float = 0.0
+    heartbeat_last_event_monotonic: float = 0.0
+    heartbeat_stale_after_s: float = 30.0
     # Number of active scope grants and seconds until the nearest one
     # expires. Refreshed at turn boundaries (per doc/49 decision —
     # don't tick every second). 0 grants → both fields 0
@@ -315,6 +320,44 @@ class LoomApp:
 
     def invalidate(self) -> None:
         self._app.invalidate()
+
+    # ------------------------------------------------------------------
+    # Heartbeat (#418) — runtime liveness signal driving the footer.
+    # ``start_heartbeat`` writes a new state + label and resets timers;
+    # ``touch_heartbeat`` extends liveness so the stalled warning resets;
+    # ``stop_heartbeat`` returns to idle. Designed so any stream-event
+    # handler can drive it without knowing footer geometry.
+    # ------------------------------------------------------------------
+
+    def start_heartbeat(
+        self,
+        *,
+        state: str,
+        label: str,
+        subject: str = "",
+        stale_after_s: float = 30.0,
+    ) -> None:
+        now = monotonic()
+        self.footer.heartbeat_state = state
+        self.footer.heartbeat_label = label
+        self.footer.heartbeat_subject = subject
+        self.footer.heartbeat_started_monotonic = now
+        self.footer.heartbeat_last_event_monotonic = now
+        self.footer.heartbeat_stale_after_s = stale_after_s
+        self.invalidate()
+
+    def touch_heartbeat(self) -> None:
+        if self.footer.heartbeat_state != "idle":
+            self.footer.heartbeat_last_event_monotonic = monotonic()
+            self.invalidate()
+
+    def stop_heartbeat(self) -> None:
+        self.footer.heartbeat_state = "idle"
+        self.footer.heartbeat_label = ""
+        self.footer.heartbeat_subject = ""
+        self.footer.heartbeat_started_monotonic = 0.0
+        self.footer.heartbeat_last_event_monotonic = 0.0
+        self.invalidate()
 
     def show_transient_hint(
         self,
@@ -700,25 +743,45 @@ class LoomApp:
                  f"🔑 {s.grants_active}·{ttl_label}")
             )
 
-        # Active envelopes — show the most recent one with elapsed
-        # time. When >1 in flight, prefix with count: ``3× ▸ ...``.
-        # Updates as ToolBegin / ToolEnd fire (see main.py wiring)
-        envs = s.active_envelopes
-        if envs:
+        # Runtime heartbeat (#418) — system-driven liveness signal that
+        # replaced the raw active-envelope label. Labels are written by
+        # interaction_language (action-language, not tool name); the
+        # ``still waiting · …`` prefix appears once a tooling state goes
+        # quiet past its ``stale_after_s`` threshold. Thinking / paused
+        # states never render the stalled prefix — they're waiting on
+        # the agent or the user, not on a tool, so silence there is not
+        # stallness. This mirrors the Discord watchdog suppression rule.
+        heartbeat_active = (
+            s.heartbeat_state
+            and s.heartbeat_state != "idle"
+            and s.heartbeat_label
+        )
+        if heartbeat_active:
             import time as _t
-            latest = envs[-1]
-            elapsed = max(0.0, _t.monotonic() - latest.started_monotonic)
-            label = f"{len(envs)}× " if len(envs) > 1 else ""
-            label += f"▸ {latest.name} · {elapsed:.1f}s"
-            parts.append(("class:footer", "  "))
-            parts.append(("class:footer.envelope", label))
-        # Thinking indicator no longer rendered here — moved to its
-        # own window above the input separator (see _render_thinking)
+            from loom.platform.interaction_language import format_elapsed
 
-        # Last-turn stats — only show when no tool is currently in
-        # flight (otherwise the active envelope already tells the
-        # user "we're busy")
-        if not envs:
+            now = _t.monotonic()
+            elapsed = max(0.0, now - s.heartbeat_started_monotonic)
+            quiet_for = max(0.0, now - s.heartbeat_last_event_monotonic)
+            stalled = (
+                s.heartbeat_state == "stalled"
+                or (
+                    s.heartbeat_state in ("tooling", "long_tooling")
+                    and quiet_for >= s.heartbeat_stale_after_s
+                )
+            )
+            prefix = "still waiting · " if stalled else ""
+            label = f"{prefix}{s.heartbeat_label}"
+            if s.heartbeat_subject:
+                label += f" · {s.heartbeat_subject}"
+            label += f" · {format_elapsed(elapsed)}"
+            parts.append(("class:footer", "  "))
+            style = "class:footer.budget.warn" if stalled else "class:footer.envelope"
+            parts.append((style, label))
+
+        # Last-turn stats — only show when nothing is in flight
+        # (otherwise the heartbeat already tells the user "we're busy")
+        if not heartbeat_active:
             stats: list[str] = []
             if s.last_turn_cache_hit is not None:
                 stats.append(f"cache {s.last_turn_cache_hit:.0f}%")

@@ -31,12 +31,12 @@ from prompt_toolkit.history import InMemoryHistory
 from loom.platform.cli.app import (
     FooterState,
     LoomApp,
-    _ActiveEnvelope,
     _ConfirmState,
     _PauseState,
     _TaskListState,
     build_loom_app,
 )
+from loom.platform.interaction_language import HeartbeatState
 
 
 def _flat_text(formatted) -> str:
@@ -64,10 +64,11 @@ class TestConstruction:
 
     def test_footer_starts_empty(self, app: LoomApp) -> None:
         assert app.footer.token_pct == 0.0
-        assert app.footer.thinking is False
         assert app.footer.compacting is False
         assert app.footer.grants_active == 0
-        assert app.footer.active_envelopes == []
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_label == ""
+        assert app.footer.heartbeat_subject == ""
 
     def test_factory_returns_loomapp(self) -> None:
         app = build_loom_app()
@@ -229,41 +230,61 @@ class TestFooterRender:
         text = _flat_text(app._render_footer())
         assert "🔑 3·∞" in text
 
-    def test_active_envelope_shown_with_elapsed(self, app: LoomApp) -> None:
+    def test_heartbeat_replaces_active_envelope_label(self, app: LoomApp) -> None:
+        # Heartbeat is the system-driven liveness signal that replaced the
+        # raw ``▸ run_bash · 1.5s`` envelope label. Now the footer reads
+        # the action-language label written by interaction_language.
         import time as _t
-        app.footer.active_envelopes.append(
-            _ActiveEnvelope(name="run_bash", started_monotonic=_t.monotonic() - 1.5)
-        )
-        text = _flat_text(app._render_footer())
-        assert "▸ run_bash" in text
-        # Elapsed format — at least the seconds suffix is fixed
-        assert "s" in text.split("▸ run_bash")[1]
 
-    def test_multiple_envelopes_show_count_prefix(self, app: LoomApp) -> None:
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "pytest"
+        app.footer.heartbeat_started_monotonic = _t.monotonic() - 8
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic()
+
+        text = _flat_text(app._render_footer())
+
+        assert "執行指令" in text
+        assert "pytest" in text
+        # Old raw glyph + tool name format must not leak back in
+        assert "▸ run_bash" not in text
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+
+    def test_stalled_heartbeat_uses_warning_copy(self, app: LoomApp) -> None:
+        # When the tool has been quiet past its stale_after_s the footer
+        # tells the user we're still waiting. Only tooling states are
+        # eligible — thinking / paused are waiting on someone else and
+        # should never render this prefix (covered by other tests).
         import time as _t
-        for name in ("read_file", "list_dir", "grep"):
-            app.footer.active_envelopes.append(
-                _ActiveEnvelope(name=name, started_monotonic=_t.monotonic())
-            )
-        text = _flat_text(app._render_footer())
-        # ``Nx ▸ <latest> · <elapsed>`` — count visible, latest one named
-        assert "3×" in text
-        assert "grep" in text  # most recent
 
-    def test_last_turn_stats_only_when_no_active_envelope(self, app: LoomApp) -> None:
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "pytest"
+        app.footer.heartbeat_started_monotonic = _t.monotonic() - 95
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 95
+        app.footer.heartbeat_stale_after_s = 90.0
+
+        text = _flat_text(app._render_footer())
+
+        assert "still waiting" in text
+        assert "執行指令" in text
+
+    def test_last_turn_stats_hidden_while_heartbeat_active(self, app: LoomApp) -> None:
         # Stats from the previous turn surface only when nothing is in
-        # flight — otherwise the active envelope owns the middle column
+        # flight — otherwise the heartbeat owns the middle column.
         app.footer.last_turn_input_tokens = 1234
         app.footer.last_turn_output_tokens = 567
         app.footer.last_turn_elapsed_s = 2.3
         text = _flat_text(app._render_footer())
         assert "1234in / 567out" in text
 
-        # Now add an active envelope — stats should disappear
+        # Now light up the heartbeat — stats should disappear.
         import time as _t
-        app.footer.active_envelopes.append(
-            _ActiveEnvelope(name="x", started_monotonic=_t.monotonic())
-        )
+        app.footer.heartbeat_state = HeartbeatState.TOOLING.value
+        app.footer.heartbeat_label = "執行指令"
+        app.footer.heartbeat_subject = "x"
+        app.footer.heartbeat_started_monotonic = _t.monotonic()
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic()
         text = _flat_text(app._render_footer())
         assert "1234in" not in text
 
