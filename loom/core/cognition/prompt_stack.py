@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from loom.core.envelope_outcome import INTERACTION_LANGUAGE_INSTRUCTIONS
+
 
 @dataclass
 class PromptLayer:
@@ -45,6 +47,10 @@ class PromptStack:
     """
 
     LAYER_SEPARATOR = "\n\n---\n\n"
+    # Re-exposed on the class so tests + downstream consumers can read
+    # the contract phrasing without importing it from another module.
+    # Source of truth is ``loom.core.envelope_outcome`` (#423).
+    INTERACTION_LANGUAGE_INSTRUCTIONS = INTERACTION_LANGUAGE_INSTRUCTIONS
 
     def __init__(
         self,
@@ -87,6 +93,22 @@ class PromptStack:
                 "agent",
                 self._agent_path.read_text(encoding="utf-8"),
                 self._agent_path,
+            ))
+
+        # Layer 2.5 — built-in interaction-language contract (#423).
+        # Tells the agent to author intent + outcome metadata for
+        # multi-tool batches; renderers (#420) consume those fields
+        # and producers fall back to mechanical derivation (#421)
+        # when absent. Slots after project Agent.md so it inherits
+        # the project's context, and before personality so persona
+        # lenses can phrase-tune on top. Gated on ``self._layers``
+        # being non-empty so prompt-free configurations stay empty —
+        # keeps ``test_empty_stack_returns_empty_string`` semantics.
+        if self._layers:
+            self._layers.append(PromptLayer(
+                "interaction_language",
+                INTERACTION_LANGUAGE_INSTRUCTIONS,
+                None,
             ))
 
         # Layer 3 — Personality

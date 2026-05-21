@@ -1,17 +1,25 @@
-"""Envelope outcome vocabulary and mechanical derivation (#421).
+"""Envelope interaction vocabulary — outcome derivation + prompt contract.
 
-Lives in ``loom.core`` rather than under ``loom.platform`` because the
-ledger projector — also a core component — needs to populate
-``ExecutionEnvelopeView.outcome`` at projection time. The architecture
-boundary (CLAUDE.md: ``Platform → Cognition → Harness → Memory``) means
-core cannot import from platform; the outcome data contract therefore
-belongs here next to the dataclass it instantiates.
+Hosts core data the agent + producers + renderers share around an
+``ExecutionEnvelopeView``:
 
-``loom.platform.interaction_language`` re-exports ``EnvelopeOutcome``
-so UI surfaces (CLI footer, Discord renderer) keep their existing
-import shape. The mechanical helper stays unexported on the platform
-side because only producers call it — renderers consume the strings,
-they don't classify them.
+- ``EnvelopeOutcome`` enum + ``derive_envelope_outcome`` helper for the
+  mechanical fallback when no LLM-authored outcome is present (#421).
+- ``INTERACTION_LANGUAGE_INSTRUCTIONS`` — the prompt-stack contract that
+  asks the agent to author intent + outcome for multi-tool batches (#423).
+
+Lives in ``loom.core`` rather than under ``loom.platform`` because both
+the ledger projector AND ``PromptStack`` (cognition layer) need this
+vocabulary, and core cannot import from platform per CLAUDE.md
+(``Platform → Cognition → Harness → Memory``). The two concepts
+co-locate because they're the producer/consumer ends of the same
+envelope-language: the prompt asks the agent to write intent/outcome,
+and the helpers classify outcomes mechanically when the agent omits
+them. Keeping them in one file means future contract changes touch
+one place.
+
+``loom.platform.interaction_language`` re-exports the public surface so
+UI consumers (Discord renderer, tests) keep their existing import shape.
 """
 from __future__ import annotations
 
@@ -24,6 +32,21 @@ class EnvelopeOutcome(str, Enum):
     UNFULFILLED = "unfulfilled"
     PIVOTED = "pivoted"
     ABORTED = "aborted"
+
+
+# Prompt-stack contract layer (#423). Slots between the project's Agent.md
+# and any active personality so the contract sits with project-level
+# context but persona lenses can still adjust phrasing on top of it.
+# Phrasing is intentionally compact — the layer appears in every turn's
+# system prompt and shouldn't bloat the cache prefix. Future localization
+# follows the same registry pattern as the label dicts in
+# ``loom.platform.interaction_language``.
+INTERACTION_LANGUAGE_INSTRUCTIONS = (
+    "When you dispatch a multi-tool batch, provide a one-line intent before "
+    "the batch and an outcome judgement after the batch completes. "
+    "Single-tool calls do not need an intent header. Keep both lines short "
+    "enough to display in one UI line."
+)
 
 
 # ``observed`` / ``validated`` / ``committed`` are intermediate
