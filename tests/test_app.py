@@ -12,9 +12,9 @@ need a TTY and a working renderer). Instead they exercise:
 - the mode flag transitions around ``request_confirm`` / ``request_pause``
   / ``request_redirect_text`` (launched as tasks, completed by directly
   resolving the future the helper awaits)
-- the render callbacks (``_render_footer`` / ``_render_thinking`` /
-  ``_render_tasklist`` / ``_render_confirm`` / ``_render_pause``) under
-  the various FooterState shapes documented in the issue
+- the render callbacks (``_render_footer`` / ``_render_tasklist`` /
+  ``_render_confirm`` / ``_render_pause``) under the various
+  FooterState shapes documented in the issue
 - the TaskList state mutations (``update_tasklist`` collapse logic) and
   Markdown reblit infrastructure shared with #248
 
@@ -269,6 +269,70 @@ class TestFooterRender:
         assert "still waiting" in text
         assert "執行指令" in text
 
+    def test_heartbeat_state_sequence_thinking_tooling_stalled_idle(self, app: LoomApp) -> None:
+        # Sanity-check the full state machine the stream loop drives:
+        # turn-start → THINKING; first ToolBegin → TOOLING; quiet past
+        # stale_after_s → stalled prefix; turn-done → IDLE.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+            stale_after_s=30.0,
+        )
+        assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="執行指令",
+            subject="pytest",
+            stale_after_s=90.0,
+        )
+        assert app.footer.heartbeat_state == HeartbeatState.TOOLING.value
+        assert "執行指令" in _flat_text(app._render_footer())
+
+        # Force the tool to look quiet past stale_after_s.
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 91
+        text = _flat_text(app._render_footer())
+        assert "still waiting" in text
+
+        app.stop_heartbeat()
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+
+    def test_paused_blocking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
+        # The PAUSED_BLOCKING state is waiting on the user, not on a
+        # tool, so the footer must never call it "still waiting"
+        # regardless of how long the human takes to decide.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.PAUSED_BLOCKING.value,
+            label="等待你的決定",
+            stale_after_s=30.0,
+        )
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 120
+
+        text = _flat_text(app._render_footer())
+        assert "等待你的決定" in text
+        assert "still waiting" not in text
+
+    def test_thinking_heartbeat_does_not_render_stalled_prefix(self, app: LoomApp) -> None:
+        # Mirror of the paused case: THINKING is waiting on the agent
+        # (LLM round-trip). A slow first token is not "still waiting"
+        # on a tool, so the stalled prefix must stay off.
+        import time as _t
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+            stale_after_s=30.0,
+        )
+        app.footer.heartbeat_last_event_monotonic = _t.monotonic() - 95
+
+        text = _flat_text(app._render_footer())
+        assert "Loom is thinking" in text
+        assert "still waiting" not in text
+
     def test_last_turn_stats_hidden_while_heartbeat_active(self, app: LoomApp) -> None:
         # Stats from the previous turn surface only when nothing is in
         # flight — otherwise the heartbeat owns the middle column.
@@ -287,22 +351,6 @@ class TestFooterRender:
         app.footer.heartbeat_last_event_monotonic = _t.monotonic()
         text = _flat_text(app._render_footer())
         assert "1234in" not in text
-
-
-# ---------------------------------------------------------------------------
-# Thinking indicator
-# ---------------------------------------------------------------------------
-
-
-class TestThinkingIndicator:
-    def test_render_thinking_contains_loom_marker(self, app: LoomApp) -> None:
-        text = _flat_text(app._render_thinking())
-        assert "Loom is thinking" in text
-
-    def test_thinking_flag_default_off(self, app: LoomApp) -> None:
-        # ConditionalContainer reads ``footer.thinking`` directly; the
-        # render only fires when True, but the flag default matters
-        assert app.footer.thinking is False
 
 
 # ---------------------------------------------------------------------------

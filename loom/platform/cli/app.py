@@ -106,10 +106,6 @@ class FooterState:
     # else and shows ``⚡ 壓縮中…`` so the long pause doesn't look
     # like a hang
     compacting: bool = False
-    # Loom is thinking (LLM call dispatched, no stream output yet).
-    # Surfaces as a soft animated indicator above the input separator
-    # so the user knows their input is being chewed on
-    thinking: bool = False
     # Runtime heartbeat — single liveness signal that replaced the raw
     # ``▸ run_bash`` envelope label (#418). States: idle / thinking /
     # tooling / long_tooling / stalled / paused_blocking. Written by
@@ -215,9 +211,6 @@ _APP_STYLE = Style.from_dict(
         # above the input separator then auto-vanish
         "hint.info":             _CLI_ACCENT,
         "hint.warn":             _CLI_WARNING,
-        # Thinking indicator above the input separator
-        "thinking":              _CLI_MUTED,
-        "thinking.dot":          _CLI_ACCENT,
         # Floating TaskList panel
         "tasklist.frame":        _CLI_BORDER,
         "tasklist.title":        f"{_CLI_ACCENT} bold",
@@ -630,24 +623,13 @@ class LoomApp:
             filter=Condition(lambda: bool(self._tasklist_state.todos)),
         )
 
-        # Thinking indicator — appears as its own line *above* the
-        # separator (so visually attached to the input region), only
-        # while ``footer.thinking`` is True. Mirrors Claude Code-style
-        # "● thinking…" status above the prompt rather than tucking
-        # it into the footer
-        thinking_window = ConditionalContainer(
-            Window(
-                content=FormattedTextControl(self._render_thinking),
-                height=1,
-            ),
-            filter=Condition(lambda: self.footer.thinking),
-        )
-
-        # Issue #284: transient hint line. Shares the slot above the
-        # separator with the thinking indicator (both can be active —
-        # they stack). Filter checks expiry so the line collapses once
-        # the deadline passes; the ticker re-evaluates at 2 Hz so the
-        # collapse is visible without a render storm.
+        # Issue #284: transient hint line. Footer heartbeat (#418/#419)
+        # now owns the "Loom is thinking…" signal as part of the
+        # broader runtime liveness model, so no separate thinking
+        # window stacks above the separator. Filter checks expiry so
+        # the line collapses once the deadline passes; the ticker
+        # re-evaluates at 2 Hz so the collapse is visible without a
+        # render storm.
         hint_window = ConditionalContainer(
             Window(
                 content=FormattedTextControl(self._render_hint),
@@ -660,7 +642,6 @@ class LoomApp:
             HSplit([
                 tasklist_window,
                 hint_window,
-                thinking_window,
                 separator_top,
                 input_window,
                 confirm_window,
@@ -825,22 +806,6 @@ class LoomApp:
             return FormattedText([])
         cls = "class:hint.warn" if h.severity == "warn" else "class:hint.info"
         return FormattedText([(cls, f" {h.text} ")])
-
-    def _render_thinking(self) -> FormattedText:
-        """Animated thinking indicator above the input separator.
-
-        Style: ``● Loom is thinking···`` with the dots cycling on the
-        ticker invalidate. Bullet glyph in accent gold so it reads as
-        a status pip; the rest in muted parchment so the line stays
-        quiet relative to streaming output.
-        """
-        import time as _t
-        phase = int(_t.monotonic() * 2) % 4
-        dots = "·" * phase + " " * (3 - phase)
-        return FormattedText([
-            ("class:thinking.dot", " ● "),
-            ("class:thinking", f"Loom is thinking{dots}"),
-        ])
 
     def _render_tasklist(self) -> FormattedText:
         """Floating TaskList panel — agent's todo board (PR-E, #236).

@@ -568,14 +568,17 @@ async def _chat(
                 text = "[使用者打斷上一輪並接續]\n" + text
 
             console.print()
-            # PR-D4: thinking indicator. Set True the moment we
-            # dispatch the streaming turn; cleared inside
-            # _run_streaming_turn the first time anything visible
-            # happens (TextChunk / ToolBegin / TurnDone). If turn
-            # crashes / aborts before that, the finally below still
-            # clears it
-            app.footer.thinking = True
-            app.invalidate()
+            # Heartbeat (#418/#419). Light up THINKING the moment we
+            # dispatch the streaming turn; stream-event handlers inside
+            # _run_streaming_turn transition it to TOOLING / PAUSED /
+            # back to idle. If the turn crashes / aborts before any
+            # event lands, the finally below still returns to idle.
+            from loom.platform.interaction_language import HeartbeatState
+            app.start_heartbeat(
+                state=HeartbeatState.THINKING.value,
+                label="Loom is thinking",
+                stale_after_s=30.0,
+            )
             current_turn_task = asyncio.create_task(
                 _run_streaming_turn(session, text)
             )
@@ -587,7 +590,7 @@ async def _chat(
                 harness.inline(f"turn error: {exc}", level="error")
             finally:
                 current_turn_task = None
-                app.footer.thinking = False
+                app.stop_heartbeat()
 
             # Update footer token budget + grants at each turn boundary
             # (per doc/49 decision: TTL refresh on turn edge, not per-
@@ -622,12 +625,11 @@ async def _chat(
 
     async def footer_ticker() -> None:
         """Tick the footer at 2 Hz so live fields (heartbeat elapsed,
-        compaction spinner, thinking dots, transient hint expiry —
-        #284) progress visibly."""
+        compaction spinner, transient hint expiry — #284) progress
+        visibly."""
         while not shutdown.is_set():
             if (app.footer.heartbeat_state != "idle"
                     or app.footer.compacting
-                    or app.footer.thinking
                     or app.footer.transient_hint is not None):
                 app.invalidate()
             await asyncio.sleep(0.5)
@@ -1149,6 +1151,25 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
 
 
+def _start_tool_heartbeat(loom_app: Any, name: str, args: dict[str, Any]) -> None:
+    """Resolve action-language label for ``name`` + ``args`` and push it
+    into the footer heartbeat as TOOLING. Stale threshold falls out of
+    ``resolve_tool_action`` (long-runners get 90s; everything else 30s).
+    """
+    from loom.platform.interaction_language import (
+        HeartbeatState,
+        resolve_tool_action,
+    )
+
+    action = resolve_tool_action(name, args)
+    loom_app.start_heartbeat(
+        state=HeartbeatState.TOOLING.value,
+        label=action.label,
+        subject=action.subject,
+        stale_after_s=action.stale_after_s,
+    )
+
+
 async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     """
     Execute one streaming agent turn with real character-by-character output.
@@ -1399,21 +1420,24 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     # PR-D4: clear the "thinking" footer indicator on the first
     # observable event of the turn. After that, the active envelope
     # / streaming output / turn stats take over the footer's middle.
+    # Heartbeat (#418/#419) is THINKING from turn dispatch. The first
+    # observable event clears it; subsequent ToolBegin/etc handlers
+    # transition into TOOLING themselves. Guarded so plain TextChunk
+    # streaming doesn't keep stomping the heartbeat to idle.
     _thinking_cleared = False
 
-    def _clear_thinking() -> None:
+    def _clear_thinking_heartbeat() -> None:
         nonlocal _thinking_cleared
         if _thinking_cleared:
             return
         _thinking_cleared = True
         loom_app = getattr(session, "_loom_app", None)
-        if loom_app is not None:
-            loom_app.footer.thinking = False
-            loom_app.invalidate()
+        if loom_app is not None and loom_app.footer.heartbeat_state == "thinking":
+            loom_app.stop_heartbeat()
 
     try:
         async for event in session.stream_turn(user_input):
-            _clear_thinking()
+            _clear_thinking_heartbeat()
             if isinstance(event, TextChunk):
                 _bump_output_seq()
                 _stream_pending += event.text
@@ -1473,6 +1497,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # previously not displayed in CLI ("too noisy for
                 # inline chat"); a 3-second flash is the right weight.
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    # Heartbeat may still hold a stale THINKING/TOOLING
+                    # from before the compact gate fired; clear it so
+                    # the transient hint isn't competing with a
+                    # phantom "still waiting" warning.
+                    loom_app.stop_heartbeat()
                     loom_app.show_transient_hint(
                         f"🗜 compacted → {event.fact_count} facts",
                         severity="info",
@@ -1515,10 +1544,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 )
                 # Start spinner animation
                 spinner_task = asyncio.create_task(_spin_loop())
-                # Heartbeat wiring lands in #419 (Task 4 of the
-                # interaction-language plan). #418 removed the raw
-                # active-envelope push; the footer reads heartbeat
-                # state instead, but nothing writes that state yet.
+                # Footer heartbeat → TOOLING with action-language label
+                # resolved from the tool name + args (#419).
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    _start_tool_heartbeat(loom_app, event.name, event.args)
 
             elif isinstance(event, ToolEnd):
                 _bump_output_seq()
@@ -1539,8 +1569,14 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     _freeze_envelope(_output_seq, event.name,
                                      event.success, event.duration_ms)
                 )
-                # Heartbeat clear lands in #419 (Task 4 of the
-                # interaction-language plan).
+                # Footer heartbeat → idle; #419. Touch first so any
+                # very-long tool that managed to land here still counts
+                # as alive at the moment of completion (avoids the
+                # observer-effect race where stop() raced the watchdog).
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    loom_app.touch_heartbeat()
+                    loom_app.stop_heartbeat()
 
             elif isinstance(event, TurnPaused):
                 _bump_output_seq()
@@ -1567,6 +1603,15 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 # (用過即焚, no scrollback residue) rather than spinning
                 # nested Applications.
                 loom_app = getattr(session, "_loom_app", None)
+                # Heartbeat → PAUSED_BLOCKING while waiting on user; the
+                # stalled-prefix is suppressed for this state so a long
+                # think-time doesn't render as "still waiting".
+                if loom_app is not None:
+                    from loom.platform.interaction_language import HeartbeatState
+                    loom_app.start_heartbeat(
+                        state=HeartbeatState.PAUSED_BLOCKING.value,
+                        label="等待你的決定",
+                    )
                 if loom_app is not None:
                     choice = await loom_app.request_pause(
                         title="Loom 已暫停，下一步？",
@@ -1594,6 +1639,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                         )
                     runner = getattr(session, "_run_interactive", None)
                     choice = await (runner(_pause_pick) if runner else _pause_pick())
+
+                # Decision made — release the PAUSED_BLOCKING heartbeat.
+                # The next event (TextChunk / ToolBegin) will repaint it.
+                if loom_app is not None:
+                    loom_app.stop_heartbeat()
 
                 if choice == _PAUSE_CANCEL:
                     session.cancel()
@@ -1623,6 +1673,12 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
             elif isinstance(event, TurnDone):
                 _bump_output_seq()
+                # Heartbeat → idle before any of the post-turn UI work
+                # so the footer isn't claiming "still thinking" while we
+                # write last-turn stats. The finally on the outer turn
+                # loop is belt-and-suspenders.
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.stop_heartbeat()
                 # Cancel any pending freeze before we touch the
                 # cursor — markdown reblit will move it past the
                 # frozen target row anyway
