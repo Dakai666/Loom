@@ -17,7 +17,10 @@ Pure-function coverage around ``_format_envelope_status``. Verifies:
 from __future__ import annotations
 
 from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
-from loom.platform.discord.bot import _format_envelope_status
+from loom.platform.discord.bot import (
+    _format_envelope_status,
+    _should_emit_stalled_status,
+)
 from loom.platform.interaction_language import EnvelopeOutcome, ParallelReason
 
 
@@ -190,3 +193,64 @@ def test_fulfilled_outcome_does_not_add_summary_line() -> None:
     assert "◐" not in text
     assert "⚠" not in text
     assert "↪" not in text
+
+
+# ----------------------------------------------------------------------
+# Stalled-status proxy (#422)
+# ----------------------------------------------------------------------
+
+
+def test_stalled_status_emits_once_after_threshold() -> None:
+    # First check past the threshold returns True; once the caller has
+    # recorded the emit, subsequent ticks must not retrigger until the
+    # next observable event resets ``already_emitted``.
+    assert _should_emit_stalled_status(
+        now=100.0,
+        last_event_at=9.0,
+        threshold_s=90.0,
+        already_emitted=False,
+    )
+    assert not _should_emit_stalled_status(
+        now=100.0,
+        last_event_at=9.0,
+        threshold_s=90.0,
+        already_emitted=True,
+    )
+
+
+def test_stalled_status_does_not_emit_before_threshold() -> None:
+    assert not _should_emit_stalled_status(
+        now=100.0,
+        last_event_at=20.0,  # only 80s of quiet, threshold is 90s
+        threshold_s=90.0,
+        already_emitted=False,
+    )
+
+
+def test_stalled_status_is_suppressed_while_waiting_for_user() -> None:
+    # During a TurnPaused window, the runtime is quiet on the agent
+    # side because we're waiting on a human. The watchdog must not
+    # call this "still waiting" — same invariant as the CLI footer's
+    # PAUSED_BLOCKING heartbeat state (#419).
+    assert not _should_emit_stalled_status(
+        now=200.0,
+        last_event_at=0.0,
+        threshold_s=90.0,
+        already_emitted=False,
+        suppressed=True,
+    )
+
+
+def test_stalled_status_suppression_takes_precedence_over_already_emitted() -> None:
+    # Even if the watchdog had already fired (and would normally just
+    # stay quiet), the suppression flag is the dominant signal. This
+    # protects against a race where a pause arrives right after a
+    # stalled emit — we want the pause window to govern, not the
+    # stalled latch.
+    assert not _should_emit_stalled_status(
+        now=200.0,
+        last_event_at=0.0,
+        threshold_s=90.0,
+        already_emitted=True,
+        suppressed=True,
+    )

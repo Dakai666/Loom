@@ -53,6 +53,7 @@ showing the TTL or grant scope.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import json
 import os
@@ -180,6 +181,33 @@ _OUTCOME_GLYPHS: dict[str, str] = {
     "pivoted": "↪",
     "aborted": "🛑",
 }
+
+
+def _should_emit_stalled_status(
+    *,
+    now: float,
+    last_event_at: float,
+    threshold_s: float,
+    already_emitted: bool,
+    suppressed: bool = False,
+) -> bool:
+    """Decide whether the watchdog should append a ``still waiting`` line.
+
+    Discord lacks a true heartbeat surface (no equivalent to the CLI
+    footer), so #422 proxies it via a periodic edit on the active status
+    message. The watchdog fires at most once per quiet stretch — caller
+    sets ``already_emitted=True`` after the edit and resets it on the
+    next observable event.
+
+    ``suppressed`` is the pause-window guard: when ``TurnPaused`` is
+    waiting on a user reply, the runtime is intentionally quiet on the
+    agent side, so "still waiting" would mislead. This mirrors the CLI
+    heartbeat's PAUSED_BLOCKING state (#419), which never renders the
+    stalled prefix for the same reason.
+    """
+    if suppressed:
+        return False
+    return (not already_emitted) and now - last_event_at >= threshold_s
 
 
 def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
@@ -1314,10 +1342,58 @@ class LoomDiscordBot:
         _had_pause = False
         _had_rollback = False
 
+        # ── Stalled-status watchdog (#422) ───────────────────────────────
+        # Discord has no equivalent of the CLI footer heartbeat, so we
+        # proxy "runtime is still alive" by appending a ``still waiting``
+        # line to the active status_msg when an observable event hasn't
+        # landed in ``_active_stale_threshold_s`` seconds. Fires at most
+        # once per quiet stretch — any subsequent event resets both the
+        # timestamp and the latch so the next stall would re-emit.
+        #
+        # ``_stall_watchdog_suppressed`` is the pause-window guard:
+        # TurnPaused sets it True before waiting on the user reply and
+        # False after, so a slow human decision is never mis-displayed
+        # as a runtime stall. Mirrors the CLI PAUSED_BLOCKING heartbeat
+        # rule (#419) — pause time is on the user, not the agent.
+        _last_runtime_event_at = time.monotonic()
+        _stalled_emitted = False
+        _active_stale_threshold_s = 90.0
+        _turn_done = False
+        _stall_watchdog_suppressed = False
+
+        async def _stall_watchdog() -> None:
+            nonlocal _stalled_emitted
+            while not _turn_done:
+                await asyncio.sleep(5.0)
+                now = time.monotonic()
+                if _should_emit_stalled_status(
+                    now=now,
+                    last_event_at=_last_runtime_event_at,
+                    threshold_s=_active_stale_threshold_s,
+                    already_emitted=_stalled_emitted,
+                    suppressed=_stall_watchdog_suppressed,
+                ):
+                    _stalled_emitted = True
+                    quiet_for = int(now - _last_runtime_event_at)
+                    await _safe_edit(
+                        status_msg,
+                        (tool_buf.lstrip() or "-# ◌ working…")
+                        + f"\n-# still waiting · {quiet_for}s",
+                    )
+
+        _stall_task = asyncio.create_task(_stall_watchdog())
+
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
+                    # Heartbeat for the watchdog — any observed event
+                    # counts as "agent is alive". TurnPaused will flip
+                    # suppression on its own; we still reset here so the
+                    # post-resume window restarts from "fresh" rather
+                    # than carrying over the pre-pause quiet time.
+                    _last_runtime_event_at = time.monotonic()
+                    _stalled_emitted = False
                     if isinstance(event, TextChunk):
                         narration_buf += event.text
 
@@ -1421,6 +1497,13 @@ class LoomDiscordBot:
                                 and not m.author.bot
                             )
 
+                        # Suppress the stalled watchdog while we wait on
+                        # the user (#422). Pause time is on the human;
+                        # tagging the status as ``still waiting`` would
+                        # mislead. The finally also resets the watchdog
+                        # timestamp so the post-resume window doesn't
+                        # inherit pre-pause quiet time.
+                        _stall_watchdog_suppressed = True
                         try:
                             reply = await self._client.wait_for(
                                 "message", check=_pause_check, timeout=120.0
@@ -1436,6 +1519,10 @@ class LoomDiscordBot:
                         except asyncio.TimeoutError:
                             session.cancel()
                             tool_buf += "\n*(pause timed out — cancelled)*"
+                        finally:
+                            _stall_watchdog_suppressed = False
+                            _last_runtime_event_at = time.monotonic()
+                            _stalled_emitted = False
 
                     elif isinstance(event, CompressDone):
                         await _safe_send(message.channel,
@@ -1558,6 +1645,16 @@ class LoomDiscordBot:
                 except discord.HTTPException:
                     pass
                 return
+            finally:
+                # Stop the stalled watchdog (#422). Setting ``_turn_done``
+                # makes the loop exit naturally next tick; cancel + await
+                # ensures we don't leak the task across turns even when
+                # the asyncio.sleep(5.0) is mid-wait. CancelledError from
+                # the task itself is expected and swallowed.
+                _turn_done = True
+                _stall_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await _stall_task
 
         # typing() context exits here — "Bot is typing…" disappears.
 
