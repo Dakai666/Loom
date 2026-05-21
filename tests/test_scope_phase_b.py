@@ -368,7 +368,10 @@ class TestScopeConfirmDurations:
         assert result.success
         confirm_fn.assert_called_once()
         handler.assert_called_once()
-        assert perm.grants == []
+        assert len(perm.grants) >= 1
+        g = perm.grants[-1]
+        assert g.source == "manual_confirm"
+        assert g.valid_until == 0.0
         assert call.metadata["confirm_decision"] == "once"
 
     async def test_once_confirmation_does_not_grant_fetch_url_network_scope(self):
@@ -390,7 +393,10 @@ class TestScopeConfirmDurations:
         assert result.success
         confirm_fn.assert_called_once()
         handler.assert_called_once()
-        assert perm.grants == []
+        assert len(perm.grants) >= 1
+        g = perm.grants[-1]
+        assert g.source == "manual_confirm"
+        assert g.valid_until == 0.0
         assert call.metadata["confirm_decision"] == "once"
 
     async def test_scope_confirmation_creates_ttl_grant(self):
