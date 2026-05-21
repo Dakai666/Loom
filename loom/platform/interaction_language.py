@@ -11,7 +11,18 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from loom.core.envelope_outcome import EnvelopeOutcome, derive_envelope_outcome
 from loom.core.security.sandbox_runtime import extract_command_root
+
+# Re-exported so UI consumers (Discord bot, tests) keep their existing
+# ``from loom.platform.interaction_language import EnvelopeOutcome``
+# import shape. The canonical home is ``loom.core.envelope_outcome`` —
+# the ledger projector needs the enum at projection time and core
+# cannot import from platform (CLAUDE.md layering).
+__all__ = [
+    "EnvelopeOutcome",
+    "derive_envelope_outcome",
+]
 
 
 class HeartbeatState(str, Enum):
@@ -29,14 +40,6 @@ class HeartbeatState(str, Enum):
     LONG_TOOLING = "long_tooling"
     STALLED = "stalled"
     PAUSED_BLOCKING = "paused_blocking"
-
-
-class EnvelopeOutcome(str, Enum):
-    FULFILLED = "fulfilled"
-    PARTIAL = "partial"
-    UNFULFILLED = "unfulfilled"
-    PIVOTED = "pivoted"
-    ABORTED = "aborted"
 
 
 class ParallelReason(str, Enum):

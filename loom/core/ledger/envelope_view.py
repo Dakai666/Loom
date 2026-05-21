@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from loom.core.envelope_outcome import derive_envelope_outcome
 from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
 from loom.core.ledger.replay import reconstruct_tool_calls
 
@@ -129,6 +130,21 @@ class LedgerEnvelopeProjector:
         nodes: list[ExecutionNodeView] = []
         terminal_count = 0
         failure_count = 0
+        # Outcome-state list mirrors node states but upgrades failures
+        # the way the lifecycle hides them (#421 + codex review of #428).
+        #
+        # The Loom lifecycle memorialises every terminal call — including
+        # ``denied`` / ``timed_out`` / ``aborted`` — so ``_derive_state``
+        # always returns ``"memorialized"`` for terminated calls regardless
+        # of whether they succeeded or failed. The real failure signal
+        # lives in ``state_transitions`` (mid-history) and on the
+        # ``rolled_back`` flag. Without scanning the full history, a
+        # ``timed_out → memorialized`` call gets fed to the outcome helper
+        # as ``"memorialized"`` and derives ``fulfilled`` — wrong; both
+        # the envelope status and the outcome glyph would lie. This loop
+        # consults the full history for both signals so producer truth
+        # stays straight at the source.
+        outcome_states: list[str] = []
 
         for s in summaries:
             meta = call_meta.get(s.tool_call_id)
@@ -138,10 +154,26 @@ class LedgerEnvelopeProjector:
             #   1) ledger state_transitions last "to" (authoritative when END seen)
             #   2) "executing" (BEGIN seen, no END yet)
             state = self._derive_state(s)
+            failure_in_history = self._failure_state_in_history(s.state_transitions)
             if state in _TERMINAL_STATES:
                 terminal_count += 1
-            if state in _FAILURE_STATES or s.rolled_back:
+            if (
+                state in _FAILURE_STATES
+                or s.rolled_back
+                or failure_in_history is not None
+            ):
                 failure_count += 1
+            # Precedence: rollback flag > history failure > current state.
+            # Rollback is the most user-meaningful signal (something was
+            # accepted then undone), then the specific failure mid-history
+            # (denied / timed_out / aborted preserved for the outcome
+            # glyph), and finally the surface state for plain success.
+            if s.rolled_back:
+                outcome_states.append("reverted")
+            elif failure_in_history is not None:
+                outcome_states.append(failure_in_history)
+            else:
+                outcome_states.append(state)
 
             duration_ms = self._batch_duration_ms(batch_events, s.tool_call_id)
             auth_expires = (
@@ -211,6 +243,25 @@ class LedgerEnvelopeProjector:
 
         elapsed_ms = (time.monotonic() - batch_t0) * 1000 if batch_t0 else 0.0
 
+        # Mechanical outcome (#421): only derived when the envelope is
+        # terminal. Running envelopes get the empty string ("unknown"),
+        # because ``derive_envelope_outcome`` returns FULFILLED on an
+        # all-in-flight node set and that would paint a passing glyph
+        # on something still in flight. ``outcome_states`` already
+        # remaps rolled-back nodes to ``"reverted"`` so the helper sees
+        # the failure signal that envelope-status saw.
+        if status in ("completed", "failed"):
+            # Missing placeholder nodes (declared but no BEGIN) get
+            # appended after the summary loop; they're never terminal,
+            # so they only appear in a status="running" branch. Safe to
+            # skip them here.
+            outcome = derive_envelope_outcome(outcome_states)
+        else:
+            outcome = ""
+
+        # ``intent`` and ``parallel_reason`` stay defaulted in this
+        # task — they're authored by the LLM via the prompt contract
+        # landing in #423 and synthesised by the renderer otherwise.
         return ExecutionEnvelopeView(
             envelope_id=envelope_id,
             session_id=session_id,
@@ -221,9 +272,28 @@ class LedgerEnvelopeProjector:
             elapsed_ms=elapsed_ms,
             levels=[[n.node_id for n in nodes]] if nodes else [],
             nodes=nodes,
+            outcome=outcome,
         )
 
     # -- helpers ---------------------------------------------------------
+
+    @staticmethod
+    def _failure_state_in_history(transitions: list[dict]) -> str | None:
+        """Find the first failure-state transition in lifecycle history.
+
+        The Loom lifecycle terminates every call by transitioning to
+        ``memorialized`` — even denied / timed_out / aborted ones. The
+        actual failure signal lives mid-history. Returning the first
+        such transition preserves the most user-meaningful failure
+        category (``aborted`` distinct from generic failure) for the
+        outcome glyph. Returns ``None`` for clean histories so callers
+        can fall back to the current state.
+        """
+        for t in transitions:
+            to = (t.get("to") or "").lower()
+            if to in _FAILURE_STATES:
+                return to
+        return None
 
     @staticmethod
     def _derive_state(summary) -> str:
