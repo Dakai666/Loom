@@ -38,6 +38,47 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
+_OUTCOME_MARKERS: dict[str, str] = {
+    "✓": "fulfilled",
+    "◐": "partial",
+    "⚠": "unfulfilled",
+    "↪": "pivoted",
+    "🛑": "aborted",
+}
+
+
+def _clean_envelope_metadata_line(text: str, *, max_len: int = 140) -> str:
+    line = " ".join(str(text or "").strip().split())
+    if len(line) <= max_len:
+        return line
+    return line[: max_len - 1] + "…"
+
+
+def _iter_nonempty_lines(text: str):
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if line:
+            yield line
+
+
+def _extract_envelope_intent_marker(text: str) -> str:
+    for line in _iter_nonempty_lines(text):
+        if line.startswith("▸"):
+            return _clean_envelope_metadata_line(line.removeprefix("▸"))
+    return ""
+
+
+def _extract_envelope_outcome_marker(text: str) -> tuple[str, str]:
+    for line in _iter_nonempty_lines(text):
+        marker = line[0]
+        outcome = _OUTCOME_MARKERS.get(marker)
+        if outcome is None:
+            continue
+        summary = _clean_envelope_metadata_line(line[1:].lstrip("\ufe0f"))
+        return outcome, summary
+    return "", ""
+
+
 from loom.core.config import load_loom_config as _load_loom_config  # re-exported for tests/diagnostic/cli
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
 from loom.core.ledger import (
@@ -748,6 +789,7 @@ class LoomSession:
         self._envelope_projector: LedgerEnvelopeProjector | None = None
         self._call_metadata: dict[str, CallMeta] = {}
         self._envelope_call_ids: list[str] = []
+        self._envelope_metadata: dict[str, dict[str, str]] = {}
         # Per-turn ledger aggregators (#334). Reset at every turn_start.
         # _turn_token_usage feeds turn_end.token_usage so the placeholder
         # `{}` from Step 2 finally goes away. _thought_buffer holds the
@@ -1870,6 +1912,7 @@ class LoomSession:
         # full_args (which can be sizeable for write_file / shell tool
         # batches).
         self._call_metadata.clear()
+        self._envelope_metadata.clear()
         if self._ledger_emitter is not None:
             _ledger_turn_token = set_turn_id(_turn_id_v2)
             _ledger_corr_token = set_correlation(_turn_corr_id)
@@ -2254,6 +2297,17 @@ class LoomSession:
                 ))
 
                 if response.stop_reason == "end_turn":
+                    _outcome, _summary = _extract_envelope_outcome_marker(
+                        response.text or ""
+                    )
+                    if (_outcome or _summary) and self._recent_envelopes:
+                        _last_envelope = self._recent_envelopes[-1]
+                        if _last_envelope.turn_index == self._turn_index:
+                            if _outcome:
+                                _last_envelope.outcome = _outcome
+                            if _summary:
+                                _last_envelope.outcome_summary = _summary
+
                     # Issue #205: Pre-final-response self-check. If the TaskList
                     # has pending/in-progress nodes and we haven't already nudged
                     # this turn, inject a reminder and loop back into the model.
@@ -2368,6 +2422,14 @@ class LoomSession:
 
                     # ── Issue #106: Create envelope for this tool batch ────────
                     self._envelope_counter += 1
+                    _envelope_id = f"e{self._envelope_counter}"
+                    _intent = ""
+                    if len(response.tool_uses) > 1:
+                        _intent = _extract_envelope_intent_marker(response.text or "")
+                    if _intent:
+                        self._envelope_metadata.setdefault(_envelope_id, {})[
+                            "intent"
+                        ] = _intent
                     # Step 5: reset per-batch call_id ordering (call_metadata
                     # itself is turn-scoped and stays). Pre-populate with
                     # the tool_uses about to dispatch so EnvelopeStarted
@@ -2527,6 +2589,10 @@ class LoomSession:
 
                     # ── Issue #106: Envelope completed ─────────────────────────
                     _completed_view = await self._build_envelope_view(_batch_t0)
+                    _completed_view = await self._author_envelope_outcome_summary(
+                        _completed_view,
+                        model=_active_model,
+                    )
                     yield EnvelopeCompleted(envelope=_completed_view)
                     # Keep last 50 envelopes — covers TUI history display *and*
                     # the Issue #196 turn-boundary judge digest. 10 was enough for
@@ -4104,8 +4170,10 @@ class LoomSession:
             from loom.core.ledger import current_turn_id
 
             turn_id = current_turn_id() or "system"
+            envelope_id = f"e{self._envelope_counter}"
+            metadata = self._envelope_metadata.get(envelope_id, {})
             return await self._envelope_projector.build_view(
-                envelope_id=f"e{self._envelope_counter}",
+                envelope_id=envelope_id,
                 session_id=self.session_id,
                 turn_id=turn_id,
                 turn_index=self._turn_index,
@@ -4113,6 +4181,9 @@ class LoomSession:
                 call_meta=self._call_metadata,
                 auth_expires_lookup=self._auth_expires_for,
                 batch_t0=batch_t0,
+                intent=metadata.get("intent", ""),
+                outcome_summary=metadata.get("outcome_summary", ""),
+                parallel_reason=metadata.get("parallel_reason", ""),
             )
 
         # No ledger wired → return an empty stub. The shape stays the
@@ -4129,8 +4200,77 @@ class LoomSession:
             status="running",
             node_count=0,
             parallel_groups=0,
+            intent=self._envelope_metadata.get(
+                f"e{self._envelope_counter}", {}
+            ).get("intent", ""),
             outcome="",
         )
+
+    async def _author_envelope_outcome_summary(
+        self,
+        view: ExecutionEnvelopeView,
+        *,
+        model: str,
+    ) -> ExecutionEnvelopeView:
+        """Fill one display-line outcome summary for non-fulfilled multi-node batches."""
+        if view.node_count <= 1:
+            return view
+        if view.outcome_summary:
+            return view
+        if view.outcome in ("", "fulfilled", "aborted"):
+            return view
+
+        node_lines = []
+        for node in view.nodes:
+            detail = node.error_snippet or node.output_preview
+            node_lines.append(
+                {
+                    "tool": node.tool_name,
+                    "state": node.state,
+                    "detail": detail[:120] if detail else "",
+                }
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Write one Traditional Chinese UI outcome line for a tool "
+                    "batch. Be factual, no markdown, no bullet, under 40 Chinese "
+                    "characters. Summarize what did not finish or what needs "
+                    "follow-up."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "intent": view.intent,
+                        "outcome": view.outcome,
+                        "nodes": node_lines,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        try:
+            response = await self.router.chat(
+                model=model,
+                messages=messages,
+                tools=None,
+                max_tokens=80,
+            )
+        except Exception as exc:
+            logger.debug("Envelope outcome summary skipped: %s", exc)
+            return view
+
+        summary = _clean_envelope_metadata_line(response.text or "", max_len=120)
+        if summary:
+            view.outcome_summary = summary
+            self._envelope_metadata.setdefault(view.envelope_id, {})[
+                "outcome_summary"
+            ] = summary
+        return view
 
     # =========================================================================
     # SECTION 10 — HITL / SCOPE / GRANTS

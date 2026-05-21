@@ -100,6 +100,9 @@ class LedgerEnvelopeProjector:
         call_meta: dict[str, CallMeta],
         auth_expires_lookup: Callable[[str], float] | None = None,
         batch_t0: float = 0.0,
+        intent: str = "",
+        outcome_summary: str = "",
+        parallel_reason: str = "",
     ) -> ExecutionEnvelopeView:
         """Project the ledger into an ExecutionEnvelopeView.
 
@@ -259,9 +262,9 @@ class LedgerEnvelopeProjector:
         else:
             outcome = ""
 
-        # ``intent`` and ``parallel_reason`` stay defaulted in this
-        # task — they're authored by the LLM via the prompt contract
-        # landing in #423 and synthesised by the renderer otherwise.
+        if not parallel_reason:
+            parallel_reason = self._classify_parallel_reason(call_ids, call_meta)
+
         return ExecutionEnvelopeView(
             envelope_id=envelope_id,
             session_id=session_id,
@@ -272,7 +275,10 @@ class LedgerEnvelopeProjector:
             elapsed_ms=elapsed_ms,
             levels=[[n.node_id for n in nodes]] if nodes else [],
             nodes=nodes,
+            intent=intent,
+            parallel_reason=parallel_reason,
             outcome=outcome,
+            outcome_summary=outcome_summary,
         )
 
     # -- helpers ---------------------------------------------------------
@@ -304,6 +310,45 @@ class LedgerEnvelopeProjector:
         # 2) BEGIN seen, no END yet → "executing" (sub-state granularity
         #    is intentionally coarsened — see module docstring).
         return "executing" if "BEGIN" in summary.state_history else "declared"
+
+    @staticmethod
+    def _classify_parallel_reason(
+        call_ids: list[str],
+        call_meta: dict[str, CallMeta],
+    ) -> str:
+        """Classify the batch shape from dispatch metadata.
+
+        This is system-produced, not agent-authored: the dispatcher knows
+        whether a batch repeated the same call, fanned out across targets,
+        or mixed independent tools.
+        """
+        if len(call_ids) <= 1:
+            return "serial"
+
+        metas = [call_meta.get(cid) for cid in call_ids]
+        tool_names = [m.tool_name for m in metas if m is not None]
+        if len(tool_names) != len(call_ids):
+            return "unspecified"
+        if len(set(tool_names)) > 1:
+            return "fan_out_independent"
+
+        args_digests = {
+            LedgerEnvelopeProjector._stable_args_digest(m.full_args)
+            for m in metas
+            if m is not None
+        }
+        if len(args_digests) == 1:
+            return "fan_out_replicas"
+        return "multi_target"
+
+    @staticmethod
+    def _stable_args_digest(args: dict[str, Any]) -> str:
+        import json
+
+        try:
+            return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            return repr(sorted((str(k), repr(v)) for k, v in args.items()))
 
     @staticmethod
     def _batch_duration_ms(events, call_id: str) -> float:

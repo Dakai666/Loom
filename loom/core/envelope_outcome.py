@@ -43,7 +43,9 @@ class EnvelopeOutcome(str, Enum):
 # ``loom.platform.interaction_language``.
 INTERACTION_LANGUAGE_INSTRUCTIONS = (
     "When you dispatch a multi-tool batch, provide a one-line intent before "
-    "the batch and an outcome judgement after the batch completes. "
+    "the batch starting with '▸ '. After the batch completes, start your "
+    "outcome judgement line with one glyph: '✓ ' fulfilled, '◐ ' partial, "
+    "'⚠ ' unfulfilled, '↪ ' pivoted, or '🛑 ' aborted. "
     "Single-tool calls do not need an intent header. Keep both lines short "
     "enough to display in one UI line."
 )
