@@ -174,11 +174,50 @@ _ENVELOPE_STATE_ICONS: dict[str, str] = {
 }
 
 
+_OUTCOME_GLYPHS: dict[str, str] = {
+    "partial": "◐",
+    "unfulfilled": "⚠",
+    "pivoted": "↪",
+    "aborted": "🛑",
+}
+
+
 def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
-    """Format an envelope view into a compact Discord status block."""
+    """Format an envelope view into a compact Discord status block.
+
+    Multi-node batches use the interaction-language header (``▸ <intent>``
+    optionally followed by the parallel-reason label). Single-node calls
+    keep the original compact ``Envelope <id>`` header — the per-node row
+    underneath already names the tool, so an intent line would just
+    duplicate it.
+
+    Outcomes other than ``fulfilled`` add a summary line. Empty
+    ``outcome`` is treated as unknown — when ``status == "failed"`` it
+    is upgraded to ``unfulfilled`` so the user is never shown a passing
+    glyph next to a failed batch. Successful batches show nothing extra
+    so the per-node ✓ icons aren't drowned out.
+    """
+    from loom.platform.interaction_language import (
+        EnvelopeOutcome,
+        format_parallel_reason,
+        synthesize_envelope_intent,
+    )
+
     lines: list[str] = []
+    is_multi = view.node_count > 1
+
     # Header
-    header = f"-# Envelope {view.envelope_id} · {view.node_count} actions"
+    if is_multi:
+        intent = view.intent or synthesize_envelope_intent(
+            parallel_reason=view.parallel_reason,
+            tool_names=[n.tool_name for n in view.nodes],
+        )
+        header = f"-# ▸ {intent}"
+        reason_label = format_parallel_reason(view.parallel_reason)
+        if reason_label:
+            header += f" · {reason_label}"
+    else:
+        header = f"-# Envelope {view.envelope_id} · {view.node_count} actions"
     if view.parallel_groups > 1:
         header += f" · {view.parallel_groups} parallel groups"
     if view.status == "failed":
@@ -203,6 +242,19 @@ def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
                 level_parts.append(f"{icon} {name}{extra}")
         prefix = f"L{level_idx}  " if show_level_prefix else ""
         lines.append(f"-# {prefix}{'  '.join(level_parts)}")
+
+    # Outcome summary (#420). Empty outcome means unknown, not success
+    # — when the status is failed, infer UNFULFILLED so we never imply
+    # things went well. FULFILLED is silent on purpose.
+    outcome = view.outcome
+    if not outcome and view.status == "failed":
+        outcome = EnvelopeOutcome.UNFULFILLED.value
+    if outcome and outcome != EnvelopeOutcome.FULFILLED.value:
+        glyph = _OUTCOME_GLYPHS.get(outcome, "◐")
+        if view.outcome_summary:
+            lines.append(f"-# {glyph} {view.outcome_summary}")
+        elif outcome == EnvelopeOutcome.UNFULFILLED.value:
+            lines.append(f"-# {glyph} envelope did not fulfill its intent")
 
     return "\n".join(lines)
 
