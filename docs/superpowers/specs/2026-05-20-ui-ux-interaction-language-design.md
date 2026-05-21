@@ -547,44 +547,82 @@ breaking change to consumers.
 - Memory dedup hits are not surfaced today. Add `MemoryDedupSkipped` (count
   per turn rolled into summary, not per event).
 
-## Decisions To Confirm
+## Decisions Closed For First Implementation
 
-These design choices remain open. Each one is independent and can be settled
-without blocking the others.
+Settled during slice 1 (PRs #425–#430). Each item is keyed back to the
+implementation that locks it in so future-spec readers can find the seam.
 
-1. **Stale thresholds**: 30 seconds default, 90 seconds for known long-runners.
-   Acceptable as a starting point, or should the default be longer to avoid
-   crying wolf on local LLM latency.
-2. **Single-node envelope header policy**: skipping the intent header on
-   single-tool envelopes keeps the stream quiet but means a routine
-   `read_file` looks the same regardless of why it was called. Acceptable, or
-   should there be an opt-in for power users who want every tool justified.
-3. **Outcome judgement source of truth**: LLM-authored outcome is the warm
-   answer but unreliable for self-honest negative outcomes. The mechanical
-   fallback covers omission, but not LLM bias. Consider whether to display
-   both when they disagree (rare event, useful when it happens) or always
-   trust the LLM with mechanical-only as silent backstop.
-4. **Persona voice in heartbeat labels**: Voice Rules say system layer is
-   precise. Persona-flavoured heartbeat labels (`抽牌中` instead of `查詢檔案`
-   for the tarot persona) violate that. Confirm precision wins over persona
-   immersion at this layer.
-5. **TaskList versus envelope intent overlap**: both are agent-authored.
-   TaskList spans turns; envelope intent spans one batch. When a task and an
-   envelope describe the same work, the doc currently says runtime heartbeat
-   wins over TaskList in the footer, but it does not address envelope intent
-   versus TaskList in the timeline. Decide whether envelope intent quotes the
-   active task line, links to it, or stays independent.
-6. **Transient hints on Discord**: CLI has a 3-4 second flash channel for
-   cross-threshold signals. Discord has no equivalent. Per event, decide
-   either to suppress on Discord or to escalate to a persistent message.
-   Default proposal: suppress `📍 turn N milestone` (CLI-only nudge) and
-   escalate `⚠️ context 80%` (real warning) to a persistent line.
-7. **Localization slot**: heartbeat labels are Chinese in the proposed map.
-   Confirm Traditional Chinese as the default, English as a configurable
-   override, and whether the override is per-user or per-session.
-8. **Tool progress event for long-runners**: optional but high-value. Decide
-   whether to add `ToolProgress` in this slice or defer to a later iteration
-   and rely on timeout-based stale detection alone.
+1. **Stale thresholds — 30 s default, 90 s for known long-runners.** Locked
+   in ``stale_threshold_for_tool`` (#416). The threshold is configurable per
+   tool name in the same registry as the action labels, so adding a new
+   long-runner is a one-line table edit.
+2. **Single-node envelope header — skip the intent row.** ``Envelope <id> · N
+   actions`` keeps a routine ``read_file`` quiet; the per-node line already
+   names the tool, so an intent line would just duplicate it (#420).
+3. **Outcome judgement — mechanical is system truth; LLM summary is display
+   enrichment.** ``derive_envelope_outcome`` always runs at terminal status
+   and writes ``view.outcome`` (#421). LLM-authored ``view.outcome_summary``
+   is the warm display when present, but absence is silent — the renderer
+   pairs the mechanical outcome with the glyph regardless.
+4. **Empty ``outcome`` means unknown, never fulfilled.** Renderers infer
+   ``UNFULFILLED`` from ``status == "failed"`` when the producer left
+   outcome empty (#420 inference path). Locked by
+   ``test_empty_outcome_infers_from_failed_status_without_claiming_success``.
+5. **Heartbeat labels — precision wins over persona immersion.** The system
+   layer stays neutral (``查詢檔案`` / ``執行指令``); personas adjust their own
+   narration but do not retheme the heartbeat. Implemented in the static
+   ``_LABELS_ZH_TW`` registry (#416), no persona hook.
+6. **TaskList and envelope intent stay independent in v1.** Envelope intent
+   describes one batch; TaskList spans turns. They may mirror text but do
+   not link — kept simple to avoid runtime coupling between two
+   agent-authored surfaces.
+7. **Discord transient hints — suppress ambient, persist real warnings.**
+   Concrete defaults: ``📍 turn N milestone`` suppressed on Discord;
+   ``⚠️ context 80%`` persisted as a regular message. Same rule is
+   implemented by the Discord status pipeline today.
+8. **Default heartbeat language — Traditional Chinese.** Labels live in a
+   locale-shaped registry (``_LABELS_ZH_TW``) so English can be added later
+   as a sibling map without touching the resolver control flow (#416).
+9. **``ToolProgress`` — deferred.** Stale detection in v1 is timeout-based
+   via the heartbeat (CLI #419) and the Discord watchdog (#422). Adding a
+   true progress event is high-value but doesn't block the rest of the
+   slice; revisited in a later iteration.
+10. **Mechanical outcome derivation never returns ``pivoted``.** Pivoted
+    means the agent changed strategy on purpose — only LLM-authored
+    judgement can claim it. The helper falls back to
+    ``fulfilled / partial / unfulfilled / aborted`` (#421).
+
+## Deferred From First Implementation
+
+Slice 1 intentionally narrowed scope on these items. Tracked separately so
+the chain becomes complete in subsequent work.
+
+- **Producer-side capture for envelope metadata — #431** (slice 2).
+  ``view.intent`` / ``view.outcome_summary`` / ``view.parallel_reason`` all
+  have consumer-side wiring (#420) and ``outcome`` has a mechanical fallback
+  (#421), but no producer ever writes the first three today. Sisi-on-Discord
+  manual verification (post-#430) confirmed that multi-tool batches always
+  render the ``▸ 執行 <tool>`` fallback from ``synthesize_envelope_intent``
+  because both intent and parallel_reason stay defaulted. Issue #431 holds
+  the mechanism choice (marker parser vs structured tool call) for intent
+  and outcome_summary, plus a deterministic classifier for parallel_reason
+  in the dispatch layer.
+- **``PermissionLeaseGranted`` event.** Not in slice 1. The footer's
+  ``🔑 N·M:SS`` badge stays the durable display for active grants; the
+  timeline-level lease event lands after heartbeat is settled.
+- **``MemoryDedupSkipped`` event.** Not in slice 1. Dedup counts remain
+  summary material until memory event surfacing is designed.
+- **L3 expandable-details command.** Not in slice 1. ``/think`` remains the
+  only explicit detail entry point.
+- **``ToolProgress`` event.** See decision 9 above. Long-runner progress
+  stays timeout-based for now.
+- **English heartbeat labels.** Not in slice 1. The label registry shape
+  must keep this additive (sibling ``_LABELS_EN_US`` map plus a locale
+  selector).
+- **Heartbeat ``compacting`` state.** Not in slice 1. Compaction display
+  stays on the legacy ``FooterState.compacting`` flag (``⚡ 壓縮中…``); the
+  enum value is intentionally absent until ``CompressStarted`` is wired
+  into heartbeat.
 
 ## Non-Goals
 
