@@ -67,15 +67,18 @@ class TestComposition:
     def test_soul_only(self, tmp_soul):
         stack = PromptStack(soul_path=tmp_soul)
         result = stack.load()
-        assert result == "I am SOUL."
-        assert stack.layer_names == ["soul"]
+        sep = PromptStack.LAYER_SEPARATOR
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert result == f"I am SOUL.{sep}{instr}"
+        assert stack.layer_names == ["soul", "interaction_language"]
 
     def test_soul_and_agent(self, tmp_soul, tmp_agent):
         stack = PromptStack(soul_path=tmp_soul, agent_path=tmp_agent)
         result = stack.load()
         sep = PromptStack.LAYER_SEPARATOR
-        assert result == f"I am SOUL.{sep}I am Agent."
-        assert stack.layer_names == ["soul", "agent"]
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert result == f"I am SOUL.{sep}I am Agent.{sep}{instr}"
+        assert stack.layer_names == ["soul", "agent", "interaction_language"]
 
     def test_three_layers(self, tmp_soul, tmp_agent, tmp_personalities):
         p_path = tmp_personalities / "adversarial.md"
@@ -87,14 +90,23 @@ class TestComposition:
         )
         result = stack.load()
         sep = PromptStack.LAYER_SEPARATOR
-        assert result == f"I am SOUL.{sep}I am Agent.{sep}I challenge assumptions."
-        assert stack.layer_names == ["soul", "agent", "personality"]
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert result == (
+            f"I am SOUL.{sep}I am Agent.{sep}{instr}{sep}I challenge assumptions."
+        )
+        assert stack.layer_names == [
+            "soul",
+            "agent",
+            "interaction_language",
+            "personality",
+        ]
 
     def test_missing_files_are_skipped(self, tmp_path):
         stack = PromptStack(
             soul_path=tmp_path / "nonexistent_soul.md",
             agent_path=tmp_path / "nonexistent_agent.md",
         )
+        # No user layer loaded → no built-in layer either.
         assert stack.load() == ""
         assert stack.layer_names == []
 
@@ -103,8 +115,10 @@ class TestComposition:
             soul_path=tmp_soul,
             agent_path=tmp_path / "ghost.md",
         )
-        assert stack.load() == "I am SOUL."
-        assert stack.layer_names == ["soul"]
+        sep = PromptStack.LAYER_SEPARATOR
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert stack.load() == f"I am SOUL.{sep}{instr}"
+        assert stack.layer_names == ["soul", "interaction_language"]
 
     def test_separator_is_present_between_layers(self, tmp_soul, tmp_agent):
         stack = PromptStack(soul_path=tmp_soul, agent_path=tmp_agent)
@@ -140,7 +154,7 @@ class TestProperties:
     def test_layer_names_reflects_loaded_layers(self, tmp_soul, tmp_agent):
         stack = PromptStack(soul_path=tmp_soul, agent_path=tmp_agent)
         stack.load()
-        assert stack.layer_names == ["soul", "agent"]
+        assert stack.layer_names == ["soul", "agent", "interaction_language"]
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +252,9 @@ class TestClearPersonality:
         )
         stack.load()
         stack.clear_personality()
-        assert stack.layer_names == ["soul", "agent"]
+        # Built-in layer stays — it's anchored to the SOUL+Agent
+        # configuration, not to whether a personality is active.
+        assert stack.layer_names == ["soul", "agent", "interaction_language"]
 
     def test_clear_resets_current_personality(self, tmp_personalities):
         p_path = tmp_personalities / "adversarial.md"
@@ -307,14 +323,18 @@ class TestFromConfig:
         stack = PromptStack.from_config(config, base_dir=tmp_path)
         result = stack.load()
         sep = PromptStack.LAYER_SEPARATOR
-        assert result == f"soul{sep}agent{sep}adv"
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert result == f"soul{sep}agent{sep}{instr}{sep}adv"
 
     def test_no_identity_section(self, tmp_path):
         (tmp_path / "SOUL.md").write_text("soul", encoding="utf-8")
         stack = PromptStack.from_config({}, base_dir=tmp_path)
-        # Default soul path is SOUL.md relative to base_dir
+        # Default soul path is SOUL.md relative to base_dir; built-in
+        # interaction-language layer slots after it.
         result = stack.load()
-        assert result == "soul"
+        sep = PromptStack.LAYER_SEPARATOR
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert result == f"soul{sep}{instr}"
 
     def test_empty_personality_string_treated_as_none(self, tmp_path):
         (tmp_path / "SOUL.md").write_text("soul", encoding="utf-8")
@@ -328,10 +348,96 @@ class TestFromConfig:
         (tmp_path / "SOUL.md").write_text("soul content", encoding="utf-8")
         config = {"identity": {"soul": "SOUL.md"}}
         stack = PromptStack.from_config(config, base_dir=tmp_path)
-        assert stack.load() == "soul content"
+        sep = PromptStack.LAYER_SEPARATOR
+        instr = PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS
+        assert stack.load() == f"soul content{sep}{instr}"
 
     def test_missing_optional_fields_produce_no_layers(self, tmp_path):
         # No SOUL.md exists in tmp_path
         config = {"identity": {}}
         stack = PromptStack.from_config(config, base_dir=tmp_path)
         assert stack.load() == ""
+
+
+# ---------------------------------------------------------------------------
+# Built-in interaction-language layer (#423)
+# ---------------------------------------------------------------------------
+
+
+class TestBuiltInInteractionLanguageLayer:
+    """``PromptStack.load`` inserts a built-in layer carrying the envelope
+    intent/outcome contract whenever at least one user prompt layer is
+    loaded. The layer slots between project-level Agent.md and any active
+    personality so personas can adjust phrasing on top of it while the
+    contract sits with stable project context.
+    """
+
+    def test_layer_present_after_soul_and_agent(self, tmp_soul, tmp_agent):
+        stack = PromptStack(soul_path=tmp_soul, agent_path=tmp_agent)
+        stack.load()
+        assert stack.layer_names == ["soul", "agent", "interaction_language"]
+
+    def test_layer_slots_after_agent_before_personality(
+        self, tmp_soul, tmp_agent, tmp_personalities
+    ):
+        p_path = tmp_personalities / "adversarial.md"
+        stack = PromptStack(
+            soul_path=tmp_soul,
+            agent_path=tmp_agent,
+            personality_path=p_path,
+            personalities_dir=tmp_personalities,
+        )
+        stack.load()
+        assert stack.layer_names == [
+            "soul",
+            "agent",
+            "interaction_language",
+            "personality",
+        ]
+
+    def test_layer_present_with_soul_only(self, tmp_soul):
+        # Even without an Agent.md, the contract still applies — it's
+        # about how the agent writes envelope metadata, not about
+        # project-specific behaviour. So soul-only stacks also get it.
+        stack = PromptStack(soul_path=tmp_soul)
+        stack.load()
+        assert stack.layer_names == ["soul", "interaction_language"]
+
+    def test_no_layer_when_no_user_prompt_loaded(self, tmp_path):
+        # An empty stack stays empty — the built-in layer needs at
+        # least one user prompt layer to anchor to. This keeps
+        # ``test_empty_stack_returns_empty_string`` semantics intact
+        # and prevents the built-in layer from leaking into agents
+        # configured to run prompt-free.
+        stack = PromptStack(
+            soul_path=tmp_path / "nonexistent_soul.md",
+            agent_path=tmp_path / "nonexistent_agent.md",
+        )
+        assert stack.load() == ""
+        assert stack.layer_names == []
+
+    def test_layer_content_mentions_envelope_intent_contract(self, tmp_agent):
+        stack = PromptStack(agent_path=tmp_agent)
+        prompt = stack.load()
+        # Pin the load-bearing phrases so a future docstring tweak
+        # can't quietly weaken the contract.
+        assert "multi-tool batch" in prompt
+        assert "one-line intent" in prompt
+        assert "outcome judgement" in prompt
+        assert "Single-tool calls do not need an intent header" in prompt
+
+    def test_layer_separator_between_agent_and_built_in(self, tmp_soul, tmp_agent):
+        stack = PromptStack(soul_path=tmp_soul, agent_path=tmp_agent)
+        result = stack.load()
+        sep = PromptStack.LAYER_SEPARATOR
+        # The built-in layer sits AFTER the agent layer; the standard
+        # separator must appear between them so layers don't run together.
+        assert f"I am Agent.{sep}" in result
+
+    def test_class_attribute_exposes_contract_text(self):
+        # Tests that haven't loaded a stack still need to assert the
+        # contract phrasing — exposing it as a class attribute keeps
+        # the import shape consistent across consumers.
+        from loom.core.envelope_outcome import INTERACTION_LANGUAGE_INSTRUCTIONS
+
+        assert PromptStack.INTERACTION_LANGUAGE_INSTRUCTIONS == INTERACTION_LANGUAGE_INSTRUCTIONS

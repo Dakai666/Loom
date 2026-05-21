@@ -11,16 +11,21 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from loom.core.envelope_outcome import EnvelopeOutcome, derive_envelope_outcome
+from loom.core.envelope_outcome import (
+    INTERACTION_LANGUAGE_INSTRUCTIONS,
+    EnvelopeOutcome,
+    derive_envelope_outcome,
+)
 from loom.core.security.sandbox_runtime import extract_command_root
 
-# Re-exported so UI consumers (Discord bot, tests) keep their existing
-# ``from loom.platform.interaction_language import EnvelopeOutcome``
+# Re-exported so UI consumers (Discord bot, tests, prompt_stack) keep
+# their existing ``from loom.platform.interaction_language import …``
 # import shape. The canonical home is ``loom.core.envelope_outcome`` —
-# the ledger projector needs the enum at projection time and core
-# cannot import from platform (CLAUDE.md layering).
+# both the ledger projector AND PromptStack need this vocabulary and
+# core cannot import from platform (CLAUDE.md layering).
 __all__ = [
     "EnvelopeOutcome",
+    "INTERACTION_LANGUAGE_INSTRUCTIONS",
     "derive_envelope_outcome",
 ]
 
@@ -61,16 +66,10 @@ class ToolAction:
 
 _LONG_RUNNER_THRESHOLD_S = 90.0
 
-# Prompt contract for envelope-level intent and outcome.
-# Lives next to the data and UI behaviour it instructs about so prompt_stack
-# stays a pure layering mechanism. Future localization follows the same
-# registry pattern as the label dicts below.
-INTERACTION_LANGUAGE_INSTRUCTIONS = (
-    "When you dispatch a multi-tool batch, provide a one-line intent before "
-    "the batch and an outcome judgement after the batch completes. "
-    "Single-tool calls do not need an intent header. Keep both lines short "
-    "enough to display in one UI line."
-)
+# ``INTERACTION_LANGUAGE_INSTRUCTIONS`` lives in ``loom.core.envelope_outcome``
+# now and is re-exported above. PromptStack (core/cognition) needed it
+# at layer-injection time; keeping it in core also keeps the architecture
+# guard happy (#423).
 
 _LABELS_ZH_TW: dict[str, tuple[str, ...]] = {
     "read_file": ("查詢檔案",),
