@@ -3122,8 +3122,18 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         description=(
             "Spawn an ephemeral sub-agent to complete a bounded, self-contained task. "
             "The sub-agent runs independently with its own context and returns a result. "
-            "Use this to delegate research, file analysis, or parallel investigation tasks. "
-            "The sub-agent cannot interact with the user — it works autonomously until done."
+            "Use this to delegate research, file analysis, or external review tasks. "
+            "The sub-agent cannot interact with the user — it works autonomously until done.\n"
+            "\n"
+            "Tool scope: by default the sub-agent only sees SAFE tools (read_file, "
+            "fetch_url, web_search, list_dir, scratchpad_read, plus result_write). "
+            "If your task description requires write_file, run_bash, or any other "
+            "GUARDED tool, you MUST list it in `tools=[...]` — otherwise the "
+            "sub-agent will reach for a tool that does not exist and burn turns. "
+            "Result hand-off goes through the sub-agent's result_write slot; the "
+            "sub-agent CANNOT persist files for you under default tool scope, "
+            "so prefer instructing it to put everything in result_write and "
+            "letting the parent persist the artifact after."
         ),
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.AGENT_SPAN | ToolCapability.MUTATES,
@@ -3140,7 +3150,9 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                     "description": (
                         "Tool whitelist for the sub-agent. "
                         "List of tool names (e.g. ['read_file', 'web_search']) or comma-separated string. "
-                        "Omit or null for SAFE-only tools. CRITICAL tools are always blocked."
+                        "Omit or null for SAFE-only tools. CRITICAL tools are always blocked. "
+                        "MUST explicitly include GUARDED tools like 'write_file' or 'run_bash' if "
+                        "the task needs them — otherwise the sub-agent has no way to call them."
                     ),
                 },
                 "max_turns": {

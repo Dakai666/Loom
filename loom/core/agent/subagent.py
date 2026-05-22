@@ -148,22 +148,40 @@ async def run_subagent(
                 error="'content' must be a string",
                 failure_type="validation_error",
             )
-        _result_slot_cell["value"] = content
+        mode = call.args.get("mode", "append")
+        if mode not in ("append", "replace"):
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=f"'mode' must be 'append' or 'replace', got {mode!r}",
+                failure_type="validation_error",
+            )
+        prev = _result_slot_cell["value"]
+        if mode == "replace" or not prev:
+            _result_slot_cell["value"] = content
+        else:
+            # append: join with a single blank line so sections stay readable
+            joiner = "" if prev.endswith("\n\n") else ("\n" if prev.endswith("\n") else "\n\n")
+            _result_slot_cell["value"] = prev + joiner + content
+        new_len = len(_result_slot_cell["value"] or "")
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True,
-            output=f"[result slot updated, {len(content)} chars]",
+            output=f"[result slot {mode}d, +{len(content)} chars, total {new_len}]",
         )
 
     child_registry.register(ToolDefinition(
         name="result_write",
         description=(
-            "Overwrite your best-effort task result. Each call replaces the slot "
-            "entirely — there is no append. The parent agent receives the latest "
-            "slot content even if you run out of turns, so write incrementally: "
-            "save what you have at every meaningful checkpoint, refine on the "
-            "next turn. Empty / never-called slot ⇒ parent gets your end_turn "
-            "text on success or nothing on max_turns."
+            "Commit your best-effort task result to the hand-off slot the parent "
+            "receives when you exit (end_turn or max_turns). Default mode is "
+            "'append' — each call concatenates onto what is already there with a "
+            "blank-line separator, ideal for multi-section reports / audits / "
+            "reviews. Use mode='replace' when you want to overwrite (e.g. to "
+            "refine a single coherent answer). Whatever is in the slot at exit "
+            "is what the parent gets; empty / never-called ⇒ parent gets your "
+            "end_turn text on success or nothing on max_turns. Call early and "
+            "often: write something useful before any long tool chain."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -171,7 +189,15 @@ async def run_subagent(
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Best-effort result so far. Replaces any prior slot.",
+                    "description": "Text to commit to the slot.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["append", "replace"],
+                    "description": (
+                        "'append' (default) concatenates onto the existing slot "
+                        "with a blank-line separator. 'replace' overwrites."
+                    ),
                 },
             },
             "required": ["content"],
@@ -255,6 +281,7 @@ async def run_subagent(
 
     # ── Build initial messages ────────────────────────────────────────────────
     now_str = user_timestamp()
+    available_tools = ", ".join(sorted(child_registry._tools.keys())) or "none"
     system_prompt = (
         f"You are a sub-agent (id: {agent_id}) spawned by a parent agent.\n"
         f"Your workspace is: {workspace}\n"
@@ -262,15 +289,24 @@ async def run_subagent(
         f"Complete the following task and respond with a clear, concise result.\n"
         f"Do not ask clarifying questions — work with what you have.\n"
         f"\n"
-        f"IMPORTANT — result_write contract:\n"
-        f"At every meaningful checkpoint, call `result_write(content=...)` "
-        f"to commit your best-effort result so far. The slot is overwrite-only "
-        f"(each call replaces the previous content). Whatever is in the slot "
-        f"when you exit — whether you reach end_turn naturally or run out of "
-        f"turns — is what the parent agent receives. Treat it as your hand-off "
-        f"buffer: write something useful early, refine it as you go.\n"
+        f"AVAILABLE TOOLS (this list is exhaustive — no other tools exist in "
+        f"your environment):\n"
+        f"  {available_tools}\n"
+        f"If the task description names a tool not in this list (for example "
+        f"`write_file` or `run_bash`), DO NOT attempt to call it. Treat the "
+        f"task's wording as intent, not literal instruction: route any file or "
+        f"shell output you would have produced through `result_write` instead.\n"
         f"\n"
-        f"Available tools: {', '.join(child_registry._tools.keys()) or 'none'}."
+        f"HAND-OFF CONTRACT — result_write:\n"
+        f"Your only channel back to the parent agent is the result_write slot. "
+        f"Whatever is in the slot when you exit (end_turn or max_turns) is what "
+        f"the parent receives — nothing else (no files, no console output, no "
+        f"end_turn free text once the slot is non-empty) is observed. "
+        f"Default mode is 'append': each call concatenates onto the slot, ideal "
+        f"for multi-section reports / reviews / audits. Use mode='replace' only "
+        f"when you want to overwrite (e.g. refining a single coherent answer). "
+        f"Call result_write early — write something useful before any long tool "
+        f"chain, so a max_turns cut never costs you the work."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -367,7 +403,24 @@ async def run_subagent(
                 total_tool_calls += 1
                 tool_def = child_registry.get(tu.name)
                 if tool_def is None:
-                    tool_output = f"Unknown tool: {tu.name}"
+                    available = sorted(child_registry._tools.keys())
+                    # File-output redirect hint: the most common cause of an
+                    # "unknown tool" hit in sub-agents is the LLM reaching for
+                    # write_file / run_bash when they were not whitelisted by
+                    # the parent. Point it at result_write so it does not burn
+                    # turns retrying.
+                    redirect = ""
+                    if tu.name in ("write_file", "run_bash"):
+                        redirect = (
+                            " To produce output, call result_write(content=..., "
+                            "mode='append') — the parent agent will persist whatever "
+                            "is in the slot when you exit."
+                        )
+                    tool_output = (
+                        f"Unknown tool: {tu.name!r}. This tool is not in your "
+                        f"available set; do not retry it. Available tools: "
+                        f"{', '.join(available) or 'none'}.{redirect}"
+                    )
                     result = ToolResult(
                         call_id=tu.id, tool_name=tu.name,
                         success=False, error=tool_output,
@@ -421,9 +474,10 @@ async def run_subagent(
                     "content": (
                         "<system-reminder>\n"
                         "You have 2 turns left. On your next turn, call "
-                        "`result_write(content=...)` with your best-effort "
-                        "result so far, then end_turn. Do not start new long "
-                        "tool chains — wrap up.\n"
+                        "`result_write(content=..., mode='append')` (or "
+                        "mode='replace' for a final coherent rewrite) to "
+                        "commit your best-effort result, then end_turn. "
+                        "Do not start new long tool chains — wrap up.\n"
                         "</system-reminder>"
                     ),
                 })

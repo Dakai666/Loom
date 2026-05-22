@@ -606,18 +606,23 @@ class TestSubAgentFailureCodes:
 # ── result_write slot — issue #225 ──────────────────────────────────────────
 
 
-def _result_write_response(call_id: str, content: str) -> LLMResponse:
-    """Assistant calls result_write(content=...) — registered by run_subagent."""
+def _result_write_response(
+    call_id: str, content: str, mode: str | None = None,
+) -> LLMResponse:
+    """Assistant calls result_write(content=..., mode=...) — registered by run_subagent."""
+    args: dict = {"content": content}
+    if mode is not None:
+        args["mode"] = mode
     return LLMResponse(
         text=None,
-        tool_uses=[ToolUse(id=call_id, name="result_write", args={"content": content})],
+        tool_uses=[ToolUse(id=call_id, name="result_write", args=args)],
         stop_reason="tool_use",
         raw_message={
             "role": "assistant",
             "content": [
                 {
                     "type": "tool_use", "id": call_id,
-                    "name": "result_write", "input": {"content": content},
+                    "name": "result_write", "input": args,
                 },
             ],
             "tool_calls": [
@@ -626,7 +631,7 @@ def _result_write_response(call_id: str, content: str) -> LLMResponse:
                     "type": "function",
                     "function": {
                         "name": "result_write",
-                        "arguments": json.dumps({"content": content}),
+                        "arguments": json.dumps(args),
                     },
                 }
             ],
@@ -763,18 +768,18 @@ class TestResultWriteSlot:
         payload = json.loads(scratchpad.read(f"subagent_failure:sub-slot-maxturns"))
         assert payload["result_slot"] == "checkpoint A: 3/5 done"
 
-    async def test_slot_overwrites_on_repeated_writes(
+    async def test_slot_replace_mode_overwrites(
         self,
         semantic: SemanticMemory,
         episodic: EpisodicMemory,
         procedural: ProceduralMemory,
         tmp_path: Path,
     ) -> None:
-        """Each result_write replaces the slot — last write wins."""
+        """mode='replace' overwrites — last write wins."""
         registry = ToolRegistry()
         router = _FakeRouter([
-            _result_write_response("c1", "version 1"),
-            _result_write_response("c2", "version 2 — refined"),
+            _result_write_response("c1", "version 1", mode="replace"),
+            _result_write_response("c2", "version 2 — refined", mode="replace"),
             _end_turn_response("done"),
         ])
 
@@ -797,6 +802,91 @@ class TestResultWriteSlot:
 
         assert result.result_slot == "version 2 — refined"
         assert result.output == "version 2 — refined"
+
+    async def test_slot_append_is_default_and_concatenates(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #440: default mode is 'append' — multi-section calls accumulate.
+
+        Previously the slot was overwrite-only, so a sub-agent told to produce
+        a 3-section audit would have only section #3 survive. Now successive
+        calls without an explicit mode concatenate with a blank-line separator.
+        """
+        registry = ToolRegistry()
+        router = _FakeRouter([
+            _result_write_response("c1", "## Section A\nfinding 1"),
+            _result_write_response("c2", "## Section B\nfinding 2"),
+            _result_write_response("c3", "## Section C\nfinding 3"),
+            _end_turn_response("done"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="audit in three sections",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=5,
+                agent_id="sub-append",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        assert result.success is True
+        assert result.result_slot is not None
+        # All three sections survive
+        assert "Section A" in result.result_slot
+        assert "Section B" in result.result_slot
+        assert "Section C" in result.result_slot
+        assert "finding 1" in result.result_slot
+        assert "finding 2" in result.result_slot
+        assert "finding 3" in result.result_slot
+        # Sections are separated, not glued together
+        assert "finding 1\n\n## Section B" in result.result_slot
+
+    async def test_slot_mode_validation_rejects_garbage(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Invalid mode value returns a validation error — slot stays untouched."""
+        registry = ToolRegistry()
+        router = _FakeRouter([
+            _result_write_response("c1", "initial", mode="replace"),
+            _result_write_response("c2", "ignored", mode="overwrite"),  # invalid
+            _end_turn_response("done"),
+        ])
+
+        result = await run_subagent(
+            SubAgentConfig(
+                task="x",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=5,
+                agent_id="sub-mode-validate",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        # First write committed; second rejected ⇒ slot unchanged
+        assert result.result_slot == "initial"
 
 
 class TestWrapupReminder:
@@ -915,3 +1005,128 @@ class TestWrapupReminder:
                     isinstance(m.get("content"), str)
                     and "2 turns left" in m["content"]
                 ), "no reminder expected when max_turns < 3"
+
+
+def _bare_tool_use_response(call_id: str, tool_name: str) -> LLMResponse:
+    """Tool call to an arbitrary name — used to probe unknown-tool handling."""
+    return LLMResponse(
+        text=None,
+        tool_uses=[ToolUse(id=call_id, name=tool_name, args={})],
+        stop_reason="tool_use",
+        raw_message={
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": call_id, "name": tool_name, "input": {}},
+            ],
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+    )
+
+
+class TestUnknownToolHint:
+    """Issue #440: unknown-tool error must guide the sub-agent to self-recover."""
+
+    async def test_unknown_tool_lists_available_tools(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Calling a tool that does not exist returns an error listing what does."""
+        registry = ToolRegistry()
+
+        seen_messages: list[list[dict]] = []
+
+        class _SpyRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                seen_messages.append([dict(m) for m in messages])
+                async for chunk, final in super().stream_chat(model, messages, tools, max_tokens):
+                    yield chunk, final
+
+        router = _SpyRouter([
+            _bare_tool_use_response("c1", "nonexistent_thing"),
+            _end_turn_response("ok"),
+        ])
+
+        await run_subagent(
+            SubAgentConfig(
+                task="x",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=4,
+                agent_id="sub-unknown",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        # The tool_result that flows into the LLM on turn 2 must carry the
+        # helpful error message — not just "Unknown tool: X".
+        second_call = seen_messages[1]
+        tool_msgs = [m for m in second_call if m.get("role") == "tool"]
+        assert tool_msgs, "expected a tool result message back to the agent"
+        body = tool_msgs[-1].get("content") or ""
+        assert "nonexistent_thing" in body
+        assert "Available tools" in body
+        # result_write is always registered, so it should appear in the list
+        assert "result_write" in body
+
+    async def test_unknown_write_file_redirects_to_result_write(
+        self,
+        semantic: SemanticMemory,
+        episodic: EpisodicMemory,
+        procedural: ProceduralMemory,
+        tmp_path: Path,
+    ) -> None:
+        """Issue #440: when the agent reaches for write_file (the most common
+        confusion), the error explicitly redirects it to result_write."""
+        registry = ToolRegistry()
+
+        seen_messages: list[list[dict]] = []
+
+        class _SpyRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                seen_messages.append([dict(m) for m in messages])
+                async for chunk, final in super().stream_chat(model, messages, tools, max_tokens):
+                    yield chunk, final
+
+        router = _SpyRouter([
+            _bare_tool_use_response("c1", "write_file"),
+            _end_turn_response("ok"),
+        ])
+
+        await run_subagent(
+            SubAgentConfig(
+                task="audit and write to tmp/audit.md",
+                model="gpt-test",
+                allowed_tools=[],
+                max_turns=4,
+                agent_id="sub-redirect",
+            ),
+            router=router,
+            episodic=episodic,
+            semantic=semantic,
+            procedural=procedural,
+            tool_registry=registry,
+            parent_session_id="parent-1",
+            workspace=tmp_path,
+        )
+
+        second_call = seen_messages[1]
+        tool_msgs = [m for m in second_call if m.get("role") == "tool"]
+        body = tool_msgs[-1].get("content") or ""
+        assert "result_write" in body
+        # The redirect language should be specific enough to be actionable
+        assert "persist" in body or "parent" in body
