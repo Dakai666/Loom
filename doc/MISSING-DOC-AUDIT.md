@@ -37,9 +37,8 @@ loom/
 │                       self_reflection.py, history.py
 ├── notify/
 │   └── adapters/       cli.py, discord.py, webhook.py, discord_bot.py
-├── extensibility/       adapter.py, plugin.py, lens.py, hermes.py,
-│                       mcp_client.py, mcp_server.py, openai_tools.py,
-│                       pipeline.py, dreaming_plugin.py
+├── extensibility/       adapter.py, plugin.py,
+│                       mcp_client.py, mcp_server.py
 ├── platform/
 │   ├── cli/
 │   ├── api/            server.py
@@ -77,7 +76,7 @@ loom/
 | 13 | PromptStack switch_personality | ✅ 已完成 | `doc/26-Prompt-Stack.md`（重寫）|
 | 14 | Discord Notifier 工具行為 | ✅ 已完成 | `doc/36-Web-Tools.md`（增量）|
 | 15 | Plugin 首次確認機制 | ✅ 已完成 | `doc/31-Plugin-系統.md`（增量）|
-| 16 | Skills 目錄結構與格式 | ✅ 已完成 | `doc/10-Skill-Genome.md`（增量）+ `doc/32-Skill-Import.md`（增量）|
+| 16 | Skills 目錄結構與格式 | ✅ 已完成 | `doc/10-Skill-Genome.md`（增量）+ ~~`doc/32-Skill-Import.md`~~（2026-05-23 隨 Lens 系統一併退役）|
 
 ---
 

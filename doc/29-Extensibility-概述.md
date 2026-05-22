@@ -1,285 +1,141 @@
 # Extensibility 概述
 
-Extensibility 是 Loom 的「擴充系統」。它讓開發者可以新增工具、通知適配器、人格等元件，而不需要修改核心程式碼。
+Extensibility 是 Loom 對外開放的擴充介面：新增工具、新增 plugin、接入 MCP 生態，全部不需要 fork 核心。
 
 ---
 
-## 三大擴充機制
+## 三條擴充通道
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Loom 擴充系統                              │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│   │    Lens     │  │   Plugin    │  │  Skill      │    │
-│   │   系統      │  │   系統      │  │  Import     │    │
-│   │            │  │            │  │            │    │
-│   │  包裝工具   │  │  擴充功能   │  │  匯入技能   │    │
-│   │  增強功能   │  │  新增模組   │  │  審查流程   │    │
-│   └─────────────┘  └─────────────┘  └─────────────┘    │
-│                                                             │
-│   ┌─────────────┐  ┌─────────────┐                       │
-│   │     MCP     │  │  Dreaming   │                       │
-│   │   整合      │  │   Plugin   │                       │
-│   │            │  │  離線夢境   │                       │
-│   └─────────────┘  └─────────────┘                       │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                  Loom 擴充系統（current）                  │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│   │  @loom.tool  │  │  LoomPlugin  │  │     MCP      │ │
+│   │              │  │              │  │              │ │
+│   │  單一 tool   │  │  tools +     │  │  雙向接入    │ │
+│   │  快速註冊    │  │  middleware  │  │  外部生態    │ │
+│   │              │  │  + notifier  │  │              │ │
+│   └──────────────┘  └──────────────┘  └──────────────┘ │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Lens 系統
+## `@loom.tool` — 單一 tool 快速註冊
 
-### 用途
+最簡單的擴充：寫一個 async 函式，加上 `@loom.tool` 裝飾器，丟進 `~/.loom/plugins/` 或工作區 `loom_tools.py`。
 
-Lens 是工具的「包裝器」。它為現有工具添加新功能：
+```python
+# ~/.loom/plugins/git_log.py
+import loom
+from loom.core.harness.middleware import ToolCall, ToolResult
 
-| 功能 | 說明 |
-|------|------|
-| 輸入處理 | 驗證、轉換、豐富化 |
-| 輸出處理 | 格式化、快取、錯誤處理 |
-| 日誌記錄 | 追蹤工具呼叫 |
-| 重試機制 | 自動重試失敗的呼叫 |
+@loom.tool(trust_level="safe", description="Show last 5 git commits")
+async def git_log(call: ToolCall) -> ToolResult:
+    ...
+```
 
-詳見 [30-Lens-系統.md](30-Lens-系統.md)。
+實作位置：`loom/extensibility/adapter.py` 的 `AdapterRegistry`。模組層 `_default_registry` 是 sink，session 啟動時 `install_into(self.registry)` 全量灌入。
 
 ---
 
-## Plugin 系統
+## `LoomPlugin` — 多元件擴充
 
-### 用途
+當你要同時貢獻 tools + middleware + notifier，繼承 `LoomPlugin`：
 
-Plugin 是功能的「插件」。它允許新增全新的模組：
+```python
+# ~/.loom/plugins/my_pack.py
+import loom
+from loom.extensibility import LoomPlugin
 
-| 功能 | 說明 |
-|------|------|
-| 新工具 | 新增自訂工具 |
-| 新 Notifier | 新增通知方式 |
-| 新 Middleware | 新增中介層功能 |
-| 新 Trigger | 新增觸發器類型 |
+class MyPack(LoomPlugin):
+    name = "my_pack"
+    version = "1.0"
+
+    def tools(self):         return [...]
+    def middleware(self):    return [...]
+    def notifiers(self):     return [...]
+    def on_session_start(self, session): ...
+
+loom.register_plugin(MyPack())
+```
+
+實作位置：`loom/extensibility/plugin.py` 的 `LoomPlugin` ABC + `PluginRegistry`。同樣 session 啟動時呼叫 `install_into(self)`，把 tools 進 registry、middleware prepend 到 pipeline、notifier 註冊到 NotificationRouter。
 
 詳見 [31-Plugin-系統.md](31-Plugin-系統.md)。
 
 ---
 
-## 內建 Plugin 演變
+## Plugin 載入流程
 
-Loom 目前**沒有**內建的 `LoomPlugin` 實作 —— `loom/extensibility/` 只放抽象與適配器（`adapter.py`、`plugin.py`、`lens.py`、`hermes.py`、`openai_tools.py`、`pipeline.py`、`mcp_client.py`、`mcp_server.py`）。歷史上：
+```
+LoomSession.start()
+  └─ _load_plugins()
+        └─ scan ~/.loom/plugins/*.py
+              └─ 首次見到 → 顯示前 N 行 → ask user approve
+                    └─ 寫入 RelationalMemory（`plugin:<path>` predicate=approved）
+                          └─ exec_module()  # 觸發 @loom.tool / register_plugin()
+                                └─ _get_default_registry().install_into(session.registry)
+                                └─ _get_default_plugin_registry().install_into(session)
+```
 
-- **v0.2.5.3 / v0.2.6.1** 將 `DreamingPlugin` / `SelfReflectionPlugin` 搬到 `loom/extensibility/` 解決架構倒置。
-- **v0.2.6.4 (#172)** 把 `dream_cycle` 邏輯併回 `loom/core/memory/` —— 不再需要 plugin 包裝。
-- **Issue #120 PR 1** 把「反思」合併進 `TaskReflector`（`loom/core/cognition/task_reflector.py`），由它在每次結構化診斷後以 post-hook fire-and-forget 觸發 `run_self_reflection`（位於 `loom/core/cognition/self_reflection.py`；audit-B / #399 從 `loom/autonomy/` 搬到 cognition 修 layer violation）。
-
-三種行為三元組樣式（由 `run_self_reflection` 寫入 RelationalMemory）：
-
-- `should_avoid:<行為>` — 應避免的重複錯誤
-- `tends_to:<行為>` — 持續的傾向性
-- `discovered:<觀察>` — 新發現
+只掃 `~/.loom/plugins/`（沒有多重路徑也沒有 manifest.toml）。一次性人工核可，approval 落 SQLite，之後 silent 重載。
 
 ---
 
-## Skill Import
+## MCP 整合
 
-### 用途
+| 方向 | 入口 | 用途 |
+|------|------|------|
+| **MCP Server** | `loom mcp serve` | 把 Loom 內建 tools 暴露給 Claude Desktop / Cursor / Continue 等 MCP client |
+| **MCP Client** | `loom mcp connect <cmd>` 或 `loom.toml` 的 `[[mcp.servers]]` | 把外部 MCP server 的 tools 拉進當前 session |
 
-Skill Import 允許從外部匯入技能到 Loom：
+實作：`loom/extensibility/mcp_server.py`、`loom/extensibility/mcp_client.py`。Client 路徑在 `LoomSession.start()` 內呼叫 `load_mcp_servers_into_session()`，持有的 client 物件存在 `session._mcp_clients`，stop() 時收尾。
 
-| 功能 | 說明 |
-|------|------|
-| 技能發現 | 從描述中发现潜在技能 |
-| 審查流程 | 驗證技能的有效性 |
-| 去重 | 避免重複技能 |
-| Confidence Gate | 設定初始 confidence |
-
-詳見 [32-Skill-Import.md](32-Skill-Import.md)。
+詳見 [31b-MCP-Server-實作.md](31b-MCP-Server-實作.md)。
 
 ---
 
-## MCP 整合（v0.2.6.0）
+## 退役通道（2026-05-23）
 
-Model Context Protocol（MCP）提供完整的雙向整合：
+歷史上 `loom/extensibility/` 還有兩個子系統，現已退役：
 
-| 方向 | 說明 |
-|------|------|
-| **MCP Server** | 將 Loom 工具暴露給任何 MCP 客戶端（Claude Desktop、Cursor、Continue）|
-| **MCP Client** | 將外部 MCP 伺服器的工具導入 Loom |
+| 退役模組 | 原始用途 | 退役原因 |
+|----------|----------|----------|
+| Lens 系統（`lens.py` / `hermes.py` / `openai_tools.py`）| 從 Hermes / OpenAI JSON 抽 skill + tool 的轉換層 | 從未實際被用；skill 系統收斂到 `.claude/skills/` |
+| Skill Import Pipeline（`pipeline.py` + `loom import` CLI）| trust 加權後寫進 ProceduralMemory | 同上；skill ingestion 改走 ProceduralMemory 直連 |
 
-詳見 [31-Plugin-系統.md](31-Plugin-系統.md)。
+snapshot 存於 `_archive/extensibility-lens-retired-2026-05-23/`（gitignored，僅作考古）。
 
----
+更早期還有 `DreamingPlugin` / `SelfReflectionPlugin` 兩個內建 plugin，現已併入核心模組：
 
-## 擴充的層級
+- `dream_cycle` 邏輯 → `loom/core/memory/`（v0.2.6.4 / #172）
+- self-reflection → `loom/core/cognition/self_reflection.py`，由 `TaskReflector` 觸發（Issue #120 / audit-B / #399）
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      擴充層級                                  │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   Level 1: Configuration（配置層）                           │
-│   │   直接修改 loom.toml                                     │
-│   │   新增工具定義、通知設定、觸發器、MCP servers             │
-│   │                                                           │
-│   ├─▶ Level 2: Lens（鏡片層）                               │
-│   │   為工具添加包裝器，不需要修改工具本身                    │
-│   │                                                           │
-│   ├─▶ Level 3: Plugin（插件層）                             │
-│   │   新增全新的元件類型                                      │
-│   │                                                           │
-│   └─▶ Level 4: Core（核心層）                               │
-│       修改 Loom 核心程式碼（需要 fork）                      │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+所以目前 `loom/extensibility/` **沒有**內建 LoomPlugin 實作，只剩抽象介面（`adapter.py` / `plugin.py`）與 MCP runtime（`mcp_client.py` / `mcp_server.py`）。
 
 ---
 
-## 擴充載入時機
-
-實際載入路徑見 `loom/extensibility/adapter.py`、`loom/extensibility/plugin.py` 與 `LoomSession.start()`。沒有獨立 `ExtensionLoader` 類別。
-
-```python
-# loom/extensibility/plugin.py
-class PluginRegistry:
-    def register(self, plugin: LoomPlugin) -> None: ...
-
-    def install_into(self, session: object) -> dict[str, int]:
-        for plugin in self._plugins:
-            for tool_def in plugin.tools():
-                session.registry.register(tool_def)
-            for notifier in plugin.notifiers():
-                router = getattr(session, "_notifier_router", None)
-                if router is not None:
-                    router.register(notifier)
-```
-
-`LoomSession.start()` 會建立 live session 所需的 registry、pipeline、notification router 等物件，再安裝內建或外部擴充貢獻的 tools / middleware / notifiers。
-
----
-
-## Plugin Discovery
-
-### 自動發現
-
-Loom 會自動掃描以下位置來發現 plugins：
-
-```python
-PLUGIN_PATHS = [
-    "~/.loom/plugins/",          # 用戶 plugins
-    "./loom/plugins/",           # 專案 plugins
-    "/usr/local/share/loom/plugins/",  # 系統 plugins
-]
-```
-
-### Plugin 結構
-
-```
-~/.loom/plugins/
-└── my-plugin/
-    ├── __init__.py
-    ├── plugin.py          # Plugin 實作
-    └── manifest.toml       # Plugin 描述
-```
-
-### manifest.toml
-
-```toml
-[plugin]
-name = "my-plugin"
-version = "1.0.0"
-description = "我的自訂插件"
-author = "developer@example.com"
-
-[plugin.dependencies]
-loom = ">=0.1.0"
-other-plugin = ">=1.0.0"
-
-[plugin.provides]
-tools = ["my_tool"]
-notifiers = ["my_notifier"]
-
-[plugin.requires]
-permissions = ["network", "filesystem"]
-```
-
----
-
-## 安全性考量
-
-### Sandboxing
-
-Plugin 運行在受限環境中：
-
-```python
-# 預設禁止的權限
-RESTRICTED_PERMISSIONS = [
-    "subprocess",      # 不能執行外部程式
-    "eval",            # 不能使用 eval
-    "import",          # 不能動態 import
-]
-```
-
-### 權限請求
-
-```toml
-[plugin.permissions]
-network = "optional"    # 可選的網路權限
-filesystem = "read-only"  # 只讀檔案系統
-```
-
----
-
-## skills/ 目錄命名（v0.2.6.1）
-
-> **變更背景**：根目錄的 `extensibility/`（用戶-authored 技能包）與 `loom/extensibility/`（框架代碼）同名，造成混淆。
->
-> v0.2.6.1 起，用戶技能包目錄統一改名為 `skills/`。
-
-```
-# 舊（v0.2.5.x）
-extensibility/           # 用戶技能包 ❌ 與 loom/extensibility/ 同名混淆
-
-# 新（v0.2.6.1）
-skills/                  # 用戶技能包 ✅
-loom/extensibility/      # 框架 Plugin 代碼 ✅
-```
-
-**與 Plugin 的分工：**
+## 與 `skills/` 的命名分工
 
 | 放置位置 | 類型 | 用途 |
 |----------|------|------|
-| `~/.loom/plugins/<name>/` | Plugin | 含 tools/middleware/notifiers/lenses 的完整擴充單元 |
-| `skills/<name>/` | Skill Package | 用 Markdown 撰寫的技能，可被 Skill Import Pipeline 匯入 |
-| `loom/extensibility/` | 框架代碼 | 框架內建 Lens / Plugin / Adapter |
+| `~/.loom/plugins/<name>.py` | Python plugin | 含 `@loom.tool` 或 `LoomPlugin` 的可執行擴充 |
+| `.claude/skills/<name>/SKILL.md` | Skill 包 | Markdown + YAML frontmatter 形式的技能描述 |
+| `loom/extensibility/` | 框架代碼 | Plugin 抽象 + MCP runtime |
+
+`skills/` 跟 `loom/extensibility/` 是兩個截然不同的層：前者是 agent 行為 spec，後者是 Python 擴充機制。
 
 ---
 
-## loom.toml 配置
+## loom.toml 對應段落
+
+實際被讀取的擴充配置只有 MCP servers：
 
 ```toml
-[extensibility]
-
-# Plugin 搜尋路徑
-plugin_paths = [
-    "~/.loom/plugins/",
-    "./loom/plugins/",
-]
-
-# 是否啟用自動發現
-auto_discover = true
-
-# Lens 設定
-[extensibility.lenses]
-enabled = true
-auto_wrap = false  # 不自動包裝所有工具
-
-# Plugin 安全性
-[extensibility.security]
-sandbox = true
-allow_unsigned = false  # 必須有簽章
-
-# MCP Servers（v0.2.6.0）
 [[mcp.servers]]
 name        = "filesystem"
 command     = "npx"
@@ -287,18 +143,17 @@ args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 trust_level = "safe"
 ```
 
+Plugin 路徑、auto_discover、sandbox 等 keys 並沒有實作 —— Plugin 一律 hard-coded 走 `~/.loom/plugins/`。
+
 ---
 
 ## 總結
 
-Loom 的擴充系統提供多層次的客製化能力：
+| 通道 | 適用情境 |
+|------|----------|
+| `@loom.tool` | 單一 async 函式即可解決 |
+| `LoomPlugin` | 同時要貢獻 tools + middleware + notifier |
+| MCP Server | 把 Loom 工具開放給其他 agent 平台 |
+| MCP Client | 直接吃外部 MCP 生態的 tools |
 
-| 層級 | 機制 | 用途 |
-|------|------|------|
-| 配置層 | loom.toml | 工具定義、通知設定、觸發器、MCP servers |
-| Lens 層 | Lens 包裝器 | 為工具添加功能 |
-| Plugin 層 | Plugin 系統 | 新增功能模組（內建 DreamingPlugin）|
-| MCP 層 | MCP 整合 | 雙向整合外部 MCP 工具生態 |
-| 核心層 | Fork | 修改核心行為 |
-
-選擇合適的層級可以保持向後相容性，減少維護成本。
+> 全部走「對 session 一次 install」的模式，runtime 中不熱裝載 / 不熱卸載；要改 plugin 必須重啟 session。
