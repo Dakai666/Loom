@@ -1,7 +1,7 @@
 # Loom — Agent Framework
 
 <p align="center">
-  <img src="loom_ai_logo.png" alt="Loom AI" width="320"/>
+  <img src="assets/readme-hero.png" alt="Loom — threads woven into shape" width="640"/>
 </p>
 
 > *A single thread may seem insignificant, but when many threads are precisely interwoven, they can be woven into any shape.*
@@ -38,47 +38,11 @@ This is what *harness engineering* means: the execution machinery around your to
 
 Loom is organized into seven layers. Every tool call — whether from a human prompt, an autonomy schedule, or a sub-agent — passes through all of them.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Platform Layer                          │
-│               CLI · Discord Bot                              │
-├─────────────────────────────────────────────────────────────┤
-│                     Cognition Layer                          │
-│         LLM Router · Context Budget · Reflection API        │
-├─────────────────────────────────────────────────────────────┤
-│                   Harness Layer          ← the backbone      │
-│   Middleware Pipeline · Trust Hierarchy · Action Lifecycle   │
-│          Scope-Aware Authorization · Audit Trail             │
-├─────────────────────────────────────────────────────────────┤
-│                      Memory Layer                            │
-│    Episodic · Semantic · Procedural (Skills) · Relational    │
-├─────────────────────────────────────────────────────────────┤
-│                      Task Engine                             │
-│    TaskList · Async Jobs (JobStore + Scratchpad) · Spawn     │
-├─────────────────────────────────────────────────────────────┤
-│                     Autonomy Engine                          │
-│       Cron Triggers · Event Triggers · Action Planner        │
-├─────────────────────────────────────────────────────────────┤
-│                   Extensibility Layer                         │
-│         Lens System · Plugin Interface · Skill Import        │
-└─────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/readme-architecture.png" alt="Loom seven-layer architecture" width="520"/>
+</p>
 
 Large source files are navigable via **`# SECTION N`** banners — run `grep "# SECTION N" <file>` to jump directly to any major block.
-
----
-
-## Version History
-
-| Version | Date | Highlights |
-|---------|------|-----------|
-| **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
-| **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
-| **v0.3.6.2** | 2026-05-05 | Fix spurious asyncio.Future() in render-only tests |
-| **v0.3.6.1** | 2026-05-01 | Skill-driven model tier system (Issue #276) |
-| **v0.3.6.0** | 2026-04-29 | LLM-as-judge Phase 2 (verdicts + turn hooks); CLI Refresh E (TaskList floating panel); Envelope three-stage fade |
-| **v0.3.5.1** | 2026-04-22 | Anthropic prompt caching with hit% display; per-file probe tracking; `probe_file` tool |
-| **v0.3.4.0** | 2026-04-16 | `MemoryFacade` Phase A–C; `TaskReflector`; SubAgent structured failure codes; startup diagnostic suite |
 
 ---
 
@@ -100,38 +64,19 @@ Beyond trust levels, tools carry **capability flags** — `EXEC`, `NETWORK`, `AG
 
 ### Middleware Pipeline
 
-All tool calls — regardless of origin — flow through the same ordered middleware chain:
+All tool calls — regardless of origin — flow through the same ordered middleware chain, wrapped from outermost to innermost around the tool handler:
 
-```
-harness.execute(name, args, session_state)
-         │
-         ▼
-┌─────────────────────────┐
-│  LifecycleMiddleware    │  ← outermost: DECLARED + post-OBSERVED + MEMORIALIZED
-└─────────────────────────┘
-         │
-┌─────────────────────────┐
-│  LogMiddleware          │  ← rich-formatted terminal output
-│  TraceMiddleware        │  ← timing + episodic memory write
-└─────────────────────────┘
-         │
-┌─────────────────────────┐
-│  SchemaValidation       │  ← JSON schema validation; hallucinates-parameter guard
-└─────────────────────────┘
-         │
-┌─────────────────────────┐
-│  BlastRadiusMiddleware  │  ← trust classification + user confirmation
-│                         │    writes authorization result to LifecycleContext
-└─────────────────────────┘
-         │
-┌─────────────────────────┐
-│  LifecycleGateMiddleware│  ← innermost: real-time control gates
-│                         │    AUTHORIZED → PREPARED → EXECUTING → OBSERVED
-└─────────────────────────┘
-         │
-         ▼
-   tool handler runs
-```
+<p align="center">
+  <img src="assets/readme-middleware.png" alt="Middleware pipeline — nested layers around the tool handler" width="480"/>
+</p>
+
+| Layer | Responsibility |
+|-------|----------------|
+| **Lifecycle** (outermost) | Opens / closes the `ActionRecord`: `DECLARED` at entry, `MEMORIALIZED` at exit |
+| **Log + Trace** | Rich-formatted terminal output; timing + episodic memory write |
+| **SchemaValidation** | JSON schema validation; hallucinated-parameter guard |
+| **BlastRadius** | Trust classification + user confirmation; writes authorization result to `LifecycleContext` |
+| **LifecycleGate** (innermost) | Real-time control gates: `AUTHORIZED → PREPARED → EXECUTING → OBSERVED` |
 
 Middleware is stackable and pluggable — you can inject custom middleware at any position via the plugin system.
 
@@ -139,11 +84,9 @@ Middleware is stackable and pluggable — you can inject custom middleware at an
 
 Every tool call is wrapped in an `ActionRecord` that lives inside a deterministic state machine. These states are not just labels — they are **real-time control gates**: each transition must complete before execution proceeds.
 
-```
-DECLARED → AUTHORIZED → PREPARED → EXECUTING → OBSERVED → VALIDATED → COMMITTED → MEMORIALIZED
-                                       │                      │
-                                    ABORTED               REVERTING → REVERTED → MEMORIALIZED
-```
+<p align="center">
+  <img src="assets/readme-action-lifecycle.png" alt="Action lifecycle state machine" width="720"/>
+</p>
 
 Terminal failure paths: `DENIED` / `ABORTED` / `TIMED_OUT` → always end in `MEMORIALIZED`.
 
@@ -358,7 +301,7 @@ An `ActionPlanner` maps the current trust level and context to a decision path. 
 
 ## Platforms
 
-Loom has two first-party frontends with command parity. The earlier Textual TUI was retired on 2026-05-19 (PR #404).
+Loom has three first-party frontends. The earlier Textual TUI was retired on 2026-05-19 (PR #404).
 
 ### CLI
 
@@ -375,6 +318,15 @@ Loom has two first-party frontends with command parity. The earlier Textual TUI 
 - **Stalled-status proxy** — when a GUARDED tool is awaiting authorization the embed switches to `⏸ 等待授權` and suppresses heartbeat updates, so the UI never looks like agent thinking while it's actually waiting on the user
 - **Confirm flow** — four buttons (Allow / Lease / Auto / Deny) with follow-up messages explaining grant scope and TTL
 - **Slash commands** — `/scope`, `/summary`, `/model`, `/think`, `/compact` etc. land natively alongside text-prefix routing
+
+### MCP — bidirectional bridge
+
+Loom speaks [Model Context Protocol](https://modelcontextprotocol.io/) in both directions:
+
+- **`loom mcp serve`** — exposes Loom's tool catalog to any MCP client (Claude Desktop, Cursor, Continue, …), so other agent platforms can drive Loom under the same trust hierarchy and lifecycle gates as a native session
+- **`loom mcp connect <cmd>`** or `[[mcp.servers]]` in `loom.toml` — pulls external MCP servers' tools into the current session; each remote tool is registered into the same `ToolRegistry`, picks up the standard middleware pipeline, and is auto-prefixed to avoid collisions
+
+The two ends share `loom/extensibility/mcp_{server,client}.py`. Connected clients are tracked on `session._mcp_clients` and cleaned up at `session.stop()`.
 
 ---
 
@@ -440,7 +392,25 @@ The `doc/` directory contains full technical documentation for every subsystem:
 | Execution visualization | `docs/designs/43-Harness-Execution-可視化規劃.md` |
 | Autonomy engine | `doc/19-Autonomy-概述.md`, `doc/21-Action-Planner.md` |
 | Extensibility & plugins | `doc/29-Extensibility-概述.md`, `doc/31-Plugin-系統.md` |
+| MCP server / client implementation | `doc/31b-MCP-Server-實作.md` |
 | Full config reference | `doc/37-loom-toml-參考.md` |
+
+---
+
+## Version History
+
+| Version | Date | Highlights |
+|---------|------|-----------|
+| **v0.3.8.1** | 2026-05-23 | Lens import family retired (`loom import` CLI · `Hermes`/`OpenAI` lenses removed); extensibility surface convergence to `@loom.tool` / `LoomPlugin` / MCP (PR #442) |
+| **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
+| **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
+| **v0.3.6.2** | 2026-05-05 | Fix spurious asyncio.Future() in render-only tests |
+| **v0.3.6.1** | 2026-05-01 | Skill-driven model tier system (Issue #276) |
+| **v0.3.6.0** | 2026-04-29 | LLM-as-judge Phase 2 (verdicts + turn hooks); CLI Refresh E (TaskList floating panel); Envelope three-stage fade |
+| **v0.3.5.1** | 2026-04-22 | Anthropic prompt caching with hit% display; per-file probe tracking; `probe_file` tool |
+| **v0.3.4.0** | 2026-04-16 | `MemoryFacade` Phase A–C; `TaskReflector`; SubAgent structured failure codes; startup diagnostic suite |
+
+For releases prior to v0.3.4.0 see the [GitHub releases page](https://github.com/Dakai666/Loom/releases).
 
 ---
 
