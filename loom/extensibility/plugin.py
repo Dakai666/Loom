@@ -1,7 +1,7 @@
 """
 Plugin System — unified extension interface for Loom.
 
-A ``LoomPlugin`` can contribute tools, middleware, lenses, and notifiers in one
+A ``LoomPlugin`` can contribute tools, middleware, and notifiers in one
 package.  Plugins live in ``~/.loom/plugins/`` and are auto-scanned on session
 start.  The first time a new plugin file is seen, the user is asked to approve
 it (GUARDED); approval is stored in RelationalMemory so future sessions load
@@ -40,7 +40,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from loom.core.harness.middleware import Middleware
     from loom.core.harness.registry import ToolDefinition
-    from loom.extensibility.lens import BaseLens
     from loom.notify.router import BaseNotifier
 
 
@@ -67,10 +66,6 @@ class LoomPlugin(ABC):
 
     def middleware(self) -> list["Middleware"]:
         """Return Middleware instances to prepend to the session pipeline."""
-        return []
-
-    def lenses(self) -> list["BaseLens"]:
-        """Return BaseLens instances to register in the global LensRegistry."""
         return []
 
     def notifiers(self) -> list["BaseNotifier"]:
@@ -127,9 +122,6 @@ class PluginRegistry:
             for mw in plugin.middleware():
                 if session._pipeline is not None:  # type: ignore[attr-defined]
                     session._pipeline._middlewares.insert(0, mw)  # type: ignore[attr-defined]
-
-            # Lenses → global LensRegistry (no per-session state needed)
-            # (LensRegistry is stateless; plugins just add more lenses)
 
             # Notifiers → session notification router (if present)
             for notifier in plugin.notifiers():

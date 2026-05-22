@@ -223,8 +223,6 @@ trust_level = "safe"
 notify = false
 ```
 
-詳見 [30-Lens-系統.md](30-Lens-系統.md)。
-
 ---
 
 ## Behavioural Self-Reflection（v0.2.5.3 → Issue #120 PR 1）

@@ -16,30 +16,24 @@ Usage
 
     # Install all adapter tools into a session
     adapters.install_into(session.registry)
-
-    # Build from a LensResult's platform_adapters
-    adapters = AdapterRegistry.from_lens_result(lens_result)
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
-
-if TYPE_CHECKING:
-    from loom.extensibility.lens import LensResult
 
 
 class AdapterRegistry:
     """
     Holds externally registered ToolDefinitions.
 
-    Unlike the built-in ``ToolRegistry``, this registry is designed for
-    third-party tools and lens-imported adapters. Use ``install_into()``
-    to merge its tools into a live session's ToolRegistry.
+    Designed for third-party tools registered through the ``@loom.tool``
+    decorator. Use ``install_into()`` to merge its tools into a live
+    session's ToolRegistry.
     """
 
     def __init__(self) -> None:
@@ -119,65 +113,3 @@ class AdapterRegistry:
             return tool_def
 
         return decorator
-
-    # ------------------------------------------------------------------
-    # Factory from LensResult
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_lens_result(
-        cls,
-        result: "LensResult",
-        executor_factory: Callable[[dict], Callable] | None = None,
-    ) -> "AdapterRegistry":
-        """
-        Build an AdapterRegistry from a LensResult's ``platform_adapters``.
-
-        Each adapter dict is converted to a ToolDefinition.
-
-        Parameters
-        ----------
-        result:            A LensResult returned by a Lens.
-        executor_factory:  Optional callable that receives an adapter dict and
-                           returns an async ``executor(call: ToolCall) -> ToolResult``.
-                           If omitted, a placeholder executor is used that returns
-                           an error result when called.
-        """
-        registry = cls()
-
-        for adapter in result.platform_adapters:
-            name = (adapter.get("name") or "unknown").strip()
-            trust_raw = (adapter.get("trust_level") or "safe").lower()
-            try:
-                trust = TrustLevel[trust_raw.upper()]
-            except KeyError:
-                trust = TrustLevel.SAFE
-
-            if executor_factory:
-                executor = executor_factory(adapter)
-            else:
-                _name = name  # close over the current value
-
-                async def _placeholder(call: ToolCall, _n: str = _name) -> ToolResult:
-                    return ToolResult(
-                        call_id=call.id,
-                        tool_name=_n,
-                        success=False,
-                        error=f"No executor registered for adapter '{_n}'",
-                    )
-
-                executor = _placeholder
-
-            tool_def = ToolDefinition(
-                name=name,
-                description=(adapter.get("description") or "").strip(),
-                trust_level=trust,
-                input_schema=adapter.get(
-                    "input_schema", {"type": "object", "properties": {}}
-                ),
-                executor=executor,
-                tags=list(adapter.get("tags", [])),
-            )
-            registry.register(tool_def)
-
-        return registry
