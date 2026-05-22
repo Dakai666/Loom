@@ -1,6 +1,6 @@
 ---
 name: wiki_maintenance
-description: "Research Library 維護技能。當使用者說「蒸餾這個進 wiki」、「整理 outputs/ 文件」、「跑一下 wiki lint」、「檢查 orphan pages」、「更新 index」時使用。也適用于：建立了新的研究報告需要收進 Research Library、發現有 orphan pages、每週定期維護時觸發。"
+description: "Research Library 維護技能。當使用者說「蒸餾這個進 wiki」、「整理 outputs/ 文件」、「跑一下 wiki lint」、「檢查 orphan pages」、「更新 index」時使用。也適用於：建立了新的研究報告需要收進 Research Library、發現有 orphan pages、每週定期維護時觸發。"
 tags: [research, file_organization, knowledge_management, maintenance]
 ---
 
@@ -15,7 +15,7 @@ Research Library 是絲絲的「研究作品圖書館」——消化完畢、值
 
 - **產出**：完成蒸餾 / lint / index 更新，寫進正確位置並更新 `_meta/` 紀錄
 - **品質指標**：蒸餾後的 wiki 頁面有 `[[wikilinks]]` 互相引用、有 frontmatter、有「下一步」路標；lint 能找出 orphan pages 與矛盾
-- **驗收方式**：蒸餾出來的頁面在 `_meta/index.md` 可找到；log 有新增 entry；舊文件在蒸餾後視情況歸檔或刪除
+- **驗收方式**：蒸餾出來的頁面在 `_meta/index.md` 可找到；log 有新增 entry；原始檔案進 archive/distilled/{date}/
 
 ---
 
@@ -35,12 +35,15 @@ Research Library 是絲絲的「研究作品圖書館」——消化完畢、值
 
 ### 情境 A：蒸餾新研究進 wiki
 
-1. **確認來源**：讀取待蒸餾的原始檔案（如 `outputs/doc/indirect_measurement_research.md`）
-2. **確認目標分類**：`taxonomy.md` 的 research/ 分類結構（cognitive / ai / system / philosophy 等）
+1. **確認來源**：讀取待蒸餾的原始檔案
+2. **確認目標分類**：根據 `taxonomy.md` 選擇 cognitive / ai / system / philosophy 等
 3. **寫入 wiki 頁面**：格式見下方「Wiki 頁面標準格式」
 4. **更新 `_meta/index.md`**：在對應分類下新增 entry
-5. **更新 `_meta/log.md`**：append log entry（格式：`## [YYYY-MM-DD] distill | {filename} — {一句話描述}））
-6. **評估舊檔案**：蒸餾完成後，原檔案是否該刪除/歸檔？若需要，執行並在 log 標注
+5. **更新 `_meta/log.md`**：append log entry
+6. **處理原始檔案**：蒸餾完成後，原始檔案移入 `archive/distilled/{YYYYMMDD}/`
+   - 若同一批次蒸餾多個檔案，用同一個 date 目錄
+   - `archive/distilled/` 是原始檔案的「冷儲存」，未來 lint 發現 orphan 可再次評估刪除
+7. **呼叫 `unload_skill("wiki_maintenance")` 收尾**
 
 ### 情境 B：Wiki Lint（健康檢查）
 
@@ -51,13 +54,16 @@ Research Library 是絲絲的「研究作品圖書館」——消化完畢、值
    - **矛盾**：主題 A 的結論和主題 B 是否有明顯衝突？
    - **過時**：有新的研究是否覆蓋了舊頁面的結論？
    - **該補的連結**：提到了某概念但沒有建立 link
+   - **archive/orphan**：archive/ 中是否有從未被 wiki 吸收的原始檔案？
 4. 發現問題寫入 `_meta/audit.md`（或直接口報，視嚴重程度）
+5. **呼叫 `unload_skill("wiki_maintenance")` 收尾**
 
 ### 情境 C：更新 index / 整理結構
 
 1. 讀取 `_meta/index.md`
 2. 根據 taxonomy 結構，檢查是否有新頁面未列入、分類是否正確
 3. 修正並更新 log entry
+4. **呼叫 `unload_skill("wiki_maintenance")` 收尾**
 
 ---
 
@@ -104,10 +110,28 @@ research/
 ├── system/       ← Loom框架技術、工具開發
 ├── philosophy/   ← 哲學、宗教、抽象概念
 ├── history/      ← 歷史研究
-└── _index.md     ← 該目錄的子索引
+└── meta/         ← 關於 wiki 自身的記錄
 ```
 
-蒸餾時根據主題選擇對應子目錄，沒有對應子目錄就放 `research/` 根目錄。
+---
+
+## 原始檔案處理流程（標準步驟）
+
+```
+研究完成
+    ↓
+蒸餾進 wiki（寫入正確分類目錄）
+    ↓
+更新 _meta/index.md + _meta/log.md
+    ↓
+原始檔案 move archive/distilled/{YYYYMMDD}/
+    ↓（未來）
+lint 時若發現 archive/ 檔案也 orphan → 評估刪除
+```
+
+**為什麼要這樣處理：**
+- `archive/distilled/` 是「冷儲存」，不是垃圾筒——有需要的原始檔案（如有引用價值的審查記錄、過程紀錄）可以回溯
+- lint 時的 orphan 檢查會順便看 archive/，減少長期噪音累積
 
 ---
 
@@ -118,6 +142,7 @@ _meta/
 ├── taxonomy.md    ← Schema 定義（分類規範、命名慣例）
 ├── index.md      ← 全部 wiki 頁面的內容目錄（按主題分類）
 ├── log.md        ← 依時間順序的維護日誌（append-only）
+├── lint_report_*.md ← 歷次 lint 報告
 └── audit.md      ← Lint 發現的問題（可選）
 ```
 
@@ -153,4 +178,4 @@ _meta/
 
 ---
 
-*wiki_maintenance v0.1 — 2026-05-22*
+*wiki_maintenance v0.2 — 2026-05-22*
