@@ -331,14 +331,6 @@ internal = "UTC"
 default_trust_level = "guarded"   # "safe" | "guarded" | "critical"
 require_audit_log   = true
 
-# ─────────────────────────────────────────────
-# Task Write (Issue #207)
-# ─────────────────────────────────────────────
-[task_write]
-# Enables an auto-updating Discord embed notification whenever `task_write` is called.
-# Provides real-time visual feedback of task progress in Discord threads.
-discord_reminder = false
-
 # ── Context management (Issue #197) ──────────────────────────────────────────
 #
 # Just-in-time retrieval: when a tool's output exceeds this token budget,
@@ -394,6 +386,14 @@ mask_age_turns = 20
 # Does not prevent OS-level container escapes — for that, enable the
 # [security.sandbox] block below (Issue #29, Quest A Phase 4).
 strict_sandbox = false
+
+# ─────────────────────────────────────────────
+# Task Write (Issue #207)
+# ─────────────────────────────────────────────
+[task_write]
+# Enables an auto-updating Discord embed notification whenever `task_write` is called.
+# Provides real-time visual feedback of task progress in Discord threads.
+discord_reminder = false
 
 # ─────────────────────────────────────────────
 # Security · Sandbox Runtime (Issue #29)
@@ -691,12 +691,17 @@ enabled  = false           # set true to activate daemon
 # ─────────────────────────────────────────────
 # default_channel is informational; actual routing is determined at runtime
 # by which notifiers are registered (CLI, DiscordBotNotifier, etc.)
+#
+# trust_level + notify interaction:
+#   guarded + notify=false → execute immediately, no confirmation
+#   guarded + notify=true  → Discord Allow/Deny buttons (60s timeout → skip)
+# notify_thread: Discord thread ID to post results into.
+#   0 = use the --notify-channel passed to `loom discord start`
 
 # ─────────────────────────────────────────────
 # Embeddings
 # ─────────────────────────────────────────────
-# Embeddings
-# ─────────────────────────────────────────────
+# Semantic memory uses vector embeddings for similarity search.
 # Two backends selected by the ``provider`` field:
 #   "ollama"   — local Ollama server (no API key required)
 #   "minimax"  — MiniMax cloud API (requires API key)

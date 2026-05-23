@@ -1,0 +1,136 @@
+# ============================================================
+# LOOM PROFILE: SECURE  (企業 / 高敏感場景)
+# ============================================================
+# 適用場景:
+#   • 接觸敏感資料、客戶程式碼、私鑰、SSH config
+#   • 純 CLI 操作，無對外 Discord bot
+#   • 寧可慢、寧可多問，不能讓 agent 自作主張
+#
+# 預設姿態:
+#   • OS-level sandbox (srt) 啟用 —— 缺 binary 仍會啟動但會印
+#     明顯警告，使用者自負風險（你選了這個 profile = 你接受）
+#   • 網路 allowlist 明列（PyPI / GitHub / Anthropic / OpenAI）
+#   • 寫入路徑限 workspace
+#   • Autonomy 完全關閉
+#   • run_bash 強制 strict_sandbox（workspace cwd）
+#   • Dream cycle 關 —— 不跑背景 LLM 呼叫
+#
+# 不適合: 自動化排程、長時運行 bot、需要外連未列入 allowlist 的 API
+#
+# 完整 per-key 教學註解請看根目錄 loom.toml.example
+# 此檔僅標註 profile-specific 的取捨理由
+# ============================================================
+
+[loom]
+name    = "loom"
+version = "0.1.0"
+
+[identity]
+soul        = "SOUL.md"
+agent       = "Agent.md"
+personality = ""
+
+[cognition]
+default_model = "claude-sonnet-4-6"
+max_tokens    = 8096
+
+[cognition.tiers]
+1 = "minimax-m2.7"
+2 = "deepseek-v4-pro"
+default_tier         = 1
+reminder_after_turns = 10
+
+[memory]
+backend                     = "sqlite"
+db_path                     = "~/.loom/memory.db"
+episodic_retention_days     = 7
+skill_deprecation_threshold = 0.3
+episodic_compress_threshold = 30
+
+[memory.governance]
+admission_threshold      = 0.5
+episodic_ttl_days        = 30
+semantic_decay_threshold = 0.1
+dup_window_days          = 7
+dup_lookback_limit       = 500
+dup_similarity_threshold = 0.85
+
+[memory.lifecycle]
+enabled         = true
+interval_hours  = 24
+min_gap_minutes = 30
+threshold       = 0.1
+
+# PROFILE: dream cycle 關閉 —— secure 不跑背景 LLM
+[memory.dream]
+enabled        = false
+interval_hours = 12
+sample_size    = 15
+
+[reflection]
+auto_reflect = true
+visibility   = "summary"
+
+[telemetry]
+enabled          = true
+persist_interval = 100
+retention_days   = 30
+
+[session]
+prefetch_enabled = false
+prefetch_top_n   = 3
+
+[cli]
+transient_hints = true
+
+[timezone]
+user     = "Asia/Taipei"
+internal = "UTC"
+
+[harness]
+default_trust_level        = "guarded"
+require_audit_log          = true
+jit_spill_threshold_tokens = 2000
+mask_age_turns             = 20
+
+# PROFILE: strict_sandbox 強制 —— run_bash 限定 workspace cwd
+strict_sandbox = true
+
+[task_write]
+discord_reminder = false
+
+# ─────────────────────────────────────────────
+# Sandbox —— SECURE 啟用 srt OS-level 隔離
+# ─────────────────────────────────────────────
+# srt 必須先安裝:
+#     npm install -g @anthropic-ai/sandbox-runtime
+#
+# 缺 binary 時 Loom 仍會啟動但會在 console 印警告，使用者自負風險。
+# 寫入限 workspace + /private/tmp；網路只允許明列的 host。
+[security.sandbox]
+backend = "srt"
+
+allow_write = [".", "/private/tmp"]
+
+deny_read = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+
+allowed_domains = [
+    "pypi.org",
+    "files.pythonhosted.org",
+    "api.github.com",
+    "api.anthropic.com",
+    "api.openai.com",
+]
+
+# ─────────────────────────────────────────────
+# Autonomy —— SECURE 完全關閉
+# ─────────────────────────────────────────────
+# 不接受任何 autonomous trigger。需要自動化排程改用 assistant 或 autonomous profile。
+[autonomy]
+enabled = false
+
+[notify]
+default_channel = "cli"
+
+[ledger]
+enabled = true

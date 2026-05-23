@@ -1,0 +1,198 @@
+# ============================================================
+# LOOM PROFILE: AUTONOMOUS AGENT  (最小授權, 自主執行)
+# ============================================================
+# ⚠️  這是本框架「最高風險」的設定。請務必確認:
+#   • 跑在獨立設備 / 雲端 isolated server / 容器
+#   • 不與使用者個人資料、私鑰、SSH config 共存
+#   • 接受 agent 在無人值守下自主修改檔案、觸發任務
+#
+# ⛔  不適合: 個人筆電、家用 server、有他人共用的環境
+#
+# 預設姿態:
+#   • Sandbox: pattern scan only —— autonomy 需要彈性，不開 srt
+#   • 寫入路徑: workspace + /tmp + ~/.loom
+#   • Autonomy 三類 trigger 全開（cron + event + condition）
+#   • Dream cycle + memory housekeeping 定期跑
+#   • Discord bot 同步啟用（方便人類隨時 ping 進來看狀況）
+#   • GUARDED tool 預先 pre-authorize 給 autonomy schedule —— 無人值守
+#     場景下不能仰賴互動確認
+#
+# 強烈建議搭配:
+#   • 雲端 IAM / 容器網路限制
+#   • 定期 audit ~/.loom/ledger.db
+#   • 不要在這個 profile 下開放任何個人帳號（GitHub、Email、雲服務）
+#
+# 完整 per-key 教學註解請看根目錄 loom.toml.example
+# 此檔僅標註 profile-specific 的取捨理由
+# ============================================================
+
+[loom]
+name    = "loom"
+version = "0.1.0"
+
+[identity]
+soul        = "SOUL.md"
+agent       = "Agent.md"
+personality = ""
+
+[cognition]
+default_model = "claude-sonnet-4-6"
+max_tokens    = 8096
+
+[cognition.tiers]
+1 = "minimax-m2.7"
+2 = "deepseek-v4-pro"
+default_tier         = 1
+reminder_after_turns = 10
+
+[memory]
+backend                     = "sqlite"
+db_path                     = "~/.loom/memory.db"
+episodic_retention_days     = 7
+skill_deprecation_threshold = 0.3
+
+# PROFILE: 自主運行 session 通常很長 —— 提早 compress
+episodic_compress_threshold = 10
+
+[memory.governance]
+admission_threshold      = 0.5
+episodic_ttl_days        = 30
+semantic_decay_threshold = 0.1
+dup_window_days          = 7
+dup_lookback_limit       = 500
+dup_similarity_threshold = 0.85
+
+[memory.lifecycle]
+enabled         = true
+interval_hours  = 24
+min_gap_minutes = 30
+threshold       = 0.1
+
+# PROFILE: 自主運行依賴強健記憶 —— dream cycle 加密 (8h 一次)
+[memory.dream]
+enabled        = true
+interval_hours = 8
+sample_size    = 20
+
+[reflection]
+auto_reflect = true
+visibility   = "summary"
+
+[telemetry]
+enabled          = true
+persist_interval = 100
+retention_days   = 30
+
+[session]
+prefetch_enabled = false
+prefetch_top_n   = 3
+
+[cli]
+transient_hints = true
+
+[timezone]
+user     = "Asia/Taipei"
+internal = "UTC"
+
+[harness]
+default_trust_level        = "guarded"
+require_audit_log          = true
+jit_spill_threshold_tokens = 2000
+mask_age_turns             = 20
+strict_sandbox             = false
+
+[task_write]
+discord_reminder = true
+
+# ─────────────────────────────────────────────
+# Sandbox —— AUTONOMOUS 維持 pattern scan
+# ─────────────────────────────────────────────
+# 不開 srt：autonomy schedule 動態決定行為，sandbox 限制會卡住正常運作。
+# 風險由「跑在 isolated 環境」這個前提條件吸收 —— 看本檔頂端 ⚠️ 警告。
+[security.sandbox]
+backend = "none"
+
+allow_write = [".", "/private/tmp", "~/.loom"]
+
+deny_read = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+
+allowed_domains = []
+
+# ─────────────────────────────────────────────
+# Autonomy —— AUTONOMOUS 全開
+# ─────────────────────────────────────────────
+# 三類 trigger（cron / event / condition）都通；schedule 必須在
+# allowed_tools / scope_grants 預先宣告權限，否則 GUARDED 會被 deny。
+[autonomy]
+enabled = true
+
+# ── 範例 1: 每日記憶整理（dream + housekeeping） ─────────────────
+# [[autonomy.schedules]]
+# name          = "memory_housekeeping"
+# cron          = "0 19 * * 0"            # 19:00 UTC Sunday = 03:00 Asia/Taipei Monday
+# intent        = """Run memory housekeeping. First call memory_prune with
+#                    dry_run=true to preview decayed entries. If any qualify,
+#                    call again with dry_run=false to delete them. Report:
+#                    total examined, pruned, and retained."""
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0
+
+# ── 範例 2: 每日 free dream（補 themed 沒覆蓋到的 cross-domain） ────
+# [[autonomy.schedules]]
+# name          = "offline_dreaming_free"
+# cron          = "0 19 * * *"            # 19:00 UTC = 03:00 Asia/Taipei
+# intent        = """Run a free cross-domain dream. Call dream_cycle with
+#                    themed=false so the sample spans all four ontology
+#                    domains at random."""
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0
+# allowed_tools = ["dream_cycle", "memorize"]
+
+# ── 範例 3: weekly skill review ────────────────────────────────
+# [[autonomy.schedules]]
+# name          = "skill_weekly_review"
+# cron          = "0 2 * * 6"             # 02:00 UTC Saturday = 10:00 Asia/Taipei
+# intent        = """Run `loom skill weekly` via run_bash, then read the
+#                    generated report and surface items in the 該關注清單."""
+# trust_level   = "safe"
+# notify        = true
+# notify_thread = 0
+# allowed_tools = ["run_bash", "read_file"]
+# scope_grants  = [
+#   { resource = "exec", action = "execute", selector = "workspace" },
+#   { resource = "path", action = "read",    selector = "outputs"   },
+# ]
+# attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
+
+# ── 範例 4: event trigger（外部訊號觸發） ─────────────────────────
+# [[autonomy.triggers]]
+# name          = "deploy_check"
+# event         = "deployment_done"        # 用 `loom autonomy emit deployment_done` 觸發
+# intent        = "Run smoke tests and post results."
+# trust_level   = "guarded"
+# notify        = true
+# notify_thread = 0
+# allowed_tools = ["run_bash"]
+# scope_grants  = [
+#   { resource = "exec", action = "execute", selector = "workspace" },
+# ]
+
+[notify]
+default_channel = "discord"
+
+[ledger]
+enabled = true
+
+# ─────────────────────────────────────────────
+# Discord bot 啟動（建議搭配 --autonomy 旗標）
+# ─────────────────────────────────────────────
+# DISCORD_BOT_TOKEN=your_bot_token_here
+#
+# 啟動指令:
+#     loom discord start --autonomy --channel <CHANNEL_ID>
+#
+# 想看 autonomy 跑得怎麼樣:
+#     loom autonomy status
+#     loom diagnostic recent
