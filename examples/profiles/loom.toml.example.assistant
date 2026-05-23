@@ -90,15 +90,15 @@ user     = "Asia/Taipei"
 internal = "UTC"
 
 [harness]
-default_trust_level = "guarded"
-require_audit_log   = true
-
-# PROFILE: 助手場景啟用 task_write Discord 通知
-[task_write]
-discord_reminder           = true
+default_trust_level        = "guarded"
+require_audit_log          = true
 jit_spill_threshold_tokens = 2000
 mask_age_turns             = 20
 strict_sandbox             = false
+
+# PROFILE: 助手場景啟用 task_write Discord 通知
+[task_write]
+discord_reminder = true
 
 # ─────────────────────────────────────────────
 # Sandbox —— ASSISTANT 用 pattern scan 預設（無 srt）

@@ -88,16 +88,16 @@ user     = "Asia/Taipei"
 internal = "UTC"
 
 [harness]
-default_trust_level = "guarded"
-require_audit_log   = true
-
-[task_write]
-discord_reminder           = false
+default_trust_level        = "guarded"
+require_audit_log          = true
 jit_spill_threshold_tokens = 2000
 mask_age_turns             = 20
 
 # PROFILE: strict_sandbox 強制 —— run_bash 限定 workspace cwd
 strict_sandbox = true
+
+[task_write]
+discord_reminder = false
 
 # ─────────────────────────────────────────────
 # Sandbox —— SECURE 啟用 srt OS-level 隔離

@@ -95,14 +95,14 @@ user     = "Asia/Taipei"
 internal = "UTC"
 
 [harness]
-default_trust_level = "guarded"
-require_audit_log   = true
-
-[task_write]
-discord_reminder           = true
+default_trust_level        = "guarded"
+require_audit_log          = true
 jit_spill_threshold_tokens = 2000
 mask_age_turns             = 20
 strict_sandbox             = false
+
+[task_write]
+discord_reminder = true
 
 # ─────────────────────────────────────────────
 # Sandbox —— AUTONOMOUS 維持 pattern scan
