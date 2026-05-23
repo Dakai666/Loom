@@ -29,7 +29,7 @@ Loom/
 │       ├── international_briefing.md → 國際晨報
 │       ├── medical_briefing.md     → 醫學晨報
 │       ├── astronomy_briefing.md    → 天文晨報
-│       └── daily_briefing.md       → 四合一總摘要（含跨領域關聯分析）
+│       └── daily_briefing.md       → 四合一總摘要（含跨域關聯分析）
 └── skills/news-aggregator/
     ├── SKILL.md                  ← 本技能定義
     └── scripts/
@@ -41,7 +41,15 @@ Loom/
 
 ## 🔄 工作流程
 
-### 步驟 1：抓取（fetch）
+### 步驟 1：前置準備（建立寫入上下文）
+```bash
+# 在任何 write_file 之前，先執行這行建立 news/ 目錄的 Legitimacy Guard 上下文
+list_dir("news/")
+```
+> ⚠️ **重要性**：fetch_news.py 由 run_bash subprocess 執行，無法建立 Loom 的 Legitimacy Guard 上下文。
+> 若跳過此步驟，後續 `write_file` 到 `news/YYYY-MM-DD/*.md` 會被 Guard 擋住（看似成功但實際被 block）。
+
+### 步驟 2：抓取（fetch）
 ```bash
 cd skills/news-aggregator/scripts
 
@@ -55,7 +63,7 @@ python fetch_news.py --source tech --limit 8 --no-save
 python fetch_news.py --source hackernews --no-save
 ```
 
-### 步驟 2：深度整合（integrate）
+### 步驟 3：深度整合（integrate）
 讀取 JSON 資料後，以下的格式要求是強制性的——
 **絲絲的整合想法比原始新聞更有價值**，因此每則新聞都必須包含絲絲自己的深度分析，而非只是轉述。
 
@@ -130,15 +138,16 @@ python fetch_news.py --source hackernews --no-save
 |------|------|
 | Hacker News | ✅ 正常 |
 | GitHub Trending | ✅ 正常 |
-| Reuters World | ⚠️ 需確認 |
+| Reuters World | ⚠️ 部分網路環境 DNS 解析失敗，以 BBC/NHK 為主 |
 | BBC World | ✅ 正常 |
 | NHK World | ✅ 正常 |
 | NEJM Alerts | ✅ 正常 |
 | WHO News | ✅ 正常 |
 | Medscape Medical | ✅ 正常 |
-| NASA News | ✅ 正常 |
+| NASA News (RSS) | ✅ 正常（NASA News RSS feed） |
 | ESA News | ✅ 正常 |
 | Astronomy.com | ✅ 正常 |
+| NASA APOD | ⚠️ URL 格式已變更（`apod.nasa.gov/apod/apYYMMDD.html`），需更新 fetch 方式 |
 
 ---
 
@@ -217,6 +226,8 @@ python fetch_news.py --source hackernews --no-save
 2. **Ben's Bites** 受 Cloudflare 保護，需要 Playwright
 3. Reuters RSS 在部分網路環境可能 DNS 解析失敗，標記 ⚠️ 並以 BBC/NHK 為主
 4. `--deep` 模式會增加抓取時間
+5. **NASA APOD**：URL 格式已從 `apod.nasa.gov/apod/` 變更為 `apod.nasa.gov/apod/apYYMMDD.html`，
+   需要主動拼接當天日期才能抓取；Astronomy.com 可作為穩定的備援來源
 
 ---
 
