@@ -1,0 +1,142 @@
+# ============================================================
+# LOOM PROFILE: 7×24 ASSISTANT  (Discord 為主, CLI 為輔)
+# ============================================================
+# 適用場景:
+#   • 長期在 Discord 上聊天、查資料、修小 patch
+#   • 手機 / 桌面雙端可用，週末也能 ping
+#   • Agent 等使用者開口，不主動排任務
+#
+# 預設姿態:
+#   • Sandbox: pattern scan only (預設等級，不開 srt)
+#   • 寫入路徑: workspace + /tmp + ~/.loom
+#   • Discord bot 預期啟用 —— .env 必須提供 DISCORD_BOT_TOKEN
+#   • Autonomy 預設關 —— bot 連著但不自主排任務
+#   • GUARDED 用 session 緩存（預設行為，session 內第一次 prompt）
+#   • Dream cycle 預設開（背景知識整理）
+#
+# 註: autonomy 排程未來會獨立成獨立檔案管理（issue #444），避免
+#     agent 誤改 loom.toml 引發連鎖錯誤；目前先全關。需要時參考
+#     根目錄 loom.toml.example 的 [[autonomy.schedules]] 範例。
+#
+# 完整 per-key 教學註解請看根目錄 loom.toml.example
+# 此檔僅標註 profile-specific 的取捨理由
+# ============================================================
+
+[loom]
+name    = "loom"
+version = "0.1.0"
+
+[identity]
+soul        = "SOUL.md"
+agent       = "Agent.md"
+personality = ""
+
+[cognition]
+default_model = "claude-sonnet-4-6"
+max_tokens    = 8096
+
+[cognition.tiers]
+1 = "minimax-m2.7"
+2 = "deepseek-v4-pro"
+default_tier         = 1
+reminder_after_turns = 10
+
+[memory]
+backend                     = "sqlite"
+db_path                     = "~/.loom/memory.db"
+episodic_retention_days     = 7
+skill_deprecation_threshold = 0.3
+
+# PROFILE: 長 session 用較小 compress threshold —— Discord 助手會掛幾天
+episodic_compress_threshold = 10
+
+[memory.governance]
+admission_threshold      = 0.5
+episodic_ttl_days        = 30
+semantic_decay_threshold = 0.1
+dup_window_days          = 7
+dup_lookback_limit       = 500
+dup_similarity_threshold = 0.85
+
+[memory.lifecycle]
+enabled         = true
+interval_hours  = 24
+min_gap_minutes = 30
+threshold       = 0.1
+
+[memory.dream]
+enabled        = true
+interval_hours = 12
+sample_size    = 15
+
+[reflection]
+auto_reflect = true
+visibility   = "summary"
+
+[telemetry]
+enabled          = true
+persist_interval = 100
+retention_days   = 30
+
+[session]
+prefetch_enabled = false
+prefetch_top_n   = 3
+
+[cli]
+transient_hints = true
+
+[timezone]
+user     = "Asia/Taipei"
+internal = "UTC"
+
+[harness]
+default_trust_level = "guarded"
+require_audit_log   = true
+
+# PROFILE: 助手場景啟用 task_write Discord 通知
+[task_write]
+discord_reminder           = true
+jit_spill_threshold_tokens = 2000
+mask_age_turns             = 20
+strict_sandbox             = false
+
+# ─────────────────────────────────────────────
+# Sandbox —— ASSISTANT 用 pattern scan 預設（無 srt）
+# ─────────────────────────────────────────────
+# 預設只有 CommandScanner tripwire；如果想加 OS-level 牆，換到 secure profile
+# 或自行改 backend = "srt"（記得先 npm install -g @anthropic-ai/sandbox-runtime）。
+#
+# deny_read 仍保留敏感目錄，pattern scan 抓到時會擋。
+[security.sandbox]
+backend = "none"
+
+allow_write = [".", "/private/tmp", "~/.loom"]
+
+deny_read = ["~/.ssh", "~/.aws", "~/.gnupg", ".env"]
+
+# 空白 = pattern scan 模式下不影響網路（srt 模式下空白才是「禁止網路」）
+allowed_domains = []
+
+# ─────────────────────────────────────────────
+# Autonomy —— ASSISTANT 預設關（bot 連著就好，不主動排任務）
+# ─────────────────────────────────────────────
+# 想啟用自動排程：把 enabled 改 true，再解註解需要的 schedule 範例
+# （完整範例見根目錄 loom.toml.example 的 [[autonomy.schedules]] 區塊）。
+[autonomy]
+enabled = false
+
+[notify]
+default_channel = "discord"
+
+[ledger]
+enabled = true
+
+# ─────────────────────────────────────────────
+# Discord bot 啟動需要的環境變數（.env）
+# ─────────────────────────────────────────────
+# DISCORD_BOT_TOKEN=your_bot_token_here
+#
+# 啟動指令:
+#     loom discord start --channel <CHANNEL_ID>
+# 或同時啟用 autonomy:
+#     loom discord start --autonomy --channel <CHANNEL_ID>

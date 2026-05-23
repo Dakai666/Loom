@@ -339,11 +339,28 @@ cd Loom
 pip install -e ".[dev]"
 ```
 
+Pick a starting configuration by copying one of the templates under
+[`examples/profiles/`](examples/profiles/) into `loom.toml` at the repo root:
+
+| Profile | When to use |
+|---------|-------------|
+| `loom.toml.example.secure` | 企業 / 高敏感資料 / 純 CLI — OS-level sandbox + 網路 allowlist + autonomy 關 |
+| `loom.toml.example.assistant` | 7×24 Discord 助手（**主要推薦**）— Discord bot 主場、autonomy 關、預設安全等級 |
+| `loom.toml.example.autonomous` | 自主智能體 / 獨立設備 / 容器 — autonomy 全開 + scope_grants 預先批准（⚠ 高風險） |
+
+```bash
+cp examples/profiles/loom.toml.example.assistant loom.toml   # 主要推薦
+# 或從根目錄的 loom.toml.example 起步 (dev baseline, 含所有 per-key 教學註解)
+```
+
 Create a `.env` in the project root with at least one provider:
 
 ```env
 OPENAI_API_KEY=your_openai_key_here
 ANTHROPIC_API_KEY=your_key_here
+
+# Discord bot (required by assistant / autonomous profiles)
+DISCORD_BOT_TOKEN=your_bot_token_here
 
 # Local providers (no API key needed)
 OLLAMA_BASE_URL=http://localhost:11434/v1
@@ -358,6 +375,12 @@ loom chat --model codex/gpt-5.5    # Codex OAuth backend
 loom chat --model ollama/llama3.2  # local model
 loom discord start --autonomy --channel <id>
 loom autonomy start
+```
+
+To pull and upgrade in one step (handles `pyproject.toml` changes):
+
+```bash
+make update                       # = git pull && pip install -e ".[dev]"
 ```
 
 Model routing works by prefix — `gpt-*` and `openai/<model>` use
