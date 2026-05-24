@@ -347,6 +347,39 @@ async def test_tts_rejects_empty_audio_response(tmp_path, monkeypatch):
     assert "empty" in (result.error or "").lower()
 
 
+def test_tts_default_scope_selector_targets_outputs_subdir(tmp_path):
+    """When ``output_path`` is omitted the scope selector must point at
+    ``outputs`` (where the executor actually writes), not the workspace
+    root. Guards against widening write permission beyond what the
+    executor mutates. (Review feedback on PR #448.)"""
+    tool = make_xai_tts_tool(tmp_path)
+    call_no_path = ToolCall(
+        tool_name=tool.name,
+        args={"text": "hello"},
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+    call_with_path = ToolCall(
+        tool_name=tool.name,
+        args={"text": "hello", "output_path": "outputs/foo.mp3"},
+        trust_level=TrustLevel.GUARDED,
+        session_id="s1",
+    )
+
+    no_path_selectors = {
+        (req.resource, req.action, req.selector)
+        for req in tool.scope_resolver(call_no_path).requirements
+    }
+    with_path_selectors = {
+        (req.resource, req.action, req.selector)
+        for req in tool.scope_resolver(call_with_path).requirements
+    }
+
+    assert ("path", "write", "outputs") in no_path_selectors
+    assert ("path", "write", ".") not in no_path_selectors
+    assert ("path", "write", "outputs") in with_path_selectors
+
+
 def test_tts_artifact_extractor_returns_audio_metadata():
     from loom.core.harness.middleware import (
         ToolResult,

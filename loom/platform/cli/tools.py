@@ -3002,7 +3002,11 @@ def _make_xai_tts_scope_resolver(workspace: Path):
     _workspace_resolved = workspace.resolve()
 
     def _resolve(call: ToolCall) -> ScopeRequest:
-        raw = call.args.get("output_path") or "outputs"
+        # When ``output_path`` is omitted the executor writes to
+        # ``outputs/tts-<id>.<codec>``. Mirror that here so the
+        # permission selector reflects the real mutation surface
+        # (``outputs``) instead of widening it to the workspace root.
+        raw = call.args.get("output_path") or "outputs/tts-default"
         p = Path(str(raw))
         resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
         try:
