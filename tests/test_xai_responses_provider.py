@@ -154,6 +154,42 @@ class _XAIErrorAsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_xai_provider_uses_output_text_for_assistant_history(tmp_path, monkeypatch):
+    """Mirrors the Codex Responses contract — assistant content must be
+    ``output_text``, user content ``input_text``."""
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":0,"output_tokens":0}}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    await provider.chat(messages=[
+        {"role": "user", "content": "first user"},
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "second user"},
+    ])
+
+    input_items = fake_client.requests[0]["json"]["input"]
+    assert [item["role"] for item in input_items] == ["user", "assistant", "user"]
+    assert input_items[0]["content"][0]["type"] == "input_text"
+    assert input_items[1]["content"][0]["type"] == "output_text"
+    assert input_items[2]["content"][0]["type"] == "input_text"
+
+
+@pytest.mark.asyncio
 async def test_xai_provider_surfaces_streaming_backend_error(tmp_path, monkeypatch):
     import httpx
 

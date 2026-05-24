@@ -191,6 +191,35 @@ async def test_codex_provider_normalizes_tool_call(monkeypatch, codex_home):
 
 
 @pytest.mark.asyncio
+async def test_codex_provider_uses_output_text_for_assistant_history(monkeypatch, codex_home):
+    """Codex Responses backend rejects ``input_text`` in assistant slots
+    with HTTP 400 ``Supported values are: 'output_text' and 'refusal'``.
+    History replay must use ``output_text`` for the assistant role and
+    ``input_text`` for the user role."""
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":0,"output_tokens":0}}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    await provider.chat(messages=[
+        {"role": "user", "content": "first user"},
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "second user"},
+    ])
+
+    input_items = fake_client.requests[0]["json"]["input"]
+    assert [item["role"] for item in input_items] == ["user", "assistant", "user"]
+    assert input_items[0]["content"][0]["type"] == "input_text"
+    assert input_items[1]["content"][0]["type"] == "output_text"
+    assert input_items[2]["content"][0]["type"] == "input_text"
+
+
+@pytest.mark.asyncio
 async def test_codex_provider_surfaces_backend_error_body(monkeypatch, codex_home):
     import httpx
 

@@ -979,7 +979,7 @@ class CodexResponsesProvider(LLMProvider):
                 if content:
                     input_items.append({
                         "role": "assistant",
-                        "content": [{"type": "input_text", "text": str(content)}],
+                        "content": [{"type": "output_text", "text": str(content)}],
                     })
                 for tc in msg.get("tool_calls", []) or []:
                     fn = tc.get("function", {}) if isinstance(tc, dict) else {}
@@ -1224,7 +1224,7 @@ class XAIResponsesProvider(LLMProvider):
                 if content:
                     input_items.append({
                         "role": "assistant",
-                        "content": [{"type": "input_text", "text": str(content)}],
+                        "content": [{"type": "output_text", "text": str(content)}],
                     })
                 for tc in msg.get("tool_calls", []) or []:
                     fn = tc.get("function", {}) if isinstance(tc, dict) else {}
