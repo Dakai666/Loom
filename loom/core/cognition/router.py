@@ -12,6 +12,7 @@ Model routing rules
 "gpt-*"        → OpenAIProvider
 "openai/*"     → OpenAIProvider
 "codex/*"      → CodexResponsesProvider
+"xai/*"        → XAIResponsesProvider
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
@@ -59,6 +60,7 @@ class LLMRouter:
         ("gpt-",       "openai"),
         ("openai/",    "openai"),
         ("codex/",     "codex"),
+        ("xai/",       "xai"),
         ("openrouter/", "openrouter"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),

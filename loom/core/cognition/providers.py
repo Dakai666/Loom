@@ -9,6 +9,7 @@ Supported providers
 -------------------
 OpenAIProvider     — api.openai.com/v1 (OpenAI-compatible chat completions)
 CodexResponsesProvider — chatgpt.com/backend-api/codex/responses (Codex OAuth)
+XAIResponsesProvider — api.x.ai/v1/responses (xAI OAuth)
 AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
 OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
 DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
@@ -909,6 +910,17 @@ class CodexResponsesProvider(LLMProvider):
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)
 
+    def _load_bearer_token(self) -> str:
+        from loom.core.cognition.openai_auth import load_codex_oauth_credential
+
+        credential = load_codex_oauth_credential()
+        if credential is None:
+            raise RuntimeError(
+                "No unexpired Codex OAuth token found. Run `codex login` "
+                "or switch to an API-key OpenAI model such as `gpt-5.5`."
+            )
+        return credential.token
+
     def _build_payload(
         self,
         messages: list[dict[str, Any]],
@@ -1008,15 +1020,8 @@ class CodexResponsesProvider(LLMProvider):
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
         import httpx
-        from loom.core.cognition.openai_auth import load_codex_oauth_credential
 
-        credential = load_codex_oauth_credential()
-        if credential is None:
-            raise RuntimeError(
-                "No unexpired Codex OAuth token found. Run `codex login` "
-                "or switch to an API-key OpenAI model such as `gpt-5.5`."
-            )
-
+        bearer = self._load_bearer_token()
         payload = self._build_payload(messages, tools, max_tokens)
         full_content = ""
         output_items: list[dict[str, Any]] = []
@@ -1031,7 +1036,7 @@ class CodexResponsesProvider(LLMProvider):
                 "POST",
                 self._base_url,
                 headers={
-                    "Authorization": f"Bearer {credential.token}",
+                    "Authorization": f"Bearer {bearer}",
                     "Content-Type": "application/json",
                     "Accept": "text/event-stream",
                 },
@@ -1117,6 +1122,34 @@ class CodexResponsesProvider(LLMProvider):
             "tool_call_id": tool_use_id,
             "content": content if success else f"Error: {content}",
         }
+
+
+class XAIResponsesProvider(CodexResponsesProvider):
+    """
+    xAI Grok OAuth chat via xAI's Responses API.
+
+    Routing prefix: ``xai/``. This provider intentionally has no
+    ``XAI_API_KEY`` fallback; selecting ``xai/...`` means OAuth only.
+    Coupled to ``CodexResponsesProvider``'s Responses SSE shape; revisit if
+    xAI diverges from that protocol.
+    """
+
+    name = "xai"
+    ROUTING_PREFIX = "xai/"
+    DEFAULT_MODEL = "grok-4.3"
+    DEFAULT_BASE_URL = "https://api.x.ai/v1/responses"
+    DEFAULT_TIMEOUT = 180.0
+
+    def _load_bearer_token(self) -> str:
+        from loom.core.cognition.xai_auth import load_xai_oauth_credential
+
+        credential = load_xai_oauth_credential()
+        if credential is None:
+            raise RuntimeError(
+                "No unexpired xAI OAuth token found. Run `loom auth xai` "
+                "before using an OAuth model such as `xai/grok-4.3`."
+            )
+        return credential.token
 
 
 class LMStudioProvider(_OpenAICompatibleBase):

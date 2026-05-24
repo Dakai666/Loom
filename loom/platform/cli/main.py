@@ -809,6 +809,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "[loom.muted]  gpt-*               requires OPENAI_API_KEY in .env (try `loom auth openai`)[/loom.muted]\n"
                 "[loom.muted]  openai/<model>      explicit OpenAI prefix (e.g. openai/gpt-5.5)[/loom.muted]\n"
                 "[loom.muted]  codex/<model>       Codex OAuth backend (e.g. codex/gpt-5.5; run `codex login`)[/loom.muted]\n"
+                "[loom.muted]  xai/<model>         xAI OAuth backend (e.g. xai/grok-4.3; run `loom auth xai`)[/loom.muted]\n"
                 "[loom.muted]  openrouter/<v>/<m>  requires OPENROUTER_API_KEY in .env (e.g. openrouter/deepseek/deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  deepseek-*          requires DEEPSEEK_API_KEY in .env  (e.g. deepseek-v4-pro)[/loom.muted]\n"
                 "[loom.muted]  ollama/<name>       enable [providers.ollama] in loom.toml[/loom.muted]\n"
@@ -1122,6 +1123,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]gpt-5.5 / gpt-5.5-pro   → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
                 "    [loom.muted]codex/gpt-5.5           → Codex OAuth backend (run `codex login`)[/loom.muted]\n"
+                "    [loom.muted]xai/grok-4.3            → xAI OAuth backend (run `loom auth xai`; no XAI_API_KEY fallback)[/loom.muted]\n"
                 "    [loom.muted]ollama/<model>          → local Ollama  (enable in loom.toml)[/loom.muted]\n"
                 "    [loom.muted]lmstudio/<model>        → local LM Studio  (enable in loom.toml)[/loom.muted]\n"
                 "  [loom.warning]/theme[/loom.warning]                    Show available CLI themes\n"
@@ -1969,6 +1971,39 @@ def auth_openai(api_key: str | None, skip_codex_login: bool, env_file: Path | No
             "[loom.muted]No API key saved. Codex CLI login is still useful for "
             "`codex`, but Loom needs OPENAI_API_KEY for OpenAI provider calls.[/loom.muted]"
         )
+
+
+@auth.command("xai")
+@click.option("--no-browser", is_flag=True, default=False,
+              help="Print the xAI OAuth URL without opening a browser.")
+@click.option("--timeout", default=180.0, show_default=True,
+              help="Seconds to wait for the local OAuth callback.")
+def auth_xai(no_browser: bool, timeout: float) -> None:
+    """Run xAI OAuth login for Loom."""
+    from loom.core.cognition.xai_auth import (
+        XAIAuthError,
+        run_xai_oauth_login,
+        save_xai_oauth_state,
+    )
+
+    console.print("[loom.muted]xAI OAuth setup for Loom[/loom.muted]")
+    console.print(
+        "[loom.muted]This path is OAuth-only; Loom will not use an xAI API key "
+        "for xai/<model>.[/loom.muted]"
+    )
+    try:
+        state = run_xai_oauth_login(
+            open_browser=not no_browser,
+            timeout_seconds=timeout,
+        )
+        saved_to = save_xai_oauth_state(state)
+    except XAIAuthError as exc:
+        console.print(f"[loom.error]xAI OAuth failed: {exc}[/loom.error]")
+        raise click.Abort() from exc
+
+    console.print("[loom.muted]xAI OAuth login completed.[/loom.muted]")
+    console.print(f"[loom.muted]Saved xAI OAuth credentials to {saved_to}.[/loom.muted]")
+    console.print("[loom.muted]Try: loom chat --model xai/grok-4.3[/loom.muted]")
 
 
 # ---------------------------------------------------------------------------

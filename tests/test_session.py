@@ -64,6 +64,24 @@ class TestBuildRouter:
         assert "codex" in router.providers
         assert router.get_provider("codex/gpt-5.5").name == "codex"
 
+    def test_registers_xai_oauth_provider_only_when_requested(self, monkeypatch: pytest.MonkeyPatch):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {
+            "XAI_API_KEY": "xai-api-key-that-must-not-register",
+        })
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "MiniMax-M2.7"},
+        })
+
+        with pytest.raises(RuntimeError, match="No LLM provider configured"):
+            session_module.build_router()
+
+        router = session_module.build_router(active_model="xai/grok-4.3")
+
+        assert "xai" in router.providers
+        assert router.get_provider("xai/grok-4.3").name == "xai"
+
 
 class TestSetModel:
     def test_lazy_registers_codex_provider_on_switch(self, monkeypatch: pytest.MonkeyPatch):
