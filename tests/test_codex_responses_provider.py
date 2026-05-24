@@ -219,6 +219,48 @@ async def test_codex_provider_uses_output_text_for_assistant_history(monkeypatch
     assert input_items[2]["content"][0]["type"] == "input_text"
 
 
+@pytest.mark.asyncio
+async def test_codex_provider_does_not_leak_function_call_args_into_text(monkeypatch, codex_home):
+    """OpenAI Responses SSE emits ``delta`` on multiple event types.
+    ``response.function_call_arguments.delta`` carries the JSON args of
+    an in-flight tool call and must NOT bleed into the assistant text —
+    otherwise the user sees the JSON appear inline and then the tool
+    fires immediately after, which looks like a duplicated submission.
+    Regression test for the live-smoke observation on PR #448.
+    """
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"on it"}',
+        "",
+        "event: response.function_call_arguments.delta",
+        'data: {"type":"response.function_call_arguments.delta","delta":"{\\"path\\":"}',
+        "",
+        "event: response.function_call_arguments.delta",
+        'data: {"type":"response.function_call_arguments.delta","delta":"\\"README.md\\"}"}',
+        "",
+        "event: response.output_item.done",
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    response = await provider.chat(messages=[{"role": "user", "content": "read"}])
+
+    # Only the real output_text.delta becomes user-facing text.
+    assert response.text == "on it"
+    assert '"path"' not in (response.text or "")
+    # The tool call still arrives normally via output_item.done.
+    assert len(response.tool_uses) == 1
+    assert response.tool_uses[0].name == "read_file"
+    assert response.tool_uses[0].args == {"path": "README.md"}
+
+
 class _StreamDropResponse:
     """Simulates an SSE peer closing the connection mid-stream.
 

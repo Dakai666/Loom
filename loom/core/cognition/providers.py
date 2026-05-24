@@ -1107,12 +1107,21 @@ class CodexResponsesProvider(LLMProvider):
                                 data = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue
+                            event_type = data.get("type", "")
                             delta = data.get("delta")
-                            if isinstance(delta, str):
+                            # OpenAI Responses SSE emits ``delta`` on multiple
+                            # event types — only ``response.output_text.delta``
+                            # is user-facing text. ``response.function_call_arguments.delta``
+                            # streams the JSON args of an in-flight tool call
+                            # and must NOT leak into the assistant message;
+                            # the canonical args still arrive on
+                            # ``response.output_item.done`` so we can ignore
+                            # the streaming form entirely.
+                            if isinstance(delta, str) and event_type.endswith("output_text.delta"):
                                 full_content += delta
                                 yield (delta, None)
                             item = data.get("item")
-                            if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
+                            if isinstance(item, dict) and event_type.endswith("output_item.done"):
                                 output_items.append(item)
                             response = data.get("response")
                             if isinstance(response, dict):
@@ -1354,12 +1363,21 @@ class XAIResponsesProvider(LLMProvider):
                                 data = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue
+                            event_type = data.get("type", "")
                             delta = data.get("delta")
-                            if isinstance(delta, str):
+                            # OpenAI Responses SSE emits ``delta`` on multiple
+                            # event types — only ``response.output_text.delta``
+                            # is user-facing text. ``response.function_call_arguments.delta``
+                            # streams the JSON args of an in-flight tool call
+                            # and must NOT leak into the assistant message;
+                            # the canonical args still arrive on
+                            # ``response.output_item.done`` so we can ignore
+                            # the streaming form entirely.
+                            if isinstance(delta, str) and event_type.endswith("output_text.delta"):
                                 full_content += delta
                                 yield (delta, None)
                             item = data.get("item")
-                            if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
+                            if isinstance(item, dict) and event_type.endswith("output_item.done"):
                                 output_items.append(item)
                             response = data.get("response")
                             if isinstance(response, dict):
