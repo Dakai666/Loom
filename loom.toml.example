@@ -110,6 +110,14 @@ reminder_after_turns = 10
 # enabled       = true                 # optional; explicit --model codex/... also registers it
 # base_url      = "https://chatgpt.com/backend-api/codex/responses"
 # default_model = "gpt-5.5"            # bare model name — no "codex/" prefix here
+
+# [providers.xai_oauth]
+# enabled       = true                 # optional; explicit --model xai/... also registers it
+# base_url      = "https://api.x.ai/v1/responses"
+# default_model = "grok-4.3"           # bare model name — no "xai/" prefix here
+#
+# xAI is OAuth-only in Loom. Run `loom auth xai`; XAI_API_KEY is intentionally
+# not used by the xai/<model> provider.
 #
 # ─────────────────────────────────────────────
 # Image generation

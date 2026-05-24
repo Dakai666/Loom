@@ -525,6 +525,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
       Anthropic  — ANTHROPIC_API_KEY
       OpenAI     — OPENAI_API_KEY
       Codex      — Codex OAuth from `codex login` (explicit codex/<model> prefix)
+      xAI        — xAI OAuth from `loom auth xai` (explicit xai/<model> prefix)
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
@@ -537,6 +538,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         OllamaProvider,
         LMStudioProvider,
         CodexResponsesProvider,
+        XAIResponsesProvider,
         OpenAIProvider,
         OpenRouterProvider,
     )
@@ -623,6 +625,33 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             ),
             default=codex_default or codex_requested,
             fallback=codex_default or codex_requested,
+        )
+
+    # xAI OAuth — explicit opt-in via xai/<model>. This path intentionally
+    # has no XAI_API_KEY fallback so OAuth subscription use and API spend
+    # cannot be confused.
+    xai_cfg = cfg.get("providers", {}).get("xai_oauth", {})
+    xai_requested = requested_model.startswith("xai/")
+    xai_default = default.startswith("xai/")
+    xai_enabled = bool(xai_cfg.get("enabled", False))
+    if xai_requested or xai_default or xai_enabled:
+        xai_model = xai_cfg.get("default_model", XAIResponsesProvider.DEFAULT_MODEL)
+        if requested_model.startswith("xai/"):
+            xai_model = requested_model
+        elif default.startswith("xai/"):
+            xai_model = default
+        else:
+            xai_model = f"xai/{xai_model}"
+        router.register(
+            XAIResponsesProvider(
+                model=xai_model,
+                base_url=(
+                    str(xai_cfg.get("base_url", "") or "").rstrip("/")
+                    or XAIResponsesProvider.DEFAULT_BASE_URL
+                ),
+            ),
+            default=xai_default or xai_requested,
+            fallback=xai_default or xai_requested,
         )
 
     # OpenRouter — OpenAI-compatible aggregator. Single key fronts many vendors.
@@ -718,7 +747,8 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         raise RuntimeError(
             "No LLM provider configured. "
             "Add MINIMAX_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY to .env, "
-            "or enable a local provider in loom.toml ([providers.ollama] / [providers.lmstudio])."
+            "run `loom auth xai` for xAI OAuth, or enable a local provider in loom.toml "
+            "([providers.ollama] / [providers.lmstudio])."
         )
     return router
 
