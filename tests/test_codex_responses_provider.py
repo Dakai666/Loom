@@ -53,6 +53,49 @@ class _FakeAsyncClient:
         return _Ctx()
 
 
+class _ErrorStreamResponse:
+    status_code = 400
+    text = '{"detail":"Unsupported parameter: max_output_tokens"}'
+
+    def raise_for_status(self):
+        import httpx
+
+        request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+        response = httpx.Response(400, text=self.text, request=request)
+        raise httpx.HTTPStatusError(
+            "Client error '400 Bad Request' for url",
+            request=request,
+            response=response,
+        )
+
+    async def aiter_lines(self):
+        if False:
+            yield ""
+
+
+class _FakeErrorAsyncClient:
+    def __init__(self):
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"method": method, "url": url, "headers": headers, "json": json})
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _ErrorStreamResponse()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+
 @pytest.fixture
 def codex_home(tmp_path, monkeypatch):
     home = tmp_path / "codex"
@@ -123,3 +166,15 @@ async def test_codex_provider_normalizes_tool_call(monkeypatch, codex_home):
     assert response.tool_uses[0].args == {"path": "README.md"}
     assert response.raw_message["tool_calls"][0]["function"]["name"] == "read_file"
     assert fake_client.requests[0]["json"]["tools"][0]["type"] == "function"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_surfaces_backend_error_body(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeErrorAsyncClient()
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    with pytest.raises(RuntimeError, match="Unsupported parameter: max_output_tokens"):
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])

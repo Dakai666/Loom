@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from loom.core.cognition.providers import XAIResponsesProvider
+from loom.core.cognition.providers import CodexResponsesProvider, XAIResponsesProvider
 from loom.core.cognition.xai_auth import DEFAULT_XAI_BASE_URL, save_xai_oauth_state
 
 
@@ -14,6 +14,10 @@ def _jwt(exp: int) -> str:
         json.dumps({"exp": exp}).encode()
     ).rstrip(b"=").decode()
     return f"{header}.{payload}."
+
+
+def test_xai_provider_does_not_inherit_codex_provider():
+    assert not issubclass(XAIResponsesProvider, CodexResponsesProvider)
 
 
 class _StreamResponse:
