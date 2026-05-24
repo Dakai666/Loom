@@ -88,6 +88,7 @@ async def test_xai_provider_streams_with_oauth_token_not_api_key(tmp_path, monke
     assert req["headers"]["Authorization"] == f"Bearer {token}"
     assert "xai-api-key-that-must-not-be-used" not in json.dumps(req)
     assert req["json"]["model"] == "grok-4.3"
+    assert req["json"]["max_output_tokens"] == 8096
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,7 @@ async def test_codex_provider_streams_text(monkeypatch, codex_home):
     assert req["json"]["model"] == "gpt-5.5"
     assert req["json"]["store"] is False
     assert req["json"]["stream"] is True
+    assert "max_output_tokens" not in req["json"]
 
 
 @pytest.mark.asyncio

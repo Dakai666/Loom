@@ -896,6 +896,7 @@ class CodexResponsesProvider(LLMProvider):
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
     DEFAULT_TIMEOUT = 180.0
+    SUPPORTS_MAX_OUTPUT_TOKENS = False
 
     def __init__(
         self,
@@ -971,8 +972,9 @@ class CodexResponsesProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "store": False,
-            "max_output_tokens": max_tokens,
         }
+        if self.SUPPORTS_MAX_OUTPUT_TOKENS:
+            payload["max_output_tokens"] = max_tokens
         if tools:
             payload["tools"] = self.format_tools(tools)
         return payload
@@ -1139,6 +1141,7 @@ class XAIResponsesProvider(CodexResponsesProvider):
     DEFAULT_MODEL = "grok-4.3"
     DEFAULT_BASE_URL = "https://api.x.ai/v1/responses"
     DEFAULT_TIMEOUT = 180.0
+    SUPPORTS_MAX_OUTPUT_TOKENS = True
 
     def _load_bearer_token(self) -> str:
         from loom.core.cognition.xai_auth import load_xai_oauth_credential
