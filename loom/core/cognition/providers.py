@@ -44,12 +44,29 @@ from .forensics import get_forensics
 logger = logging.getLogger(__name__)
 
 
-def _http_status_detail(provider: str, exc: Any) -> str:
+async def _http_status_detail(provider: str, exc: Any) -> str:
+    """Format an HTTPStatusError into a human-readable detail string.
+
+    Works for both regular and streaming responses. Streaming responses
+    raised through ``client.stream(...).__aenter__()`` haven't loaded
+    their body yet, so accessing ``.text`` would raise
+    ``httpx.ResponseNotRead``. We call ``aread()`` first and swallow any
+    read failure so the caller always gets *some* detail.
+    """
     response = getattr(exc, "response", None)
     status_code = getattr(response, "status_code", "unknown")
     body = ""
     if response is not None:
-        body = str(getattr(response, "text", "") or "").strip()
+        aread = getattr(response, "aread", None)
+        if callable(aread):
+            try:
+                await aread()
+            except Exception:
+                pass
+        try:
+            body = str(getattr(response, "text", "") or "").strip()
+        except Exception:
+            body = ""
     detail = f"{provider} request failed with HTTP {status_code}"
     if body:
         detail += f": {body[:1000]}"
@@ -1059,7 +1076,7 @@ class CodexResponsesProvider(LLMProvider):
                 try:
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as exc:
-                    raise RuntimeError(_http_status_detail("Codex Responses", exc)) from exc
+                    raise RuntimeError(await _http_status_detail("Codex Responses", exc)) from exc
                 event: str | None = None
                 data_lines: list[str] = []
                 async for line in resp.aiter_lines():
@@ -1301,7 +1318,7 @@ class XAIResponsesProvider(LLMProvider):
                 try:
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as exc:
-                    raise RuntimeError(_http_status_detail("xAI Responses", exc)) from exc
+                    raise RuntimeError(await _http_status_detail("xAI Responses", exc)) from exc
                 event: str | None = None
                 data_lines: list[str] = []
                 async for line in resp.aiter_lines():

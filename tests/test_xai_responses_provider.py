@@ -95,6 +95,89 @@ async def test_xai_provider_streams_with_oauth_token_not_api_key(tmp_path, monke
     assert req["json"]["max_output_tokens"] == 8096
 
 
+class _XAIErrorStreamResponse:
+    """Streaming-aware mock that mirrors httpx.ResponseNotRead semantics."""
+
+    status_code = 401
+    _body = '{"detail":"invalid bearer token"}'
+
+    def __init__(self):
+        self._read = False
+
+    async def aread(self):
+        self._read = True
+
+    @property
+    def text(self):
+        if not self._read:
+            import httpx
+
+            raise httpx.ResponseNotRead()
+        return self._body
+
+    def raise_for_status(self):
+        import httpx
+
+        request = httpx.Request("POST", "https://api.x.ai/v1/responses")
+        raise httpx.HTTPStatusError(
+            "Client error '401 Unauthorized' for url",
+            request=request,
+            response=self,
+        )
+
+    async def aiter_lines(self):
+        if False:
+            yield ""
+
+
+class _XAIErrorAsyncClient:
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"method": method, "url": url, "headers": headers, "json": json})
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _XAIErrorStreamResponse()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_surfaces_streaming_backend_error(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    monkeypatch.setattr(httpx, "AsyncClient", _XAIErrorAsyncClient)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "401" in message
+    assert "invalid bearer token" in message
+    assert "without having called" not in message
+
+
 @pytest.mark.asyncio
 async def test_xai_router_rejects_config_base_url_before_streaming(tmp_path, monkeypatch):
     import httpx

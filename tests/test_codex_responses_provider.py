@@ -54,18 +54,40 @@ class _FakeAsyncClient:
 
 
 class _ErrorStreamResponse:
+    """Mock that mirrors httpx streaming-response semantics.
+
+    A streaming response raises ``httpx.ResponseNotRead`` when ``.text``
+    is accessed before ``aread()``. ``raise_for_status()`` itself does
+    *not* read the body, so the exception carries this same streaming
+    response — accessing its ``.text`` blindly is the bug PR #449's
+    original handler had.
+    """
+
     status_code = 400
-    text = '{"detail":"Unsupported parameter: max_output_tokens"}'
+    _body = '{"detail":"Unsupported parameter: max_output_tokens"}'
+
+    def __init__(self):
+        self._read = False
+
+    async def aread(self):
+        self._read = True
+
+    @property
+    def text(self):
+        if not self._read:
+            import httpx
+
+            raise httpx.ResponseNotRead()
+        return self._body
 
     def raise_for_status(self):
         import httpx
 
         request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
-        response = httpx.Response(400, text=self.text, request=request)
         raise httpx.HTTPStatusError(
             "Client error '400 Bad Request' for url",
             request=request,
-            response=response,
+            response=self,
         )
 
     async def aiter_lines(self):
@@ -176,5 +198,13 @@ async def test_codex_provider_surfaces_backend_error_body(monkeypatch, codex_hom
     monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
     provider = CodexResponsesProvider(model="codex/gpt-5.5")
 
-    with pytest.raises(RuntimeError, match="Unsupported parameter: max_output_tokens"):
+    with pytest.raises(RuntimeError) as excinfo:
         await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "Unsupported parameter: max_output_tokens" in message
+    assert "HTTP 400" in message
+    # Guard against regression of the `.text` on streaming-response bug —
+    # the helper must call ``aread()`` before reading ``.text``, otherwise
+    # this string from httpx leaks out and masks the real backend error.
+    assert "without having called" not in message
