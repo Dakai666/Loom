@@ -542,6 +542,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         OpenAIProvider,
         OpenRouterProvider,
     )
+    from loom.core.cognition.xai_auth import validate_xai_base_url
 
     env = _load_env()
     cfg = _load_loom_config()
@@ -635,20 +636,21 @@ def build_router(active_model: str | None = None) -> LLMRouter:
     xai_default = default.startswith("xai/")
     xai_enabled = bool(xai_cfg.get("enabled", False))
     if xai_requested or xai_default or xai_enabled:
-        xai_model = xai_cfg.get("default_model", XAIResponsesProvider.DEFAULT_MODEL)
         if requested_model.startswith("xai/"):
             xai_model = requested_model
         elif default.startswith("xai/"):
             xai_model = default
         else:
-            xai_model = f"xai/{xai_model}"
+            raw_xai_model = str(xai_cfg.get("default_model", XAIResponsesProvider.DEFAULT_MODEL)).strip()
+            xai_model = f"xai/{raw_xai_model.removeprefix('xai/') or XAIResponsesProvider.DEFAULT_MODEL}"
+        xai_base_url = validate_xai_base_url(
+            str(xai_cfg.get("base_url", "") or "").rstrip("/"),
+            fallback=XAIResponsesProvider.DEFAULT_BASE_URL,
+        )
         router.register(
             XAIResponsesProvider(
                 model=xai_model,
-                base_url=(
-                    str(xai_cfg.get("base_url", "") or "").rstrip("/")
-                    or XAIResponsesProvider.DEFAULT_BASE_URL
-                ),
+                base_url=xai_base_url,
             ),
             default=xai_default or xai_requested,
             fallback=xai_default or xai_requested,

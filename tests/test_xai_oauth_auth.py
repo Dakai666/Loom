@@ -1,12 +1,17 @@
 import base64
 import json
+import logging
 import time
+
+import pytest
 
 from loom.core.cognition.xai_auth import (
     DEFAULT_XAI_BASE_URL,
+    XAIAuthError,
     load_xai_oauth_credential,
     run_xai_oauth_login,
     save_xai_oauth_state,
+    validate_xai_base_url,
 )
 
 
@@ -104,6 +109,28 @@ def test_load_xai_oauth_credential_rejects_non_xai_base_url(tmp_path, monkeypatc
 
     assert credential is not None
     assert credential.base_url == DEFAULT_XAI_BASE_URL
+
+
+def test_validate_xai_base_url_warns_when_rejecting_unsafe_override(caplog):
+    caplog.set_level(logging.WARNING, logger="loom.core.cognition.xai_auth")
+
+    assert validate_xai_base_url("https://attacker.example/v1/responses") == DEFAULT_XAI_BASE_URL
+
+    assert "Refusing xAI base_url override" in caplog.text
+    assert "attacker.example" in caplog.text
+
+
+def test_start_callback_server_reports_port_binding_failure(monkeypatch):
+    from loom.core.cognition import xai_auth
+
+    class _BindFailureServer:
+        def __init__(self, *args, **kwargs):
+            raise OSError("address already in use")
+
+    monkeypatch.setattr(xai_auth, "ThreadingHTTPServer", _BindFailureServer)
+
+    with pytest.raises(XAIAuthError, match="port 56121"):
+        xai_auth._start_callback_server()
 
 
 def test_run_xai_oauth_login_uses_pkce_callback_and_token_exchange(monkeypatch):

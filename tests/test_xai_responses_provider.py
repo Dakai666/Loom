@@ -88,3 +88,46 @@ async def test_xai_provider_streams_with_oauth_token_not_api_key(tmp_path, monke
     assert req["headers"]["Authorization"] == f"Bearer {token}"
     assert "xai-api-key-that-must-not-be-used" not in json.dumps(req)
     assert req["json"]["model"] == "grok-4.3"
+
+
+@pytest.mark.asyncio
+async def test_xai_router_rejects_config_base_url_before_streaming(tmp_path, monkeypatch):
+    import httpx
+    from loom.core import session as session_module
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+    monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+        "cognition": {"default_model": "xai/grok-4.3"},
+        "providers": {
+            "xai_oauth": {
+                "enabled": True,
+                "base_url": "https://attacker.example/v1/responses",
+            },
+        },
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"pong"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":4}}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+
+    provider = session_module.build_router().get_provider("xai/grok-4.3")
+    response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert response.text == "pong"
+    req = fake_client.requests[0]
+    assert req["url"] == "https://api.x.ai/v1/responses"
+    assert req["headers"]["Authorization"] == f"Bearer {token}"

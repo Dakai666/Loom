@@ -1130,6 +1130,8 @@ class XAIResponsesProvider(CodexResponsesProvider):
 
     Routing prefix: ``xai/``. This provider intentionally has no
     ``XAI_API_KEY`` fallback; selecting ``xai/...`` means OAuth only.
+    Coupled to ``CodexResponsesProvider``'s Responses SSE shape; revisit if
+    xAI diverges from that protocol.
     """
 
     name = "xai"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -23,6 +24,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_OAUTH_ISSUER = "https://auth.x.ai"
@@ -172,6 +175,13 @@ def exchange_xai_code_for_tokens(
     code_challenge: str,
     timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
+    """Exchange an authorization code for xAI tokens.
+
+    xAI's OAuth flow accepts the S256 challenge fields on the token request;
+    Loom sends them together with the required ``code_verifier`` for parity
+    with xAI's browser CLI flow.
+    """
+
     response = httpx.post(
         _validate_xai_oauth_endpoint(token_endpoint, field="token_endpoint"),
         headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
@@ -238,7 +248,13 @@ def _start_callback_server() -> tuple[HTTPServer, threading.Thread, dict[str, An
         allow_reuse_address = True
         daemon_threads = True
 
-    server = _ReuseHTTPServer((XAI_OAUTH_REDIRECT_HOST, XAI_OAUTH_REDIRECT_PORT), handler_cls)
+    try:
+        server = _ReuseHTTPServer((XAI_OAUTH_REDIRECT_HOST, XAI_OAUTH_REDIRECT_PORT), handler_cls)
+    except OSError as exc:
+        raise XAIAuthError(
+            f"xAI OAuth callback port {XAI_OAUTH_REDIRECT_PORT} is unavailable. "
+            "Close the process using it, then run `loom auth xai` again."
+        ) from exc
     redirect_uri = f"http://{XAI_OAUTH_REDIRECT_HOST}:{server.server_address[1]}{XAI_OAUTH_REDIRECT_PATH}"
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
     thread.start()
@@ -270,7 +286,11 @@ def run_xai_oauth_login(
     open_browser: bool = True,
     timeout_seconds: float = 180.0,
 ) -> dict[str, Any]:
-    """Run browser-based xAI OAuth login and return auth state."""
+    """Run browser-based xAI OAuth login and return unsaved auth state.
+
+    The caller is responsible for persisting the returned state with
+    ``save_xai_oauth_state()``.
+    """
 
     discovery = xai_oauth_discovery(timeout_seconds)
     server, thread, callback_result, redirect_uri = _start_callback_server()
@@ -344,9 +364,8 @@ def validate_xai_base_url(value: str, *, fallback: str = DEFAULT_XAI_BASE_URL) -
         return fallback
     parsed = urlparse(candidate)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https":
-        return fallback
-    if host != "x.ai" and not host.endswith(".x.ai"):
+    if parsed.scheme != "https" or (host != "x.ai" and not host.endswith(".x.ai")):
+        logger.warning("Refusing xAI base_url override %r; using %s", candidate, fallback)
         return fallback
     return candidate
 
