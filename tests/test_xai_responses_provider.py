@@ -189,6 +189,49 @@ async def test_xai_provider_uses_output_text_for_assistant_history(tmp_path, mon
     assert input_items[2]["content"][0]["type"] == "input_text"
 
 
+@pytest.mark.asyncio
+async def test_xai_provider_does_not_leak_function_call_args_into_text(tmp_path, monkeypatch):
+    """Mirror of the Codex regression — function_call_arguments.delta
+    must not bleed into assistant text."""
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"thinking"}',
+        "",
+        "event: response.function_call_arguments.delta",
+        'data: {"type":"response.function_call_arguments.delta","delta":"{\\"q\\":"}',
+        "",
+        "event: response.function_call_arguments.delta",
+        'data: {"type":"response.function_call_arguments.delta","delta":"\\"loom\\"}"}',
+        "",
+        "event: response.output_item.done",
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"search","arguments":"{\\"q\\":\\"loom\\"}"}}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    response = await provider.chat(messages=[{"role": "user", "content": "search loom"}])
+
+    assert response.text == "thinking"
+    assert '"q"' not in (response.text or "")
+    assert len(response.tool_uses) == 1
+    assert response.tool_uses[0].args == {"q": "loom"}
+
+
 class _XAIStreamDropResponse:
     """Simulates an SSE peer closing the connection mid-stream."""
 
