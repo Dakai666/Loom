@@ -169,6 +169,28 @@ def _extract_image_generate_artifact(
     }
 
 
+def _extract_tts_generate_artifact(
+    call: "ToolCall", result: "ToolResult"
+) -> dict | None:
+    import hashlib
+    import json as _json
+    try:
+        payload = _json.loads(result.output or "{}")
+    except Exception:
+        payload = {}
+    size_bytes = int(payload.get("bytes", 0) or 0)
+    digest_input = (
+        f"{payload.get('path','')}|{size_bytes}|"
+        f"{payload.get('voice_id','')}|{payload.get('format','')}"
+    ).encode("utf-8")
+    return {
+        "artifact_type": "audio",
+        "size_bytes": size_bytes,
+        "digest": "sha256:" + hashlib.sha256(digest_input).hexdigest(),
+        "location": payload.get("path"),
+    }
+
+
 def _extract_pursuit_write_artifact(
     call: "ToolCall", result: "ToolResult"
 ) -> dict | None:
@@ -192,6 +214,7 @@ _ARTIFACT_EXTRACTORS: dict[str, Callable[["ToolCall", "ToolResult"], dict | None
     "write_file": _extract_write_file_artifact,
     "image_generate": _extract_image_generate_artifact,
     "openai__text_to_image": _extract_image_generate_artifact,
+    "tts_generate": _extract_tts_generate_artifact,
     "pursuit_write": _extract_pursuit_write_artifact,
 }
 
