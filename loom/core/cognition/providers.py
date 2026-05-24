@@ -44,6 +44,18 @@ from .forensics import get_forensics
 logger = logging.getLogger(__name__)
 
 
+def _stream_interrupt_detail(provider: str, exc: BaseException) -> str:
+    """Format a streaming-transport error.
+
+    Some httpx exceptions (notably ``RemoteProtocolError`` raised when an
+    SSE peer closes mid-stream) carry an empty ``str(exc)``. Fall back
+    to the exception class name so the user never sees the bare
+    ``turn aborted with error: `` with nothing after the colon.
+    """
+    detail = str(exc).strip() or type(exc).__name__
+    return f"{provider} stream interrupted: {detail}"
+
+
 async def _http_status_detail(provider: str, exc: Any) -> str:
     """Format an HTTPStatusError into a human-readable detail string.
 
@@ -1079,39 +1091,44 @@ class CodexResponsesProvider(LLMProvider):
                     raise RuntimeError(await _http_status_detail("Codex Responses", exc)) from exc
                 event: str | None = None
                 data_lines: list[str] = []
-                async for line in resp.aiter_lines():
-                    if abort_signal is not None and abort_signal.is_set():
-                        break
-                    if line.startswith("event: "):
-                        event = line[7:]
-                    elif line.startswith("data: "):
-                        data_lines.append(line[6:])
-                    elif line == "" and event:
-                        raw = "\n".join(data_lines)
-                        event = None
-                        data_lines = []
-                        try:
-                            data = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        delta = data.get("delta")
-                        if isinstance(delta, str):
-                            full_content += delta
-                            yield (delta, None)
-                        item = data.get("item")
-                        if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
-                            output_items.append(item)
-                        response = data.get("response")
-                        if isinstance(response, dict):
-                            response_status = str(response.get("status") or response_status)
-                            usage = response.get("usage") or {}
-                            if isinstance(usage, dict):
-                                input_tokens = int(
-                                    usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
-                                )
-                                output_tokens = int(
-                                    usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
-                                )
+                try:
+                    async for line in resp.aiter_lines():
+                        if abort_signal is not None and abort_signal.is_set():
+                            break
+                        if line.startswith("event: "):
+                            event = line[7:]
+                        elif line.startswith("data: "):
+                            data_lines.append(line[6:])
+                        elif line == "" and event:
+                            raw = "\n".join(data_lines)
+                            event = None
+                            data_lines = []
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            delta = data.get("delta")
+                            if isinstance(delta, str):
+                                full_content += delta
+                                yield (delta, None)
+                            item = data.get("item")
+                            if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
+                                output_items.append(item)
+                            response = data.get("response")
+                            if isinstance(response, dict):
+                                response_status = str(response.get("status") or response_status)
+                                usage = response.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    input_tokens = int(
+                                        usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
+                                    )
+                                    output_tokens = int(
+                                        usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
+                                    )
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(
+                        _stream_interrupt_detail("Codex Responses", exc)
+                    ) from exc
 
         tool_uses: list[ToolUse] = []
         raw_tool_calls: list[dict[str, Any]] = []
@@ -1321,39 +1338,44 @@ class XAIResponsesProvider(LLMProvider):
                     raise RuntimeError(await _http_status_detail("xAI Responses", exc)) from exc
                 event: str | None = None
                 data_lines: list[str] = []
-                async for line in resp.aiter_lines():
-                    if abort_signal is not None and abort_signal.is_set():
-                        break
-                    if line.startswith("event: "):
-                        event = line[7:]
-                    elif line.startswith("data: "):
-                        data_lines.append(line[6:])
-                    elif line == "" and event:
-                        raw = "\n".join(data_lines)
-                        event = None
-                        data_lines = []
-                        try:
-                            data = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        delta = data.get("delta")
-                        if isinstance(delta, str):
-                            full_content += delta
-                            yield (delta, None)
-                        item = data.get("item")
-                        if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
-                            output_items.append(item)
-                        response = data.get("response")
-                        if isinstance(response, dict):
-                            response_status = str(response.get("status") or response_status)
-                            usage = response.get("usage") or {}
-                            if isinstance(usage, dict):
-                                input_tokens = int(
-                                    usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
-                                )
-                                output_tokens = int(
-                                    usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
-                                )
+                try:
+                    async for line in resp.aiter_lines():
+                        if abort_signal is not None and abort_signal.is_set():
+                            break
+                        if line.startswith("event: "):
+                            event = line[7:]
+                        elif line.startswith("data: "):
+                            data_lines.append(line[6:])
+                        elif line == "" and event:
+                            raw = "\n".join(data_lines)
+                            event = None
+                            data_lines = []
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            delta = data.get("delta")
+                            if isinstance(delta, str):
+                                full_content += delta
+                                yield (delta, None)
+                            item = data.get("item")
+                            if isinstance(item, dict) and data.get("type", "").endswith("output_item.done"):
+                                output_items.append(item)
+                            response = data.get("response")
+                            if isinstance(response, dict):
+                                response_status = str(response.get("status") or response_status)
+                                usage = response.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    input_tokens = int(
+                                        usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
+                                    )
+                                    output_tokens = int(
+                                        usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
+                                    )
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(
+                        _stream_interrupt_detail("xAI Responses", exc)
+                    ) from exc
 
         tool_uses: list[ToolUse] = []
         raw_tool_calls: list[dict[str, Any]] = []

@@ -189,6 +189,73 @@ async def test_xai_provider_uses_output_text_for_assistant_history(tmp_path, mon
     assert input_items[2]["content"][0]["type"] == "input_text"
 
 
+class _XAIStreamDropResponse:
+    """Simulates an SSE peer closing the connection mid-stream."""
+
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    async def aiter_lines(self):
+        import httpx
+
+        yield "event: response.output_text.delta"
+        yield 'data: {"type":"response.output_text.delta","delta":"par"}'
+        yield ""
+        raise httpx.RemoteProtocolError("")
+
+
+class _XAIStreamDropAsyncClient:
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"method": method, "url": url, "headers": headers, "json": json})
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _XAIStreamDropResponse()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_raises_meaningful_error_on_stream_drop(tmp_path, monkeypatch):
+    """Mid-stream RemoteProtocolError with empty message must not surface
+    as ``turn aborted with error: `` (empty after colon)."""
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    monkeypatch.setattr(httpx, "AsyncClient", _XAIStreamDropAsyncClient)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "xAI Responses stream interrupted" in message
+    assert "RemoteProtocolError" in message
+    assert message.strip().endswith("RemoteProtocolError")
+
+
 @pytest.mark.asyncio
 async def test_xai_provider_surfaces_streaming_backend_error(tmp_path, monkeypatch):
     import httpx
