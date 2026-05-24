@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from loom.core.cognition.providers import XAIResponsesProvider
+from loom.core.cognition.providers import CodexResponsesProvider, XAIResponsesProvider
 from loom.core.cognition.xai_auth import DEFAULT_XAI_BASE_URL, save_xai_oauth_state
 
 
@@ -14,6 +14,10 @@ def _jwt(exp: int) -> str:
         json.dumps({"exp": exp}).encode()
     ).rstrip(b"=").decode()
     return f"{header}.{payload}."
+
+
+def test_xai_provider_does_not_inherit_codex_provider():
+    assert not issubclass(XAIResponsesProvider, CodexResponsesProvider)
 
 
 class _StreamResponse:
@@ -88,6 +92,193 @@ async def test_xai_provider_streams_with_oauth_token_not_api_key(tmp_path, monke
     assert req["headers"]["Authorization"] == f"Bearer {token}"
     assert "xai-api-key-that-must-not-be-used" not in json.dumps(req)
     assert req["json"]["model"] == "grok-4.3"
+    assert req["json"]["max_output_tokens"] == 8096
+
+
+class _XAIErrorStreamResponse:
+    """Streaming-aware mock that mirrors httpx.ResponseNotRead semantics."""
+
+    status_code = 401
+    _body = '{"detail":"invalid bearer token"}'
+
+    def __init__(self):
+        self._read = False
+
+    async def aread(self):
+        self._read = True
+
+    @property
+    def text(self):
+        if not self._read:
+            import httpx
+
+            raise httpx.ResponseNotRead()
+        return self._body
+
+    def raise_for_status(self):
+        import httpx
+
+        request = httpx.Request("POST", "https://api.x.ai/v1/responses")
+        raise httpx.HTTPStatusError(
+            "Client error '401 Unauthorized' for url",
+            request=request,
+            response=self,
+        )
+
+    async def aiter_lines(self):
+        if False:
+            yield ""
+
+
+class _XAIErrorAsyncClient:
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"method": method, "url": url, "headers": headers, "json": json})
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _XAIErrorStreamResponse()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_uses_output_text_for_assistant_history(tmp_path, monkeypatch):
+    """Mirrors the Codex Responses contract — assistant content must be
+    ``output_text``, user content ``input_text``."""
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":0,"output_tokens":0}}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    await provider.chat(messages=[
+        {"role": "user", "content": "first user"},
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "second user"},
+    ])
+
+    input_items = fake_client.requests[0]["json"]["input"]
+    assert [item["role"] for item in input_items] == ["user", "assistant", "user"]
+    assert input_items[0]["content"][0]["type"] == "input_text"
+    assert input_items[1]["content"][0]["type"] == "output_text"
+    assert input_items[2]["content"][0]["type"] == "input_text"
+
+
+class _XAIStreamDropResponse:
+    """Simulates an SSE peer closing the connection mid-stream."""
+
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    async def aiter_lines(self):
+        import httpx
+
+        yield "event: response.output_text.delta"
+        yield 'data: {"type":"response.output_text.delta","delta":"par"}'
+        yield ""
+        raise httpx.RemoteProtocolError("")
+
+
+class _XAIStreamDropAsyncClient:
+    def __init__(self, *args, **kwargs):
+        self.requests = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        self.requests.append({"method": method, "url": url, "headers": headers, "json": json})
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _XAIStreamDropResponse()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_raises_meaningful_error_on_stream_drop(tmp_path, monkeypatch):
+    """Mid-stream RemoteProtocolError with empty message must not surface
+    as ``turn aborted with error: `` (empty after colon)."""
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    monkeypatch.setattr(httpx, "AsyncClient", _XAIStreamDropAsyncClient)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "xAI Responses stream interrupted" in message
+    assert "RemoteProtocolError" in message
+    assert message.strip().endswith("RemoteProtocolError")
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_surfaces_streaming_backend_error(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    monkeypatch.setattr(httpx, "AsyncClient", _XAIErrorAsyncClient)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "401" in message
+    assert "invalid bearer token" in message
+    assert "without having called" not in message
 
 
 @pytest.mark.asyncio
