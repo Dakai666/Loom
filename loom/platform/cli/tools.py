@@ -100,6 +100,15 @@ _WEB_TIMEOUT = 10.0       # seconds for all HTTP calls
 _CONTENT_LIMIT = 2000     # max chars returned to agent
 _SEARCH_RESULTS = 5       # default Brave results
 _IMAGE_TIMEOUT = 180.0
+_TTS_TIMEOUT = 180.0
+_TTS_CODECS = ("mp3", "wav", "pcm", "mulaw", "alaw")
+_TTS_CODEC_SUFFIX = {
+    "mp3": ".mp3",
+    "wav": ".wav",
+    "pcm": ".pcm",
+    "mulaw": ".ulaw",
+    "alaw": ".alaw",
+}
 
 
 async def _race_abort(coro, abort_signal):
@@ -2983,6 +2992,278 @@ def make_openai_image_generation_tool(
             "writes one generated image file under the workspace",
         ],
         scope_resolver=_make_openai_image_scope_resolver(workspace),
+    )
+
+
+def _make_xai_tts_scope_resolver(workspace: Path):
+    """Scope resolver for the xAI-backed TTS generation tool."""
+    import os.path
+
+    _workspace_resolved = workspace.resolve()
+
+    def _resolve(call: ToolCall) -> ScopeRequest:
+        # When ``output_path`` is omitted the executor writes to
+        # ``outputs/tts-<id>.<codec>``. Mirror that here so the
+        # permission selector reflects the real mutation surface
+        # (``outputs``) instead of widening it to the workspace root.
+        raw = call.args.get("output_path") or "outputs/tts-default"
+        p = Path(str(raw))
+        resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
+        try:
+            selector = str(resolved.parent.relative_to(_workspace_resolved))
+        except ValueError:
+            selector = os.path.normpath(str(resolved.parent))
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="path",
+                    action="write",
+                    selector=selector,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+                ScopeRequirement(
+                    resource="network",
+                    action="connect",
+                    selector="api.x.ai",
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+        )
+
+    return _resolve
+
+
+def make_xai_tts_tool(
+    workspace: Path,
+    *,
+    tool_name: str = "tts_generate",
+    default_voice_id: str = "eve",
+    default_language: str = "auto",
+    default_format: str = "mp3",
+    default_auth_mode: str = "oauth",
+    default_sample_rate: int | None = None,
+    default_bit_rate: int | None = None,
+) -> ToolDefinition:
+    """Build the canonical tts_generate tool backed by xAI TTS (OAuth-only).
+
+    No XAI_API_KEY fallback by design — mirrors the xai/<model> chat provider
+    so an OAuth-only path cannot silently spend API-key quota.
+    """
+
+    from loom.core.cognition.xai_auth import load_xai_oauth_credential
+
+    async def _xai_tts(call: ToolCall) -> ToolResult:
+        text = str(call.args.get("text", "")).strip()
+        if not text:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error="Missing required argument: text",
+            )
+
+        auth_mode = str(call.args.get("auth_mode", default_auth_mode)).strip().lower()
+        if auth_mode != "oauth":
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error="auth_mode must be: oauth (xAI TTS is OAuth-only in Loom).",
+            )
+
+        credential = load_xai_oauth_credential()
+        if credential is None:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=(
+                    "No unexpired xAI OAuth token found. "
+                    "Run `loom auth xai` before using tts_generate."
+                ),
+            )
+
+        codec = str(call.args.get("format", default_format)).strip().lower() or default_format
+        if codec not in _TTS_CODEC_SUFFIX:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"format must be one of: {list(_TTS_CODECS)}",
+            )
+
+        raw_output = str(call.args.get("output_path", "")).strip()
+        suffix = _TTS_CODEC_SUFFIX[codec]
+        if raw_output:
+            output_path = _resolve_workspace_path(raw_output, workspace)
+        else:
+            output_path = workspace / "outputs" / f"tts-{uuid.uuid4().hex[:8]}{suffix}"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        voice_id = str(call.args.get("voice_id", default_voice_id)).strip() or default_voice_id
+        language = str(call.args.get("language", default_language)).strip() or default_language
+
+        def _coerce_positive_int(value: Any, fallback: int | None) -> int | None:
+            if isinstance(value, bool):
+                return fallback
+            if isinstance(value, (int, float)):
+                ivalue = int(value)
+                return ivalue if ivalue > 0 else fallback
+            return fallback
+
+        sample_rate = _coerce_positive_int(call.args.get("sample_rate"), default_sample_rate)
+        bit_rate = _coerce_positive_int(call.args.get("bit_rate"), default_bit_rate)
+
+        output_format: dict[str, Any] = {"codec": codec}
+        if sample_rate is not None:
+            output_format["sample_rate"] = sample_rate
+        if bit_rate is not None and codec == "mp3":
+            output_format["bit_rate"] = bit_rate
+
+        payload: dict[str, Any] = {
+            "text": text,
+            "voice_id": voice_id,
+            "language": language,
+            "output_format": output_format,
+        }
+        speed = call.args.get("speed")
+        if isinstance(speed, (int, float)) and not isinstance(speed, bool):
+            payload["speed"] = float(speed)
+
+        try:
+            async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as client:
+                resp = await client.post(
+                    "https://api.x.ai/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {credential.token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                resp.raise_for_status()
+                audio_bytes = resp.content
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"xAI TTS request failed with HTTP {exc.response.status_code}: {body}",
+            )
+        except Exception as exc:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error=f"xAI TTS request failed: {type(exc).__name__}: {exc}",
+            )
+
+        if not audio_bytes:
+            return ToolResult(
+                call_id=call.id,
+                tool_name=call.tool_name,
+                success=False,
+                error="xAI TTS returned empty audio payload.",
+            )
+
+        output_path.write_bytes(audio_bytes)
+        try:
+            display_path = str(output_path.relative_to(workspace))
+        except ValueError:
+            display_path = str(output_path)
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.tool_name,
+            success=True,
+            output=json.dumps({
+                "path": display_path,
+                "provider": "xai",
+                "voice_id": voice_id,
+                "format": codec,
+                "bytes": len(audio_bytes),
+            }, ensure_ascii=False),
+        )
+
+    return ToolDefinition(
+        name=tool_name,
+        description=(
+            "Generate speech audio from text via xAI TTS (OAuth-only) and save "
+            "it to a workspace file. Defaults to MP3 with built-in voice `eve`."
+        ),
+        trust_level=TrustLevel.GUARDED,
+        capabilities=ToolCapability.NETWORK | ToolCapability.MUTATES,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to convert to speech."},
+                "output_path": {
+                    "type": "string",
+                    "description": (
+                        "Workspace-relative output path. "
+                        "Defaults to outputs/tts-<id>.<codec-ext>."
+                    ),
+                },
+                "voice_id": {
+                    "type": "string",
+                    "description": (
+                        "Built-in xAI voice (eve, ara, leo, rex, sal) "
+                        "or a custom voice id."
+                    ),
+                    "default": default_voice_id,
+                },
+                "language": {
+                    "type": "string",
+                    "description": "BCP-47 language code (e.g. en, zh, pt-BR) or `auto`.",
+                    "default": default_language,
+                },
+                "format": {
+                    "type": "string",
+                    "enum": list(_TTS_CODECS),
+                    "description": "Audio codec for the saved file.",
+                    "default": default_format,
+                },
+                "speed": {
+                    "type": "number",
+                    "description": "Speaking rate multiplier (xAI default applies when omitted).",
+                },
+                "sample_rate": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Output sample rate in Hz. Omit to use xAI default "
+                        "(typically 24000)."
+                    ),
+                },
+                "bit_rate": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Output bit rate in bps. Only applied for mp3; omit to "
+                        "use xAI default (typically 128000)."
+                    ),
+                },
+                "auth_mode": {
+                    "type": "string",
+                    "enum": ["oauth"],
+                    "default": default_auth_mode,
+                    "description": "xAI TTS is OAuth-only; XAI_API_KEY is intentionally ignored.",
+                },
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+        executor=_xai_tts,
+        tags=["tts", "audio", "xai"],
+        impact_scope="network",
+        scope_descriptions=[
+            "connects to api.x.ai for xAI OAuth text-to-speech",
+            "writes one generated audio file under the workspace",
+        ],
+        scope_resolver=_make_xai_tts_scope_resolver(workspace),
     )
 
 

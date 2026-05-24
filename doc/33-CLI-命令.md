@@ -92,6 +92,34 @@ Codex OAuth access token；若 Codex backend 拒絕且 `.env` 有 `OPENAI_API_KE
 `subject_reference` 目前支援 Codex OAuth path，會把 workspace 內的參照圖轉成 Codex Responses
 `input_image`，用於角色或主體一致性；API key path 會明確拒絕而非靜默忽略。
 
+### `tts_generate`
+
+Agent 可用工具，將文字合成語音並寫入 workspace。預設不註冊；在 `loom.toml`
+設定 `[tools.tts].enabled = true` 且 `default_provider = "xai"` 後，Loom 會註冊
+canonical `tts_generate`，目前背後使用 xAI TTS（**OAuth-only**：先跑 `loom auth xai`；
+即使 `.env` 有 `XAI_API_KEY` 也刻意不使用，避免 OAuth 訂閱跟 API 計費混淆）：
+
+```json
+{
+  "text": "Hello from Loom.",
+  "voice_id": "eve",
+  "language": "auto",
+  "format": "mp3",
+  "speed": 1.0,
+  "output_path": "outputs/intro.mp3"
+}
+```
+
+`voice_id` 接受 xAI 內建 voice（`eve` / `ara` / `leo` / `rex` / `sal`）或 custom voice id。
+`language` 用 BCP-47 codes（如 `en` / `zh` / `pt-BR`）或 `auto`。`format` 支援
+`mp3 | wav | pcm | mulaw | alaw`；省略 `output_path` 時預設寫到
+`outputs/tts-<id>.<codec-ext>`。`speed`、`sample_rate`（Hz）與 `bit_rate`（bps，只對 mp3 生效）
+為選填；不送則由 xAI 用 server-side default（24 kHz / 128 kbps）。
+
+`auth_mode` 目前只有 `oauth` 一個有效值——這個欄位保留是為了未來加 path 時 schema
+不需要重塑。請求結束後工具回傳 `{path, provider, voice_id, format, bytes}` 給 agent，
+audio bytes 不會在回傳裡攜帶（只寫到指定檔案）。
+
 ---
 
 ## 對話中 HITL 命令

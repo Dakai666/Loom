@@ -1310,6 +1310,7 @@ class LoomSession:
             make_exec_escape_fn,
             make_fetch_url_tool,
             make_openai_image_generation_tool,
+            make_xai_tts_tool,
             make_memorize_tool,
             make_memory_health_tool,
             make_query_relations_tool,
@@ -1494,6 +1495,48 @@ class LoomSession:
             logger.warning(
                 "[tools.image] provider %r is not supported; skipping image_generate.",
                 _image_provider,
+            )
+
+        _tts_cfg = (_load_loom_config().get("tools", {}).get("tts", {}) or {})
+        _tts_enabled = bool(_tts_cfg.get("enabled", False))
+        _tts_provider = str(_tts_cfg.get("default_provider", "")).strip().lower()
+        _xai_tts_cfg = (_tts_cfg.get("xai", {}) or {})
+        _xai_tts_enabled = bool(_xai_tts_cfg.get("enabled", True))
+        if _tts_enabled and _tts_provider == "xai" and _xai_tts_enabled:
+            def _positive_int_or_none(raw: Any) -> int | None:
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    return None
+                return value if value > 0 else None
+
+            self.registry.register(
+                make_xai_tts_tool(
+                    self.workspace,
+                    default_voice_id=str(
+                        _xai_tts_cfg.get("voice_id", "eve")
+                    ).strip() or "eve",
+                    default_language=str(
+                        _xai_tts_cfg.get("language", "auto")
+                    ).strip() or "auto",
+                    default_format=str(
+                        _xai_tts_cfg.get("format", "mp3")
+                    ).strip().lower() or "mp3",
+                    default_auth_mode=str(
+                        _xai_tts_cfg.get("auth_mode", "oauth")
+                    ).strip().lower() or "oauth",
+                    default_sample_rate=_positive_int_or_none(
+                        _xai_tts_cfg.get("sample_rate")
+                    ),
+                    default_bit_rate=_positive_int_or_none(
+                        _xai_tts_cfg.get("bit_rate")
+                    ),
+                )
+            )
+        elif _tts_enabled and _tts_provider and _tts_provider != "xai":
+            logger.warning(
+                "[tools.tts] provider %r is not supported; skipping tts_generate.",
+                _tts_provider,
             )
 
         # Register sub-agent tool (Phase 5E)

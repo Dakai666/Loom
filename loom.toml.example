@@ -139,6 +139,29 @@ reminder_after_turns = 10
 # OpenAI Images API.
 
 # ─────────────────────────────────────────────
+# Text-to-speech
+# ─────────────────────────────────────────────
+# Disabled by default. Enable this block to expose the canonical
+# tts_generate tool backed by xAI TTS (OAuth-only — run `loom auth xai`).
+#
+# [tools.tts]
+# enabled = true
+# default_provider = "xai"
+#
+# [tools.tts.xai]
+# enabled     = true
+# voice_id    = "eve"     # eve | ara | leo | rex | sal | <custom-voice-id>
+# language    = "auto"    # BCP-47 (e.g. en, zh, pt-BR) or auto
+# format      = "mp3"     # mp3 | wav | pcm | mulaw | alaw
+# auth_mode   = "oauth"   # OAuth-only — XAI_API_KEY is intentionally ignored
+# sample_rate = 24000     # optional; omit to use xAI server default
+# bit_rate    = 128000    # optional; applied only for mp3
+#
+# Defaults above are also the per-call defaults inside tts_generate; the
+# agent can override voice_id / language / format / speed / sample_rate /
+# bit_rate per request.
+
+# ─────────────────────────────────────────────
 # Memory
 # ─────────────────────────────────────────────
 
