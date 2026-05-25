@@ -44,7 +44,7 @@ import logging
 from datetime import datetime, UTC
 from typing import TYPE_CHECKING
 
-from loom.core.memory.relational import RelationalEntry
+from loom.core.memory.relational_bridge import RelationalEntry, upsert_triple
 from loom.core.memory.semantic import SemanticEntry
 
 if TYPE_CHECKING:
@@ -85,9 +85,9 @@ class CounterFactualReflector:
         Model identifier passed to the router.
     memory:
         :class:`MemoryFacade` — provides access to procedural memory
-        (gating which tools have a tracked SkillGenome), semantic
-        memory (anti-pattern text destination), and relational memory
-        (``loom-self / skill`` triples destination).
+        (gating which tools have a tracked SkillGenome) and semantic
+        memory (anti-pattern text + ``loom-self / skill`` triples
+        destination via the relational bridge since #451 phase B).
     """
 
     def __init__(
@@ -101,7 +101,6 @@ class CounterFactualReflector:
         self._memory = memory
         self._procedural = memory.procedural
         self._semantic = memory.semantic
-        self._relational = memory.relational
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,31 +194,28 @@ class CounterFactualReflector:
             )
         )
 
-        # --- Write to RelationalMemory -------------------------------
-        # (subject, predicate) pairs are unique — truncate pattern to
-        # keep the predicate/object combo concise for the triples store.
+        # --- Write relational triples via the bridge (#451 phase B) ──
+        # (subject, predicate) uniqueness is enforced via the semantic
+        # key ``rel:{subject}::{predicate}``. Truncate pattern to keep
+        # the object concise.
         short = pattern[:200]
 
-        await self._relational.upsert(
-            RelationalEntry(
-                subject=f"skill:{call.tool_name}",
-                predicate="has_anti_pattern",
-                object=short,
-                source=f"counter_factual:{session_id}",
-                metadata={"full_pattern": pattern, "session_id": session_id},
-            )
-        )
+        await upsert_triple(self._semantic, RelationalEntry(
+            subject=f"skill:{call.tool_name}",
+            predicate="has_anti_pattern",
+            object=short,
+            source=f"counter_factual:{session_id}",
+            metadata={"full_pattern": pattern, "session_id": session_id},
+        ))
         # One triple per skill — predicate encodes the tool name so upsert
         # doesn't collapse all skills onto a single (loom-self, should_avoid) row.
-        await self._relational.upsert(
-            RelationalEntry(
-                subject="loom-self",
-                predicate=f"should_avoid:{call.tool_name}",
-                object=short,
-                source=f"counter_factual:{session_id}:{call.tool_name}",
-                metadata={"tool_name": call.tool_name, "session_id": session_id},
-            )
-        )
+        await upsert_triple(self._semantic, RelationalEntry(
+            subject="loom-self",
+            predicate=f"should_avoid:{call.tool_name}",
+            object=short,
+            source=f"counter_factual:{session_id}:{call.tool_name}",
+            metadata={"tool_name": call.tool_name, "session_id": session_id},
+        ))
 
         logger.debug(
             "Counter-factual reflection written for skill '%s': %s",

@@ -26,7 +26,6 @@ from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.procedural import SkillGenome, ProceduralMemory
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
@@ -38,7 +37,6 @@ def _facade(conn) -> MemoryFacade:
     return MemoryFacade(
         semantic=sem,
         procedural=pr,
-        relational=RelationalMemory(conn),
         episodic=EpisodicMemory(conn),
         search=MemorySearch(sem, pr),
     )

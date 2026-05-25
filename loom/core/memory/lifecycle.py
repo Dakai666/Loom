@@ -131,7 +131,14 @@ def effective_confidence(
 
 @dataclass
 class LifecycleResult:
-    """Per-table summary of one ``MemoryLifecycle.run()`` invocation."""
+    """Per-table summary of one ``MemoryLifecycle.run()`` invocation.
+
+    Issue #451 phase B: rel:* triples live in ``semantic_entries`` via
+    the bridge, so the legacy ``relational_*`` counters always read 0
+    on fresh installs. They remain as fields so consumers reading them
+    by name don't crash mid-cutover; legacy DBs in the migration cycle
+    may still report non-zero values once before the table is dropped.
+    """
     semantic_examined:   int = 0
     semantic_archived:   int = 0
     semantic_deleted:    int = 0
@@ -235,15 +242,25 @@ class MemoryLifecycle:
         result.semantic_deleted = sem_d
         result.semantic_archived = sem_a
 
-        rel_e, rel_d = await self._process_table_delete(
-            "relational_entries", dry_run=dry_run, key_col="id",
-        )
-        rel_arch_e, rel_a = await self._process_table_demote(
-            "relational_entries", dry_run=dry_run, key_col="id",
-        )
-        result.relational_examined = rel_e + rel_arch_e
-        result.relational_deleted = rel_d
-        result.relational_archived = rel_a
+        # #451 phase B: relational_entries table is retired — rel:* rows
+        # live in semantic_entries and were already processed above.
+        # On legacy DBs the table may still exist for one boot (it gets
+        # dropped during the same initialize() cycle that triggered this
+        # decay run), so run the path defensively to absorb its last
+        # archived/deleted slice into the result.
+        try:
+            rel_e, rel_d = await self._process_table_delete(
+                "relational_entries", dry_run=dry_run, key_col="id",
+            )
+            rel_arch_e, rel_a = await self._process_table_demote(
+                "relational_entries", dry_run=dry_run, key_col="id",
+            )
+            result.relational_examined = rel_e + rel_arch_e
+            result.relational_deleted = rel_d
+            result.relational_archived = rel_a
+        except Exception:
+            # Table no longer exists — expected after #451 phase B migration.
+            pass
 
         if not dry_run:
             # B1: throttle bookkeeping must not break the never-raises contract

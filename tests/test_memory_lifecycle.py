@@ -34,7 +34,7 @@ from loom.core.memory.ontology import (
     TEMPORAL_RECENT,
 )
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import RelationalEntry, upsert_triple
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
 
@@ -53,9 +53,9 @@ async def db_conn(tmp_path):
 
 @pytest_asyncio.fixture
 async def memories(db_conn):
+    # #451 phase B: relational triples live in SemanticMemory via the bridge.
     return (
         SemanticMemory(db_conn),
-        RelationalMemory(db_conn),
         ProceduralMemory(db_conn),
         EpisodicMemory(db_conn),
     )
@@ -268,27 +268,38 @@ class TestSemanticTransitions:
 
 class TestRelationalCoverage:
     """Issue #299 fix: relational decay must not be limited to
-    ``source='dreaming'``."""
+    ``source='dreaming'``. Since #451 phase B the triples live in
+    ``semantic_entries`` via the bridge — the semantic decay path
+    handles them by construction."""
 
     @pytest.mark.asyncio
     async def test_non_dreaming_source_is_examined(self, db_conn, memories):
-        _, relational, *_ = memories
+        semantic, *_ = memories
         old = (datetime.now(UTC) - timedelta(days=1000)).isoformat()
         for sub, src in [("a", "user"), ("b", "agent"), ("c", "skill_eval")]:
+            # Insert as bridge-shaped rel:* semantic rows directly.
             await db_conn.execute(
-                "INSERT INTO relational_entries (id, subject, predicate, object, "
-                "confidence, source, metadata, created_at, updated_at, "
-                "domain, temporal) "
-                "VALUES (?, ?, 'rel', 'x', ?, ?, '{}', ?, ?, ?, ?)",
-                (f"id_{sub}", sub, 1.0, src, old, old,
-                 DOMAIN_PROJECT, TEMPORAL_RECENT),
+                "INSERT INTO semantic_entries (id, key, value, confidence, "
+                "source, metadata, created_at, updated_at, domain, temporal) "
+                "VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)",
+                (
+                    f"id_{sub}",
+                    f"rel:{sub}::rel",
+                    f"{sub} rel x",
+                    1.0,
+                    src,
+                    old,
+                    old,
+                    DOMAIN_PROJECT,
+                    TEMPORAL_RECENT,
+                ),
             )
         await db_conn.commit()
 
         result = await MemoryLifecycle(db_conn).run()
-        # All three should have been demoted to archived, regardless of source
-        assert result.relational_examined == 3
-        assert result.relational_archived == 3
+        # All three should be archived alongside ordinary semantic facts.
+        assert result.semantic_examined >= 3
+        assert result.semantic_archived >= 3
 
 
 class TestDryRun:
@@ -320,7 +331,7 @@ class TestGovernanceIntegration:
     async def test_run_decay_cycle_returns_archived_and_pruned(
         self, db_conn, memories,
     ):
-        semantic, relational, procedural, episodic = memories
+        semantic, procedural, episodic = memories
         old = (datetime.now(UTC) - timedelta(days=1000)).isoformat()
         # one to archive, one already-archived to delete
         await db_conn.execute(
@@ -341,7 +352,7 @@ class TestGovernanceIntegration:
 
         gov = MemoryGovernor(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic, db=db_conn,
+            episodic=episodic, db=db_conn,
         )
         result = await gov.run_decay_cycle()
 

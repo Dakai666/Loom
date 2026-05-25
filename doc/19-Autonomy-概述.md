@@ -204,11 +204,12 @@ class AutonomyDaemon:
 
 ```python
 # loom/core/cognition/dreaming.py
-async def dream_cycle(semantic_memory, relational_memory) -> None:
+async def dream_cycle(*, semantic, llm_fn, ...) -> dict:
     """
-    1. SemanticMemory.get_random(limit=15) 隨機抽樣事實
+    1. semantic.get_random(limit=15) 隨機抽樣事實
     2. LLM 分析：「這些事實之間有什麼非顯而易見的關聯？」
-    3. 寫入 RelationalMemory 三元組（source="dreaming"）
+    3. 透過 relational_bridge.upsert_triple(semantic, ...) 寫入三元組
+       （source="dreaming"，鍵格式 rel:{S}::{P}）— #451 phase B
     """
 ```
 
@@ -227,7 +228,7 @@ notify = false
 
 ## Behavioural Self-Reflection（v0.2.5.3 → Issue #120 PR 1）
 
-原本由 `SelfReflectionPlugin.on_session_stop` 觸發的自我反思，Issue #120 PR 1 起合併進 `TaskReflector`。每次 `TaskReflector` 完成一份結構化 `TaskDiagnostic` 之後，以 fire-and-forget 的方式呼叫 `run_self_reflection` 產生 RelationalMemory 三元組：
+原本由 `SelfReflectionPlugin.on_session_stop` 觸發的自我反思，Issue #120 PR 1 起合併進 `TaskReflector`。每次 `TaskReflector` 完成一份結構化 `TaskDiagnostic` 之後，以 fire-and-forget 的方式呼叫 `run_self_reflection` 產生 ``loom-self`` 三元組（#451 phase B 起寫入 SemanticMemory，鍵 ``rel:loom-self::*``）：
 
 ```python
 # loom/core/cognition/task_reflector.py（簡化）
@@ -235,7 +236,7 @@ class TaskReflector:
     def _schedule_behavioural_triples(self) -> None:
         asyncio.create_task(run_self_reflection(
             episodic=self._episodic,
-            relational=self._relational,
+            semantic=self._semantic,    # #451 phase B
             llm_fn=self._llm_fn,
         ))
 ```
@@ -260,9 +261,10 @@ execution_error
     ↓
 「這個失敗是什麼 pattern 造成的？下次應避免什麼？」
     ↓
-SemanticMemory → skill:<name>:anti_pattern:<timestamp>
-RelationalMemory → (skill:<name>, has_anti_pattern, …)
-                  (loom-self, should_avoid:<tool_name>, …)
+SemanticMemory（兩條鍵都同表，#451 phase B）：
+  skill:<name>:anti_pattern:<timestamp>                ← 純語義事實
+  rel:skill:<name>::has_anti_pattern                   ← 三元組（橋接）
+  rel:loom-self::should_avoid:<tool_name>              ← 三元組（橋接）
 ```
 
 反思失敗完全 non-fatal，不會阻斷任何流程。
@@ -342,8 +344,8 @@ enabled = false
 │                                     │ (通知結果)  │          │
 │                                     └────────────┘          │
 │                                                             │
-│   TaskReflector        ──▶ RelationalMemory（loom-self 三元組）│
-│   DreamingPlugin       ──▶ RelationalMemory（dreaming 三元組）│
+│   TaskReflector        ──▶ SemanticMemory（rel:loom-self::* 三元組）│
+│   DreamingPlugin       ──▶ SemanticMemory（rel:* 三元組，source=dreaming）│
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -382,6 +384,6 @@ Autonomy Engine 預設是保守的：
 | Autonomy Daemon | 常駐監控觸發器狀態 |
 | TaskReflector | 每輪技能使用後產生結構化 TaskDiagnostic，並在 post-hook 寫入 loom-self 三元組（Issue #120 PR 1）|
 | DreamingPlugin | 離線探索記憶中的隱藏關聯 |
-| Counter-factual Reflection | 工具失敗後分析 Anti-pattern，寫入 Semantic + Relational Memory |
+| Counter-factual Reflection | 工具失敗後分析 Anti-pattern，寫入 SemanticMemory（anti_pattern 鍵 + ``rel:*`` 三元組同表，#451 phase B）|
 
 透過 Autonomy Engine，Loom 可以成為真正的「數位助手」——不只是回答問題，而是主動幫用戶完成任務，並從每次行動中學習。

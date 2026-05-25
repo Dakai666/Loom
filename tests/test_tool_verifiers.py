@@ -17,7 +17,6 @@ from loom.core.harness.permissions import TrustLevel
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
@@ -192,10 +191,9 @@ async def memory_facade(tmp_path):
         semantic = SemanticMemory(conn)
         procedural = ProceduralMemory(conn)
         episodic = EpisodicMemory(conn)
-        relational = RelationalMemory(conn)
         facade = MemoryFacade(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic,
+            episodic=episodic,
             search=MemorySearch(semantic, procedural),
         )
         yield facade

@@ -70,22 +70,11 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at   TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS relational_entries (
-    id              TEXT PRIMARY KEY,
-    subject         TEXT NOT NULL,
-    predicate       TEXT NOT NULL,
-    object          TEXT NOT NULL,
-    confidence      REAL NOT NULL DEFAULT 1.0,
-    source          TEXT NOT NULL DEFAULT 'agent',
-    metadata        TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-    -- Memory Ontology v0.1 (issue #281): three-axis classification.
-    domain          TEXT NOT NULL DEFAULT 'knowledge',
-    temporal        TEXT NOT NULL DEFAULT 'recent',
-    last_accessed_at TEXT,
-    UNIQUE(subject, predicate)
-);
+-- Issue #451 phase B: ``relational_entries`` table retired. Triples
+-- live in ``semantic_entries`` under key prefix ``rel:{subject}::{predicate}``
+-- (see ``loom/core/memory/relational_bridge.py``). Legacy DBs still
+-- carrying the table get a one-shot backfill + DROP in
+-- ``_backfill_relational_into_semantic`` below.
 
 CREATE INDEX IF NOT EXISTS idx_episodic_session   ON episodic_entries(session_id);
 CREATE INDEX IF NOT EXISTS idx_episodic_created   ON episodic_entries(created_at);
@@ -102,9 +91,6 @@ CREATE TABLE IF NOT EXISTS trigger_history (
     last_fire_iso TEXT NOT NULL,
     fire_count    INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE INDEX IF NOT EXISTS idx_relational_subject  ON relational_entries(subject);
-CREATE INDEX IF NOT EXISTS idx_relational_pred     ON relational_entries(predicate);
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
@@ -246,10 +232,13 @@ class SQLiteStore:
                 # them so compression losses can be audited and recovered.
                 "ALTER TABLE episodic_entries ADD COLUMN compressed_at TEXT",
                 # Memory Ontology v0.1 (issue #281): three-axis classification on
-                # semantic + relational facts. See loom/core/memory/ontology.py.
+                # semantic facts. See loom/core/memory/ontology.py.
                 "ALTER TABLE semantic_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
                 "ALTER TABLE semantic_entries ADD COLUMN temporal TEXT NOT NULL DEFAULT 'recent'",
                 "ALTER TABLE semantic_entries ADD COLUMN last_accessed_at TEXT",
+                # #451 phase A relational_entries ALTERs kept for legacy DBs
+                # that still have the table — backfill + DROP runs further
+                # below. New DBs never see this column scheme.
                 "ALTER TABLE relational_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
                 "ALTER TABLE relational_entries ADD COLUMN temporal TEXT NOT NULL DEFAULT 'recent'",
                 "ALTER TABLE relational_entries ADD COLUMN last_accessed_at TEXT",
@@ -268,8 +257,6 @@ class SQLiteStore:
                 # is the primary recall path for axis-aware queries.
                 "CREATE INDEX IF NOT EXISTS idx_semantic_domain_temporal "
                 "ON semantic_entries(domain, temporal)",
-                "CREATE INDEX IF NOT EXISTS idx_relational_domain_temporal "
-                "ON relational_entries(domain, temporal)",
             ]:
                 try:
                     await db.execute(_index_sql)
@@ -277,18 +264,20 @@ class SQLiteStore:
                 except Exception:
                     pass
 
-            # Issue #451 phase A: backfill relational_entries → semantic_entries.
-            # Idempotent — INSERT OR IGNORE keyed on `rel:{subject}::{predicate}`.
-            # New relational writes dual-write directly via RelationalMemory.upsert,
-            # so this backfill is only load-bearing on first run and as a safety net
-            # for any process that wrote without plumbing semantic through.
+            # Issue #451 phase B: final backfill + drop of relational_entries.
+            # Backfill is idempotent (INSERT OR IGNORE on rel:* keys); DROP
+            # runs only if the table is present. Legacy DBs migrate cleanly
+            # on the first boot after this commit; fresh installs never see
+            # the table at all.
             try:
                 await self._backfill_relational_into_semantic(db)
+                await db.execute("DROP TABLE IF EXISTS relational_entries")
+                await db.commit()
             except Exception as exc:
-                # Backfill failure must not block startup. Surface to logs.
                 import logging
                 logging.getLogger(__name__).warning(
-                    "Relational → semantic backfill failed: %s", exc,
+                    "Relational table retirement (backfill+drop) failed: %s",
+                    exc,
                 )
 
             # Ensure FTS indexes are up-to-date with existing content (idempotent, fast)
@@ -321,11 +310,23 @@ class SQLiteStore:
         a ``rel:{subject}::{predicate}`` key. Uses ``INSERT OR IGNORE`` so
         re-runs are no-ops once the row exists.
 
+        Skips silently when the legacy table is absent — fresh installs (and
+        users who have already migrated through #451 phase B) never carry
+        the table.
+
         Embeddings are *not* populated here — running provider calls inline
-        with startup would slow boot. Embedding maintenance fills them
-        opportunistically as recall traffic hits these keys.
+        with startup would slow boot. ``LoomSession.start()`` calls
+        ``SemanticMemory.ensure_embeddings_for_prefix("rel:")`` once the
+        embedding provider is available.
         """
-        # Build (subject, predicate, object, ...) → SemanticEntry-shaped rows.
+        # Skip if the table doesn't exist (post-#451-phase-B installs).
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='relational_entries'"
+        )
+        if await cursor.fetchone() is None:
+            return
+
         cursor = await db.execute(
             "SELECT id, subject, predicate, object, confidence, source, metadata, "
             "created_at, updated_at, domain, temporal, last_accessed_at "
@@ -349,12 +350,31 @@ class SQLiteStore:
             md["object"] = obj
             key = f"rel:{subject}::{predicate}"
             value = f"{subject} {predicate} {obj}"
+            # #451 phase B P1 fix: phase-A dual-write was best-effort
+            # (semantic write failures were silently swallowed), so a row
+            # may exist in semantic but be stale relative to its
+            # authoritative relational source. INSERT OR IGNORE would
+            # discard the relational update; instead, upsert with a
+            # ``WHERE excluded.updated_at > semantic_entries.updated_at``
+            # guard so the legacy table always wins on newer timestamps
+            # but never overwrites a semantic row that was updated AFTER
+            # phase B's bridge writers took over.
             cur = await db.execute(
                 """
-                INSERT OR IGNORE INTO semantic_entries
+                INSERT INTO semantic_entries
                     (id, key, value, confidence, source, metadata,
                      created_at, updated_at, domain, temporal, last_accessed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value      = excluded.value,
+                    confidence = excluded.confidence,
+                    source     = excluded.source,
+                    metadata   = excluded.metadata,
+                    updated_at = excluded.updated_at,
+                    domain     = excluded.domain,
+                    temporal   = excluded.temporal,
+                    last_accessed_at = excluded.last_accessed_at
+                WHERE excluded.updated_at > semantic_entries.updated_at
                 """,
                 (
                     rel_id,

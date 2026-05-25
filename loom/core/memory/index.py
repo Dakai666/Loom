@@ -34,7 +34,6 @@ from typing import Any
 
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 
 
@@ -130,7 +129,11 @@ class MemoryIndex:
             "Use memorize(key, value) to store a new fact.",
         ]
         if self.relational_count > 0:
-            lines.append("Use query_relations(subject) to look up relationships.")
+            lines.append(
+                f"Relational triples: {self.relational_count} stored "
+                f"(returned by recall alongside ordinary facts; "
+                f"use relate(subject, predicate, object) to add more)."
+            )
 
         # Issue #26: Self-Portrait — show agent's own behavioural notes inline
         if self.self_triples:
@@ -189,13 +192,11 @@ class MemoryIndexer:
         semantic: SemanticMemory,
         procedural: ProceduralMemory,
         episodic: EpisodicMemory | None = None,
-        relational: RelationalMemory | None = None,
         skill_catalog: list[SkillCatalogEntry] | None = None,
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
         self._episodic = episodic
-        self._relational = relational
         self._skill_catalog: list[SkillCatalogEntry] = skill_catalog or []
 
     async def build(self) -> MemoryIndex:
@@ -217,32 +218,30 @@ class MemoryIndexer:
             all_tags.update(s.tags)
         skill_tags = sorted(all_tags)[:10]
 
-        # Relational triples
-        relational_count = 0
-        relational_predicates: list[str] = []
-        if self._relational is not None:
-            triples = await self._relational.query()
-            relational_count = len(triples)
-            seen: dict[str, int] = {}
-            for t in triples:
-                seen[t.predicate] = seen.get(t.predicate, 0) + 1
-            relational_predicates = sorted(seen, key=lambda p: seen[p], reverse=True)[:8]
+        # Relational triples (since #451 phase B: stored in semantic_entries
+        # under the ``rel:`` key prefix; the bridge decodes them back into
+        # ``RelationalEntry`` shape).
+        from loom.core.memory.relational_bridge import query_triples
+
+        triples = await query_triples(self._semantic)
+        relational_count = len(triples)
+        seen: dict[str, int] = {}
+        for t in triples:
+            seen[t.predicate] = seen.get(t.predicate, 0) + 1
+        relational_predicates = sorted(seen, key=lambda p: seen[p], reverse=True)[:8]
 
         # Anti-pattern count + Self-Portrait triples (Issue #26)
-        anti_pattern_count = 0
-        self_triples: list = []
-        if self._relational is not None:
-            self_entries = await self._relational.query(subject="loom-self")
-            anti_pattern_count = sum(
-                1 for t in self_entries if t.predicate.startswith("should_avoid")
-            )
-            # Sort: should_avoid first, then tends_to, then others
-            _order = {"should_avoid": 0, "tends_to": 1}
-            self_triples = sorted(
-                self_entries,
-                key=lambda t: (_order.get(t.predicate, 2), t.updated_at),
-                reverse=False,
-            )
+        self_entries = await query_triples(self._semantic, subject="loom-self")
+        anti_pattern_count = sum(
+            1 for t in self_entries if t.predicate.startswith("should_avoid")
+        )
+        # Sort: should_avoid first, then tends_to, then others
+        _order = {"should_avoid": 0, "tends_to": 1}
+        self_triples = sorted(
+            self_entries,
+            key=lambda t: (_order.get(t.predicate, 2), t.updated_at),
+            reverse=False,
+        )
 
         return MemoryIndex(
             semantic_count=semantic_count,

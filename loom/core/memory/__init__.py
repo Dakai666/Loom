@@ -2,7 +2,13 @@ from .store import SQLiteStore
 from .episodic import EpisodicEntry, EpisodicMemory
 from .semantic import SemanticEntry, SemanticMemory
 from .procedural import SkillGenome, ProceduralMemory
-from .relational import RelationalEntry, RelationalMemory
+from .relational_bridge import (
+    RelationalEntry,
+    delete_triple,
+    get_triple,
+    query_triples,
+    upsert_triple,
+)
 from .search import MemorySearchResult, MemorySearch
 from .index import MemoryIndex, MemoryIndexer
 from .session_log import SessionLog
@@ -14,7 +20,10 @@ __all__ = [
     "EpisodicEntry", "EpisodicMemory",
     "SemanticEntry", "SemanticMemory",
     "SkillGenome", "ProceduralMemory",
-    "RelationalEntry", "RelationalMemory",
+    # #451 phase B: relational triples live in the semantic store via the
+    # bridge. ``RelationalMemory`` is retired; helpers replace its API.
+    "RelationalEntry",
+    "upsert_triple", "get_triple", "query_triples", "delete_triple",
     "MemorySearchResult", "MemorySearch",
     "MemoryIndex", "MemoryIndexer",
     "SessionLog",

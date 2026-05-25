@@ -17,9 +17,17 @@ Loom 的記憶系統模擬人類認知中的四種記憶類型：
 │  情節記憶（Episodic）  │  剛發生的事       │  EpisodicMemory │
 │  語義記憶（Semantic）  │  知道的事實       │  SemanticMemory │
 │  程序記憶（Procedural）│  如何做的技能     │  ProceduralMemory│
-│  關係記憶（Relational）│  事物間的關係     │  RelationalMemory│
+│  關係（Relational）   │  事物間的關係     │  SemanticMemory │
+│                       │                  │  + relational_bridge │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+> **#451 phase B**：原本獨立的 ``RelationalMemory`` 子系統已退役。三元組
+> ``(subject, predicate, object)`` 編碼為 ``SemanticEntry`` 行（key
+> ``rel:{subject}::{predicate}``），由 ``loom/core/memory/relational_bridge.py``
+> 提供 ``upsert_triple`` / ``get_triple`` / ``query_triples`` /
+> ``delete_triple`` 助手。``recall`` 是唯一讀取入口；命中 ``rel:*`` 鍵
+> 時結果帶 ``type="relational"`` 標記，agent 看得到 kind 但不需切換 verb。
 
 ### Anti-pattern 記憶（v0.2.5.1）
 
@@ -30,9 +38,10 @@ execution_error 發生
     ↓
 LLM 分析：「這個失敗是什麼 pattern 造成的？下次應避免什麼？」
     ↓
-寫入 SemanticMemory：  key = "skill:<name>:anti_pattern:<timestamp>"
-寫入 RelationalMemory：(skill:<name>, has_anti_pattern, …)
-                       (loom-self, should_avoid:<tool_name>, …)
+寫入 SemanticMemory（兩條路徑都同表）：
+  key = "skill:<name>:anti_pattern:<timestamp>"       ← 純語義事實
+  key = "rel:skill:<name>::has_anti_pattern"          ← 三元組（橋接編碼）
+  key = "rel:loom-self::should_avoid:<tool_name>"     ← 三元組（橋接編碼）
 ```
 
 `MemoryIndex` 在 session 啟動時讀取 `should_avoid` 三元組，agent 在每次對話開始就知道自己過去踩過的坑。

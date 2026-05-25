@@ -185,8 +185,11 @@ class TaskReflector:
     procedural:
         For updating ``SkillGenome.confidence`` via quality_score EMA.
     semantic:
-        Destination for the serialized ``TaskDiagnostic`` JSON.
-    relational, episodic:
+        Destination for the serialized ``TaskDiagnostic`` JSON, and
+        also the write target for ``run_self_reflection``'s loom-self
+        triples (since #451 phase B, relational lives in semantic via
+        the bridge).
+    episodic:
         Optional — when present, a post-hook runs ``run_self_reflection``
         to preserve behavioural triple writes (subject=loom-self).
     session_id:
@@ -217,7 +220,6 @@ class TaskReflector:
         self._memory = memory
         self._procedural = memory.procedural
         self._semantic = memory.semantic
-        self._relational = memory.relational
         self._episodic = memory.episodic
         self._session_id = session_id
         self._enabled = enabled
@@ -341,8 +343,10 @@ class TaskReflector:
 
         # Post-hook: preserve loom-self behavioural triples (Issue #26).
         # Fire-and-forget so a slow behavioural pass doesn't block the
-        # diagnostic callback chain.
-        if self._relational is not None and self._episodic is not None:
+        # diagnostic callback chain. Since #451 phase B the triples
+        # write into the semantic store via the bridge — semantic is
+        # always present on a real session, so the gate is just episodic.
+        if self._episodic is not None:
             self._schedule_behavioural_triples()
 
         # Notify subscribers (TUI / Discord / CLI).
@@ -412,7 +416,7 @@ class TaskReflector:
             try:
                 await run_self_reflection(
                     episodic=self._episodic,  # type: ignore[arg-type]
-                    relational=self._relational,  # type: ignore[arg-type]
+                    semantic=self._semantic,  # type: ignore[arg-type]
                     llm_fn=_llm,
                     session_id=self._session_id,
                 )

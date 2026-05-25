@@ -4,20 +4,21 @@
 
 ---
 
-## Plugin 首次確認：RelationalMemory 記錄格式
+## Plugin 首次確認：批准三元組記錄格式
 
-首次執行新 plugin 時，批准記錄寫入 `RelationalMemory`：
+首次執行新 plugin 時，批准三元組透過 ``relational_bridge.upsert_triple`` 寫入 SemanticMemory（#451 phase B 起；原本獨立的 ``RelationalMemory`` 表已退役）：
 
 ```
-RelationalTriple(
-  subject = "user",
-  predicate = "approved_plugin",
-  object = "<plugin_name>",
-  source = "manual_confirm"
+RelationalEntry(
+  subject = "plugin:<path>",
+  predicate = "approved",
+  object = "true",
+  source = "user",
 )
+# 實際儲存：SemanticEntry(key="rel:plugin:<path>::approved", value="...", ...)
 ```
 
-未來 session 啟動時，PluginRegistry 檢查 `query_relations(user, approved_plugin, plugin_name)`，若存在則跳過確認，直接安裝。
+未來 session 啟動時，``LoomSession._load_plugins`` 透過 ``get_triple(semantic, f"plugin:{path}", "approved")`` 檢查批准狀態，若 ``object == "true"`` 則跳過確認，直接安裝。
 
 ---
 

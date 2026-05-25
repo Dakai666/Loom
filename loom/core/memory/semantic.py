@@ -611,15 +611,10 @@ class SemanticMemory:
         those drifting toward archived state. Silent no-op for empty keys
         list — recall hot path stays cheap.
 
-        Issue #451 phase A: when any ``rel:*`` keys are present, mirror the
-        timestamp into ``relational_entries`` as well. The bridged rows
-        share the same ``id`` across both tables (see
-        ``SQLiteStore._backfill_relational_into_semantic`` and
-        ``relational_bridge.triple_to_semantic``), so the mirror reduces to
-        an UPDATE..WHERE id IN (...). Without this, dream/relational
-        triples that are actively recalled still decay out of the
-        relational source-of-truth table. Phase B retires this mirror
-        when the relational table itself goes away.
+        Issue #451 phase B: relational triples (key prefix ``rel:``) live
+        in ``semantic_entries`` directly, so a single UPDATE covers them.
+        The phase-A mirror into ``relational_entries`` was retired with
+        the table.
         """
         if not keys:
             return
@@ -630,17 +625,4 @@ class SemanticMemory:
             f"WHERE key IN ({placeholders})",
             (now, *keys),
         )
-
-        # Mirror into relational_entries for any bridged rel:* keys.
-        rel_keys = [k for k in keys if k.startswith("rel:")]
-        if rel_keys:
-            rel_placeholders = ",".join("?" * len(rel_keys))
-            await self._db.execute(
-                f"UPDATE relational_entries SET last_accessed_at = ? "
-                f"WHERE id IN ("
-                f"  SELECT id FROM semantic_entries WHERE key IN ({rel_placeholders})"
-                f")",
-                (now, *rel_keys),
-            )
-
         await self._db.commit()

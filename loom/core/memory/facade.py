@@ -1,29 +1,28 @@
 """
-MemoryFacade — unified entry point for the four memory subsystems.
+MemoryFacade — unified entry point for the memory subsystems.
 
-Issue #147 — single object that owns the four memory subsystems
-(``SemanticMemory`` / ``ProceduralMemory`` / ``RelationalMemory`` /
-``EpisodicMemory``) plus the ``MemorySearch`` index and an optional
-``MemoryGovernor``.  ``LoomSession`` holds it as ``self._memory`` and
-forwards subsystem references through the facade's handles.
+Issue #147 — single object that owns the memory subsystems
+(``SemanticMemory`` / ``ProceduralMemory`` / ``EpisodicMemory``) plus
+the ``MemorySearch`` index and an optional ``MemoryGovernor``.
+``LoomSession`` holds it as ``self._memory`` and forwards subsystem
+references through the facade's handles.
 
-Phase A (read API): :meth:`search` / :meth:`get_fact` /
-:meth:`query_relations` — what the agent ``recall`` / ``query_relations``
-tools need.
+Read API: :meth:`search` / :meth:`get_fact` / :meth:`recall_period`.
+Agent recall is the *sole* path for surfacing relational triples
+(issue #451 phase B — ``query_relations`` retired).
 
-Phase B (write API + agent tool migration):
+Write API:
 
 * :meth:`memorize` — semantic write through ``MemoryGovernor`` (or a
   direct ``SemanticMemory.upsert`` fallback when no governor is wired).
   Surfaces embedding-write failures via a structured WARN log so callers
   no longer need to inspect ``MemoryHealthTracker`` themselves.
-* :meth:`relate` — relational triple upsert.
+* :meth:`relate` — relational triple upsert. Since #451 phase B this
+  routes through :func:`loom.core.memory.relational_bridge.upsert_triple`
+  onto the semantic store; ``relational_entries`` no longer exists.
 * :meth:`prune_decayed` — wraps ``SemanticMemory.prune_decayed`` so the
   ``memory_prune`` cron tool (and any future caller) goes through one
   entry point.
-
-Phase C (caller migration + removal of the direct subsystem imports) is
-tracked separately on Issue #147.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ if TYPE_CHECKING:
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.governance import GovernedWriteResult, MemoryGovernor
     from loom.core.memory.procedural import ProceduralMemory
-    from loom.core.memory.relational import RelationalEntry, RelationalMemory
+    from loom.core.memory.relational_bridge import RelationalEntry
     from loom.core.memory.search import MemorySearch, MemorySearchResult
     from loom.core.memory.session_log import SessionLog
     from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -69,7 +68,6 @@ class MemoryFacade:
         *,
         semantic: "SemanticMemory",
         procedural: "ProceduralMemory",
-        relational: "RelationalMemory",
         episodic: "EpisodicMemory",
         search: "MemorySearch",
         session_log: "SessionLog | None" = None,
@@ -78,7 +76,6 @@ class MemoryFacade:
     ) -> None:
         self.semantic = semantic
         self.procedural = procedural
-        self.relational = relational
         self.episodic = episodic
         self.search_index = search
         self.session_log = session_log
@@ -137,26 +134,6 @@ class MemoryFacade:
             trigger="agent_get_fact",
         )
         return entry
-
-    async def query_relations(
-        self,
-        subject: str | None = None,
-        predicate: str | None = None,
-    ) -> list["RelationalEntry"]:
-        """Query relational triples by subject and/or predicate.
-
-        Pass ``subject`` to get all predicates for a subject; pass
-        ``predicate`` to find all subjects with that predicate; pass both
-        for an exact lookup; pass neither to return all entries.  Mirrors
-        the underlying :meth:`RelationalMemory.query` signature.
-        """
-        results = await self.relational.query(subject=subject, predicate=predicate)
-        await self._emit_memory_op(
-            operation="read",
-            type_summary="relational_query",
-            trigger="agent_query_relations",
-        )
-        return results
 
     async def recall_period(
         self,
@@ -265,13 +242,15 @@ class MemoryFacade:
     async def relate(self, entry: "RelationalEntry") -> None:
         """Upsert a relational (subject, predicate, object) triple.
 
-        Thin wrapper around :meth:`RelationalMemory.upsert` so callers
-        that already hold a facade do not need a second handle for
-        relational writes.  Relational memory has no governance hooks
-        today; this method exists so future governance can be added in
-        one place.
+        Since #451 phase B this routes through the bridge into the
+        semantic store; ``relational_entries`` no longer exists. The
+        bridge encodes the triple as a ``SemanticEntry`` keyed
+        ``rel:{subject}::{predicate}``, so ``recall`` surfaces it
+        naturally with ``type="relational"``.
         """
-        await self.relational.upsert(entry)
+        from loom.core.memory.relational_bridge import upsert_triple
+
+        await upsert_triple(self.semantic, entry)
         triple = f"{entry.subject}|{entry.predicate}|{entry.object}"
         await self._emit_memory_op(
             operation="write",

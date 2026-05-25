@@ -30,7 +30,6 @@ from loom.core.memory.semantic import (
 )
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.contradiction import (
     ContradictionDetector,
     ConflictType,
@@ -85,22 +84,18 @@ async def procedural(db):
 
 
 @pytest_asyncio.fixture
-async def relational(db):
-    return RelationalMemory(db)
-
-
-@pytest_asyncio.fixture
-async def governor(db, semantic, procedural, relational, episodic):
+async def governor(db, semantic, procedural, episodic):
     return MemoryGovernor(
         semantic=semantic,
         procedural=procedural,
-        relational=relational,
         episodic=episodic,
         db=db,
         config={
             "admission_threshold": 0.5,
             "episodic_ttl_days": 30,
             "semantic_decay_threshold": 0.1,
+            # ``relational_decay_factor`` kept here for back-compat; the
+            # governor silently ignores it.
             "relational_decay_factor": 1.5,
         },
     )
@@ -437,7 +432,6 @@ class TestGovernedUpsert:
         governor = MemoryGovernor(
             semantic=MagicMock(),
             procedural=MagicMock(),
-            relational=MagicMock(),
             episodic=MagicMock(),
             db=db,
             config={},
@@ -525,12 +519,11 @@ class TestAdmissionGate:
         assert results[2].admitted is True
 
     @pytest.mark.asyncio
-    async def test_threshold_respected(self, db, semantic, procedural, relational, episodic):
+    async def test_threshold_respected(self, db, semantic, procedural, episodic):
         """Facts at different quality levels should respect the threshold."""
         strict_governor = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             db=db,
             config={"admission_threshold": 0.8},  # strict
@@ -554,7 +547,7 @@ class TestAdmissionSemanticNovelty:
 
     @pytest.mark.asyncio
     async def test_rejects_semantic_paraphrase(
-        self, db, procedural, relational, episodic,
+        self, db, procedural, episodic,
     ):
         """Fact that is *paraphrased* (low lexical overlap, high cosine) is
         rejected once an embedding provider can see the similarity."""
@@ -571,7 +564,6 @@ class TestAdmissionSemanticNovelty:
         gov = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             db=db,
             config={"admission_threshold": 0.5},
@@ -587,7 +579,7 @@ class TestAdmissionSemanticNovelty:
 
     @pytest.mark.asyncio
     async def test_admits_when_only_lexical_overlap_no_semantic_dup(
-        self, db, procedural, relational, episodic,
+        self, db, procedural, episodic,
     ):
         """When the embedding says distinct (orthogonal) and lexical Jaccard
         stays under 0.8, the fact should still be admitted — avoid over-killing
@@ -605,7 +597,6 @@ class TestAdmissionSemanticNovelty:
         gov = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             db=db,
             config={"admission_threshold": 0.5},
@@ -653,7 +644,7 @@ class TestAdmissionSemanticNovelty:
 
     @pytest.mark.asyncio
     async def test_embedding_failure_falls_back_to_lexical(
-        self, db, procedural, relational, episodic,
+        self, db, procedural, episodic,
     ):
         """If the embedding call raises, lexical check still catches near-
         exact dups — the gate degrades gracefully."""
@@ -669,7 +660,6 @@ class TestAdmissionSemanticNovelty:
         gov = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             db=db,
             config={"admission_threshold": 0.5},
@@ -742,7 +732,9 @@ class TestDecayCycle:
         assert isinstance(result, DecayCycleResult)
         assert result.semantic_pruned >= 0
         assert result.episodic_pruned >= 0
-        assert result.relational_pruned >= 0
+        # #451 phase B: relational counter remains as a back-compat field
+        # (always 0 on fresh installs) so external readers don't crash.
+        assert result.relational_pruned == 0
         assert result.total_pruned >= 0
 
 

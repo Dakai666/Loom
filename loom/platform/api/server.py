@@ -37,7 +37,12 @@ except ImportError as exc:  # pragma: no cover
 
 import aiosqlite
 
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import (
+    RelationalEntry,
+    delete_triple,
+    query_triples,
+    upsert_triple,
+)
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.notify.types import ConfirmResult
 
@@ -149,9 +154,10 @@ def create_app(
         subject: str | None = Query(default=None),
         predicate: str | None = Query(default=None),
     ):
-        # Read path: semantic dual-write not needed; pass None for semantic.
-        mem = RelationalMemory(app.state.db)
-        entries = await mem.query(
+        # #451 phase B: triples live in the semantic store via the bridge.
+        sem = SemanticMemory(app.state.db)
+        entries = await query_triples(
+            sem,
             subject=subject or None,
             predicate=predicate or None,
         )
@@ -169,9 +175,7 @@ def create_app(
 
     @app.post("/memory/relational", status_code=201, tags=["memory"])
     async def upsert_relational(body: RelationalBody):
-        # Issue #451 phase A: dual-write to semantic so recall can find it.
         sem = SemanticMemory(app.state.db)
-        mem = RelationalMemory(app.state.db, semantic=sem)
         entry = RelationalEntry(
             subject=body.subject,
             predicate=body.predicate,
@@ -179,15 +183,13 @@ def create_app(
             confidence=body.confidence,
             source=body.source,
         )
-        await mem.upsert(entry)
+        await upsert_triple(sem, entry)
         return {"ok": True, "subject": body.subject, "predicate": body.predicate}
 
     @app.delete("/memory/relational", tags=["memory"])
     async def delete_relational(subject: str, predicate: str):
-        # Mirror delete into semantic so recall stops returning the triple.
         sem = SemanticMemory(app.state.db)
-        mem = RelationalMemory(app.state.db, semantic=sem)
-        deleted = await mem.delete(subject, predicate)
+        deleted = await delete_triple(sem, subject, predicate)
         if not deleted:
             raise HTTPException(status_code=404, detail="Entry not found")
         return {"ok": True, "deleted": True}

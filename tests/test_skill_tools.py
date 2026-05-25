@@ -581,18 +581,35 @@ class TestLoadSkillCheckResolutionFailure:
         mock_manager.activate = MagicMock()
         mock_manager.mount = MagicMock(return_value=[])
 
-        # Pre-approved via RelationalMemory so the approval gate doesn't bail
-        # before reaching SkillCheckManager.resolve_all.
-        mock_rel = MagicMock()
-        approved_entry = MagicMock()
-        approved_entry.object = "true"
-        mock_rel.get = AsyncMock(return_value=approved_entry)
+        # Pre-approved via the semantic store (relational bridge) so the
+        # approval gate doesn't bail before reaching
+        # SkillCheckManager.resolve_all. #451 phase B: ``load_skill`` reads
+        # approval from semantic + bridge, not the retired
+        # ``RelationalMemory``.
+        approved_sem_entry = MagicMock()
+        approved_sem_entry.key = "rel:skill_checks:probe-skill::approved"
+        approved_sem_entry.metadata = {
+            "subject": "skill_checks:probe-skill",
+            "predicate": "approved",
+            "object": "true",
+        }
+        approved_sem_entry.value = "skill_checks:probe-skill approved true"
+        approved_sem_entry.confidence = 1.0
+        approved_sem_entry.source = "user"
+        approved_sem_entry.id = "approved-id"
+        approved_sem_entry.created_at = None
+        approved_sem_entry.updated_at = None
+        approved_sem_entry.domain = "knowledge"
+        approved_sem_entry.temporal = "recent"
+        approved_sem_entry.last_accessed_at = None
+        mock_sem = MagicMock()
+        mock_sem.get = AsyncMock(return_value=approved_sem_entry)
 
         tool = make_load_skill_tool(
             procedural=mock_procedural,
             skills_dirs=[tmp_path],
             skill_check_manager=mock_manager,
-            relational=mock_rel,
+            semantic=mock_sem,
         )
 
         call = ToolCall(

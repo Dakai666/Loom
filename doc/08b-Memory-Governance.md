@@ -22,7 +22,7 @@ loom/core/memory/
 ├── lifecycle.py       ← MemoryLifecycle（domain × temporal decay table）
 ├── maintenance.py     ← MaintenanceLoop（daemon-cron decay runner）
 ├── pulse.py          ← MemoryPulse（Hook G session preheat + Hook A contradiction notice）
-└── relational.py    ← RelationalMemory（dreaming + decay）
+└── relational_bridge.py ← RelationalEntry + 三元組讀寫助手（#451 phase B 起，dreaming + decay 走 semantic_entries 同一條路徑）
 ```
 
 ---

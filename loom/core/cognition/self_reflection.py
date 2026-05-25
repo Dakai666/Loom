@@ -1,8 +1,11 @@
 """
-Self-reflection core logic — Relational Memory as Mirror (Issue #26).
+Self-reflection core logic — semantic store as mirror (Issue #26 / #451 B).
 
 ``run_self_reflection()`` analyses recent episodic entries and writes
-behavioural observations as RelationalMemory triples (subject="loom-self").
+behavioural observations as relational triples (subject="loom-self").
+Since #451 phase B those triples land in ``semantic_entries`` via the
+``relational_bridge`` — the standalone ``relational_entries`` table is
+retired.
 
 As of Issue #120 PR 1, this function is invoked as a post-hook from
 ``TaskReflector._schedule_behavioural_triples`` after each structured
@@ -12,7 +15,7 @@ and ``reflect_self`` tool have been removed.
 Usage::
 
     from loom.core.cognition.self_reflection import run_self_reflection
-    await run_self_reflection(episodic=..., relational=..., llm_fn=...)
+    await run_self_reflection(episodic=..., semantic=..., llm_fn=...)
 """
 
 from __future__ import annotations
@@ -23,7 +26,8 @@ from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable
 
 from loom.core.memory.episodic import EpisodicMemory
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import RelationalEntry, upsert_triple
+from loom.core.memory.semantic import SemanticMemory
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +71,7 @@ LLMFn = Callable[[str], Awaitable[str]]
 
 async def run_self_reflection(
     episodic: EpisodicMemory,
-    relational: RelationalMemory,
+    semantic: SemanticMemory,
     llm_fn: LLMFn,
     session_id: str | None = None,
     max_entries: int = 40,
@@ -78,7 +82,8 @@ async def run_self_reflection(
     Parameters
     ----------
     episodic:   EpisodicMemory to query.
-    relational: RelationalMemory to write triples into.
+    semantic:   SemanticMemory to write triples into (via
+                ``relational_bridge.upsert_triple`` — see #451 phase B).
     llm_fn:     Async callable that takes a prompt string and returns the
                 LLM response text.  Inject ``router.chat()`` here.
     session_id: When given, only considers entries from this session.
@@ -158,7 +163,7 @@ async def run_self_reflection(
             metadata={"reflected_at": now.isoformat(), "session_id": session_id or ""},
         )
         try:
-            await relational.upsert(entry)
+            await upsert_triple(semantic, entry)
             written.append(entry)
         except Exception as exc:
             logger.warning("self_reflection: failed to write triple: %s", exc)
