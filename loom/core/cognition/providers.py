@@ -85,6 +85,62 @@ async def _http_status_detail(provider: str, exc: Any) -> str:
     return detail
 
 
+_RESPONSES_REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+_RESPONSES_REASONING_DEFAULT_EFFORT = "medium"
+
+
+class _ReasoningStreamWrapper:
+    """Wrap Responses SSE reasoning_summary deltas as ``<think>…</think>`` text.
+
+    The session-level consumer (``session.py``) already parses ``<think>``
+    tags out of the assistant text stream and surfaces them as
+    ``ThinkCollapsed`` UI events. Wrapping reasoning chunks in the same
+    protocol lets the user see *that the model is thinking* during the long
+    reasoning phase of o1-class / gpt-5.5 / grok-4 reasoning models —
+    instead of staring at an empty stream until output_text starts.
+
+    State: ``False`` until first reasoning delta seen; flipped back when
+    reasoning is done OR output_text starts OR stream ends. The caller is
+    responsible for calling ``flush()`` after the SSE loop exits to close
+    any dangling tag.
+    """
+
+    __slots__ = ("_open",)
+
+    def __init__(self) -> None:
+        self._open = False
+
+    def open_chunk(self, delta: str) -> str:
+        if not self._open:
+            self._open = True
+            return f"<think>{delta}"
+        return delta
+
+    def close(self) -> str:
+        if self._open:
+            self._open = False
+            return "</think>"
+        return ""
+
+    @property
+    def is_open(self) -> bool:
+        return self._open
+
+
+def _normalize_reasoning_effort(value: str | None) -> str:
+    """Coerce an optional config value into a valid Responses reasoning effort.
+
+    Falls back to ``medium`` for empty/None/invalid input rather than raising:
+    a typo in loom.toml should not block the whole chat path.
+    """
+    if not value:
+        return _RESPONSES_REASONING_DEFAULT_EFFORT
+    candidate = str(value).strip().lower()
+    if candidate in _RESPONSES_REASONING_EFFORTS:
+        return candidate
+    return _RESPONSES_REASONING_DEFAULT_EFFORT
+
+
 def _responses_sse_error_detail(provider: str, event_type: str, data: dict[str, Any]) -> str | None:
     """Return a user-facing error detail for Responses SSE error events.
 
@@ -1007,10 +1063,18 @@ class CodexResponsesProvider(LLMProvider):
         model: str = "",
         base_url: str = "",
         timeout: float = 0.0,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
+        # Default to ``medium``: gpt-5.5 reasoning chains stall the visible
+        # text stream for tens of seconds at ``high``; ``medium`` keeps
+        # quality while shortening time-to-first-token noticeably. Users can
+        # override via ``[providers.codex].reasoning_effort``.
+        self._reasoning_effort = _normalize_reasoning_effort(
+            reasoning_effort or _RESPONSES_REASONING_DEFAULT_EFFORT
+        )
 
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)
@@ -1076,6 +1140,14 @@ class CodexResponsesProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "store": False,
+            # ``summary: auto`` makes the backend emit
+            # ``response.reasoning_summary_text.delta`` events during the
+            # otherwise-silent reasoning phase so users see the model is
+            # thinking instead of staring at an empty stream.
+            "reasoning": {
+                "effort": self._reasoning_effort,
+                "summary": "auto",
+            },
         }
         if self.SUPPORTS_MAX_OUTPUT_TOKENS:
             payload["max_output_tokens"] = max_tokens
@@ -1134,6 +1206,7 @@ class CodexResponsesProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
         response_status = "in_progress"
+        reasoning_wrapper = _ReasoningStreamWrapper()
 
         # SSE may already have yielded partial output; retrying mid-stream can
         # duplicate content or tool calls, so failures propagate to the caller.
@@ -1184,7 +1257,33 @@ class CodexResponsesProvider(LLMProvider):
                             # the canonical args still arrive on
                             # ``response.output_item.done`` so we can ignore
                             # the streaming form entirely.
-                            if isinstance(delta, str) and event_type.endswith("output_text.delta"):
+                            #
+                            # ``reasoning_summary_text.delta`` carries the
+                            # backend's reasoning summary — surface it wrapped
+                            # in ``<think>…</think>`` so session.stream_turn
+                            # renders it as a collapsed thinking block instead
+                            # of a silent stall.
+                            if isinstance(delta, str) and event_type.endswith("reasoning_summary_text.delta"):
+                                yield (reasoning_wrapper.open_chunk(delta), None)
+                            elif (
+                                event_type.endswith("reasoning_summary_text.done")
+                                or event_type.endswith("reasoning_summary_part.done")
+                            ):
+                                # OpenAI Responses emits BOTH events at the
+                                # end of a summary part. ``part.done`` is the
+                                # outer wrapper and is the one we can rely on
+                                # to always arrive — ``text.done`` may be
+                                # omitted by some compat backends. Either
+                                # event closes the ``<think>`` tag so the UI
+                                # surfaces the block before ``output_text``
+                                # starts, which is the whole point of the fix.
+                                closing = reasoning_wrapper.close()
+                                if closing:
+                                    yield (closing, None)
+                            elif isinstance(delta, str) and event_type.endswith("output_text.delta"):
+                                closing = reasoning_wrapper.close()
+                                if closing:
+                                    yield (closing, None)
                                 full_content += delta
                                 yield (delta, None)
                             item = data.get("item")
@@ -1205,6 +1304,12 @@ class CodexResponsesProvider(LLMProvider):
                     raise RuntimeError(
                         _stream_interrupt_detail("Codex Responses", exc)
                     ) from exc
+
+        # Close any reasoning tag the stream left dangling (e.g. abort signal,
+        # or backend that omitted the .done event).
+        closing = reasoning_wrapper.close()
+        if closing:
+            yield (closing, None)
 
         tool_uses: list[ToolUse] = []
         raw_tool_calls: list[dict[str, Any]] = []
@@ -1270,10 +1375,19 @@ class XAIResponsesProvider(LLMProvider):
         model: str = "",
         base_url: str = "",
         timeout: float = 0.0,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
+        # xAI Grok-4.x already streams text deltas during reasoning, so
+        # injecting ``reasoning.effort`` by default is unnecessary — and
+        # would risk a 400 if xAI's Responses-compat tightens later. Opt-in
+        # only: leave ``None`` to preserve the current working payload, or
+        # set ``[providers.xai_oauth].reasoning_effort`` to request a value.
+        self._reasoning_effort = (
+            _normalize_reasoning_effort(reasoning_effort) if reasoning_effort else None
+        )
 
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)
@@ -1341,6 +1455,14 @@ class XAIResponsesProvider(LLMProvider):
             "store": False,
             "max_output_tokens": max_tokens,
         }
+        if self._reasoning_effort:
+            # Opt-in only — see __init__ comment. ``summary: auto`` lets the
+            # backend stream reasoning summary so it can render via the same
+            # ``<think>…</think>`` path the Codex provider uses.
+            payload["reasoning"] = {
+                "effort": self._reasoning_effort,
+                "summary": "auto",
+            }
         if tools:
             payload["tools"] = self.format_tools(tools)
         return payload
@@ -1396,6 +1518,7 @@ class XAIResponsesProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
         response_status = "in_progress"
+        reasoning_wrapper = _ReasoningStreamWrapper()
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream(
@@ -1444,7 +1567,33 @@ class XAIResponsesProvider(LLMProvider):
                             # the canonical args still arrive on
                             # ``response.output_item.done`` so we can ignore
                             # the streaming form entirely.
-                            if isinstance(delta, str) and event_type.endswith("output_text.delta"):
+                            #
+                            # ``reasoning_summary_text.delta`` is no-op here
+                            # in xAI's default config (Grok streams text
+                            # deltas during reasoning anyway) but is wired so
+                            # opt-in ``reasoning_effort`` works symmetrically
+                            # with Codex.
+                            if isinstance(delta, str) and event_type.endswith("reasoning_summary_text.delta"):
+                                yield (reasoning_wrapper.open_chunk(delta), None)
+                            elif (
+                                event_type.endswith("reasoning_summary_text.done")
+                                or event_type.endswith("reasoning_summary_part.done")
+                            ):
+                                # OpenAI Responses emits BOTH events at the
+                                # end of a summary part. ``part.done`` is the
+                                # outer wrapper and is the one we can rely on
+                                # to always arrive — ``text.done`` may be
+                                # omitted by some compat backends. Either
+                                # event closes the ``<think>`` tag so the UI
+                                # surfaces the block before ``output_text``
+                                # starts, which is the whole point of the fix.
+                                closing = reasoning_wrapper.close()
+                                if closing:
+                                    yield (closing, None)
+                            elif isinstance(delta, str) and event_type.endswith("output_text.delta"):
+                                closing = reasoning_wrapper.close()
+                                if closing:
+                                    yield (closing, None)
                                 full_content += delta
                                 yield (delta, None)
                             item = data.get("item")
@@ -1465,6 +1614,10 @@ class XAIResponsesProvider(LLMProvider):
                     raise RuntimeError(
                         _stream_interrupt_detail("xAI Responses", exc)
                     ) from exc
+
+        closing = reasoning_wrapper.close()
+        if closing:
+            yield (closing, None)
 
         tool_uses: list[ToolUse] = []
         raw_tool_calls: list[dict[str, Any]] = []
