@@ -455,18 +455,72 @@ async def test_codex_provider_payload_falls_back_to_medium_on_invalid_effort(mon
 async def test_codex_provider_wraps_reasoning_summary_in_think_tags(monkeypatch, codex_home):
     """Reasoning summary deltas must surface to the stream as ``<think>…</think>``.
 
-    Without this, gpt-5.5 stalls visibly during the reasoning phase since the
-    backend emits ``reasoning_summary_text.delta`` but no ``output_text.delta``
-    until reasoning completes — see PR #455.
+    Uses the official OpenAI Responses event sequence — ``part.done`` is the
+    real end-of-summary signal. Without this, gpt-5.5 stalls visibly during
+    the reasoning phase since the backend emits ``reasoning_summary_text.delta``
+    but no ``output_text.delta`` until reasoning completes — see PR #455.
     """
     import httpx
 
     fake_client = _FakeAsyncClient([
+        "event: response.reasoning_summary_part.added",
+        'data: {"type":"response.reasoning_summary_part.added"}',
+        "",
         "event: response.reasoning_summary_text.delta",
         'data: {"type":"response.reasoning_summary_text.delta","delta":"Considering"}',
         "",
         "event: response.reasoning_summary_text.delta",
         'data: {"type":"response.reasoning_summary_text.delta","delta":" options"}',
+        "",
+        "event: response.reasoning_summary_part.done",
+        'data: {"type":"response.reasoning_summary_part.done"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    chunks: list[str] = []
+    async for delta, final in provider.stream_chat(
+        messages=[{"role": "user", "content": "ping"}],
+    ):
+        if final is None and delta:
+            chunks.append(delta)
+
+    joined = "".join(chunks)
+    assert "<think>Considering options</think>" in joined
+    assert joined.endswith("answer")
+
+    # Stream-order invariant: ``</think>`` must arrive BEFORE the first
+    # ``output_text`` delta, otherwise the UI sees the answer first and
+    # only learns about the thinking block retroactively — defeating the
+    # purpose of streaming the summary.
+    close_idx = next(i for i, c in enumerate(chunks) if "</think>" in c)
+    answer_idx = next(i for i, c in enumerate(chunks) if c == "answer")
+    assert close_idx < answer_idx, (
+        f"</think> at chunk {close_idx} must come before 'answer' at chunk {answer_idx}"
+    )
+
+    # Final assistant text must not include the reasoning summary.
+    final_response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+    assert "Considering" not in (final_response.text or "")
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_closes_think_on_text_done_event_too(monkeypatch, codex_home):
+    """Some compat backends emit ``reasoning_summary_text.done`` but not
+    ``reasoning_summary_part.done``. Either should close the tag.
+    """
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}',
         "",
         "event: response.reasoning_summary_text.done",
         'data: {"type":"response.reasoning_summary_text.done"}',
@@ -489,13 +543,11 @@ async def test_codex_provider_wraps_reasoning_summary_in_think_tags(monkeypatch,
             chunks.append(delta)
 
     joined = "".join(chunks)
-    # ``<think>`` opens on first reasoning delta, closes on .done event.
-    assert "<think>Considering options</think>" in joined
-    # Output text comes after, NOT inside the think tags.
-    assert joined.endswith("answer")
-    # Final assistant text must not include the reasoning summary.
-    final_response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
-    assert "Considering" not in (final_response.text or "")
+    assert "<think>thinking</think>" in joined
+    # Close must precede answer.
+    close_idx = next(i for i, c in enumerate(chunks) if "</think>" in c)
+    answer_idx = next(i for i, c in enumerate(chunks) if c == "answer")
+    assert close_idx < answer_idx
 
 
 @pytest.mark.asyncio

@@ -502,8 +502,8 @@ async def test_xai_provider_wraps_reasoning_summary_in_think_tags(tmp_path, monk
         "event: response.reasoning_summary_text.delta",
         'data: {"type":"response.reasoning_summary_text.delta","delta":"weighing"}',
         "",
-        "event: response.reasoning_summary_text.done",
-        'data: {"type":"response.reasoning_summary_text.done"}',
+        "event: response.reasoning_summary_part.done",
+        'data: {"type":"response.reasoning_summary_part.done"}',
         "",
         "event: response.output_text.delta",
         'data: {"type":"response.output_text.delta","delta":"reply"}',
@@ -525,3 +525,7 @@ async def test_xai_provider_wraps_reasoning_summary_in_think_tags(tmp_path, monk
     joined = "".join(chunks)
     assert "<think>weighing</think>" in joined
     assert joined.endswith("reply")
+    # Stream-order invariant: close-think before output text.
+    close_idx = next(i for i, c in enumerate(chunks) if "</think>" in c)
+    reply_idx = next(i for i, c in enumerate(chunks) if c == "reply")
+    assert close_idx < reply_idx

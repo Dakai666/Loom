@@ -1265,7 +1265,18 @@ class CodexResponsesProvider(LLMProvider):
                             # of a silent stall.
                             if isinstance(delta, str) and event_type.endswith("reasoning_summary_text.delta"):
                                 yield (reasoning_wrapper.open_chunk(delta), None)
-                            elif event_type.endswith("reasoning_summary_text.done"):
+                            elif (
+                                event_type.endswith("reasoning_summary_text.done")
+                                or event_type.endswith("reasoning_summary_part.done")
+                            ):
+                                # OpenAI Responses emits BOTH events at the
+                                # end of a summary part. ``part.done`` is the
+                                # outer wrapper and is the one we can rely on
+                                # to always arrive — ``text.done`` may be
+                                # omitted by some compat backends. Either
+                                # event closes the ``<think>`` tag so the UI
+                                # surfaces the block before ``output_text``
+                                # starts, which is the whole point of the fix.
                                 closing = reasoning_wrapper.close()
                                 if closing:
                                     yield (closing, None)
@@ -1564,7 +1575,18 @@ class XAIResponsesProvider(LLMProvider):
                             # with Codex.
                             if isinstance(delta, str) and event_type.endswith("reasoning_summary_text.delta"):
                                 yield (reasoning_wrapper.open_chunk(delta), None)
-                            elif event_type.endswith("reasoning_summary_text.done"):
+                            elif (
+                                event_type.endswith("reasoning_summary_text.done")
+                                or event_type.endswith("reasoning_summary_part.done")
+                            ):
+                                # OpenAI Responses emits BOTH events at the
+                                # end of a summary part. ``part.done`` is the
+                                # outer wrapper and is the one we can rely on
+                                # to always arrive — ``text.done`` may be
+                                # omitted by some compat backends. Either
+                                # event closes the ``<think>`` tag so the UI
+                                # surfaces the block before ``output_text``
+                                # starts, which is the whole point of the fix.
                                 closing = reasoning_wrapper.close()
                                 if closing:
                                     yield (closing, None)
