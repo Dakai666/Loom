@@ -277,6 +277,20 @@ class SQLiteStore:
                 except Exception:
                     pass
 
+            # Issue #451 phase A: backfill relational_entries → semantic_entries.
+            # Idempotent — INSERT OR IGNORE keyed on `rel:{subject}::{predicate}`.
+            # New relational writes dual-write directly via RelationalMemory.upsert,
+            # so this backfill is only load-bearing on first run and as a safety net
+            # for any process that wrote without plumbing semantic through.
+            try:
+                await self._backfill_relational_into_semantic(db)
+            except Exception as exc:
+                # Backfill failure must not block startup. Surface to logs.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Relational → semantic backfill failed: %s", exc,
+                )
+
             # Ensure FTS indexes are up-to-date with existing content (idempotent, fast)
             try:
                 await db.execute("INSERT INTO semantic_fts(semantic_fts) VALUES ('rebuild')")
@@ -300,6 +314,71 @@ class SQLiteStore:
             # instead of immediately raising `database is locked`.
             await db.execute("PRAGMA busy_timeout = 5000;")
             yield db
+
+    @staticmethod
+    async def _backfill_relational_into_semantic(db: aiosqlite.Connection) -> None:
+        """Copy every ``relational_entries`` row into ``semantic_entries`` with
+        a ``rel:{subject}::{predicate}`` key. Uses ``INSERT OR IGNORE`` so
+        re-runs are no-ops once the row exists.
+
+        Embeddings are *not* populated here — running provider calls inline
+        with startup would slow boot. Embedding maintenance fills them
+        opportunistically as recall traffic hits these keys.
+        """
+        # Build (subject, predicate, object, ...) → SemanticEntry-shaped rows.
+        cursor = await db.execute(
+            "SELECT id, subject, predicate, object, confidence, source, metadata, "
+            "created_at, updated_at, domain, temporal, last_accessed_at "
+            "FROM relational_entries"
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return
+
+        inserted = 0
+        for (
+            rel_id, subject, predicate, obj, confidence, source, metadata_raw,
+            created_at, updated_at, domain, temporal, last_accessed_at,
+        ) in rows:
+            try:
+                md = json.loads(metadata_raw) if metadata_raw else {}
+            except Exception:
+                md = {}
+            md["subject"] = subject
+            md["predicate"] = predicate
+            md["object"] = obj
+            key = f"rel:{subject}::{predicate}"
+            value = f"{subject} {predicate} {obj}"
+            cur = await db.execute(
+                """
+                INSERT OR IGNORE INTO semantic_entries
+                    (id, key, value, confidence, source, metadata,
+                     created_at, updated_at, domain, temporal, last_accessed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rel_id,
+                    key,
+                    value,
+                    confidence,
+                    source,
+                    json.dumps(md, ensure_ascii=False),
+                    created_at,
+                    updated_at,
+                    domain or "knowledge",
+                    temporal or "recent",
+                    last_accessed_at,
+                ),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                inserted += 1
+        await db.commit()
+        if inserted:
+            import logging
+            logging.getLogger(__name__).info(
+                "Backfilled %d relational triples into semantic store "
+                "(issue #451 phase A).", inserted,
+            )
 
     @staticmethod
     def _dumps(obj: dict) -> str:

@@ -18,10 +18,11 @@ Examples
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -31,6 +32,11 @@ from loom.core.memory.ontology import (
     normalize_domain,
     normalize_temporal,
 )
+
+if TYPE_CHECKING:
+    from loom.core.memory.semantic import SemanticMemory
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +99,18 @@ class RelationalMemory:
     Upserting with the same (subject, predicate) replaces the object.
     """
 
-    def __init__(self, db: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        db: aiosqlite.Connection,
+        semantic: "SemanticMemory | None" = None,
+    ) -> None:
         self._db = db
+        # Issue #451 phase A: dual-write triples into the semantic store so
+        # ``recall`` can surface them. The legacy ``relational_entries``
+        # table remains the source of truth until phase B. When ``semantic``
+        # is None (e.g. ad-hoc scripts), dual-write is skipped — the next
+        # session startup will backfill via ``SQLiteStore.initialize``.
+        self._semantic = semantic
 
     async def upsert(self, entry: RelationalEntry) -> None:
         """Insert or update the (subject, predicate) entry."""
@@ -130,6 +146,19 @@ class RelationalMemory:
             ),
         )
         await self._db.commit()
+
+        # Issue #451 phase A: dual-write to semantic so recall can find this.
+        # Failure here must not block the relational write (semantic is the
+        # *new* path; relational remains the source of truth in phase A).
+        if self._semantic is not None:
+            try:
+                from loom.core.memory.relational_bridge import triple_to_semantic
+                await self._semantic.upsert(triple_to_semantic(entry))
+            except Exception as exc:
+                logger.warning(
+                    "Relational dual-write to semantic failed for (%s, %s): %s",
+                    entry.subject, entry.predicate, exc,
+                )
 
     async def get(self, subject: str, predicate: str) -> RelationalEntry | None:
         """Return the entry for (subject, predicate), or None."""
@@ -183,7 +212,22 @@ class RelationalMemory:
             (subject, predicate),
         )
         await self._db.commit()
-        return (cursor.rowcount or 0) > 0
+        deleted = (cursor.rowcount or 0) > 0
+
+        # Issue #451 phase A: mirror the delete in semantic so recall stops
+        # finding the triple. Safe to attempt even if the bridge row never
+        # existed — delete is idempotent.
+        if deleted and self._semantic is not None:
+            try:
+                from loom.core.memory.relational_bridge import make_rel_key
+                await self._semantic.delete(make_rel_key(subject, predicate))
+            except Exception as exc:
+                logger.warning(
+                    "Relational dual-delete in semantic failed for (%s, %s): %s",
+                    subject, predicate, exc,
+                )
+
+        return deleted
 
     # ------------------------------------------------------------------
 

@@ -44,6 +44,17 @@ def _sanitize_fts(query: str) -> str:
     return " ".join(f'"{t}"' for t in query.replace('"', " ").split() if t)
 
 
+def _semantic_result_type(key: str) -> str:
+    """Issue #451: tag rel:* keys as ``"relational"`` so callers see the kind.
+
+    Relational triples live in ``semantic_entries`` with key ``rel:{S}::{P}``
+    (see ``loom/core/memory/relational_bridge.py``). They surface through
+    the same BM25 / embedding paths as ordinary semantic facts; this helper
+    just relabels them for the agent-facing display.
+    """
+    return "relational" if key.startswith("rel:") else "semantic"
+
+
 def _axis_filter_sql(
     domain: str | None,
     temporal: str | None,
@@ -283,7 +294,7 @@ class MemorySearch:
             if score > 0.0:
                 results.append(
                     MemorySearchResult(
-                        type="semantic",
+                        type=_semantic_result_type(entry.key),
                         key=entry.key,
                         value=entry.value,
                         score=score,
@@ -316,7 +327,7 @@ class MemorySearch:
                 entries = await self._semantic.list_recent(limit)
             results.extend(
                 MemorySearchResult(
-                    type="semantic",
+                    type=_semantic_result_type(e.key),
                     key=e.key,
                     value=e.value,
                     score=0.0,
@@ -392,7 +403,7 @@ class MemorySearch:
             score = abs(r[11]) if r[11] else 0.0
             results.append(
                 MemorySearchResult(
-                    type="semantic",
+                    type=_semantic_result_type(entry.key),
                     key=entry.key,
                     value=entry.value,
                     score=score,

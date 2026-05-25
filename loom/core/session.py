@@ -1138,7 +1138,7 @@ class LoomSession:
         emb_provider = build_embedding_provider(_load_env(), _load_loom_config())
         semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         procedural = ProceduralMemory(self._db)
-        relational = RelationalMemory(self._db)
+        relational = RelationalMemory(self._db, semantic=semantic)
         # Issue #147 Phase C.1: ReflectionAPI / CounterFactualReflector
         # now take the MemoryFacade. They are constructed below, after
         # ``self._memory`` is built (search "Phase C.1: facade-aware

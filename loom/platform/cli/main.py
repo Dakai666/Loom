@@ -2065,7 +2065,7 @@ async def _reflect(session_id: str | None, db: str) -> None:
         ep = EpisodicMemory(conn)
         pr = ProceduralMemory(conn)
         sem = SemanticMemory(conn)
-        rel = RelationalMemory(conn)
+        rel = RelationalMemory(conn, semantic=sem)
         facade = MemoryFacade(
             semantic=sem,
             procedural=pr,
