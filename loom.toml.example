@@ -110,10 +110,14 @@ reminder_after_turns = 10
 # enabled          = true              # optional; explicit --model codex/... also registers it
 # base_url         = "https://chatgpt.com/backend-api/codex/responses"
 # default_model    = "gpt-5.5"         # bare model name — no "codex/" prefix here
-# reasoning_effort = "medium"          # minimal | low | medium | high (default: medium)
-#                                      # gpt-5.5 stalls the visible stream during reasoning at
-#                                      # "high"; "medium" is the default tradeoff. "low" if you
-#                                      # want shorter time-to-first-token at some quality cost.
+# reasoning_effort = "medium"          # OPT-IN — minimal | low | medium | high.
+#                                      # Leaving unset sends NO reasoning block, so the
+#                                      # ChatGPT.com Codex backend uses its tuned default
+#                                      # (fastest TTFT, no <think> in UI). Forcing a value
+#                                      # makes the backend allocate a parallel reasoning
+#                                      # summary stream — empirically 3× slower TTFT, and
+#                                      # minutes-long stalls in tool-heavy turns. Only set
+#                                      # this if you actively want visible reasoning.
 
 # [providers.xai_oauth]
 # enabled          = true              # optional; explicit --model xai/... also registers it

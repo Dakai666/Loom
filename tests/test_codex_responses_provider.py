@@ -395,7 +395,12 @@ async def test_codex_provider_keeps_max_output_incomplete_recoverable(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_codex_provider_payload_includes_reasoning_default_medium(monkeypatch, codex_home):
+async def test_codex_provider_omits_reasoning_block_by_default(monkeypatch, codex_home):
+    """Forcing ``reasoning: {effort, summary}`` empirically slows the
+    ChatGPT.com Codex backend (3x TTFT on plain prompts, minutes on
+    tool-heavy turns) and may force a different reasoning path than the
+    backend's tuned default. Send nothing unless user opts in.
+    """
     import httpx
 
     fake_client = _FakeAsyncClient([
@@ -408,8 +413,7 @@ async def test_codex_provider_payload_includes_reasoning_default_medium(monkeypa
 
     await provider.chat(messages=[{"role": "user", "content": "ping"}])
 
-    payload = fake_client.requests[0]["json"]
-    assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert "reasoning" not in fake_client.requests[0]["json"]
 
 
 @pytest.mark.asyncio
@@ -441,6 +445,7 @@ async def test_codex_provider_payload_falls_back_to_medium_on_invalid_effort(mon
         "",
     ])
     monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    # User explicitly opted in but typo'd the effort value.
     provider = CodexResponsesProvider(
         model="codex/gpt-5.5", reasoning_effort="ultra",
     )
