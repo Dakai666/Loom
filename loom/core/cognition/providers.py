@@ -1068,12 +1068,16 @@ class CodexResponsesProvider(LLMProvider):
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
-        # Default to ``medium``: gpt-5.5 reasoning chains stall the visible
-        # text stream for tens of seconds at ``high``; ``medium`` keeps
-        # quality while shortening time-to-first-token noticeably. Users can
-        # override via ``[providers.codex].reasoning_effort``.
-        self._reasoning_effort = _normalize_reasoning_effort(
-            reasoning_effort or _RESPONSES_REASONING_DEFAULT_EFFORT
+        # Opt-in only. Forcing ``reasoning: {effort, summary: "auto"}`` into
+        # every request makes the ChatGPT.com Codex backend allocate a
+        # parallel summary stream, which empirically triples TTFT (1.7s →
+        # 5.8s in plain prompts, minutes in tool-heavy turns) and may
+        # downshift the model from its silent default reasoning path. When
+        # nothing is set we send no ``reasoning`` field at all so the
+        # backend uses its (faster, undocumented-but-tuned) default.
+        # Users can opt-in via ``[providers.codex].reasoning_effort``.
+        self._reasoning_effort = (
+            _normalize_reasoning_effort(reasoning_effort) if reasoning_effort else None
         )
 
     def _api_model(self) -> str:
@@ -1140,15 +1144,15 @@ class CodexResponsesProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "store": False,
-            # ``summary: auto`` makes the backend emit
-            # ``response.reasoning_summary_text.delta`` events during the
-            # otherwise-silent reasoning phase so users see the model is
-            # thinking instead of staring at an empty stream.
-            "reasoning": {
+        }
+        if self._reasoning_effort:
+            # Opt-in only — see __init__ comment. ``summary: auto`` makes
+            # the backend emit ``response.reasoning_summary_text.delta``
+            # events that the SSE handler renders as ``<think>…</think>``.
+            payload["reasoning"] = {
                 "effort": self._reasoning_effort,
                 "summary": "auto",
-            },
-        }
+            }
         if self.SUPPORTS_MAX_OUTPUT_TOKENS:
             payload["max_output_tokens"] = max_tokens
         if tools:
