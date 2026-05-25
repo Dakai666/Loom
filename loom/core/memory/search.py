@@ -243,8 +243,14 @@ class MemorySearch:
         return ranked
 
     async def _mark_accessed(self, results: list[MemorySearchResult]) -> None:
-        """Bump last_accessed_at for semantic hits (Memory Ontology v0.1)."""
-        keys = [r.key for r in results if r.type == "semantic"]
+        """Bump last_accessed_at for semantic + relational hits (Memory Ontology v0.1).
+
+        Issue #451 phase A: ``relational`` is a display label for ``rel:*``
+        keys that live in ``semantic_entries`` (see ``_semantic_result_type``).
+        Both kinds need their access timestamp refreshed; ``SemanticMemory.
+        mark_accessed`` handles the relational source-table mirror.
+        """
+        keys = [r.key for r in results if r.type in ("semantic", "relational")]
         if keys:
             await self._semantic.mark_accessed(keys)
 

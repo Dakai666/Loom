@@ -44,6 +44,8 @@ LIMIT ?
 
 距離越小越相似，取 `1.0 - distance` 轉換為相似度分數（0–1）。
 
+> **#451 Phase A — Relational triples 走同一條路**：dreaming / `relate` tool / self-reflection 寫入的 `(subject, predicate, object)` 三元組會以 `key = "rel:{subject}::{predicate}"`、`value = "{subject} {predicate} {object}"` 鏡射到 `semantic_entries`，因此自動參與這兩階段瀑布。`recall` 回傳時透過 `_semantic_result_type()` 把 `rel:*` 鍵的命中標為 `type="relational"`，agent 看得到 kind 但不需要切換 verb。Legacy DB 升級後缺 embedding 的 `rel:*` 行，在 `LoomSession.start()` 由 `SemanticMemory.ensure_embeddings_for_prefix("rel:")` 補齊一次。
+
 ### SemanticMemory.upsert() 中的自動嵌入
 
 ```python

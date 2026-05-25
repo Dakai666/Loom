@@ -1139,6 +1139,20 @@ class LoomSession:
         semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         procedural = ProceduralMemory(self._db)
         relational = RelationalMemory(self._db, semantic=semantic)
+        # Issue #451 phase A: backfill embeddings for `rel:*` mirror rows
+        # that were copied into semantic_entries by SQLiteStore.initialize()
+        # (which runs before the embedding provider is plumbed). Without
+        # this, the embedding tier filters them out and recall's short-
+        # circuit means BM25 never sees them. Idempotent — only acts on
+        # rows where embedding IS NULL.
+        if semantic.has_embeddings:
+            try:
+                await semantic.ensure_embeddings_for_prefix("rel:")
+            except Exception as exc:
+                logger.warning(
+                    "Relational embedding backfill failed (will retry next "
+                    "session start): %s", exc,
+                )
         # Issue #147 Phase C.1: ReflectionAPI / CounterFactualReflector
         # now take the MemoryFacade. They are constructed below, after
         # ``self._memory`` is built (search "Phase C.1: facade-aware

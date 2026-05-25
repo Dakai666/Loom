@@ -19,6 +19,7 @@ Covers
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -32,7 +33,7 @@ from loom.core.memory.relational_bridge import (
     triple_to_semantic,
 )
 from loom.core.memory.search import MemorySearch
-from loom.core.memory.semantic import SemanticMemory
+from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
 
 
@@ -273,8 +274,6 @@ async def test_recall_returns_relational_triples_tagged_as_relational(tmp_db):
 
 async def test_recall_does_not_relabel_ordinary_semantic_facts(tmp_db):
     """Regression guard — ``type="semantic"`` must still apply to plain facts."""
-    from loom.core.memory.semantic import SemanticEntry
-
     store = SQLiteStore(tmp_db)
     await store.initialize()
     async with store.connect() as db:
@@ -289,3 +288,156 @@ async def test_recall_does_not_relabel_ordinary_semantic_facts(tmp_db):
         assert results
         ordinary = next(r for r in results if r.key == "ordinary_fact")
         assert ordinary.type == "semantic"
+
+
+# ---------------------------------------------------------------------------
+# Review P1 regression — embedding backfill makes legacy rel:* rows visible
+# even when the embedding tier short-circuits the BM25 fallback.
+# ---------------------------------------------------------------------------
+
+async def test_ensure_embeddings_for_prefix_fills_missing_rows(tmp_db):
+    """``ensure_embeddings_for_prefix`` should only touch ``embedding IS NULL``."""
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        # Seed two legacy relational rows (no semantic dual-write, so they
+        # land in semantic_entries via the initialize() backfill only — and
+        # therefore have no embedding).
+        await _seed_legacy_relational_row(
+            db, subject="user", predicate="likes_tts_voice", object="xAI eve",
+        )
+        await _seed_legacy_relational_row(
+            db, subject="user", predicate="prefers_lang", object="zh-TW",
+        )
+
+    # Backfill table on second initialize().
+    await store.initialize()
+
+    # Now plumb a fake embedding provider and call the new ensure method.
+    async with store.connect() as db:
+        mock_provider = AsyncMock()
+        mock_provider.embed.return_value = [
+            [0.1, 0.2, 0.3],
+            [0.4, 0.5, 0.6],
+        ]
+        sem = SemanticMemory(db, embedding_provider=mock_provider)
+        n = await sem.ensure_embeddings_for_prefix("rel:")
+        assert n == 2
+
+        # Both rows now have embeddings.
+        pairs = await sem.list_with_embeddings(10)
+        rel_pairs = [(e, v) for (e, v) in pairs if e.key.startswith("rel:")]
+        assert len(rel_pairs) == 2
+        for _entry, vec in rel_pairs:
+            assert vec is not None
+
+        # Idempotent — second call is a no-op.
+        n2 = await sem.ensure_embeddings_for_prefix("rel:")
+        assert n2 == 0
+
+
+async def test_ensure_embeddings_no_op_without_provider(tmp_db):
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db, embedding_provider=None)
+        n = await sem.ensure_embeddings_for_prefix("rel:")
+        assert n == 0
+
+
+async def test_embedding_recall_finds_backfilled_rel_rows_after_ensure(tmp_db):
+    """Reviewer's manual repro: with embedding provider configured, recall
+    short-circuits on the embedding tier. Backfilled rel:* rows must end up
+    with embeddings or they're invisible. After ``ensure_embeddings_for_prefix``
+    they should surface alongside ordinary embedded semantic facts.
+    """
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        # Legacy relational row (no embedding yet).
+        await _seed_legacy_relational_row(
+            db, subject="user", predicate="likes_tts_voice",
+            object="xAI eve Chinese sounds natural",
+        )
+
+    await store.initialize()  # backfill into semantic_entries (no embedding)
+
+    async with store.connect() as db:
+        # Embedding provider returns deterministic vectors. We use the same
+        # vector for everything so cosine == 1.0; the goal is to confirm
+        # rel:* rows reach the embedding tier at all, not ranking fidelity.
+        provider = AsyncMock()
+        provider.embed.side_effect = lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+
+        sem = SemanticMemory(db, embedding_provider=provider)
+        proc = ProceduralMemory(db)
+
+        # Embed both the legacy rel:* row and a plain semantic fact.
+        await sem.ensure_embeddings_for_prefix("rel:")
+        await sem.upsert(SemanticEntry(key="ordinary", value="harness-first"))
+
+        # Reviewer's exact scenario: recall with a query that would short-
+        # circuit on the embedding tier.
+        search = MemorySearch(sem, proc)
+        results = await search.recall("likes_tts_voice", limit=10)
+        keys = {r.key for r in results}
+        assert "rel:user::likes_tts_voice" in keys, (
+            "backfilled relational row invisible to embedding-tier recall "
+            "— P1 regression"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Review P2 regression — recall must refresh last_accessed_at on both
+# semantic_entries and the relational source-of-truth row.
+# ---------------------------------------------------------------------------
+
+async def test_recall_refreshes_last_accessed_on_both_tables(tmp_db):
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        rel = RelationalMemory(db, semantic=sem)
+        proc = ProceduralMemory(db)
+        await rel.upsert(RelationalEntry(
+            subject="user",
+            predicate="likes_tts_voice",
+            object="xAI eve",
+        ))
+
+        # Both rows start with NULL last_accessed_at.
+        sem_row = await sem.get("rel:user::likes_tts_voice")
+        assert sem_row.last_accessed_at is None
+        rel_row = await rel.get("user", "likes_tts_voice")
+        assert rel_row.last_accessed_at is None
+
+        # Recall should bump both.
+        search = MemorySearch(sem, proc)
+        results = await search.recall("likes_tts_voice", limit=5)
+        assert any(r.type == "relational" for r in results)
+
+        sem_after = await sem.get("rel:user::likes_tts_voice")
+        rel_after = await rel.get("user", "likes_tts_voice")
+        assert sem_after.last_accessed_at is not None, (
+            "semantic row last_accessed_at not refreshed — P2 regression"
+        )
+        assert rel_after.last_accessed_at is not None, (
+            "relational source row last_accessed_at not mirrored "
+            "— would cause source/mirror decay drift"
+        )
+
+
+async def test_mark_accessed_does_not_touch_relational_when_no_rel_keys(tmp_db):
+    """Regression guard — non-rel:* keys must not trigger the relational
+    UPDATE branch (it would be wasted SQL on a hot recall path)."""
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        await sem.upsert(SemanticEntry(key="ordinary_fact", value="something"))
+        # The UPDATE returns silently regardless, but at least confirm no
+        # row in relational_entries exists for this key shape.
+        await sem.mark_accessed(["ordinary_fact"])
+        cur = await db.execute("SELECT COUNT(*) FROM relational_entries")
+        (count,) = await cur.fetchone()
+        assert count == 0

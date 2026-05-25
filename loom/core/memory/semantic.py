@@ -449,6 +449,81 @@ class SemanticMemory:
             results.append((_row_to_entry(r[:11]), float(score)))
         return results
 
+    async def ensure_embeddings_for_prefix(
+        self,
+        prefix: str,
+        *,
+        batch_size: int = 32,
+    ) -> int:
+        """Fill missing embeddings for rows whose ``key`` starts with ``prefix``.
+
+        Idempotent — only touches rows where ``embedding IS NULL``. Returns
+        the number of rows embedded. No-op when no embedding provider is
+        configured (callers should still be safe to invoke).
+
+        Added for issue #451 phase A so that legacy ``relational_entries``
+        rows backfilled into ``semantic_entries`` (without an embedding,
+        since ``SQLiteStore.initialize`` runs before the embedding provider
+        is plumbed) become visible through the embedding-tier recall path.
+        Without this, ``_search_semantic_embedding``'s
+        ``WHERE embedding IS NOT NULL`` filter excludes them, and recall's
+        short-circuit on non-empty embedding results means BM25 never sees
+        them either.
+        """
+        if self._embeddings is None:
+            return 0
+
+        cursor = await self._db.execute(
+            "SELECT key, value FROM semantic_entries "
+            "WHERE key LIKE ? AND embedding IS NULL",
+            (f"{prefix}%",),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return 0
+
+        embedded = 0
+        for i in range(0, len(rows), batch_size):
+            chunk = rows[i:i + batch_size]
+            texts = [f"{k} {v}" for k, v in chunk]
+            try:
+                vectors = await self._embeddings.embed(texts)
+            except Exception as exc:
+                logger.warning(
+                    "ensure_embeddings_for_prefix(%r) batch embed failed at "
+                    "offset %d (%d rows): %s — skipping remainder of this batch",
+                    prefix, i, len(chunk), exc,
+                )
+                if self._health:
+                    self._health.record_failure("embedding_write", str(exc))
+                continue
+
+            for (key, _value), vector in zip(chunk, vectors):
+                if vector is None:
+                    continue
+                try:
+                    await self._db.execute(
+                        "UPDATE semantic_entries SET embedding = ? WHERE key = ?",
+                        (json.dumps(vector), key),
+                    )
+                    embedded += 1
+                except Exception as exc:
+                    logger.warning(
+                        "ensure_embeddings_for_prefix(%r) write failed for "
+                        "key=%r: %s", prefix, key, exc,
+                    )
+            await self._db.commit()
+            if self._health:
+                self._health.record_success("embedding_write")
+
+        if embedded:
+            logger.info(
+                "Filled %d missing embeddings for prefix %r "
+                "(issue #451 phase A backfill).",
+                embedded, prefix,
+            )
+        return embedded
+
     async def list_by_prefix(self, prefix: str, limit: int = 10) -> list[SemanticEntry]:
         """Return entries whose key starts with *prefix*, newest first.
 
@@ -535,6 +610,16 @@ class SemanticMemory:
         decay cycle can distinguish facts that are still in active use from
         those drifting toward archived state. Silent no-op for empty keys
         list — recall hot path stays cheap.
+
+        Issue #451 phase A: when any ``rel:*`` keys are present, mirror the
+        timestamp into ``relational_entries`` as well. The bridged rows
+        share the same ``id`` across both tables (see
+        ``SQLiteStore._backfill_relational_into_semantic`` and
+        ``relational_bridge.triple_to_semantic``), so the mirror reduces to
+        an UPDATE..WHERE id IN (...). Without this, dream/relational
+        triples that are actively recalled still decay out of the
+        relational source-of-truth table. Phase B retires this mirror
+        when the relational table itself goes away.
         """
         if not keys:
             return
@@ -545,4 +630,17 @@ class SemanticMemory:
             f"WHERE key IN ({placeholders})",
             (now, *keys),
         )
+
+        # Mirror into relational_entries for any bridged rel:* keys.
+        rel_keys = [k for k in keys if k.startswith("rel:")]
+        if rel_keys:
+            rel_placeholders = ",".join("?" * len(rel_keys))
+            await self._db.execute(
+                f"UPDATE relational_entries SET last_accessed_at = ? "
+                f"WHERE id IN ("
+                f"  SELECT id FROM semantic_entries WHERE key IN ({rel_placeholders})"
+                f")",
+                (now, *rel_keys),
+            )
+
         await self._db.commit()
