@@ -35,7 +35,11 @@ from loom.core.memory.ontology import (
     normalize_temporal,
 )
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import (
+    RelationalEntry,
+    get_triple,
+    upsert_triple,
+)
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
@@ -60,11 +64,11 @@ async def db_conn(store):
 
 @pytest_asyncio.fixture
 async def memories(db_conn):
+    # #451 phase B: relational triples live in SemanticMemory via the bridge.
     semantic = SemanticMemory(db_conn)
-    relational = RelationalMemory(db_conn)
     procedural = ProceduralMemory(db_conn)
     episodic = EpisodicMemory(db_conn)
-    return semantic, relational, procedural, episodic
+    return semantic, procedural, episodic
 
 
 # ---------------------------------------------------------------------------
@@ -270,12 +274,12 @@ class TestSemanticPersistence:
 class TestRelationalPersistence:
     @pytest.mark.asyncio
     async def test_relational_round_trip(self, memories):
-        _, relational, *_ = memories
-        await relational.upsert(RelationalEntry(
+        semantic, *_ = memories
+        await upsert_triple(semantic, RelationalEntry(
             subject="user", predicate="prefers", object="brevity",
             domain=DOMAIN_USER, temporal=TEMPORAL_MILESTONE,
         ))
-        got = await relational.get("user", "prefers")
+        got = await get_triple(semantic, "user", "prefers")
         assert got.domain == DOMAIN_USER
         assert got.temporal == TEMPORAL_MILESTONE
 
@@ -289,10 +293,10 @@ class TestGovernorClassifier:
     async def test_governor_upgrades_default_domain_via_classifier(
         self, db_conn, memories
     ):
-        semantic, relational, procedural, episodic = memories
+        semantic, procedural, episodic = memories
         gov = MemoryGovernor(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic, db=db_conn,
+            episodic=episodic, db=db_conn,
         )
         # Default domain on the entry, but key has a `user:` prefix —
         # governor should rewrite to DOMAIN_USER before persisting.
@@ -311,10 +315,10 @@ class TestGovernorClassifier:
     async def test_governor_preserves_explicit_non_default_domain(
         self, db_conn, memories
     ):
-        semantic, relational, procedural, episodic = memories
+        semantic, procedural, episodic = memories
         gov = MemoryGovernor(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic, db=db_conn,
+            episodic=episodic, db=db_conn,
         )
         # Caller explicitly set DOMAIN_SELF — classifier must not override
         # even though key prefix says ``user:``.
@@ -336,7 +340,7 @@ class TestGovernorClassifier:
 class TestRecallAxisFilter:
     @pytest_asyncio.fixture
     async def populated(self, memories):
-        semantic, _, procedural, _ = memories
+        semantic, procedural, _ = memories
         for key, value, domain, temporal in [
             ("user:prefers", "concise responses", DOMAIN_USER, TEMPORAL_RECENT),
             ("project:db", "uses sqlite wal", DOMAIN_PROJECT, TEMPORAL_RECENT),

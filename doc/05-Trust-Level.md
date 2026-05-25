@@ -14,7 +14,7 @@ Trust Level 是 Loom 工具安全模型的基礎。每個工具在註冊時都�
 
 這些操作風險極低，session 開始時已預授權，不需要每次確認。
 
-**典型工具**：`read_file`, `list_dir`, `recall`, `query_relations`, `fetch_url`
+**典型工具**：`read_file`, `list_dir`, `recall`, `fetch_url`
 
 **執行流程**：
 ```
@@ -85,12 +85,11 @@ class ToolCapability(Flag):
 |------|-----------|-------------|------|
 | `read_file` | SAFE | — | 讀取工作區內的檔案 |
 | `list_dir` | SAFE | — | 列出目錄內容 |
-| `recall` | SAFE | — | 搜尋記憶 |
-| `query_relations` | SAFE | — | 查詢關聯記憶三元組 |
+| `recall` | SAFE | — | 搜尋記憶（含三元組，#451 phase B 起為唯一讀取入口）|
 | `fetch_url` | SAFE | NETWORK | 擷取網頁（唯讀） |
 | `write_file` | GUARDED | MUTATES | 寫入工作區檔案 |
 | `memorize` | GUARDED | MUTATES | 寫入語意記憶 |
-| `relate` | GUARDED | MUTATES | 寫入關聯記憶 |
+| `relate` | GUARDED | MUTATES | 寫入三元組（#451 phase B 起透過 relational_bridge 落到 semantic 同一表） |
 | `web_search` | GUARDED | NETWORK | 透過 Brave API 搜尋 |
 | `run_bash` | GUARDED | **EXEC** | 執行 shell 指令 — 每次重新確認 |
 | `spawn_agent` | GUARDED | **AGENT_SPAN** + MUTATES | 啟動子代理 — 每次重新確認 |

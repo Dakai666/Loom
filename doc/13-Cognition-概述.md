@@ -117,7 +117,7 @@ Reflection API 在 session 結束時執行「自我反思」，生成：
 | **Session Summary** | 壓縮後寫入 Episodic Memory |
 | **Tool Report** | 每個工具的成功率寫入 Skill Genome |
 | **Health Report** | Skill confidence 趨勢、需關注的問題 |
-| **Counter-factual** | Anti-pattern 分析寫入 Semantic + Relational Memory |
+| **Counter-factual** | Anti-pattern 分析寫入 Semantic（anti_pattern 鍵 + relational_bridge 編碼的 ``rel:*`` 三元組同表）|
 
 詳見 [16-Reflection-API.md](16-Reflection-API.md)。
 
@@ -130,8 +130,9 @@ execution_error 發生
     ↓
 LLM 問：「什麼 pattern 導致失敗？下次應避免什麼？」
     ↓
-寫入 SemanticMemory → skill:<name>:anti_pattern:<timestamp>
-寫入 RelationalMemory → (loom-self, should_avoid:<tool_name>, <行為>)
+寫入 SemanticMemory（兩條鍵都同表，#451 phase B）：
+  skill:<name>:anti_pattern:<timestamp>                ← 純語義事實
+  rel:loom-self::should_avoid:<tool_name>              ← 三元組（橋接編碼）
 ```
 
 Session 開始時，MemoryIndex 讀取 `should_avoid` 三元組，agent 在進入對話前就知道自己踩過的坑。

@@ -163,7 +163,6 @@ from loom.core.memory.pulse import (
     PulseRecord,
     fold_contradiction_pulses,
 )
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
@@ -1138,13 +1137,11 @@ class LoomSession:
         emb_provider = build_embedding_provider(_load_env(), _load_loom_config())
         semantic = SemanticMemory(self._db, embedding_provider=emb_provider)
         procedural = ProceduralMemory(self._db)
-        relational = RelationalMemory(self._db, semantic=semantic)
-        # Issue #451 phase A: backfill embeddings for `rel:*` mirror rows
-        # that were copied into semantic_entries by SQLiteStore.initialize()
-        # (which runs before the embedding provider is plumbed). Without
-        # this, the embedding tier filters them out and recall's short-
-        # circuit means BM25 never sees them. Idempotent — only acts on
-        # rows where embedding IS NULL.
+        # Issue #451 phase A backfill (kept for legacy DBs upgrading from
+        # pre-phase-B). After the table drop, this only fills embeddings
+        # for ``rel:*`` rows that were migrated into ``semantic_entries``
+        # before this branch landed and never reached the embedding tier.
+        # Idempotent and silently no-op on fresh installs.
         if semantic.has_embeddings:
             try:
                 await semantic.ensure_embeddings_for_prefix("rel:")
@@ -1173,7 +1170,6 @@ class LoomSession:
         self._governor = MemoryGovernor(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             db=self._db,
             config=_gov_cfg,
@@ -1236,7 +1232,6 @@ class LoomSession:
         self._memory = MemoryFacade(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             search=search,
             session_log=self._session_log,
@@ -1282,7 +1277,7 @@ class LoomSession:
                 for s in skill_catalog:
                     _ls.add(s.name)
         indexer = MemoryIndexer(
-            semantic, procedural, episodic, relational,
+            semantic, procedural, episodic,
             skill_catalog=skill_catalog,
         )
         self._memory_index = await indexer.build()
@@ -1327,7 +1322,6 @@ class LoomSession:
             make_xai_tts_tool,
             make_memorize_tool,
             make_memory_health_tool,
-            make_query_relations_tool,
             make_recall_period_tool,
             make_recall_tool,
             make_relate_tool,
@@ -1353,7 +1347,8 @@ class LoomSession:
             make_memorize_tool(self._memory, on_reject=_governor_reject_hook)
         )
         self.registry.register(make_relate_tool(self._memory))
-        self.registry.register(make_query_relations_tool(self._memory))
+        # #451 phase B: ``query_relations`` tool retired — relational
+        # triples surface through ``recall`` (single agent verb).
         self.registry.register(make_memory_health_tool(self._governor))
 
         # Issue #147 Phase C.1: facade-aware cognition wiring.
@@ -1384,8 +1379,7 @@ class LoomSession:
 
         self.registry.register(
             make_dream_cycle_tool(
-                self._memory.semantic, self._memory.relational, _dream_llm_fn,
-                db=self._db,
+                self._memory.semantic, _dream_llm_fn, db=self._db,
             )
         )
         self.registry.register(make_memory_prune_tool(self._memory.semantic))
@@ -1443,7 +1437,6 @@ class LoomSession:
             semantic=self._memory.semantic,
             turn_index_fn=lambda: self._turn_index,
             skill_check_manager=self._skill_check_manager,
-            relational=self._memory.relational,
             confirm_fn=lambda call: self._confirm_fn(call),
         ))
 
@@ -1843,8 +1836,7 @@ class LoomSession:
                         console.print(
                             f"[dim]  Decayed {decay.total_pruned} stale entries "
                             f"(semantic={decay.semantic_pruned}, "
-                            f"episodic={decay.episodic_pruned}, "
-                            f"relational={decay.relational_pruned}).[/dim]"
+                            f"episodic={decay.episodic_pruned}).[/dim]"
                         )
                     if _health:
                         _health.record_success("decay_cycle")
@@ -3192,7 +3184,8 @@ class LoomSession:
         for plugin_path, rel_key in candidates:
             approved = False
             if self._memory is not None:
-                entry = await self._memory.relational.get(rel_key, "approved")
+                from loom.core.memory.relational_bridge import get_triple
+                entry = await get_triple(self._memory.semantic, rel_key, "approved")
                 approved = entry is not None and entry.object == "true"
 
             if not approved:
@@ -3219,8 +3212,10 @@ class LoomSession:
 
                 # Persist approval
                 if self._memory is not None:
-                    from loom.core.memory.relational import RelationalEntry
-                    await self._memory.relational.upsert(RelationalEntry(
+                    from loom.core.memory.relational_bridge import (
+                        RelationalEntry, upsert_triple,
+                    )
+                    await upsert_triple(self._memory.semantic, RelationalEntry(
                         subject=rel_key,
                         predicate="approved",
                         object="true",
@@ -4708,7 +4703,7 @@ class LoomSession:
         try:
             indexer = MemoryIndexer(
                 self._memory.semantic, self._memory.procedural,
-                self._memory.episodic, self._memory.relational,
+                self._memory.episodic,
             )
             new_index = await indexer.build()
             if new_index.is_empty:

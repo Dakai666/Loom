@@ -16,7 +16,7 @@ from loom.core.ledger import (
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import RelationalEntry
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
@@ -42,14 +42,12 @@ async def facade(tmp_path: Path, ledger: LedgerStore) -> MemoryFacade:
     async with store.connect() as db:
         semantic = SemanticMemory(db)
         procedural = ProceduralMemory(db)
-        relational = RelationalMemory(db)
         episodic = EpisodicMemory(db)
         search = MemorySearch(semantic, procedural)
         emitter = LedgerEmitter(ledger, session_id="sess_mem")
         yield MemoryFacade(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             search=search,
             ledger_emitter=emitter,
@@ -95,16 +93,10 @@ async def test_get_fact_emits_memory_op_read(
     assert p["type_summary"] == "semantic_fact"
 
 
-async def test_query_relations_emits_memory_op_read(
-    facade: MemoryFacade, ledger: LedgerStore
-) -> None:
-    async with async_turn_scope("turn_mem"), async_correlation_scope("c1"):
-        await facade.query_relations(subject="alice")
-
-    events = await _events_of_type(ledger, "memory_op")
-    assert len(events) == 1
-    assert events[0].payload["trigger"] == "agent_query_relations"
-    assert events[0].payload["type_summary"] == "relational_query"
+# #451 phase B: ``MemoryFacade.query_relations`` retired — relational
+# triples flow through ``facade.search`` / agent ``recall`` instead.
+# The search emit test above already covers the read-side emit; no
+# separate ``agent_query_relations`` event exists any more.
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +173,11 @@ async def test_facade_without_emitter_is_silent(tmp_path: Path) -> None:
     async with store.connect() as db:
         semantic = SemanticMemory(db)
         procedural = ProceduralMemory(db)
-        relational = RelationalMemory(db)
         episodic = EpisodicMemory(db)
         search = MemorySearch(semantic, procedural)
         f = MemoryFacade(
             semantic=semantic,
             procedural=procedural,
-            relational=relational,
             episodic=episodic,
             search=search,
         )  # no ledger_emitter

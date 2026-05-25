@@ -34,17 +34,16 @@ def __init__(self, config: LoomConfig, db: aiosqlite.Connection, ...):
     if config.harness.strict_sandbox:
         self._perm.enable_exec_auto()  # 注入 workspace exec grant
 
-    # 3. 建 Memory 實例
+    # 3. 建 Memory 實例（#451 phase B：relational 三元組住在 semantic 表，
+    #    透過 relational_bridge 編碼讀寫；不再有獨立的 RelationalMemory）
     self._semantic  = SemanticMemory(db)
     self._episodic  = EpisodicMemory(db)
     self._procedural = ProceduralMemory(db, config_dir)
-    self._relational = RelationalMemory(db)
 
-    # 4. 建 Governor（v0.2.9.0）
+    # 4. 建 Governor（v0.2.9.0；#451 phase B 移除 relational 參數）
     self._governor = MemoryGovernor(
         semantic=self._semantic,
         procedural=self._procedural,
-        relational=self._relational,
         episodic=self._episodic,
         db=db,
         config=config.memory.governance,
@@ -344,11 +343,11 @@ registry.register(make_fetch_url_tool(
 ## Session 與 Memory 的關係
 
 ```
-LoomSession
-  ├─ _semantic   → SemanticMemory（長期事實，with Governance）
+LoomSession（#451 phase B 起，三元組住在 _semantic，無獨立 _relational）
+  ├─ _memory     → MemoryFacade（semantic/procedural/episodic/search/governor）
+  ├─ _semantic   → SemanticMemory（長期事實 + ``rel:*`` 三元組同表，with Governance）
   ├─ _episodic   → EpisodicMemory（Session Log，turn-by-turn）
   ├─ _procedural → ProceduralMemory（SkillGenome，skills/）
-  ├─ _relational → RelationalMemory（三元組，偏好/關係）
   ├─ _governor   → MemoryGovernor + _pulse（Hook A contradiction notice）
   ├─ _pending_pulses → list[str]（pulse buffer，drain 至 system-reminder）
   ├─ _jobstore   → JobStore（背景 IO 任務）

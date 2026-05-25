@@ -52,7 +52,6 @@ from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.harness.middleware import BlastRadiusMiddleware
 from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.session_log import SessionLog
@@ -2065,11 +2064,9 @@ async def _reflect(session_id: str | None, db: str) -> None:
         ep = EpisodicMemory(conn)
         pr = ProceduralMemory(conn)
         sem = SemanticMemory(conn)
-        rel = RelationalMemory(conn, semantic=sem)
         facade = MemoryFacade(
             semantic=sem,
             procedural=pr,
-            relational=rel,
             episodic=ep,
             search=MemorySearch(sem, pr),
         )

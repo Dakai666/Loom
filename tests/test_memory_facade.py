@@ -1,12 +1,16 @@
 """
 Issue #147 — MemoryFacade.
 
-Verifies the facade owns the four memory subsystems + search index +
-optional governor, and that its read API (``search`` / ``get_fact`` /
-``query_relations``) and write API (``memorize`` / ``relate`` /
-``prune_decayed``) delegate to the right subsystem.  Also verifies
-handle identity so ``LoomSession`` callers that still reach through
-``self._semantic`` etc. keep seeing the same object the facade holds.
+Verifies the facade owns the memory subsystems + search index +
+optional governor, and that its read API (``search`` / ``get_fact``)
+and write API (``memorize`` / ``relate`` / ``prune_decayed``) delegate
+to the right subsystem. Also verifies handle identity so ``LoomSession``
+callers that still reach through ``self._semantic`` etc. keep seeing
+the same object the facade holds.
+
+#451 phase B: ``query_relations`` and ``MemoryFacade.relational`` are
+retired — relational triples live in the semantic store via the
+``relational_bridge`` and surface through ``recall``.
 """
 from __future__ import annotations
 
@@ -21,7 +25,11 @@ from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
 from loom.core.memory.governance import GovernedWriteResult, MemoryGovernor
 from loom.core.memory.procedural import ProceduralMemory
-from loom.core.memory.relational import RelationalEntry, RelationalMemory
+from loom.core.memory.relational_bridge import (
+    RelationalEntry,
+    get_triple,
+    query_triples,
+)
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
@@ -35,13 +43,12 @@ async def facade(tmp_path):
     async with store.connect() as db:
         semantic = SemanticMemory(db)
         procedural = ProceduralMemory(db)
-        relational = RelationalMemory(db)
         episodic = EpisodicMemory(db)
         search = MemorySearch(semantic, procedural)
         session_log = SessionLog(db)
         yield MemoryFacade(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic, search=search,
+            episodic=episodic, search=search,
             session_log=session_log,
         )
 
@@ -49,12 +56,14 @@ async def facade(tmp_path):
 # ── construction & handle identity ─────────────────────────────────────────
 
 def test_facade_exposes_subsystem_handles(facade):
-    """All five attributes are present and are the exact instances passed in."""
+    """All four attributes are present and are the exact instances passed in."""
     assert isinstance(facade.semantic, SemanticMemory)
     assert isinstance(facade.procedural, ProceduralMemory)
-    assert isinstance(facade.relational, RelationalMemory)
     assert isinstance(facade.episodic, EpisodicMemory)
     assert isinstance(facade.search_index, MemorySearch)
+    assert not hasattr(facade, "relational"), (
+        "MemoryFacade.relational retired in #451 phase B"
+    )
 
 
 def test_search_index_wraps_facade_subsystems(facade):
@@ -81,27 +90,28 @@ async def test_get_fact_returns_none_for_missing_key(facade):
     assert await facade.get_fact("nope") is None
 
 
-# ── read API: query_relations ──────────────────────────────────────────────
+# ── relational triples flow through recall ─────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_query_relations_filters_by_subject(facade):
-    await facade.relational.upsert(RelationalEntry(
+async def test_relate_writes_visible_to_recall(facade):
+    """#451 phase B: ``facade.relate`` lands in the semantic store, and
+    ``facade.search`` / agent ``recall`` is the sole read verb — there is
+    no separate ``query_relations``."""
+    await facade.relate(RelationalEntry(
         subject="alice", predicate="knows", object="bob", source="user",
     ))
-    await facade.relational.upsert(RelationalEntry(
+    await facade.relate(RelationalEntry(
         subject="alice", predicate="likes", object="cake", source="user",
     ))
-    await facade.relational.upsert(RelationalEntry(
-        subject="bob", predicate="knows", object="carol", source="user",
-    ))
 
-    alice_rels = await facade.query_relations(subject="alice")
-    assert len(alice_rels) == 2
-    assert {r.predicate for r in alice_rels} == {"knows", "likes"}
+    # Bridge read path (used by MemoryIndex self-portrait projection).
+    triples = await query_triples(facade.semantic, subject="alice")
+    assert {t.predicate for t in triples} == {"knows", "likes"}
 
-    knows_rels = await facade.query_relations(predicate="knows")
-    assert len(knows_rels) == 2
-    assert {r.subject for r in knows_rels} == {"alice", "bob"}
+    # Agent-facing read path: recall surfaces the same rows tagged "relational".
+    results = await facade.search("alice knows bob", limit=5)
+    keys = {r.key for r in results}
+    assert "rel:alice::knows" in keys
 
 
 # ── read API: search delegates to MemorySearch ─────────────────────────────
@@ -204,12 +214,13 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
 
         # Issue #147 Phase C.2: per-subsystem session attributes were
         # removed.  The facade is now the only access path — assert
-        # every subsystem is wired and live.
+        # every subsystem is wired and live. #451 phase B: relational
+        # is no longer a facade attribute (triples live in semantic
+        # via the bridge).
         assert hasattr(session, "_memory")
         assert session._memory is not None
         assert session._memory.semantic is not None
         assert session._memory.procedural is not None
-        assert session._memory.relational is not None
         assert session._memory.episodic is not None
     finally:
         await session.stop()
@@ -265,11 +276,10 @@ async def governed_facade(tmp_path):
     async with store.connect() as db:
         semantic = SemanticMemory(db)
         procedural = ProceduralMemory(db)
-        relational = RelationalMemory(db)
         episodic = EpisodicMemory(db)
         governor = MemoryGovernor(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic,
+            episodic=episodic,
             db=db, session_id="test-session",
         )
         await governor.health.ensure_table()
@@ -277,7 +287,7 @@ async def governed_facade(tmp_path):
         search = MemorySearch(semantic, procedural)
         yield MemoryFacade(
             semantic=semantic, procedural=procedural,
-            relational=relational, episodic=episodic,
+            episodic=episodic,
             search=search, governor=governor,
         )
 
@@ -353,29 +363,39 @@ async def test_memorize_no_warn_when_embedding_failure_count_unchanged(
 # ── write API: relate ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_relate_upserts_into_relational_memory(facade):
+async def test_relate_writes_into_semantic_via_bridge(facade):
+    """#451 phase B: ``facade.relate`` encodes the triple as a
+    ``SemanticEntry`` keyed ``rel:{subject}::{predicate}`` so ``recall``
+    naturally surfaces it. No separate relational store any more."""
     await facade.relate(RelationalEntry(
         subject="user", predicate="prefers", object="terse output", source="test",
     ))
-    rels = await facade.query_relations(subject="user")
-    assert len(rels) == 1
-    assert rels[0].object == "terse output"
+    sem_row = await facade.semantic.get("rel:user::prefers")
+    assert sem_row is not None
+    assert sem_row.value == "user prefers terse output"
+
+    # Bridge round-trip works.
+    triple = await get_triple(facade.semantic, "user", "prefers")
+    assert triple.object == "terse output"
 
 
 @pytest.mark.asyncio
-async def test_relate_uses_facade_held_relational_instance():
-    """relate() must write to the same RelationalMemory the facade
-    exposes — otherwise tools that read via facade.query_relations
-    wouldn't see writes from facade.relate."""
-    rel_mock = AsyncMock(spec=RelationalMemory)
+async def test_relate_routes_through_facade_semantic_handle():
+    """relate() must write to the same SemanticMemory the facade exposes —
+    otherwise recall and the bridge readers won't see the new triple."""
+    sem_mock = AsyncMock(spec=SemanticMemory)
     facade = MemoryFacade(
-        semantic=AsyncMock(), procedural=AsyncMock(),
-        relational=rel_mock, episodic=AsyncMock(),
+        semantic=sem_mock, procedural=AsyncMock(),
+        episodic=AsyncMock(),
         search=AsyncMock(),
     )
     entry = RelationalEntry(subject="a", predicate="b", object="c", source="t")
     await facade.relate(entry)
-    rel_mock.upsert.assert_awaited_once_with(entry)
+    # Bridge upserts a SemanticEntry — the key must encode (a, b).
+    sem_mock.upsert.assert_awaited_once()
+    sem_entry = sem_mock.upsert.await_args.args[0]
+    assert sem_entry.key == "rel:a::b"
+    assert sem_entry.value == "a b c"
 
 
 # ── write API: prune_decayed ───────────────────────────────────────────────
@@ -402,7 +422,7 @@ async def test_prune_decayed_forwards_kwargs():
     }
     facade = MemoryFacade(
         semantic=sem_mock, procedural=AsyncMock(),
-        relational=AsyncMock(), episodic=AsyncMock(), search=AsyncMock(),
+        episodic=AsyncMock(), search=AsyncMock(),
     )
     out = await facade.prune_decayed(threshold=0.3, dry_run=False)
     sem_mock.prune_decayed.assert_awaited_once_with(threshold=0.3, dry_run=False)
@@ -413,10 +433,10 @@ async def test_prune_decayed_forwards_kwargs():
 
 @pytest.mark.asyncio
 async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_path):
-    """Issue #147 階段 B: the four agent memory tools (recall, memorize,
-    relate, query_relations) must be registered with the facade — not
-    individual subsystem references — so future Phase C migrations can
-    drop the direct subsystem fields without breaking tool wiring."""
+    """Issue #147 階段 B: the agent memory tools (recall, memorize, relate)
+    must be registered with the facade — not individual subsystem
+    references. #451 phase B retires ``query_relations`` (recall is the
+    sole read verb)."""
     from unittest.mock import MagicMock
     from rich.prompt import Confirm
     import loom as loom_pkg
@@ -449,10 +469,12 @@ async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_pa
         # Phase B contract: facade carries the governor, and the four
         # agent memory tools are present on the registry.
         assert session._memory.governor is session._governor
-        for name in ("recall", "memorize", "relate", "query_relations"):
+        for name in ("recall", "memorize", "relate"):
             assert session.registry.get(name) is not None, (
                 f"tool {name!r} must be registered through the facade"
             )
+        # #451 phase B: query_relations retired.
+        assert session.registry.get("query_relations") is None
     finally:
         await session.stop()
         registry._tools.clear()

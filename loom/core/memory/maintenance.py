@@ -2,10 +2,11 @@
 Memory maintenance tools — Issue #149.
 
 Houses the ``dream_cycle`` and ``memory_prune`` tool factories that used to
-live in ``loom.extensibility.dreaming_plugin``. Both touch private memory
-subsystems (``SemanticMemory`` / ``RelationalMemory``) and are conceptually
-the read-and-synthesize / decay-management half of ``MemoryGovernor`` —
-they belong in core memory, not in the plugin layer.
+live in ``loom.extensibility.dreaming_plugin``. Both touch the
+``SemanticMemory`` subsystem (relational triples live there too since
+#451 phase B) and are conceptually the read-and-synthesize /
+decay-management half of ``MemoryGovernor`` — they belong in core memory,
+not in the plugin layer.
 
 The core synthesis logic stays in ``loom.core.cognition.dreaming.dream_cycle``;
 this module only adapts it to the ``ToolDefinition`` contract and the
@@ -23,7 +24,6 @@ from loom.core.harness.registry import ToolDefinition
 
 if TYPE_CHECKING:
     import aiosqlite
-    from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.semantic import SemanticMemory
 
 
@@ -32,7 +32,6 @@ LLMFn = Callable[[list[dict]], Awaitable[str]]
 
 def make_dream_cycle_tool(
     semantic: "SemanticMemory",
-    relational: "RelationalMemory",
     llm_fn: LLMFn,
     db: "aiosqlite.Connection | None" = None,
 ) -> ToolDefinition:
@@ -40,9 +39,11 @@ def make_dream_cycle_tool(
 
     Parameters
     ----------
-    semantic, relational:
-        Already-initialised memory subsystems (typically taken from
-        ``LoomSession`` after ``MemoryGovernor`` is set up).
+    semantic:
+        The semantic memory subsystem (typically taken from ``LoomSession``
+        after ``MemoryGovernor`` is set up). Since #451 phase B, dream
+        cycle writes its discovered triples directly to the semantic
+        store via the ``relational_bridge`` helpers.
     llm_fn:
         Async callable that takes an OpenAI-style messages list and returns
         the assistant's text. ``LoomSession.start()`` wires this to its
@@ -76,7 +77,6 @@ def make_dream_cycle_tool(
 
         result = await dream_cycle(
             semantic=semantic,
-            relational=relational,
             llm_fn=llm_fn,
             sample_size=sample,
             dry_run=dry_run,

@@ -76,7 +76,8 @@ LoomSession.start()
   └─ _load_plugins()
         └─ scan ~/.loom/plugins/*.py
               └─ 首次見到 → 顯示前 N 行 → ask user approve
-                    └─ 寫入 RelationalMemory（`plugin:<path>` predicate=approved）
+                    └─ 透過 relational_bridge.upsert_triple 寫入 SemanticMemory
+                          （`plugin:<path>` predicate=approved；#451 phase B）
                           └─ exec_module()  # 觸發 @loom.tool / register_plugin()
                                 └─ _get_default_registry().install_into(session.registry)
                                 └─ _get_default_plugin_registry().install_into(session)

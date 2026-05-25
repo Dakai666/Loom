@@ -42,7 +42,6 @@ from unittest.mock import AsyncMock, MagicMock
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
-from loom.core.memory.relational import RelationalMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.procedural import SkillGenome, ProceduralMemory
 from loom.core.memory.search import MemorySearch, MemorySearchResult
@@ -60,17 +59,15 @@ def _facade(
     *,
     semantic: SemanticMemory,
     procedural: ProceduralMemory,
-    relational: RelationalMemory | None = None,
     episodic: EpisodicMemory | None = None,
     search: MemorySearch | None = None,
 ) -> MemoryFacade:
     """Phase-B helper: build a MemoryFacade from whatever subsystems
-    the caller already has. Tests that don't exercise relational /
-    episodic / governor pass ``MagicMock()`` for the unused handles."""
+    the caller already has. Tests that don't exercise episodic /
+    governor pass ``MagicMock()`` for the unused handles."""
     return MemoryFacade(
         semantic=semantic,
         procedural=procedural,
-        relational=relational or MagicMock(),
         episodic=episodic or MagicMock(),
         search=search or MemorySearch(semantic, procedural),
         governor=None,

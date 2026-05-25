@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.ledger import LedgerStore
     from loom.core.memory.procedural import ProceduralMemory, SkillGenome
-    from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
@@ -133,7 +132,6 @@ def make_load_skill_tool(
     semantic: "SemanticMemory | None" = None,
     turn_index_fn: "Callable[[], int] | None" = None,
     skill_check_manager: "SkillCheckManager | None" = None,
-    relational: "RelationalMemory | None" = None,
     confirm_fn: "Callable | None" = None,
     on_loaded: "Callable[[str], None] | None" = None,
 ) -> ToolDefinition:
@@ -223,9 +221,10 @@ def make_load_skill_tool(
                 lines.append(f"  <file>{res}</file>")
             lines.append("</skill_resources>")
 
-        # Issue #64 Phase B: mount skill-declared precondition checks
+        # Issue #64 Phase B: mount skill-declared precondition checks.
+        # Approval reads/writes go through the semantic store (#451 phase B).
         checks_summary = await _mount_skill_checks(
-            name, skill, skill_dir, skill_check_manager, relational,
+            name, skill, skill_dir, skill_check_manager, semantic,
             keep_existing=keep_existing,
         )
         if checks_summary:
@@ -259,7 +258,7 @@ def make_load_skill_tool(
         skill: "SkillGenome",
         skill_dir_str: str | None,
         manager: "SkillCheckManager | None",
-        rel: "RelationalMemory | None",
+        sem: "SemanticMemory | None",
         keep_existing: bool = False,
     ) -> list[str]:
         """Resolve and mount precondition checks for a skill. Returns descriptions."""
@@ -275,14 +274,16 @@ def make_load_skill_tool(
             return []
 
         from loom.core.harness.skill_checks import SkillPreconditionRef, SkillCheckManager
+        from loom.core.memory.relational_bridge import get_triple, upsert_triple
 
         refs = [SkillPreconditionRef.from_dict(d) for d in skill.precondition_check_refs]
 
-        # Approval gate: first-time approval via RelationalMemory
+        # Approval gate: first-time approval (stored as a relational triple
+        # in the semantic store via the bridge since #451 phase B).
         rel_key = f"skill_checks:{name}"
         approved = False
-        if rel is not None:
-            entry = await rel.get(rel_key, "approved")
+        if sem is not None:
+            entry = await get_triple(sem, rel_key, "approved")
             approved = entry is not None and entry.object == "true"
 
         if not approved:
@@ -314,9 +315,9 @@ def make_load_skill_tool(
                 return []
 
             # Persist approval
-            if rel is not None:
-                from loom.core.memory.relational import RelationalEntry
-                await rel.upsert(RelationalEntry(
+            if sem is not None:
+                from loom.core.memory.relational_bridge import RelationalEntry
+                await upsert_triple(sem, RelationalEntry(
                     subject=rel_key,
                     predicate="approved",
                     object="true",

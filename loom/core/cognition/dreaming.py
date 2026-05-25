@@ -171,7 +171,6 @@ Find hidden connections and return the JSON triple array now.
 async def dream_cycle(
     *,
     semantic,                                      # SemanticMemory
-    relational,                                    # RelationalMemory
     llm_fn: Callable[..., Awaitable[str]],         # async fn(messages) -> str
     sample_size: int = 15,
     dry_run: bool = False,
@@ -184,8 +183,9 @@ async def dream_cycle(
 
     Parameters
     ----------
-    semantic:     SemanticMemory instance (must expose ``get_random``).
-    relational:   RelationalMemory instance (must expose ``upsert``).
+    semantic:     SemanticMemory instance — used both for sampling
+                  (``get_random``) and as the write target via
+                  ``relational_bridge.upsert_triple`` since #451 phase B.
     llm_fn:       Async callable receiving OpenAI-style messages list and
                   returning the assistant reply string.  Typically wraps
                   ``LoomSession._router.route()`` or a provider ``complete()``.
@@ -269,10 +269,10 @@ async def dream_cycle(
     # ── 3. Parse JSON triples ──────────────────────────────────────────
     triples = _parse_triples(raw, errors)
 
-    # ── 4. Write to RelationalMemory ──────────────────────────────────
+    # ── 4. Write to semantic via relational bridge (#451 phase B) ─────
     written = 0
     if not dry_run:
-        from loom.core.memory.relational import RelationalEntry
+        from loom.core.memory.relational_bridge import RelationalEntry, upsert_triple
         for triple in triples:
             try:
                 entry = RelationalEntry(
@@ -287,7 +287,7 @@ async def dream_cycle(
                         "sampled_facts": sampled_facts_metadata,
                     },
                 )
-                await relational.upsert(entry)
+                await upsert_triple(semantic, entry)
                 written += 1
             except Exception as exc:
                 errors.append(f"upsert error: {exc}")

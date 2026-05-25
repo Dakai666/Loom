@@ -338,23 +338,24 @@ execution_error 發生
     ↓
 LLM 提問：「什麼 pattern 導致了這個失敗？下次應避免什麼？」
     ↓
-寫入 SemanticMemory：  key = "skill:<name>:anti_pattern:<timestamp>"
-                       value = "[Anti-pattern] <LLM 分析內容>"
-                       source = "reflection"
-寫入 RelationalMemory：(skill:<name>, has_anti_pattern, <分析>)
-                       (loom-self, should_avoid:<tool_name>, <行為>)
+寫入 SemanticMemory（#451 phase B 起所有路徑都同表）：
+  key = "skill:<name>:anti_pattern:<timestamp>"            ← 純語義事實
+  key = "rel:skill:<name>::has_anti_pattern"               ← 三元組（橋接）
+  key = "rel:loom-self::should_avoid:<tool_name>"          ← 三元組（橋接）
+  source = "counter_factual:<session_id>"
 ```
 
 **觸發條件：**
 - `execution_error` 類型的失敗（工具執行時拋出異常）
 - 該工具有 SkillGenome 記錄
 
-**寫入位置：**
-- SemanticMemory — `skill:<name>:anti_pattern:<timestamp>` key
-- RelationalMemory — `(skill:<name>, has_anti_pattern, …)` 和 `(loom-self, should_avoid:<tool_name>, …)` 三元組
+**寫入位置（皆為 SemanticMemory，三元組透過 ``relational_bridge.upsert_triple`` 編碼）：**
+- ``skill:<name>:anti_pattern:<timestamp>`` — 純語義 anti-pattern 文本
+- ``rel:skill:<name>::has_anti_pattern`` — 三元組：技能 → has_anti_pattern → 描述
+- ``rel:loom-self::should_avoid:<tool_name>`` — 三元組：自我 → should_avoid → 行為
 
 **Session 開始時：**
-`MemoryIndex` 讀取 `should_avoid` 三元組，agent 在每次對話開始就知道自己過去踩過的坑。
+`MemoryIndex` 透過 ``query_triples(semantic, subject="loom-self")`` 讀取 ``should_avoid`` 三元組，agent 在每次對話開始就知道自己過去踩過的坑。
 
 > 反思失敗完全 non-fatal，不會阻斷任何流程。
 
@@ -453,11 +454,13 @@ loom reflect --format json
 │   │      └──▶ Notification (if critical)                   │
 │   │                                                           │
 │   ├──▶ Counter-factual Reflection                          │
-│   │      ├──▶ SemanticMemory (anti_pattern keys)           │
-│   │      └──▶ RelationalMemory (should_avoid triples)     │
+│   │      └──▶ SemanticMemory                               │
+│   │             ├─ anti_pattern keys                       │
+│   │             └─ rel:* triples via relational_bridge     │
 │   │                                                           │
 │   └──▶ Self-Reflection (via TaskReflector post-hook)      │
-│          └──▶ RelationalMemory (loom-self triples)          │
+│          └──▶ SemanticMemory                                │
+│                 └─ rel:loom-self::* via relational_bridge   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -473,7 +476,7 @@ Reflection API 讓 Loom 每次 session 後都「反省」：
 | Session Summary | 對話壓縮摘要 | Episodic Memory |
 | Tool Report | 每個工具的成功率 | Skill Genome |
 | Health Report | 問題預警 | Notification |
-| Counter-factual | Anti-pattern 分析 | Semantic + Relational Memory |
-| Self-Reflection | loom-self 行為觀察 | Relational Memory |
+| Counter-factual | Anti-pattern 分析 | Semantic（anti_pattern + ``rel:*`` 三元組同表）|
+| Self-Reflection | loom-self 行為觀察 | Semantic（``rel:loom-self::*`` 三元組） |
 
 這確保了 Loom 的「經驗」得以累積，而不是每次 session 都是獨立的。

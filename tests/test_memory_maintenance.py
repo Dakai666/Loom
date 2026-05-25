@@ -29,7 +29,7 @@ def _call(name: str, args: dict | None = None) -> ToolCall:
 # ── make_dream_cycle_tool ──────────────────────────────────────────────────
 
 def test_dream_cycle_definition_shape():
-    tool = make_dream_cycle_tool(semantic=object(), relational=object(), llm_fn=AsyncMock())
+    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
     assert tool.name == "dream_cycle"
     assert tool.trust_level == TrustLevel.SAFE
     props = tool.input_schema["properties"]
@@ -43,7 +43,7 @@ def test_dream_cycle_definition_shape():
 async def test_dream_cycle_executor_passes_args_through(monkeypatch):
     captured = {}
 
-    async def fake_dream_cycle(*, semantic, relational, llm_fn, sample_size, dry_run, **kwargs):
+    async def fake_dream_cycle(*, semantic, llm_fn, sample_size, dry_run, **kwargs):
         captured["sample_size"] = sample_size
         captured["dry_run"] = dry_run
         captured.update({k: kwargs[k] for k in ("domain", "themed") if k in kwargs})
@@ -58,7 +58,7 @@ async def test_dream_cycle_executor_passes_args_through(monkeypatch):
         "loom.core.cognition.dreaming.dream_cycle", fake_dream_cycle,
     )
 
-    tool = make_dream_cycle_tool(semantic=object(), relational=object(), llm_fn=AsyncMock())
+    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
     res = await tool.executor(_call("dream_cycle", {"sample_size": 7, "dry_run": True}))
 
     assert res.success
@@ -79,7 +79,7 @@ async def test_dream_cycle_executor_reports_warnings(monkeypatch):
         "loom.core.cognition.dreaming.dream_cycle", fake_dream_cycle,
     )
 
-    tool = make_dream_cycle_tool(semantic=object(), relational=object(), llm_fn=AsyncMock())
+    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
     res = await tool.executor(_call("dream_cycle"))
     assert "Warnings: malformed JSON" in res.output
 

@@ -80,7 +80,7 @@
 | 文件 | 說明 |
 |------|------|
 | [29-Extensibility-概述.md](29-Extensibility-概述.md) | `@loom.tool` / `LoomPlugin` / MCP 三條通道、skills/ 命名 |
-| [31-Plugin-系統.md](31-Plugin-系統.md) | LoomPlugin 抽象、PluginRegistry、首次確認機制（RelationalMemory）|
+| [31-Plugin-系統.md](31-Plugin-系統.md) | LoomPlugin 抽象、PluginRegistry、首次確認機制（透過 relational_bridge 寫入 SemanticMemory）|
 | **[31b-MCP-Server-實作.md](31b-MCP-Server-實作.md)** | MCP Server / Client 雙向實作詳解、tool 前綴、env 擴展 |
 
 ### 10. Platform（CLI 與 Discord）

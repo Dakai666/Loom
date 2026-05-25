@@ -111,7 +111,7 @@ Relations : 34 triples  [predicates: first_applied, has_known_gap, applied_on]
 ─────────────────────────────────────────────
 Use recall(query) to retrieve relevant entries.
 Use memorize(key, value) to store a new fact.
-Use query_relations(subject) to look up relationships.
+Relational triples flow through the same recall verb (#451 phase B).
 
 Self-Portrait (loom-self observations):
   [should_avoid] write long summaries without checking context

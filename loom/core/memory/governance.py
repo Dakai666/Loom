@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.procedural import ProceduralMemory
     from loom.core.memory.pulse import MemoryPulse
-    from loom.core.memory.relational import RelationalMemory
     from loom.core.memory.semantic import SemanticMemory
 
 logger = logging.getLogger(__name__)
@@ -86,18 +85,23 @@ class DecayCycleResult:
     """
     semantic_pruned: int
     episodic_pruned: int
-    relational_pruned: int
     total_examined: int
     semantic_archived: int = 0
+    # Issue #451 phase B: relational triples now live in semantic_entries
+    # via the bridge — they decay alongside ordinary semantic facts. The
+    # legacy ``relational_pruned`` / ``relational_archived`` counters are
+    # retained as properties (always 0) so consumers that read them by
+    # name don't crash mid-cutover.
+    relational_pruned: int = 0
     relational_archived: int = 0
 
     @property
     def total_pruned(self) -> int:
-        return self.semantic_pruned + self.episodic_pruned + self.relational_pruned
+        return self.semantic_pruned + self.episodic_pruned
 
     @property
     def total_archived(self) -> int:
-        return self.semantic_archived + self.relational_archived
+        return self.semantic_archived
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +115,10 @@ class MemoryGovernor:
 
     Parameters
     ----------
-    semantic:   SemanticMemory instance
+    semantic:   SemanticMemory instance (since #451 phase B this also
+                hosts relational triples via the bridge — no separate
+                ``RelationalMemory`` parameter).
     procedural: ProceduralMemory instance
-    relational: RelationalMemory instance
     episodic:   EpisodicMemory instance
     db:         Raw aiosqlite connection (for audit_log writes)
     config:     Governance config dict from loom.toml [memory.governance]
@@ -123,7 +128,6 @@ class MemoryGovernor:
         self,
         semantic: SemanticMemory,
         procedural: ProceduralMemory,
-        relational: RelationalMemory,
         episodic: EpisodicMemory,
         db: aiosqlite.Connection,
         config: dict | None = None,
@@ -131,7 +135,6 @@ class MemoryGovernor:
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
-        self._relational = relational
         self._episodic = episodic
         self._db = db
         self._detector = ContradictionDetector(semantic)
@@ -432,19 +435,17 @@ class MemoryGovernor:
         # ── Episodic TTL (still a flat age check, not lifecycle-managed) ──
         episodic_pruned = await self._prune_episodic_ttl()
 
+        # #451 phase B: rel:* triples live in semantic_entries, so the
+        # semantic decay path covers them. Lifecycle's relational counters
+        # are 0 for fresh installs but may report > 0 on legacy DBs during
+        # the one-shot migration cycle before the table is dropped.
         result = DecayCycleResult(
             semantic_pruned=(
                 lifecycle_result.semantic_archived + lifecycle_result.semantic_deleted
             ),
             episodic_pruned=episodic_pruned,
-            relational_pruned=(
-                lifecycle_result.relational_archived + lifecycle_result.relational_deleted
-            ),
-            total_examined=(
-                lifecycle_result.semantic_examined + lifecycle_result.relational_examined
-            ),
+            total_examined=lifecycle_result.semantic_examined,
             semantic_archived=lifecycle_result.semantic_archived,
-            relational_archived=lifecycle_result.relational_archived,
         )
 
         if result.total_pruned > 0:
@@ -454,8 +455,6 @@ class MemoryGovernor:
                 {
                     "semantic_archived": lifecycle_result.semantic_archived,
                     "semantic_deleted":  lifecycle_result.semantic_deleted,
-                    "relational_archived": lifecycle_result.relational_archived,
-                    "relational_deleted":  lifecycle_result.relational_deleted,
                     "episodic": episodic_pruned,
                     "examined": result.total_examined,
                 },
