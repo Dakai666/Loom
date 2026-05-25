@@ -149,6 +149,7 @@ def create_app(
         subject: str | None = Query(default=None),
         predicate: str | None = Query(default=None),
     ):
+        # Read path: semantic dual-write not needed; pass None for semantic.
         mem = RelationalMemory(app.state.db)
         entries = await mem.query(
             subject=subject or None,
@@ -168,7 +169,9 @@ def create_app(
 
     @app.post("/memory/relational", status_code=201, tags=["memory"])
     async def upsert_relational(body: RelationalBody):
-        mem = RelationalMemory(app.state.db)
+        # Issue #451 phase A: dual-write to semantic so recall can find it.
+        sem = SemanticMemory(app.state.db)
+        mem = RelationalMemory(app.state.db, semantic=sem)
         entry = RelationalEntry(
             subject=body.subject,
             predicate=body.predicate,
@@ -181,7 +184,9 @@ def create_app(
 
     @app.delete("/memory/relational", tags=["memory"])
     async def delete_relational(subject: str, predicate: str):
-        mem = RelationalMemory(app.state.db)
+        # Mirror delete into semantic so recall stops returning the triple.
+        sem = SemanticMemory(app.state.db)
+        mem = RelationalMemory(app.state.db, semantic=sem)
         deleted = await mem.delete(subject, predicate)
         if not deleted:
             raise HTTPException(status_code=404, detail="Entry not found")
