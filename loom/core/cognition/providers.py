@@ -85,6 +85,69 @@ async def _http_status_detail(provider: str, exc: Any) -> str:
     return detail
 
 
+def _responses_sse_error_detail(provider: str, event_type: str, data: dict[str, Any]) -> str | None:
+    """Return a user-facing error detail for Responses SSE error events.
+
+    Some Responses-compatible backends report request failures inside the
+    event stream after HTTP 200. If we ignore those events, the harness sees
+    an empty successful turn and the operator gets no actionable error.
+    """
+    response = data.get("response")
+    response = response if isinstance(response, dict) else {}
+    status = str(response.get("status") or "").lower()
+    error = data.get("error") or response.get("error")
+    incomplete = response.get("incomplete_details")
+
+    if status == "incomplete" and isinstance(incomplete, dict):
+        reason = str(incomplete.get("reason") or "").strip()
+        # Preserve existing max-output handling: session.stream_turn can
+        # recover from max_tokens by injecting its reasoning-continuation
+        # reminder. Other incomplete reasons need to be visible.
+        if reason and reason != "max_output_tokens":
+            error = incomplete
+
+    failed_event = (
+        event_type in {"error", "response.failed"}
+        or event_type.endswith(".failed")
+        or status in {"failed", "cancelled"}
+        or error is not None
+    )
+    if not failed_event:
+        return None
+
+    parts: list[str] = []
+    if event_type:
+        parts.append(event_type)
+    if status:
+        parts.append(f"status={status}")
+
+    detail = ""
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("detail") or error.get("reason")
+        code = error.get("code") or error.get("type")
+        if code and message:
+            detail = f"{code}: {message}"
+        elif message:
+            detail = str(message)
+        elif code:
+            detail = str(code)
+        else:
+            detail = json.dumps(error, ensure_ascii=False)
+    elif error:
+        detail = str(error)
+    elif isinstance(incomplete, dict):
+        detail = json.dumps(incomplete, ensure_ascii=False)
+    elif data.get("message"):
+        detail = str(data.get("message"))
+
+    context = " ".join(parts).strip()
+    if detail:
+        return f"{provider} response error ({context}): {detail[:1000]}"
+    if context:
+        return f"{provider} response error ({context})"
+    return f"{provider} response error"
+
+
 # ---------------------------------------------------------------------------
 # Retry helper
 # ---------------------------------------------------------------------------
@@ -1108,6 +1171,10 @@ class CodexResponsesProvider(LLMProvider):
                             except json.JSONDecodeError:
                                 continue
                             event_type = data.get("type", "")
+                            if detail := _responses_sse_error_detail(
+                                "Codex Responses", event_type, data,
+                            ):
+                                raise RuntimeError(detail)
                             delta = data.get("delta")
                             # OpenAI Responses SSE emits ``delta`` on multiple
                             # event types — only ``response.output_text.delta``
@@ -1364,6 +1431,10 @@ class XAIResponsesProvider(LLMProvider):
                             except json.JSONDecodeError:
                                 continue
                             event_type = data.get("type", "")
+                            if detail := _responses_sse_error_detail(
+                                "xAI Responses", event_type, data,
+                            ):
+                                raise RuntimeError(detail)
                             delta = data.get("delta")
                             # OpenAI Responses SSE emits ``delta`` on multiple
                             # event types — only ``response.output_text.delta``

@@ -347,3 +347,48 @@ async def test_codex_provider_surfaces_backend_error_body(monkeypatch, codex_hom
     # the helper must call ``aread()`` before reading ``.text``, otherwise
     # this string from httpx leaks out and masks the real backend error.
     assert "without having called" not in message
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_surfaces_sse_response_failed(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.failed",
+        (
+            'data: {"type":"response.failed","response":{"status":"failed",'
+            '"error":{"code":"context_length_exceeded",'
+            '"message":"input is too large"}}}'
+        ),
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "Codex Responses response error" in message
+    assert "context_length_exceeded" in message
+    assert "input is too large" in message
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_keeps_max_output_incomplete_recoverable(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.incomplete",
+        (
+            'data: {"type":"response.incomplete","response":{"status":"incomplete",'
+            '"incomplete_details":{"reason":"max_output_tokens"}}}'
+        ),
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert response.stop_reason == "max_tokens"

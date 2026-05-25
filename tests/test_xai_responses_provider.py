@@ -325,6 +325,69 @@ async def test_xai_provider_surfaces_streaming_backend_error(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_xai_provider_surfaces_sse_response_failed(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.failed",
+        (
+            'data: {"type":"response.failed","response":{"status":"failed",'
+            '"error":{"code":"context_length_exceeded",'
+            '"message":"input is too large"}}}'
+        ),
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    message = str(excinfo.value)
+    assert "xAI Responses response error" in message
+    assert "context_length_exceeded" in message
+    assert "input is too large" in message
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_keeps_max_output_incomplete_recoverable(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.incomplete",
+        (
+            'data: {"type":"response.incomplete","response":{"status":"incomplete",'
+            '"incomplete_details":{"reason":"max_output_tokens"}}}'
+        ),
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert response.stop_reason == "max_tokens"
+
+
+@pytest.mark.asyncio
 async def test_xai_router_rejects_config_base_url_before_streaming(tmp_path, monkeypatch):
     import httpx
     from loom.core import session as session_module
