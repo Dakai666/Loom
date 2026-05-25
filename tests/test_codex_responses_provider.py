@@ -392,3 +392,142 @@ async def test_codex_provider_keeps_max_output_incomplete_recoverable(monkeypatc
     response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
 
     assert response.stop_reason == "max_tokens"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_payload_includes_reasoning_default_medium(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    payload = fake_client.requests[0]["json"]
+    assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_payload_honors_configured_reasoning_effort(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(
+        model="codex/gpt-5.5", reasoning_effort="low",
+    )
+
+    await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert fake_client.requests[0]["json"]["reasoning"]["effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_payload_falls_back_to_medium_on_invalid_effort(monkeypatch, codex_home):
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(
+        model="codex/gpt-5.5", reasoning_effort="ultra",
+    )
+
+    await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    # Typo in loom.toml shouldn't block chat — falls back to medium.
+    assert fake_client.requests[0]["json"]["reasoning"]["effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_wraps_reasoning_summary_in_think_tags(monkeypatch, codex_home):
+    """Reasoning summary deltas must surface to the stream as ``<think>…</think>``.
+
+    Without this, gpt-5.5 stalls visibly during the reasoning phase since the
+    backend emits ``reasoning_summary_text.delta`` but no ``output_text.delta``
+    until reasoning completes — see PR #455.
+    """
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"Considering"}',
+        "",
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":" options"}',
+        "",
+        "event: response.reasoning_summary_text.done",
+        'data: {"type":"response.reasoning_summary_text.done"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    chunks: list[str] = []
+    async for delta, final in provider.stream_chat(
+        messages=[{"role": "user", "content": "ping"}],
+    ):
+        if final is None and delta:
+            chunks.append(delta)
+
+    joined = "".join(chunks)
+    # ``<think>`` opens on first reasoning delta, closes on .done event.
+    assert "<think>Considering options</think>" in joined
+    # Output text comes after, NOT inside the think tags.
+    assert joined.endswith("answer")
+    # Final assistant text must not include the reasoning summary.
+    final_response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+    assert "Considering" not in (final_response.text or "")
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_closes_dangling_think_tag_when_output_starts_without_done(
+    monkeypatch, codex_home,
+):
+    """If the backend omits ``.done`` and jumps straight to output_text, the
+    wrapper must still close the ``<think>`` tag so the UI doesn't bleed
+    reasoning into the answer.
+    """
+    import httpx
+
+    fake_client = _FakeAsyncClient([
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"answer"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+
+    chunks: list[str] = []
+    async for delta, final in provider.stream_chat(
+        messages=[{"role": "user", "content": "ping"}],
+    ):
+        if final is None and delta:
+            chunks.append(delta)
+
+    joined = "".join(chunks)
+    assert "<think>thinking</think>answer" in joined

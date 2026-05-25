@@ -428,3 +428,100 @@ async def test_xai_router_rejects_config_base_url_before_streaming(tmp_path, mon
     req = fake_client.requests[0]
     assert req["url"] == "https://api.x.ai/v1/responses"
     assert req["headers"]["Authorization"] == f"Bearer {token}"
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_omits_reasoning_block_by_default(tmp_path, monkeypatch):
+    """xAI Grok-4.3 already streams text during reasoning; injecting the
+    ``reasoning`` field by default risks a 400 if compat tightens and gains
+    nothing visible. Preserve the working payload — opt-in only via config.
+    """
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {"access_token": token, "refresh_token": "refresh-secret"},
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert "reasoning" not in fake_client.requests[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_payload_includes_reasoning_when_configured(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {"access_token": token, "refresh_token": "refresh-secret"},
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(
+        model="xai/grok-4.3", reasoning_effort="high",
+    )
+
+    await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    assert fake_client.requests[0]["json"]["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+    }
+
+
+@pytest.mark.asyncio
+async def test_xai_provider_wraps_reasoning_summary_in_think_tags(tmp_path, monkeypatch):
+    """If xAI ever does emit reasoning_summary deltas, surface them via the
+    same ``<think>…</think>`` protocol Codex uses.
+    """
+    import httpx
+
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {"access_token": token, "refresh_token": "refresh-secret"},
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    fake_client = _FakeAsyncClient([
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"weighing"}',
+        "",
+        "event: response.reasoning_summary_text.done",
+        'data: {"type":"response.reasoning_summary_text.done"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"reply"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+
+    chunks: list[str] = []
+    async for delta, final in provider.stream_chat(
+        messages=[{"role": "user", "content": "ping"}],
+    ):
+        if final is None and delta:
+            chunks.append(delta)
+
+    joined = "".join(chunks)
+    assert "<think>weighing</think>" in joined
+    assert joined.endswith("reply")
