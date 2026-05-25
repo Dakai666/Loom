@@ -20,6 +20,15 @@ def test_xai_provider_does_not_inherit_codex_provider():
     assert not issubclass(XAIResponsesProvider, CodexResponsesProvider)
 
 
+def test_xai_provider_default_timeout_is_600_seconds():
+    """Match Codex — grok-4.x at high effort on big context can stretch
+    past the old 180s ceiling. Override via [providers.xai_oauth].timeout."""
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+    assert provider._timeout == 600.0
+    overridden = XAIResponsesProvider(model="xai/grok-4.3", timeout=900.0)
+    assert overridden._timeout == 900.0
+
+
 class _StreamResponse:
     status_code = 200
 

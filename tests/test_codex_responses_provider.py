@@ -130,6 +130,19 @@ def codex_home(tmp_path, monkeypatch):
     return home
 
 
+def test_codex_provider_default_timeout_is_600_seconds():
+    """gpt-5.5 high-effort multi-turn reasoning routinely exceeds 180s.
+    The old default raised ReadTimeout mid-stream, surfaced as
+    ``turn aborted with error: ... ReadTimeout``. 600s gives reasoning
+    enough room to complete."""
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+    assert provider._timeout == 600.0
+    # Override via constructor (which session.py wires from
+    # [providers.codex].timeout in loom.toml) still works.
+    overridden = CodexResponsesProvider(model="codex/gpt-5.5", timeout=900.0)
+    assert overridden._timeout == 900.0
+
+
 @pytest.mark.asyncio
 async def test_codex_provider_streams_text(monkeypatch, codex_home):
     import httpx

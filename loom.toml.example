@@ -119,6 +119,10 @@ reminder_after_turns = 10
 #                                      # the backend, so the budget signal has to live here).
 #                                      # All effort levels finish in <6s on big context —
 #                                      # only the unbounded omit-path stalls.
+# timeout          = 600.0             # httpx read timeout in seconds. Default 600s — gpt-5.5
+#                                      # at effort=high can reason 3–6 minutes before the first
+#                                      # output token on tool-heavy multi-turn. Bump if you see
+#                                      # ``turn aborted with error: ... ReadTimeout``.
 
 # [providers.xai_oauth]
 # enabled          = true              # optional; explicit --model xai/... also registers it
@@ -129,6 +133,7 @@ reminder_after_turns = 10
 #                                      # Default "high" to match Codex; xAI doesn't stall on
 #                                      # omit but the consistent default makes the tier-2
 #                                      # behavior predictable across providers.
+# timeout          = 600.0             # httpx read timeout in seconds. Default 600s.
 #
 # xAI is OAuth-only in Loom. Run `loom auth xai`; XAI_API_KEY is intentionally
 # not used by the xai/<model> provider.

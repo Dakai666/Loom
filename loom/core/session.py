@@ -622,6 +622,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             CodexResponsesProvider(
                 model=codex_model,
                 base_url=codex_cfg.get("base_url", "") or CodexResponsesProvider.DEFAULT_BASE_URL,
+                timeout=float(codex_cfg.get("timeout") or 0.0),
                 reasoning_effort=codex_cfg.get("reasoning_effort") or None,
             ),
             default=codex_default or codex_requested,
@@ -651,6 +652,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             XAIResponsesProvider(
                 model=xai_model,
                 base_url=xai_base_url,
+                timeout=float(xai_cfg.get("timeout") or 0.0),
                 reasoning_effort=xai_cfg.get("reasoning_effort") or None,
             ),
             default=xai_default or xai_requested,

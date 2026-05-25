@@ -1061,7 +1061,13 @@ class CodexResponsesProvider(LLMProvider):
     ROUTING_PREFIX = "codex/"
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
-    DEFAULT_TIMEOUT = 180.0
+    # gpt-5.5 at ``effort=high`` on big multi-turn payloads routinely
+    # spends 3–6 minutes thinking before the first output token. The old
+    # 180s default raised ``httpx.ReadTimeout`` mid-reasoning and the
+    # harness surfaced ``turn aborted with error: ... ReadTimeout`` — DK
+    # observed this 3 times in a single PR review session. 600s gives
+    # enough headroom; users can override via ``[providers.codex].timeout``.
+    DEFAULT_TIMEOUT = 600.0
     SUPPORTS_MAX_OUTPUT_TOKENS = False
 
     def __init__(
@@ -1377,7 +1383,10 @@ class XAIResponsesProvider(LLMProvider):
     ROUTING_PREFIX = "xai/"
     DEFAULT_MODEL = "grok-4.3"
     DEFAULT_BASE_URL = "https://api.x.ai/v1/responses"
-    DEFAULT_TIMEOUT = 180.0
+    # Match Codex (600s) — grok-4.x at ``effort=high`` on big context can
+    # also stretch past the old 180s ceiling. Users can override via
+    # ``[providers.xai_oauth].timeout``.
+    DEFAULT_TIMEOUT = 600.0
 
     def __init__(
         self,
