@@ -85,8 +85,14 @@ async def _http_status_detail(provider: str, exc: Any) -> str:
     return detail
 
 
-_RESPONSES_REASONING_EFFORTS = ("minimal", "low", "medium", "high")
-_RESPONSES_REASONING_DEFAULT_EFFORT = "medium"
+_RESPONSES_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+_RESPONSES_REASONING_DEFAULT_EFFORT = "high"
+# Per-model accepted values are not uniform: gpt-5.5 supports
+# none/low/medium/high/xhigh but rejects "minimal"; xAI grok-4.x accepts
+# all six. We pass any value in this set through to the backend; a per-model
+# 400 is surfaced via PR #453's SSE failure handling so the user gets a
+# clear "Unsupported value 'X' for model Y" message instead of a silent
+# fallback that drifts from what they configured.
 
 
 class _ReasoningStreamWrapper:
@@ -130,8 +136,8 @@ class _ReasoningStreamWrapper:
 def _normalize_reasoning_effort(value: str | None) -> str:
     """Coerce an optional config value into a valid Responses reasoning effort.
 
-    Falls back to ``medium`` for empty/None/invalid input rather than raising:
-    a typo in loom.toml should not block the whole chat path.
+    Falls back to the default for empty/None/invalid input rather than
+    raising: a typo in loom.toml should not block the whole chat path.
     """
     if not value:
         return _RESPONSES_REASONING_DEFAULT_EFFORT
@@ -1068,17 +1074,19 @@ class CodexResponsesProvider(LLMProvider):
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
-        # Opt-in only. Forcing ``reasoning: {effort, summary: "auto"}`` into
-        # every request makes the ChatGPT.com Codex backend allocate a
-        # parallel summary stream, which empirically triples TTFT (1.7s →
-        # 5.8s in plain prompts, minutes in tool-heavy turns) and may
-        # downshift the model from its silent default reasoning path. When
-        # nothing is set we send no ``reasoning`` field at all so the
-        # backend uses its (faster, undocumented-but-tuned) default.
-        # Users can opt-in via ``[providers.codex].reasoning_effort``.
-        self._reasoning_effort = (
-            _normalize_reasoning_effort(reasoning_effort) if reasoning_effort else None
-        )
+        # Always send a ``reasoning.effort`` value. Omitting the field lets
+        # the ChatGPT.com Codex backend run gpt-5.5's reasoning *unbounded*
+        # — in large-context multi-turn (real Loom chat with skills + tool
+        # history) that means 3+ minute silent stalls before the first
+        # output token. Pre-PR #449 this was implicitly capped by
+        # ``max_output_tokens`` (which the backend now rejects), so the cap
+        # has to move to ``reasoning.effort`` instead. Default ``high``:
+        # tier 2 users selected codex/gpt-5.5 because they want depth, and
+        # all effort levels finish in <6s on big multi-turn — only the
+        # *unbounded* path stalls. ``summary`` is intentionally never sent:
+        # PR #455 showed ``summary: auto`` is what triples TTFT, not the
+        # effort field itself.
+        self._reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)
@@ -1144,15 +1152,12 @@ class CodexResponsesProvider(LLMProvider):
             "input": input_items,
             "stream": True,
             "store": False,
+            # See ``__init__`` for the full story. ``effort`` is the
+            # required reasoning-budget signal; ``summary`` is omitted on
+            # purpose — emitting it requires the backend to allocate a
+            # parallel reasoning_summary stream that triples TTFT.
+            "reasoning": {"effort": self._reasoning_effort},
         }
-        if self._reasoning_effort:
-            # Opt-in only — see __init__ comment. ``summary: auto`` makes
-            # the backend emit ``response.reasoning_summary_text.delta``
-            # events that the SSE handler renders as ``<think>…</think>``.
-            payload["reasoning"] = {
-                "effort": self._reasoning_effort,
-                "summary": "auto",
-            }
         if self.SUPPORTS_MAX_OUTPUT_TOKENS:
             payload["max_output_tokens"] = max_tokens
         if tools:
@@ -1384,14 +1389,13 @@ class XAIResponsesProvider(LLMProvider):
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
-        # xAI Grok-4.x already streams text deltas during reasoning, so
-        # injecting ``reasoning.effort`` by default is unnecessary — and
-        # would risk a 400 if xAI's Responses-compat tightens later. Opt-in
-        # only: leave ``None`` to preserve the current working payload, or
-        # set ``[providers.xai_oauth].reasoning_effort`` to request a value.
-        self._reasoning_effort = (
-            _normalize_reasoning_effort(reasoning_effort) if reasoning_effort else None
-        )
+        # Match Codex: default ``high`` since tier-2 model selection
+        # implies the user wants reasoning depth. Unlike Codex, omitting
+        # the field doesn't stall on xAI's backend — but sending it makes
+        # behavior consistent across providers and gives the user a single
+        # knob to turn. xAI accepts the full range including ``minimal``
+        # (which gpt-5.5 rejects).
+        self._reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)
@@ -1459,14 +1463,9 @@ class XAIResponsesProvider(LLMProvider):
             "store": False,
             "max_output_tokens": max_tokens,
         }
-        if self._reasoning_effort:
-            # Opt-in only — see __init__ comment. ``summary: auto`` lets the
-            # backend stream reasoning summary so it can render via the same
-            # ``<think>…</think>`` path the Codex provider uses.
-            payload["reasoning"] = {
-                "effort": self._reasoning_effort,
-                "summary": "auto",
-            }
+        # See ``__init__``. ``summary`` omitted on purpose — it carries
+        # the same TTFT cost on xAI as on Codex and the UI doesn't need it.
+        payload["reasoning"] = {"effort": self._reasoning_effort}
         if tools:
             payload["tools"] = self.format_tools(tools)
         return payload

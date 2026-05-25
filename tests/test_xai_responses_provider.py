@@ -431,10 +431,10 @@ async def test_xai_router_rejects_config_base_url_before_streaming(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_xai_provider_omits_reasoning_block_by_default(tmp_path, monkeypatch):
-    """xAI Grok-4.3 already streams text during reasoning; injecting the
-    ``reasoning`` field by default risks a 400 if compat tightens and gains
-    nothing visible. Preserve the working payload — opt-in only via config.
+async def test_xai_provider_payload_defaults_to_effort_high_no_summary(tmp_path, monkeypatch):
+    """xAI matches Codex: default ``effort=high`` (tier-2 implies depth),
+    no ``summary`` field (it triples TTFT for no UI benefit when nothing
+    consumes reasoning_summary deltas).
     """
     import httpx
 
@@ -454,11 +454,13 @@ async def test_xai_provider_omits_reasoning_block_by_default(tmp_path, monkeypat
 
     await provider.chat(messages=[{"role": "user", "content": "ping"}])
 
-    assert "reasoning" not in fake_client.requests[0]["json"]
+    payload = fake_client.requests[0]["json"]
+    assert payload["reasoning"] == {"effort": "high"}
+    assert "summary" not in payload["reasoning"]
 
 
 @pytest.mark.asyncio
-async def test_xai_provider_payload_includes_reasoning_when_configured(tmp_path, monkeypatch):
+async def test_xai_provider_payload_honors_configured_reasoning_effort(tmp_path, monkeypatch):
     import httpx
 
     monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
@@ -474,15 +476,15 @@ async def test_xai_provider_payload_includes_reasoning_when_configured(tmp_path,
     ])
     monkeypatch.setattr(httpx, "AsyncClient", lambda *args, **kwargs: fake_client)
     provider = XAIResponsesProvider(
-        model="xai/grok-4.3", reasoning_effort="high",
+        model="xai/grok-4.3", reasoning_effort="low",
     )
 
     await provider.chat(messages=[{"role": "user", "content": "ping"}])
 
-    assert fake_client.requests[0]["json"]["reasoning"] == {
-        "effort": "high",
-        "summary": "auto",
-    }
+    payload_reasoning = fake_client.requests[0]["json"]["reasoning"]
+    assert payload_reasoning == {"effort": "low"}
+    # ``summary`` must never leak in — see PR #455 post-mortem.
+    assert "summary" not in payload_reasoning
 
 
 @pytest.mark.asyncio

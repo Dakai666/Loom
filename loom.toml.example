@@ -110,23 +110,25 @@ reminder_after_turns = 10
 # enabled          = true              # optional; explicit --model codex/... also registers it
 # base_url         = "https://chatgpt.com/backend-api/codex/responses"
 # default_model    = "gpt-5.5"         # bare model name — no "codex/" prefix here
-# reasoning_effort = "medium"          # OPT-IN — minimal | low | medium | high.
-#                                      # Leaving unset sends NO reasoning block, so the
-#                                      # ChatGPT.com Codex backend uses its tuned default
-#                                      # (fastest TTFT, no <think> in UI). Forcing a value
-#                                      # makes the backend allocate a parallel reasoning
-#                                      # summary stream — empirically 3× slower TTFT, and
-#                                      # minutes-long stalls in tool-heavy turns. Only set
-#                                      # this if you actively want visible reasoning.
+# reasoning_effort = "high"            # none | low | medium | high | xhigh (gpt-5.5 supported).
+#                                      # Default "high" — tier-2 selection implies depth.
+#                                      # Must be set: omitting the field lets gpt-5.5's
+#                                      # reasoning run unbounded on big multi-turn payloads,
+#                                      # which stalls for 3+ minutes (the pre-PR #449 implicit
+#                                      # cap via max_output_tokens is no longer accepted by
+#                                      # the backend, so the budget signal has to live here).
+#                                      # All effort levels finish in <6s on big context —
+#                                      # only the unbounded omit-path stalls.
 
 # [providers.xai_oauth]
 # enabled          = true              # optional; explicit --model xai/... also registers it
 # base_url         = "https://api.x.ai/v1/responses"
 # default_model    = "grok-4.3"        # bare model name — no "xai/" prefix here
-# reasoning_effort = "medium"          # OPT-IN — leave unset to preserve xAI's default behavior
-#                                      # (Grok-4.x already streams text during reasoning; setting
-#                                      # this also makes Loom render the <think> summary, but
-#                                      # adds a payload field xAI may not always accept).
+# reasoning_effort = "high"            # none | minimal | low | medium | high | xhigh
+#                                      # (xAI accepts the full range; "minimal" is xAI-only).
+#                                      # Default "high" to match Codex; xAI doesn't stall on
+#                                      # omit but the consistent default makes the tier-2
+#                                      # behavior predictable across providers.
 #
 # xAI is OAuth-only in Loom. Run `loom auth xai`; XAI_API_KEY is intentionally
 # not used by the xai/<model> provider.
