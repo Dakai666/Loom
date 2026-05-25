@@ -421,3 +421,197 @@ async def test_mark_accessed_handles_empty_keys(tmp_db):
     async with store.connect() as db:
         sem = SemanticMemory(db)
         await sem.mark_accessed([])  # No raise, no SQL touch.
+
+
+# ---------------------------------------------------------------------------
+# Review P1 regression — stale semantic mirror must NOT shadow an authoritative
+# newer relational source row during the phase-B backfill.
+# ---------------------------------------------------------------------------
+
+async def test_backfill_overwrites_stale_semantic_mirror_with_newer_relational(tmp_db):
+    """Phase-A dual-write was best-effort — semantic write failures were
+    silently swallowed, so the mirror row can lag the authoritative
+    ``relational_entries`` row. The phase-B retirement backfill must
+    pick the newer side, not the older one.
+    """
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+
+    # Re-create the legacy table so we can seed the stale-mirror scenario.
+    async with store.connect() as db:
+        await _create_legacy_relational_table(db)
+
+        old_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+        new_ts = datetime.now(UTC).isoformat()
+        shared_id = str(uuid.uuid4())
+
+        # Stale semantic mirror with object "old" — what a phase-A dual-write
+        # might have left behind after a successful initial write that
+        # later failed to mirror an update.
+        await db.execute(
+            "INSERT INTO semantic_entries (id, key, value, confidence, source, "
+            "metadata, created_at, updated_at, domain, temporal, last_accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                shared_id,
+                "rel:user::prefers",
+                "user prefers old",
+                1.0,
+                "agent",
+                json.dumps({"subject": "user", "predicate": "prefers", "object": "old"}),
+                old_ts,
+                old_ts,
+                "knowledge",
+                "recent",
+                None,
+            ),
+        )
+        # Authoritative legacy relational row with the newer object "new".
+        await db.execute(
+            "INSERT INTO relational_entries (id, subject, predicate, object, "
+            "confidence, source, metadata, created_at, updated_at, "
+            "domain, temporal, last_accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                shared_id,
+                "user",
+                "prefers",
+                "new",
+                1.0,
+                "agent",
+                "{}",
+                old_ts,
+                new_ts,
+                "knowledge",
+                "recent",
+                None,
+            ),
+        )
+        await db.commit()
+
+    # Trigger the phase-B migration.
+    await store.initialize()
+
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        entry = await sem.get("rel:user::prefers")
+        assert entry is not None
+        # Bug previously left this as "user prefers old".
+        assert entry.value == "user prefers new", (
+            f"backfill ignored newer relational row — got {entry.value!r} "
+            "(P1 regression: stale phase-A mirror must lose to authoritative source)"
+        )
+        assert entry.metadata["object"] == "new"
+
+
+async def test_backfill_keeps_semantic_when_relational_is_older(tmp_db):
+    """Reverse guard for P1: when the semantic row was updated after the
+    legacy relational row (e.g. phase-B writers ran before initialize()
+    finished the migration in the *same* boot), the backfill must NOT
+    overwrite it with the older relational data.
+    """
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+
+    async with store.connect() as db:
+        await _create_legacy_relational_table(db)
+
+        old_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+        new_ts = datetime.now(UTC).isoformat()
+        shared_id = str(uuid.uuid4())
+
+        # Newer semantic row, older relational row.
+        await db.execute(
+            "INSERT INTO semantic_entries (id, key, value, confidence, source, "
+            "metadata, created_at, updated_at, domain, temporal, last_accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                shared_id,
+                "rel:user::prefers",
+                "user prefers brand_new",
+                1.0,
+                "agent",
+                json.dumps({"subject": "user", "predicate": "prefers", "object": "brand_new"}),
+                old_ts,
+                new_ts,
+                "knowledge",
+                "recent",
+                None,
+            ),
+        )
+        await db.execute(
+            "INSERT INTO relational_entries (id, subject, predicate, object, "
+            "confidence, source, metadata, created_at, updated_at, "
+            "domain, temporal, last_accessed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                shared_id, "user", "prefers", "stale", 1.0, "agent", "{}",
+                old_ts, old_ts, "knowledge", "recent", None,
+            ),
+        )
+        await db.commit()
+
+    await store.initialize()
+
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        entry = await sem.get("rel:user::prefers")
+        assert entry.value == "user prefers brand_new", (
+            "newer semantic mirror must survive the backfill — backfill "
+            "should only overwrite when the relational source is newer"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Review P2 regression — query_triples(subject=...) must do exact matching,
+# not LIKE-wildcard matching, on subjects that contain `_` or `%`.
+# ---------------------------------------------------------------------------
+
+async def test_query_triples_subject_with_underscore_is_exact(tmp_db):
+    """SQL ``LIKE`` treats ``_`` as a single-char wildcard. Subjects
+    like ``user_1`` and ``userA1`` would both match ``LIKE 'rel:user_1::%'``
+    pre-fix. The bridge must filter by exact subject equality."""
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        await upsert_triple(sem, RelationalEntry(
+            subject="user_1", predicate="prefers", object="A",
+        ))
+        await upsert_triple(sem, RelationalEntry(
+            subject="userA1", predicate="prefers", object="B",
+        ))
+
+        results = await query_triples(sem, subject="user_1")
+        assert [r.object for r in results] == ["A"], (
+            f"subject filter leaked LIKE wildcard semantics — got "
+            f"{[(r.subject, r.object) for r in results]!r} (P2 regression)"
+        )
+
+
+async def test_query_triples_subject_with_percent_is_exact(tmp_db):
+    """SQL ``LIKE`` treats ``%`` as a multi-char wildcard. Subjects
+    like ``minimax%token`` and ``minimaxAtoken`` would both match
+    ``LIKE 'rel:minimax%token::%'`` pre-fix."""
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        await upsert_triple(sem, RelationalEntry(
+            subject="minimax%token", predicate="status", object="active",
+        ))
+        await upsert_triple(sem, RelationalEntry(
+            subject="minimaxAtoken", predicate="status", object="other",
+        ))
+
+        results = await query_triples(sem, subject="minimax%token")
+        assert [r.object for r in results] == ["active"], (
+            f"subject filter leaked LIKE wildcard semantics — got "
+            f"{[(r.subject, r.object) for r in results]!r} (P2 regression)"
+        )

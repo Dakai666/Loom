@@ -193,21 +193,21 @@ async def query_triples(
 ) -> list[RelationalEntry]:
     """List triples matching the given filters.
 
-    All filtering happens after the key-prefix scan against
-    ``semantic_entries``. Passing neither filter returns every triple
-    (capped by ``limit``); passing ``subject`` narrows to a key prefix
-    scan; passing ``predicate`` filters in Python.
+    Always scans the ``rel:`` key prefix and filters subjects/predicates
+    in Python on the decoded triples. The prefix scan itself uses SQL
+    ``LIKE`` which treats ``_`` and ``%`` as wildcards (PR #454 review
+    P2) — both characters are valid in subjects (e.g. ``user_pref``,
+    ``minimax%token``), so subject narrowing must happen *after* the
+    bridge decodes the metadata. ``rel:`` itself contains no LIKE
+    metacharacters, so the prefix scan stays safe.
     """
-    if subject is not None:
-        prefix = f"{REL_KEY_PREFIX}{subject}{REL_KEY_SEP}"
-        sem_entries = await semantic.list_by_prefix(prefix, limit=limit)
-    else:
-        sem_entries = await semantic.list_by_prefix(REL_KEY_PREFIX, limit=limit)
-
+    sem_entries = await semantic.list_by_prefix(REL_KEY_PREFIX, limit=limit)
     triples: list[RelationalEntry] = []
     for s in sem_entries:
         t = semantic_to_triple(s)
         if t is None:
+            continue
+        if subject is not None and t.subject != subject:
             continue
         if predicate is not None and t.predicate != predicate:
             continue

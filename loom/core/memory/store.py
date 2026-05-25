@@ -350,12 +350,31 @@ class SQLiteStore:
             md["object"] = obj
             key = f"rel:{subject}::{predicate}"
             value = f"{subject} {predicate} {obj}"
+            # #451 phase B P1 fix: phase-A dual-write was best-effort
+            # (semantic write failures were silently swallowed), so a row
+            # may exist in semantic but be stale relative to its
+            # authoritative relational source. INSERT OR IGNORE would
+            # discard the relational update; instead, upsert with a
+            # ``WHERE excluded.updated_at > semantic_entries.updated_at``
+            # guard so the legacy table always wins on newer timestamps
+            # but never overwrites a semantic row that was updated AFTER
+            # phase B's bridge writers took over.
             cur = await db.execute(
                 """
-                INSERT OR IGNORE INTO semantic_entries
+                INSERT INTO semantic_entries
                     (id, key, value, confidence, source, metadata,
                      created_at, updated_at, domain, temporal, last_accessed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value      = excluded.value,
+                    confidence = excluded.confidence,
+                    source     = excluded.source,
+                    metadata   = excluded.metadata,
+                    updated_at = excluded.updated_at,
+                    domain     = excluded.domain,
+                    temporal   = excluded.temporal,
+                    last_accessed_at = excluded.last_accessed_at
+                WHERE excluded.updated_at > semantic_entries.updated_at
                 """,
                 (
                     rel_id,
