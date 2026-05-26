@@ -801,7 +801,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         if not arg:
             providers = ", ".join(session.router.providers)
             console.print(
-                f"[loom.muted]Current model: [bold]{session.model}[/bold]  "
+                f"[loom.muted]Current model: [bold]{session.current_model()}[/bold]  "
                 f"providers: {providers}[/loom.muted]\n"
                 "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
                 "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
@@ -823,7 +823,9 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 # line above but the bottom badge kept showing the old name
                 # until the next turn boundary's stat refresh.
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
-                    loom_app.footer.model = arg
+                    # #471: read the single source of truth, not the raw arg —
+                    # the resolved active model is what actually serves.
+                    loom_app.footer.model = session.current_model()
                     loom_app.invalidate()
             else:
                 console.print(

@@ -501,6 +501,17 @@ class TestLLMRouter:
         assert router.get_provider("codex/gpt-5.5") is p_codex
         assert router.get_provider("unknown") is p_default
 
+    def test_recognized_prefix_unregistered_raises(self):
+        # #471: a known prefix (xai/) whose provider isn't registered must NOT
+        # silently fall back to the default — that would serve a different model
+        # under the requested name. Unrecognized names still use the default.
+        router = LLMRouter()
+        p_default = self._make_mock_provider("minimax")
+        router.register(p_default, default=True)
+        with pytest.raises(RuntimeError, match="not registered"):
+            router.get_provider("xai/grok-4.3")
+        assert router.get_provider("totally-unknown-name") is p_default
+
     def test_openai_provider_strips_optional_prefix(self):
         provider = OpenAIProvider(api_key="test", model="openai/gpt-5.5")
         assert provider._api_model() == "gpt-5.5"

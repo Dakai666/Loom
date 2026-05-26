@@ -127,6 +127,7 @@ def _mock_session(
     for attr in (
         "_active_tier", "_active_model", "_set_sticky_tier",
         "_compute_skill_max_tier", "_tick_tier_counter",
+        "_refresh_runtime_identity",
     ):
         setattr(s, attr, getattr(LoomSession, attr).__get__(s))
     return s

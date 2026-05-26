@@ -1277,13 +1277,10 @@ class LoomSession:
             )
             await self._telemetry.ensure_table()
 
-            # Issue #279: wire new dimensions with their data sources
-            _ri = self._telemetry.get("runtime_identity")
-            if _ri is not None:
-                _model = self._active_model()
-                _tier = self._active_tier()
-                _ri.update(model=_model, tier=_tier,
-                           tier_models=self._tier_models)
+            # Issue #279: wire new dimensions with their data sources.
+            # Issue #471: identity is derived from _active_model() via a single
+            # helper so start / tier-switch / set_model can never drift apart.
+            self._refresh_runtime_identity()
             _cb = self._telemetry.get("context_budget")
             if _cb is not None:
                 _cb.set_budget(self.budget)
@@ -3617,6 +3614,34 @@ class LoomSession:
         tier = self._active_tier()
         return self._tier_models.get(tier, self._model)
 
+    def current_model(self) -> str:
+        """Public single source of truth for the model serving the next turn.
+
+        Issue #471: every surface that displays "which model is active"
+        (footer, agent_health/runtime_identity, diagnostics) should read this
+        rather than caching their own copy, so the displayed name can never
+        diverge from what actually serves. Mirrors ``_active_model()``.
+        """
+        return self._active_model()
+
+    def _refresh_runtime_identity(self) -> None:
+        """Push the resolved model/tier into the runtime_identity telemetry.
+
+        Issue #471: the single writer for the runtime_identity dimension.
+        Called on session start, tier switch, and ``/model`` (set_model) so the
+        dimension always reflects ``_active_model()`` — no stale cache that
+        makes ``agent_health`` report a different model than the one serving.
+        Defensive ``getattr`` because some unit tests drive this method on a
+        bare ``LoomSession`` without a wired telemetry store.
+        """
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is None:
+            return
+        _ri = telemetry.get("runtime_identity")
+        if _ri is not None:
+            _ri.update(model=self._active_model(), tier=self._active_tier(),
+                       tier_models=self._tier_models)
+
     def _set_sticky_tier(
         self, new_tier: int | None, *, reason: str, source: str,
     ) -> "TierChanged | None":
@@ -3640,15 +3665,9 @@ class LoomSession:
         active = self._active_tier()
         if active == old_tier:
             return None
-        # Issue #279: update runtime_identity on tier switch.
-        # Use getattr — _set_sticky_tier is unit-tested with a SimpleNamespace
-        # self that does not always carry a _telemetry attribute.
-        _telemetry = getattr(self, "_telemetry", None)
-        if _telemetry is not None:
-            _ri = _telemetry.get("runtime_identity")
-            if _ri is not None:
-                _ri.update(model=self._tier_models.get(active, self._model),
-                           tier=active)
+        # Issue #279/#471: refresh runtime_identity on tier switch through the
+        # single helper so it stays consistent with start / set_model.
+        self._refresh_runtime_identity()
         return TierChanged(
             from_tier=old_tier,
             to_tier=active,
@@ -4932,12 +4951,25 @@ class LoomSession:
         and updates the provider's model attribute.  Returns True on success.
         """
         ok = self.router.switch_model(model)
-        if not ok and model.startswith("codex/"):
-            self.router = build_router(active_model=model)
-            ok = self.router.switch_model(model)
+        # Issue #471: a recognized prefix whose provider wasn't registered at
+        # startup (e.g. xai/ or codex/ OAuth provider only enabled later) needs
+        # a router rebuild so the provider gets registered, then retry. This was
+        # previously codex-only, which silently left xai/ unswitchable.
+        if not ok and self.router._provider_name_for_model(model) is not None:
+            # Build into a temp and only commit the new router if the retry
+            # actually succeeds — otherwise a failed switch would leave the
+            # session with a new router but the old model, the exact
+            # router/model drift this PR exists to prevent (#471 review).
+            rebuilt = build_router(active_model=model)
+            if rebuilt.switch_model(model):
+                self.router = rebuilt
+                ok = True
         if ok:
             self._model = model
             self._manual_model_override = True
+            # Keep the identity telemetry (agent_health) in lock-step with the
+            # model that will actually serve — set_model previously skipped this.
+            self._refresh_runtime_identity()
         return ok
 
 
