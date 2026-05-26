@@ -1681,6 +1681,23 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 else:  # _PAUSE_RESUME
                     session.resume()
 
+            elif isinstance(event, TurnDropped):
+                _bump_output_seq()
+                _cancel_pending_freeze()
+                _flush_streaming(force=True)
+                _cancel_spinner()
+                clear_line()
+                if not at_line_start:
+                    console.print()
+                    at_line_start = True
+                detail = event.provider_error_detail.strip()
+                message = f"turn dropped: stop_reason={event.stop_reason}"
+                if detail:
+                    message += f"; {detail}"
+                harness.inline(message, level="error")
+                if (loom_app := getattr(session, "_loom_app", None)) is not None:
+                    loom_app.stop_heartbeat(force=True)
+
             elif isinstance(event, TurnDone):
                 _bump_output_seq()
                 # Heartbeat → idle before any of the post-turn UI work

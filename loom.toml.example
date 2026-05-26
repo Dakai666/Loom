@@ -123,6 +123,14 @@ reminder_after_turns = 10
 #                                      # at effort=high can reason 3–6 minutes before the first
 #                                      # output token on tool-heavy multi-turn. Bump if you see
 #                                      # ``turn aborted with error: ... ReadTimeout``.
+# first_event_timeout = 45.0           # SSE watchdog: max seconds to wait for the FIRST stream
+#                                      # event before declaring a ttfb_timeout. Default 45s.
+#                                      # Set 0 to disable (e.g. if the backend buffers and emits
+#                                      # no early event on very heavy reasoning turns).
+# idle_event_timeout  = 0.0            # SSE watchdog: max seconds between events after the first
+#                                      # one before declaring an idle_timeout. Default 0 = off,
+#                                      # so long reasoning gaps don't false-trip; the overall
+#                                      # ``timeout`` above still bounds the request.
 
 # [providers.xai_oauth]
 # enabled          = true              # optional; explicit --model xai/... also registers it
@@ -134,6 +142,11 @@ reminder_after_turns = 10
 #                                      # omit but the consistent default makes the tier-2
 #                                      # behavior predictable across providers.
 # timeout          = 600.0             # httpx read timeout in seconds. Default 600s.
+# first_event_timeout = 45.0           # SSE watchdog: max seconds to wait for the FIRST stream
+#                                      # event before declaring a ttfb_timeout. Default 45s.
+#                                      # Set 0 to disable.
+# idle_event_timeout  = 0.0            # SSE watchdog: max seconds between events after the first
+#                                      # one before declaring an idle_timeout. Default 0 = off.
 #
 # xAI is OAuth-only in Loom. Run `loom auth xai`; XAI_API_KEY is intentionally
 # not used by the xai/<model> provider.

@@ -64,6 +64,29 @@ class TestBuildRouter:
         assert "codex" in router.providers
         assert router.get_provider("codex/gpt-5.5").name == "codex"
 
+    def test_registers_codex_provider_with_responses_timeout_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "codex/gpt-5.5"},
+            "providers": {
+                "codex": {
+                    "first_event_timeout": 180,
+                    "idle_event_timeout": 0,
+                },
+            },
+        })
+
+        provider = session_module.build_router(
+            active_model="codex/gpt-5.5",
+        ).get_provider("codex/gpt-5.5")
+
+        assert provider._first_event_timeout == 180.0
+        assert provider._idle_event_timeout == 0.0
+
     def test_registers_xai_oauth_provider_only_when_requested(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
 
@@ -81,6 +104,28 @@ class TestBuildRouter:
 
         assert "xai" in router.providers
         assert router.get_provider("xai/grok-4.3").name == "xai"
+
+    def test_registers_xai_provider_with_responses_timeout_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "xai/grok-4.3"},
+            "providers": {
+                "xai_oauth": {
+                    "enabled": True,
+                    "first_event_timeout": 120,
+                    "idle_event_timeout": 0,
+                },
+            },
+        })
+
+        provider = session_module.build_router().get_provider("xai/grok-4.3")
+
+        assert provider._first_event_timeout == 120.0
+        assert provider._idle_event_timeout == 0.0
 
 
 class TestSetModel:
@@ -952,6 +997,61 @@ class TestStreamTurnLock:
             "see PR for incident 2026-05-14: the session would be wedged "
             "and every subsequent stream_turn() would hang forever."
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_surfaces_responses_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from loom.core import session as session_module
+    from loom.core.cognition.responses_sse import ResponsesProviderError
+    from loom.core.events import TurnDropped
+    from loom.core.session import LoomSession
+
+    async def failing_stream_chat(**kwargs):
+        raise ResponsesProviderError(
+            provider="Codex Responses",
+            model="gpt-5.5",
+            failure_type="ttfb_timeout",
+            phase="first_event_wait",
+            detail="no SSE event within 45.0s",
+            elapsed_seconds=45.0,
+        )
+        yield "", None
+
+    router = SimpleNamespace(
+        stream_chat=failing_stream_chat,
+        native_max_tokens=lambda model: None,
+    )
+    monkeypatch.setattr(session_module, "build_router", lambda *args, **kwargs: router)
+    monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = LoomSession(
+        model="codex/gpt-5.5",
+        db_path=str(tmp_path / "loom.db"),
+        workspace=workspace,
+    )
+
+    class FakeEpisodic:
+        async def write(self, entry):
+            return None
+
+    session._memory = SimpleNamespace(episodic=FakeEpisodic())
+
+    events = []
+    async for event in session.stream_turn("hello"):
+        events.append(event)
+        if isinstance(event, TurnDropped):
+            break
+
+    dropped = next(event for event in events if isinstance(event, TurnDropped))
+    assert dropped.stop_reason == "provider_ttfb_timeout"
+    assert dropped.exhausted is True
+    assert "provider=Codex Responses" in dropped.provider_error_detail
+    assert "failure_type=ttfb_timeout" in dropped.provider_error_detail
 
 
 class TestSanitizeHistoryAdjacency:

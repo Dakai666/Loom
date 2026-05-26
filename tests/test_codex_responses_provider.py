@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import json
 import time
 
@@ -141,6 +142,61 @@ def test_codex_provider_default_timeout_is_600_seconds():
     # [providers.codex].timeout in loom.toml) still works.
     overridden = CodexResponsesProvider(model="codex/gpt-5.5", timeout=900.0)
     assert overridden._timeout == 900.0
+
+
+def test_codex_provider_first_event_timeout_can_be_disabled():
+    provider = CodexResponsesProvider(
+        model="codex/gpt-5.5",
+        first_event_timeout=0.0,
+    )
+
+    assert provider._first_event_timeout == 0.0
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_chat_raises_ttfb_timeout(monkeypatch, codex_home):
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+    provider._first_event_timeout = 0.01
+
+    class HangingResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            while True:
+                await asyncio.sleep(3600)
+                yield "unreachable"
+
+    class StreamContext:
+        async def __aenter__(self):
+            return HangingResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return StreamContext()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        async for _chunk, _final in provider.stream_chat([{"role": "user", "content": "hi"}]):
+            pass
+
+    assert "failure_type=ttfb_timeout" in str(exc.value)
+    assert "provider=Codex Responses" in str(exc.value)
 
 
 @pytest.mark.asyncio

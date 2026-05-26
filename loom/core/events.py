@@ -219,6 +219,7 @@ class TurnDropped:
     retry_count: int = 0
     tool_count: int = 0
     exhausted: bool = False
+    provider_error_detail: str = ""
 
 
 @dataclass

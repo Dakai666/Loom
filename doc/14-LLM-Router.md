@@ -87,7 +87,7 @@ LLMRouter.chat(model="ollama/llama3.2", messages=[...])
 ```python
 from loom.core.cognition.providers import (
     MiniMaxProvider, AnthropicProvider, OpenAIProvider, CodexResponsesProvider,
-    OllamaProvider, LMStudioProvider,
+    XAIResponsesProvider, OllamaProvider, LMStudioProvider,
 )
 
 router = LLMRouter()
@@ -95,8 +95,15 @@ router.register(MiniMaxProvider(api_key=..., model="MiniMax-M2.7"), default=True
 router.register(AnthropicProvider(api_key=...))
 router.register(OpenAIProvider(api_key=..., model="gpt-5.5"))
 router.register(CodexResponsesProvider(model="codex/gpt-5.5"), fallback=False)
+router.register(XAIResponsesProvider(model="xai/grok-4.3"), fallback=False)
 router.register(OllamaProvider(base_url="http://localhost:11434"))
 ```
+
+Codex/xAI Responses OAuth providers expose `first_event_timeout` and
+`idle_event_timeout` through `loom.toml` (`[providers.codex]` /
+`[providers.xai_oauth]`). `first_event_timeout = 0` disables the first-SSE-line
+watchdog for unusually heavy reasoning turns; `idle_event_timeout` defaults to
+`0` so a long post-`response.created` reasoning phase is not killed by Loom.
 
 ---
 

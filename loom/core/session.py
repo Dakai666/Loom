@@ -101,6 +101,7 @@ from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider
+from loom.core.cognition.responses_sse import ResponsesProviderError
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.judge import (
     JudgeVerdict,
@@ -624,6 +625,14 @@ def build_router(active_model: str | None = None) -> LLMRouter:
                 base_url=codex_cfg.get("base_url", "") or CodexResponsesProvider.DEFAULT_BASE_URL,
                 timeout=float(codex_cfg.get("timeout") or 0.0),
                 reasoning_effort=codex_cfg.get("reasoning_effort") or None,
+                first_event_timeout=(
+                    float(codex_cfg["first_event_timeout"])
+                    if "first_event_timeout" in codex_cfg else None
+                ),
+                idle_event_timeout=(
+                    float(codex_cfg["idle_event_timeout"])
+                    if "idle_event_timeout" in codex_cfg else None
+                ),
             ),
             default=codex_default or codex_requested,
             fallback=codex_default or codex_requested,
@@ -654,6 +663,14 @@ def build_router(active_model: str | None = None) -> LLMRouter:
                 base_url=xai_base_url,
                 timeout=float(xai_cfg.get("timeout") or 0.0),
                 reasoning_effort=xai_cfg.get("reasoning_effort") or None,
+                first_event_timeout=(
+                    float(xai_cfg["first_event_timeout"])
+                    if "first_event_timeout" in xai_cfg else None
+                ),
+                idle_event_timeout=(
+                    float(xai_cfg["idle_event_timeout"])
+                    if "idle_event_timeout" in xai_cfg else None
+                ),
             ),
             default=xai_default or xai_requested,
             fallback=xai_default or xai_requested,
@@ -2828,6 +2845,15 @@ class LoomSession:
                 cache_read_input_tokens=cache_read_input_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
                 stop_reason=_stop_reason,
+            )
+        except ResponsesProviderError as exc:
+            logger.error("stream_turn: provider error: %s", exc)
+            yield TurnDropped(
+                stop_reason=f"provider_{exc.failure_type}",
+                retry_count=locals().get("_stream_retry", 0),
+                tool_count=locals().get("tool_count", 0),
+                exhausted=True,
+                provider_error_detail=str(exc),
             )
         finally:
             try:
