@@ -124,12 +124,36 @@ This module must not know provider names, OAuth, model IDs, or reasoning policy.
 
 ### `loom/core/cognition/providers.py`
 
-After migration, keep only thin compatibility imports/classes where needed:
+This file is **not** reduced to thin imports. Only the Codex/xAI runtime moves
+out; `AnthropicProvider`, the `_OpenAICompatibleBase` family
+(OpenAI/OpenRouter/Ollama/LMStudio), and `_to_anthropic_messages` stay here
+unchanged.
 
-- `CodexResponsesProvider` imported from `codex_responses_provider.py`
-- `XAIResponsesProvider` imported from `xai_responses_provider.py`
+After migration, providers.py keeps:
+
+- `CodexResponsesProvider` re-exported (import) from `codex_responses_provider.py`
+- `XAIResponsesProvider` re-exported (import) from `xai_responses_provider.py`
+
+The re-export is load-bearing: existing tests import both classes from
+`loom.core.cognition.providers` (`tests/test_codex_responses_provider.py`,
+`tests/test_xai_responses_provider.py`). Breaking the import path breaks them.
 
 No new provider runtime logic should be added to this file.
+
+#### Helper keep/move list
+
+Module-level helpers in providers.py must be triaged before moving (extraction
+hazard — cf. PR #407 missing a module-level `_log`):
+
+| Helper | Used by | Action |
+|--------|---------|--------|
+| `_retry_async` | **Anthropic only** (not Responses) | **Stay** in providers.py |
+| `_to_anthropic_messages` | Anthropic only | Stay |
+| `_stream_interrupt_detail` | Codex + xAI | Move to shared (responses_sse or provider base) |
+| `_http_status_detail` | Codex + xAI | Move to shared |
+| `_responses_sse_error_detail` | Codex + xAI, provider-neutral | Move to `responses_sse.py` |
+| `_ReasoningStreamWrapper` | Codex + xAI, provider-neutral | Move to `responses_sse.py` |
+| `_normalize_reasoning_effort` + `_RESPONSES_REASONING_*` | Codex + xAI, **reasoning policy** | See Open Question C — must NOT land in `responses_sse.py` |
 
 ## Runtime Behavior
 
@@ -212,6 +236,78 @@ Live smoke tests:
 If live provider calls fail because of account entitlement, quota, or upstream
 service state, the result is acceptable only if Loom surfaces a clear
 structured failure instead of hanging silently.
+
+## Open Questions / Decisions to Resolve
+
+切檔本身不會讓 codex/gpt 停滯消失；消失靠的是 watchdog 與失敗分類。這份 design
+對「真正修掉 bug 的那一塊」目前規格最薄。以下是 implementation plan 定稿前必須先
+拍板的項目，按影響排序。
+
+### Must resolve (decides whether the stall is actually fixed)
+
+**A. TTFB/idle watchdog 機制、threshold、與「reasoning 期靜默」的衝突。**
+- 現況是 `async for line in resp.aiter_lines()` 的阻塞迭代。加 watchdog 需要併發
+  計時器（`asyncio.wait_for(anext(...))` 或獨立 watchdog task）；本 design 未定義
+  機制，也未定義它與 `abort_signal` 及既有 600s timeout 的協調。
+- 語義衝突：本 design 強制省略 `summary`。一旦不送 summary，gpt-5.5 在
+  `effort=high` 的 reasoning 期很可能完全沒有 SSE event（即一直在打的數分鐘靜默）。
+  若 TTFB watchdog 以「first SSE event」為基準，會誤殺它本要保護的 workload。
+  Testing 一節「does not fire after any event arrives, including reasoning-only」
+  預設 reasoning 期有事件，與「省略 summary」自相矛盾。
+- **先回答的事實問題**：Codex/xAI backend 在 reasoning 期是否送
+  `response.created` / `response.in_progress` / keep-alive 心跳？沒有的話「TTFB」
+  概念站不住，watchdog 判準須改（例如「header 已到但 N 秒無 byte」vs「已收到
+  created 後 idle」）。此題不解，threshold 是猜的、smoke test 不可重現。
+
+**B. 「失敗類型 / 結構化診斷」如何交付給 session，而 session 不在檔案計劃內。**
+目前 contract 是 provider `raise RuntimeError(str)` + stream 吐
+`(chunk, LLMResponse)`。要把 `failure_type / phase / last_event / elapsed` 傳上去，
+要嘛新 exception class、要嘛 `LLMResponse` 加欄位 —— 兩者都會動到
+`session.stream_turn` 的 except handler，但 PR 步驟 3–7 只動 provider 檔。契約邊界
+改了卻沒追到消費端。需明確：失敗是「更豐富的 RuntimeError 字串」還是「結構化
+物件」？後者要列出 session 端改動點。
+
+**C. `_normalize_reasoning_effort` + effort tuple 沒有家。**
+它是 reasoning policy，而本 design 明文禁止 `responses_sse.py` 知道 reasoning
+policy。但目前只規劃兩個獨立 provider 檔 + 一個 neutral SSE 檔，沒有 Responses
+provider 共享 base。結果這段要嘛重複進兩個 provider 檔（違反 DRY），要嘛需要第四個
+「shared-but-policy」模組。需指定歸屬。
+
+> （D「providers.py 不會變薄、helper 搬留」已併入上方 Proposed Files →
+> `providers.py` 一節，不在此重複。）
+
+### Decisions to nail down (doc 目前沉默或矛盾)
+
+**E. `malformed_sse` 是行為變更。** 現況 `json.JSONDecodeError` 是 silently
+`continue`。列為 failure type 等於要改成 surface。skip-vs-fail 是真決策，須挑明。
+
+**F. xAI 仍送 `max_output_tokens`，Codex 不送（`SUPPORTS_MAX_OUTPUT_TOKENS=False`）。**
+gpt-5.5 stall 的根因正是 `max_output_tokens` 隱性 cap 推理，而 xAI payload 現在
+還在送。此 asymmetry 須顯式決定去留，不能默默留著。
+
+**G. `stream_incomplete` 不能吃掉 `reason==max_output_tokens`。**
+那條是 load-bearing recovery：session 的 Issue #271 `_consecutive_max_tokens`
+reasoning-continuation 靠它把高推理 turn 接下去。本 design 已說保留
+non-`max_output_tokens` 才當錯誤，但須明指這個 cross-module 契約連到 session #271，
+否則實作者可能把這條線斷掉。
+
+### Smaller notes
+
+**H. Codex/xAI credential 不對稱。** `load_xai_oauth_credential` 會自動 refresh；
+`load_codex_oauth_credential` 不 refresh（過期回 None，靠 `codex` CLI 外部刷新）。
+`credential_expired` 對兩者的意義與補救不同，不應對稱處理。
+
+**I. Phase enum 跨越邊界。** `request_built / request_sent / headers_received`
+發生在 httpx 設定階段（provider 側），不在 SSE line loop 內。phase tracker 須由
+provider 先更新、再交給 parser；其所有權其實是跨層的，非純 `responses_sse.py`。
+
+**J. `tool_call_stream` phase 偵測**需要監看目前被刻意丟棄的
+`function_call_arguments.delta`（canonical args 走 `output_item.done`）。要嘛接受
+此 phase 永遠不亮，要嘛改 parser。
+
+**K.（相鄰、非本 PR）** `validate_xai_base_url` 不保證 `/responses` 後綴：user 若
+override `base_url=https://api.x.ai/v1` 會 POST 到缺 `/responses` 的 endpoint。
+建議掛 follow-up issue，不阻擋本 PR。
 
 ## PR Workflow
 
