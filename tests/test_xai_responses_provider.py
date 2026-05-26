@@ -1,10 +1,12 @@
 import base64
+import asyncio
 import json
 import time
 
 import pytest
 
 from loom.core.cognition.providers import CodexResponsesProvider, XAIResponsesProvider
+from loom.core.cognition.responses_sse import classify_xai_http_failure
 from loom.core.cognition.xai_auth import DEFAULT_XAI_BASE_URL, save_xai_oauth_state
 
 
@@ -27,6 +29,12 @@ def test_xai_provider_default_timeout_is_600_seconds():
     assert provider._timeout == 600.0
     overridden = XAIResponsesProvider(model="xai/grok-4.3", timeout=900.0)
     assert overridden._timeout == 900.0
+
+
+def test_xai_http_body_classifies_entitlement_or_quota() -> None:
+    body = '{"error":{"message":"subscription does not include this model quota"}}'
+
+    assert classify_xai_http_failure(body) == "entitlement_or_quota"
 
 
 class _StreamResponse:
@@ -65,6 +73,61 @@ class _FakeAsyncClient:
                 return False
 
         return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_xai_stream_chat_raises_ttfb_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_HOME", str(tmp_path / "loom-home"))
+    token = _jwt(int(time.time()) + 3600)
+    save_xai_oauth_state({
+        "tokens": {
+            "access_token": token,
+            "refresh_token": "refresh-secret",
+        },
+        "base_url": DEFAULT_XAI_BASE_URL,
+    })
+    provider = XAIResponsesProvider(model="xai/grok-4.3")
+    provider._first_event_timeout = 0.01
+
+    class HangingResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            while True:
+                await asyncio.sleep(3600)
+                yield "unreachable"
+
+    class StreamContext:
+        async def __aenter__(self):
+            return HangingResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return StreamContext()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(RuntimeError) as exc:
+        async for _chunk, _final in provider.stream_chat([{"role": "user", "content": "hi"}]):
+            pass
+
+    assert "failure_type=ttfb_timeout" in str(exc.value)
+    assert "provider=xAI Responses" in str(exc.value)
 
 
 @pytest.mark.asyncio

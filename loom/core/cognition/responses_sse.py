@@ -185,10 +185,11 @@ def classify_responses_sse_error(
         if reason == "max_output_tokens":
             return None
         if reason:
+            context = " ".join(part for part in (event_type, f"status={status}" if status else "") if part)
             return ResponsesProviderError.from_state(
                 state,
                 failure_type="stream_incomplete",
-                detail=_error_detail(data, event_type, status),
+                detail=f"{state.provider} response error ({context}): {_error_detail(data, event_type, status)}",
             )
 
     failed_event = (
@@ -200,10 +201,17 @@ def classify_responses_sse_error(
     if not failed_event:
         return None
 
+    context = " ".join(part for part in (event_type, f"status={status}" if status else "") if part)
+    detail = f"{state.provider} response error"
+    if context:
+        detail += f" ({context})"
+    extra = _error_detail(data, event_type, status)
+    if extra:
+        detail += f": {extra}"
     return ResponsesProviderError.from_state(
         state,
         failure_type="stream_error_event",
-        detail=_error_detail(data, event_type, status),
+        detail=detail,
     )
 
 
