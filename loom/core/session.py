@@ -101,6 +101,7 @@ from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider
+from loom.core.cognition.responses_sse import ResponsesProviderError
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.judge import (
     JudgeVerdict,
@@ -2828,6 +2829,15 @@ class LoomSession:
                 cache_read_input_tokens=cache_read_input_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
                 stop_reason=_stop_reason,
+            )
+        except ResponsesProviderError as exc:
+            logger.error("stream_turn: provider error: %s", exc)
+            yield TurnDropped(
+                stop_reason=f"provider_{exc.failure_type}",
+                retry_count=locals().get("_stream_retry", 0),
+                tool_count=locals().get("tool_count", 0),
+                exhausted=True,
+                provider_error_detail=str(exc),
             )
         finally:
             try:

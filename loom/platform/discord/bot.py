@@ -951,9 +951,13 @@ class LoomDiscordBot:
                         if isinstance(event, TextChunk):
                             narration_buf += event.text
                         elif isinstance(event, TurnDropped):
+                            detail = (
+                                f" — {event.provider_error_detail[:900]}"
+                                if event.provider_error_detail else ""
+                            )
                             await _safe_send(
                                 channel,
-                                f"-# ⚠️ Chime turn dropped: {event.stop_reason}",
+                                f"-# ⚠️ Chime turn dropped: {event.stop_reason}{detail}",
                             )
             except Exception as exc:
                 await _safe_send(channel, f"❌ Chime error: {exc}")
@@ -1660,6 +1664,8 @@ class LoomDiscordBot:
                                 f"-# ⚠️ 任務中止：`stop_reason={event.stop_reason}` "
                                 f"（已完成 {event.tool_count} 個工具）"
                             )
+                        if event.provider_error_detail:
+                            drop_msg += f"\n-# `{event.provider_error_detail[:900]}`"
                         await _safe_send(message.channel, drop_msg)
 
                     elif isinstance(event, ActionRolledBack):
