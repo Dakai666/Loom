@@ -144,6 +144,15 @@ def test_codex_provider_default_timeout_is_600_seconds():
     assert overridden._timeout == 900.0
 
 
+def test_codex_provider_first_event_timeout_can_be_disabled():
+    provider = CodexResponsesProvider(
+        model="codex/gpt-5.5",
+        first_event_timeout=0.0,
+    )
+
+    assert provider._first_event_timeout == 0.0
+
+
 @pytest.mark.asyncio
 async def test_codex_stream_chat_raises_ttfb_timeout(monkeypatch, codex_home):
     provider = CodexResponsesProvider(model="codex/gpt-5.5")

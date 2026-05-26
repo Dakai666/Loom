@@ -41,13 +41,23 @@ class CodexResponsesProvider(LLMProvider):
         base_url: str = "",
         timeout: float = 0.0,
         reasoning_effort: str | None = None,
+        first_event_timeout: float | None = None,
+        idle_event_timeout: float | None = None,
     ) -> None:
         self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
         self._base_url = base_url or self.DEFAULT_BASE_URL
         self._timeout = timeout or self.DEFAULT_TIMEOUT
         self._reasoning_effort = normalize_reasoning_effort(reasoning_effort)
-        self._first_event_timeout = DEFAULT_FIRST_EVENT_TIMEOUT
-        self._idle_event_timeout = DEFAULT_IDLE_EVENT_TIMEOUT
+        self._first_event_timeout = (
+            DEFAULT_FIRST_EVENT_TIMEOUT
+            if first_event_timeout is None or first_event_timeout < 0
+            else first_event_timeout
+        )
+        self._idle_event_timeout = (
+            DEFAULT_IDLE_EVENT_TIMEOUT
+            if idle_event_timeout is None or idle_event_timeout < 0
+            else idle_event_timeout
+        )
 
     def _api_model(self) -> str:
         return self.model.removeprefix(self.ROUTING_PREFIX)

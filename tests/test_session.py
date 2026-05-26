@@ -64,6 +64,29 @@ class TestBuildRouter:
         assert "codex" in router.providers
         assert router.get_provider("codex/gpt-5.5").name == "codex"
 
+    def test_registers_codex_provider_with_responses_timeout_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "codex/gpt-5.5"},
+            "providers": {
+                "codex": {
+                    "first_event_timeout": 180,
+                    "idle_event_timeout": 0,
+                },
+            },
+        })
+
+        provider = session_module.build_router(
+            active_model="codex/gpt-5.5",
+        ).get_provider("codex/gpt-5.5")
+
+        assert provider._first_event_timeout == 180.0
+        assert provider._idle_event_timeout == 0.0
+
     def test_registers_xai_oauth_provider_only_when_requested(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
 
@@ -81,6 +104,28 @@ class TestBuildRouter:
 
         assert "xai" in router.providers
         assert router.get_provider("xai/grok-4.3").name == "xai"
+
+    def test_registers_xai_provider_with_responses_timeout_config(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "xai/grok-4.3"},
+            "providers": {
+                "xai_oauth": {
+                    "enabled": True,
+                    "first_event_timeout": 120,
+                    "idle_event_timeout": 0,
+                },
+            },
+        })
+
+        provider = session_module.build_router().get_provider("xai/grok-4.3")
+
+        assert provider._first_event_timeout == 120.0
+        assert provider._idle_event_timeout == 0.0
 
 
 class TestSetModel:

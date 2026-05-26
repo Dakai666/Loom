@@ -28,7 +28,7 @@ import asyncio
 import pytest
 from prompt_toolkit.history import InMemoryHistory
 
-from loom.core.events import TextChunk
+from loom.core.events import TextChunk, TurnDropped
 from loom.platform.cli import main as cli_main
 from loom.platform.cli.app import (
     FooterState,
@@ -499,6 +499,37 @@ class TestHeartbeatMinDwell:
 
         assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
         assert app.footer.heartbeat_pending_stop is False
+
+    def test_turn_dropped_renders_cli_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: list[tuple[str, str]] = []
+
+        class _Harness:
+            def inline(self, message: str, *, level: str = "info") -> None:
+                captured.append((level, message))
+
+        class _Session:
+            _loom_app = None
+
+            async def stream_turn(self, _user_input: str):
+                yield TurnDropped(
+                    stop_reason="provider_ttfb_timeout",
+                    exhausted=True,
+                    provider_error_detail=(
+                        "provider=Codex Responses; failure_type=ttfb_timeout; "
+                        "phase=first_event_wait"
+                    ),
+                )
+
+        monkeypatch.setattr(cli_main, "harness", _Harness())
+
+        asyncio.run(cli_main._run_streaming_turn(_Session(), "hi"))
+
+        assert captured == [(
+            "error",
+            "turn dropped: stop_reason=provider_ttfb_timeout; "
+            "provider=Codex Responses; failure_type=ttfb_timeout; "
+            "phase=first_event_wait",
+        )]
 
     def test_stop_after_dwell_clears_immediately(self, app: LoomApp) -> None:
         # When a tool legitimately runs longer than the dwell, stop

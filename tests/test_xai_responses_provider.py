@@ -31,6 +31,15 @@ def test_xai_provider_default_timeout_is_600_seconds():
     assert overridden._timeout == 900.0
 
 
+def test_xai_provider_first_event_timeout_can_be_disabled():
+    provider = XAIResponsesProvider(
+        model="xai/grok-4.3",
+        first_event_timeout=0.0,
+    )
+
+    assert provider._first_event_timeout == 0.0
+
+
 def test_xai_http_body_classifies_entitlement_or_quota() -> None:
     body = '{"error":{"message":"subscription does not include this model quota"}}'
 
