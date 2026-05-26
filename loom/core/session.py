@@ -4956,8 +4956,14 @@ class LoomSession:
         # a router rebuild so the provider gets registered, then retry. This was
         # previously codex-only, which silently left xai/ unswitchable.
         if not ok and self.router._provider_name_for_model(model) is not None:
-            self.router = build_router(active_model=model)
-            ok = self.router.switch_model(model)
+            # Build into a temp and only commit the new router if the retry
+            # actually succeeds — otherwise a failed switch would leave the
+            # session with a new router but the old model, the exact
+            # router/model drift this PR exists to prevent (#471 review).
+            rebuilt = build_router(active_model=model)
+            if rebuilt.switch_model(model):
+                self.router = rebuilt
+                ok = True
         if ok:
             self._model = model
             self._manual_model_override = True

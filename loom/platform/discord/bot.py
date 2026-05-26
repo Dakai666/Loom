@@ -1092,7 +1092,7 @@ class LoomDiscordBot:
         if not arg:
             providers = ", ".join(session.router.providers)
             return (
-                f"Current model: **{session.model}**  providers: `{providers}`\n"
+                f"Current model: **{session.current_model()}**  providers: `{providers}`\n"
                 "Prefixes: `MiniMax-*` · `claude-*` · `deepseek-*` · "
                 "`openrouter/<vendor>/<model>` · `ollama/<name>` · `lmstudio/<name>`"
             )

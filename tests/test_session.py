@@ -170,6 +170,28 @@ class TestSetModel:
         assert session.router is xai_router
         assert session.model == "xai/grok-4.3"
 
+    def test_failed_retry_keeps_original_router(self, monkeypatch: pytest.MonkeyPatch):
+        # #471 review: if the rebuild retry still can't switch, the session must
+        # keep its original router + model — never commit a router built for a
+        # target that ultimately failed (that's the router/model drift this fix
+        # is meant to prevent).
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        original = MagicMock()
+        original.switch_model.return_value = False
+        rebuilt = MagicMock()
+        rebuilt.switch_model.return_value = False  # retry also fails
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: rebuilt)
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = original
+        session._model = "MiniMax-M2.7"
+
+        assert session.set_model("xai/grok-4.3") is False
+        assert session.router is original
+        assert session.model == "MiniMax-M2.7"
+
     def test_unrecognized_prefix_does_not_rebuild(self, monkeypatch: pytest.MonkeyPatch):
         # A model with no recognized prefix must not trigger a router rebuild.
         from loom.core import session as session_module

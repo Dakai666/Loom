@@ -801,7 +801,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         if not arg:
             providers = ", ".join(session.router.providers)
             console.print(
-                f"[loom.muted]Current model: [bold]{session.model}[/bold]  "
+                f"[loom.muted]Current model: [bold]{session.current_model()}[/bold]  "
                 f"providers: {providers}[/loom.muted]\n"
                 "[loom.muted]  MiniMax-*           requires MINIMAX_API_KEY in .env (Anthropic-compatible endpoint)[/loom.muted]\n"
                 "[loom.muted]  claude-*            requires ANTHROPIC_API_KEY in .env[/loom.muted]\n"
