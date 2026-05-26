@@ -150,6 +150,70 @@ class TestSetModel:
         assert session.model == "codex/gpt-5.5"
         assert session._manual_model_override is True
 
+    def test_lazy_registers_xai_provider_on_switch(self, monkeypatch: pytest.MonkeyPatch):
+        # #471: the rebuild-retry used to be codex-only, so /model xai/... left
+        # xai unswitchable when it wasn't registered at startup.
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        initial_router = MagicMock()
+        initial_router.switch_model.return_value = False
+        xai_router = MagicMock()
+        xai_router.switch_model.return_value = True
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: xai_router)
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = initial_router
+        session._model = "MiniMax-M2.7"
+
+        assert session.set_model("xai/grok-4.3") is True
+        assert session.router is xai_router
+        assert session.model == "xai/grok-4.3"
+
+    def test_unrecognized_prefix_does_not_rebuild(self, monkeypatch: pytest.MonkeyPatch):
+        # A model with no recognized prefix must not trigger a router rebuild.
+        from loom.core import session as session_module
+        from loom.core.session import LoomSession
+
+        router = MagicMock()
+        router.switch_model.return_value = False
+        router._provider_name_for_model.return_value = None
+        rebuilt = MagicMock()
+        monkeypatch.setattr(
+            session_module, "build_router",
+            lambda *a, **k: pytest.fail("build_router must not run for unrecognized prefix"),
+        )
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = router
+        session._model = "MiniMax-M2.7"
+
+        assert session.set_model("bogus-model") is False
+        assert session.router is router  # unchanged
+
+    def test_set_model_refreshes_runtime_identity(self):
+        # #471: agent_health reads runtime_identity; set_model must refresh it so
+        # it can't keep reporting the startup/tier model after a /model switch.
+        from loom.core.session import LoomSession
+
+        router = MagicMock()
+        router.switch_model.return_value = True
+
+        session = LoomSession.__new__(LoomSession)
+        session.router = router
+        session._model = "MiniMax-M2.7"
+        session._sticky_tier = None
+        session._default_tier = 1
+        session._tier_models = {}
+        ri = MagicMock()
+        telemetry = MagicMock()
+        telemetry.get.return_value = ri
+        session._telemetry = telemetry
+
+        assert session.set_model("xai/grok-4.3") is True
+        ri.update.assert_called_once()
+        assert ri.update.call_args.kwargs["model"] == "xai/grok-4.3"
+
 
 class TestLoomSessionStartup:
     @pytest_asyncio.fixture

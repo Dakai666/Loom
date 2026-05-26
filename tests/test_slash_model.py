@@ -41,16 +41,27 @@ def capture_console(monkeypatch):
 
 def _stub_session(switch_ok: bool = True) -> SimpleNamespace:
     """Minimal session with the surface ``/model`` reads."""
-    return SimpleNamespace(
+    s = SimpleNamespace(
         model="minimax-m2.7",
         router=SimpleNamespace(providers=["anthropic", "deepseek"]),
-        set_model=lambda model: switch_ok,
         # Other slash branches reach for these — provide no-op stubs so the
         # full dispatcher walk doesn't AttributeError on unrelated paths.
         current_personality=None,
         _stack=MagicMock(),
         _last_think="",
     )
+
+    def _set_model(model: str) -> bool:
+        # Mirror LoomSession.set_model: on success the active model becomes the
+        # requested one, which is what current_model() (the footer's source of
+        # truth, #471) reports.
+        if switch_ok:
+            s.model = model
+        return switch_ok
+
+    s.set_model = _set_model
+    s.current_model = lambda: s.model
+    return s
 
 
 class TestSlashModel:

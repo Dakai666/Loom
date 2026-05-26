@@ -823,7 +823,9 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 # line above but the bottom badge kept showing the old name
                 # until the next turn boundary's stat refresh.
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
-                    loom_app.footer.model = arg
+                    # #471: read the single source of truth, not the raw arg —
+                    # the resolved active model is what actually serves.
+                    loom_app.footer.model = session.current_model()
                     loom_app.invalidate()
             else:
                 console.print(

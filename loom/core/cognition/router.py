@@ -94,6 +94,17 @@ class LLMRouter:
             p = self._providers.get(provider_name)
             if p:
                 return p
+            # Recognized prefix but the provider isn't registered (OAuth login
+            # missing, key absent, or provider disabled). Do NOT silently fall
+            # back to the default provider — that would serve a *different*
+            # model under the requested name (e.g. ``xai/grok-4.3`` answered by
+            # MiniMax), and every display surface would keep showing the
+            # requested name. Surface it loudly instead. See issue #471.
+            raise RuntimeError(
+                f"Model '{model}' routes to provider '{provider_name}', which is "
+                f"not registered (OAuth/credential missing or provider disabled?). "
+                f"Registered providers: {list(self._providers)}"
+            )
         if self._default:
             return self._providers[self._default]
         raise RuntimeError(
