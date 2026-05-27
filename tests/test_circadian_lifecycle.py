@@ -141,12 +141,16 @@ class TestEnsureSpawn:
     async def test_rebuilds_when_thread_deleted(self):
         plat, ev = FakePlatform(), FakeEvaluator()
         first = await ensure_today_session(_now_utc(), plat, CFG, evaluator=ev)
-        # Simulate manual thread deletion.
+        # Simulate genuine thread deletion (not a 24h TTL auto-archive, which
+        # verify_thread_alive still treats as alive).
         plat.threads[first.thread_id] = False
 
         second = await ensure_today_session(_now_utc(), plat, CFG, evaluator=ev)
         assert len(plat.spawns) == 2
         assert second is not None and second.thread_id != first.thread_id
+        # PR #476 review P1: the orphaned session must be finalized before the
+        # rebuild, not left loaded until shutdown.
+        assert first.thread_id in plat.closed
 
     async def test_no_channel_means_no_spawn(self):
         plat, ev = FakePlatform(channel_id=None), FakeEvaluator()
@@ -371,3 +375,32 @@ class TestHelpers:
         assert local_hhmm_to_utc_cron("08:00", TZ) == "0 0 * * *"
         assert local_hhmm_to_utc_cron("00:00", TZ) == "0 16 * * *"
         assert local_hhmm_to_utc_cron("09:30", TZ) == "30 1 * * *"
+
+
+# ===========================================================================
+# Bot adapter — deterministic channel resolution (PR #476 review P2)
+# ===========================================================================
+
+
+class TestBotChannelResolution:
+    def _stub_bot(self, *, channels, circadian=None):
+        from loom.platform.discord.bot import LoomDiscordBot
+
+        bot = LoomDiscordBot.__new__(LoomDiscordBot)
+        bot._allowed_channels = set(channels)
+        bot._channel_list = list(dict.fromkeys(channels))
+        bot._circadian_channel_id = circadian
+        return bot
+
+    def test_first_allowed_channel_is_deterministic(self):
+        # A set's iteration order is arbitrary; the ordered list is not.
+        bot = self._stub_bot(channels=[111, 222, 333])
+        assert bot.resolve_channel_id() == 111
+
+    def test_explicit_circadian_channel_wins(self):
+        bot = self._stub_bot(channels=[111, 222], circadian=999)
+        assert bot.resolve_channel_id() == 999
+
+    def test_none_when_no_channels(self):
+        bot = self._stub_bot(channels=[])
+        assert bot.resolve_channel_id() is None

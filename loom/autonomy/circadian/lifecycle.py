@@ -203,6 +203,18 @@ async def ensure_today_session(
                     "[circadian] today's thread %s no longer exists — rebuilding",
                     state.thread_id,
                 )
+                # Best-effort finalize the orphaned session before replacing it.
+                # Without this the old thread's session stays loaded + registered
+                # until shutdown, so a stale discord_thread chime target would
+                # still pass deliver_chime() and the session would miss its
+                # session.stop() memory finalization (PR #476 review P1).
+                try:
+                    await platform.close_daily_session(state.thread_id)
+                except Exception:  # noqa: BLE001 — never block the rebuild
+                    logger.exception(
+                        "[circadian] closing orphaned session for thread %s failed",
+                        state.thread_id,
+                    )
             elif state is not None and not state.is_for_today(tz):
                 closed = await _close_and_archive(state, platform, config)
                 if closed is not None:

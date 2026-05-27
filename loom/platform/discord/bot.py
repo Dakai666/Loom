@@ -397,6 +397,14 @@ class LoomDiscordBot:
         self._model = model
         self._db_path = str(Path(db_path).expanduser())
         self._allowed_channels: set[int] = set(channel_ids or [])
+        # Insertion-ordered view of the same channels: membership checks use the
+        # set above, but circadian needs a *deterministic* "first channel" to
+        # open the daily thread in (a set's iteration order is arbitrary).
+        self._channel_list: list[int] = list(dict.fromkeys(channel_ids or []))
+        # Explicit channel for the circadian daily thread, set at autonomy
+        # wiring time to the resolved notify channel. Falls back to the first
+        # allowed channel when unset.
+        self._circadian_channel_id: int | None = None
         self._allowed_users: set[int] = set(allowed_user_ids or [])
 
         # thread_id → LoomSession (in-memory, cleared on restart)
@@ -759,9 +767,13 @@ class LoomDiscordBot:
     # ------------------------------------------------------------------
 
     def resolve_channel_id(self) -> int | None:
-        """The channel the daily thread is opened in: the bot's first allowed
-        channel (DISCORD_CHANNEL_ID / --channel). ``None`` ⇒ cannot spawn."""
-        return next(iter(self._allowed_channels), None)
+        """The channel the daily thread is opened in: the explicit circadian /
+        notify channel when set, else the *first* allowed channel
+        (DISCORD_CHANNEL_ID / --channel). Order is deterministic — never a
+        set's arbitrary iteration order. ``None`` ⇒ cannot spawn."""
+        if self._circadian_channel_id:
+            return self._circadian_channel_id
+        return self._channel_list[0] if self._channel_list else None
 
     async def spawn_daily_thread(
         self, *, name: str, channel_id: int
