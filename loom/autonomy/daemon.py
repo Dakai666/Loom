@@ -166,6 +166,11 @@ class AutonomyDaemon:
         self._session = loom_session
         self._abort = AbortController()
         self._chime_delivery = chime_delivery
+        # Trigger name → deterministic async handler. When a fired trigger has
+        # a direct handler it bypasses the LLM ActionPlanner entirely — used by
+        # circadian lifecycle (dawn spawn / nightly close), where the action is
+        # a fixed bookkeeping step, not a planned agent run (doc/57 §7 PR 1).
+        self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -180,7 +185,26 @@ class AutonomyDaemon:
         self._planner_handle_orig = self._planner.handle
         self._evaluator._on_fire = self._on_trigger_fire
 
+    def register_direct_handler(
+        self, name: str, handler: Callable[..., Awaitable[None]]
+    ) -> None:
+        """Route fires of trigger ``name`` to ``handler`` instead of the planner.
+
+        The handler is invoked as ``await handler(trigger, context)``. Used for
+        deterministic triggers (circadian dawn/close) that must not be subject
+        to the planner's EXECUTE/SKIP/NOTIFY decision."""
+        self._direct_handlers[name] = handler
+
     async def _on_trigger_fire(self, trigger, context):
+        handler = self._direct_handlers.get(trigger.name)
+        if handler is not None:
+            try:
+                await handler(trigger, context)
+            except Exception:
+                logger.exception(
+                    "[autonomy] direct handler for trigger=%s raised", trigger.name
+                )
+            return
         plan = await self._planner.handle(trigger, context)
         await self._execute_plan(plan)
 

@@ -588,6 +588,19 @@ backend = "none"   # "none" | "srt"
 [autonomy]
 enabled  = false           # set true to activate daemon
 
+# ── Circadian Autonomy — daily-life rhythm (milestone #14, doc/57) ────────────
+# Opens one daily Discord thread at `start` and closes it at `sleep` (close runs
+# the existing memory-finalization path). The thread is opened in the channel
+# from DISCORD_CHANNEL_ID (.env) — per Loom convention environment/personal IDs
+# live in .env, behaviour lives here. Unlike the schedules below, `start`/`sleep`
+# are LOCAL wall-clock times in `timezone` (converted to UTC internally).
+[autonomy.circadian]
+enabled        = false          # opt-in
+timezone       = "Asia/Taipei"
+start          = "08:00"        # local wake → daily thread opens
+sleep          = "00:00"        # local sleep → daily thread closes (00:00 = end of day)
+session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
+
 # Cron times are always UTC. Convert your local time before filling in.
 # Example: Asia/Taipei UTC+8 → subtract 8 h  (09:00 CST = 01:00 UTC)
 
