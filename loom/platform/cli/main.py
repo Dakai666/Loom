@@ -2581,6 +2581,37 @@ async def _discord_graceful_run(bot: "LoomDiscordBot", token: str) -> None:
             await bot._close_session(tid)
 
 
+async def _setup_circadian_if_enabled(
+    bot: "LoomDiscordBot", daemon, config_path: str, channel_id: int
+) -> None:
+    """Read ``[autonomy.circadian]`` and wire the daily-life lifecycle onto the
+    daemon. The daily thread opens in ``channel_id`` (the resolved notify
+    channel) so the target is deterministic rather than an arbitrary allowed
+    channel. Failures are logged but never block the daemon from starting."""
+    import tomllib
+    from pathlib import Path as _Path
+
+    from loom.autonomy.circadian.lifecycle import CircadianConfig, setup_circadian
+
+    try:
+        path = _Path(config_path)
+        raw: dict = {}
+        if path.exists():
+            with open(path, "rb") as f:
+                raw = tomllib.load(f).get("autonomy", {}).get("circadian", {})
+        circ_cfg = CircadianConfig.from_dict(raw)
+        if channel_id:
+            bot._circadian_channel_id = channel_id
+        if await setup_circadian(daemon, bot, circ_cfg):
+            console.print(
+                f"[loom.muted]Circadian: [loom.success]on[/loom.success]  "
+                f"start={circ_cfg.start} sleep={circ_cfg.sleep} "
+                f"{circ_cfg.timezone}[/loom.muted]"
+            )
+    except Exception as exc:  # noqa: BLE001 — circadian must not break startup
+        console.print(f"[loom.muted]Circadian: setup skipped ({exc})[/loom.muted]")
+
+
 async def _discord_with_autonomy(
     bot: "LoomDiscordBot",
     token: str,
@@ -2639,6 +2670,11 @@ async def _discord_with_autonomy(
         # Wait for the Discord connection before the daemon begins polling,
         # so notifications can be delivered from the first fire onwards.
         await bot._client.wait_until_ready()
+        # Circadian Autonomy (milestone #14): wire the daily-life lifecycle now
+        # that the connection is live — registers dawn/close triggers, recovers
+        # any leftover state, and catch-up-spawns if we came up inside active
+        # hours. No-op unless [autonomy.circadian].enabled is true.
+        await _setup_circadian_if_enabled(bot, daemon, config_path, notify_channel_id)
         console.print("[loom.muted]Autonomy daemon started.[/loom.muted]")
         _t = asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
         _background_tasks.add(_t)

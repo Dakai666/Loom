@@ -397,6 +397,14 @@ class LoomDiscordBot:
         self._model = model
         self._db_path = str(Path(db_path).expanduser())
         self._allowed_channels: set[int] = set(channel_ids or [])
+        # Insertion-ordered view of the same channels: membership checks use the
+        # set above, but circadian needs a *deterministic* "first channel" to
+        # open the daily thread in (a set's iteration order is arbitrary).
+        self._channel_list: list[int] = list(dict.fromkeys(channel_ids or []))
+        # Explicit channel for the circadian daily thread, set at autonomy
+        # wiring time to the resolved notify channel. Falls back to the first
+        # allowed channel when unset.
+        self._circadian_channel_id: int | None = None
         self._allowed_users: set[int] = set(allowed_user_ids or [])
 
         # thread_id → LoomSession (in-memory, cleared on restart)
@@ -747,6 +755,71 @@ class LoomDiscordBot:
                 await session.stop()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Circadian platform adapter (milestone #14, issue #459)
+    #
+    # These five methods implement loom.autonomy.circadian.lifecycle's
+    # CircadianPlatform protocol. They reuse the existing thread/session
+    # machinery above — circadian adds no new session lifecycle, it just
+    # drives the daily one. Wired in from _discord_with_autonomy after the
+    # client is ready (so every call reaches a live connection).
+    # ------------------------------------------------------------------
+
+    def resolve_channel_id(self) -> int | None:
+        """The channel the daily thread is opened in: the explicit circadian /
+        notify channel when set, else the *first* allowed channel
+        (DISCORD_CHANNEL_ID / --channel). Order is deterministic — never a
+        set's arbitrary iteration order. ``None`` ⇒ cannot spawn."""
+        if self._circadian_channel_id:
+            return self._circadian_channel_id
+        return self._channel_list[0] if self._channel_list else None
+
+    async def spawn_daily_thread(
+        self, *, name: str, channel_id: int
+    ) -> tuple[int, str]:
+        """Create today's daily thread in ``channel_id`` and start its session.
+
+        Unlike ``_create_session_thread`` (which threads off a user message),
+        this opens a standalone public thread on the channel itself."""
+        channel = self._client.get_channel(channel_id)
+        if channel is None:
+            channel = await self._client.fetch_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            raise RuntimeError(
+                f"circadian channel {channel_id} is not a text channel "
+                f"({type(channel).__name__}); cannot open daily thread"
+            )
+        thread = await channel.create_thread(
+            name=name,
+            type=discord.ChannelType.public_thread,
+            auto_archive_duration=_THREAD_ARCHIVE_MINUTES,
+        )
+        session = await self._start_session(thread.id, provisional_title=name)
+        return thread.id, session.session_id
+
+    async def verify_thread_alive(self, thread_id: int) -> bool:
+        """True if the thread still exists. A transient HTTP error is treated
+        as alive so a network blip never triggers a needless rebuild; only a
+        definitive 404 (deleted) returns False."""
+        if self._client.get_channel(thread_id) is not None:
+            return True
+        try:
+            return await self._client.fetch_channel(thread_id) is not None
+        except discord.NotFound:
+            return False
+        except discord.HTTPException:
+            return True
+
+    async def ensure_session_loaded(self, thread_id: int) -> None:
+        """Resume the in-memory session for an existing daily thread (bot
+        restarted, session map persisted). Idempotent."""
+        if thread_id not in self._sessions:
+            await self._start_session(thread_id)
+
+    async def close_daily_session(self, thread_id: int) -> None:
+        """Close + stop today's session → existing memory finalization path."""
+        await self._close_session(thread_id)
 
     # ------------------------------------------------------------------
     # Chime delivery (issue #369)
