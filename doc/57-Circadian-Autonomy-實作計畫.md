@@ -1,10 +1,24 @@
 # 57 — Circadian Autonomy 實作計畫
 
-> 狀態：Plan / 待 review
-> 建立：2026-05-26（2026-05-26 因 multi-agent shared working tree 衝突被 wipe，由 CC 從 conversation context 重建並立刻 commit）
-> 上游藍圖：`doc/56-Circadian-Autonomy-藍圖.md`
+> 狀態：Plan / 部分 superseded（見下方對齊更新）
+> 建立：2026-05-26（曾因 multi-agent shared working tree 衝突被 wipe，由 CC 從 conversation context 重建並 commit）
+> 上游藍圖：`doc/56-Circadian-Autonomy-藍圖.md`（2026-05-27 從 git stash 尋回原版本尊並 commit，本計畫以它為準）
 > 對應 issue：#458（epic）、milestone #14
-> 子 issue：#459 (PR 1)、#460 (PR 2)、#461 (PR 3)、#462 (PR 4)、#463 (PR 5)、#464 (生活語義 review)、#465 (weekly weave)、#466 (persona refresh)、#472 (lifecycle events)、#473 (state watchdog)
+> 子 issue：#459 (PR 1 ✅ merged #476)、#460 (PR 2，**已重寫**)、#461 (PR 3)、#462 (PR 4)、#463 (PR 5)、#464 (生活語義 review)、#465 (weekly weave)、#466 (persona refresh)、#472 (emit 點清單)、#473 (state watchdog)、#477 (self-scheduling 工具)、#478 (事件驅動喚醒層)
+
+---
+
+## ⚠️ 對齊更新（2026-05-27，PR1 merge 後）
+
+PR 1（#459 → #476）落地後，回看藍圖 doc/56 + 第二個 agent（小晴）出現，發現本計畫 §7 的 **PR 2 拆法 drift 出 doc/56 核心精神**，已對齊修正。**§7 PR 2 以下視為被重寫後的 #460 取代；以下變更優先於本文舊敘述：**
+
+1. **loom.toml 只有一塊 `[autonomy.circadian]` 引擎 config，phase/行程「讀表」**（doc/56 §3.3：「loom.toml 不適合描述今天怎麼過」）。**取消** §3.2 / §7 PR 2 的「7 個 `[[autonomy.schedules]]` phase chime 塞 loom.toml」。
+2. **Phase / 時間 / 語義住 per-agent 節律表**（資料，非 hardcode 在 `phase.py`）。藍圖 `PhaseResolver` 假設的固定 phase 集合改為 per-agent——絲絲（生活：共讀/喵吉…）與小晴（業務：記帳/提醒/雜務）讀各自的表、共用同一引擎。
+3. **喚醒模型 = B 事件驅動為主**（絲絲 end-user 拍板）。但「先求有再精進」：**#460 先只做時間錨點的 cron 自動註冊**（沿用 PR1 `register_triggers` pattern）；反應式 EventTrigger 層 + agenda 追蹤延後到 #478。
+4. **cheap gate 移出 PR 2**：B 無 blanket 30m tick，就不需要「擋輪詢」的閘（§4 / §8.3 / §11 的 gate 敘述暫擱）。真有輪詢需求再議。
+5. 新增 #477（絲絲自編節律表工具）、#478（事件驅動層）；#472 收斂為 emit 點清單。
+
+**仍有效、未受影響**：§4 anti-heartbeat 目標精神（B 更純地達成它）、§5 健壯性場景表、§4 CircadianState schema、PR 1（已 merged）、PR 3/4/5（#461–#463）大方向、§10「不該被綁」、§11 風險。
 
 ---
 
@@ -295,6 +309,8 @@ loom/platform/discord/
 ---
 
 ### PR 2 — Phase chime + Cheap gate + `circadian_today` target type（對應 P0b + P0c，issue #460）
+
+> 🛑 **SUPERSEDED（2026-05-27）**：本節已被重寫後的 #460 取代——loom.toml 不再塞 7 個 schedule（改 per-agent 節律表讀表）、cheap gate 移出、喚醒走 cron 錨點（事件層延後 #478）。詳見本文件頂部「對齊更新」。以下保留為歷史脈絡。
 
 > **絲絲 user requirement（2026-05-26）：**
 > - tick_interval default 從 15m 提高到 30m（runtime sensing，不是 LLM heartbeat）
