@@ -37,5 +37,8 @@ date: 2026-05-28
 
 ## evening_closure
 - 跟 DK 道晚安
-- 決定今天哪些值得留下（semantic memory / journal / 都不留）
-- 想想明天織程要不要調 — 若要，明早可以走 weave_propose 工具
+- 決定今天哪些值得留下：
+  - 結構性洞察 → `memorize`
+  - 生活片段 / 有趣發現 / 留念 / 明日想試 → `journal_append`
+  - 都不留也行
+- 想想明天織程要不要真的調 — 若要，今晚就走 `weave_revise` 工具

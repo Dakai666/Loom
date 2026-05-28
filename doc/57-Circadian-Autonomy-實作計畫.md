@@ -4,7 +4,7 @@
 > 建立：2026-05-26（曾因 multi-agent shared working tree 衝突被 wipe，由 CC 從 conversation context 重建並 commit）
 > 上游藍圖：`doc/56-Circadian-Autonomy-藍圖.md`（2026-05-27 從 git stash 尋回原版本尊並 commit，本計畫以它為準）
 > 對應 issue：#458（epic）、milestone #14
-> 子 issue：#459 (PR 1 ✅ merged #476)、#460 (PR 2，**已重寫**)、#461 (PR 3)、#462 (PR 4)、#463 (PR 5)、#464 (生活語義 review)、#465 (weekly weave)、#466 (persona refresh)、#472 (emit 點清單)、#473 (state watchdog)、#477 (self-scheduling 工具)、#478 (事件驅動喚醒層)
+> 子 issue：#459 (PR 1 ✅ merged #476)、#460 (PR 2 ✅ merged #479)、#461 (PR 3 ✅ merged #480)、#462 (PR 4 ✅ merged #481)、#463 (PR 5)、#464 (生活語義 review)、#465 (weekly weave)、#466 (persona refresh)、#472 (emit 點清單)、#473 (state watchdog)、#477 (self-scheduling 工具)、#478 (事件驅動喚醒層)
 
 ---
 
