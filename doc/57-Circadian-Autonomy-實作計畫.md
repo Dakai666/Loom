@@ -115,10 +115,11 @@ mode = "chime"
 `LoomDiscordBot.deliver_chime` 看到 `circadian_today` type：
 
 1. 從 `CircadianState` 讀今日 `thread_id`
-2. 若有 → 重寫 `req.target` 成 `{"type": "discord_thread", "id": str(thread_id)}` 後走原本邏輯
-3. 若無 → return False（daemon 走 fallback）
+2. **驗 freshness**：`state.is_for_today(state.timezone)` 必須為真。若 state 是昨日殘留（nightly close 失敗、daemon 還沒跑 recovery 到）→ return False + log warning。沒這層 chime 會被 queue 進昨日 thread（PR #479 review P1）
+3. 若 OK → 重寫 `req.target` 成 `{"type": "discord_thread", "id": str(thread_id)}` 後走原本邏輯
+4. 若 state 不存在 / state 不是今日 → return False（daemon 走 fallback）
 
-**乾淨在於**：autonomy daemon 完全不知道 thread_id 概念，platform 邊界完整。
+**乾淨在於**：autonomy daemon 完全不知道 thread_id 概念，platform 邊界完整；freshness 驗證用 state 自帶的 timezone，bot 也不需要 circadian config。
 
 ### 3.3 為什麼不用方案 A（state 給 daemon 讀）或方案 B（bot 內建 scheduler）
 
@@ -144,6 +145,7 @@ mode = "chime"
   "version": 1,
   "date": "2026-05-26",
   "started_at": "2026-05-26T08:00:13+08:00",
+  "timezone": "Asia/Taipei",
   "thread_id": 1490024181994225744,
   "session_id": "daily-life-2026-05-26-a3f1",
   "channel_id": 1488000000000000000,
@@ -155,6 +157,8 @@ mode = "chime"
 }
 ```
 
+`timezone` 是 required（PR #479 review P1）：bot 端 `circadian_today` 驗 freshness 時需要知道 state 寫入當下的 tz 才能正確比 date — 不能拿 bot 的 system tz 假設。pre-#479 寫出的 state 沒這欄位，load 會 KeyError → 走既有 `state.json.broken-*` quarantine path → `ensure_today_session` 重建。
+
 ### 4.3 存取規約
 
 | 規則 | 理由 |
@@ -164,6 +168,7 @@ mode = "chime"
 | `version` 欄位先寫死 1，未來升級走 explicit migration | 不做 hidden upgrade |
 | `phase_log` 只保留當日，午夜 close 時 archive 到 `~/.loom/circadian/log/YYYY-MM-DD.json` | 不讓 state.json 無限長大 |
 | `date` 必比對：讀到不是今天 → 視為昨日殘留，觸發 recovery | 跨日邊界處理 |
+| `timezone` 寫一次（spawn 時帶 `config.timezone`），後續 reader 拿這個比 date | freshness 驗證有 source of truth，不靠 caller 傳對 tz |
 
 ### 4.4 API surface
 
