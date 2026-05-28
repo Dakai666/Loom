@@ -232,19 +232,33 @@ async def ensure_today_session(now: datetime, *, force_spawn: bool = False) -> C
 
 ## 6. 模組結構（新增檔案清單）
 
+對齊更新後的實際模組（PR1 #459 落地 + PR2 #460 落地）：
+
 ```
 loom/autonomy/circadian/
 ├── __init__.py
-├── state.py            # CircadianState dataclass + load/save/archive
-├── lifecycle.py        # ensure_today_session() + recovery helpers
-├── phase.py            # Phase enum (含 hardcode meaning) + resolve_phase()
-├── gate.py             # CheapGate.check() → SkipReason | None
-├── weave.py            # daily_weave.md reader (PR3 加)
-└── watchdog.py         # ConditionTrigger state-drift watchdog (issue #473, 後續加)
+├── state.py            # CircadianState dataclass + load/save/archive (PR1)
+├── lifecycle.py        # ensure_today_session() + register_rhythm_anchors() (PR1+PR2)
+└── rhythm.py           # Anchor + load_rhythm() — 取代原 phase.py / gate.py (PR2)
 
 loom/platform/discord/
-└── bot.py              # deliver_chime 擴 circadian_today；on_ready 加補開
+└── bot.py              # deliver_chime 擴 circadian_today；on_ready 加補開 (PR1+PR2)
 ```
+
+未來模組（尚未落地，刻意不放空 stub）：
+
+<!-- doc-integrity:ignore-block -->
+```
+# PR3 #461
+loom/autonomy/circadian/weave.py        # daily_weave.md reader
+
+# issue #473（觀察期後評估）
+loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
+```
+
+**已退役的舊規劃**（保留為歷史，勿建立）：
+- `loom/autonomy/circadian/phase.py` — phase 語義改住 per-agent 節律表（`rhythm.toml` 的 `meaning` 欄位），不再 hardcode 在 enum <!-- doc-integrity:ignore -->
+- `loom/autonomy/circadian/gate.py` — cheap gate 隨「事件驅動為主」拍板被移出 PR 2，目前無 blanket tick 要 gate（見頂部「對齊更新」§4） <!-- doc-integrity:ignore -->
 
 無新 runtime class、無新 daemon、無新 scheduler。
 
@@ -320,11 +334,11 @@ loom/platform/discord/
 > - 新增 acceptance criteria 條：實際 review chime body 保留生活語義
 
 **Scope**：
-- 新增 `loom/autonomy/circadian/phase.py`：
+- 新增 `loom/autonomy/circadian/phase.py`： <!-- doc-integrity:ignore — SUPERSEDED, see top "對齊更新" -->
   - `Phase` enum：`dawn` / `shared_learning` / `pet` / `curiosity` / `deep_weave` / `check_in` / `evening_closure`
   - `resolve_phase(now, config) → Phase | None`
   - **每個 Phase 必帶語義欄位**（見「Phase chime prompt contract」）
-- 新增 `loom/autonomy/circadian/gate.py`：
+- 新增 `loom/autonomy/circadian/gate.py`： <!-- doc-integrity:ignore — SUPERSEDED, see top "對齊更新" -->
   - `CheapGate` class，建構子吃 session ref + state
   - `check() → SkipReason | None`
   - V1 implementation：檢查 (a) user message recency (b) `daily_weave.md` mtime (c) phase 自身是否強制公開（只有 `dawn` / `evening_closure` 永遠 wake）
@@ -381,7 +395,7 @@ loom/platform/discord/
 ### PR 3 — Daily Weave plan reader（對應 P1，issue #461）
 
 **Scope**：
-- 新增 `loom/autonomy/circadian/weave.py`：
+- 新增 `loom/autonomy/circadian/weave.py`： <!-- doc-integrity:ignore — planned, lands in PR 3 -->
   - `WeavePlan.load(path) → WeavePlan | None`
   - parse `autonomy/circadian/daily_weave.md` 的 H2 sections，回 `dict[phase_name, str]`
   - 容錯：檔案不在、section 缺、亂格式都不能炸
