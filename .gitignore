@@ -120,5 +120,7 @@ loom.toml.bak
 
 # Per-agent rhythm table (issue #460) — copy from rhythm.example.toml
 autonomy/circadian/rhythm.toml
+# Per-agent daily weave plan (issue #461) — copy from daily_weave.example.md
+autonomy/circadian/daily_weave.md
 
 .gitnexus

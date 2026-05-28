@@ -237,26 +237,24 @@ async def ensure_today_session(now: datetime, *, force_spawn: bool = False) -> C
 
 ## 6. 模組結構（新增檔案清單）
 
-對齊更新後的實際模組（PR1 #459 落地 + PR2 #460 落地）：
+對齊更新後的實際模組（PR1 #459 + PR2 #460 + PR3 #461 落地）：
 
 ```
 loom/autonomy/circadian/
 ├── __init__.py
 ├── state.py            # CircadianState dataclass + load/save/archive (PR1)
-├── lifecycle.py        # ensure_today_session() + register_rhythm_anchors() (PR1+PR2)
-└── rhythm.py           # Anchor + load_rhythm() — 取代原 phase.py / gate.py (PR2)
+├── lifecycle.py        # ensure_today_session() + register_rhythm_anchors() + chime composition (PR1+PR2+PR3)
+├── rhythm.py           # Anchor + load_rhythm() — 取代原 phase.py / gate.py (PR2)
+└── weave.py            # WeavePlan + load_weave() — daily_weave.md H2 reader (PR3)
 
 loom/platform/discord/
-└── bot.py              # deliver_chime 擴 circadian_today；on_ready 加補開 (PR1+PR2)
+└── bot.py              # deliver_chime 擴 circadian_today + freshness 驗證；on_ready 加補開 (PR1+PR2)
 ```
 
 未來模組（尚未落地，刻意不放空 stub）：
 
 <!-- doc-integrity:ignore-block -->
 ```
-# PR3 #461
-loom/autonomy/circadian/weave.py        # daily_weave.md reader
-
 # issue #473（觀察期後評估）
 loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
 ```
@@ -397,22 +395,26 @@ loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
 
 ---
 
-### PR 3 — Daily Weave plan reader（對應 P1，issue #461）
+### PR 3 — Daily Weave plan reader（對應 P1，issue #461）✅ 落地
+
+> **PR2 重寫後的調整**（2026-05-28）：path 走 hardcoded `autonomy/circadian/daily_weave.md`（跟 PR2 rhythm.toml 對稱，不加 `plan_path` config）；gate.py mtime check 移除（gate.py 已隨 PR2 退役，B 模型無 blanket tick 要 gate — mtime 觀察未來可由 #478 EventTrigger 接手）。
 
 **Scope**：
-- 新增 `loom/autonomy/circadian/weave.py`： <!-- doc-integrity:ignore — planned, lands in PR 3 -->
-  - `WeavePlan.load(path) → WeavePlan | None`
-  - parse `autonomy/circadian/daily_weave.md` 的 H2 sections，回 `dict[phase_name, str]`
-  - 容錯：檔案不在、section 缺、亂格式都不能炸
-- dawn / 各 phase chime 注入時把對應 section 內容塞進 `ChimeRequest.intent` 或附在 `<system_chime>` body
-- gate.py 的 plan mtime check 改成真實檔案路徑（之前是 stub）
-- `loom.toml.example` 加 `plan_path` 設定（藍圖建議 `autonomy/circadian/daily_weave.md`）
-- 提供範例 `autonomy/circadian/daily_weave.example.md`（藍圖 §9.2 內容）
+- 新增 `loom/autonomy/circadian/weave.py`：
+  - `WeavePlan` dataclass + `load_weave(path) → WeavePlan`（empty plan 不是 None）
+  - `_parse_h2_sections(text)` regex-based，preserves inner markdown（bullets / blockquotes / code fences）
+  - 容錯：檔案不在、section 缺、亂格式、duplicate H2 都不炸
+- `_deliver_phase_chime` 改走 `_compose_chime_intent(anchor)`：composition order = `anchor.meaning`（rhythm，scaffolding）→ `**今日織程**\n{weave_section}`（today's items）→ generic fallback
+- `.gitignore` 加 `autonomy/circadian/daily_weave.md`（user-specific）
+- 範例 `autonomy/circadian/daily_weave.example.md`（H2 用 anchor.name = `dawn` / `shared_learning` / …，bodies markdown）
 
 **Acceptance criteria**：
-- [ ] DK 改 plan 隔天 dawn chime 內容跟著變
-- [ ] 不存在 plan 檔時系統不炸、phase chime 仍正常發（用 default intent）
-- [ ] plan 改動 mtime 變化 → cheap gate 下一次 tick 視為 state transition
+- [x] DK 改 plan，隔天 dawn chime 內容跟著變（每次 fire load file，沒 cache）
+- [x] 不存在 plan 檔時系統不炸、phase chime 仍正常發（用 `anchor.meaning` alone）
+- [x] meaning 為空但 section 存在 → chime body 是 section 自己，不退到 generic fallback
+- [x] H2 對應 phase name 直接 match（簡單 contract，例：`## dawn` ↔ `name = "dawn"`）
+
+**~~移除~~**：~~plan mtime → cheap gate state transition~~（gate 已退役；未來如要 plan-changed 喚醒走 #478 EventTrigger）
 
 ---
 

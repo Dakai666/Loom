@@ -1,0 +1,118 @@
+"""
+Daily weave plan — today's specific items per phase (PR3, issue #461).
+
+The rhythm table from PR2 ([[rhythm.py]]) answers *what phases exist and why*
+— stable, edited rarely. The weave plan answers *what does this phase look
+like today* — content, can change daily. doc/56 §6: "Daily Weave 是
+Circadian Autonomy 的日程內容層 … 類似遊戲『美少女夢工廠』的 time block".
+
+Composition at chime time (lifecycle._deliver_phase_chime):
+    intent = anchor.meaning   ← rhythm.toml, the *why*
+           + weave.section_for(anchor.name)   ← daily_weave.md, today's *what*
+
+Phase name is the bridge: `anchor.name` must match a markdown H2 heading
+verbatim. doc/57 §8 Q2: rolling file (not dated) — the agent rewrites it
+nightly via the proposal tool (#462 PR4); for now any caller (user or
+agent) just edits the file in place.
+
+Tolerant by contract: missing file, unreadable bytes, no H2 sections, all
+return an empty WeavePlan so phase chimes keep firing with `meaning` alone.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_WEAVE_PATH = Path("autonomy/circadian/daily_weave.md")
+
+# ATX H2: `## heading text` (two hashes, at least one space, then text).
+# We intentionally do *not* support Setext (===/---) headings — the example
+# template and proposal tool both write ATX, and Setext would muddy the
+# regex without buying anything.
+_H2_RE = re.compile(r"^##\s+(.+?)\s*$")
+
+
+@dataclass(frozen=True)
+class WeavePlan:
+    """Parsed daily weave: phase name → markdown body for that section.
+
+    ``section_for`` is the only consumer-facing method; everything else is
+    internal to the parser. Empty plan (missing file / no H2s) returns
+    ``None`` for every lookup so the composition site can do a simple
+    truthy-check.
+    """
+
+    sections: dict[str, str] = field(default_factory=dict)
+
+    def section_for(self, phase_name: str) -> str | None:
+        body = self.sections.get(phase_name)
+        return body if body else None
+
+
+def load_weave(path: Path | None = None) -> WeavePlan:
+    """Read and parse the rolling daily weave file.
+
+    Returns an empty ``WeavePlan`` for every failure mode the engine must
+    survive: file absent, OS read error, decode error, no H2s. The lifecycle
+    chime composer treats empty-plan the same as missing-section so the
+    chime body falls through to ``anchor.meaning`` alone.
+    """
+    p = path or DEFAULT_WEAVE_PATH
+    if not p.exists():
+        logger.info(
+            "[circadian] daily weave at %s not found — chimes use rhythm meaning only",
+            p,
+        )
+        return WeavePlan()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("[circadian] daily weave at %s unreadable (%s)", p, exc)
+        return WeavePlan()
+    return WeavePlan(sections=_parse_h2_sections(text))
+
+
+def _parse_h2_sections(text: str) -> dict[str, str]:
+    """Walk the markdown line-by-line, slicing it on H2 boundaries.
+
+    Body is every line between this H2 and the next (or EOF), with leading
+    and trailing whitespace stripped but inner content preserved verbatim —
+    bullets, code fences, nested headings, blank lines all survive. The
+    agent reads the chime body as markdown so faithful preservation matters.
+
+    Duplicate H2 names: last one wins with a warning. The agent's nightly
+    weave proposal could in theory produce a duplicate, but the proposal
+    flow is supposed to overwrite a section in place; a duplicate is a bug
+    upstream and the user should see it in logs.
+    """
+    sections: dict[str, str] = {}
+    current_name: str | None = None
+    current_body: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current_name
+        if current_name is None:
+            return
+        body = "\n".join(current_body).strip()
+        if current_name in sections:
+            logger.warning(
+                "[circadian] daily weave: H2 '%s' duplicated; keeping latest",
+                current_name,
+            )
+        sections[current_name] = body
+
+    for line in text.splitlines():
+        m = _H2_RE.match(line)
+        if m:
+            _flush()
+            current_name = m.group(1).strip()
+            current_body.clear()
+        elif current_name is not None:
+            current_body.append(line)
+    _flush()
+    return sections

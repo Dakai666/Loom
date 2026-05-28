@@ -607,6 +607,12 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 # table answers "今天怎麼過". Copy autonomy/circadian/rhythm.example.toml to
 # start, then edit. Different agents = different workspaces = different
 # tables, same engine.
+#
+# Today's per-phase content (what specifically to do at dawn / shared_learning
+# today) lives in  autonomy/circadian/daily_weave.md  (rolling, also
+# workspace-relative). H2 headings = phase names from rhythm.toml; bodies
+# are markdown. Missing file → chimes use rhythm `meaning` alone. Copy
+# autonomy/circadian/daily_weave.example.md to start.
 
 # Cron times are always UTC. Convert your local time before filling in.
 # Example: Asia/Taipei UTC+8 → subtract 8 h  (09:00 CST = 01:00 UTC)
