@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
+from loom.autonomy.circadian.weave import load_weave
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -430,13 +431,21 @@ async def _deliver_phase_chime(
     """Fire one phase chime: build the request, route via the daemon's chime
     callback, append the outcome to ``phase_log``.
 
-    The chime body is the anchor's ``meaning`` (markdown) — that is the only
-    thing the agent sees, so it must carry the *why* of this phase, not just
-    its name (doc/57 §"Phase chime prompt contract"). When the bot can't
-    deliver (no live thread, ``deliver_chime`` returns False) we still log a
-    ``skipped`` outcome so phase_log is a complete audit trail.
+    Body composition (PR3 #461 adds the second layer):
+      - ``anchor.meaning`` (rhythm.toml, stable) — *why* this phase exists
+      - ``daily_weave.md`` section matching ``anchor.name`` — today's *what*
+
+    Both are markdown; the agent sees them concatenated under a 「今日織程」
+    sub-heading so it can tell the difference between scaffolding and today's
+    specifics. Missing weave file or missing section is normal — chimes fall
+    through to ``meaning`` alone so a fresh install with no weave plan still
+    works (PR2 acceptance preserved).
+
+    When the bot can't deliver (no live thread, ``deliver_chime`` returns
+    False) we still log a ``skipped`` outcome so phase_log is a complete
+    audit trail.
     """
-    intent = anchor.meaning.strip() or f"Circadian phase: {anchor.name}"
+    intent = _compose_chime_intent(anchor)
     req = ChimeRequest(
         schedule_name=anchor.trigger_name,
         intent=intent,
@@ -447,6 +456,32 @@ async def _deliver_phase_chime(
     outcome = "delivered" if delivered else "skipped"
     reason = None if delivered else "no_today_session"
     _record_phase_outcome(anchor.name, outcome, reason, config.timezone)
+
+
+def _compose_chime_intent(anchor: Anchor) -> str:
+    """Stitch rhythm meaning + today's weave section into the chime body.
+
+    Both layers are optional in the degenerate sense (an anchor with no
+    meaning, a phase missing from today's weave, the weave file itself
+    missing). Whatever survives gets joined with a blank line; if both are
+    empty we fall back to a generic intent so the chime is never a literal
+    empty string (which agents handle poorly).
+
+    The 「今日織程」 sub-heading is the contract: it tells the agent the
+    bullets below are today-specific, not the stable scaffolding above.
+    """
+    meaning = anchor.meaning.strip()
+    weave = load_weave()
+    section = weave.section_for(anchor.name)
+
+    parts: list[str] = []
+    if meaning:
+        parts.append(meaning)
+    if section:
+        parts.append(f"**今日織程**\n{section}")
+    if not parts:
+        return f"Circadian phase: {anchor.name}"
+    return "\n\n".join(parts)
 
 
 def _record_phase_outcome(

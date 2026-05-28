@@ -338,3 +338,102 @@ class TestSetupCircadianIntegration:
         names = {t.name for t in daemon.evaluator.list()}
         assert "circadian:dawn_spawn" in names
         assert [n for n in names if n.startswith("circadian:phase_")] == []
+
+
+def _write_weave(text: str) -> None:
+    from pathlib import Path
+    p = Path("autonomy/circadian/daily_weave.md")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+
+
+class TestWeaveCompositionInChime:
+    """PR3 #461: daily_weave section composes into chime body after rhythm
+    meaning, under a 「今日織程」 sub-heading so the agent can distinguish
+    stable scaffolding from today-specific items."""
+
+    async def test_weave_section_composes_after_meaning(self):
+        _write_weave("""
+## dawn
+- recall 近期記憶
+- 跟 DK 說早安
+""")
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來成為今天的絲絲"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "醒來成為今天的絲絲" in intent
+        assert "**今日織程**" in intent
+        assert "recall 近期記憶" in intent
+        # Meaning comes first, weave second (ordering matters for the agent).
+        assert intent.index("醒來成為今天的絲絲") < intent.index("**今日織程**")
+
+    async def test_weave_missing_for_phase_falls_back_to_meaning(self):
+        _write_weave("## shared_learning\n- 讀 HN top 10\n")  # no dawn section
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert intent == "醒來"
+        assert "今日織程" not in intent  # no spurious heading when section absent
+
+    async def test_no_weave_file_preserves_pr2_behavior(self):
+        """PR2 regression: with no weave file at all, intent is meaning only."""
+        # No _write_weave call.
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="只有 meaning"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        assert deliveries[0].intent == "只有 meaning"
+
+    async def test_meaning_empty_with_weave_section_still_composes(self):
+        """An anchor with empty meaning but a weave section — chime body is
+        the weave section alone (not the generic fallback)."""
+        _write_weave("## dawn\n- recall\n")
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning=""),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "**今日織程**" in intent
+        assert "- recall" in intent
+        assert "Circadian phase:" not in intent  # generic fallback NOT triggered
