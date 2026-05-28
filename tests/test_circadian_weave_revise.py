@@ -163,7 +163,7 @@ class TestProposalArtifact:
         p = WeaveProposal(
             date="2026-05-28",
             phase="evening_closure",
-            based_on_mtime=1234567.89,
+            based_on_mtime=1234567890123456,  # st_mtime_ns is an int
             rationale="絲絲 想多睡半小時，dawn 從 08:00 改成 08:30 — 但這條走 rhythm 不走 weave；這份只調 deep_weave 內容。",
             changes=[
                 Change(section="deep_weave", action="replace", new_body="- 讀 DDIA Ch.7"),
@@ -265,7 +265,9 @@ class TestToolHappyPath:
             "changes": [{"section": "dawn", "action": "add", "new_body": "x"}],
         }))
         assert not result.success
-        assert "not found" in result.error
+        # Unified "could not take a stable snapshot" covers both missing file
+        # and mid-snapshot hand-edit (PR #481 P1 fix).
+        assert "stable snapshot" in result.error
 
     async def test_invalid_change_does_not_touch_weave(self):
         wp = _seed_weave("## dawn\n- original\n")
@@ -286,34 +288,34 @@ class TestToolHappyPath:
 
 
 class TestMtimeConflict:
-    async def test_concurrent_handedit_parks_proposal(self, monkeypatch):
+    async def test_concurrent_handedit_after_snapshot_parks_proposal(self, monkeypatch):
+        """Post-snapshot race: DK edits between snapshot completion and the
+        tool's pre-write stat. The existing guard catches this — proposal
+        goes to conflicts/, file untouched."""
         wp = _seed_weave("## dawn\n- original\n")
         tool = make_weave_revise_tool()
 
-        # Patch the post-snapshot mtime read to simulate a hand-edit between
-        # snapshot and apply. Using attribute injection because the tool
-        # reads via target_weave.stat().
-        from loom.autonomy.circadian import proposal as proposal_mod
-
         original_stat = Path.stat
+
+        class _FakeStat:
+            """Shim stat result that bumps st_mtime_ns to simulate a hand-edit."""
+            def __init__(self, real, bump_ns):
+                for attr in ("st_mode", "st_ino", "st_dev", "st_nlink",
+                             "st_uid", "st_gid", "st_size", "st_atime",
+                             "st_mtime", "st_ctime", "st_atime_ns",
+                             "st_ctime_ns"):
+                    setattr(self, attr, getattr(real, attr, 0))
+                self.st_mtime_ns = real.st_mtime_ns + bump_ns
 
         def _fake_stat(self, *a, **kw):
             real = original_stat(self, *a, **kw)
+            # Snapshot calls stat twice (before+after read). Only bump on the
+            # *third* stat (the tool's pre-write guard) so the snapshot itself
+            # is stable; the conflict surfaces at the post-snapshot check.
             if self.name == "daily_weave.md":
-                # Pretend mtime jumped forward by 100s
-                class FakeStat:
-                    def __init__(self, real, bump):
-                        for attr in ("st_mode", "st_ino", "st_dev", "st_nlink",
-                                     "st_uid", "st_gid", "st_size", "st_atime",
-                                     "st_ctime", "st_atime_ns", "st_ctime_ns",
-                                     "st_mtime_ns"):
-                            setattr(self, attr, getattr(real, attr, 0))
-                        self.st_mtime = real.st_mtime + bump
-                # First stat (snapshot) returns real; second (apply-time check)
-                # returns bumped — so use a call counter.
                 _fake_stat._n += 1
-                if _fake_stat._n >= 2:
-                    return FakeStat(real, 100)
+                if _fake_stat._n >= 3:
+                    return _FakeStat(real, 100_000_000)  # +100 ms in ns
             return real
 
         _fake_stat._n = 0
@@ -332,6 +334,44 @@ class TestMtimeConflict:
         conflicts = PROPOSALS_DIR / CONFLICTS_SUBDIR
         applied = PROPOSALS_DIR / APPLIED_SUBDIR
         assert list(conflicts.glob("*-evening.toml"))
+        assert not (applied.exists() and list(applied.glob("*-evening.toml")))
+
+    async def test_handedit_during_snapshot_read_blocks_revise(self, monkeypatch):
+        """PR #481 review P1: DK's edit lands *during* the snapshot read —
+        between ``read_text()`` returning the old buffer and the post-read
+        stat. The pre-fix code recorded the new mtime alongside stale
+        content, and the post-snapshot guard then passed against the
+        already-bumped mtime — silently overwriting DK's edit. The
+        stat-read-stat snapshot must refuse the torn read.
+        """
+        wp = _seed_weave("## dawn\n- ORIGINAL\n")
+        tool = make_weave_revise_tool()
+
+        original_read = Path.read_text
+
+        def _racy_read(self, *a, **kw):
+            text = original_read(self, *a, **kw)
+            if self.name == "daily_weave.md" and not getattr(_racy_read, "_done", False):
+                _racy_read._done = True
+                # Simulate DK hand-edit landing between the snapshot's
+                # initial stat and the post-read stat.
+                time.sleep(0.005)  # ensure st_mtime_ns ticks
+                self.write_text("## dawn\n- DK HAND EDIT\n", encoding="utf-8")
+            return text
+
+        monkeypatch.setattr(Path, "read_text", _racy_read)
+
+        result = await tool.executor(_call({
+            "rationale": "should be blocked by snapshot race",
+            "changes": [{"section": "dawn", "action": "replace",
+                         "new_body": "- AGENT WRITE"}],
+        }))
+        assert not result.success
+        assert "stable snapshot" in result.error
+        # DK's hand-edit preserved on disk — the agent write never happened
+        assert wp.read_text(encoding="utf-8") == "## dawn\n- DK HAND EDIT\n"
+        # No applied artifact was created — the tool refused before write
+        applied = PROPOSALS_DIR / APPLIED_SUBDIR
         assert not (applied.exists() and list(applied.glob("*-evening.toml")))
 
 

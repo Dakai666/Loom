@@ -465,7 +465,7 @@ class TestDawnRevisionReport:
         target_dir = PROPOSALS_DIR / subdir
         date = TestDawnRevisionReport._yesterday_str()
         p = WeaveProposal(
-            date=date, phase="evening_closure", based_on_mtime=0.0,
+            date=date, phase="evening_closure", based_on_mtime=0,
             rationale=rationale,
             changes=[Change(
                 section=changes_summary_token, action="add", new_body="- x",

@@ -92,7 +92,7 @@ class WeaveProposal:
 
     date: str                 # the day evening_closure fired (audit timestamp)
     phase: str                # "evening_closure" — fixed for now
-    based_on_mtime: float     # daily_weave.md mtime at snapshot
+    based_on_mtime: int       # daily_weave.md st_mtime_ns at snapshot (PR #481 P1)
     rationale: str
     changes: list[Change] = field(default_factory=list)
 
@@ -122,7 +122,7 @@ class WeaveProposal:
         return cls(
             date=str(raw["date"]),
             phase=str(raw["phase"]),
-            based_on_mtime=float(raw["based_on_mtime"]),
+            based_on_mtime=int(raw["based_on_mtime"]),
             rationale=str(raw.get("rationale", "")),
             changes=changes,
         )
@@ -370,8 +370,12 @@ def make_weave_revise_tool(
         if snapshot is None:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
-                error=f"daily weave at {target_weave} not found — "
-                      "create it (or copy daily_weave.example.md) before revising.",
+                error=(
+                    f"could not take a stable snapshot of {target_weave}. "
+                    "either the file is missing (copy daily_weave.example.md "
+                    "to create it) or it was hand-edited during the read — "
+                    "the existing file is unchanged either way."
+                ),
             )
         prelude, sections, mtime_before = snapshot
 
@@ -405,8 +409,9 @@ def make_weave_revise_tool(
         # Mtime conflict guard: if daily_weave.md moved between snapshot
         # and write, DK (or another tool) hand-edited it. DK's edit wins;
         # park the proposal under conflicts/ so DK sees it at dawn.
+        # Uses st_mtime_ns to match the snapshot precision (PR #481 P1).
         try:
-            mtime_now = target_weave.stat().st_mtime
+            mtime_now = target_weave.stat().st_mtime_ns
         except OSError:
             mtime_now = mtime_before  # treat unstattable as no-conflict
         if mtime_now != mtime_before:
