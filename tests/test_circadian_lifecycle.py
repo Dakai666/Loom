@@ -172,6 +172,7 @@ class TestEnsureSpawn:
         stale = CircadianState(
             date=_yesterday(), thread_id=7, session_id="old",
             channel_id=999, started_at="2026-01-01T08:00:00+08:00",
+            timezone=TZ,
         )
         with state_lock():
             stale.save_atomic()
@@ -232,6 +233,7 @@ class TestRecoverOnStartup:
         stale = CircadianState(
             date=_yesterday(), thread_id=7, session_id="old",
             channel_id=999, started_at="2026-01-01T08:00:00+08:00",
+            timezone=TZ,
         )
         with state_lock():
             stale.save_atomic()
@@ -249,6 +251,7 @@ class TestRecoverOnStartup:
             date=_yesterday(), thread_id=7, session_id="old",
             channel_id=999, started_at="2026-01-01T08:00:00+08:00",
             closed_at="2026-01-01T23:59:00+08:00",
+            timezone=TZ,
         )
         with state_lock():
             stale.save_atomic()

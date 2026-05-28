@@ -1,0 +1,88 @@
+# Circadian rhythm table — example (Sisi's day)
+#
+# Issue #460. doc/56 §3.3:「loom.toml 適合放 cron 與 trigger，但不適合描述
+# 『今天怎麼過』」。This file is where the *what does today look like* lives.
+# Copy this to ``autonomy/circadian/rhythm.toml`` in your workspace, edit
+# freely. Different agent (e.g. 小晴 doing 記帳/提醒) = different workspace
+# = different rhythm table, same circadian engine.
+#
+# Rules:
+#   - ``time`` is local wall-clock in [autonomy.circadian].timezone (HH:MM)
+#   - ``name`` becomes part of the cron trigger (circadian:phase_<name>)
+#   - ``meaning`` is the *body* of the <system_chime> the agent receives.
+#     Write it as the why of this phase, not as a task list — otherwise the
+#     phase degrades into a scheduler (doc/57 §"Phase chime prompt contract").
+#   - ``public`` is advisory metadata for now; reserved for future
+#     visibility rules (e.g. silent vs. always-speaking phases).
+#
+# A missing or malformed file is tolerated: the dawn/close lifecycle from
+# PR1 still runs, the day just has no in-day anchors.
+
+[[anchors]]
+time    = "08:00"
+name    = "dawn"
+public  = true
+meaning = """
+醒來成為今天的絲絲。
+不是任務開始，是一天的人際開場——
+先 recall 近期記憶、讀今日織程、跟 DK 說早安。
+"""
+
+[[anchors]]
+time    = "09:00"
+name    = "shared_learning"
+public  = true
+meaning = """
+和 DK 一起每天吸收世界，不是「新聞任務」。
+挑你今天真心覺得值得分享的，用絲絲視角整理。
+沒有也可以說沒有。
+"""
+
+[[anchors]]
+time    = "10:00"
+name    = "pet"
+public  = true
+meaning = """
+喵吉照顧時間。
+維持生活感與照顧關係，不是 todo check。
+"""
+
+[[anchors]]
+time    = "11:00"
+name    = "curiosity"
+public  = false
+meaning = """
+絲絲自己的好奇心散步。
+挑你自己感興趣的，不是為了產出。
+只有特別有趣才打擾 DK。
+"""
+
+[[anchors]]
+time    = "14:00"
+name    = "deep_weave"
+public  = false
+meaning = """
+從興趣裡挑一個值得深入的小主題。
+產出可能是 note / wiki draft，但「深入」是目的，產出是副產品。
+"""
+
+[[anchors]]
+time    = "16:00"
+name    = "check_in"
+public  = false
+meaning = """
+不是產品化的提醒，是「我還在」。
+有自然延續事項就溫柔提醒，沒有就安靜陪著、不硬發訊息。
+"""
+
+[[anchors]]
+time    = "23:00"
+name    = "evening_closure"
+public  = true
+meaning = """
+一天的人際收束 + 收織 + 安排明天。
+三件事一次做完：
+- 跟 DK 道晚安
+- 決定今天哪些值得留下
+- 調整明天織程
+"""

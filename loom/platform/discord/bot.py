@@ -825,13 +825,66 @@ class LoomDiscordBot:
     # Chime delivery (issue #369)
     # ------------------------------------------------------------------
 
+    def _resolve_circadian_today(self, req: ChimeRequest) -> ChimeRequest | None:
+        """Rewrite a ``circadian_today`` chime to a concrete ``discord_thread``
+        chime by reading today's daily thread id out of ``CircadianState``.
+
+        Returns ``None`` (→ daemon walks ``fallback``) when:
+        - no live state on disk (pre-dawn / post-archive), OR
+        - the live state is from a *previous* day, which can happen if nightly
+          close failed before archiving. Without this freshness check today's
+          phase chimes would queue into yesterday's thread (PR #479 review P1).
+
+        Date freshness uses the timezone the state itself was stamped with,
+        not the bot's wall clock — so the bot doesn't need to know circadian
+        config to validate. The downstream ``thread_id not in self._sessions``
+        check then gates against routing to a thread whose session was never
+        loaded into this bot process.
+        """
+        from dataclasses import replace
+
+        from loom.autonomy.circadian.state import CircadianState
+
+        state = CircadianState.load()
+        if state is None:
+            logger.info(
+                "[circadian] chime %r resolved to circadian_today but no live "
+                "state on disk; daemon will fall back",
+                req.schedule_name,
+            )
+            return None
+        if not state.is_for_today(state.timezone):
+            logger.warning(
+                "[circadian] chime %r resolved to circadian_today but live "
+                "state is from %s (not today in %s); falling back so chime "
+                "does not land in stale thread %s",
+                req.schedule_name, state.date, state.timezone, state.thread_id,
+            )
+            return None
+        new_target = {
+            "type": "discord_thread",
+            "id": str(state.thread_id),
+            "fallback": req.target.get("fallback", "skip"),
+        }
+        return replace(req, target=new_target)
+
     async def deliver_chime(self, req: ChimeRequest) -> bool:
         """Accept a chime from the autonomy daemon, queue it for the target
         thread, and ensure a dispatcher is draining.
 
         Returns False when the target can't be resolved (no thread, no
         session yet started) so the daemon can apply its fallback.
+
+        Supported ``target.type`` values:
+        - ``discord_thread`` (id required) — direct routing
+        - ``circadian_today`` (no id) — resolved at delivery time via
+          ``CircadianState`` (issue #460). Lets a phase cron register once
+          at engine startup and still find today's brand-new thread id.
         """
+        if req.target.get("type") == "circadian_today":
+            req = self._resolve_circadian_today(req)
+            if req is None:
+                return False
         if req.target.get("type") != "discord_thread":
             return False
         try:

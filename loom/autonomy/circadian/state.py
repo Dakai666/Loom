@@ -108,13 +108,22 @@ def state_lock(blocking: bool = True) -> Iterator[bool]:
 
 @dataclass
 class CircadianState:
-    """One day's daily-session bookkeeping. See doc/57 §4.2 for the schema."""
+    """One day's daily-session bookkeeping. See doc/57 §4.2 for the schema.
+
+    ``timezone`` is stamped at spawn so any later reader (esp. the Discord
+    bot's ``circadian_today`` resolver) can verify the state is *for today*
+    without having to know the engine's config — the date string alone is
+    ambiguous across midnight when the reader doesn't know which tz produced
+    it. PR #479 review P1: without this check, a stale state from a missed
+    nightly close routes today's phase chimes into yesterday's thread.
+    """
 
     date: str
     thread_id: int
     session_id: str
     channel_id: int
     started_at: str
+    timezone: str
     closed_at: str | None = None
     version: int = STATE_VERSION
     phase_log: list[dict[str, Any]] = field(default_factory=list)
@@ -140,6 +149,7 @@ class CircadianState:
             session_id=session_id,
             channel_id=channel_id,
             started_at=now.isoformat(),
+            timezone=tz,
         )
 
     # ------------------------------------------------------------------
@@ -167,6 +177,7 @@ class CircadianState:
                 session_id=str(raw["session_id"]),
                 channel_id=int(raw["channel_id"]),
                 started_at=raw["started_at"],
+                timezone=str(raw["timezone"]),
                 closed_at=raw.get("closed_at"),
                 version=int(raw["version"]),
                 phase_log=list(raw.get("phase_log", [])),

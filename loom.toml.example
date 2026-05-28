@@ -601,6 +601,13 @@ start          = "08:00"        # local wake → daily thread opens
 sleep          = "00:00"        # local sleep → daily thread closes (00:00 = end of day)
 session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 
+# In-day phase anchors (dawn / 共讀 / 喵吉 / 收織 …) are *not* listed here —
+# they live in a per-agent rhythm table at  autonomy/circadian/rhythm.toml
+# (workspace-relative). doc/56 §3.3: loom.toml is engine config, the rhythm
+# table answers "今天怎麼過". Copy autonomy/circadian/rhythm.example.toml to
+# start, then edit. Different agents = different workspaces = different
+# tables, same engine.
+
 # Cron times are always UTC. Convert your local time before filling in.
 # Example: Asia/Taipei UTC+8 → subtract 8 h  (09:00 CST = 01:00 UTC)
 
