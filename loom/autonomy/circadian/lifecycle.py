@@ -19,11 +19,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.chime import ChimeRequest
+from loom.autonomy.circadian.proposal import (
+    APPLIED_SUBDIR,
+    CONFLICTS_SUBDIR,
+    PROPOSALS_DIR,
+    load_proposal,
+    proposal_path,
+)
 from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
 from loom.autonomy.circadian.weave import load_weave
@@ -445,7 +452,7 @@ async def _deliver_phase_chime(
     False) we still log a ``skipped`` outcome so phase_log is a complete
     audit trail.
     """
-    intent = _compose_chime_intent(anchor)
+    intent = _compose_chime_intent(anchor, config)
     req = ChimeRequest(
         schedule_name=anchor.trigger_name,
         intent=intent,
@@ -458,17 +465,19 @@ async def _deliver_phase_chime(
     _record_phase_outcome(anchor.name, outcome, reason, config.timezone)
 
 
-def _compose_chime_intent(anchor: Anchor) -> str:
+def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
     """Stitch rhythm meaning + today's weave section into the chime body.
 
-    Both layers are optional in the degenerate sense (an anchor with no
-    meaning, a phase missing from today's weave, the weave file itself
-    missing). Whatever survives gets joined with a blank line; if both are
-    empty we fall back to a generic intent so the chime is never a literal
-    empty string (which agents handle poorly).
+    Layers (composed in order, each optional):
+      1. ``anchor.meaning`` — rhythm.toml, the *why* of this phase (PR2)
+      2. ``**今日織程**\\n{section}`` — daily_weave.md, today's *what* (PR3)
+      3. ``**昨夜你改了什麼**\\n…`` — yesterday's weave_revise summary,
+         dawn-anchor only (PR4 #462). Lets DK find out about overnight
+         self-revisions without a confirm round-trip.
 
-    The 「今日織程」 sub-heading is the contract: it tells the agent the
-    bullets below are today-specific, not the stable scaffolding above.
+    When every layer is empty we fall back to a generic intent so the chime
+    is never an empty string (agents handle that poorly). Each sub-heading
+    is the contract that tells the agent which layer it's reading.
     """
     meaning = anchor.meaning.strip()
     weave = load_weave()
@@ -479,9 +488,59 @@ def _compose_chime_intent(anchor: Anchor) -> str:
         parts.append(meaning)
     if section:
         parts.append(f"**今日織程**\n{section}")
+
+    if anchor.name == "dawn":
+        revision_report = _yesterday_revision_report(config.timezone)
+        if revision_report:
+            parts.append(revision_report)
+
     if not parts:
         return f"Circadian phase: {anchor.name}"
     return "\n\n".join(parts)
+
+
+def _yesterday_revision_report(tz: str) -> str | None:
+    """Look up yesterday's evening_closure proposal artifact and turn it
+    into the 「昨夜你改了什麼」 chime layer.
+
+    Two possible artifacts:
+      - ``proposals/applied/{yesterday}-evening.toml`` — revise succeeded
+      - ``proposals/conflicts/{yesterday}-evening.toml`` — DK hand-edit
+        won the mtime race; proposal was parked, daily_weave.md untouched
+
+    Returns ``None`` when neither exists (no overnight revision happened).
+    The applied case nudges the agent to brief DK; the conflicts case
+    surfaces the parked attempt so DK can decide what to do.
+    """
+    yesterday = (
+        datetime.now(ZoneInfo(tz)) - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+
+    applied = proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR)
+    conflict = proposal_path(yesterday, PROPOSALS_DIR / CONFLICTS_SUBDIR)
+
+    proposal = load_proposal(applied)
+    if proposal is not None:
+        summary = "\n".join(f"- {line}" for line in proposal.summary_lines())
+        return (
+            "**昨夜你改了什麼**\n"
+            f"{summary}\n"
+            f"\n_理由_：{proposal.rationale}\n"
+            "\n→ 開場時跟 DK 簡述一下你昨夜對明天織程的調整。"
+        )
+
+    parked = load_proposal(conflict)
+    if parked is not None:
+        summary = "\n".join(f"- {line}" for line in parked.summary_lines())
+        return (
+            "**昨夜的調整被擋下了（DK 半夜手改過 daily_weave.md）**\n"
+            f"{summary}\n"
+            f"\n_當時的理由_：{parked.rationale}\n"
+            f"_park 在_：{conflict}\n"
+            "\n→ 告訴 DK 這件事，問他要不要重 propose 或直接跳過。"
+        )
+
+    return None
 
 
 def _record_phase_outcome(

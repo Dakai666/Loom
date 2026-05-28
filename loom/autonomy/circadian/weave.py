@@ -54,6 +54,73 @@ class WeavePlan:
         return body if body else None
 
 
+def load_weave_for_revision(
+    path: Path | None = None,
+) -> tuple[str, dict[str, str], int] | None:
+    """Read the weave file for the revise tool: prelude + sections + mtime_ns.
+
+    The revise tool (PR4 #462) needs three things load_weave() doesn't give:
+
+    - **Prelude**: everything before the first H2 (typical: ``# 今日織程`` +
+      ``date: ...`` + free-form blurb). Preserved verbatim so DK's hand-edits
+      to the header survive a tool-driven rewrite.
+    - **mtime_ns**: stamped onto the proposal artifact so apply-time can
+      detect a concurrent hand-edit (mtime conflict guard). Nanosecond
+      precision so two writes within the same wall-second still differ.
+    - **Raw sections** as a dict (not the read-only ``WeavePlan`` wrapper)
+      so the apply path can mutate it directly per the proposal's changes.
+
+    Stable-snapshot contract (PR #481 review P1): stat-before, read,
+    stat-after; if mtime drifted during the read we treat the whole
+    snapshot as torn and return None. Without this guard, a hand-edit
+    landing between ``read_text()`` and ``stat()`` would yield (stale
+    content, fresh mtime) — the later guard would then pass and the
+    tool would silently overwrite DK's edit.
+
+    Returns ``None`` when the file doesn't exist, is unreadable, or
+    changed mid-snapshot. Fence-aware H2 boundary detection (same lesson
+    as PR3 review).
+    """
+    p = path or DEFAULT_WEAVE_PATH
+    if not p.exists():
+        return None
+    try:
+        mtime_before = p.stat().st_mtime_ns
+        text = p.read_text(encoding="utf-8")
+        mtime_after = p.stat().st_mtime_ns
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("[circadian] daily weave at %s unreadable (%s)", p, exc)
+        return None
+    if mtime_before != mtime_after:
+        logger.warning(
+            "[circadian] daily weave at %s changed during snapshot (mtime_ns %d → %d); "
+            "treating as torn read", p, mtime_before, mtime_after,
+        )
+        return None
+    mtime = mtime_after
+
+    prelude_lines: list[str] = []
+    rest_lines: list[str] = []
+    in_fence = False
+    in_prelude = True
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        is_fence = stripped.startswith("```") or stripped.startswith("~~~")
+        if is_fence:
+            in_fence = not in_fence
+            (prelude_lines if in_prelude else rest_lines).append(line)
+            continue
+        if in_prelude and not in_fence and _H2_RE.match(line):
+            in_prelude = False
+        (prelude_lines if in_prelude else rest_lines).append(line)
+
+    prelude = "\n".join(prelude_lines)
+    if prelude and not prelude.endswith("\n"):
+        prelude += "\n"
+    sections = _parse_h2_sections("\n".join(rest_lines))
+    return prelude, sections, mtime
+
+
 def load_weave(path: Path | None = None) -> WeavePlan:
     """Read and parse the rolling daily weave file.
 

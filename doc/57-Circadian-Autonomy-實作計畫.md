@@ -418,38 +418,42 @@ loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
 
 ---
 
-### PR 4 — Nightly weave proposal tool（對應 P1，issue #462）
+### PR 4 — Weave revision tool（對應 P1，issue #462）✅ 落地
 
-> **絲絲 user requirement（2026-05-26）：**
-> 第一版 **不可** autonomous overwrite `daily_weave.md`。預設走 proposal artifact 路徑，DK confirm 才落實。
+> **DK 翻案（2026-05-28）**：DK 明說「我不想 confirm，只需要跟我報告就」。propose → confirm → apply 三段流程砍掉，合併成「propose-and-apply 一步」，僅保留 audit trail + dawn 報告。原 spec 的 `allow_autonomous_weave_write` flag、`weave_apply`/`weave_reject` 獨立 tool、自然語言/slash/button confirm 機制 — 全部不做。
+>
+> 絲絲原 user requirement「不要 autonomous overwrite」**被翻**。Loom 的 owner 是 DK；DK 為自己 design call 拍板優先於絲絲對「希望被保護」的願望。安全保證改靠**結構性**（mtime guard 保 DK 手改優先、audit artifact 永遠寫出讓 DK 可 git revert）。
 
 **Scope**：
-- 新 config flag：
-  ```toml
-  [autonomy.circadian]
-  allow_autonomous_weave_write = false   # default：proposal-only
-  ```
-- 新增 tool `weave_propose`（不是 `weave_update`）：
-  - LLM 在 `evening_closure` phase 可呼叫
-  - 產出 `autonomy/circadian/proposals/YYYY-MM-DD-evening.md`（diff-like patch + 變更理由）
-  - **不直接寫 `daily_weave.md`**
-- 隔天 dawn chime 注入時帶上昨晚 proposal 摘要，DK 可在 daily thread 用一句話 confirm / reject
-- DK confirm 後：apply patch（atomic write + mtime check）、archive proposal 到 `proposals/applied/`
-- 若 `allow_autonomous_weave_write = true`（DK 自己後續解鎖）：`weave_propose` 仍產出 proposal，但同時 apply；保留 audit trail
-- Trust level：`guarded`（即使 autonomous 模式也走 guarded confirm）
-- **EventTrigger emit 點**（issue #472）：
-  - proposal 寫完 emit `circadian:weave_proposed`
-  - apply 後 emit `circadian:weave_applied`
+- 新增 `loom/autonomy/circadian/proposal.py`：
+  - `WeaveProposal` / `Change` dataclasses（TOML schema，非 markdown diff — 對齊 [[feedback_prefer_structured_over_parser]]、避 PR3 fence-bug 重演）
+  - `apply_changes(sections, changes)` — pure transform，all-or-nothing 語義
+  - `render_weave_markdown(prelude, sections)` — 重組成 markdown，prelude 原樣保留（DK 自定 header / mood / 雜記不被洗掉）
+  - **`weave_revise` tool** (trust=SAFE, cap=MUTATES)：
+    1. stable snapshot daily_weave.md：`stat-before → read → stat-after`，若 `st_mtime_ns` 不一致視為 torn read → tool 回 error、檔案不動
+    2. 寫 proposal artifact 到 `proposals/<date>-evening.toml`
+    3. `apply_changes` 套用、失敗 → all-or-nothing 退回
+    4. **mtime guard**：atomic write 前再讀 `st_mtime_ns_B`、若 ≠ snapshot 的 `st_mtime_ns_A` → proposal 移到 `proposals/conflicts/`、daily_weave.md 不動、回 error
+    5. atomic write daily_weave.md
+    6. proposal 搬到 `proposals/applied/`
+- `loom/autonomy/circadian/weave.py` 加 `load_weave_for_revision(path) → (prelude, sections, mtime_ns)`（fence-aware prelude split + stable stat-read-stat snapshot）
+- `lifecycle._compose_chime_intent` 加第 4 層：dawn anchor 偵測昨日 applied/conflict proposal → 注入「**昨夜你改了什麼**」/「**昨夜的調整被擋下了**」摘要
+- `session.py` 在 tool 註冊段 register `make_weave_revise_tool()`
+- `.gitignore` 加 `autonomy/circadian/proposals/`
 
 **Acceptance criteria**：
-- [ ] `evening_closure` phase 絲絲呼叫 `weave_propose`，產出 proposal 檔，**`daily_weave.md` 沒被動**
-- [ ] DK 隔天 dawn 看到 proposal 摘要，能用一句話 confirm 或 reject
-- [ ] confirm 後 `daily_weave.md` 被原子寫入、proposal archive
-- [ ] reject 後 proposal 移到 `proposals/rejected/`、`daily_weave.md` 不變
-- [ ] `allow_autonomous_weave_write = true` 時：proposal 仍產出，但同步 apply（audit trail 完整）
-- [ ] DK 手改 plan 不會被覆蓋（mtime check fail → propose 帶 conflict warning）
-- [ ] tool 失敗時 phase chime 不卡（exception isolated）
-- [ ] `circadian:weave_proposed` / `circadian:weave_applied` event 正確 emit
+- [x] `evening_closure` phase 絲絲呼叫 `weave_revise`，daily_weave.md 立即改、無需 confirm
+- [x] proposal artifact 永遠寫出（rationale + based_on_mtime + changes）作 audit trail
+- [x] DK 手改 daily_weave.md：讀取中的 torn snapshot 直接 fail；snapshot 後、write 前 mtime 不同 → proposal 移 `conflicts/`、檔案不動（DK 手改絕對優先）
+- [x] dawn chime 帶「昨夜你改了什麼」摘要 + 提示絲絲開場跟 DK 簡述
+- [x] conflict case dawn chime 帶「昨夜的調整被擋下了」+ 問 DK 處理
+- [x] 非 dawn phase 不會看到 revision report 雜訊
+- [x] add/remove/rename/replace 四種 action；prelude 自訂內容保留；fence 內 H2 不誤切
+
+**不做（觀察期後評估）**：
+- ❌ `circadian:weave_revised` event emit — 等 #472 EventTrigger publisher infra 成熟、有真實 subscriber 再接（proposal 檔本身已是 durable trace）
+- ❌ proposal expiration / 多份 pending 排隊 — 第一版只承載最近一份 evening-of-X.toml
+- ❌ phase 硬閘 — tool 永遠可叫；靠 dawn/evening chime body instruction 軟引導
 
 ---
 
@@ -485,9 +489,9 @@ loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
 |---|---|---|
 | Q1 platform vs core | core 定義 callback adapter，Discord bot 實作；CLI 暫 no-op | 對稱既有 `ChimeDelivery` |
 | Q2 rolling vs dated | `daily_weave.md` rolling（計畫）+ `journal/YYYY-MM-DD.md` dated（紀錄） | 計畫要改、紀錄要凍 |
-| Q3 tick 30m vs 1h | **default 30m**（絲絲 review 修正：原 15m 太頻、易給「heartbeat」錯覺；config 註明 tick 是 runtime sensing） | 反應速度交給 user message 即時 trigger，不靠 tick |
+| Q3 tick 30m vs 1h | #460 重寫後不再用 blanket `tick_interval` 作公開喚醒 gate；節律由 per-agent rhythm + cron anchor 驅動 | 反應速度交給 user message 即時 trigger，不靠 tick |
 | Q4 公開 vs silent | **dawn + evening_closure 強制公開**（絲絲 review 修正：bedtime + nightly_weave 合併成 evening_closure，避免每晚兩次固定訊息） | 一天兩次儀式性對話：開場 + 收束 |
-| Q5 daily vs weekly planning | daily 小調（PR 4，proposal-only），weekly 留 issue #465 後續 | 縮窄 MVP |
+| Q5 daily vs weekly planning | daily 小調（PR 4，`weave_revise` 直接套用 + dawn report），weekly 留 issue #465 後續 | 縮窄 MVP |
 | Q6 journal 進 wiki | 不進 | 違背藍圖 §10 分離立場 |
 | Q7 DK 整天不互動是否仍開 thread | 仍開 | 不然 close 路徑不存在 = compression 不觸發 |
 | Q8 startup recovery | 跨日 startup 強制 close 昨日、archive state、等今日 dawn cron | 見 §5 第 3 列 |
@@ -533,9 +537,11 @@ PR 1 + PR 2 合併後，DK 應該能看到這樣的一天：
          一天的人際收束 + 收織 + 安排明天⋯
        </system_chime>
        絲絲：道晚安、決定今天哪些值得留下、產出隔天 weave proposal
-       proposal 寫入 autonomy/circadian/proposals/2026-05-26-evening.md
-       daily_weave.md 本身未被動
-       evaluator.emit("circadian:weave_proposed")  ← issue #472
+       絲絲呼叫 weave_revise：
+         - proposal 寫入 autonomy/circadian/proposals/2026-05-26-evening.toml
+         - stable snapshot + mtime guard 通過 → daily_weave.md 立即 atomic update
+         - 若 DK 同時手改 → proposal 移 conflicts/，daily_weave.md 不動
+       不 emit weave event；proposal artifact 本身就是 durable trace（未來 issue #472 再接 subscriber）
 
 00:00  daemon: circadian:nightly_close fired
        bot: circadian_close()
@@ -579,10 +585,10 @@ PR 1 + PR 2 合併後，DK 應該能看到這樣的一天：
 | Discord thread 命名 `daily-life-...` 相容性 | 低 | 低 | DK 拍板 ASCII 命名，相容性已驗證 |
 | Cheap gate 規則過嚴 → 整天 silent | 中 | 中 | dawn + evening_closure 強制公開作護欄（兩次，不是三次） |
 | **Phase 退化成 task scheduler，失去生活語感** | 中 | 高 | PR 2 Phase chime prompt contract hardcode 每個 phase 的 meaning；acceptance criteria 強制 review 實際 chime body 是否保留藍圖語感；issue #464 一週 retrospective |
-| **Weave plan 被 autonomous 改壞** | 低 | 高 | PR 4 default `allow_autonomous_weave_write = false`，走 proposal-only 路徑；DK 隔天 dawn 才 confirm |
+| **Weave plan 被 autonomous 改壞** | 低 | 高 | PR 4 改為 `weave_revise` 直接套用、無 daily confirm；安全靠 audit artifact、dawn report、all-or-nothing transform、stable snapshot + `st_mtime_ns` guard，DK 可用 git revert |
 | 雙 daemon 啟動造成 state 競爭 | 低 | 中 | flock + state 後置 `is_for_today()` 檢查 |
 | Discord API rate limit（頻繁 verify thread）| 低 | 低 | verify 只在 cron 觸發跟 bot on_ready 時做，不在每個 tick 做 |
-| DK 手動編 `daily_weave.md` 跟 `weave_update` tool 同時寫 | 低 | 低 | atomic rename + mtime check（PR 4 細節）|
+| DK 手動編 `daily_weave.md` 跟 `weave_revise` tool 同時寫 | 低 | 低 | stable stat-read-stat snapshot 避免讀到半套內容；atomic write 前再比 `st_mtime_ns`，不一致則移 `conflicts/` 並保留 DK 手改 |
 | cron + on_ready 都漏網 | 低 | 中 | ConditionTrigger watchdog 60s polling（issue #473） |
 
 ---
@@ -635,8 +641,8 @@ Circadian 是天然的事件源頭。直接補 emit 點，把 dead infra 變 ali
 |---|---|---|---|
 | `circadian:day_started` | spawner 成功建 thread + 寫 state | PR 1 | `{date, thread_id, session_id}` |
 | `circadian:day_closed` | closer 完成 `session.stop()` + archive state | PR 1 | `{date, thread_id, closed_at}` |
-| `circadian:weave_proposed` | `weave_propose` tool 寫完 proposal | PR 4 | `{date, proposal_path}` |
-| `circadian:weave_applied` | dawn confirm 後 apply proposal | PR 4 | `{date, applied_from}` |
+| `circadian:weave_revised` | deferred：`weave_revise` 成功直接套用後 emit | #472 後續 | `{date, proposal_path, applied_path}` |
+| `circadian:weave_conflicted` | deferred：`weave_revise` 被 DK 手改 guard 擋下後 emit | #472 後續 | `{date, proposal_path, conflict_path}` |
 
 **不做**：
 - ❌ 不 land 任何 internal subscriber（等真實需求出現再接，避免 over-engineering）

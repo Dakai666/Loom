@@ -1408,6 +1408,13 @@ class LoomSession:
         # Issue #283: probe_file — agent-initiated context establishment
         self.registry.register(make_probe_file_tool())
 
+        # Issue #462 (Circadian PR4): weave_revise — evening_closure phase
+        # can adjust tomorrow's daily_weave.md atomically with audit trail.
+        # Tool always registered; soft-gated by phase via dawn chime body
+        # instructions (no hard phase scope on tools yet).
+        from loom.autonomy.circadian.proposal import make_weave_revise_tool
+        self.registry.register(make_weave_revise_tool())
+
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
         self._skill_outcome_tracker = SkillOutcomeTracker(

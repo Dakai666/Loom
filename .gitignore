@@ -122,5 +122,7 @@ loom.toml.bak
 autonomy/circadian/rhythm.toml
 # Per-agent daily weave plan (issue #461) — copy from daily_weave.example.md
 autonomy/circadian/daily_weave.md
+# Weave revision proposals (issue #462) — per-day TOML audit artifacts
+autonomy/circadian/proposals/
 
 .gitnexus

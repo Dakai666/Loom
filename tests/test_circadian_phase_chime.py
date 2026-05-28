@@ -437,3 +437,125 @@ class TestWeaveCompositionInChime:
         assert "**今日織程**" in intent
         assert "- recall" in intent
         assert "Circadian phase:" not in intent  # generic fallback NOT triggered
+
+
+class TestDawnRevisionReport:
+    """PR4 #462: dawn anchor surfaces yesterday's weave_revise result as
+    a 4th chime body layer so DK gets informed without a confirm round-trip."""
+
+    @staticmethod
+    def _yesterday_str(tz="Asia/Taipei"):
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        return (datetime.now(ZoneInfo(tz)) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _seed_proposal(subdir: str, rationale: str, changes_summary_token: str):
+        from pathlib import Path
+
+        from loom.autonomy.circadian.proposal import (
+            APPLIED_SUBDIR,  # noqa: F401 — kept for explicit reference
+            Change,
+            PROPOSALS_DIR,
+            WeaveProposal,
+            _save_proposal_toml,
+            proposal_path,
+        )
+
+        target_dir = PROPOSALS_DIR / subdir
+        date = TestDawnRevisionReport._yesterday_str()
+        p = WeaveProposal(
+            date=date, phase="evening_closure", based_on_mtime=0,
+            rationale=rationale,
+            changes=[Change(
+                section=changes_summary_token, action="add", new_body="- x",
+            )],
+        )
+        _save_proposal_toml(p, proposal_path(date, target_dir))
+
+    async def test_dawn_reports_applied_proposal(self):
+        from loom.autonomy.circadian.proposal import APPLIED_SUBDIR
+        self._seed_proposal(APPLIED_SUBDIR, "HN 沒看 → reading_block", "errand")
+
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "**昨夜你改了什麼**" in intent
+        assert "errand" in intent
+        assert "HN 沒看" in intent
+        assert "簡述" in intent  # nudges agent to brief DK
+
+    async def test_dawn_reports_conflict_proposal(self):
+        from loom.autonomy.circadian.proposal import CONFLICTS_SUBDIR
+        self._seed_proposal(CONFLICTS_SUBDIR, "想加 errand", "errand")
+
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "擋下" in intent
+        assert "errand" in intent
+        assert "問他要不要重 propose" in intent
+
+    async def test_non_dawn_phase_does_not_get_revision_report(self):
+        """Only dawn surfaces the revision report. shared_learning at 09:00
+        should not show the yesterday-revision layer even if a proposal exists."""
+        from loom.autonomy.circadian.proposal import APPLIED_SUBDIR
+        self._seed_proposal(APPLIED_SUBDIR, "x", "y")
+
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="09:00", name="shared_learning", meaning="共讀"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list()
+            if t.name == "circadian:phase_shared_learning"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "昨夜" not in intent
+
+    async def test_dawn_no_proposal_no_report_layer(self):
+        """Day without any overnight revision — dawn chime is just the
+        usual two layers, no 「昨夜」 noise."""
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "昨夜" not in intent
