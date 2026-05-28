@@ -41,6 +41,7 @@ def _make(date: str | None = None) -> CircadianState:
         session_id="daily-life-sess",
         channel_id=999,
         started_at=datetime.now(ZoneInfo(TZ)).isoformat(),
+        timezone=TZ,
     )
 
 
@@ -82,6 +83,23 @@ class TestQuarantine:
         sp = st.state_path()
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text(json.dumps({"version": 99, "date": _today()}), encoding="utf-8")
+
+        assert CircadianState.load() is None
+        assert list(sp.parent.glob("state.json.broken-*"))
+
+    def test_missing_timezone_field_is_quarantined(self):
+        """PR #479: ``timezone`` became required so the bot's freshness check
+        has a tz to compare against. State written by pre-PR-#479 builds
+        lacks the field and must be quarantined + rebuilt — silently using
+        a fallback would reintroduce the stale-thread bug."""
+        sp = st.state_path()
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({
+            "version": 1, "date": _today(), "thread_id": 1,
+            "session_id": "x", "channel_id": 1,
+            "started_at": "2026-01-01T08:00:00+08:00",
+            # no timezone — pre-#479 schema
+        }), encoding="utf-8")
 
         assert CircadianState.load() is None
         assert list(sp.parent.glob("state.json.broken-*"))

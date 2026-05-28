@@ -829,11 +829,17 @@ class LoomDiscordBot:
         """Rewrite a ``circadian_today`` chime to a concrete ``discord_thread``
         chime by reading today's daily thread id out of ``CircadianState``.
 
-        Returns ``None`` (→ daemon walks ``fallback``) when no live state is
-        on disk — the dawn cron hasn't spawned today's thread yet, or it has
-        already been archived past nightly close. The downstream
-        ``thread_id not in self._sessions`` check still gates against routing
-        to a thread whose session was never loaded into this bot process.
+        Returns ``None`` (→ daemon walks ``fallback``) when:
+        - no live state on disk (pre-dawn / post-archive), OR
+        - the live state is from a *previous* day, which can happen if nightly
+          close failed before archiving. Without this freshness check today's
+          phase chimes would queue into yesterday's thread (PR #479 review P1).
+
+        Date freshness uses the timezone the state itself was stamped with,
+        not the bot's wall clock — so the bot doesn't need to know circadian
+        config to validate. The downstream ``thread_id not in self._sessions``
+        check then gates against routing to a thread whose session was never
+        loaded into this bot process.
         """
         from dataclasses import replace
 
@@ -845,6 +851,14 @@ class LoomDiscordBot:
                 "[circadian] chime %r resolved to circadian_today but no live "
                 "state on disk; daemon will fall back",
                 req.schedule_name,
+            )
+            return None
+        if not state.is_for_today(state.timezone):
+            logger.warning(
+                "[circadian] chime %r resolved to circadian_today but live "
+                "state is from %s (not today in %s); falling back so chime "
+                "does not land in stale thread %s",
+                req.schedule_name, state.date, state.timezone, state.thread_id,
             )
             return None
         new_target = {

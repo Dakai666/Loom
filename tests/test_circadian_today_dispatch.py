@@ -13,8 +13,9 @@ Existing ``discord_thread`` behaviour must not regress.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -123,6 +124,35 @@ class TestCircadianTodayDispatch:
         assert accepted is True
         queued = bot._chime_pending[seeded.thread_id]["circadian:phase_dawn"]
         assert queued.target["fallback"] == "independent"
+
+
+class TestStaleStateFreshness:
+    """PR #479 review P1: a stale state from a missed nightly close must not
+    route today's phase chimes into yesterday's thread."""
+
+    @pytest.mark.asyncio
+    async def test_stale_yesterday_state_returns_false(self):
+        # Seed a state explicitly dated yesterday in the configured tz.
+        yesterday = (datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(days=1)).strftime("%Y-%m-%d")
+        stale = CircadianState(
+            date=yesterday,
+            thread_id=777,
+            session_id="stale-session",
+            channel_id=999,
+            started_at="2026-01-01T08:00:00+08:00",
+            timezone="Asia/Taipei",
+        )
+        with state_lock():
+            stale.save_atomic()
+
+        bot = _make_bot_stub()
+        # Even with a live session for the stale thread — the exact repro
+        # condition the reviewer flagged — dispatch must refuse.
+        bot._sessions[777] = MagicMock()
+
+        accepted = await bot.deliver_chime(_chime({"type": "circadian_today"}))
+        assert accepted is False
+        assert 777 not in bot._chime_pending
 
 
 class TestDiscordThreadRegression:

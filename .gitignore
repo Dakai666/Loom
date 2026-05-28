@@ -44,25 +44,34 @@ coverage.xml
 
 # Claude Code
 .claude/
+.superpowers/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only archive (retired skill files kept for personal reference)
+/_archive/
 desktop.ini
 
 # other
+.worktrees/
 CLAUDE.md
 PLAN.md
 CODE_REVIEW.md
-UI_ISSUE_TEMPLATE.md
-CLI_UI_DESIGN.md
 IMPLEMENTATION_STATUS.md
 *.md.bak
 scripts/
 *.jpg
 loom/_commit_msg.txt
 .參考
-
+suno_gen.py
+private/
+.mcp.json
+.obsidian
+doc/50-未來改善路線圖.md
+doc/51-Agent-能力評級系統.md
+doc/99-功能人工確認清單.md
 
 # Graphify
 graphify-out/
@@ -87,9 +96,29 @@ skills/github_cli
 skills/silky_tts
 personalities/personality_sisi_tarot_mood.md
 skills/sisi_mood_tarot
+skills/pet-cat
+skills/opencli
+mcp_servers
+suno_gen.py
+skills/remotion
+skills/suno_music_creator
+silu-video-creator
+skills/audio_transcriber
+skills/news-aggregator
+backups/
+_archive/
+skills/silky_chatgpt_draw
+silu-video-creator/
+skills/silky_hyperframes
+skills/wiki_maintenance
 
 # Personal config (use loom.toml.example as template)
 loom.toml
 Agent.md
 SOUL.md
+loom.toml.bak
 
+# Per-agent rhythm table (issue #460) — copy from rhythm.example.toml
+autonomy/circadian/rhythm.toml
+
+.gitnexus
