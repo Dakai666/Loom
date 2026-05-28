@@ -259,16 +259,32 @@ class AutonomyDaemon:
                 trigger_name=plan.trigger_name,
             ))
 
+    async def deliver_chime(self, req: ChimeRequest) -> bool:
+        """Route an already-built chime to the platform delivery callback.
+
+        Public surface for deterministic direct handlers (circadian phase
+        anchors, future event-driven wakes) that bypass the planner. The
+        planner's chime path delegates here via ``_deliver_chime`` so all
+        chime traffic shares one error-handling + None-callback path.
+        """
+        if self._chime_delivery is None:
+            logger.warning(
+                "[autonomy] chime %r dropped — no delivery callback wired "
+                "(daemon constructed without chime_delivery)",
+                req.schedule_name,
+            )
+            return False
+        try:
+            return bool(await self._chime_delivery(req))
+        except Exception:
+            logger.exception(
+                "[autonomy] chime delivery raised for %r", req.schedule_name
+            )
+            return False
+
     async def _deliver_chime(self, plan: PlannedAction) -> bool:
         """Route a chime-mode plan to the platform delivery callback.
         Returns True on accept, False if no callback or target missed."""
-        if self._chime_delivery is None:
-            logger.warning(
-                "[autonomy] chime trigger=%s fired but no delivery callback "
-                "is wired (daemon constructed without chime_delivery)",
-                plan.trigger_name,
-            )
-            return False
         target = plan.context.get("target") or {}
         if not target:
             logger.warning(
@@ -285,14 +301,7 @@ class AutonomyDaemon:
             allowed_tools=tuple(plan.context.get("allowed_tools", [])),
             scope_grants=tuple(plan.context.get("scope_grants", [])),
         )
-        try:
-            return bool(await self._chime_delivery(req))
-        except Exception:
-            logger.exception(
-                "[autonomy] chime delivery raised for trigger=%s",
-                plan.trigger_name,
-            )
-            return False
+        return await self.deliver_chime(req)
 
     async def _run_agent(self, plan: PlannedAction) -> None:
         if self._session is None:

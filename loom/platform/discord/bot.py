@@ -825,13 +825,52 @@ class LoomDiscordBot:
     # Chime delivery (issue #369)
     # ------------------------------------------------------------------
 
+    def _resolve_circadian_today(self, req: ChimeRequest) -> ChimeRequest | None:
+        """Rewrite a ``circadian_today`` chime to a concrete ``discord_thread``
+        chime by reading today's daily thread id out of ``CircadianState``.
+
+        Returns ``None`` (→ daemon walks ``fallback``) when no live state is
+        on disk — the dawn cron hasn't spawned today's thread yet, or it has
+        already been archived past nightly close. The downstream
+        ``thread_id not in self._sessions`` check still gates against routing
+        to a thread whose session was never loaded into this bot process.
+        """
+        from dataclasses import replace
+
+        from loom.autonomy.circadian.state import CircadianState
+
+        state = CircadianState.load()
+        if state is None:
+            logger.info(
+                "[circadian] chime %r resolved to circadian_today but no live "
+                "state on disk; daemon will fall back",
+                req.schedule_name,
+            )
+            return None
+        new_target = {
+            "type": "discord_thread",
+            "id": str(state.thread_id),
+            "fallback": req.target.get("fallback", "skip"),
+        }
+        return replace(req, target=new_target)
+
     async def deliver_chime(self, req: ChimeRequest) -> bool:
         """Accept a chime from the autonomy daemon, queue it for the target
         thread, and ensure a dispatcher is draining.
 
         Returns False when the target can't be resolved (no thread, no
         session yet started) so the daemon can apply its fallback.
+
+        Supported ``target.type`` values:
+        - ``discord_thread`` (id required) — direct routing
+        - ``circadian_today`` (no id) — resolved at delivery time via
+          ``CircadianState`` (issue #460). Lets a phase cron register once
+          at engine startup and still find today's brand-new thread id.
         """
+        if req.target.get("type") == "circadian_today":
+            req = self._resolve_circadian_today(req)
+            if req is None:
+                return False
         if req.target.get("type") != "discord_thread":
             return False
         try:

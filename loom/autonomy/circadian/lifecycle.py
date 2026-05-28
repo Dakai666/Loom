@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from loom.autonomy.chime import ChimeRequest
+from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
 from loom.autonomy.triggers import CronTrigger
 
@@ -408,17 +410,119 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
     )
 
 
+def _make_phase_handler(daemon: Any, config: CircadianConfig, anchor: Anchor):
+    """Build the cron handler for one rhythm anchor.
+
+    Bound as a default arg so closing over the loop variable in
+    ``register_rhythm_anchors`` doesn't collapse all handlers onto the last
+    anchor (the classic Python late-binding trap).
+    """
+
+    async def _phase_handler(_trigger: Any, _context: dict[str, Any]) -> None:
+        await _deliver_phase_chime(daemon, config, anchor)
+
+    return _phase_handler
+
+
+async def _deliver_phase_chime(
+    daemon: Any, config: CircadianConfig, anchor: Anchor
+) -> None:
+    """Fire one phase chime: build the request, route via the daemon's chime
+    callback, append the outcome to ``phase_log``.
+
+    The chime body is the anchor's ``meaning`` (markdown) — that is the only
+    thing the agent sees, so it must carry the *why* of this phase, not just
+    its name (doc/57 §"Phase chime prompt contract"). When the bot can't
+    deliver (no live thread, ``deliver_chime`` returns False) we still log a
+    ``skipped`` outcome so phase_log is a complete audit trail.
+    """
+    intent = anchor.meaning.strip() or f"Circadian phase: {anchor.name}"
+    req = ChimeRequest(
+        schedule_name=anchor.trigger_name,
+        intent=intent,
+        fired_at=datetime.now(timezone.utc),
+        target={"type": "circadian_today", "fallback": "skip"},
+    )
+    delivered = await daemon.deliver_chime(req)
+    outcome = "delivered" if delivered else "skipped"
+    reason = None if delivered else "no_today_session"
+    _record_phase_outcome(anchor.name, outcome, reason, config.timezone)
+
+
+def _record_phase_outcome(
+    phase: str, outcome: str, reason: str | None, tz: str
+) -> None:
+    """Append one phase fire to today's ``phase_log`` under the state lock.
+
+    Best-effort: if there's no live state, or it's not for today, or another
+    writer holds the lock, we drop the record rather than block the cron.
+    The lifecycle ``ensure_today_session`` / ``close_today`` paths are the
+    authoritative writers; this is a sidecar audit trail.
+    """
+    with state_lock(blocking=False) as acquired:
+        if not acquired:
+            logger.debug("[circadian] phase_log skip for %s — state lock held", phase)
+            return
+        state = CircadianState.load()
+        if state is None or not state.is_for_today(tz):
+            return
+        state.append_phase(phase, outcome, reason)
+        try:
+            state.save_atomic()
+        except OSError:
+            logger.exception("[circadian] phase_log save failed for %s", phase)
+
+
+def register_rhythm_anchors(
+    daemon: Any, config: CircadianConfig, anchors: list[Anchor]
+) -> int:
+    """Register one CronTrigger + direct handler per rhythm anchor.
+
+    Idempotent: re-registering overwrites by trigger name (the evaluator
+    keys triggers by name). Anchor times are local wall-clock in
+    ``config.timezone`` — converted to UTC cron the same way the dawn/close
+    triggers in :func:`register_triggers` are, so a single timezone source
+    of truth governs them all. Returns the number of anchors wired.
+    """
+    evaluator = daemon.evaluator
+    for anchor in anchors:
+        cron = local_hhmm_to_utc_cron(anchor.time, config.timezone)
+        evaluator.register(CronTrigger(
+            name=anchor.trigger_name,
+            intent=f"Circadian phase '{anchor.name}' — read from rhythm table",
+            cron=cron,
+            timezone=config.timezone,
+            notify=False,
+        ))
+        daemon.register_direct_handler(
+            anchor.trigger_name, _make_phase_handler(daemon, config, anchor)
+        )
+    if anchors:
+        logger.info(
+            "[circadian] registered %d phase anchor(s) from rhythm table: %s",
+            len(anchors),
+            ", ".join(f"{a.name}@{a.time}" for a in anchors),
+        )
+    return len(anchors)
+
+
 async def setup_circadian(
     daemon: Any, platform: CircadianPlatform, config: CircadianConfig
 ) -> bool:
     """One-shot wiring called from the bot+daemon assembly point *after the
     Discord client is ready* (so adapter calls reach a live connection).
 
-    Three startup steps (doc/57 §5, §9 restart-verification block):
+    Startup steps (doc/57 §5, §9 restart-verification block; PR2 #460 adds
+    step 2 — rhythm-driven phase anchors):
 
     1. Register the dawn/close cron triggers.
-    2. Recover leftover state (resume same-day, force-close stale yesterday).
-    3. Catch-up spawn: if we came up during active hours, run the idempotent
+    2. Read the per-agent rhythm table and register one cron anchor per phase
+       (zero ``loom.toml`` schedule entries; the table is the source of truth
+       for "what does today look like"). A missing/malformed table logs a
+       warning and leaves circadian to dawn + close only — the lifecycle
+       still runs.
+    3. Recover leftover state (resume same-day, force-close stale yesterday).
+    4. Catch-up spawn: if we came up during active hours, run the idempotent
        ``ensure_today_session`` so a daemon/bot that started after dawn still
        joins today's rhythm. ``ensure`` resumes when today's session is already
        alive, so this never double-spawns. Outside active hours we don't spawn —
@@ -428,6 +532,8 @@ async def setup_circadian(
     if not config.enabled:
         return False
     register_triggers(daemon, platform, config)
+    anchors = load_rhythm()
+    register_rhythm_anchors(daemon, config, anchors)
     await recover_on_startup(platform, config, evaluator=daemon.evaluator)
     if is_in_active_hours(datetime.now(ZoneInfo(config.timezone)), config):
         logger.info("[circadian] startup is within active hours — ensuring today's session")
