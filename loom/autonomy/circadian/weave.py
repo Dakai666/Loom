@@ -85,6 +85,12 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
     bullets, code fences, nested headings, blank lines all survive. The
     agent reads the chime body as markdown so faithful preservation matters.
 
+    Fenced-code-block awareness (PR #480 review P2): a line like
+    ``## not_a_phase`` *inside* a ``` ``` `` or ``~~~`` fence is content, not
+    a section boundary. Without this guard a weave section that shows a
+    markdown example would lose every line after the fake heading. The
+    fence delimiter lines themselves remain part of the body.
+
     Duplicate H2 names: last one wins with a warning. The agent's nightly
     weave proposal could in theory produce a duplicate, but the proposal
     flow is supposed to overwrite a section in place; a duplicate is a bug
@@ -93,6 +99,7 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
     sections: dict[str, str] = {}
     current_name: str | None = None
     current_body: list[str] = []
+    in_fence = False
 
     def _flush() -> None:
         nonlocal current_name
@@ -107,12 +114,20 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
         sections[current_name] = body
 
     for line in text.splitlines():
-        m = _H2_RE.match(line)
-        if m:
-            _flush()
-            current_name = m.group(1).strip()
-            current_body.clear()
-        elif current_name is not None:
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            if current_name is not None:
+                current_body.append(line)
+            continue
+        if not in_fence:
+            m = _H2_RE.match(line)
+            if m:
+                _flush()
+                current_name = m.group(1).strip()
+                current_body.clear()
+                continue
+        if current_name is not None:
             current_body.append(line)
     _flush()
     return sections

@@ -118,3 +118,84 @@ def x(): pass
 
     def test_empty_plan_lookup_returns_none(self):
         assert WeavePlan().section_for("anything") is None
+
+
+class TestFencedCodeBlockIsolation:
+    """PR #480 review P2: H2-looking lines *inside* a fenced code block must
+    not be treated as section boundaries — otherwise a weave section that
+    shows a markdown example would lose everything after the fake heading."""
+
+    def test_h2_inside_backtick_fence_is_body(self, tmp_path):
+        """The exact reviewer repro."""
+        p = tmp_path / "weave.md"
+        p.write_text(
+            "## deep_weave\n"
+            "- before\n"
+            "\n"
+            "```markdown\n"
+            "## not_a_phase\n"
+            "inside code\n"
+            "```\n"
+            "\n"
+            "- after\n"
+            "\n"
+            "## evening_closure\n"
+            "- close\n",
+            encoding="utf-8",
+        )
+        plan = load_weave(p)
+        assert set(plan.sections) == {"deep_weave", "evening_closure"}
+        deep = plan.section_for("deep_weave")
+        assert "- before" in deep
+        assert "```markdown" in deep
+        assert "## not_a_phase" in deep   # preserved as body, not promoted
+        assert "inside code" in deep
+        assert "- after" in deep
+        assert plan.section_for("evening_closure") == "- close"
+
+    def test_h2_inside_tilde_fence_is_body(self, tmp_path):
+        p = tmp_path / "tilde.md"
+        p.write_text(
+            "## dawn\n"
+            "~~~\n"
+            "## not_a_phase\n"
+            "~~~\n"
+            "- after\n",
+            encoding="utf-8",
+        )
+        plan = load_weave(p)
+        assert set(plan.sections) == {"dawn"}
+        assert "## not_a_phase" in plan.section_for("dawn")
+        assert "- after" in plan.section_for("dawn")
+
+    def test_fence_with_info_string(self, tmp_path):
+        """Real-world fences carry an info string (` ```python `)."""
+        p = tmp_path / "info.md"
+        p.write_text(
+            "## dawn\n"
+            "```python\n"
+            "## comment-looking-line\n"
+            "x = 1\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        plan = load_weave(p)
+        assert set(plan.sections) == {"dawn"}
+        assert "## comment-looking-line" in plan.section_for("dawn")
+
+    def test_unclosed_fence_eats_to_eof(self, tmp_path):
+        """An unclosed fence is a user error, but it must not crash and must
+        not let a later `## phase` punch through into a new section — that
+        line is, per markdown semantics, still inside the open fence."""
+        p = tmp_path / "unclosed.md"
+        p.write_text(
+            "## dawn\n"
+            "```\n"
+            "unclosed\n"
+            "## looks_like_phase\n"
+            "still inside fence\n",
+            encoding="utf-8",
+        )
+        plan = load_weave(p)
+        assert set(plan.sections) == {"dawn"}
+        assert "## looks_like_phase" in plan.section_for("dawn")
