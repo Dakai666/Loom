@@ -285,6 +285,7 @@ CircadianRuntime
 
 - 讀取今日織程
 - 可用 mtime / hash 判斷是否變更
+- 供 `weave_revise` 修改時必須採 stable snapshot：`stat-before → read → stat-after`，以 `st_mtime_ns` 偵測 DK 手改競爭
 
 ### 8.5 PhaseResolver
 
@@ -314,10 +315,9 @@ timezone = "Asia/Taipei"
 start = "08:00"
 sleep = "00:00"
 session_prefix = "sisi-day"
-plan_path = "autonomy/circadian/daily_weave.md"
-tick_interval = "30m"
-quiet_by_default = true
 ```
+
+`daily_weave.md` 採 workspace-relative 固定路徑 `autonomy/circadian/daily_weave.md`。第一版不做可配置 `plan_path`，也不以 `tick_interval` / `quiet_by_default` 作 blanket gate；公開與靜默語義由各 phase chime contract 決定。
 
 ### 9.2 `daily_weave.md`
 
@@ -431,8 +431,9 @@ autonomy/circadian/journal/2026-05-26.md
 
 ### P1 — Nightly weave planning
 
-- 收織階段允許絲絲更新明天 / 下週織程
-- Dakai 可介入調整
+- 收織階段允許絲絲用 `weave_revise` 直接小幅更新明天織程，不需要每日 confirm
+- proposal artifact 保留 rationale / changes 作 audit trail，隔天 dawn report 讓 Dakai 知道昨夜改了什麼
+- Dakai 可隨時手動編 `daily_weave.md`；`weave_revise` 以 stable snapshot + `st_mtime_ns` guard 保證手改優先
 
 ### P2 — Weave journal
 
@@ -458,10 +459,10 @@ autonomy/circadian/journal/2026-05-26.md
 ## 13. 待討論問題
 
 1. Daily session 要由 Discord bot 自動開 thread，還是由 session manager 抽象建立？
-2. `daily_weave.md` 是單一 rolling file，還是每天一份 dated file？
-3. tick interval 預設 30 分鐘還是 1 小時？
+2. `daily_weave.md` 是單一 rolling file，還是每天一份 dated file？→ PR 3/4 第一版採單一 rolling file。
+3. tick interval 預設 30 分鐘還是 1 小時？→ PR 2 後不做 blanket cheap gate；由固定 phase cron / chime contract 控制公開節點。
 4. 哪些 phase 必定公開發訊息，哪些 phase 預設 silent？
-5. Nightly planning 是每天做，還是每天小調整 + 每週大調整？
+5. Nightly planning 是每天做，還是每天小調整 + 每週大調整？→ PR 4 先做每天小調整；週期性大調整留給後續 weekly weave。
 6. Weave journal 是否需要進 Research Library / wiki index？
 7. 如果 Dakai 當天一直沒有互動，daily session 是否仍建立公開 thread？
 8. 如果昨日 close 失敗，隔天 startup 的 recovery 流程如何設計？
