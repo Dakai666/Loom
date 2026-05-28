@@ -124,5 +124,7 @@ autonomy/circadian/rhythm.toml
 autonomy/circadian/daily_weave.md
 # Weave revision proposals (issue #462) — per-day TOML audit artifacts
 autonomy/circadian/proposals/
+# Weave journal (issue #463) — per-day life-log artifacts, personal not project
+autonomy/circadian/journal/
 
 .gitnexus

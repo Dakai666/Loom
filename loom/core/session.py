@@ -1415,6 +1415,13 @@ class LoomSession:
         from loom.autonomy.circadian.proposal import make_weave_revise_tool
         self.registry.register(make_weave_revise_tool())
 
+        # Issue #463 (Circadian PR5): journal_append — dated weave journal
+        # for life fragments / findings / keepsakes that shouldn't pollute
+        # semantic memory (doc/56 §10.1). Always callable; evening_closure
+        # chime body is the soft guidance, not a phase gate.
+        from loom.autonomy.circadian.journal import make_journal_append_tool
+        self.registry.register(make_journal_append_tool())
+
         # Issue #56: Register load_skill tool with outcome tracker
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
         self._skill_outcome_tracker = SkillOutcomeTracker(
