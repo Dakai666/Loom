@@ -7,6 +7,13 @@ P3 refactor (Issue #347):
 
 TUI widget half of the parity suite was retired with the TUI subsystem
 itself; the Discord side documents the canonical confirm contract.
+
+Contract note (no auto-deny): the real view now defaults to NO timeout — the
+buttons stay live and the confirm blocks until the operator decides. Under
+Circadian Autonomy the agent may act while the operator is away, and a
+timeout→deny would be a phantom refusal it could route around. ``on_timeout``
+still maps to DENY but is only reachable when a finite timeout is passed
+explicitly; the default never fires it.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from loom.core.harness.scope import ConfirmDecision
 # =====================================================================
 
 class _ConfirmView:
-    def __init__(self, timeout: float = 60.0):
+    def __init__(self, timeout: float | None = None):
         self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
         self.timeout = timeout
@@ -80,7 +87,7 @@ async def _make_confirm_fn(
         if channel is None:
             return ConfirmDecision.DENY
 
-        view = view_class(timeout=60.0)
+        view = view_class()  # no auto-deny — waits for the operator
         active_confirmations[thread_id] = view
 
         try:
@@ -147,7 +154,15 @@ class TestConfirmView:
         await view.deny_button(AsyncMock(), MagicMock())
         assert await view.wait_decision() == ConfirmDecision.DENY
 
-    async def test_timeout_falls_back_to_deny(self):
+    def test_default_view_has_no_timeout(self):
+        # Canonical contract: no auto-deny. The default view never times out,
+        # so a confirm blocks until the operator decides (autonomy-safe).
+        assert _ConfirmView().timeout is None
+
+    async def test_timeout_falls_back_to_deny_when_explicitly_set(self):
+        # Defensive fallback only: on_timeout still maps to DENY, but is
+        # reachable only when a finite timeout is passed explicitly — the
+        # default (None) never fires it.
         view = _ConfirmView(timeout=60.0)
         await view.on_timeout()
         assert await view.wait_decision() == ConfirmDecision.DENY

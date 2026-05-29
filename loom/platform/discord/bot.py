@@ -45,8 +45,12 @@ Streaming strategy
 Confirm flow
 ------------
 BlastRadiusMiddleware.confirm_fn is patched to send a four-button message
-(Allow / Lease / Auto / Deny) in the thread and await the button interaction
-(180s timeout → deny).  Lease and Auto decisions post a follow-up message
+(Allow / Lease / Auto / Deny) in the thread and await the button interaction.
+The confirm waits indefinitely for a human decision (no auto-deny on timeout)
+— under Circadian Autonomy the agent may act while the operator is asleep or
+away, and a timeout→deny would feed it a phantom refusal it then tries to
+route around. Waiting is the safer default (and mirrors the CLI, which also
+blocks on the operator). Lease and Auto decisions post a follow-up message
 showing the TTL or grant scope.
 """
 
@@ -112,7 +116,12 @@ if TYPE_CHECKING:
 class _ConfirmView(View):
     """Discord UI view with Allow / Lease / Auto / Deny buttons for tool confirmation."""
 
-    def __init__(self, timeout: float = 180.0) -> None:
+    def __init__(self, timeout: float | None = None) -> None:
+        # Default ``None`` = no auto-deny: the buttons stay live and the
+        # confirm blocks until the operator decides. See the module-level
+        # "Confirm flow" note for why timeout→deny is wrong under autonomy.
+        # A finite timeout may still be passed explicitly (then ``on_timeout``
+        # falls back to DENY as before).
         super().__init__(timeout=timeout)
         self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
@@ -150,6 +159,8 @@ class _ConfirmView(View):
         )
 
     async def on_timeout(self) -> None:
+        # Only reachable when a finite timeout was passed explicitly; the
+        # default (None) never times out. Kept as a defensive fallback.
         self._decision = ConfirmDecision.DENY
         self._done.set()
 
@@ -1947,16 +1958,16 @@ class LoomDiscordBot:
             )[:120]
             trust = call.trust_level.plain
             color = "🟡" if trust == "GUARDED" else "🔴"
-            view = _ConfirmView(timeout=180.0)
+            view = _ConfirmView()  # no auto-deny — waits for your decision
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
 
-            msg = await _safe_send(channel, 
+            msg = await _safe_send(channel,
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"{just_text}"
-                f"*Timeout 3min → auto-deny*",
+                f"*Waiting for your decision — no timeout.*",
                 view=view,
             )
             self._active_confirmations[thread_id] = msg
