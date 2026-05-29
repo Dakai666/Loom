@@ -272,3 +272,28 @@ class TestMakeConfirmFn:
             await confirm_fn(_make_call())
 
         assert 42 not in active
+
+    async def test_pending_confirm_cleared_on_cancellation(self):
+        # Since the default confirm now waits indefinitely (no auto-deny),
+        # turn cancellation is the primary escape hatch. Cancelling the
+        # awaiting task must propagate through ``wait_decision`` and run the
+        # ``finally`` cleanup so ``active_confirmations`` does not leak a
+        # stale, never-to-resolve entry. (#484 review P3.)
+        channel = MagicMock(send=AsyncMock())
+        active: dict = {}
+
+        confirm_fn = await _make_confirm_fn(
+            get_channel=lambda tid: channel,
+            thread_id=42,
+            active_confirmations=active,
+        )
+        task = asyncio.create_task(confirm_fn(_make_call()))
+        await asyncio.sleep(0)  # let the confirm register + reach wait_decision
+
+        assert active.get(42) is not None  # pending confirm is registered
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert 42 not in active  # finally cleanup ran on cancellation
