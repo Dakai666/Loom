@@ -1613,7 +1613,20 @@ class LoomDiscordBot:
                         # Per-tool patience: long-runners (run_bash/gitnexus_*/
                         # pytest/compact) get 90s, everything else 30s — same
                         # table the CLI uses. Replaces Discord's old flat 90.0.
-                        sensor.set_threshold(tool_name=event.name)
+                        #
+                        # Only drive the threshold from ToolBegin when there is
+                        # NO active envelope. Under parallel dispatch the
+                        # envelope emits EnvelopeStarted (which already set the
+                        # dominant/most-patient threshold across ALL nodes) and
+                        # then every ToolBegin back-to-back before any tool
+                        # completes — so a per-ToolBegin set_threshold would let
+                        # the LAST (possibly fast) tool overwrite the envelope's
+                        # patient window, contradicting "most patient wins"
+                        # (codex PR #483 review P2). When an envelope is active
+                        # the envelope events own the threshold; ToolBegin only
+                        # drives it on the no-envelope fallback path.
+                        if not _envelope_active:
+                            sensor.set_threshold(tool_name=event.name)
                         # Flush narration before tool activity (send-once, ⬥ prefix).
                         narration = narration_buf.strip()
                         narration_buf = ""

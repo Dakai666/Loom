@@ -226,6 +226,37 @@ def test_envelope_dominant_threshold_takes_most_patient_tool() -> None:
     assert _envelope_dominant_threshold_s(view) == 90.0
 
 
+def test_parallel_envelope_threshold_not_clobbered_by_last_tool_begin() -> None:
+    # Regression for PR #483 review P2: under parallel dispatch the envelope
+    # emits EnvelopeStarted (dominant threshold = most patient = 90s for a
+    # run_bash + read_file group), then every ToolBegin back-to-back before
+    # any tool completes and before any fallback EnvelopeUpdated lands. A
+    # per-ToolBegin set_threshold would let the LAST tool (read_file, 30s)
+    # overwrite the patient window. The fix gates ToolBegin on
+    # ``not _envelope_active``; this test mirrors that handler sequence.
+    sensor = LivenessSensor(default_threshold_s=30.0, clock=lambda: 0.0)
+    view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=2,
+        parallel_groups=1,
+        levels=[["n1", "n2"]],
+        nodes=[_node("n1", "read_file"), _node("n2", "run_bash")],
+    )
+    # EnvelopeStarted: envelope becomes active, dominant threshold applied.
+    envelope_active = True
+    sensor.set_threshold(seconds=_envelope_dominant_threshold_s(view))  # 90s
+    # ToolBegin(run_bash) then ToolBegin(read_file): gated out by the fix.
+    for tool_name in ("run_bash", "read_file"):
+        if not envelope_active:  # the bot.py gate — both skipped here
+            sensor.set_threshold(tool_name=tool_name)
+    # The patient 90s window survives: no stall at 30s, stall only past 90s.
+    assert sensor.should_emit_stalled(now=30.2) is False
+    assert sensor.should_emit_stalled(now=90.2) is True
+
+
 def test_envelope_dominant_threshold_default_for_fast_tools() -> None:
     view = ExecutionEnvelopeView(
         envelope_id="e1",
