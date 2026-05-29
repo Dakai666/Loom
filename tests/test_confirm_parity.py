@@ -7,6 +7,13 @@ P3 refactor (Issue #347):
 
 TUI widget half of the parity suite was retired with the TUI subsystem
 itself; the Discord side documents the canonical confirm contract.
+
+Contract note (no auto-deny): the real view now defaults to NO timeout — the
+buttons stay live and the confirm blocks until the operator decides. Under
+Circadian Autonomy the agent may act while the operator is away, and a
+timeout→deny would be a phantom refusal it could route around. ``on_timeout``
+still maps to DENY but is only reachable when a finite timeout is passed
+explicitly; the default never fires it.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from loom.core.harness.scope import ConfirmDecision
 # =====================================================================
 
 class _ConfirmView:
-    def __init__(self, timeout: float = 60.0):
+    def __init__(self, timeout: float | None = None):
         self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
         self.timeout = timeout
@@ -80,7 +87,7 @@ async def _make_confirm_fn(
         if channel is None:
             return ConfirmDecision.DENY
 
-        view = view_class(timeout=60.0)
+        view = view_class()  # no auto-deny — waits for the operator
         active_confirmations[thread_id] = view
 
         try:
@@ -147,7 +154,15 @@ class TestConfirmView:
         await view.deny_button(AsyncMock(), MagicMock())
         assert await view.wait_decision() == ConfirmDecision.DENY
 
-    async def test_timeout_falls_back_to_deny(self):
+    def test_default_view_has_no_timeout(self):
+        # Canonical contract: no auto-deny. The default view never times out,
+        # so a confirm blocks until the operator decides (autonomy-safe).
+        assert _ConfirmView().timeout is None
+
+    async def test_timeout_falls_back_to_deny_when_explicitly_set(self):
+        # Defensive fallback only: on_timeout still maps to DENY, but is
+        # reachable only when a finite timeout is passed explicitly — the
+        # default (None) never fires it.
         view = _ConfirmView(timeout=60.0)
         await view.on_timeout()
         assert await view.wait_decision() == ConfirmDecision.DENY
@@ -257,3 +272,28 @@ class TestMakeConfirmFn:
             await confirm_fn(_make_call())
 
         assert 42 not in active
+
+    async def test_pending_confirm_cleared_on_cancellation(self):
+        # Since the default confirm now waits indefinitely (no auto-deny),
+        # turn cancellation is the primary escape hatch. Cancelling the
+        # awaiting task must propagate through ``wait_decision`` and run the
+        # ``finally`` cleanup so ``active_confirmations`` does not leak a
+        # stale, never-to-resolve entry. (#484 review P3.)
+        channel = MagicMock(send=AsyncMock())
+        active: dict = {}
+
+        confirm_fn = await _make_confirm_fn(
+            get_channel=lambda tid: channel,
+            thread_id=42,
+            active_confirmations=active,
+        )
+        task = asyncio.create_task(confirm_fn(_make_call()))
+        await asyncio.sleep(0)  # let the confirm register + reach wait_decision
+
+        assert active.get(42) is not None  # pending confirm is registered
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert 42 not in active  # finally cleanup ran on cancellation

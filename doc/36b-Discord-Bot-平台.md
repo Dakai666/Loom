@@ -161,7 +161,7 @@ class _ConfirmView(View):
     # ❌ Deny (N)    → ConfirmDecision.DENY（拒絕）
 ```
 
-BlastRadiusMiddleware 的 `_confirm_fn` 被 patch 成這個 Discord view，180s 超時自動視為 DENY。
+BlastRadiusMiddleware 的 `_confirm_fn` 被 patch 成這個 Discord view。**不設逾時、不 auto-deny**——按鈕一直亮著，confirm 阻塞直到你做決定（對齊 CLI 同樣阻塞等操作者）。理由：Circadian Autonomy 下絲絲可能在你睡覺/忙碌時自主行動，逾時 auto-deny 會餵給她一個「假性拒絕」，她可能據此繞路；寧可等你授權。`on_timeout`→DENY 仍保留為防禦性 fallback（只有顯式傳入有限 timeout 時才會觸發）。
 
 ### 整合方式
 
