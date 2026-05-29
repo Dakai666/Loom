@@ -18,10 +18,14 @@ from __future__ import annotations
 
 from loom.core.events import ExecutionEnvelopeView, ExecutionNodeView
 from loom.platform.discord.bot import (
+    _envelope_dominant_threshold_s,
     _format_envelope_status,
-    _should_emit_stalled_status,
 )
-from loom.platform.interaction_language import EnvelopeOutcome, ParallelReason
+from loom.platform.interaction_language import (
+    EnvelopeOutcome,
+    LivenessSensor,
+    ParallelReason,
+)
 
 
 def _node(node_id: str, tool_name: str, state: str = "executing") -> ExecutionNodeView:
@@ -196,80 +200,85 @@ def test_fulfilled_outcome_does_not_add_summary_line() -> None:
 
 
 # ----------------------------------------------------------------------
-# Stalled-status proxy (#422)
+# Discord per-tool threshold (LivenessSensor convergence — divergence kill)
+# ----------------------------------------------------------------------
+# The stall DECISION/CLOCK logic that previously lived in bot.py
+# (``_should_emit_stalled_status`` / ``_event_resets_stall_clock``) now lives
+# in ``LivenessSensor``; its full behavior matrix is covered by
+# ``tests/test_interaction_language.py``. Here we pin only the Discord-side
+# integration: the bot now drives per-tool thresholds (run_bash takes 90s,
+# default tools 30s) instead of the old flat 90.0, proving the CLI/Discord
+# divergence is killed.
+
+
+def test_envelope_dominant_threshold_takes_most_patient_tool() -> None:
+    # Parallel nodes: the slowest-allowed tool governs (max threshold).
+    view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=2,
+        parallel_groups=1,
+        levels=[["n1", "n2"]],
+        nodes=[_node("n1", "read_file"), _node("n2", "run_bash")],
+    )
+    assert _envelope_dominant_threshold_s(view) == 90.0
+
+
+def test_envelope_dominant_threshold_default_for_fast_tools() -> None:
+    view = ExecutionEnvelopeView(
+        envelope_id="e1",
+        session_id="s1",
+        turn_index=1,
+        status="running",
+        node_count=1,
+        parallel_groups=1,
+        levels=[["n1"]],
+        nodes=[_node("n1", "read_file")],
+    )
+    assert _envelope_dominant_threshold_s(view) == 30.0
+
+
+def test_discord_watchdog_run_bash_gets_90s_not_flat_30() -> None:
+    # Drive the sensor the way the Discord ToolBegin branch does: a
+    # run_bash tool sets the per-tool threshold to 90s. After 60s of
+    # synthetic no-op envelope ticks (same fingerprint), the watchdog must
+    # NOT have stalled — the old flat-90 would also pass here, but the
+    # point is that the per-tool table now drives it.
+    sensor = LivenessSensor(default_threshold_s=30.0, clock=lambda: 0.0)
+    sensor.set_threshold(tool_name="run_bash")  # 90s
+    rendered = _format_envelope_status(_running_envelope("e1", "run_bash"))
+    sensor.observe(now=0.0, fingerprint=rendered)
+    # 60 no-op ticks, fingerprint unchanged → never resets the clock.
+    for tick in range(1, 61):
+        sensor.observe(now=float(tick), fingerprint=rendered)
+    assert sensor.should_emit_stalled(now=60.0) is False
+    # But by 90s it does stall.
+    assert sensor.should_emit_stalled(now=90.0) is True
+
+
+def test_discord_watchdog_default_tool_stalls_at_30s() -> None:
+    # A default-patience tool now stalls at 30s on Discord (it used to
+    # tolerate 90s under the old flat threshold). This is the intended
+    # user-visible behavior change that kills the divergence.
+    sensor = LivenessSensor(default_threshold_s=30.0, clock=lambda: 0.0)
+    sensor.set_threshold(tool_name="read_file")  # 30s
+    rendered = _format_envelope_status(_running_envelope("e1", "read_file"))
+    sensor.observe(now=0.0, fingerprint=rendered)
+    for tick in range(1, 31):
+        sensor.observe(now=float(tick), fingerprint=rendered)
+    assert sensor.should_emit_stalled(now=29.0) is False
+    assert sensor.should_emit_stalled(now=30.0) is True
+
+
+# ----------------------------------------------------------------------
+# Overlay-aware envelope edit gating (#422 codex review v3)
 # ----------------------------------------------------------------------
 
 
-def test_stalled_status_emits_once_after_threshold() -> None:
-    # First check past the threshold returns True; once the caller has
-    # recorded the emit, subsequent ticks must not retrigger until the
-    # next observable event resets ``already_emitted``.
-    assert _should_emit_stalled_status(
-        now=100.0,
-        last_event_at=9.0,
-        threshold_s=90.0,
-        already_emitted=False,
-    )
-    assert not _should_emit_stalled_status(
-        now=100.0,
-        last_event_at=9.0,
-        threshold_s=90.0,
-        already_emitted=True,
-    )
-
-
-def test_stalled_status_does_not_emit_before_threshold() -> None:
-    assert not _should_emit_stalled_status(
-        now=100.0,
-        last_event_at=20.0,  # only 80s of quiet, threshold is 90s
-        threshold_s=90.0,
-        already_emitted=False,
-    )
-
-
-def test_stalled_status_is_suppressed_while_waiting_for_user() -> None:
-    # During a TurnPaused window, the runtime is quiet on the agent
-    # side because we're waiting on a human. The watchdog must not
-    # call this "still waiting" — same invariant as the CLI footer's
-    # PAUSED_BLOCKING heartbeat state (#419).
-    assert not _should_emit_stalled_status(
-        now=200.0,
-        last_event_at=0.0,
-        threshold_s=90.0,
-        already_emitted=False,
-        suppressed=True,
-    )
-
-
-def test_stalled_status_suppression_takes_precedence_over_already_emitted() -> None:
-    # Even if the watchdog had already fired (and would normally just
-    # stay quiet), the suppression flag is the dominant signal. This
-    # protects against a race where a pause arrives right after a
-    # stalled emit — we want the pause window to govern, not the
-    # stalled latch.
-    assert not _should_emit_stalled_status(
-        now=200.0,
-        last_event_at=0.0,
-        threshold_s=90.0,
-        already_emitted=True,
-        suppressed=True,
-    )
-
-
-# ----------------------------------------------------------------------
-# Stall-clock heartbeat gating (#422 codex review)
-# ----------------------------------------------------------------------
-
-
-from loom.core.events import (
-    ActionStateChange,
-    EnvelopeStarted,
-    EnvelopeUpdated,
-    TextChunk,
-)
 from loom.platform.discord.bot import (
     _envelope_edit_would_clobber_overlay,
-    _event_resets_stall_clock,
 )
 
 
@@ -289,99 +298,6 @@ def _running_envelope(envelope_id: str, tool_name: str) -> ExecutionEnvelopeView
     )
 
 
-def test_envelope_started_always_resets_stall_clock() -> None:
-    event = EnvelopeStarted(envelope=_running_envelope("e1", "run_bash"))
-    assert _event_resets_stall_clock(event, last_envelope_render="") is True
-
-
-def test_envelope_updated_with_no_render_change_does_not_reset_clock() -> None:
-    # The pathological case codex caught: ``LoomSession.stream_turn``
-    # emits a synthetic ``EnvelopeUpdated`` every ~1s while a tool is
-    # running. If those reset the clock, a long sequential ``run_bash``
-    # never reaches the 90s threshold.
-    envelope = _running_envelope("e1", "run_bash")
-    rendered = _format_envelope_status(envelope)
-    event = EnvelopeUpdated(envelope=envelope)
-    assert _event_resets_stall_clock(event, last_envelope_render=rendered) is False
-
-
-def test_envelope_updated_with_state_change_resets_clock() -> None:
-    # When a node transitions (e.g., one of N parallel tools just
-    # finished), the rendered status differs from the previous view —
-    # that's real progress and must reset the clock.
-    previous = _format_envelope_status(_running_envelope("e1", "run_bash"))
-    new_view = ExecutionEnvelopeView(
-        envelope_id="e1",
-        session_id="s1",
-        turn_index=1,
-        status="running",
-        node_count=2,
-        parallel_groups=1,
-        levels=[["n1", "n2"]],
-        nodes=[_node("n1", "run_bash"), _node("n2", "pytest")],
-    )
-    event = EnvelopeUpdated(envelope=new_view)
-    assert _event_resets_stall_clock(event, last_envelope_render=previous) is True
-
-
-def test_action_state_change_never_resets_clock() -> None:
-    # Silent in Discord display by design (#422). User sees no edit,
-    # so 90s of state-machine churn still warrants a stalled message.
-    event = ActionStateChange(
-        action_id="n1",
-        tool_name="run_bash",
-        call_id="n1",
-        old_state="executing",
-        new_state="observed",
-    )
-    assert _event_resets_stall_clock(event, last_envelope_render="anything") is False
-
-
-def test_text_chunk_always_resets_clock() -> None:
-    event = TextChunk(text="hello")
-    assert _event_resets_stall_clock(event, last_envelope_render="") is True
-
-
-def test_long_sequential_dispatch_eventually_triggers_stalled() -> None:
-    """End-to-end shape: simulate the codex-described scenario.
-
-    A single long ``run_bash`` produces ``EnvelopeStarted`` followed by
-    ~90 fallback ``EnvelopeUpdated`` ticks at 1s intervals before the
-    user-visible state changes. With the unconditional heartbeat (pre
-    codex fix) the clock would reset every tick and the watchdog would
-    never fire. With the render-gated heartbeat, after 90s of identical
-    fallback ticks the threshold is crossed and a single stalled emit
-    must be allowed.
-    """
-    envelope = _running_envelope("e1", "run_bash")
-    rendered = _format_envelope_status(envelope)
-
-    started = EnvelopeStarted(envelope=envelope)
-    last_event_at = 0.0
-    if _event_resets_stall_clock(started, last_envelope_render=""):
-        last_event_at = 0.0  # turn start
-    last_envelope_render = rendered
-
-    # 90 fallback updates at 1s intervals — none change the rendered
-    # status, so none reset the clock.
-    for tick in range(1, 91):
-        now = float(tick)
-        ev = EnvelopeUpdated(envelope=envelope)
-        if _event_resets_stall_clock(ev, last_envelope_render):
-            last_event_at = now
-        # Outer loop would also keep ``last_envelope_render`` fresh; it
-        # never actually changes here so the assignment is a no-op.
-        last_envelope_render = _format_envelope_status(ev.envelope)
-
-    now = 90.5  # half a watchdog poll-tick past the threshold boundary
-    assert _should_emit_stalled_status(
-        now=now,
-        last_event_at=last_event_at,
-        threshold_s=90.0,
-        already_emitted=False,
-    ), "watchdog must fire after 90s of no-op envelope ticks"
-
-
 # ----------------------------------------------------------------------
 # Overlay-aware envelope edit gating (#422 codex review v3)
 # ----------------------------------------------------------------------
@@ -391,7 +307,7 @@ def test_long_sequential_dispatch_eventually_triggers_stalled() -> None:
 # state with displayed state and broke debounce-suppressed catch-up.
 # v3 splits them back apart:
 #
-# - ``_event_resets_stall_clock`` (clock) compares OBSERVED render.
+# - The LivenessSensor clock compares the OBSERVED fingerprint.
 # - ``_envelope_edit_would_clobber_overlay`` (edit) compares DISPLAYED
 #   render. The displayed timeline lags the observed one whenever an
 #   earlier update lost its edit to debounce, which is the exact case
@@ -502,11 +418,12 @@ def test_debounce_suppressed_progress_catches_up_via_later_fallback() -> None:
         stalled_emitted=False,
     ) is False  # → branch will run the edit → display catches up
 
-    # Also confirm the clock-gate side: observed (B) == observed (B)
-    # so a redundant fallback after we already observed B does NOT
-    # reset the clock. Two timelines, two gates.
-    fallback = EnvelopeUpdated(envelope=progress_view)
-    assert _event_resets_stall_clock(fallback, rendered_b) is False
+    # Also confirm the clock-gate side: once the sensor has observed B,
+    # a redundant fallback carrying the same fingerprint B does NOT reset
+    # the clock. Two timelines, two gates.
+    sensor = LivenessSensor()
+    sensor.observe(fingerprint=rendered_b)
+    assert sensor.observe(fingerprint=rendered_b) is False
 
 
 def test_no_op_envelope_update_with_stalled_overlay_preserves_message() -> None:
@@ -526,5 +443,6 @@ def test_no_op_envelope_update_with_stalled_overlay_preserves_message() -> None:
     ) is True
     # The clock-gate side also still returns False for this case so
     # the latch doesn't accidentally reset.
-    no_op = EnvelopeUpdated(envelope=_running_envelope("e1", "run_bash"))
-    assert _event_resets_stall_clock(no_op, rendered) is False
+    sensor = LivenessSensor()
+    sensor.observe(fingerprint=rendered)
+    assert sensor.observe(fingerprint=rendered) is False

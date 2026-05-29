@@ -79,6 +79,10 @@ from loom.core.events import (
     EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted,
     ExecutionEnvelopeView,
 )
+from loom.platform.interaction_language import (
+    LivenessSensor,
+    stale_threshold_for_tool,
+)
 from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
     CompressDone, ReasoningContinuation, TextChunk, ThinkCollapsed,
@@ -183,39 +187,6 @@ _OUTCOME_GLYPHS: dict[str, str] = {
 }
 
 
-def _event_resets_stall_clock(event: Any, last_envelope_render: str) -> bool:
-    """Decide whether ``event`` is real activity for the stalled watchdog.
-
-    Most stream events are genuine signs the runtime is alive, but two
-    cases are noise:
-
-    1. ``LoomSession.stream_turn()`` emits a synthetic ``EnvelopeUpdated``
-       roughly once per second while a tool is in flight (see the
-       ``while not dispatch_task.done()`` loop in session.py around
-       L2475), even when nothing observable changed. For a long
-       sequential ``run_bash``, blanket-resetting the clock on every
-       event would prevent the watchdog from ever reaching its 90s
-       threshold — exactly the case the watchdog is meant to cover.
-       Codex caught this on the PR #429 review.
-
-    2. ``ActionStateChange`` is silent in the Discord display by design
-       (too granular). If 90s of state-machine churn passes without any
-       visible update, the user is still owed a "still waiting" line.
-
-    For ``EnvelopeUpdated``, the helper compares the new render against
-    ``last_envelope_render`` — the most recently OBSERVED render, not
-    what's currently DISPLAYED. The two diverge when the display edit
-    is suppressed by debounce; tracking the observed render separately
-    avoids false positives where a debounced gap makes a no-op fallback
-    look like new progress relative to the stale display.
-    """
-    if isinstance(event, ActionStateChange):
-        return False
-    if isinstance(event, EnvelopeUpdated):
-        return _format_envelope_status(event.envelope) != last_envelope_render
-    return True
-
-
 def _envelope_edit_would_clobber_overlay(
     *,
     new_render: str,
@@ -241,31 +212,18 @@ def _envelope_edit_would_clobber_overlay(
     return new_render == displayed_render and stalled_emitted
 
 
-def _should_emit_stalled_status(
-    *,
-    now: float,
-    last_event_at: float,
-    threshold_s: float,
-    already_emitted: bool,
-    suppressed: bool = False,
-) -> bool:
-    """Decide whether the watchdog should append a ``still waiting`` line.
+def _envelope_dominant_threshold_s(view: ExecutionEnvelopeView) -> float:
+    """The most patient per-tool stall threshold across an envelope's nodes.
 
-    Discord lacks a true heartbeat surface (no equivalent to the CLI
-    footer), so #422 proxies it via a periodic edit on the active status
-    message. The watchdog fires at most once per quiet stretch — caller
-    sets ``already_emitted=True`` after the edit and resets it on the
-    next observable event.
-
-    ``suppressed`` is the pause-window guard: when ``TurnPaused`` is
-    waiting on a user reply, the runtime is intentionally quiet on the
-    agent side, so "still waiting" would mislead. This mirrors the CLI
-    heartbeat's PAUSED_BLOCKING state (#419), which never renders the
-    stalled prefix for the same reason.
+    Envelope nodes can run several tools in parallel; the threshold must be
+    deterministic. We take the MAX threshold over all nodes in the envelope
+    so the slowest-allowed tool governs — matching the CLI's intent that a
+    slow tool lengthens patience rather than shortening it. Including
+    already-completed nodes only lengthens patience (the safe direction).
+    Falls back to the default 30.0 for an empty node list.
     """
-    if suppressed:
-        return False
-    return (not already_emitted) and now - last_event_at >= threshold_s
+    thresholds = [stale_threshold_for_tool(n.tool_name) for n in view.nodes]
+    return max(thresholds) if thresholds else 30.0
 
 
 def _format_envelope_status(view: ExecutionEnvelopeView) -> str:
@@ -1534,40 +1492,26 @@ class LoomDiscordBot:
         # Discord has no equivalent of the CLI footer heartbeat, so we
         # proxy "runtime is still alive" by appending a ``still waiting``
         # line to the active status_msg when an observable event hasn't
-        # landed in ``_active_stale_threshold_s`` seconds. Fires at most
-        # once per quiet stretch — any subsequent event resets both the
-        # timestamp and the latch so the next stall would re-emit.
+        # landed within the active per-tool threshold. The decision logic
+        # now lives in the shared ``LivenessSensor`` (interaction_language)
+        # so CLI and Discord converge on one observation timeline, one
+        # latch rule, and one pause-suppression rule. The sensor owns the
+        # observed-vs-displayed comparison (it compares against its own
+        # stored fingerprint, never against a UI display variable), which
+        # is what makes codex #422's bug class structurally impossible.
         #
-        # ``_stall_watchdog_suppressed`` is the pause-window guard:
-        # TurnPaused sets it True before waiting on the user reply and
-        # False after, so a slow human decision is never mis-displayed
-        # as a runtime stall. Mirrors the CLI PAUSED_BLOCKING heartbeat
-        # rule (#419) — pause time is on the user, not the agent.
-        _last_runtime_event_at = time.monotonic()
-        _stalled_emitted = False
-        _active_stale_threshold_s = 90.0
+        # Bonus over the old flat 90.0: ``set_threshold(tool_name=…)`` on
+        # ToolBegin / per envelope gives Discord the same per-tool patience
+        # table the CLI already uses (run_bash/gitnexus_*/pytest/compact get
+        # 90s; everything else 30s), killing the CLI/Discord divergence.
+        sensor = LivenessSensor(default_threshold_s=30.0)
         _turn_done = False
-        _stall_watchdog_suppressed = False
-        # Cached envelope render for the watchdog. Stays in sync with
-        # the most-recently OBSERVED envelope view (not the displayed
-        # one — debounce skips would otherwise let synthetic 1Hz
-        # fallback ``EnvelopeUpdated`` ticks look like new progress).
-        _last_envelope_render = ""
 
         async def _stall_watchdog() -> None:
-            nonlocal _stalled_emitted
             while not _turn_done:
                 await asyncio.sleep(5.0)
-                now = time.monotonic()
-                if _should_emit_stalled_status(
-                    now=now,
-                    last_event_at=_last_runtime_event_at,
-                    threshold_s=_active_stale_threshold_s,
-                    already_emitted=_stalled_emitted,
-                    suppressed=_stall_watchdog_suppressed,
-                ):
-                    _stalled_emitted = True
-                    quiet_for = int(now - _last_runtime_event_at)
+                if sensor.should_emit_stalled():
+                    quiet_for = int(sensor.quiet_for())
                     await _safe_edit(
                         status_msg,
                         (tool_buf.lstrip() or "-# ◌ working…")
@@ -1580,23 +1524,30 @@ class LoomDiscordBot:
         async with message.channel.typing():
             try:
                 async for event in session.stream_turn(content):
-                    # ── Stall-clock heartbeat (#422 codex review v1) ──
-                    # Gated on OBSERVED progress — see helper docstring.
-                    # Synthetic fallback ``EnvelopeUpdated`` ticks and
-                    # ``ActionStateChange`` don't reset the clock; all
-                    # other events do.
-                    if _event_resets_stall_clock(event, _last_envelope_render):
-                        _last_runtime_event_at = time.monotonic()
-                        _stalled_emitted = False
-                    # Keep the OBSERVED render fresh for the next clock
-                    # comparison. Updated unconditionally on envelope
-                    # events — even when the branch's debounce later
-                    # suppresses the display edit, observation moves on.
-                    if isinstance(
+                    # ── Stall-clock observation (#422, now via LivenessSensor) ──
+                    # The sensor decides observed-vs-displayed by comparing the
+                    # supplied fingerprint against its own stored observation,
+                    # never against the displayed ``tool_buf``. Synthetic ~1Hz
+                    # no-op ``EnvelopeUpdated`` ticks carry an unchanged
+                    # fingerprint (so they don't reset); ``ActionStateChange``
+                    # is silent-by-design (``is_progress=False``); every other
+                    # event resets the clock. Per-tool patience is set from the
+                    # dominant node threshold on envelope events and from the
+                    # tool name on ToolBegin (see those branches).
+                    if isinstance(event, ActionStateChange):
+                        sensor.observe(is_progress=False)
+                    elif isinstance(
                         event,
                         (EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted),
                     ):
-                        _last_envelope_render = _format_envelope_status(event.envelope)
+                        sensor.set_threshold(
+                            seconds=_envelope_dominant_threshold_s(event.envelope)
+                        )
+                        sensor.observe(
+                            fingerprint=_format_envelope_status(event.envelope)
+                        )
+                    else:
+                        sensor.observe()
                     if isinstance(event, TextChunk):
                         narration_buf += event.text
 
@@ -1623,13 +1574,14 @@ class LoomDiscordBot:
                         if now - _last_envelope_edit >= _ENVELOPE_DEBOUNCE_S:
                             new_render = _format_envelope_status(event.envelope)
                             # Overlay-aware edit skip (#422 codex review v3).
-                            # See helper docstring for why this uses
-                            # displayed (``tool_buf``) rather than observed
-                            # (``_last_envelope_render``) state.
+                            # See helper docstring for why this uses the
+                            # displayed (``tool_buf``) render rather than the
+                            # sensor's observed fingerprint — the edit gate
+                            # governs the display, not liveness.
                             if _envelope_edit_would_clobber_overlay(
                                 new_render=new_render,
                                 displayed_render=tool_buf,
-                                stalled_emitted=_stalled_emitted,
+                                stalled_emitted=sensor.stalled_emitted,
                             ):
                                 pass  # preserve watchdog overlay
                             else:
@@ -1658,6 +1610,10 @@ class LoomDiscordBot:
                         _last_envelope_edit = time.monotonic()
 
                     elif isinstance(event, ToolBegin):
+                        # Per-tool patience: long-runners (run_bash/gitnexus_*/
+                        # pytest/compact) get 90s, everything else 30s — same
+                        # table the CLI uses. Replaces Discord's old flat 90.0.
+                        sensor.set_threshold(tool_name=event.name)
                         # Flush narration before tool activity (send-once, ⬥ prefix).
                         narration = narration_buf.strip()
                         narration_buf = ""
@@ -1715,11 +1671,14 @@ class LoomDiscordBot:
                         # Suppress the stalled watchdog while we wait on
                         # the user (#422). Pause time is on the human;
                         # tagging the status as ``still waiting`` would
-                        # mislead. The finally also resets the watchdog
-                        # timestamp so the post-resume window doesn't
-                        # inherit pre-pause quiet time.
-                        _stall_watchdog_suppressed = True
+                        # mislead. ``resume()`` in the finally clears the
+                        # suppression AND resets the observation clock + latch
+                        # so the post-resume window doesn't inherit pre-pause
+                        # quiet time — a matched pair fully inside this
+                        # try/finally per Loom's shared-session
+                        # preemption-race convention (never fire-and-forget).
                         try:
+                            sensor.suppress()
                             reply = await self._client.wait_for(
                                 "message", check=_pause_check, timeout=120.0
                             )
@@ -1735,9 +1694,7 @@ class LoomDiscordBot:
                             session.cancel()
                             tool_buf += "\n*(pause timed out — cancelled)*"
                         finally:
-                            _stall_watchdog_suppressed = False
-                            _last_runtime_event_at = time.monotonic()
-                            _stalled_emitted = False
+                            sensor.resume()
 
                     elif isinstance(event, CompressDone):
                         await _safe_send(message.channel,

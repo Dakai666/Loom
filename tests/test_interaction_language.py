@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from loom.platform.interaction_language import (
     HeartbeatState,
+    LivenessSensor,
     _LABELS_ZH_TW,
     derive_envelope_outcome,
     format_elapsed,
@@ -10,6 +11,16 @@ from loom.platform.interaction_language import (
     synthesize_envelope_intent,
     stale_threshold_for_tool,
 )
+
+
+class _FakeClock:
+    """Manually-advanced monotonic clock for deterministic sensor tests."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
 
 
 def test_format_elapsed_under_one_minute_uses_seconds() -> None:
@@ -145,3 +156,180 @@ def test_derive_envelope_outcome_empty_list_returns_fulfilled_for_callers_to_gat
     # be misread as fulfilled. ``LedgerEnvelopeProjector`` gates on
     # ``status in ("completed", "failed")``.
     assert derive_envelope_outcome([]) == "fulfilled"
+
+
+# ----------------------------------------------------------------------
+# LivenessSensor — shared runtime-stall logic for CLI + Discord
+# (convergence refactor; was split between bot.py and cli/app.py)
+# ----------------------------------------------------------------------
+
+
+class TestLivenessSensor:
+    def test_injected_clock_is_used_for_defaults(self) -> None:
+        clock = _FakeClock(100.0)
+        sensor = LivenessSensor(clock=clock)
+        # quiet_for with default now reads the injected clock.
+        clock.t = 105.0
+        assert sensor.quiet_for() == 5.0
+
+    def test_observe_progress_resets_clock_and_clears_latch(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        clock.t = 40.0
+        # Latch it.
+        assert sensor.should_emit_stalled() is True
+        # A genuine event resets the clock and clears the latch.
+        assert sensor.observe() is True
+        assert sensor.quiet_for() == 0.0
+        # Latch cleared → not immediately re-stalled.
+        assert sensor.is_stalled() is False
+
+    def test_observe_is_progress_false_never_resets(self) -> None:
+        # ActionStateChange analog: silent-by-design, never resets.
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(clock=clock)
+        clock.t = 10.0
+        assert sensor.observe(is_progress=False) is False
+        assert sensor.quiet_for() == 10.0
+
+    def test_observe_same_fingerprint_does_not_reset(self) -> None:
+        # Synthetic ~1Hz no-op EnvelopeUpdated analog: unchanged
+        # fingerprint must not move the clock.
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(clock=clock)
+        assert sensor.observe(fingerprint="A") is True
+        clock.t = 10.0
+        assert sensor.observe(fingerprint="A") is False
+        assert sensor.quiet_for() == 10.0
+
+    def test_observe_changed_fingerprint_resets(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(clock=clock)
+        sensor.observe(fingerprint="A")
+        clock.t = 10.0
+        assert sensor.observe(fingerprint="B") is True
+        assert sensor.quiet_for() == 0.0
+
+    def test_observe_none_fingerprint_always_resets(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(clock=clock)
+        sensor.observe(fingerprint="A")
+        clock.t = 5.0
+        # No fingerprint supplied → treated as new progress.
+        assert sensor.observe() is True
+        assert sensor.quiet_for() == 0.0
+
+    def test_should_emit_stalled_emits_once_then_latches(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        clock.t = 29.0
+        assert sensor.should_emit_stalled() is False  # below threshold
+        clock.t = 30.0
+        assert sensor.should_emit_stalled() is True   # at threshold
+        # Latched: a second tick at the same quiet stretch does not re-emit.
+        assert sensor.should_emit_stalled() is False
+        clock.t = 60.0
+        assert sensor.should_emit_stalled() is False
+        # …until the next observable event clears the latch.
+        sensor.observe()
+        clock.t = 95.0
+        assert sensor.should_emit_stalled() is True
+
+    def test_is_stalled_is_continuous_no_latch(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        clock.t = 30.0
+        assert sensor.is_stalled() is True
+        # Re-reading keeps returning True (no latch) while still quiet.
+        clock.t = 31.0
+        assert sensor.is_stalled() is True
+        # is_stalled never sets the emit latch, so should_emit_stalled
+        # can still fire.
+        assert sensor.should_emit_stalled() is True
+
+    def test_quiet_for_clamps_to_non_negative(self) -> None:
+        clock = _FakeClock(10.0)
+        sensor = LivenessSensor(clock=clock)  # last_observed = 10.0
+        clock.t = 5.0  # clock went backwards (shouldn't happen, but clamp)
+        assert sensor.quiet_for() == 0.0
+
+    def test_suppress_blocks_emission_and_resume_resets_clock(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        clock.t = 100.0
+        sensor.suppress()
+        assert sensor.should_emit_stalled() is False
+        assert sensor.is_stalled() is False
+        # Resume clears suppression AND resets the clock so the
+        # post-resume window does not inherit the pre-pause quiet time.
+        sensor.resume()
+        assert sensor.quiet_for() == 0.0
+        assert sensor.should_emit_stalled() is False
+        clock.t = 130.0
+        assert sensor.should_emit_stalled() is True
+
+    def test_set_threshold_per_tool_drives_decision_boundary(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        # Default 30s tool stalls at 30.
+        clock.t = 30.0
+        assert sensor.is_stalled() is True
+        # Switch to a long-runner: 90s patience.
+        sensor.set_threshold(tool_name="run_bash")
+        assert stale_threshold_for_tool("run_bash") == 90.0
+        clock.t = 60.0
+        assert sensor.is_stalled() is False
+        clock.t = 90.0
+        assert sensor.is_stalled() is True
+
+    def test_set_threshold_explicit_seconds_and_reset_to_default(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        sensor.set_threshold(seconds=10.0)
+        clock.t = 10.0
+        assert sensor.is_stalled() is True
+        # No args → back to default.
+        sensor.set_threshold()
+        clock.t = 20.0
+        assert sensor.is_stalled() is False
+        clock.t = 30.0
+        assert sensor.is_stalled() is True
+
+    def test_reset_starts_fresh_quiet_stretch(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        sensor.set_threshold(tool_name="run_bash")  # 90s
+        sensor.suppress()
+        clock.t = 50.0
+        sensor.should_emit_stalled()  # would latch if not suppressed
+        sensor.reset()
+        # Threshold back to default, suppression cleared, clock fresh.
+        assert sensor.quiet_for() == 0.0
+        clock.t = 80.0
+        assert sensor.is_stalled() is True  # 80 >= default 30
+
+    def test_resume_clears_suppression_even_when_pause_branch_raises(self) -> None:
+        # Mirrors the Discord try/finally contract: even if the paused
+        # branch raises, ``resume()`` in the finally must clear
+        # suppression so it can't stick into the next state.
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        sensor.suppress()
+        try:
+            raise RuntimeError("pause branch blew up")
+        except RuntimeError:
+            pass
+        finally:
+            sensor.resume()
+        clock.t = 30.0
+        assert sensor.should_emit_stalled() is True
+
+    def test_stalled_emitted_property_tracks_latch(self) -> None:
+        clock = _FakeClock(0.0)
+        sensor = LivenessSensor(default_threshold_s=30.0, clock=clock)
+        assert sensor.stalled_emitted is False
+        clock.t = 30.0
+        sensor.should_emit_stalled()
+        assert sensor.stalled_emitted is True
+        sensor.observe()
+        assert sensor.stalled_emitted is False

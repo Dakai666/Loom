@@ -55,6 +55,7 @@ from prompt_toolkit.styles import Style
 
 from loom.platform.cli.theme import active_palette
 from loom.platform.cli.ui import SLASH_COMMANDS, SlashCompleter
+from loom.platform.interaction_language import LivenessSensor
 
 _CLI_PALETTE = active_palette()
 _CLI_BG = _CLI_PALETTE["bg"]
@@ -296,6 +297,23 @@ class LoomApp:
         # Footer state
         self.footer = FooterState()
 
+        # Runtime-liveness sensor (#418/#419) — shared stall-DECISION logic
+        # with the Discord watchdog (#422). The footer owns the CLI
+        # observation timeline of record (the ``heartbeat_*`` fields:
+        # label/subject/elapsed/min-dwell plus last-event timestamp and
+        # per-tool threshold). ``_render_footer`` is the SINGLE point that
+        # drives the sensor: each redraw it feeds the footer's timestamp +
+        # threshold in and reads the non-latching ``is_stalled`` for the
+        # 'still waiting' prefix. The sensor is therefore a pure calculator
+        # on the CLI — there is no separate CLI-side sensor state to keep in
+        # sync, so start/touch/stop_heartbeat deliberately don't poke it.
+        # CLI suppression is the STATE gate in ``_render_footer`` (only
+        # tooling states consult the sensor, so thinking/paused never render
+        # the prefix), NOT the sensor's ``suppress`` flag — that path belongs
+        # to Discord, which lacks a state gate. Discord uses the latching
+        # ``should_emit_stalled``; the CLI uses ``is_stalled``.
+        self._liveness = LivenessSensor(default_threshold_s=30.0)
+
         # Issue #284: dedup keys already shown this session, and a master
         # toggle from `cli.transient_hints` in loom.toml (default on).
         # The toggle is set by main.py after construction so build_loom_app
@@ -354,6 +372,9 @@ class LoomApp:
         self.footer.heartbeat_started_monotonic = now
         self.footer.heartbeat_last_event_monotonic = now
         self.footer.heartbeat_stale_after_s = stale_after_s
+        # NB: the liveness sensor is driven solely from ``_render_footer``
+        # (it re-syncs from these fields each redraw), so there is nothing
+        # to poke here — see the sensor comment in ``__init__``.
         # Min-dwell guard: a stop within the next _HEARTBEAT_MIN_DWELL_S
         # seconds is held back so the user can actually see this label.
         # A new ``start_heartbeat`` arriving inside the dwell window
@@ -797,12 +818,25 @@ class LoomApp:
 
             now = _t.monotonic()
             elapsed = max(0.0, now - s.heartbeat_started_monotonic)
-            quiet_for = max(0.0, now - s.heartbeat_last_event_monotonic)
+            # The stall DECISION delegates to the shared sensor's
+            # non-latching ``is_stalled`` (threshold + observation timeline).
+            # This is the SINGLE point that drives the CLI sensor: the footer
+            # owns the observation timeline of record
+            # (``heartbeat_last_event_monotonic``, touched on every observable
+            # event) and the per-tool threshold (``heartbeat_stale_after_s``),
+            # both re-synced into the sensor here so it does the arithmetic.
+            # ``observe`` with the field's timestamp is a pure re-sync (no UI
+            # display variable is ever read). CLI suppression stays the STATE
+            # gate below: only the explicit ``stalled`` state or tooling
+            # states are eligible, so thinking/paused_blocking never render
+            # the prefix regardless of the sensor arithmetic.
+            self._liveness.set_threshold(seconds=s.heartbeat_stale_after_s)
+            self._liveness.observe(now=s.heartbeat_last_event_monotonic)
             stalled = (
                 s.heartbeat_state == "stalled"
                 or (
                     s.heartbeat_state in ("tooling", "long_tooling")
-                    and quiet_for >= s.heartbeat_stale_after_s
+                    and self._liveness.is_stalled(now=now)
                 )
             )
             prefix = "still waiting · " if stalled else ""

@@ -145,7 +145,7 @@ TurnDone → 編輯主訊息為最終文字（超過 2000 字自動分段）
 
 當有未授權的 GUARDED tool 卡在 confirm flow 時，Discord embed 切換到「⏸ 等待授權」狀態並暫停 heartbeat 更新，避免 UI 看起來像 agent thinking 但實際上是 user 該動作。
 
----
+stall 判斷邏輯與 CLI footer heartbeat 共用 `loom/platform/interaction_language.py` 的 `LivenessSensor`（單一 observation timeline、observed-vs-displayed 比對只此一處）。stall 門檻是 **per-tool** 的：long-runner（`run_bash`/`gitnexus_*`/`pytest`/`compact`）給 90s，其餘 30s；envelope 多節點時取最寬鬆者。CLI 與 Discord 因此不再各持一套 watchdog。
 
 ## 確認流程（Confirm Flow）
 
