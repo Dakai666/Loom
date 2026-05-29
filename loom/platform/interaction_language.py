@@ -7,6 +7,8 @@ and Discord without teaching the LLM how to author system status text.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -26,7 +28,9 @@ from loom.core.security.sandbox_runtime import extract_command_root
 __all__ = [
     "EnvelopeOutcome",
     "INTERACTION_LANGUAGE_INSTRUCTIONS",
+    "LivenessSensor",
     "derive_envelope_outcome",
+    "stale_threshold_for_tool",
 ]
 
 
@@ -181,3 +185,187 @@ def format_elapsed(seconds: float) -> str:
         return f"{seconds_i}s"
     minutes, sec = divmod(seconds_i, 60)
     return f"{minutes}:{sec:02d}"
+
+
+class LivenessSensor:
+    """Pure, platform-agnostic runtime-stall sensor.
+
+    Owns the single observation timeline that both the CLI footer heartbeat
+    (#418/#419) and the Discord stall watchdog (#422) previously open-coded
+    in divergent ways. The sensor consumes ONLY monotonic timestamps and
+    caller-supplied progress fingerprints — it never imports prompt_toolkit,
+    discord, or inspects any rendered/debounced UI variable. That is the
+    structural guard against codex #422's bug class: observed-vs-displayed is
+    decided here by comparing against the sensor's OWN stored observed
+    fingerprint, never against what a surface happens to have painted.
+
+    State owned:
+
+    - ``_last_observed``: monotonic timestamp of the last reset (a genuine
+      observable event).
+    - ``_last_fingerprint``: the render-agnostic string the surface computed
+      for the most-recently OBSERVED state. ``observe`` compares against this
+      to decide whether an event carries new progress.
+    - ``_stalled_emitted``: emit-once latch for the Discord watchdog
+      semantics (``should_emit_stalled``). The CLI footer reads the
+      non-latching ``is_stalled`` instead.
+    - ``_suppressed``: pause-window guard (CLI PAUSED_BLOCKING / Discord
+      ``_stall_watchdog_suppressed``).
+    - ``_active_threshold_s``: the per-tool quiet threshold currently in
+      force (set via ``set_threshold``).
+
+    Two read methods sit over one observation state. ``should_emit_stalled``
+    latches (Discord, emit-once-per-quiet-stretch); ``is_stalled`` does not
+    (CLI footer re-renders the prefix every redraw). Both share the same
+    threshold + suppression + observation-timeline arithmetic.
+
+    The monotonic ``clock`` is injectable so tests pass synthetic readings
+    instead of sleeping.
+    """
+
+    def __init__(
+        self,
+        *,
+        default_threshold_s: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._clock = clock
+        self._default_threshold_s = default_threshold_s
+        self._active_threshold_s = default_threshold_s
+        self._last_observed = clock()
+        self._last_fingerprint: str | None = None
+        self._stalled_emitted = False
+        self._suppressed = False
+
+    def _now(self, now: float | None) -> float:
+        return self._clock() if now is None else now
+
+    @property
+    def stalled_emitted(self) -> bool:
+        """Whether a stall line has been emitted for the current quiet stretch.
+
+        True between a ``should_emit_stalled`` firing and the next ``observe``
+        that resets the clock. Discord reads this to drive the overlay-clobber
+        edit gate (whether re-painting would erase the 'still waiting' line)
+        without re-deriving the latch by hand.
+        """
+        return self._stalled_emitted
+
+    def observe(
+        self,
+        *,
+        now: float | None = None,
+        fingerprint: str | None = None,
+        is_progress: bool = True,
+    ) -> bool:
+        """Record a stream event against the observation timeline.
+
+        Generalizes the old ``_event_resets_stall_clock`` helper. The surface
+        decides per-event whether the event is a candidate for resetting the
+        clock:
+
+        - ``is_progress=False`` for events that are silent-by-design (e.g.
+          Discord ``ActionStateChange``) — never resets.
+        - ``fingerprint`` is the render-agnostic string the surface computed
+          for the current observable state. The clock resets ONLY when
+          ``is_progress`` is True AND (``fingerprint`` is None OR
+          ``fingerprint != self._last_fingerprint``). This rejects the
+          synthetic ~1Hz no-op ``EnvelopeUpdated`` ticks whose fingerprint is
+          unchanged.
+
+        When a fingerprint is supplied it is stored regardless of whether the
+        clock reset, so the next comparison sees the latest observed state.
+
+        Returns True when the clock was reset (callers can mirror old
+        ``if reset:`` branches).
+        """
+        if fingerprint is not None:
+            changed = fingerprint != self._last_fingerprint
+            self._last_fingerprint = fingerprint
+        else:
+            changed = True
+        if not (is_progress and changed):
+            return False
+        self._last_observed = self._now(now)
+        self._stalled_emitted = False
+        return True
+
+    def should_emit_stalled(self, *, now: float | None = None) -> bool:
+        """Latching stall check for the Discord watchdog.
+
+        Generalizes ``_should_emit_stalled_status``. Returns False if
+        suppressed (pause window) or if the already-emitted latch is set;
+        otherwise returns whether quiet time has reached the active threshold.
+        On a True result it sets the latch internally so the caller gets
+        emit-once-per-quiet-stretch without managing the latch by hand.
+        """
+        if self._suppressed or self._stalled_emitted:
+            return False
+        if self.quiet_for(now=now) >= self._active_threshold_s:
+            self._stalled_emitted = True
+            return True
+        return False
+
+    def is_stalled(self, *, now: float | None = None) -> bool:
+        """Continuous (non-latching) stall check for the CLI footer.
+
+        Returns False if suppressed; otherwise whether quiet time has reached
+        the active threshold. Does NOT touch the latch — the CLI footer
+        re-renders the 'still waiting' prefix on every redraw rather than
+        emitting once.
+        """
+        if self._suppressed:
+            return False
+        return self.quiet_for(now=now) >= self._active_threshold_s
+
+    def quiet_for(self, *, now: float | None = None) -> float:
+        """Seconds since the last observed event, clamped to >= 0.0."""
+        return max(0.0, self._now(now) - self._last_observed)
+
+    def set_threshold(
+        self,
+        *,
+        tool_name: str | None = None,
+        seconds: float | None = None,
+    ) -> None:
+        """Set the active quiet threshold.
+
+        With ``tool_name``, looks it up via ``stale_threshold_for_tool`` (the
+        existing per-tool seam shared with the CLI). With explicit
+        ``seconds``, sets directly. With neither, resets to the default.
+        """
+        if tool_name is not None:
+            self._active_threshold_s = stale_threshold_for_tool(tool_name)
+        elif seconds is not None:
+            self._active_threshold_s = seconds
+        else:
+            self._active_threshold_s = self._default_threshold_s
+
+    def suppress(self) -> None:
+        """Enter the pause-suppression window (no stall emitted while set)."""
+        self._suppressed = True
+
+    def resume(self, *, now: float | None = None) -> None:
+        """Leave the pause-suppression window.
+
+        Clears the suppressed flag AND resets the observation clock + latch so
+        the post-resume window does not inherit pre-pause quiet time. Bind to
+        the TurnPaused try/finally as a matched pair with ``suppress`` per
+        Loom's shared-session preemption-race convention.
+        """
+        self._suppressed = False
+        self._last_observed = self._now(now)
+        self._stalled_emitted = False
+
+    def reset(self, *, now: float | None = None) -> None:
+        """Reset to a fresh quiet stretch.
+
+        ``last_observed=now``, clear the latch, clear suppression, and return
+        the threshold to the default. Used at turn start (Discord turn-begin
+        init; CLI ``start_heartbeat`` for a new state).
+        """
+        self._last_observed = self._now(now)
+        self._last_fingerprint = None
+        self._stalled_emitted = False
+        self._suppressed = False
+        self._active_threshold_s = self._default_threshold_s
