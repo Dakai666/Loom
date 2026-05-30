@@ -3405,6 +3405,9 @@ class LoomSession:
 
     @property
     def _skill_tier_snapshot(self) -> dict[str, int]:
+        # Returns the live dict, so in-place item writes during skill bootstrap
+        # (``self._skill_tier_snapshot[name] = tier``) land on the TierManager.
+        # Read-only as an attribute — never reassign the whole dict here.
         return self._tier.skill_tier_snapshot
 
     @property
