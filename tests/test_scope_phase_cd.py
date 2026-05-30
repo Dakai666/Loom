@@ -97,9 +97,9 @@ class TestFormatScopePanel:
     """Test _format_scope_panel produces correct Rich markup."""
 
     def _import_format(self):
-        # Import the static method from LoomSession
-        from loom.core.session import LoomSession
-        return LoomSession._format_scope_panel
+        # Stateless helper extracted to session_support (re-exported by session).
+        from loom.core.session import _format_scope_panel
+        return _format_scope_panel
 
     def test_legacy_no_metadata(self):
         fmt = self._import_format()
