@@ -424,6 +424,7 @@ The `doc/` directory contains full technical documentation for every subsystem:
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.3.8.2** | 2026-05-28 | Circadian autonomy lifecycle completed (PRs #459–463); cognition provider split (Codex/xAI) + model identity convergence (PR #474); CLI/Discord LivenessSensor convergence (PR #483); Discord confirm timeout fix (PR #484) |
 | **v0.3.8.1** | 2026-05-23 | Lens import family retired (`loom import` CLI · `Hermes`/`OpenAI` lenses removed); extensibility surface convergence to `@loom.tool` / `LoomPlugin` / MCP (PR #442) |
 | **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
 | **v0.3.7.5** | 2026-05-18 | OS-level sandbox for `run_bash` via Anthropic's `sandbox-runtime` — opt-in kernel-level filesystem + network confinement (Quest A · Issue #29) |
