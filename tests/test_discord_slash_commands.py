@@ -52,6 +52,7 @@ def _fake_session(
     session = MagicMock()
     session.session_id = "sess-test"
     session.model = model
+    session.current_model = lambda: session.model
     session.current_personality = personality
     session._stack = MagicMock()
     session._stack.available_personalities = MagicMock(return_value=list(available_personalities))
