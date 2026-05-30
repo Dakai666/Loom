@@ -126,6 +126,7 @@ from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
 from loom.core.memory.store import SQLiteStore
+from loom.core.tier_manager import TierManager
 
 # Stateless helpers extracted to a sibling module (see session_support.py).
 # Re-exported here so historical import paths
@@ -696,33 +697,11 @@ class LoomSession:
         # name. Skills declare ``model_tier: N`` in frontmatter; when activated,
         # the harness escalates to that tier (sticky). Agent / user can
         # downgrade explicitly. ``reminder_after_turns`` triggers a soft hint
-        # — never auto-reverts.
-        _tier_cfg = (config.get("cognition") or {}).get("tiers", {}) or {}
-        self._tier_models: dict[int, str] = {}
-        for k, v in _tier_cfg.items():
-            try:
-                tier_int = int(k)
-                if isinstance(v, str) and v.strip():
-                    self._tier_models[tier_int] = v.strip()
-            except (TypeError, ValueError):
-                continue
-        self._default_tier: int = int(_tier_cfg.get("default_tier", 1) or 1)
-        self._tier_reminder_after_turns: int = int(
-            _tier_cfg.get("reminder_after_turns", 10) or 10
-        )
-        # ``None`` = follow ``_default_tier``; integer = sticky override.
-        self._sticky_tier: int | None = None
-        self._manual_model_override: bool = False
-        # Counts consecutive turns at the *active* tier (sticky or default).
-        # Reset on tier change; surfaces in TierExpiryHint after threshold.
-        self._turns_at_current_tier: int = 0
-        # Tracks "did we already emit a reminder this sticky session?" so we
-        # don't spam the agent every turn after the threshold is hit.
-        self._tier_reminder_emitted: bool = False
-        # Issue #276: skill name → declared tier, populated during skill
-        # bootstrap. ``_compute_skill_max_tier`` reads this synchronously
-        # from inside stream_turn (procedural.get is async).
-        self._skill_tier_snapshot: dict[str, int] = {}
+        # — never auto-reverts. The state machine lives in TierManager; it reads
+        # the base model live via the getter so ``self._model`` stays the single
+        # source of truth. The leaked attribute names (``_tier_models`` etc.)
+        # remain available to CLI / Discord through read-only properties below.
+        self._tier = TierManager.from_config(config, lambda: self._model)
 
         # Issue #271: when stop_reason='max_tokens' fires after 0 tools, inject
         # a system-reminder telling the agent to spill in-flight reasoning to
@@ -3404,21 +3383,41 @@ class LoomSession:
         )
         self._telemetry.mark_dirty()
 
+    # ------------------------------------------------------------------
+    # Tier / model resolution — delegates to TierManager (#276). The state
+    # machine lives in tier_manager.py; these stay on the session because
+    # they are part of its public surface (CLI / Discord reach into them)
+    # and because _set_sticky_tier owns the telemetry side effect.
+    # The leaked private-attribute names are preserved as read-only
+    # properties so external callers keep working unchanged.
+    # ------------------------------------------------------------------
+    @property
+    def _tier_models(self) -> dict[int, str]:
+        return self._tier.tier_models
+
+    @property
+    def _sticky_tier(self) -> int | None:
+        return self._tier.sticky_tier
+
+    @property
+    def _default_tier(self) -> int:
+        return self._tier.default_tier
+
+    @property
+    def _skill_tier_snapshot(self) -> dict[str, int]:
+        return self._tier.skill_tier_snapshot
+
+    @property
+    def _turns_at_current_tier(self) -> int:
+        return self._tier.turns_at_current_tier
+
     def _active_tier(self) -> int:
         """Effective tier this turn — sticky override or default."""
-        return self._sticky_tier if self._sticky_tier is not None else self._default_tier
+        return self._tier.active_tier()
 
     def _active_model(self) -> str:
-        """Resolve the model name for the active tier.
-
-        A manual ``/model`` selection wins until the user or agent explicitly
-        changes tier again. Otherwise, falls back to ``self._model`` when the
-        tier system isn't configured for this tier.
-        """
-        if getattr(self, "_manual_model_override", False):
-            return self._model
-        tier = self._active_tier()
-        return self._tier_models.get(tier, self._model)
+        """Resolve the model name for the active tier (delegates to TierManager)."""
+        return self._tier.active_model()
 
     def current_model(self) -> str:
         """Public single source of truth for the model serving the next turn.
@@ -3457,64 +3456,25 @@ class LoomSession:
         ``source`` is one of ``"skill"`` / ``"agent"`` / ``"user"`` / ``"clear"``
         and lands in the event for telemetry / graphify analysis.
         """
-        old_tier = self._active_tier()
-        # Normalize: setting sticky to default_tier is equivalent to clearing,
-        # so the "no override" state remains canonical.
-        if new_tier == self._default_tier:
-            new_tier = None
-        if new_tier == self._sticky_tier:
-            return None  # no-op
-        self._manual_model_override = False
-        self._sticky_tier = new_tier
-        self._turns_at_current_tier = 0
-        self._tier_reminder_emitted = False
-        active = self._active_tier()
-        if active == old_tier:
-            return None
-        # Issue #279/#471: refresh runtime_identity on tier switch through the
-        # single helper so it stays consistent with start / set_model.
-        self._refresh_runtime_identity()
-        return TierChanged(
-            from_tier=old_tier,
-            to_tier=active,
-            from_model=self._tier_models.get(old_tier, self._model),
-            to_model=self._tier_models.get(active, self._model),
-            source=source,
-            reason=reason,
-        )
+        ev = self._tier.set_sticky(new_tier, reason=reason, source=source)
+        if ev is not None:
+            # Issue #279/#471: refresh runtime_identity on tier switch so it
+            # stays consistent with start / set_model.
+            self._refresh_runtime_identity()
+        return ev
 
     def _tick_tier_counter(self) -> "TierExpiryHint | None":
         """Increment the per-turn counter for the active tier and return a
-        ``TierExpiryHint`` event the first time the threshold is crossed
-        within a sticky session.
-
-        Called once per ``stream_turn`` completion (immediately before
-        ``TurnDone``). Skips emission when:
-          - We're on the default tier (no sticky to expire)
-          - Threshold isn't configured (``<= 0``)
-          - The hint has already been emitted this sticky session
+        ``TierExpiryHint`` the first time the threshold is crossed within a
+        sticky session. Called once per ``stream_turn`` completion.
         """
-        self._turns_at_current_tier += 1
-        if self._sticky_tier is None:
-            return None
-        if self._tier_reminder_after_turns <= 0:
-            return None
-        if self._tier_reminder_emitted:
-            return None
-        if self._turns_at_current_tier < self._tier_reminder_after_turns:
-            return None
-        self._tier_reminder_emitted = True
-        return TierExpiryHint(
-            tier=self._sticky_tier,
-            model=self._active_model(),
-            turns_used=self._turns_at_current_tier,
-            threshold=self._tier_reminder_after_turns,
-        )
+        return self._tier.tick_counter()
 
     def _compute_skill_max_tier(self) -> int:
-        """Take max ``model_tier`` across currently-activated skills.
+        """Max ``model_tier`` across currently-activated skills (#276).
 
-        Skills with no declared tier contribute 0, never escalating.
+        The activated-skill list comes from the session-owned outcome tracker;
+        the tier lookup lives in TierManager's snapshot.
         """
         tracker = getattr(self, "_skill_outcome_tracker", None)
         if tracker is None:
@@ -3523,21 +3483,7 @@ class LoomSession:
             names = tracker.activated_skills
         except Exception:
             return 0
-        if not names:
-            return 0
-        max_tier = 0
-        for name in names:
-            try:
-                # Cached lookup; ProceduralMemory.get is async, so we use the
-                # in-memory snapshot if available. The snapshot is populated
-                # at session start by _refresh_memory_index.
-                snapshot = getattr(self, "_skill_tier_snapshot", {})
-                tier = snapshot.get(name, 0)
-            except Exception:
-                tier = 0
-            if tier > max_tier:
-                max_tier = tier
-        return max_tier
+        return self._tier.skill_max_tier(names)
 
     def _should_continue_reasoning(self, stop_reason: str, tool_count: int) -> bool:
         """Decide whether to inject a continuation reminder for #271.
@@ -4644,8 +4590,8 @@ class LoomSession:
                 self.router = rebuilt
                 ok = True
         if ok:
-            self._model = model
-            self._manual_model_override = True
+            self._model = model  # base model — TierManager reads it live
+            self._tier.mark_manual_override()
             # Keep the identity telemetry (agent_health) in lock-step with the
             # model that will actually serve — set_model previously skipped this.
             self._refresh_runtime_identity()

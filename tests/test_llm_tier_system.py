@@ -20,6 +20,7 @@ import pytest
 
 from loom.core.events import TierChanged, TierExpiryHint
 from loom.core.session import LoomSession, _parse_skill_frontmatter
+from loom.core.tier_manager import TierManager
 from loom.core.memory.procedural import SkillGenome
 from loom.platform.cli.tools import make_request_model_tier_tool, make_clear_model_tier_tool
 
@@ -91,6 +92,32 @@ class TestSkillGenomeStores:
 # Session state methods (duck-typed; mirrors test_observation_masking pattern)
 # ---------------------------------------------------------------------------
 
+class _FakeSession:
+    """Stand-in that mirrors LoomSession's tier surface faithfully.
+
+    The tier state machine now lives in TierManager (loom/core/tier_manager.py);
+    LoomSession's tier methods are thin delegators + read-only properties over
+    ``self._tier``. We reuse the *real* delegators and property logic here (no
+    re-implementation) over a real TierManager, so these tests exercise the
+    actual session surface AND the real state machine — including the leaked
+    private-attribute reads (``session._tier_models`` etc.) that the CLI tools
+    perform. State assertions read through ``s._tier``.
+    """
+
+    _tier_models = property(lambda self: self._tier.tier_models)
+    _sticky_tier = property(lambda self: self._tier.sticky_tier)
+    _default_tier = property(lambda self: self._tier.default_tier)
+    _turns_at_current_tier = property(lambda self: self._tier.turns_at_current_tier)
+    _skill_tier_snapshot = property(lambda self: self._tier.skill_tier_snapshot)
+
+    _active_tier = LoomSession._active_tier
+    _active_model = LoomSession._active_model
+    _set_sticky_tier = LoomSession._set_sticky_tier
+    _tick_tier_counter = LoomSession._tick_tier_counter
+    _compute_skill_max_tier = LoomSession._compute_skill_max_tier
+    _refresh_runtime_identity = LoomSession._refresh_runtime_identity
+
+
 def _mock_session(
     *,
     tier_models: dict[int, str] | None = None,
@@ -102,34 +129,23 @@ def _mock_session(
     turns_at_current_tier: int = 0,
     reminder_emitted: bool = False,
     base_model: str = "minimax-m2.7",
-) -> SimpleNamespace:
-    """Build a stand-in exposing the surface the tier methods read.
-
-    LoomSession's tier methods call each other (``_active_model`` calls
-    ``_active_tier``), so we must bind them onto the mock as bound methods
-    rather than calling unbound. Same idea as ``test_observation_masking``
-    but with multi-method binding.
-    """
-    s = SimpleNamespace(
-        _tier_models=tier_models or {1: "minimax-m2.7", 2: "deepseek-v4-pro"},
-        _default_tier=default_tier,
-        _sticky_tier=sticky_tier,
-        _skill_tier_snapshot=skill_snapshot or {},
-        _skill_outcome_tracker=SimpleNamespace(
-            activated_skills=activated_skills or [],
-        ),
-        _tier_reminder_after_turns=reminder_threshold,
-        _turns_at_current_tier=turns_at_current_tier,
-        _tier_reminder_emitted=reminder_emitted,
-        _model=base_model,
+) -> _FakeSession:
+    """Build a ``_FakeSession`` backed by a real TierManager."""
+    s = _FakeSession()
+    s._model = base_model
+    s._telemetry = None
+    s._skill_outcome_tracker = SimpleNamespace(activated_skills=activated_skills or [])
+    tier = TierManager(
+        base_model_getter=lambda: s._model,
+        tier_models=tier_models or {1: "minimax-m2.7", 2: "deepseek-v4-pro"},
+        default_tier=default_tier,
+        reminder_after_turns=reminder_threshold,
     )
-    # Bind the methods we exercise so internal self._x() calls resolve.
-    for attr in (
-        "_active_tier", "_active_model", "_set_sticky_tier",
-        "_compute_skill_max_tier", "_tick_tier_counter",
-        "_refresh_runtime_identity",
-    ):
-        setattr(s, attr, getattr(LoomSession, attr).__get__(s))
+    tier.sticky_tier = sticky_tier
+    tier.turns_at_current_tier = turns_at_current_tier
+    tier.reminder_emitted = reminder_emitted
+    tier.skill_tier_snapshot = skill_snapshot or {}
+    s._tier = tier
     return s
 
 
@@ -160,7 +176,7 @@ class TestActiveTierAndModel:
 
     def test_manual_model_override_wins_over_tier(self):
         s = _mock_session(sticky_tier=2, base_model="codex/gpt-5.5")
-        s._manual_model_override = True
+        s._tier.manual_override = True
         assert s._active_model() == "codex/gpt-5.5"
 
     def test_unknown_tier_falls_back_to_base_model(self):
@@ -173,7 +189,7 @@ class TestSetStickyTier:
     def test_set_default_tier_normalizes_to_none(self):
         s = _mock_session(sticky_tier=2)
         ev = s._set_sticky_tier(1, reason="done", source="agent")
-        assert s._sticky_tier is None  # normalized
+        assert s._tier.sticky_tier is None  # normalized
         assert ev is not None
         assert isinstance(ev, TierChanged)
         assert ev.from_tier == 2
@@ -189,7 +205,7 @@ class TestSetStickyTier:
     def test_escalation_emits_event(self):
         s = _mock_session(sticky_tier=None, default_tier=1)
         ev = s._set_sticky_tier(2, reason="hard", source="skill")
-        assert s._sticky_tier == 2
+        assert s._tier.sticky_tier == 2
         assert ev is not None
         assert ev.from_tier == 1
         assert ev.to_tier == 2
@@ -199,7 +215,7 @@ class TestSetStickyTier:
     def test_explicit_clear_via_none(self):
         s = _mock_session(sticky_tier=2)
         ev = s._set_sticky_tier(None, reason="ok", source="clear")
-        assert s._sticky_tier is None
+        assert s._tier.sticky_tier is None
         assert ev is not None
         assert ev.to_tier == 1  # default
 
@@ -208,14 +224,14 @@ class TestSetStickyTier:
             sticky_tier=None, turns_at_current_tier=7, reminder_emitted=True,
         )
         s._set_sticky_tier(2, reason="x", source="skill")
-        assert s._turns_at_current_tier == 0
-        assert s._tier_reminder_emitted is False
+        assert s._tier.turns_at_current_tier == 0
+        assert s._tier.reminder_emitted is False
 
     def test_tier_change_clears_manual_model_override(self):
         s = _mock_session(sticky_tier=None, base_model="codex/gpt-5.5")
-        s._manual_model_override = True
+        s._tier.manual_override = True
         s._set_sticky_tier(2, reason="x", source="user")
-        assert s._manual_model_override is False
+        assert s._tier.manual_override is False
         assert s._active_model() == "deepseek-v4-pro"
 
 
@@ -252,7 +268,7 @@ class TestTickTierCounter:
         s = _mock_session(sticky_tier=None)
         ev = s._tick_tier_counter()
         assert ev is None
-        assert s._turns_at_current_tier == 1  # still increments
+        assert s._tier.turns_at_current_tier == 1  # still increments
 
     def test_below_threshold_no_hint(self):
         s = _mock_session(
@@ -260,7 +276,7 @@ class TestTickTierCounter:
         )
         ev = s._tick_tier_counter()
         assert ev is None
-        assert s._turns_at_current_tier == 6
+        assert s._tier.turns_at_current_tier == 6
 
     def test_at_threshold_emits_hint_once(self):
         s = _mock_session(
@@ -271,7 +287,7 @@ class TestTickTierCounter:
         assert ev.tier == 2
         assert ev.turns_used == 10
         assert ev.threshold == 10
-        assert s._tier_reminder_emitted is True
+        assert s._tier.reminder_emitted is True
 
         # Subsequent ticks don't re-emit
         ev2 = s._tick_tier_counter()
@@ -321,7 +337,7 @@ class TestRequestModelTierTool:
             "request_model_tier", tier=2, reason="multi-constraint puzzle",
         ))
         assert result.success
-        assert s._sticky_tier == 2
+        assert s._tier.sticky_tier == 2
         # TierChanged was queued
         assert not s._lifecycle_events.empty()
         ev = s._lifecycle_events.get_nowait()
@@ -337,7 +353,7 @@ class TestRequestModelTierTool:
             "clear_model_tier", reason="phase done",
         ))
         assert result.success
-        assert s._sticky_tier is None
+        assert s._tier.sticky_tier is None
         assert "cleared" in result.output.lower()
 
     async def test_clear_model_tier_rejects_empty_reason(self):

@@ -10,6 +10,22 @@ import pytest
 import pytest_asyncio
 
 import loom as loom_pkg
+from loom.core.tier_manager import TierManager
+
+
+def _bare_tier(session, *, tier_models=None, default_tier=1):
+    """Attach a TierManager to a bare ``LoomSession.__new__`` instance.
+
+    set_model() / the runtime-identity path delegate to ``self._tier``; tests
+    that drive a hand-built session need it wired.
+    """
+    session._tier = TierManager(
+        base_model_getter=lambda: session._model,
+        tier_models=tier_models or {},
+        default_tier=default_tier,
+        reminder_after_turns=10,
+    )
+    return session._tier
 
 
 @pytest.fixture(autouse=True)
@@ -142,13 +158,14 @@ class TestSetModel:
         session = LoomSession.__new__(LoomSession)
         session.router = initial_router
         session._model = "MiniMax-M2.7"
+        tier = _bare_tier(session)
 
         assert session.set_model("codex/gpt-5.5") is True
         initial_router.switch_model.assert_called_once_with("codex/gpt-5.5")
         codex_router.switch_model.assert_called_once_with("codex/gpt-5.5")
         assert session.router is codex_router
         assert session.model == "codex/gpt-5.5"
-        assert session._manual_model_override is True
+        assert tier.manual_override is True
 
     def test_lazy_registers_xai_provider_on_switch(self, monkeypatch: pytest.MonkeyPatch):
         # #471: the rebuild-retry used to be codex-only, so /model xai/... left
@@ -165,6 +182,7 @@ class TestSetModel:
         session = LoomSession.__new__(LoomSession)
         session.router = initial_router
         session._model = "MiniMax-M2.7"
+        _bare_tier(session)
 
         assert session.set_model("xai/grok-4.3") is True
         assert session.router is xai_router
@@ -224,9 +242,7 @@ class TestSetModel:
         session = LoomSession.__new__(LoomSession)
         session.router = router
         session._model = "MiniMax-M2.7"
-        session._sticky_tier = None
-        session._default_tier = 1
-        session._tier_models = {}
+        _bare_tier(session)
         ri = MagicMock()
         telemetry = MagicMock()
         telemetry.get.return_value = ri
