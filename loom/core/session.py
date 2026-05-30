@@ -33,51 +33,9 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from dotenv import dotenv_values
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
-
-_OUTCOME_MARKERS: dict[str, str] = {
-    "✓": "fulfilled",
-    "◐": "partial",
-    "⚠": "unfulfilled",
-    "↪": "pivoted",
-    "🛑": "aborted",
-}
-
-
-def _clean_envelope_metadata_line(text: str, *, max_len: int = 140) -> str:
-    line = " ".join(str(text or "").strip().split())
-    if len(line) <= max_len:
-        return line
-    return line[: max_len - 1] + "…"
-
-
-def _iter_nonempty_lines(text: str):
-    for line in str(text or "").splitlines():
-        line = line.strip()
-        if line:
-            yield line
-
-
-def _extract_envelope_intent_marker(text: str) -> str:
-    for line in _iter_nonempty_lines(text):
-        if line.startswith("▸"):
-            return _clean_envelope_metadata_line(line.removeprefix("▸"))
-    return ""
-
-
-def _extract_envelope_outcome_marker(text: str) -> tuple[str, str]:
-    for line in _iter_nonempty_lines(text):
-        marker = line[0]
-        outcome = _OUTCOME_MARKERS.get(marker)
-        if outcome is None:
-            continue
-        summary = _clean_envelope_metadata_line(line[1:].lstrip("\ufe0f"))
-        return outcome, summary
-    return "", ""
-
 
 from loom.core.config import load_loom_config as _load_loom_config  # re-exported for tests/diagnostic/cli
 from loom.core.diagnostic import DiagnosticReport, StartupDiagnostic
@@ -168,6 +126,27 @@ from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
 from loom.core.memory.store import SQLiteStore
+from loom.core.tier_manager import TierManager
+
+# Stateless helpers extracted to a sibling module (see session_support.py).
+# Re-exported here so historical import paths
+# (``from loom.core.session import _load_env`` etc.) keep working.
+from loom.core.session_support import (  # noqa: F401  (re-export)
+    _OUTCOME_MARKERS,
+    _DEFAULT_OUTPUT_MAX_TOKENS,
+    _MAX_REASONING_CONTINUATIONS,
+    _build_jobs_inject_message,
+    _clean_envelope_metadata_line,
+    _extract_envelope_intent_marker,
+    _extract_envelope_outcome_marker,
+    _find_partial_tag_suffix,
+    _format_scope_panel,
+    _format_scope_summary_plain,
+    _iter_nonempty_lines,
+    _load_env,
+    _parse_skill_frontmatter,
+    _resolve_output_max_tokens,
+)
 
 console = Console(highlight=False)
 logger = logging.getLogger(__name__)
@@ -322,194 +301,8 @@ async def compress_session(
 
 
 # ---------------------------------------------------------------------------
-# Think-block filter helpers
-# ---------------------------------------------------------------------------
-
-
-def _find_partial_tag_suffix(text: str, tag: str) -> int:
-    """Return the length of the longest suffix of *text* that is a prefix of *tag*.
-
-    Used to detect `<think>` / `</think>` tags split across streaming chunks so
-    we can hold the partial tag in a lookahead buffer instead of emitting it.
-    """
-    for n in range(min(len(tag) - 1, len(text)), 0, -1):
-        if text[-n:] == tag[:n]:
-            return n
-    return 0
-
-
-# ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
-
-
-# Issue #181: per-model output cap. Different providers have very different
-# output ceilings (MiniMax-M2.7 ~64K, Claude Sonnet 4.6 ~64K, smaller local
-# models often 4-8K) so a single hardcoded value was either wasteful or
-# clipping long tool-loop turns. Resolved once at session start.
-_DEFAULT_OUTPUT_MAX_TOKENS = 8192
-
-# Issue #271: max consecutive max_tokens-with-zero-tools recoveries within a
-# single stream_turn() before falling through to TurnDropped. Two attempts
-# is empirically enough for deep-reasoning prompts (10-question deductive
-# quizzes) without risking unbounded loops on pathologically long inputs.
-_MAX_REASONING_CONTINUATIONS = 2
-
-
-def _resolve_output_max_tokens(
-    cfg: dict, model: str, router: "LLMRouter | None" = None,
-) -> int:
-    """Return the output-token cap for *model*.
-
-    Precedence (Issue #272):
-      1. ``[cognition.output_max_tokens_overrides][<model>]`` — explicit
-         user override, case-sensitive (intentional: user typed it).
-      2. ``[cognition].output_max_tokens`` — global user-set cap.
-      3. **Provider-declared native limit** — provider class knows what its
-         own models support. Lookup is case-insensitive. New models become
-         available without loom.toml edits.
-      4. ``_DEFAULT_OUTPUT_MAX_TOKENS`` — last-resort fallback.
-
-    The provider-native step (3) is the one that lets users drop the
-    overrides table entirely once their models are in the provider's
-    ``NATIVE_OUTPUT_LIMITS``.
-    """
-    cog = cfg.get("cognition", {}) or {}
-    overrides = cog.get("output_max_tokens_overrides", {}) or {}
-    if model in overrides:
-        try:
-            return int(overrides[model])
-        except (TypeError, ValueError):
-            pass
-    default = cog.get("output_max_tokens")
-    if default is not None:
-        try:
-            return int(default)
-        except (TypeError, ValueError):
-            pass
-    # Step 3 — ask the provider what its native ceiling is for this model.
-    if router is not None:
-        try:
-            provider = router.get_provider(model)
-            native = provider.native_max_tokens(model)
-            if native is not None and native > 0:
-                return int(native)
-        except Exception:
-            # Routing failures or missing provider shouldn't break the call;
-            # fall through to the constant default.
-            pass
-    return _DEFAULT_OUTPUT_MAX_TOKENS
-
-
-def _load_env(project_root: Path | None = None) -> dict[str, str]:
-    """Load .env from project root or current directory."""
-    search = [
-        Path.cwd() / ".env",
-        Path(__file__).parents[2] / ".env",
-    ]
-    if project_root:
-        search.insert(0, project_root / ".env")
-
-    for path in search:
-        if path.exists():
-            return dict(dotenv_values(str(path)))
-    return {}
-
-
-def _parse_skill_frontmatter(
-    raw: str,
-) -> tuple[str, str, list[str], list[dict], int | None]:
-    """
-    Parse YAML frontmatter from a SKILL.md file.
-
-    Returns ``(name, description, tags, precondition_check_refs, model_tier)``.
-    On parse failure returns empty strings / lists / ``None``.
-    Follows Agent Skills spec lenient validation: best-effort parsing.
-
-    Issue #276: ``model_tier`` is an optional positive int declaring the
-    LLM tier this skill expects (1 = daily, 2 = deep reasoning, …). The
-    harness escalates the active model when the skill is loaded. ``None``
-    means "no opinion".
-    """
-    if not raw.startswith("---"):
-        return "", "", [], [], None
-
-    parts = raw.split("---", 2)
-    if len(parts) < 3:
-        return "", "", [], [], None
-
-    yaml_text = parts[1].strip()
-    try:
-        import yaml
-        data = yaml.safe_load(yaml_text)
-        if not isinstance(data, dict):
-            return "", "", [], [], None
-    except Exception:
-        return "", "", [], [], None
-
-    name = str(data.get("name", "")).strip()
-    description = str(data.get("description", "")).strip()
-    tags = data.get("tags", [])
-    if isinstance(tags, str):
-        tags = [t.strip() for t in tags.split(",")]
-    elif not isinstance(tags, list):
-        tags = []
-
-    # Issue #64 Phase B: skill-declared precondition checks
-    pc_refs = data.get("precondition_checks", [])
-    if not isinstance(pc_refs, list):
-        pc_refs = []
-    # Validate each entry has at minimum 'ref' and 'applies_to'
-    valid_refs: list[dict] = []
-    for entry in pc_refs:
-        if isinstance(entry, dict) and entry.get("ref") and entry.get("applies_to"):
-            valid_refs.append(entry)
-
-    # Issue #276: skill-declared LLM tier requirement
-    raw_tier = data.get("model_tier")
-    model_tier: int | None
-    try:
-        model_tier = int(raw_tier) if raw_tier is not None else None
-        if model_tier is not None and model_tier < 1:
-            model_tier = None  # invalid; treat as unspecified
-    except (TypeError, ValueError):
-        model_tier = None
-
-    return name, description, tags, valid_refs, model_tier
-
-
-def _build_jobs_inject_message(jobstore: Any) -> str | None:
-    """Issue #154: render a pre-final-response reminder about background jobs.
-
-    Returns None when there is nothing to report — no new completions and no
-    still-running jobs. Only items finished since the last call are listed
-    under 'Completed since last turn' (JobStore.reap_since_last is idempotent).
-    """
-    new_finished, running = jobstore.reap_since_last()
-    if not new_finished and not running:
-        return None
-
-    lines = ["[Jobs update]"]
-    if new_finished:
-        lines.append("Completed since last turn:")
-        for j in new_finished:
-            if j.state.value == "done":
-                ref = f"scratchpad://{j.result_ref}" if j.result_ref else "(no output)"
-                size = f" ({j.result_summary})" if j.result_summary else ""
-                lines.append(f"  - {j.id} ({j.fn_name}): done → {ref}{size}")
-            elif j.state.value == "failed":
-                lines.append(f"  - {j.id} ({j.fn_name}): failed — {j.error}")
-            elif j.state.value == "cancelled":
-                lines.append(f"  - {j.id} ({j.fn_name}): cancelled — {j.cancel_reason}")
-    if running:
-        if new_finished:
-            lines.append("")
-        lines.append("Still running:")
-        for j in running:
-            elapsed = j.elapsed_seconds
-            elapsed_str = f" ({elapsed:.0f}s elapsed)" if elapsed else ""
-            lines.append(f"  - {j.id} ({j.fn_name}): {j.state.value}{elapsed_str}")
-    return "\n".join(lines)
 
 
 def build_router(active_model: str | None = None) -> LLMRouter:
@@ -904,33 +697,11 @@ class LoomSession:
         # name. Skills declare ``model_tier: N`` in frontmatter; when activated,
         # the harness escalates to that tier (sticky). Agent / user can
         # downgrade explicitly. ``reminder_after_turns`` triggers a soft hint
-        # — never auto-reverts.
-        _tier_cfg = (config.get("cognition") or {}).get("tiers", {}) or {}
-        self._tier_models: dict[int, str] = {}
-        for k, v in _tier_cfg.items():
-            try:
-                tier_int = int(k)
-                if isinstance(v, str) and v.strip():
-                    self._tier_models[tier_int] = v.strip()
-            except (TypeError, ValueError):
-                continue
-        self._default_tier: int = int(_tier_cfg.get("default_tier", 1) or 1)
-        self._tier_reminder_after_turns: int = int(
-            _tier_cfg.get("reminder_after_turns", 10) or 10
-        )
-        # ``None`` = follow ``_default_tier``; integer = sticky override.
-        self._sticky_tier: int | None = None
-        self._manual_model_override: bool = False
-        # Counts consecutive turns at the *active* tier (sticky or default).
-        # Reset on tier change; surfaces in TierExpiryHint after threshold.
-        self._turns_at_current_tier: int = 0
-        # Tracks "did we already emit a reminder this sticky session?" so we
-        # don't spam the agent every turn after the threshold is hit.
-        self._tier_reminder_emitted: bool = False
-        # Issue #276: skill name → declared tier, populated during skill
-        # bootstrap. ``_compute_skill_max_tier`` reads this synchronously
-        # from inside stream_turn (procedural.get is async).
-        self._skill_tier_snapshot: dict[str, int] = {}
+        # — never auto-reverts. The state machine lives in TierManager; it reads
+        # the base model live via the getter so ``self._model`` stays the single
+        # source of truth. The leaked attribute names (``_tier_models`` etc.)
+        # remain available to CLI / Discord through read-only properties below.
+        self._tier = TierManager.from_config(config, lambda: self._model)
 
         # Issue #271: when stop_reason='max_tokens' fires after 0 tools, inject
         # a system-reminder telling the agent to spill in-flight reasoning to
@@ -3612,21 +3383,44 @@ class LoomSession:
         )
         self._telemetry.mark_dirty()
 
+    # ------------------------------------------------------------------
+    # Tier / model resolution — delegates to TierManager (#276). The state
+    # machine lives in tier_manager.py; these stay on the session because
+    # they are part of its public surface (CLI / Discord reach into them)
+    # and because _set_sticky_tier owns the telemetry side effect.
+    # The leaked private-attribute names are preserved as read-only
+    # properties so external callers keep working unchanged.
+    # ------------------------------------------------------------------
+    @property
+    def _tier_models(self) -> dict[int, str]:
+        return self._tier.tier_models
+
+    @property
+    def _sticky_tier(self) -> int | None:
+        return self._tier.sticky_tier
+
+    @property
+    def _default_tier(self) -> int:
+        return self._tier.default_tier
+
+    @property
+    def _skill_tier_snapshot(self) -> dict[str, int]:
+        # Returns the live dict, so in-place item writes during skill bootstrap
+        # (``self._skill_tier_snapshot[name] = tier``) land on the TierManager.
+        # Read-only as an attribute — never reassign the whole dict here.
+        return self._tier.skill_tier_snapshot
+
+    @property
+    def _turns_at_current_tier(self) -> int:
+        return self._tier.turns_at_current_tier
+
     def _active_tier(self) -> int:
         """Effective tier this turn — sticky override or default."""
-        return self._sticky_tier if self._sticky_tier is not None else self._default_tier
+        return self._tier.active_tier()
 
     def _active_model(self) -> str:
-        """Resolve the model name for the active tier.
-
-        A manual ``/model`` selection wins until the user or agent explicitly
-        changes tier again. Otherwise, falls back to ``self._model`` when the
-        tier system isn't configured for this tier.
-        """
-        if getattr(self, "_manual_model_override", False):
-            return self._model
-        tier = self._active_tier()
-        return self._tier_models.get(tier, self._model)
+        """Resolve the model name for the active tier (delegates to TierManager)."""
+        return self._tier.active_model()
 
     def current_model(self) -> str:
         """Public single source of truth for the model serving the next turn.
@@ -3665,64 +3459,25 @@ class LoomSession:
         ``source`` is one of ``"skill"`` / ``"agent"`` / ``"user"`` / ``"clear"``
         and lands in the event for telemetry / graphify analysis.
         """
-        old_tier = self._active_tier()
-        # Normalize: setting sticky to default_tier is equivalent to clearing,
-        # so the "no override" state remains canonical.
-        if new_tier == self._default_tier:
-            new_tier = None
-        if new_tier == self._sticky_tier:
-            return None  # no-op
-        self._manual_model_override = False
-        self._sticky_tier = new_tier
-        self._turns_at_current_tier = 0
-        self._tier_reminder_emitted = False
-        active = self._active_tier()
-        if active == old_tier:
-            return None
-        # Issue #279/#471: refresh runtime_identity on tier switch through the
-        # single helper so it stays consistent with start / set_model.
-        self._refresh_runtime_identity()
-        return TierChanged(
-            from_tier=old_tier,
-            to_tier=active,
-            from_model=self._tier_models.get(old_tier, self._model),
-            to_model=self._tier_models.get(active, self._model),
-            source=source,
-            reason=reason,
-        )
+        ev = self._tier.set_sticky(new_tier, reason=reason, source=source)
+        if ev is not None:
+            # Issue #279/#471: refresh runtime_identity on tier switch so it
+            # stays consistent with start / set_model.
+            self._refresh_runtime_identity()
+        return ev
 
     def _tick_tier_counter(self) -> "TierExpiryHint | None":
         """Increment the per-turn counter for the active tier and return a
-        ``TierExpiryHint`` event the first time the threshold is crossed
-        within a sticky session.
-
-        Called once per ``stream_turn`` completion (immediately before
-        ``TurnDone``). Skips emission when:
-          - We're on the default tier (no sticky to expire)
-          - Threshold isn't configured (``<= 0``)
-          - The hint has already been emitted this sticky session
+        ``TierExpiryHint`` the first time the threshold is crossed within a
+        sticky session. Called once per ``stream_turn`` completion.
         """
-        self._turns_at_current_tier += 1
-        if self._sticky_tier is None:
-            return None
-        if self._tier_reminder_after_turns <= 0:
-            return None
-        if self._tier_reminder_emitted:
-            return None
-        if self._turns_at_current_tier < self._tier_reminder_after_turns:
-            return None
-        self._tier_reminder_emitted = True
-        return TierExpiryHint(
-            tier=self._sticky_tier,
-            model=self._active_model(),
-            turns_used=self._turns_at_current_tier,
-            threshold=self._tier_reminder_after_turns,
-        )
+        return self._tier.tick_counter()
 
     def _compute_skill_max_tier(self) -> int:
-        """Take max ``model_tier`` across currently-activated skills.
+        """Max ``model_tier`` across currently-activated skills (#276).
 
-        Skills with no declared tier contribute 0, never escalating.
+        The activated-skill list comes from the session-owned outcome tracker;
+        the tier lookup lives in TierManager's snapshot.
         """
         tracker = getattr(self, "_skill_outcome_tracker", None)
         if tracker is None:
@@ -3731,21 +3486,7 @@ class LoomSession:
             names = tracker.activated_skills
         except Exception:
             return 0
-        if not names:
-            return 0
-        max_tier = 0
-        for name in names:
-            try:
-                # Cached lookup; ProceduralMemory.get is async, so we use the
-                # in-memory snapshot if available. The snapshot is populated
-                # at session start by _refresh_memory_index.
-                snapshot = getattr(self, "_skill_tier_snapshot", {})
-                tier = snapshot.get(name, 0)
-            except Exception:
-                tier = 0
-            if tier > max_tier:
-                max_tier = tier
-        return max_tier
+        return self._tier.skill_max_tier(names)
 
     def _should_continue_reasoning(self, stop_reason: str, tool_count: int) -> bool:
         """Decide whether to inject a continuation reminder for #271.
@@ -4456,133 +4197,6 @@ class LoomSession:
             grants=summaries,
         )
 
-    @staticmethod
-    def _format_scope_panel(call: ToolCall) -> str:
-        """
-        Build a Rich-formatted string describing scope verdict + diff.
-
-        Phase C (Issue #45): when scope metadata is available, the confirm
-        prompt shows structured information instead of raw args.
-        """
-        from loom.core.harness.scope import (
-            DiffReason, PermissionVerdict, ScopeDiff, ScopeRequest,
-        )
-
-        verdict = call.metadata.get("scope_verdict")
-        diff: ScopeDiff | None = call.metadata.get("scope_diff")
-        scope_req: ScopeRequest | None = call.metadata.get("scope_request")
-
-        if verdict is None or scope_req is None:
-            # Legacy path — no scope metadata available.
-            # Format args with smart truncation so long paths remain readable.
-            arg_lines: list[str] = []
-            for k, v in call.args.items():
-                if isinstance(v, str):
-                    display = v if len(v) <= 120 else v[:40] + "…" + v[-40:]
-                    arg_lines.append(f"  [cyan]{k}[/cyan]: {display}")
-                else:
-                    arg_lines.append(f"  [cyan]{k}[/cyan]: {v!r}")
-            args_display = "\n".join(arg_lines) if arg_lines else "  (no args)"
-            return (
-                f"[#c8a464]{call.tool_name}[/#c8a464]  {call.trust_level.label}\n"
-                f"{args_display}"
-            )
-
-        # --- Verdict-aware header ---
-        _REASON_LABELS: dict[DiffReason, str] = {
-            DiffReason.FIRST_TIME: "First time accessing this resource",
-            DiffReason.SELECTOR_EXPANSION: "Expanding beyond previously approved scope",
-            DiffReason.CONSTRAINT_EXPANSION: "Exceeding previously approved limits",
-            DiffReason.RESOURCE_TYPE_NEW: "New resource type not previously authorized",
-        }
-
-        _VERDICT_TITLES: dict[PermissionVerdict, tuple[str, str]] = {
-            PermissionVerdict.CONFIRM: ("Tool requires confirmation", "yellow"),
-            PermissionVerdict.EXPAND_SCOPE: ("Scope expansion required", "red"),
-        }
-        title_text, border = _VERDICT_TITLES.get(
-            verdict, ("Tool requires confirmation", "yellow"),
-        )
-
-        lines: list[str] = [
-            f"[#c8a464]{call.tool_name}[/#c8a464]  {call.trust_level.label}",
-        ]
-
-        # Scope summary: what the tool wants to access
-        for req in scope_req.requirements:
-            lines.append(
-                f"  [cyan]{req.resource}[/cyan]:{req.action} → "
-                f"[bold]{req.selector}[/bold]"
-            )
-            if req.constraints.get("scope_unknown"):
-                lines.append("  [yellow]⚠ scope could not be fully resolved[/yellow]")
-
-        # Diff reason
-        if diff is not None and not diff.is_fully_covered:
-            reason_label = _REASON_LABELS.get(diff.reason, str(diff.reason.value))
-            lines.append(f"\n[dim]{reason_label}[/dim]")
-
-            # Show what's already covered vs missing
-            if diff.covered:
-                covered_selectors = ", ".join(r.selector for r in diff.covered)
-                lines.append(f"[green]✓ covered:[/green] {covered_selectors}")
-            if diff.missing:
-                missing_selectors = ", ".join(r.selector for r in diff.missing)
-                lines.append(f"[yellow]● new:[/yellow] {missing_selectors}")
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_scope_summary_plain(call: ToolCall) -> str:
-        """Plain-text scope summary for the LoomApp confirm widget.
-
-        Mirrors :meth:`_format_scope_panel` but strips Rich markup so it
-        renders cleanly inside a prompt_toolkit FormattedTextControl,
-        which doesn't speak Rich's ``[bold]`` syntax.
-        """
-        from loom.core.harness.scope import (
-            DiffReason, ScopeDiff, ScopeRequest,
-        )
-
-        scope_req: ScopeRequest | None = call.metadata.get("scope_request")
-        diff: ScopeDiff | None = call.metadata.get("scope_diff")
-
-        if scope_req is None:
-            arg_lines: list[str] = []
-            for k, v in call.args.items():
-                if isinstance(v, str):
-                    display = v if len(v) <= 120 else v[:40] + "…" + v[-40:]
-                    arg_lines.append(f"  {k}: {display}")
-                else:
-                    arg_lines.append(f"  {k}: {v!r}")
-            return "\n".join(arg_lines) if arg_lines else "(no args)"
-
-        _REASON_LABELS: dict[DiffReason, str] = {
-            DiffReason.FIRST_TIME: "First time accessing this resource",
-            DiffReason.SELECTOR_EXPANSION: "Expanding beyond previously approved scope",
-            DiffReason.CONSTRAINT_EXPANSION: "Exceeding previously approved limits",
-            DiffReason.RESOURCE_TYPE_NEW: "New resource type not previously authorized",
-        }
-
-        lines: list[str] = []
-        for req in scope_req.requirements:
-            line = f"  {req.resource}:{req.action} → {req.selector}"
-            if req.constraints.get("scope_unknown"):
-                line += "  ⚠ scope could not be fully resolved"
-            lines.append(line)
-        if diff is not None and not diff.is_fully_covered:
-            reason_label = _REASON_LABELS.get(diff.reason, str(diff.reason.value))
-            lines.append(reason_label)
-            if diff.covered:
-                lines.append(
-                    "  ✓ covered: " + ", ".join(r.selector for r in diff.covered)
-                )
-            if diff.missing:
-                lines.append(
-                    "  ● new: " + ", ".join(r.selector for r in diff.missing)
-                )
-        return "\n".join(lines)
-
     async def _confirm_tool_cli(self, call: ToolCall) -> "ConfirmDecision":
         """
         CLI-specific confirmation prompt — arrow-key inline widget.
@@ -4629,7 +4243,7 @@ class LoomSession:
         if loom_app is not None:
             return await loom_app.request_confirm(
                 title=widget_title,
-                body=self._format_scope_summary_plain(call),
+                body=_format_scope_summary_plain(call),
                 options=[
                     ("允許這次",                        ConfirmDecision.ONCE,   "y"),
                     ("允許並記住 30 分鐘 (lease)",      ConfirmDecision.SCOPE,  "s"),
@@ -4653,7 +4267,7 @@ class LoomSession:
             border_style = "loom.warning"
         console.print(
             Panel(
-                self._format_scope_panel(call),
+                _format_scope_panel(call),
                 title=title,
                 border_style=border_style,
             )
@@ -4979,8 +4593,8 @@ class LoomSession:
                 self.router = rebuilt
                 ok = True
         if ok:
-            self._model = model
-            self._manual_model_override = True
+            self._model = model  # base model — TierManager reads it live
+            self._tier.mark_manual_override()
             # Keep the identity telemetry (agent_health) in lock-step with the
             # model that will actually serve — set_model previously skipped this.
             self._refresh_runtime_identity()
