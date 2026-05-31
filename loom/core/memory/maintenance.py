@@ -206,3 +206,100 @@ def make_memory_prune_tool(semantic: "SemanticMemory") -> ToolDefinition:
         executor=_executor,
         trust_level=TrustLevel.SAFE,
     )
+
+
+def make_convergent_dream_tool(
+    semantic: "SemanticMemory",
+    llm_fn: LLMFn,
+    *,
+    timezone: str = "Asia/Taipei",
+    journal_dir=None,
+) -> ToolDefinition:
+    """Build the ``convergent_dream`` ToolDefinition (#488, P1).
+
+    The convergent counterpart to ``dream_cycle``: scans the semantic store,
+    proposes merge / reconcile / clean clusters, runs the diff-inventory gate
+    and 絲絲's self-review, then writes a 夢境鞏固 report to the circadian
+    journal. **Read-only** — this phase never writes to the DB; execution of
+    the approved clusters lands in P2 (#489).
+
+    Parameters mirror ``make_journal_append_tool`` (``timezone`` /
+    ``journal_dir``) so tests can redirect the report IO.
+    """
+    from loom.core.cognition.consolidation import (
+        KIND_CLEAN, KIND_MERGE, KIND_RECONCILE, run_convergent_dream,
+    )
+    from loom.autonomy.circadian.journal import append_consolidation_report
+
+    async def _executor(call) -> ToolResult:
+        corpus_limit = int(call.args.get("corpus_limit", 2000))
+        max_clusters = int(call.args.get("max_clusters", 20))
+        min_similarity = float(call.args.get("min_similarity", 0.85))
+
+        plan, report = await run_convergent_dream(
+            semantic, llm_fn,
+            corpus_limit=corpus_limit,
+            min_similarity=min_similarity,
+            max_clusters=max_clusters,
+        )
+
+        path = append_consolidation_report(
+            report, timezone=timezone, journal_dir=journal_dir,
+        )
+
+        counts = plan.counts()
+        verdicts: dict[str, int] = {}
+        for d in plan.decisions:
+            verdicts[d.verdict] = verdicts.get(d.verdict, 0) + 1
+        verdict_str = ", ".join(f"{k}={v}" for k, v in sorted(verdicts.items())) or "(none)"
+
+        lines = [
+            "Convergent dream complete (read-only / P1)",
+            f"  Scanned     : {plan.scanned} facts",
+            f"  Clusters    : {counts[KIND_MERGE]} merge, "
+            f"{counts[KIND_RECONCILE]} reconcile, {counts[KIND_CLEAN]} clean",
+            f"  Self-review : {verdict_str}",
+            f"  Report      : {path}",
+        ]
+        if plan.deferred_to_next_pass:
+            lines.append(f"  Deferred    : {plan.deferred_to_next_pass} clusters → next pass")
+
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output="\n".join(lines),
+        )
+
+    return ToolDefinition(
+        name="convergent_dream",
+        description=(
+            "Run a read-only convergent dream: scan semantic memory for "
+            "duplicate / contradicting / orphaned facts, propose how to "
+            "consolidate them, run a self-review with veto, and write a "
+            "夢境鞏固 report to the circadian journal. Does NOT modify memory "
+            "(P1) — it plans and records so consolidation can be reviewed "
+            "before it ever touches a fact. Counterpart to dream_cycle "
+            "(which grows new connections)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "corpus_limit": {
+                    "type": "integer",
+                    "description": "Max facts to scan this pass (default 2000).",
+                    "default": 2000,
+                },
+                "max_clusters": {
+                    "type": "integer",
+                    "description": "Cap on merge clusters proposed per pass; overflow is deferred and reported (default 20).",
+                    "default": 20,
+                },
+                "min_similarity": {
+                    "type": "number",
+                    "description": "Cosine threshold for near-duplicate merge candidates (default 0.85).",
+                    "default": 0.85,
+                },
+            },
+        },
+        executor=_executor,
+        trust_level=TrustLevel.SAFE,
+    )
