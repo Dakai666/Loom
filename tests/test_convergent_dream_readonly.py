@@ -302,6 +302,37 @@ class TestDiffInventory:
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
+    async def test_string_mergeable_is_not_truthy(self):
+        # Codex re-review #493 — a malformed string "false" must NOT become
+        # True via bool("false"). Only a real JSON boolean true counts.
+        cluster = CandidateCluster(
+            cluster_id="c1", kind=KIND_MERGE,
+            members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
+        llm = _stub_llm('{"unique_by_key": {"a": "", "b": ""}, '
+                        '"mergeable": "false", "rationale": "r"}')
+        diff = await diff_inventory(cluster, llm)
+        assert diff.mergeable is False
+
+    async def test_string_true_also_not_mergeable(self):
+        # A stringified "true" is still malformed output → fail safe.
+        cluster = CandidateCluster(
+            cluster_id="c1", kind=KIND_MERGE,
+            members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
+        llm = _stub_llm('{"unique_by_key": {"a": "", "b": ""}, '
+                        '"mergeable": "true", "rationale": "r"}')
+        diff = await diff_inventory(cluster, llm)
+        assert diff.mergeable is False
+
+    async def test_non_object_unique_by_key_fails_safe_without_raising(self):
+        # Codex re-review #493 — unique_by_key returned as a list must not
+        # crash .items(); it should fail safe to not-mergeable.
+        cluster = CandidateCluster(
+            cluster_id="c1", kind=KIND_MERGE,
+            members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
+        llm = _stub_llm('{"unique_by_key": ["a", "b"], "mergeable": true, "rationale": "r"}')
+        diff = await diff_inventory(cluster, llm)   # must not raise
+        assert diff.mergeable is False
+
 
 # ---------------------------------------------------------------------------
 # self_review — strong veto, fail-safe (spec §6.2)

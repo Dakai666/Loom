@@ -362,8 +362,19 @@ async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInvent
     if data is None:
         return DiffInventory(mergeable=False, rationale="diff-inventory output unparseable")
 
-    unique_by_key = {str(k): str(v) for k, v in (data.get("unique_by_key") or {}).items()}
-    mergeable = bool(data.get("mergeable", False))
+    # unique_by_key must be an object; a list/string/None would crash .items()
+    # — fail safe rather than raise (Codex re-review #493).
+    raw_ubk = data.get("unique_by_key")
+    if not isinstance(raw_ubk, dict):
+        return DiffInventory(
+            mergeable=False,
+            rationale="diff-inventory unique_by_key was not an object — failing safe",
+        )
+    unique_by_key = {str(k): str(v) for k, v in raw_ubk.items()}
+    # Only an explicit JSON boolean true counts. bool("false") is True, so a
+    # stringified verdict must NOT slip through — anything other than real
+    # `true` fails safe to not-mergeable (Codex re-review #493).
+    mergeable = data.get("mergeable") is True
     rationale = str(data.get("rationale", ""))
 
     # Fail safe when the inventory shape does not match the cluster (Codex
