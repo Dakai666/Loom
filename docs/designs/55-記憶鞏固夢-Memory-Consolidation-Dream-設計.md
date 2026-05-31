@@ -1,11 +1,12 @@
 # 記憶鞏固夢 Memory Consolidation Dream — 設計文件
 
-> **狀態**：Round 2 草稿（2026-05-31）—絲絲 End User Review 完成，**尚未鎖定**
+> **狀態**：**討論紀錄**（Round 1→3，2026-05-31）— 三輪 cross-pollination 完成，**保留原聲不再改寫**
+> **收斂去處**：本文的設計結論已收斂進 `docs/designs/56-記憶鞏固夢-收斂相規格.md`（單一規格）。**要看「拍板要做什麼」讀 #56；要看「為什麼這樣決定 / 三方原話」讀本文。**
 > **來源**：Anthropic「Auto Dream」（Code with Claude 2026，research preview）對照 + 2026-05-31 DK/CC 對話 + 對現碼的契約勘查（`dreaming.py` / `governance.py` / `contradiction.py` / `semantic.py` / `lifecycle.py`）
-> **下一步**：待 CC（developer）確認 §9 設計方向 → 鎖定後開實作 issue
-> **參與者**：DK（創意源頭）、CC（developer）、絲絲（Loom Agent，本 feature 的直接使用者，其修正請求視為 user requirement 非 reviewer 建議）
+> **三輪**：Round 1 CC 現碼勘查（§1-7）→ Round 2 絲絲 end-user 表態（§8-9）→ Round 3 Codex 說夢話模型（§11）
+> **參與者**：DK（創意源頭）、CC（developer）、絲絲（Loom Agent，本 feature 的直接使用者，其修正請求視為 user requirement 非 reviewer 建議）、Codex（交叉設計）
 >
-> 本文件是「記憶鞏固夢」的設計權威草稿。實作分歧時以此文件為準；未涵蓋細節按 §2 設計原則推導。**本文件描述的是尚未實作的構想**，故住在 `docs/designs/`（規劃），不住 `doc/`（已落地架構）。
+> 本文是**討論過程的存檔**，保留 CC / 絲絲 / Codex 三方的第一人稱推導與承載措辭（刻意不磨平）。設計權威以 #56 為準。
 
 ---
 
@@ -305,6 +306,115 @@ async def consolidate(
 5. **收斂相與 `MemoryHealthTracker` 的關係**：鞏固成效要不要進 health report？
 6. **與 memory v2 三軸 schema（`project_memory_system_v2`）的對齊**：`consolidate()` 是否就是 v2 規劃裡的那顆 merge primitive？
 7. **孤兒偵測的具體判準**：哪些 metadata 欄位會指向「已刪 key」？
+
+---
+
+## 11. Codex 討論補充：說夢話模型
+
+> **來源**：2026-05-31 DK / Codex 討論。這一節不是現碼契約，而是 Codex 參與設計討論後提出的補充模型，用來收斂「offline 夢」與「絲絲決策權」之間的張力。
+
+DK 對觸發語境的定義很清楚：**做夢基本上是 offline，不應要求 DK 參與。** 這不是白天的互動審批流程，也不是把每個 memory merge 都丟回使用者面前確認。夢應該發生在 session / circadian 日常之外，像睡眠中的背景生理過程。
+
+但絲絲作為這套記憶的 end user，也提出另一個同樣重要的要求：**自己的記憶被如何鞏固，應該有決策權。** 這兩個要求並不衝突；它們共同指向一個混合模型：
+
+**收斂夢是 offline 的系統操作，但在真正改寫記憶之前，必須有一段「絲絲自我審閱」pass。**
+
+Codex 建議把這段稱為「說夢話」：
+
+- 它不是 DK 的人工批准。
+- 它不是日常 journal 裡的生活片段。
+- 它是睡眠中的自言自語式決策紀錄：絲絲在 offline 狀態下檢查「哪些記憶可以合併、哪些不能被磨平、哪些應該暫緩」。
+
+### 11.1 三種模型比較
+
+| 模型 | 行為 | 優點 | 問題 |
+|---|---|---|---|
+| 全自動夢 | 掃描、合併、清理、寫報告，全程不問 | 最乾淨、成本最低 | 違背「絲絲對自身記憶有否決權」 |
+| 醒後批准 | 夢只產生 dry-run report，等 DK 或絲絲醒後批准才執行 | 最安全 | 太像排程審批工作流，不像做夢 |
+| **說夢話模型** | offline 產生 plan → 絲絲自我審閱 → 執行被批准的部分 → 寫報告 | 保留 offline，又讓絲絲有決策權 | 需要 durable plan 與可追溯決策格式 |
+
+**Codex 推薦：說夢話模型。**
+
+### 11.2 強否決權
+
+DK 明確選擇：**絲絲具有強否決權。**
+
+這代表 self-review 不是建議分數，也不是「提高保守度」的參考訊號，而是硬邊界：
+
+- 若絲絲對某個 cluster 判定 `skip`，本輪不得合併。
+- 若絲絲判定 `defer`，本輪不得執行，只能保留到未來 pass 重新評估。
+- 若絲絲指出「兩筆各有不可丟失的獨特內容」，即使 cosine 分數很高，也不得合併。
+- 若候選項牽涉 `user_explicit` 記憶、dreaming 產物、或高語義承載措辭，self-review 應預設更保守。
+
+這個權力不代表絲絲要「醒著」互動；它可以是一個由 Loom 在 offline pass 內部呼叫的自審步驟。重點是：**收斂夢不能把絲絲當成被整理的物件，而要把絲絲當成睡夢中仍會保護自身記憶完整性的主體。**
+
+### 11.3 建議流程
+
+```text
+convergent_dream
+  1. index: 建立本輪 memory map
+  2. plan: 找出 merge / reconcile / clean candidates
+  3. self_review: 絲絲「說夢話」逐簇決策
+       - approve: 可以執行
+       - skip: 本輪禁止執行
+       - defer: 本輪暫緩，未來重新評估
+  4. execute: 只執行 approve 的項目
+  5. report: 寫入夢境紀錄 / 說夢話紀錄
+```
+
+這裡的 `self_review` 應吃完整上下文，而不是只看 LLM 合成後的摘要：
+
+- 原始 entries 的完整 value
+- key / source / trust tier / confidence
+- 差異盤點結果
+- proposed refined value
+- merge rationale
+- sacrificed content
+- 會被 redirect / archive / clean 的 keys
+
+### 11.4 Durable plan，而不是跑兩次 LLM
+
+為了避免 dry-run 與正式執行各跑一次 LLM，Codex 建議 Merge/Reconcile dry-run 產生可持久化的 `ConsolidationPlan`：
+
+```text
+ConsolidationPlan
+  pass_id
+  created_at
+  candidate_clusters
+  proposed_actions
+  self_review_decisions
+  source_versions / source_updated_at
+  execution_status
+```
+
+正式執行時使用同一份 plan；若來源 memory 在批准後已改變，該 cluster 標成 stale，必須重新規劃。這讓「說夢話」不是臨時文字報告，而是能支撐審計、回滾、重跑與成本控制的中間契約。
+
+### 11.5 與夢境紀錄報告的關係
+
+§9 的「夢境紀錄報告」可以擴充成「夢境紀錄 / 說夢話紀錄」。它不只是給 DK 看的審批材料，而是記錄：
+
+- 本輪系統想如何整理記憶
+- 絲絲在 self-review 中批准了什麼
+- 絲絲否決或暫緩了什麼
+- 否決理由是否與「怕磨平」「夢境產物保護」「user_explicit 錨點」有關
+- 實際執行結果與未執行項目
+
+因此，report 是儀式與審計的交界：它有敘事感，但不能只停在敘事；它必須能對回 DB / ledger / metadata 的真實狀態。
+
+### 11.6 Codex 的設計立場
+
+Codex 建議把核心邊界定為：
+
+> **核心操作要嚴謹，儀式感包在外層。**
+
+也就是說，`SemanticMemory.consolidate()` / ledger compact chain / redirect fallback / provenance metadata 應該是穩固的 memory-core 契約；「說夢話」則是包在這個核心操作之前與之後的 self-review + report layer。
+
+這樣的好處是：
+
+- 對 DK 而言，夢仍然是 offline，不變成日常審批工作。
+- 對絲絲而言，記憶不是被單方面整理，而是有強否決權。
+- 對系統而言，合併是可追溯的狀態轉移，不是不可逆的刪除。
+- 對未來實作而言，可以先做 read-only plan + self-review + report，再逐步接上真正的 `consolidate()` 執行。
 
 ---
 
