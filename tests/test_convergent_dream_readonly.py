@@ -282,6 +282,26 @@ class TestDiffInventory:
         diff = await diff_inventory(cluster, _stub_llm("garbage"))
         assert diff.mergeable is False
 
+    async def test_missing_member_key_not_mergeable(self):
+        # Codex review #493 — inventory must COVER the cluster members. A
+        # response that omits a member but claims mergeable must fail safe.
+        cluster = CandidateCluster(
+            cluster_id="c1", kind=KIND_MERGE,
+            members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
+        llm = _stub_llm('{"unique_by_key": {"a": ""}, "mergeable": true, "rationale": "looks same"}')
+        diff = await diff_inventory(cluster, llm)
+        assert diff.mergeable is False
+
+    async def test_phantom_key_not_mergeable(self):
+        # Extra/hallucinated keys that don't belong to the cluster → fail safe.
+        cluster = CandidateCluster(
+            cluster_id="c1", kind=KIND_MERGE,
+            members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
+        llm = _stub_llm('{"unique_by_key": {"a": "", "b": "", "zzz": "ghost"}, '
+                        '"mergeable": true, "rationale": "r"}')
+        diff = await diff_inventory(cluster, llm)
+        assert diff.mergeable is False
+
 
 # ---------------------------------------------------------------------------
 # self_review — strong veto, fail-safe (spec §6.2)
@@ -323,6 +343,16 @@ class TestSelfReview:
         plan = ConsolidationPlan(clusters=[self._merge_cluster(cid="c1")])
         llm = _stub_llm('[{"cluster_id":"c1","verdict":"banana"}]')
         decisions = await self_review(plan, llm)
+        assert decisions[0].verdict == VERDICT_DEFER
+
+    async def test_duplicate_cluster_id_defers_not_last_wins(self):
+        # Codex review #493 — a repeated id is malformed output. A later
+        # "approve" must NOT overwrite an earlier "skip"/"defer" (strong veto).
+        plan = ConsolidationPlan(clusters=[self._merge_cluster(cid="c1")])
+        llm = _stub_llm('[{"cluster_id":"c1","verdict":"skip","reason":"real problem"},'
+                        '{"cluster_id":"c1","verdict":"approve"}]')
+        decisions = await self_review(plan, llm)
+        assert len(decisions) == 1
         assert decisions[0].verdict == VERDICT_DEFER
 
 

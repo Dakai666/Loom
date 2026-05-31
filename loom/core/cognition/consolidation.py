@@ -40,6 +40,7 @@ import json
 import logging
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Awaitable, Callable, TYPE_CHECKING
@@ -360,11 +361,27 @@ async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInvent
     data = _parse_json_object(raw)
     if data is None:
         return DiffInventory(mergeable=False, rationale="diff-inventory output unparseable")
-    return DiffInventory(
-        unique_by_key={str(k): str(v) for k, v in (data.get("unique_by_key") or {}).items()},
-        mergeable=bool(data.get("mergeable", False)),
-        rationale=str(data.get("rationale", "")),
-    )
+
+    unique_by_key = {str(k): str(v) for k, v in (data.get("unique_by_key") or {}).items()}
+    mergeable = bool(data.get("mergeable", False))
+    rationale = str(data.get("rationale", ""))
+
+    # Fail safe when the inventory shape does not match the cluster (Codex
+    # review #493): a response that omits a member — or invents a key that
+    # isn't in the cluster — cannot be trusted to claim mergeable. The gate
+    # must COVER exactly the cluster members before we honour mergeable=True.
+    expected = set(cluster.member_keys)
+    if expected and set(unique_by_key) != expected:
+        return DiffInventory(
+            unique_by_key=unique_by_key,
+            mergeable=False,
+            rationale=(
+                f"diff-inventory keys {sorted(unique_by_key)} did not cover "
+                f"cluster members {sorted(expected)} — failing safe"
+            ),
+        )
+
+    return DiffInventory(unique_by_key=unique_by_key, mergeable=mergeable, rationale=rationale)
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +472,19 @@ async def self_review(plan: ConsolidationPlan, llm_fn: LLMFn) -> list[ReviewDeci
         return decisions
 
     parsed = _parse_json_array(raw)
+    id_counts = Counter(str(d.get("cluster_id")) for d in parsed if isinstance(d, dict))
     by_id = {str(d.get("cluster_id")): d for d in parsed if isinstance(d, dict)}
     for c in review_clusters:
+        # A repeated id is malformed output (Codex review #493). Never let a
+        # later verdict silently overwrite an earlier one — last-wins would
+        # let a bogus "approve" bury a real "skip"/"defer" and weaken the
+        # strong-veto contract. Ambiguous → defer.
+        if id_counts.get(c.cluster_id, 0) > 1:
+            decisions.append(ReviewDecision(
+                cluster_id=c.cluster_id, verdict=VERDICT_DEFER,
+                reason="duplicate cluster_id in self-review output — deferred",
+            ))
+            continue
         d = by_id.get(c.cluster_id)
         verdict = str(d.get("verdict", "")).lower() if d else ""
         if verdict not in (VERDICT_APPROVE, VERDICT_SKIP, VERDICT_DEFER):
