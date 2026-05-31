@@ -66,9 +66,59 @@ KIND_LABELS: dict[str, str] = {
 }
 
 
+# System-generated entry labels — NOT in KIND_LABELS so the agent-facing
+# journal_append tool's life-texture enum stays clean (#488, spec §8).
+CONSOLIDATION_LABEL = "夢境鞏固"
+
+
 def journal_path_for(date_str: str, base: Path | None = None) -> Path:
     """Dated journal file for ``date_str`` (YYYY-MM-DD). One file per day."""
     return (base or DEFAULT_JOURNAL_DIR) / f"{date_str}.md"
+
+
+def _append_dated_entry(
+    target_dir: Path, now: datetime, label: str, body: str,
+) -> Path:
+    """Append one ``## HH:MM · {label}`` entry to today's journal file.
+
+    Single-source of the atomic-append behaviour shared by the agent
+    ``journal_append`` tool and system-generated reports. Lazy H1 header on
+    first write of the day; one ``write()`` syscall so concurrent appends
+    don't tear (POSIX O_APPEND atomic ≤ PIPE_BUF). Raises ``OSError`` on IO
+    failure — callers decide how to surface it.
+    """
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    path = journal_path_for(date_str, target_dir)
+
+    chunk = ""
+    if not path.exists():
+        chunk += f"# {date_str} Journal\n\n"
+    chunk += f"## {time_str} · {label}\n{body}\n\n"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(chunk)
+    return path
+
+
+def append_consolidation_report(
+    report_body: str,
+    *,
+    timezone: str = "Asia/Taipei",
+    journal_dir: Path | None = None,
+) -> Path:
+    """Append a convergent-dream pass report to today's journal (#488, spec §8).
+
+    System-generated (written by the convergent-dream orchestrator, not the
+    agent), so it uses the ``夢境鞏固`` label directly rather than a
+    ``journal_append`` ``kind`` — keeping the agent tool's enum life-texture
+    only. Lands in the same dated file so the circadian journal becomes the
+    record of both dream phases (``grep 夢境鞏固`` to review). Returns the path.
+    """
+    target_dir = journal_dir or DEFAULT_JOURNAL_DIR
+    now = datetime.now(ZoneInfo(timezone))
+    return _append_dated_entry(target_dir, now, CONSOLIDATION_LABEL, report_body)
 
 
 def make_journal_append_tool(
@@ -102,29 +152,15 @@ def make_journal_append_tool(
             )
 
         now = datetime.now(ZoneInfo(timezone))
-        date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M")
         label = KIND_LABELS[kind]
-        path = journal_path_for(date_str, target_dir)
-
-        # Build the full payload first so the actual write() is one syscall —
-        # POSIX O_APPEND is atomic for writes ≤ PIPE_BUF, and a single string
-        # write keeps two concurrent journal_append calls from interleaving
-        # mid-entry.
-        new_file = not path.exists()
-        chunk = ""
-        if new_file:
-            chunk += f"# {date_str} Journal\n\n"
-        chunk += f"## {time_str} · {label}\n{body}\n\n"
 
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(chunk)
+            path = _append_dated_entry(target_dir, now, label, body)
         except OSError as exc:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
-                error=f"could not write journal entry to {path}: {exc}",
+                error=f"could not write journal entry: {exc}",
             )
 
         return ToolResult(

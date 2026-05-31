@@ -1156,6 +1156,7 @@ class LoomSession:
         # tools (formerly DreamingPlugin). Wired with dependency injection
         # so the factories stay session-agnostic.
         from loom.core.memory.maintenance import (
+            make_convergent_dream_tool,
             make_dream_cycle_tool,
             make_memory_prune_tool,
         )
@@ -1172,6 +1173,12 @@ class LoomSession:
             )
         )
         self.registry.register(make_memory_prune_tool(self._memory.semantic))
+        # Issue #488 (P1): convergent_dream — read-only consolidation pass
+        # (counterpart to the divergent dream_cycle). Plans/self-reviews/reports
+        # but never writes to the DB; execution lands in P2 (#489).
+        self.registry.register(
+            make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
+        )
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
