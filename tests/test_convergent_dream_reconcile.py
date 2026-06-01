@@ -26,6 +26,7 @@ from loom.core.cognition.consolidation import (
     ReviewDecision,
     KIND_RECONCILE,
     VERDICT_APPROVE,
+    build_plan,
     classify_reconcile,
     execute_plan,
 )
@@ -108,6 +109,38 @@ class TestClassifyReconcile:
 
     async def test_unknown_kind_returns_skip(self):
         assert await classify_reconcile(self._cluster(), _reconcile_llm("banana")) == "skip"
+
+    async def test_unrelated_returns_skip(self):
+        # 2b safety net: "unrelated" is an explicit option; it maps to skip so
+        # two facts that are neither same nor opposing are never arbitrated.
+        assert await classify_reconcile(self._cluster(), _reconcile_llm("unrelated")) == "skip"
+
+
+class TestSameSessionExclusion:
+    """2a: same-session sibling facts must not be reconcile candidates (#497)."""
+
+    async def test_same_session_siblings_excluded(self, semantic):
+        # session:<id>:<ts>:fact:<n> siblings share the tier-2 prefix but are
+        # natural segmentation of one compression, not contradictions.
+        await semantic.upsert(SemanticEntry(
+            key="session:s1:t0:fact:0", value="zebra ocean mountain peak",
+            source="session:s1:t0:fact:0"))
+        await semantic.upsert(SemanticEntry(
+            key="session:s1:t0:fact:1", value="violin guitar drum trumpet",
+            source="session:s1:t0:fact:1"))
+        plan = await build_plan(semantic)
+        assert [c for c in plan.clusters if c.kind == KIND_RECONCILE] == []
+
+    async def test_cross_session_or_semantic_prefix_still_detected(self, semantic):
+        # A genuine semantic-namespace contradiction is still a candidate.
+        await semantic.upsert(SemanticEntry(
+            key="user:pref:tone:formal", value="answer in polished formal prose",
+            source="manual"))
+        await semantic.upsert(SemanticEntry(
+            key="user:pref:tone:casual", value="reply with short blunt fragments",
+            source="manual"))
+        plan = await build_plan(semantic)
+        assert len([c for c in plan.clusters if c.kind == KIND_RECONCILE]) == 1
 
 
 # ---------------------------------------------------------------------------
