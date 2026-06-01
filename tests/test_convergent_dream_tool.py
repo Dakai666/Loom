@@ -73,12 +73,12 @@ class TestConvergentDreamTool:
             key="user:pref:tone:b", value="reply short blunt fragments only", source="manual"))
 
         tool = make_convergent_dream_tool(
-            semantic, _combined_llm, timezone="Asia/Taipei", journal_dir=tmp_path)
+            semantic, _combined_llm, timezone="Asia/Taipei", dreams_dir=tmp_path)
         result = await tool.executor(_make_call({}))
 
         assert result.success is True
         assert "scanned" in result.output.lower() or "掃描" in result.output
-        # report file written to the journal dir
+        # report file written to the dreams dir
         md_files = list(tmp_path.glob("*.md"))
         assert len(md_files) == 1
         assert "夢境鞏固" in md_files[0].read_text(encoding="utf-8")
@@ -92,7 +92,7 @@ class TestConvergentDreamTool:
 
         before = await _snapshot(db_conn)
         tool = make_convergent_dream_tool(
-            semantic, _combined_llm, journal_dir=tmp_path)
+            semantic, _combined_llm, dreams_dir=tmp_path)
         await tool.executor(_make_call({}))
         after = await _snapshot(db_conn)
         assert before == after

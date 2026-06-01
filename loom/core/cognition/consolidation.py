@@ -471,29 +471,17 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
     return "\n".join(lines)
 
 
-async def self_review(plan: ConsolidationPlan, llm_fn: LLMFn) -> list[ReviewDecision]:
-    """絲絲 reviews each cluster offline and returns hard-boundary verdicts.
+async def _review_batch(
+    clusters: list[CandidateCluster], llm_fn: LLMFn,
+) -> list[ReviewDecision]:
+    """Review one context-bounded batch of clusters in a single LLM call.
 
-    Clusters whose diff-inventory already says ``mergeable=False`` are auto-
-    skipped without consulting the LLM (the gate already vetoed them, spec §6.4).
+    A batch that fails (e.g. the provider rejects an over-long prompt) or
+    returns malformed output defers ONLY its own clusters — never the whole
+    pass. This is the per-batch isolation that batching buys us (#499).
     """
     decisions: list[ReviewDecision] = []
-    review_clusters: list[CandidateCluster] = []
-
-    for cluster in plan.clusters:
-        if cluster.kind == KIND_MERGE and cluster.diff is not None and not cluster.diff.mergeable:
-            decisions.append(ReviewDecision(
-                cluster_id=cluster.cluster_id,
-                verdict=VERDICT_SKIP,
-                reason=f"diff-inventory: not mergeable — {cluster.diff.rationale}",
-            ))
-        else:
-            review_clusters.append(cluster)
-
-    if not review_clusters:
-        return decisions
-
-    block = "\n\n".join(_render_cluster_for_review(c) for c in review_clusters)
+    block = "\n\n".join(_render_cluster_for_review(c) for c in clusters)
     messages = [
         {"role": "system", "content": _SELF_REVIEW_SYSTEM},
         {"role": "user", "content": f"Clusters to review:\n\n{block}\n\nReturn the JSON array now."},
@@ -501,19 +489,20 @@ async def self_review(plan: ConsolidationPlan, llm_fn: LLMFn) -> list[ReviewDeci
     try:
         raw = await llm_fn(messages)
     except Exception as exc:
-        logger.warning("[convergent-dream] self_review LLM failed: %s", exc)
-        # Fail safe: if absent self-review, defer everything (never auto-approve).
-        for c in review_clusters:
-            decisions.append(ReviewDecision(
+        logger.warning("[convergent-dream] self_review batch LLM failed: %s", exc)
+        # Fail safe: defer this batch (never auto-approve), let the pass go on.
+        return [
+            ReviewDecision(
                 cluster_id=c.cluster_id, verdict=VERDICT_DEFER,
                 reason=f"self-review unavailable — deferred: {exc}",
-            ))
-        return decisions
+            )
+            for c in clusters
+        ]
 
     parsed = _parse_json_array(raw)
     id_counts = Counter(str(d.get("cluster_id")) for d in parsed if isinstance(d, dict))
     by_id = {str(d.get("cluster_id")): d for d in parsed if isinstance(d, dict)}
-    for c in review_clusters:
+    for c in clusters:
         # A repeated id is malformed output (Codex review #493). Never let a
         # later verdict silently overwrite an earlier one — last-wins would
         # let a bogus "approve" bury a real "skip"/"defer" and weaken the
@@ -537,6 +526,63 @@ async def self_review(plan: ConsolidationPlan, llm_fn: LLMFn) -> list[ReviewDeci
                 cluster_id=c.cluster_id, verdict=verdict,
                 reason=str(d.get("reason", "")) if d else "",
             ))
+    return decisions
+
+
+async def self_review(
+    plan: ConsolidationPlan,
+    llm_fn: LLMFn,
+    *,
+    batch_size: int = 10,
+    max_review_clusters: int = 40,
+) -> list[ReviewDecision]:
+    """絲絲 reviews each cluster offline and returns hard-boundary verdicts.
+
+    Clusters whose diff-inventory already says ``mergeable=False`` are auto-
+    skipped without consulting the LLM (the gate already vetoed them, spec §6.4)
+    and do NOT consume the review budget.
+
+    The remaining clusters are reviewed in batches of ``batch_size`` — one
+    context-bounded LLM call each — rather than one mega-prompt. Real-run
+    finding (#499): a single all-clusters prompt blew the context window at
+    scale → 2013 → everything fell back to defer. ``max_review_clusters`` caps
+    how many clusters one pass reviews; the overflow is deferred to the next
+    pass via ``plan.deferred_to_next_pass`` (no silent truncation).
+    """
+    decisions: list[ReviewDecision] = []
+    review_clusters: list[CandidateCluster] = []
+
+    for cluster in plan.clusters:
+        if cluster.kind == KIND_MERGE and cluster.diff is not None and not cluster.diff.mergeable:
+            decisions.append(ReviewDecision(
+                cluster_id=cluster.cluster_id,
+                verdict=VERDICT_SKIP,
+                reason=f"diff-inventory: not mergeable — {cluster.diff.rationale}",
+            ))
+        else:
+            review_clusters.append(cluster)
+
+    if not review_clusters:
+        return decisions
+
+    # Per-pass cap — overflow deferred to next pass, never silently dropped.
+    if max_review_clusters is not None and len(review_clusters) > max_review_clusters:
+        overflow = review_clusters[max_review_clusters:]
+        review_clusters = review_clusters[:max_review_clusters]
+        for c in overflow:
+            decisions.append(ReviewDecision(
+                cluster_id=c.cluster_id, verdict=VERDICT_DEFER,
+                reason="self-review cap reached this pass — deferred to next pass",
+            ))
+        plan.deferred_to_next_pass += len(overflow)
+        plan.notes.append(
+            f"self-review cap {max_review_clusters} reached; "
+            f"{len(overflow)} clusters deferred to next pass (no silent truncation)."
+        )
+
+    for start in range(0, len(review_clusters), batch_size):
+        batch = review_clusters[start:start + batch_size]
+        decisions.extend(await _review_batch(batch, llm_fn))
     return decisions
 
 
@@ -625,6 +671,8 @@ async def run_convergent_dream(
     corpus_limit: int = 2000,
     min_similarity: float = 0.85,
     max_clusters: int = 20,
+    review_batch_size: int = 10,
+    max_review_clusters: int = 40,
     execute: bool = False,
 ) -> tuple[ConsolidationPlan, str]:
     """Run one convergent-dream pass.
@@ -647,7 +695,11 @@ async def run_convergent_dream(
         if cluster.kind == KIND_MERGE:
             cluster.diff = await diff_inventory(cluster, llm_fn)
 
-    plan.decisions = await self_review(plan, llm_fn)
+    plan.decisions = await self_review(
+        plan, llm_fn,
+        batch_size=review_batch_size,
+        max_review_clusters=max_review_clusters,
+    )
 
     execute_result = None
     if execute:
