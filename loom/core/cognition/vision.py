@@ -423,13 +423,15 @@ def build_user_content(
             "type": "image",
             "source": {
                 "kind": validated.source.kind,
-                # We can't serialise Path/bytes here; we rely on the
-                # provider adapter to re-validate and read at wire time.
-                # For the canonical block we encode the parts that are
-                # safe to serialise (URLs) and pass-through for others.
+                # ``file`` and ``url`` refs are both JSON-serialisable.
+                # File refs are coerced to str so Path objects (which
+                # callers may pass in) become a plain string. Only
+                # ``raw`` (bytes) is dropped at this stage — the
+                # session_log strip handles persistence-time filtering,
+                # so we do not need to over-eagerly null out file refs.
                 "ref": (
-                    validated.source.ref
-                    if validated.source.kind == "url" else None
+                    str(validated.source.ref)
+                    if validated.source.kind in {"url", "file"} else None
                 ),
                 "media_type": validated.media_type,
                 "digest": validated.digest,

@@ -207,6 +207,79 @@ class TestBuildUserContent:
         assert out[0]["text"] == "hi"
         assert out[1]["type"] == "image"
         assert out[1]["source"]["digest"] == vi.digest
+        # Regression for #506 review by CC: file refs must be preserved
+        # in the canonical block so the provider adapter can re-read
+        # the image at wire time. Previously this was nulled out and
+        # the CLI path-detection round-trip would crash.
+        assert out[1]["source"]["kind"] == "file"
+        assert out[1]["source"]["ref"] == str(png_path)
+
+    def test_url_ref_preserved(self) -> None:
+        vi = vision.VisionInput(
+            source=vision.VisionSource(kind="url", ref="https://example.com/x.png"),
+        )
+        out = vision.build_user_content("see", [vi])
+        assert out[1]["source"]["ref"] == "https://example.com/x.png"
+
+    def test_raw_ref_dropped(self, png_path: Path) -> None:
+        # Use real PNG bytes from the fixture so magic-byte detection
+        # passes through validate_vision_input.
+        vi = vision.VisionInput(
+            source=vision.VisionSource(kind="raw", ref=png_path.read_bytes()),
+        )
+        out = vision.build_user_content("see", [vi])
+        # raw bytes are not JSON-serialisable; ref is intentionally None.
+        assert out[1]["source"]["ref"] is None
+
+
+class TestBuildUserContentRoundTrips:
+    """End-to-end: build_user_content -> provider adapter.
+
+    These exist because the unit tests for each adapter build canonical
+    blocks by hand and never go through build_user_content. That gap
+    let a bug ship where file refs were nulled at the build step
+    (caught by CC in #506 review).
+    """
+
+    def test_anthropic_round_trip(self, png_path: Path) -> None:
+        vi = vision.load_vision_input(png_path)
+        content = vision.build_user_content("看下這張", [vi])
+        _, anth = _to_anthropic_messages(
+            [{"role": "user", "content": content}]
+        )
+        anth_content = anth[0]["content"]
+        assert isinstance(anth_content, list)
+        img = anth_content[1]
+        assert img["type"] == "image"
+        assert img["source"]["type"] == "base64"
+        import base64
+        assert base64.b64decode(img["source"]["data"]) == png_path.read_bytes()
+
+    def test_responses_round_trip(self, png_path: Path) -> None:
+        vi = vision.load_vision_input(png_path)
+        content = vision.build_user_content("看下這張", [vi])
+        blocks = _build_responses_content(content, "user")
+        assert blocks[0] == {"type": "input_text", "text": "看下這張"}
+        assert blocks[1]["type"] == "input_image"
+        assert blocks[1]["image_url"].startswith("data:image/png;base64,")
+
+    def test_full_cli_path_detection_round_trip(self, png_path: Path) -> None:
+        """Reproduce the exact CLI flow: str input with image path ->
+        extract_image_paths -> build_user_content -> provider adapter.
+
+        This is the acceptance criterion #2 from #505 and was the path
+        CC's review caught as broken.
+        """
+        user_input = f"看下 {png_path} 謝謝"
+        detected = vision.extract_image_paths(user_input, base=png_path.parent)
+        assert len(detected) == 1
+        images = [vision.load_vision_input(p, origin="user") for p in detected]
+        content = vision.build_user_content(user_input, images)
+        # Should not raise.
+        _, anth = _to_anthropic_messages(
+            [{"role": "user", "content": content}]
+        )
+        assert anth[0]["content"][1]["source"]["type"] == "base64"
 
 
 # ---------------------------------------------------------------------------
