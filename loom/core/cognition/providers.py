@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .forensics import get_forensics
+from . import vision as _vision
 
 logger = logging.getLogger(__name__)
 
@@ -945,7 +946,52 @@ def _to_anthropic_messages(
             i += 1
 
         elif role == "user":
-            result.append({"role": "user", "content": msg["content"]})
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Canonical list content: [{type, ...}, ...] where ``type`` is
+                # either "text" or "image" (provider-neutral, see
+                # ``loom.core.cognition.vision``). Convert ``image`` blocks to
+                # the Anthropic wire shape; pass ``text`` blocks through.
+                anth_blocks: list[dict] = []
+                for block in content:
+                    btype = block.get("type")
+                    if btype == "text":
+                        anth_blocks.append({"type": "text", "text": block.get("text", "")})
+                    elif btype == "image":
+                        src = block.get("source", {}) or {}
+                        if src.get("kind") == "url":
+                            anth_blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": src.get("ref"),
+                                },
+                            })
+                            continue
+                        # file / raw: re-validate and embed base64.
+                        if src.get("kind") == "raw":
+                            from io import BytesIO
+                            raw_bytes = src.get("ref")
+                            vision_input = _vision.VisionInput(
+                                source=_vision.VisionSource(kind="raw", ref=raw_bytes),
+                                media_type=src.get("media_type", ""),
+                                size_bytes=len(raw_bytes) if raw_bytes else 0,
+                                digest=src.get("digest", ""),
+                            )
+                        else:
+                            # file: use the ref path; we re-read at wire time.
+                            vision_input = _vision.load_vision_input(
+                                src.get("ref"),
+                                origin=msg.get("_vision_origin", "user"),
+                            )
+                        anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
+                    else:
+                        # Unknown block type — keep the dict verbatim so we
+                        # don't silently drop provider-specific extensions.
+                        anth_blocks.append(block)
+                result.append({"role": "user", "content": anth_blocks})
+            else:
+                result.append({"role": "user", "content": content})
             i += 1
 
         elif role == "assistant":
