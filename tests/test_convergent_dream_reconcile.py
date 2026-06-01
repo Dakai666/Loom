@@ -26,6 +26,7 @@ from loom.core.cognition.consolidation import (
     ReviewDecision,
     KIND_RECONCILE,
     VERDICT_APPROVE,
+    _is_namespace_sibling,
     build_plan,
     classify_reconcile,
     execute_plan,
@@ -141,6 +142,81 @@ class TestSameSessionExclusion:
             source="manual"))
         plan = await build_plan(semantic)
         assert len([c for c in plan.clusters if c.kind == KIND_RECONCILE]) == 1
+
+
+class TestNamespaceSiblingHelper:
+    """#501: _is_namespace_sibling generalises 2a's session-only check to the
+    structured provenance namespaces surfaced by real-run round 2 (#56 §12.1).
+    Different leaves of one grouping are different facts, never contradictions —
+    but a same-attribute opposing pair (user:pref:tone) must still pass through.
+    """
+
+    def test_identical_key_is_not_sibling(self):
+        # a same-key value conflict is a genuine tier-1 contradiction
+        assert _is_namespace_sibling("a:b:c:d", "a:b:c:d") is False
+
+    def test_relational_triples_are_siblings(self):
+        # rel:<S>::<P> — distinct predicates about the subject, not a conflict
+        assert _is_namespace_sibling("rel:self::role", "rel:self::complements") is True
+
+    def test_date_bucketed_records_are_siblings(self):
+        assert _is_namespace_sibling(
+            "loom:diary:2026-05-11:day_34", "loom:diary:2026-05-11:pet_care") is True
+        assert _is_namespace_sibling(
+            "diary:self_check:daily:2026-04-27",
+            "diary:self_check:daily:2026-05-07") is True
+
+    def test_eval_diagnostic_logs_are_siblings(self):
+        assert _is_namespace_sibling(
+            "skill:code_weaver:eval:r1:summary",
+            "skill:code_weaver:eval:r2:summary") is True
+
+    def test_session_siblings_still_caught(self):
+        assert _is_namespace_sibling(
+            "session:s1:t0:fact:0", "session:s1:t0:fact:1") is True
+
+    def test_opposing_attribute_values_are_not_siblings(self):
+        # user:pref:tone:formal vs :casual — opposing values of one attribute,
+        # a genuine contradiction; must NOT be excluded.
+        assert _is_namespace_sibling(
+            "user:pref:tone:formal", "user:pref:tone:casual") is False
+
+    def test_cross_namespace_is_not_sibling(self):
+        assert _is_namespace_sibling("user:location:home", "profile:city:current") is False
+
+
+class TestNamespaceSiblingExclusion:
+    """#501: the build_plan reconcile loop excludes namespace siblings."""
+
+    async def test_relational_triple_siblings_excluded(self, semantic):
+        await semantic.upsert(SemanticEntry(
+            key="rel:self::role", value="developer building the harness",
+            source="manual"))
+        await semantic.upsert(SemanticEntry(
+            key="rel:self::complements", value="works alongside other agents",
+            source="manual"))
+        plan = await build_plan(semantic)
+        assert [c for c in plan.clusters if c.kind == KIND_RECONCILE] == []
+
+    async def test_eval_log_siblings_excluded(self, semantic):
+        await semantic.upsert(SemanticEntry(
+            key="skill:code_weaver:eval:r1:summary",
+            value="zebra ocean mountain peak glacier", source="manual"))
+        await semantic.upsert(SemanticEntry(
+            key="skill:code_weaver:eval:r2:summary",
+            value="violin guitar drum trumpet flute", source="manual"))
+        plan = await build_plan(semantic)
+        assert [c for c in plan.clusters if c.kind == KIND_RECONCILE] == []
+
+    async def test_date_bucketed_siblings_excluded(self, semantic):
+        await semantic.upsert(SemanticEntry(
+            key="loom:diary:2026-05-11:day_34",
+            value="zebra ocean mountain peak glacier", source="manual"))
+        await semantic.upsert(SemanticEntry(
+            key="loom:diary:2026-05-11:pet_care",
+            value="violin guitar drum trumpet flute", source="manual"))
+        plan = await build_plan(semantic)
+        assert [c for c in plan.clusters if c.kind == KIND_RECONCILE] == []
 
 
 # ---------------------------------------------------------------------------
