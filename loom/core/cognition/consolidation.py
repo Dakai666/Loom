@@ -157,6 +157,20 @@ def _is_stub(entry: SemanticEntry) -> bool:
     return bool(entry.metadata.get("redirected_to"))
 
 
+def _is_session_sibling(key_a: str, key_b: str) -> bool:
+    """True if two keys are sibling facts from the same session compression.
+
+    Session facts use ``session:<id>:<ts>:fact:<n>`` — siblings share the first
+    three segments. That prefix is a *provenance namespace*, not a semantic
+    subtopic, so they must NOT be treated as contradictions (#497, real-run
+    finding: 98% of reconcile candidates were this noise). They are the natural
+    segmentation of one compression, not competing claims.
+    """
+    if not (key_a.startswith("session:") and key_b.startswith("session:")):
+        return False
+    return key_a.split(":")[:3] == key_b.split(":")[:3]
+
+
 def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
     """Group keys into connected components from a list of (key_a, key_b) edges."""
     parent: dict[str, str] = {}
@@ -280,6 +294,8 @@ async def build_plan(
         for c in contradictions:
             if _is_dreaming(c.existing) or _is_stub(c.existing):
                 continue
+            if _is_session_sibling(entry.key, c.existing.key):
+                continue  # provenance-namespace siblings, not contradictions (#497)
             pair = frozenset((entry.key, c.existing.key))
             if entry.key == c.existing.key or pair in seen_pairs:
                 continue
@@ -744,16 +760,19 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
 
 
 _RECONCILE_CLASSIFY_SYSTEM = """\
-Two facts were flagged as contradicting. Decide which kind of conflict this is:
+Two facts were flagged as possibly contradicting. Decide which kind this is:
   - "merge": they are actually the SAME fact in different words — no real
     conflict, they should be fused into one.
   - "arbitrate": they are genuinely OPPOSING (one says something the other
     denies) — the more trustworthy / more recent one should win and the other
     becomes a superseded belief.
+  - "unrelated": they are NEITHER the same nor opposing — two distinct facts
+    that merely look similar. Keep BOTH, do nothing.
 
-Do NOT guess. If you cannot tell, that is itself important — say so.
+Do NOT guess. When in doubt prefer "unrelated" — merging or arbitrating two
+distinct facts destroys a good memory.
 
-Return ONLY a JSON object: {"kind": "merge" | "arbitrate", "reason": "..."}.
+Return ONLY a JSON object: {"kind": "merge"|"arbitrate"|"unrelated", "reason": "..."}.
 Return ONLY the JSON object — no preamble, no markdown fences.
 """
 
@@ -781,6 +800,8 @@ async def classify_reconcile(cluster: CandidateCluster, llm_fn: LLMFn) -> str:
     if data is None:
         return "skip"
     kind = str(data.get("kind", "")).strip().lower()
+    # "unrelated" (and anything unrecognised) → skip: never merge/arbitrate
+    # two facts that aren't actually in conflict.
     return kind if kind in ("merge", "arbitrate") else "skip"
 
 
