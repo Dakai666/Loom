@@ -125,3 +125,14 @@ class TestOrphanExecution:
         result = await execute_plan(semantic, plan, _stub_llm("[]"))
         assert result.cleaned == []
         assert await semantic.get("a") is not None  # untouched
+
+    async def test_clean_revalidates_orphan_at_execute(self, semantic):
+        # Codex review #496 — TOCTTOU: survivor restored between plan and
+        # execute. The stub row itself is unchanged (stale check passes), but
+        # it now resolves again → must NOT be deleted (live fallback).
+        plan, clean = await self._clean_plan(semantic)   # a→b dangling, approved
+        await semantic.upsert(SemanticEntry(key="b", value="restored survivor", source="manual"))
+        result = await execute_plan(semantic, plan, _stub_llm("[]"))
+        assert "a" not in result.cleaned
+        assert await semantic.get("a") is not None        # live old-key fallback preserved
+        assert (await semantic.resolve_redirect("a")).key == "b"

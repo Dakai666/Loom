@@ -841,9 +841,17 @@ async def execute_plan(
             result.skipped_stale.append(cluster.cluster_id)
             continue
 
-        # Clean arm — delete the dangling orphan stub(s).
+        # Clean arm — delete the dangling orphan stub(s). Re-validate orphan
+        # status at execute time (Codex #496 — TOCTTOU): the stub's own row is
+        # unchanged so the stale check passes, but the survivor may have been
+        # restored after planning. If the key resolves again it is a live
+        # fallback now — never delete it.
         if cluster.kind == KIND_CLEAN:
             for m in cluster.members:
+                if await semantic.resolve_redirect(m.key) is not None:
+                    result.notes.append(
+                        f"{cluster.cluster_id}: {m.key} resolves again at execute — kept")
+                    continue
                 if await semantic.delete(m.key):
                     result.cleaned.append(m.key)
             continue
