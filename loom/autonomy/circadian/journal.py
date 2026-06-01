@@ -52,6 +52,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_JOURNAL_DIR = Path("autonomy/circadian/journal")
 
+# Convergent-dream reports land in their OWN dated tree, parallel to journal/.
+# #499 (real run): sharing the journal file drowned the day's life entries under
+# the much larger consolidation report — the spec §8 "two phases, one file"
+# decision was falsified under real volume.
+DEFAULT_DREAMS_DIR = Path("autonomy/circadian/dreams")
+
 # kind: stable English enum keys (tool args) → Chinese H2 labels (file output).
 # Mirrors the four bullet list in doc/56 §10.3.
 #   moment    — 生活片段     a piece of the day's texture
@@ -76,24 +82,36 @@ def journal_path_for(date_str: str, base: Path | None = None) -> Path:
     return (base or DEFAULT_JOURNAL_DIR) / f"{date_str}.md"
 
 
+def dream_path_for(date_str: str, base: Path | None = None) -> Path:
+    """Dated convergent-dream report file for ``date_str`` (YYYY-MM-DD).
+
+    Parallel to ``journal_path_for`` but rooted at ``dreams/`` so the
+    consolidation report never shares a file with the life journal (#499).
+    """
+    return (base or DEFAULT_DREAMS_DIR) / f"{date_str}.md"
+
+
 def _append_dated_entry(
     target_dir: Path, now: datetime, label: str, body: str,
+    *, header_title: str = "Journal",
 ) -> Path:
-    """Append one ``## HH:MM · {label}`` entry to today's journal file.
+    """Append one ``## HH:MM · {label}`` entry to today's dated file.
 
     Single-source of the atomic-append behaviour shared by the agent
-    ``journal_append`` tool and system-generated reports. Lazy H1 header on
-    first write of the day; one ``write()`` syscall so concurrent appends
-    don't tear (POSIX O_APPEND atomic ≤ PIPE_BUF). Raises ``OSError`` on IO
-    failure — callers decide how to surface it.
+    ``journal_append`` tool and system-generated reports. Lazy H1 header
+    (``# {date} {header_title}``) on first write of the day; one ``write()``
+    syscall so concurrent appends don't tear (POSIX O_APPEND atomic ≤
+    PIPE_BUF). ``header_title`` distinguishes the life journal from the dream
+    report file. Raises ``OSError`` on IO failure — callers decide how to
+    surface it.
     """
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M")
-    path = journal_path_for(date_str, target_dir)
+    path = target_dir / f"{date_str}.md"
 
     chunk = ""
     if not path.exists():
-        chunk += f"# {date_str} Journal\n\n"
+        chunk += f"# {date_str} {header_title}\n\n"
     chunk += f"## {time_str} · {label}\n{body}\n\n"
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,19 +124,24 @@ def append_consolidation_report(
     report_body: str,
     *,
     timezone: str = "Asia/Taipei",
-    journal_dir: Path | None = None,
+    dreams_dir: Path | None = None,
 ) -> Path:
-    """Append a convergent-dream pass report to today's journal (#488, spec §8).
+    """Append a convergent-dream pass report to today's dream file (spec §8; #499).
 
     System-generated (written by the convergent-dream orchestrator, not the
     agent), so it uses the ``夢境鞏固`` label directly rather than a
     ``journal_append`` ``kind`` — keeping the agent tool's enum life-texture
-    only. Lands in the same dated file so the circadian journal becomes the
-    record of both dream phases (``grep 夢境鞏固`` to review). Returns the path.
+    only. Lands in its OWN dated tree (``autonomy/circadian/dreams/``), parallel
+    to the life journal: #499 real-run finding showed the report dwarfs and
+    drowns the day's journal entries when they share a file. ``grep 夢境鞏固
+    dreams/`` to review. Returns the path.
     """
-    target_dir = journal_dir or DEFAULT_JOURNAL_DIR
+    target_dir = dreams_dir or DEFAULT_DREAMS_DIR
     now = datetime.now(ZoneInfo(timezone))
-    return _append_dated_entry(target_dir, now, CONSOLIDATION_LABEL, report_body)
+    return _append_dated_entry(
+        target_dir, now, CONSOLIDATION_LABEL, report_body,
+        header_title="Dream Consolidation",
+    )
 
 
 def make_journal_append_tool(

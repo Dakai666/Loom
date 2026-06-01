@@ -213,18 +213,18 @@ def make_convergent_dream_tool(
     llm_fn: LLMFn,
     *,
     timezone: str = "Asia/Taipei",
-    journal_dir=None,
+    dreams_dir=None,
 ) -> ToolDefinition:
     """Build the ``convergent_dream`` ToolDefinition (#488, P1).
 
     The convergent counterpart to ``dream_cycle``: scans the semantic store,
     proposes merge / reconcile / clean clusters, runs the diff-inventory gate
-    and 絲絲's self-review, then writes a 夢境鞏固 report to the circadian
-    journal. **Read-only** — this phase never writes to the DB; execution of
-    the approved clusters lands in P2 (#489).
+    and 絲絲's self-review, then writes a 夢境鞏固 report to its own dated
+    ``dreams/`` file. **Read-only** — this phase never writes to the DB;
+    execution of the approved clusters lands in P2 (#489).
 
     Parameters mirror ``make_journal_append_tool`` (``timezone`` /
-    ``journal_dir``) so tests can redirect the report IO.
+    ``dreams_dir``) so tests can redirect the report IO.
     """
     from loom.core.cognition.consolidation import (
         KIND_CLEAN, KIND_MERGE, KIND_RECONCILE, run_convergent_dream,
@@ -235,16 +235,34 @@ def make_convergent_dream_tool(
         corpus_limit = int(call.args.get("corpus_limit", 2000))
         max_clusters = int(call.args.get("max_clusters", 20))
         min_similarity = float(call.args.get("min_similarity", 0.85))
+        review_batch_size = int(call.args.get("review_batch_size", 10))
+        max_review_clusters = int(call.args.get("max_review_clusters", 40))
+
+        # The batch/cap knobs feed range() steps and slice bounds; a
+        # non-positive value would crash the pass or silently leave every
+        # cluster unreviewed (#502 review). Reject before any work runs so the
+        # SAFE tool returns a friendly error and writes no report.
+        if review_batch_size < 1 or max_review_clusters < 1:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=(
+                    "review_batch_size and max_review_clusters must be positive "
+                    f"integers; got review_batch_size={review_batch_size}, "
+                    f"max_review_clusters={max_review_clusters}."
+                ),
+            )
 
         plan, report = await run_convergent_dream(
             semantic, llm_fn,
             corpus_limit=corpus_limit,
             min_similarity=min_similarity,
             max_clusters=max_clusters,
+            review_batch_size=review_batch_size,
+            max_review_clusters=max_review_clusters,
         )
 
         path = append_consolidation_report(
-            report, timezone=timezone, journal_dir=journal_dir,
+            report, timezone=timezone, dreams_dir=dreams_dir,
         )
 
         counts = plan.counts()
@@ -297,6 +315,18 @@ def make_convergent_dream_tool(
                     "type": "number",
                     "description": "Cosine threshold for near-duplicate merge candidates (default 0.85).",
                     "default": 0.85,
+                },
+                "review_batch_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Clusters per self-review LLM call; keeps each prompt context-bounded (default 10).",
+                    "default": 10,
+                },
+                "max_review_clusters": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Cap on clusters self-reviewed per pass; overflow is deferred to the next pass (default 40).",
+                    "default": 40,
                 },
             },
         },
