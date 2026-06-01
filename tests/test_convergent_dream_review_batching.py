@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 from loom.core.memory.semantic import SemanticEntry
 from loom.core.cognition.consolidation import (
     CandidateCluster,
@@ -120,6 +122,39 @@ class TestPerPassCap:
     async def test_under_cap_reviews_all(self):
         plan = _plan(8)
         decisions = await self_review(plan, _RecordingLLM(), batch_size=10, max_review_clusters=40)
+        assert all(d.verdict == VERDICT_APPROVE for d in decisions)
+        assert plan.deferred_to_next_pass == 0
+
+
+class TestInvalidKnobs:
+    """#502 review (Codex P2): the batch/cap knobs are now public tool args, so
+    they must be validated. ``batch_size=0`` crashes ``range(step=0)``;
+    ``batch_size=-1`` silently reviews nothing (empty range) yet the pass still
+    'succeeds' with every cluster left unreviewed and deferred_to_next_pass==0.
+    Both must be rejected, not coerced, so the bad value is never honoured.
+    """
+
+    async def test_batch_size_zero_raises(self):
+        with pytest.raises(ValueError):
+            await self_review(_plan(3), _RecordingLLM(), batch_size=0)
+
+    async def test_batch_size_negative_raises(self):
+        with pytest.raises(ValueError):
+            await self_review(_plan(3), _RecordingLLM(), batch_size=-1)
+
+    async def test_max_review_clusters_zero_raises(self):
+        with pytest.raises(ValueError):
+            await self_review(_plan(3), _RecordingLLM(), max_review_clusters=0)
+
+    async def test_max_review_clusters_negative_raises(self):
+        with pytest.raises(ValueError):
+            await self_review(_plan(3), _RecordingLLM(), max_review_clusters=-1)
+
+    async def test_none_max_review_clusters_means_no_cap(self):
+        # None remains a valid sentinel for "review everything, no cap".
+        plan = _plan(12)
+        decisions = await self_review(
+            plan, _RecordingLLM(), batch_size=5, max_review_clusters=None)
         assert all(d.verdict == VERDICT_APPROVE for d in decisions)
         assert plan.deferred_to_next_pass == 0
 

@@ -534,7 +534,7 @@ async def self_review(
     llm_fn: LLMFn,
     *,
     batch_size: int = 10,
-    max_review_clusters: int = 40,
+    max_review_clusters: int | None = 40,
 ) -> list[ReviewDecision]:
     """絲絲 reviews each cluster offline and returns hard-boundary verdicts.
 
@@ -546,9 +546,24 @@ async def self_review(
     context-bounded LLM call each — rather than one mega-prompt. Real-run
     finding (#499): a single all-clusters prompt blew the context window at
     scale → 2013 → everything fell back to defer. ``max_review_clusters`` caps
-    how many clusters one pass reviews; the overflow is deferred to the next
-    pass via ``plan.deferred_to_next_pass`` (no silent truncation).
+    how many clusters one pass reviews (``None`` = no cap); the overflow is
+    deferred to the next pass via ``plan.deferred_to_next_pass`` (no silent
+    truncation).
+
+    ``batch_size`` and ``max_review_clusters`` must be positive — a
+    non-positive ``batch_size`` would crash ``range(step=0)`` or silently
+    review nothing (empty range), and a non-positive cap would defer or
+    mis-slice the whole set. These are public tool knobs (#502 review), so a
+    bad value is rejected outright rather than honoured.
     """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size}")
+    if max_review_clusters is not None and max_review_clusters < 1:
+        raise ValueError(
+            f"max_review_clusters must be a positive integer or None, "
+            f"got {max_review_clusters}"
+        )
+
     decisions: list[ReviewDecision] = []
     review_clusters: list[CandidateCluster] = []
 
@@ -672,7 +687,7 @@ async def run_convergent_dream(
     min_similarity: float = 0.85,
     max_clusters: int = 20,
     review_batch_size: int = 10,
-    max_review_clusters: int = 40,
+    max_review_clusters: int | None = 40,
     execute: bool = False,
 ) -> tuple[ConsolidationPlan, str]:
     """Run one convergent-dream pass.
