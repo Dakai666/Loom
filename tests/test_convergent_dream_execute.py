@@ -207,17 +207,24 @@ class TestExecutePlan:
         # untouched: survivor not consolidated
         assert (await semantic.get("k:a")).value == "the user prefers tea in the morning"
 
-    async def test_reconcile_cluster_deferred_to_p3(self, semantic):
+    async def test_reconcile_unclassifiable_fails_safe(self, semantic):
+        # P3: reconcile is now handled (classified merge/arbitrate), not
+        # blanket-deferred. A response that yields no valid classification must
+        # fail safe — not executed. (Full reconcile coverage lives in
+        # test_convergent_dream_reconcile.py.)
         await semantic.upsert(SemanticEntry(key="r:a", value="x", source="manual"))
         await semantic.upsert(SemanticEntry(key="r:b", value="y", source="manual"))
         a, b = await semantic.get("r:a"), await semantic.get("r:b")
         cluster = CandidateCluster(cluster_id="rc1", kind=KIND_RECONCILE, members=[a, b])
         plan = ConsolidationPlan(clusters=[cluster])
+        plan.source_versions = {"r:a": a.updated_at.isoformat(), "r:b": b.updated_at.isoformat()}
         plan.decisions = [ReviewDecision(cluster_id="rc1", verdict=VERDICT_APPROVE)]
 
+        # _MERGE_RESP has no "kind" field → classify_reconcile → "skip"
         result = await execute_plan(semantic, plan, _stub_llm(_MERGE_RESP))
         assert result.executed == []
-        assert len(result.skipped_other) == 1
+        assert "rc1" in result.skipped_error
+        assert (await semantic.get("r:a")).value == "x"  # untouched
 
     async def test_synthesis_failure_skips_without_writing(self, semantic):
         plan, cluster = await _seed_merge_cluster(semantic)

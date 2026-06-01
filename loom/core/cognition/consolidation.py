@@ -728,6 +728,64 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
     )
 
 
+_RECONCILE_CLASSIFY_SYSTEM = """\
+Two facts were flagged as contradicting. Decide which kind of conflict this is:
+  - "merge": they are actually the SAME fact in different words — no real
+    conflict, they should be fused into one.
+  - "arbitrate": they are genuinely OPPOSING (one says something the other
+    denies) — the more trustworthy / more recent one should win and the other
+    becomes a superseded belief.
+
+Do NOT guess. If you cannot tell, that is itself important — say so.
+
+Return ONLY a JSON object: {"kind": "merge" | "arbitrate", "reason": "..."}.
+Return ONLY the JSON object — no preamble, no markdown fences.
+"""
+
+
+async def classify_reconcile(cluster: CandidateCluster, llm_fn: LLMFn) -> str:
+    """Classify a reconcile cluster as "merge", "arbitrate", or "skip" (P3).
+
+    "skip" is the fail-safe: an unparseable / failed / unrecognised verdict
+    never resolves a contradiction blindly.
+    """
+    fact_lines = []
+    for e in cluster.members:
+        tier, _ = classify_source(e.source)
+        fact_lines.append(f'- key="{e.key}"  trust={tier}\n  value="{e.value}"')
+    messages = [
+        {"role": "system", "content": _RECONCILE_CLASSIFY_SYSTEM},
+        {"role": "user", "content": "The two facts:\n" + "\n".join(fact_lines) + "\n\nReturn the JSON now."},
+    ]
+    try:
+        raw = await llm_fn(messages)
+    except Exception as exc:
+        logger.warning("[convergent-dream] classify_reconcile LLM failed: %s", exc)
+        return "skip"
+    data = _parse_json_object(raw)
+    if data is None:
+        return "skip"
+    kind = str(data.get("kind", "")).strip().lower()
+    return kind if kind in ("merge", "arbitrate") else "skip"
+
+
+def _arbitrate(members: list[SemanticEntry]) -> tuple[SemanticEntry, list[SemanticEntry], str]:
+    """Pick the winner of an opposing contradiction: higher trust, tie → newer.
+
+    Returns (winner, losers, reason). Mirrors ContradictionDetector.resolve's
+    trust-then-recency order, but recency is by actual updated_at (batch
+    context) rather than write-time "proposed is newer".
+    """
+    winner = max(members, key=lambda e: (_trust_of(e), e.updated_at.timestamp()))
+    losers = [e for e in members if e.key != winner.key]
+    wt, _ = classify_source(winner.source)
+    reason = (
+        f"{winner.key!r} (trust={wt}) wins over "
+        f"{[l.key for l in losers]} on trust then recency"
+    )
+    return winner, losers, reason
+
+
 async def execute_plan(
     semantic: "SemanticMemory",
     plan: ConsolidationPlan,
@@ -752,8 +810,8 @@ async def execute_plan(
         if decision is None or decision.verdict != VERDICT_APPROVE:
             result.skipped_verdict.append(cluster.cluster_id)
             continue
-        if cluster.kind != KIND_MERGE:
-            result.skipped_other.append(cluster.cluster_id)
+        if cluster.kind not in (KIND_MERGE, KIND_RECONCILE):
+            result.skipped_other.append(cluster.cluster_id)   # clean → orphan pass
             continue
 
         # stale check — source must be byte-identical to the planned snapshot
@@ -768,19 +826,40 @@ async def execute_plan(
             result.skipped_stale.append(cluster.cluster_id)
             continue
 
-        syn = await synthesize_merge(cluster, llm_fn)
-        if syn is None:
-            result.skipped_error.append(cluster.cluster_id)
-            result.notes.append(f"{cluster.cluster_id}: synthesis failed — skipped")
-            continue
+        # Resolve the cluster into a (entries, refined_value, survivor_key,
+        # sacrificed_content, rationale) consolidate() call. Merge clusters and
+        # the merge arm of reconcile both fuse via synthesize_merge; the
+        # arbitrate arm keeps the trust/recency winner's value verbatim.
+        if cluster.kind == KIND_MERGE:
+            mode = "merge"
+        else:  # KIND_RECONCILE — classify same-fact (merge) vs opposing (arbitrate)
+            mode = await classify_reconcile(cluster, llm_fn)
+            if mode not in ("merge", "arbitrate"):
+                result.skipped_error.append(cluster.cluster_id)
+                result.notes.append(f"{cluster.cluster_id}: reconcile classify → skip")
+                continue
+
+        if mode == "merge":
+            syn = await synthesize_merge(cluster, llm_fn)
+            if syn is None:
+                result.skipped_error.append(cluster.cluster_id)
+                result.notes.append(f"{cluster.cluster_id}: synthesis failed — skipped")
+                continue
+            entries, refined, survivor = cluster.members, syn.refined_value, syn.survivor_key
+            sacrificed_content, rationale = syn.sacrificed_content, syn.merge_rationale
+        else:  # arbitrate
+            winner, losers, reason = _arbitrate(cluster.members)
+            entries, refined, survivor = cluster.members, winner.value, winner.key
+            sacrificed_content = "\n\n".join(f"[{l.key}] {l.value}" for l in losers)
+            rationale = f"superseded (opposing): {reason}"
 
         try:
             res = await semantic.consolidate(
-                cluster.members,
-                refined_value=syn.refined_value,
-                survivor_key=syn.survivor_key,
-                sacrificed_content=syn.sacrificed_content,
-                merge_rationale=syn.merge_rationale,
+                entries,
+                refined_value=refined,
+                survivor_key=survivor,
+                sacrificed_content=sacrificed_content,
+                merge_rationale=rationale,
             )
         except Exception as exc:
             result.skipped_error.append(cluster.cluster_id)
