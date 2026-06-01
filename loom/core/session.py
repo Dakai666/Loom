@@ -1750,7 +1750,7 @@ class LoomSession:
     # =========================================================================
     async def stream_turn(
         self,
-        user_input: str,
+        user_input: str | list[dict[str, Any]],
         *,
         abort_signal: "asyncio.Event | None" = None,
         origin: str = "interactive",
@@ -1781,6 +1781,27 @@ class LoomSession:
                 origin,
             )
         await self._turn_lock.acquire()
+
+        # Issue #505: if user input is a free-form str that references
+        # local image files, upgrade to canonical list content so the
+        # model receives a real vision input. We do not mutate the
+        # caller's str when nothing was detected.
+        if isinstance(user_input, str):
+            detected = _detect_vision_paths_in_text(
+                user_input, base_dir=self.workspace
+            )
+            if detected:
+                images = [
+                    _vision.VisionInput(
+                        source=_vision.VisionSource(kind="file", ref=d["source"]["ref"]),
+                        media_type=d["source"]["media_type"],
+                        digest=d["source"]["digest"],
+                        origin="user",
+                    )
+                    for d in detected
+                ]
+                user_input = _vision.build_user_content(user_input, images)
+
         # ── AgentLedger turn scope (Quest B Phase 2 Step 2 commit 6) ──
         # turn_id is set once per stream_turn invocation and never
         # rotates within the turn (doc/53 §4.4). correlation_id seeds a
@@ -1840,7 +1861,7 @@ class LoomSession:
             # Prepend current datetime so the LLM always has temporal context.
             # The UI shows the original user_input; the history gets the annotated version.
             now_str = user_timestamp()
-            annotated = f"[{now_str}]\n{user_input}"
+            annotated = _annotate_user_input(user_input, now_str)
             self.messages.append({"role": "user", "content": annotated})
             asyncio.ensure_future(self._log_message("user", annotated, turn_index=self._turn_index))
 
@@ -4619,3 +4640,50 @@ __all__ = [
     "COMPRESS_PROMPT",
     "COMPACT_PROMPT",
 ]
+
+# ---------------------------------------------------------------------------
+# Vision: annotate user input with timestamp and optional path detection
+# ---------------------------------------------------------------------------
+
+def _annotate_user_input(user_input, timestamp: str):
+    """Return a fresh user-input value with a timestamp prefix.
+
+    Str input → ``f"[{ts}]\n{user_input}"``.
+
+    List input → returns ``[{"type": "text", "text": f"[{ts}]"}, *user_input]``
+    so vision content is preserved. We do not mutate the caller's list.
+    """
+    if isinstance(user_input, str):
+        return f"[{timestamp}]\n{user_input}"
+    return [{"type": "text", "text": f"[{timestamp}]"}, *user_input]
+
+
+def _detect_vision_paths_in_text(user_input: str, base_dir=None):
+    """Upgrade a free-form str to canonical list content when it
+    references local images on disk. Returns ``[]`` when no images are
+    found so the caller can keep the original str.
+    """
+    try:
+        paths = _vision.extract_image_paths(user_input, base=base_dir)
+    except Exception:
+        return []
+    if not paths:
+        return []
+    blocks = []
+    for pp in paths:
+        try:
+            vi = _vision.load_vision_input(pp, origin="user")
+        except _vision.VisionInputError:
+            continue
+        blocks.append({
+            "type": "image",
+            "source": {
+                "kind": "file",
+                "ref": str(pp),
+                "media_type": vi.media_type,
+                "digest": vi.digest,
+            },
+        })
+    return blocks
+
+

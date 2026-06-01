@@ -79,6 +79,7 @@ except ImportError as exc:  # pragma: no cover
 
 from loom.core.harness.scope import ConfirmDecision
 from loom.core.timezone import user_zone
+from loom.core.cognition import vision as _vision
 from loom.core.events import (
     EnvelopeStarted, EnvelopeUpdated, EnvelopeCompleted,
     ExecutionEnvelopeView,
@@ -545,33 +546,73 @@ class LoomDiscordBot:
             thread = await self._create_session_thread(message, content)
             session = await self._start_session(thread.id, provisional_title=thread.name)
 
-        # Process attachments
+        # Process attachments — see #505: image attachments become
+        # vision inputs (canonical list content) instead of text notes.
+        # Non-image attachments keep the old "saved to .discord_downloads"
+        # text flow so we never silently drop user data.
+        attachment_images: list[dict] = []
+        attachment_notes: list[str] = []
         if getattr(message, "attachments", None):
             dl_dir = session.workspace / ".discord_downloads"
             dl_dir.mkdir(parents=True, exist_ok=True)
-            attachment_notes = []
             for att in message.attachments:
                 dest = dl_dir / att.filename
                 try:
                     await att.save(dest)
-                    attachment_notes.append(f"- {att.filename} (saved to .discord_downloads/{att.filename})")
                 except Exception as e:
                     attachment_notes.append(f"- {att.filename} (failed to download: {e})")
-            
-            if attachment_notes:
+                    continue
+                # Peek at the magic bytes; treat as image only if we can
+                # validate it through the vision module. That keeps the
+                # "is this an image?" decision in one place and means
+                # a renamed .png actually containing JPEG still works.
+                try:
+                    vi = _vision.load_vision_input(dest, origin="discord")
+                except _vision.VisionInputError:
+                    # Not a supported image — fall back to text note.
+                    attachment_notes.append(
+                        f"- {att.filename} (saved to .discord_downloads/{att.filename})"
+                    )
+                    continue
+                attachment_images.append({
+                    "type": "image",
+                    "source": {
+                        "kind": "file",
+                        "ref": str(dest),
+                        "media_type": vi.media_type,
+                        "digest": vi.digest,
+                    },
+                })
+
+        if attachment_images or attachment_notes:
+            if attachment_images and attachment_notes:
                 notes_str = "\n".join(attachment_notes)
                 content += f"\n\n[系統通知：使用者上傳了附件]\n{notes_str}"
-            
-            # Start message if empty
             if not content.strip():
-                content = "[系統通知：使用者僅上傳了附件]"
+                if attachment_images:
+                    content = "[系統通知：使用者上傳了圖片]"
+                else:
+                    content = "[系統通知：使用者僅上傳了附件]"
+        # Build the user_input value: list content when we have images
+        # so the model sees real vision inputs; otherwise keep the str.
+        user_input_for_turn: "str | list[dict]" = content
+        if attachment_images:
+            user_input_for_turn = list(
+                [{"type": "text", "text": content}] if content.strip() else []
+            ) + attachment_images
 
         if is_thread:
-            await self._run_turn(message, content, session)
+            await self._run_turn(message, user_input_for_turn, session)
         else:
             # Re-route to thread (message is already the first user turn)
-            fake_msg = await _safe_send(thread, f"> {content[:100]}")  # echo starter
-            await self._run_turn(fake_msg, content, session)
+            # Echo a short text preview; full vision content still goes
+            # through user_input_for_turn.
+            if isinstance(user_input_for_turn, str):
+                preview = user_input_for_turn[:100]
+            else:
+                preview = "[含圖片附件]"
+            fake_msg = await _safe_send(thread, f"> {preview}")  # echo starter
+            await self._run_turn(fake_msg, user_input_for_turn, session)
 
     # ------------------------------------------------------------------
     # Thread / session helpers
@@ -1460,7 +1501,7 @@ class LoomDiscordBot:
     async def _run_turn(
         self,
         message: discord.Message,
-        content: str,
+        content,  # str | list[dict] (canonical vision content, see #505)
         session: "LoomSession",
     ) -> None:
         """

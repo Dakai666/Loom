@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .providers import LLMProvider, LLMResponse, ToolUse
+from . import vision as _vision
 from .responses_policy import normalize_reasoning_effort
 from .responses_sse import (
     DEFAULT_FIRST_EVENT_TIMEOUT,
@@ -17,6 +18,63 @@ from .responses_sse import (
     iter_sse_events,
     stream_interrupt_detail,
 )
+
+
+
+# ---------------------------------------------------------------------------
+# Vision: convert canonical list content to Responses-API blocks
+# ---------------------------------------------------------------------------
+
+def _build_responses_content(
+    content: Any, role: str
+) -> list[dict[str, Any]]:
+    """
+    Convert canonical user/assistant ``content`` to Responses API blocks.
+
+    * ``str`` → ``[input_text]`` or ``[output_text]`` depending on role
+    * list of blocks → mixed ``input_text`` / ``input_image`` blocks
+
+    Image blocks use the canonical ``{"type": "image", "source": {...}}``
+    shape defined in :mod:`loom.core.cognition.vision`. We delegate the
+    actual MIME/size/digest validation to the shared module and just
+    translate the wire shape here.
+    """
+    text_type = "output_text" if role == "assistant" else "input_text"
+    if isinstance(content, str):
+        return [{"type": text_type, "text": content}] if content else []
+    if not isinstance(content, list):
+        return [{"type": text_type, "text": str(content)}]
+    blocks: list[dict[str, Any]] = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text", "")
+            if txt:
+                blocks.append({"type": text_type, "text": txt})
+            continue
+        if btype == "image":
+            src = block.get("source", {}) or {}
+            if src.get("kind") == "url":
+                blocks.append({
+                    "type": "input_image",
+                    "image_url": src.get("ref"),
+                })
+                continue
+            if src.get("kind") == "raw":
+                raw_bytes = src.get("ref")
+                vi = _vision.VisionInput(
+                    source=_vision.VisionSource(kind="raw", ref=raw_bytes),
+                    media_type=src.get("media_type", ""),
+                    size_bytes=len(raw_bytes) if raw_bytes else 0,
+                    digest=src.get("digest", ""),
+                )
+            else:
+                vi = _vision.load_vision_input(src.get("ref"))
+            blocks.append(_vision.to_responses_image_block(vi))
+            continue
+        blocks.append(block)
+    return blocks
+
 
 
 class CodexResponsesProvider(LLMProvider):
@@ -104,7 +162,7 @@ class CodexResponsesProvider(LLMProvider):
                 if content:
                     input_items.append({
                         "role": "assistant",
-                        "content": [{"type": "output_text", "text": str(content)}],
+                        "content": _build_responses_content(content, "assistant"),
                     })
                 for tc in msg.get("tool_calls", []) or []:
                     fn = tc.get("function", {}) if isinstance(tc, dict) else {}
@@ -117,7 +175,7 @@ class CodexResponsesProvider(LLMProvider):
                 continue
             input_items.append({
                 "role": "user" if role != "assistant" else "assistant",
-                "content": [{"type": "input_text", "text": str(content)}],
+                "content": _build_responses_content(content, role),
             })
 
         payload: dict[str, Any] = {
