@@ -667,15 +667,35 @@ class SemanticMemory:
             "ts": now,
         }
 
-        await self._db.execute(
-            "UPDATE semantic_entries SET value=?, confidence=?, metadata=?, "
-            "updated_at=? WHERE key=?",
-            (refined_value, new_conf, json.dumps(meta, ensure_ascii=False),
-             now, survivor_key),
-        )
-        await self._db.commit()
+        # Atomic: survivor value/metadata + all sacrificed redirect stubs are
+        # one transaction — either the whole merge lands or none of it does.
+        # A half-write (survivor changed, sacrificed not redirected) would
+        # violate the execute-layer "never half-write" contract (#494 review).
+        # Each sacrificed key is preserved as a stub (recall resolves it via
+        # resolve_redirect); its embedding is nulled so it never surfaces.
+        try:
+            await self._db.execute(
+                "UPDATE semantic_entries SET value=?, confidence=?, metadata=?, "
+                "updated_at=? WHERE key=?",
+                (refined_value, new_conf, json.dumps(meta, ensure_ascii=False),
+                 now, survivor_key),
+            )
+            for e in sacrificed:
+                stub_meta = {"redirected_to": survivor_key, "consolidated_ts": now}
+                await self._db.execute(
+                    "UPDATE semantic_entries SET value=?, metadata=?, embedding=NULL, "
+                    "updated_at=? WHERE key=?",
+                    (f"[consolidated → {survivor_key}]",
+                     json.dumps(stub_meta, ensure_ascii=False), now, e.key),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
 
-        # Re-embed survivor (its value changed) so search reflects the merge.
+        # Re-embed survivor AFTER the atomic commit (best-effort, like upsert):
+        # its value changed so search should reflect the merge, but a re-embed
+        # failure must not undo a committed merge — the index may lag instead.
         if self._embeddings is not None:
             try:
                 vectors = await self._embeddings.embed([f"{survivor_key} {refined_value}"])
@@ -688,18 +708,6 @@ class SemanticMemory:
             except Exception as exc:
                 logger.warning(
                     "consolidate: survivor re-embed failed for %r: %s", survivor_key, exc)
-
-        # Sacrificed → redirect stubs. Key is preserved (recall still resolves
-        # via resolve_redirect); embedding nulled so the stub never surfaces.
-        for e in sacrificed:
-            stub_meta = {"redirected_to": survivor_key, "consolidated_ts": now}
-            await self._db.execute(
-                "UPDATE semantic_entries SET value=?, metadata=?, embedding=NULL, "
-                "updated_at=? WHERE key=?",
-                (f"[consolidated → {survivor_key}]",
-                 json.dumps(stub_meta, ensure_ascii=False), now, e.key),
-            )
-        await self._db.commit()
 
         return ConsolidationResult(
             survivor_key=survivor_key,

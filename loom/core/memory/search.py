@@ -296,6 +296,8 @@ class MemorySearch:
         for r in rows:
             # _SELECT_COLS produces 11 columns; index 11 holds the score.
             entry = _semantic_row_to_entry(r[:11])
+            if entry.metadata.get("redirected_to"):
+                continue  # consolidation stub — suppress (#494 review)
             score = r[11]
             if score > 0.0:
                 results.append(
@@ -345,6 +347,7 @@ class MemorySearch:
                     updated_at=e.updated_at.isoformat() if e.updated_at else "",
                 )
                 for e in entries
+                if not e.metadata.get("redirected_to")  # suppress stubs (#494)
             )
 
         if type in ("skill", "all"):
@@ -405,6 +408,8 @@ class MemorySearch:
         results: list[MemorySearchResult] = []
         for r in rows:
             entry = _semantic_row_to_entry(r[:11])
+            if entry.metadata.get("redirected_to"):
+                continue  # consolidation stub — suppress (#494 review)
             # Convert negative rank to positive score
             score = abs(r[11]) if r[11] else 0.0
             results.append(

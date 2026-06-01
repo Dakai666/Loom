@@ -12,8 +12,13 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
+from unittest.mock import MagicMock
+
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
+from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.search import MemorySearch
+from loom.core.memory.facade import MemoryFacade
 
 
 @pytest.fixture
@@ -139,3 +144,64 @@ class TestConsolidate:
         with pytest.raises(ValueError):
             await semantic.consolidate([a, b], refined_value="r", survivor_key="user:tea",
                                        sacrificed_content="x", merge_rationale="")
+
+    async def test_atomic_rollback_on_stub_failure(self, semantic, db_conn):
+        # Codex review #494 — consolidate must be all-or-nothing. If a stub
+        # update fails, the survivor must NOT be left half-written.
+        a, b = await _seed_pair(semantic)
+        await db_conn.execute(
+            "CREATE TRIGGER block_stub BEFORE UPDATE ON semantic_entries "
+            "WHEN NEW.key = 'user:tea_dup' "
+            "BEGIN SELECT RAISE(ABORT, 'blocked'); END;"
+        )
+        await db_conn.commit()
+        try:
+            with pytest.raises(Exception):
+                await semantic.consolidate(
+                    [a, b], refined_value="REFINED SURVIVOR", survivor_key="user:tea",
+                    sacrificed_content=b.value, merge_rationale="r")
+            # survivor rolled back to its original value — no half-write
+            assert (await semantic.get("user:tea")).value == a.value
+            assert (await semantic.get("user:tea_dup")).value == b.value
+        finally:
+            await db_conn.execute("DROP TRIGGER block_stub")
+            await db_conn.commit()
+
+
+class TestRedirectRecall:
+    """Codex review #494 — recall must resolve/suppress redirect stubs."""
+
+    async def _consolidate_pair(self, db_conn):
+        sem = SemanticMemory(db_conn)
+        proc = ProceduralMemory(db_conn)
+        await sem.upsert(SemanticEntry(key="user:tea", value="user drinks tea every single morning", source="manual"))
+        await sem.upsert(SemanticEntry(key="user:tea_dup", value="user has tea each morning daily", source="manual"))
+        a, b = await sem.get("user:tea"), await sem.get("user:tea_dup")
+        await sem.consolidate([a, b], refined_value="user drinks tea every morning",
+                              survivor_key="user:tea", sacrificed_content=b.value,
+                              merge_rationale="r")
+        return sem, proc
+
+    async def test_stub_suppressed_from_recall(self, db_conn):
+        sem, proc = await self._consolidate_pair(db_conn)
+        search = MemorySearch(sem, proc)
+        # "consolidated" appears ONLY in the stub's placeholder value — if the
+        # stub is not suppressed it is the one row that matches.
+        results = await search.recall("consolidated", type="semantic", limit=10)
+        assert "user:tea_dup" not in [r.key for r in results]
+
+    async def test_survivor_still_findable_after_merge(self, db_conn):
+        sem, proc = await self._consolidate_pair(db_conn)
+        search = MemorySearch(sem, proc)
+        results = await search.recall("tea morning", type="semantic", limit=10)
+        assert "user:tea" in [r.key for r in results]
+        assert "user:tea_dup" not in [r.key for r in results]
+
+    async def test_get_fact_follows_redirect(self, db_conn):
+        sem, proc = await self._consolidate_pair(db_conn)
+        facade = MemoryFacade(semantic=sem, procedural=proc, episodic=MagicMock(),
+                              search=MemorySearch(sem, proc), governor=None)
+        resolved = await facade.get_fact("user:tea_dup")
+        assert resolved is not None
+        assert resolved.key == "user:tea"
+        assert resolved.value == "user drinks tea every morning"
