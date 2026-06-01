@@ -152,6 +152,11 @@ def _is_dreaming(entry: SemanticEntry) -> bool:
     return tier == "dreaming"
 
 
+def _is_stub(entry: SemanticEntry) -> bool:
+    """True if the entry is a consolidation redirect stub (#490 P3)."""
+    return bool(entry.metadata.get("redirected_to"))
+
+
 def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
     """Group keys into connected components from a list of (key_a, key_b) edges."""
     parent: dict[str, str] = {}
@@ -204,8 +209,8 @@ async def build_plan(
     pair_score: dict[frozenset[str], float] = {}
     if semantic.has_embeddings:
         for entry in corpus:
-            if _is_dreaming(entry):
-                continue  # spec §6.5 — never propose dreaming output for merge
+            if _is_dreaming(entry) or _is_stub(entry):
+                continue  # §6.5 dreaming exempt; stubs aren't real facts (#490)
             try:
                 neighbours = await semantic.find_near_duplicates(
                     entry.value,
@@ -218,7 +223,7 @@ async def build_plan(
                 plan.notes.append(f"near-dup lookup failed for {entry.key!r}: {exc}")
                 continue
             for neighbour, score in neighbours:
-                if _is_dreaming(neighbour) or neighbour.key not in by_key:
+                if _is_dreaming(neighbour) or _is_stub(neighbour) or neighbour.key not in by_key:
                     continue
                 edges.append((entry.key, neighbour.key))
                 pair = frozenset((entry.key, neighbour.key))
@@ -265,7 +270,7 @@ async def build_plan(
     detector = ContradictionDetector(semantic)
     seen_pairs: set[frozenset[str]] = set()
     for entry in corpus:
-        if _is_dreaming(entry):
+        if _is_dreaming(entry) or _is_stub(entry):
             continue
         try:
             contradictions = await detector.detect(entry)
@@ -273,7 +278,7 @@ async def build_plan(
             plan.notes.append(f"contradiction scan failed for {entry.key!r}: {exc}")
             continue
         for c in contradictions:
-            if _is_dreaming(c.existing):
+            if _is_dreaming(c.existing) or _is_stub(c.existing):
                 continue
             pair = frozenset((entry.key, c.existing.key))
             if entry.key == c.existing.key or pair in seen_pairs:
@@ -290,13 +295,20 @@ async def build_plan(
                 ),
             ))
 
-    # ── Clean candidates: dreaming allowed-orphans are reported, not cleaned ──
-    # Deeper orphan criteria (dangling key references) is open (#490 / spec §11-Q7).
-    # P1 only classifies dreaming orphans so the report is honest about them.
-    plan.notes.append(
-        "clean phase: orphan-reference criteria deferred to P3 (#490); "
-        "dreaming-sourced entries treated as allowed orphans (never cleaned)."
-    )
+    # ── Clean candidates: dangling redirect stubs (#490 P3) ──────────────
+    # A stub whose terminal survivor is gone (resolve_redirect → None) is a
+    # dangling orphan. dreaming-sourced entries are allowed orphans (絲絲's
+    # principle — never cleaned). Live stubs (target still resolves) are kept.
+    for entry in corpus:
+        if not _is_stub(entry) or _is_dreaming(entry):
+            continue
+        if await semantic.resolve_redirect(entry.key) is None:
+            plan.clusters.append(CandidateCluster(
+                cluster_id=f"clean-{uuid.uuid4().hex[:8]}",
+                kind=KIND_CLEAN,
+                members=[entry],
+                proposed_action="delete dangling redirect stub (terminal survivor gone)",
+            ))
 
     # ── Snapshot source versions for stale detection at execute time (P2) ──
     for cluster in plan.clusters:
@@ -573,6 +585,8 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
         out.append("### 執行結果")
         out.append(f"- ✅ 已合併：{len(execute_result.executed)} 簇 "
                    f"(survivors: {'、'.join(f'`{k}`' for k in execute_result.executed) or '—'})")
+        if execute_result.cleaned:
+            out.append(f"- 🧹 已清理孤兒 stub：{len(execute_result.cleaned)}")
         if execute_result.skipped_stale:
             out.append(f"- ⏭️ stale 跳過：{len(execute_result.skipped_stale)}（來源在自審後已變動）")
         if execute_result.skipped_other:
@@ -644,6 +658,7 @@ class MergeSynthesis:
 class ExecuteResult:
     """Outcome of executing an approved, non-stale plan (P2)."""
     executed: list[str] = field(default_factory=list)        # survivor keys consolidated
+    cleaned: list[str] = field(default_factory=list)         # dangling stubs deleted
     skipped_stale: list[str] = field(default_factory=list)   # source changed after snapshot
     skipped_verdict: list[str] = field(default_factory=list) # not approved
     skipped_other: list[str] = field(default_factory=list)   # reconcile/clean → P3
@@ -728,6 +743,64 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
     )
 
 
+_RECONCILE_CLASSIFY_SYSTEM = """\
+Two facts were flagged as contradicting. Decide which kind of conflict this is:
+  - "merge": they are actually the SAME fact in different words — no real
+    conflict, they should be fused into one.
+  - "arbitrate": they are genuinely OPPOSING (one says something the other
+    denies) — the more trustworthy / more recent one should win and the other
+    becomes a superseded belief.
+
+Do NOT guess. If you cannot tell, that is itself important — say so.
+
+Return ONLY a JSON object: {"kind": "merge" | "arbitrate", "reason": "..."}.
+Return ONLY the JSON object — no preamble, no markdown fences.
+"""
+
+
+async def classify_reconcile(cluster: CandidateCluster, llm_fn: LLMFn) -> str:
+    """Classify a reconcile cluster as "merge", "arbitrate", or "skip" (P3).
+
+    "skip" is the fail-safe: an unparseable / failed / unrecognised verdict
+    never resolves a contradiction blindly.
+    """
+    fact_lines = []
+    for e in cluster.members:
+        tier, _ = classify_source(e.source)
+        fact_lines.append(f'- key="{e.key}"  trust={tier}\n  value="{e.value}"')
+    messages = [
+        {"role": "system", "content": _RECONCILE_CLASSIFY_SYSTEM},
+        {"role": "user", "content": "The two facts:\n" + "\n".join(fact_lines) + "\n\nReturn the JSON now."},
+    ]
+    try:
+        raw = await llm_fn(messages)
+    except Exception as exc:
+        logger.warning("[convergent-dream] classify_reconcile LLM failed: %s", exc)
+        return "skip"
+    data = _parse_json_object(raw)
+    if data is None:
+        return "skip"
+    kind = str(data.get("kind", "")).strip().lower()
+    return kind if kind in ("merge", "arbitrate") else "skip"
+
+
+def _arbitrate(members: list[SemanticEntry]) -> tuple[SemanticEntry, list[SemanticEntry], str]:
+    """Pick the winner of an opposing contradiction: higher trust, tie → newer.
+
+    Returns (winner, losers, reason). Mirrors ContradictionDetector.resolve's
+    trust-then-recency order, but recency is by actual updated_at (batch
+    context) rather than write-time "proposed is newer".
+    """
+    winner = max(members, key=lambda e: (_trust_of(e), e.updated_at.timestamp()))
+    losers = [e for e in members if e.key != winner.key]
+    wt, _ = classify_source(winner.source)
+    reason = (
+        f"{winner.key!r} (trust={wt}) wins over "
+        f"{[l.key for l in losers]} on trust then recency"
+    )
+    return winner, losers, reason
+
+
 async def execute_plan(
     semantic: "SemanticMemory",
     plan: ConsolidationPlan,
@@ -752,7 +825,7 @@ async def execute_plan(
         if decision is None or decision.verdict != VERDICT_APPROVE:
             result.skipped_verdict.append(cluster.cluster_id)
             continue
-        if cluster.kind != KIND_MERGE:
+        if cluster.kind not in (KIND_MERGE, KIND_RECONCILE, KIND_CLEAN):
             result.skipped_other.append(cluster.cluster_id)
             continue
 
@@ -768,19 +841,55 @@ async def execute_plan(
             result.skipped_stale.append(cluster.cluster_id)
             continue
 
-        syn = await synthesize_merge(cluster, llm_fn)
-        if syn is None:
-            result.skipped_error.append(cluster.cluster_id)
-            result.notes.append(f"{cluster.cluster_id}: synthesis failed — skipped")
+        # Clean arm — delete the dangling orphan stub(s). Re-validate orphan
+        # status at execute time (Codex #496 — TOCTTOU): the stub's own row is
+        # unchanged so the stale check passes, but the survivor may have been
+        # restored after planning. If the key resolves again it is a live
+        # fallback now — never delete it.
+        if cluster.kind == KIND_CLEAN:
+            for m in cluster.members:
+                if await semantic.resolve_redirect(m.key) is not None:
+                    result.notes.append(
+                        f"{cluster.cluster_id}: {m.key} resolves again at execute — kept")
+                    continue
+                if await semantic.delete(m.key):
+                    result.cleaned.append(m.key)
             continue
+
+        # Resolve the cluster into a (entries, refined_value, survivor_key,
+        # sacrificed_content, rationale) consolidate() call. Merge clusters and
+        # the merge arm of reconcile both fuse via synthesize_merge; the
+        # arbitrate arm keeps the trust/recency winner's value verbatim.
+        if cluster.kind == KIND_MERGE:
+            mode = "merge"
+        else:  # KIND_RECONCILE — classify same-fact (merge) vs opposing (arbitrate)
+            mode = await classify_reconcile(cluster, llm_fn)
+            if mode not in ("merge", "arbitrate"):
+                result.skipped_error.append(cluster.cluster_id)
+                result.notes.append(f"{cluster.cluster_id}: reconcile classify → skip")
+                continue
+
+        if mode == "merge":
+            syn = await synthesize_merge(cluster, llm_fn)
+            if syn is None:
+                result.skipped_error.append(cluster.cluster_id)
+                result.notes.append(f"{cluster.cluster_id}: synthesis failed — skipped")
+                continue
+            entries, refined, survivor = cluster.members, syn.refined_value, syn.survivor_key
+            sacrificed_content, rationale = syn.sacrificed_content, syn.merge_rationale
+        else:  # arbitrate
+            winner, losers, reason = _arbitrate(cluster.members)
+            entries, refined, survivor = cluster.members, winner.value, winner.key
+            sacrificed_content = "\n\n".join(f"[{l.key}] {l.value}" for l in losers)
+            rationale = f"superseded (opposing): {reason}"
 
         try:
             res = await semantic.consolidate(
-                cluster.members,
-                refined_value=syn.refined_value,
-                survivor_key=syn.survivor_key,
-                sacrificed_content=syn.sacrificed_content,
-                merge_rationale=syn.merge_rationale,
+                entries,
+                refined_value=refined,
+                survivor_key=survivor,
+                sacrificed_content=sacrificed_content,
+                merge_rationale=rationale,
             )
         except Exception as exc:
             result.skipped_error.append(cluster.cluster_id)
