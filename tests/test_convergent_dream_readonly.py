@@ -437,7 +437,7 @@ class TestReadOnlyInvariant:
 
         async def combined(messages):
             sys = messages[0]["content"]
-            if "difference inventory" in sys:
+            if "差異盤點" in sys:
                 return '{"unique_by_key":{"m1":"","m2":"more"},"mergeable":true,"rationale":"r"}'
             # self_review — verdict is irrelevant to the read-only invariant
             return '[]'

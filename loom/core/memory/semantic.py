@@ -156,6 +156,14 @@ def _row_to_entry(row: tuple) -> SemanticEntry:
     )
 
 
+@dataclass
+class ConsolidationResult:
+    """Outcome of a ``consolidate()`` merge (#489, P2)."""
+    survivor_key: str
+    sacrificed_keys: list[str]
+    refined_value: str
+
+
 class SemanticMemory:
     """Read/write access to the semantic_entries table."""
 
@@ -602,6 +610,125 @@ class SemanticMemory:
         )
         await self._db.commit()
         return (cursor.rowcount or 0) > 0
+
+    async def consolidate(
+        self,
+        entries: list[SemanticEntry],
+        *,
+        refined_value: str,
+        survivor_key: str,
+        sacrificed_content: str,
+        merge_rationale: str,
+    ) -> ConsolidationResult:
+        """Fuse ≥2 near-duplicate facts into one refined survivor (#489, P2).
+
+        The survivor's value becomes ``refined_value``; every sacrificed
+        entry's **full original text is preserved verbatim** in the survivor's
+        ``metadata["consolidated_into"]`` (絲絲's hard requirement — merge must
+        not flatten the wording that carries the insight), and each sacrificed
+        key is turned into a redirect stub so ``resolve_redirect`` still finds
+        the survivor. Confidence takes the max across members (independent
+        corroboration → at least as confident as the strongest). The stub's
+        embedding is nulled so it never surfaces in semantic search.
+
+        This is a write primitive — it trusts its inputs. The caller
+        (``execute_plan``) is responsible for self-review approval and stale
+        checks before calling. Raises ``ValueError`` on malformed input.
+        """
+        if len(entries) < 2:
+            raise ValueError("consolidate requires ≥2 entries")
+        keys = {e.key for e in entries}
+        if survivor_key not in keys:
+            raise ValueError(f"survivor_key {survivor_key!r} not among entries {sorted(keys)}")
+        if not refined_value.strip():
+            raise ValueError("refined_value must be non-empty")
+        if not sacrificed_content.strip():
+            raise ValueError("sacrificed_content must be non-empty (preserve the originals)")
+        if not merge_rationale.strip():
+            raise ValueError("merge_rationale must be non-empty")
+
+        survivor = await self.get(survivor_key)
+        if survivor is None:
+            raise ValueError(f"survivor_key {survivor_key!r} not found in store")
+        sacrificed = [e for e in entries if e.key != survivor_key]
+
+        now = datetime.now(UTC).isoformat()
+        new_conf = max(e.confidence for e in entries)
+
+        meta = dict(survivor.metadata)
+        meta["consolidated_into"] = {
+            "sacrificed_content": sacrificed_content,
+            "sacrificed_entries": [
+                {"key": e.key, "value": e.value, "source": e.source,
+                 "confidence": e.confidence}
+                for e in sacrificed
+            ],
+            "rationale": merge_rationale,
+            "ts": now,
+        }
+
+        # Atomic: survivor value/metadata + all sacrificed redirect stubs are
+        # one transaction — either the whole merge lands or none of it does.
+        # A half-write (survivor changed, sacrificed not redirected) would
+        # violate the execute-layer "never half-write" contract (#494 review).
+        # Each sacrificed key is preserved as a stub (recall resolves it via
+        # resolve_redirect); its embedding is nulled so it never surfaces.
+        try:
+            await self._db.execute(
+                "UPDATE semantic_entries SET value=?, confidence=?, metadata=?, "
+                "updated_at=? WHERE key=?",
+                (refined_value, new_conf, json.dumps(meta, ensure_ascii=False),
+                 now, survivor_key),
+            )
+            for e in sacrificed:
+                stub_meta = {"redirected_to": survivor_key, "consolidated_ts": now}
+                await self._db.execute(
+                    "UPDATE semantic_entries SET value=?, metadata=?, embedding=NULL, "
+                    "updated_at=? WHERE key=?",
+                    (f"[consolidated → {survivor_key}]",
+                     json.dumps(stub_meta, ensure_ascii=False), now, e.key),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+        # Re-embed survivor AFTER the atomic commit (best-effort, like upsert):
+        # its value changed so search should reflect the merge, but a re-embed
+        # failure must not undo a committed merge — the index may lag instead.
+        if self._embeddings is not None:
+            try:
+                vectors = await self._embeddings.embed([f"{survivor_key} {refined_value}"])
+                if vectors:
+                    await self._db.execute(
+                        "UPDATE semantic_entries SET embedding=? WHERE key=?",
+                        (json.dumps(vectors[0]), survivor_key),
+                    )
+                    await self._db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "consolidate: survivor re-embed failed for %r: %s", survivor_key, exc)
+
+        return ConsolidationResult(
+            survivor_key=survivor_key,
+            sacrificed_keys=[e.key for e in sacrificed],
+            refined_value=refined_value,
+        )
+
+    async def resolve_redirect(self, key: str) -> SemanticEntry | None:
+        """Resolve a key, following one redirect hop if it is a stub (#489, P2).
+
+        Returns the survivor entry for a consolidated key, the entry itself for
+        a normal key, or None if the key (or a dangling redirect target) is
+        gone. One hop only — consolidate never chains stubs.
+        """
+        entry = await self.get(key)
+        if entry is None:
+            return None
+        target = entry.metadata.get("redirected_to")
+        if target:
+            return await self.get(target)
+        return entry
 
     async def mark_accessed(self, keys: list[str]) -> None:
         """Bump ``last_accessed_at`` for the given keys (Memory Ontology v0.1).

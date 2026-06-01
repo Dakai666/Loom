@@ -125,8 +125,12 @@ class MemoryFacade:
         return results
 
     async def get_fact(self, key: str) -> "SemanticEntry | None":
-        """Direct semantic-memory lookup by exact key."""
-        entry = await self.semantic.get(key)
+        """Direct semantic-memory lookup by exact key.
+
+        Follows a consolidation redirect (#494): a key that was merged away
+        resolves to its survivor so the old-key fallback works as designed.
+        """
+        entry = await self.semantic.resolve_redirect(key)
         await self._emit_memory_op(
             operation="read",
             memory_id=getattr(entry, "id", None) if entry else None,
