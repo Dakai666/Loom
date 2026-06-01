@@ -152,6 +152,11 @@ def _is_dreaming(entry: SemanticEntry) -> bool:
     return tier == "dreaming"
 
 
+def _is_stub(entry: SemanticEntry) -> bool:
+    """True if the entry is a consolidation redirect stub (#490 P3)."""
+    return bool(entry.metadata.get("redirected_to"))
+
+
 def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
     """Group keys into connected components from a list of (key_a, key_b) edges."""
     parent: dict[str, str] = {}
@@ -204,8 +209,8 @@ async def build_plan(
     pair_score: dict[frozenset[str], float] = {}
     if semantic.has_embeddings:
         for entry in corpus:
-            if _is_dreaming(entry):
-                continue  # spec §6.5 — never propose dreaming output for merge
+            if _is_dreaming(entry) or _is_stub(entry):
+                continue  # §6.5 dreaming exempt; stubs aren't real facts (#490)
             try:
                 neighbours = await semantic.find_near_duplicates(
                     entry.value,
@@ -218,7 +223,7 @@ async def build_plan(
                 plan.notes.append(f"near-dup lookup failed for {entry.key!r}: {exc}")
                 continue
             for neighbour, score in neighbours:
-                if _is_dreaming(neighbour) or neighbour.key not in by_key:
+                if _is_dreaming(neighbour) or _is_stub(neighbour) or neighbour.key not in by_key:
                     continue
                 edges.append((entry.key, neighbour.key))
                 pair = frozenset((entry.key, neighbour.key))
@@ -265,7 +270,7 @@ async def build_plan(
     detector = ContradictionDetector(semantic)
     seen_pairs: set[frozenset[str]] = set()
     for entry in corpus:
-        if _is_dreaming(entry):
+        if _is_dreaming(entry) or _is_stub(entry):
             continue
         try:
             contradictions = await detector.detect(entry)
@@ -273,7 +278,7 @@ async def build_plan(
             plan.notes.append(f"contradiction scan failed for {entry.key!r}: {exc}")
             continue
         for c in contradictions:
-            if _is_dreaming(c.existing):
+            if _is_dreaming(c.existing) or _is_stub(c.existing):
                 continue
             pair = frozenset((entry.key, c.existing.key))
             if entry.key == c.existing.key or pair in seen_pairs:
@@ -290,13 +295,20 @@ async def build_plan(
                 ),
             ))
 
-    # ── Clean candidates: dreaming allowed-orphans are reported, not cleaned ──
-    # Deeper orphan criteria (dangling key references) is open (#490 / spec §11-Q7).
-    # P1 only classifies dreaming orphans so the report is honest about them.
-    plan.notes.append(
-        "clean phase: orphan-reference criteria deferred to P3 (#490); "
-        "dreaming-sourced entries treated as allowed orphans (never cleaned)."
-    )
+    # ── Clean candidates: dangling redirect stubs (#490 P3) ──────────────
+    # A stub whose terminal survivor is gone (resolve_redirect → None) is a
+    # dangling orphan. dreaming-sourced entries are allowed orphans (絲絲's
+    # principle — never cleaned). Live stubs (target still resolves) are kept.
+    for entry in corpus:
+        if not _is_stub(entry) or _is_dreaming(entry):
+            continue
+        if await semantic.resolve_redirect(entry.key) is None:
+            plan.clusters.append(CandidateCluster(
+                cluster_id=f"clean-{uuid.uuid4().hex[:8]}",
+                kind=KIND_CLEAN,
+                members=[entry],
+                proposed_action="delete dangling redirect stub (terminal survivor gone)",
+            ))
 
     # ── Snapshot source versions for stale detection at execute time (P2) ──
     for cluster in plan.clusters:
@@ -573,6 +585,8 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
         out.append("### 執行結果")
         out.append(f"- ✅ 已合併：{len(execute_result.executed)} 簇 "
                    f"(survivors: {'、'.join(f'`{k}`' for k in execute_result.executed) or '—'})")
+        if execute_result.cleaned:
+            out.append(f"- 🧹 已清理孤兒 stub：{len(execute_result.cleaned)}")
         if execute_result.skipped_stale:
             out.append(f"- ⏭️ stale 跳過：{len(execute_result.skipped_stale)}（來源在自審後已變動）")
         if execute_result.skipped_other:
@@ -644,6 +658,7 @@ class MergeSynthesis:
 class ExecuteResult:
     """Outcome of executing an approved, non-stale plan (P2)."""
     executed: list[str] = field(default_factory=list)        # survivor keys consolidated
+    cleaned: list[str] = field(default_factory=list)         # dangling stubs deleted
     skipped_stale: list[str] = field(default_factory=list)   # source changed after snapshot
     skipped_verdict: list[str] = field(default_factory=list) # not approved
     skipped_other: list[str] = field(default_factory=list)   # reconcile/clean → P3
@@ -810,8 +825,8 @@ async def execute_plan(
         if decision is None or decision.verdict != VERDICT_APPROVE:
             result.skipped_verdict.append(cluster.cluster_id)
             continue
-        if cluster.kind not in (KIND_MERGE, KIND_RECONCILE):
-            result.skipped_other.append(cluster.cluster_id)   # clean → orphan pass
+        if cluster.kind not in (KIND_MERGE, KIND_RECONCILE, KIND_CLEAN):
+            result.skipped_other.append(cluster.cluster_id)
             continue
 
         # stale check — source must be byte-identical to the planned snapshot
@@ -824,6 +839,13 @@ async def execute_plan(
                 break
         if stale:
             result.skipped_stale.append(cluster.cluster_id)
+            continue
+
+        # Clean arm — delete the dangling orphan stub(s).
+        if cluster.kind == KIND_CLEAN:
+            for m in cluster.members:
+                if await semantic.delete(m.key):
+                    result.cleaned.append(m.key)
             continue
 
         # Resolve the cluster into a (entries, refined_value, survivor_key,

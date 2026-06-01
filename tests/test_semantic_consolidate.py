@@ -168,6 +168,66 @@ class TestConsolidate:
             await db_conn.commit()
 
 
+class TestRedirectChain:
+    """Multi-hop redirect resolution + loop guard + chain metadata (#490 P3)."""
+
+    async def _chain_abc(self, semantic):
+        for k, v in [("a", "fact a"), ("b", "fact b"), ("c", "fact c")]:
+            await semantic.upsert(SemanticEntry(key=k, value=v, source="manual"))
+        a, b = await semantic.get("a"), await semantic.get("b")
+        await semantic.consolidate([a, b], refined_value="B refined", survivor_key="b",
+                                   sacrificed_content=a.value, merge_rationale="r")  # a→b
+        b, c = await semantic.get("b"), await semantic.get("c")
+        await semantic.consolidate([b, c], refined_value="C refined", survivor_key="c",
+                                   sacrificed_content=b.value, merge_rationale="r")  # b→c
+
+    async def test_multi_hop_follows_to_terminal(self, semantic):
+        await self._chain_abc(semantic)
+        resolved = await semantic.resolve_redirect("a")   # a→b→c
+        assert resolved is not None
+        assert resolved.key == "c"
+        assert resolved.value == "C refined"
+
+    async def test_redirect_chain_metadata_recorded(self, semantic):
+        await self._chain_abc(semantic)
+        stub_a = await semantic.get("a")
+        assert "redirect_chain" in stub_a.metadata
+
+    async def test_cycle_returns_none(self, semantic, db_conn):
+        # Craft a cycle directly: a→b, b→a.
+        await semantic.upsert(SemanticEntry(key="a", value="x", source="manual"))
+        await semantic.upsert(SemanticEntry(key="b", value="y", source="manual"))
+        import json
+        for k, tgt in [("a", "b"), ("b", "a")]:
+            await db_conn.execute(
+                "UPDATE semantic_entries SET metadata=? WHERE key=?",
+                (json.dumps({"redirected_to": tgt}), k))
+        await db_conn.commit()
+        assert await semantic.resolve_redirect("a") is None   # loop guarded
+
+    async def test_dangling_redirect_returns_none(self, semantic):
+        await semantic.upsert(SemanticEntry(key="a", value="x", source="manual"))
+        await semantic.upsert(SemanticEntry(key="b", value="y", source="manual"))
+        a, b = await semantic.get("a"), await semantic.get("b")
+        await semantic.consolidate([a, b], refined_value="r", survivor_key="b",
+                                   sacrificed_content=a.value, merge_rationale="r")  # a→b
+        await semantic.delete("b")                              # survivor gone
+        assert await semantic.resolve_redirect("a") is None    # dangling
+
+    async def test_merge_into_stub_rejected(self, semantic):
+        await semantic.upsert(SemanticEntry(key="a", value="x", source="manual"))
+        await semantic.upsert(SemanticEntry(key="b", value="y", source="manual"))
+        await semantic.upsert(SemanticEntry(key="c", value="z", source="manual"))
+        a, b = await semantic.get("a"), await semantic.get("b")
+        await semantic.consolidate([a, b], refined_value="r", survivor_key="b",
+                                   sacrificed_content=a.value, merge_rationale="r")  # a→b (a is stub)
+        a_stub, c = await semantic.get("a"), await semantic.get("c")
+        with pytest.raises(ValueError):
+            # survivor 'a' is now a stub — merging into it is malformed
+            await semantic.consolidate([c, a_stub], refined_value="r", survivor_key="a",
+                                       sacrificed_content=c.value, merge_rationale="r")
+
+
 class TestRedirectRecall:
     """Codex review #494 — recall must resolve/suppress redirect stubs."""
 

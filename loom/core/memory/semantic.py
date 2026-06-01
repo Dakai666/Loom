@@ -650,6 +650,9 @@ class SemanticMemory:
         survivor = await self.get(survivor_key)
         if survivor is None:
             raise ValueError(f"survivor_key {survivor_key!r} not found in store")
+        if survivor.metadata.get("redirected_to"):
+            raise ValueError(
+                f"survivor_key {survivor_key!r} is a redirect stub — cannot merge into it")
         sacrificed = [e for e in entries if e.key != survivor_key]
 
         now = datetime.now(UTC).isoformat()
@@ -681,7 +684,11 @@ class SemanticMemory:
                  now, survivor_key),
             )
             for e in sacrificed:
-                stub_meta = {"redirected_to": survivor_key, "consolidated_ts": now}
+                stub_meta = {
+                    "redirected_to": survivor_key,
+                    "redirect_chain": [survivor_key],   # immediate hop; resolve_redirect follows cross-pass chains
+                    "consolidated_ts": now,
+                }
                 await self._db.execute(
                     "UPDATE semantic_entries SET value=?, metadata=?, embedding=NULL, "
                     "updated_at=? WHERE key=?",
@@ -715,20 +722,28 @@ class SemanticMemory:
             refined_value=refined_value,
         )
 
-    async def resolve_redirect(self, key: str) -> SemanticEntry | None:
-        """Resolve a key, following one redirect hop if it is a stub (#489, P2).
+    async def resolve_redirect(self, key: str, *, _max_hops: int = 16) -> SemanticEntry | None:
+        """Resolve a key, following redirect stubs to the terminal survivor.
 
-        Returns the survivor entry for a consolidated key, the entry itself for
-        a normal key, or None if the key (or a dangling redirect target) is
-        gone. One hop only — consolidate never chains stubs.
+        Follows ``redirected_to`` hop by hop so cross-pass chains (A→B→C, formed
+        when a survivor is itself later consolidated) resolve to the live
+        terminal (#490, P3). Returns the terminal entry for a consolidated key,
+        the entry itself for a normal key, or ``None`` when the chain dangles
+        (a hop's target is gone), cycles, or exceeds ``_max_hops``.
         """
+        visited: set[str] = set()
         entry = await self.get(key)
-        if entry is None:
-            return None
-        target = entry.metadata.get("redirected_to")
-        if target:
-            return await self.get(target)
-        return entry
+        hops = 0
+        while entry is not None:
+            target = entry.metadata.get("redirected_to")
+            if not target:
+                return entry                     # terminal — live, non-stub
+            if target in visited or hops >= _max_hops:
+                return None                      # cycle / runaway chain
+            visited.add(entry.key)
+            hops += 1
+            entry = await self.get(target)
+        return None                              # dangling — a hop's target is gone
 
     async def mark_accessed(self, keys: list[str]) -> None:
         """Bump ``last_accessed_at`` for the given keys (Memory Ontology v0.1).
