@@ -1,3 +1,8 @@
+
+
+
+
+
 """
 SessionLog — persistent, lossless conversation history.
 
@@ -23,6 +28,38 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 import aiosqlite
+
+
+# ---------------------------------------------------------------------------
+# Vision: strip base64 from list content before persistence
+# ---------------------------------------------------------------------------
+
+def _strip_vision_blocks(content, metadata):
+    """Reduce canonical list content to (text_summary, augmented_metadata)."""
+    text_parts = []
+    image_refs = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text", "")
+            if txt:
+                text_parts.append(txt)
+        elif btype == "image":
+            src = block.get("source", {}) or {}
+            image_refs.append({
+                "kind": src.get("kind"),
+                "ref": src.get("ref") if src.get("kind") in {"url", "file"} else None,
+                "media_type": src.get("media_type"),
+                "digest": src.get("digest"),
+            })
+    text_summary = "\n".join(text_parts)
+    if not text_summary and image_refs:
+        text_summary = f"[vision input: {len(image_refs)} image(s)]"
+    md = dict(metadata or {})
+    if image_refs:
+        md["vision_inputs"] = image_refs
+    return text_summary, md
+
 
 
 # ---------------------------------------------------------------------------
