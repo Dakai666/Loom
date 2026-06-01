@@ -47,7 +47,7 @@ def _make_call(args: dict) -> ToolCall:
 
 async def _combined_llm(messages):
     sys = messages[0]["content"]
-    if "difference inventory" in sys:
+    if "差異盤點" in sys:
         return '{"unique_by_key":{},"mergeable":false,"rationale":"distinct"}'
     return "[]"
 

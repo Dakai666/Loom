@@ -519,12 +519,13 @@ async def self_review(plan: ConsolidationPlan, llm_fn: LLMFn) -> list[ReviewDeci
 _VERDICT_ICON = {VERDICT_APPROVE: "✅", VERDICT_SKIP: "⚠️", VERDICT_DEFER: "💤"}
 
 
-def render_report(plan: ConsolidationPlan) -> str:
+def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None" = None) -> str:
     """Render the convergent-dream pass as a markdown body (spec §8).
 
     This is the body of a ``夢境鞏固`` journal entry — narrative enough to read
     back, but every line maps to a concrete cluster + verdict so it can be
-    audited against the (future) executed state.
+    audited against the executed state. When ``execute_result`` is given
+    (P2 execute=True), an execution-outcome section is appended.
     """
     counts = plan.counts()
     out: list[str] = [
@@ -564,8 +565,22 @@ def render_report(plan: ConsolidationPlan) -> str:
         for n in plan.notes:
             out.append(f"- {n}")
 
-    out.append("")
-    out.append("_P1 read-only：本輪僅規劃與自審，未改寫任何記憶。執行待 P2 (#489)。_")
+    if execute_result is None:
+        out.append("")
+        out.append("_read-only：本輪僅規劃與自審，未改寫任何記憶。_")
+    else:
+        out.append("")
+        out.append("### 執行結果")
+        out.append(f"- ✅ 已合併：{len(execute_result.executed)} 簇 "
+                   f"(survivors: {'、'.join(f'`{k}`' for k in execute_result.executed) or '—'})")
+        if execute_result.skipped_stale:
+            out.append(f"- ⏭️ stale 跳過：{len(execute_result.skipped_stale)}（來源在自審後已變動）")
+        if execute_result.skipped_other:
+            out.append(f"- ⏸️ 非 merge 暫不執行（reconcile/clean → P3）：{len(execute_result.skipped_other)}")
+        if execute_result.skipped_error:
+            out.append(f"- ⚠️ 合成/執行失敗跳過：{len(execute_result.skipped_error)}")
+        for n in execute_result.notes:
+            out.append(f"  - {n}")
     return "\n".join(out)
 
 
@@ -580,11 +595,15 @@ async def run_convergent_dream(
     corpus_limit: int = 2000,
     min_similarity: float = 0.85,
     max_clusters: int = 20,
+    execute: bool = False,
 ) -> tuple[ConsolidationPlan, str]:
-    """Run one read-only convergent-dream pass.
+    """Run one convergent-dream pass.
 
-    Returns ``(plan, report_markdown)``. Never writes to the DB: no
-    ``consolidate`` / ``upsert`` / ``delete`` is reachable from here (P1).
+    Returns ``(plan, report_markdown)``. With ``execute=False`` (default) this
+    is strictly read-only: index → plan → diff-gate → self-review → report, no
+    write path reachable. With ``execute=True`` (P2 #489) the approved,
+    non-stale merge clusters are then consolidated via ``execute_plan`` and the
+    report gains an execution-outcome section.
     """
     plan = await build_plan(
         semantic,
@@ -599,8 +618,184 @@ async def run_convergent_dream(
             cluster.diff = await diff_inventory(cluster, llm_fn)
 
     plan.decisions = await self_review(plan, llm_fn)
-    report = render_report(plan)
+
+    execute_result = None
+    if execute:
+        execute_result = await execute_plan(semantic, plan, llm_fn)
+
+    report = render_report(plan, execute_result=execute_result)
     return plan, report
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — synthesize + execute (P2 #489)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MergeSynthesis:
+    """The fused result for one approved merge cluster (P2)."""
+    refined_value: str
+    survivor_key: str
+    sacrificed_content: str       # verbatim originals — built in code, not the LLM
+    merge_rationale: str
+
+
+@dataclass
+class ExecuteResult:
+    """Outcome of executing an approved, non-stale plan (P2)."""
+    executed: list[str] = field(default_factory=list)        # survivor keys consolidated
+    skipped_stale: list[str] = field(default_factory=list)   # source changed after snapshot
+    skipped_verdict: list[str] = field(default_factory=list) # not approved
+    skipped_other: list[str] = field(default_factory=list)   # reconcile/clean → P3
+    skipped_error: list[str] = field(default_factory=list)   # synthesis/consolidate failed
+    notes: list[str] = field(default_factory=list)
+
+
+_SYNTH_SYSTEM = """\
+You are Loom's memory consolidation synthesizer. You are given a cluster of
+near-duplicate facts that has ALREADY been approved for merging. One fact is
+marked as the SURVIVOR — it is the highest-trust source (e.g. the user told it
+to us directly). Your job is to write the single refined fact they fuse into.
+
+Rules:
+  - Anchor on the SURVIVOR's wording and stance. Lower-trust facts may only
+    ADD detail the survivor lacks — they must not override it.
+  - Do not invent anything not present in the cluster.
+  - Keep it one tight fact, not a summary of "these facts say...".
+
+Return ONLY a JSON object with exactly these keys:
+  "refined_value" : the single fused fact (string)
+  "rationale"     : one sentence on why they are the same fact (string)
+
+Return ONLY the JSON object — no preamble, no markdown fences.
+"""
+
+
+def _trust_of(entry: SemanticEntry) -> float:
+    return classify_source(entry.source)[1]
+
+
+async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSynthesis | None:
+    """Pick the survivor (deterministic, trust-aware) and fuse the cluster.
+
+    Survivor selection is **not** delegated to the LLM: highest trust tier
+    wins, ties break to the earliest ``created_at`` (the most established
+    statement). ``sacrificed_content`` is assembled verbatim in code so the
+    full originals are preserved regardless of what the LLM returns (spec §5.4
+    + 絲絲's no-flatten requirement). The LLM only writes the refined value.
+
+    Returns None when the cluster is malformed or the LLM cannot synthesize a
+    non-empty refined value (caller skips — never a silent bad merge).
+    """
+    members = cluster.members
+    if len(members) < 2:
+        return None
+
+    # highest trust, then earliest created_at
+    survivor = max(members, key=lambda e: (_trust_of(e), -e.created_at.timestamp()))
+    sacrificed = [e for e in members if e.key != survivor.key]
+    sacrificed_content = "\n\n".join(f"[{e.key}] {e.value}" for e in sacrificed)
+
+    fact_lines = []
+    for e in members:
+        tier, _ = classify_source(e.source)
+        marker = " ← SURVIVOR (anchor)" if e.key == survivor.key else ""
+        fact_lines.append(f'- key="{e.key}"  trust={tier}{marker}\n  value="{e.value}"')
+    messages = [
+        {"role": "system", "content": _SYNTH_SYSTEM},
+        {"role": "user", "content": "Cluster:\n" + "\n".join(fact_lines) + "\n\nReturn the JSON now."},
+    ]
+
+    try:
+        raw = await llm_fn(messages)
+    except Exception as exc:
+        logger.warning("[convergent-dream] synthesize_merge LLM failed: %s", exc)
+        return None
+
+    data = _parse_json_object(raw)
+    if data is None:
+        return None
+    refined = str(data.get("refined_value", "")).strip()
+    if not refined:
+        return None
+    rationale = str(data.get("rationale", "")).strip() or "(no rationale provided)"
+
+    return MergeSynthesis(
+        refined_value=refined,
+        survivor_key=survivor.key,
+        sacrificed_content=sacrificed_content,
+        merge_rationale=rationale,
+    )
+
+
+async def execute_plan(
+    semantic: "SemanticMemory",
+    plan: ConsolidationPlan,
+    llm_fn: LLMFn,
+) -> ExecuteResult:
+    """Execute the approved, non-stale merge clusters of a plan (P2 #489).
+
+    Boundaries (all enforced, none silent):
+      - only ``approve`` verdicts run — ``skip``/``defer``/unreviewed are left;
+      - only ``merge`` clusters run — reconcile/clean execution is P3 (#490);
+      - a cluster whose any member changed since the plan's ``source_versions``
+        snapshot is **stale** and is skipped (acts on a stale plan otherwise);
+      - synthesis/consolidate failure skips that cluster, never half-writes.
+
+    Mutates the DB via ``semantic.consolidate`` for the clusters that pass all
+    gates. Sets ``plan.execution_status = "executed"``.
+    """
+    result = ExecuteResult()
+
+    for cluster in plan.clusters:
+        decision = plan.decision_for(cluster.cluster_id)
+        if decision is None or decision.verdict != VERDICT_APPROVE:
+            result.skipped_verdict.append(cluster.cluster_id)
+            continue
+        if cluster.kind != KIND_MERGE:
+            result.skipped_other.append(cluster.cluster_id)
+            continue
+
+        # stale check — source must be byte-identical to the planned snapshot
+        stale = False
+        for m in cluster.members:
+            current = await semantic.get(m.key)
+            snap = plan.source_versions.get(m.key)
+            if current is None or snap is None or current.updated_at.isoformat() != snap:
+                stale = True
+                break
+        if stale:
+            result.skipped_stale.append(cluster.cluster_id)
+            continue
+
+        syn = await synthesize_merge(cluster, llm_fn)
+        if syn is None:
+            result.skipped_error.append(cluster.cluster_id)
+            result.notes.append(f"{cluster.cluster_id}: synthesis failed — skipped")
+            continue
+
+        try:
+            res = await semantic.consolidate(
+                cluster.members,
+                refined_value=syn.refined_value,
+                survivor_key=syn.survivor_key,
+                sacrificed_content=syn.sacrificed_content,
+                merge_rationale=syn.merge_rationale,
+            )
+        except Exception as exc:
+            result.skipped_error.append(cluster.cluster_id)
+            result.notes.append(f"{cluster.cluster_id}: consolidate failed: {exc}")
+            continue
+
+        result.executed.append(res.survivor_key)
+
+    plan.execution_status = "executed"
+    logger.info(
+        "[convergent-dream] executed=%d stale=%d verdict-skip=%d other=%d error=%d",
+        len(result.executed), len(result.skipped_stale), len(result.skipped_verdict),
+        len(result.skipped_other), len(result.skipped_error),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
