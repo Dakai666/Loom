@@ -559,6 +559,10 @@ class TestStripVisionBlocks:
 # ---------------------------------------------------------------------------
 
 
+# NOTE: kept in sync by hand with the production schema in
+# loom/core/memory/store.py (CREATE TABLE session_log). If that schema
+# gains a column or changes a type, update this block too — there is no
+# shared single-source, so a mismatch would be silent (#509 review P2-3).
 _SESSION_LOG_SCHEMA = """
 CREATE TABLE sessions (
     session_id TEXT, model TEXT, title TEXT,
