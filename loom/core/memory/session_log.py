@@ -23,6 +23,7 @@ import json
 import logging
 import re
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,52 @@ def _strip_vision_blocks(content, metadata):
     if image_refs:
         md["vision_inputs"] = image_refs
     return text_summary, md
+
+
+def _drop_unreadable_image_refs(msg):
+    """#510: on replay, drop file-backed image blocks whose file is gone.
+
+    A vision turn is rehydrated from ``raw_json`` with its canonical
+    image blocks intact (``source.kind == "file"``, ``ref`` a path). If
+    the file no longer exists (workspace cleaned, ``.discord_downloads``
+    pruned), re-feeding that block to the wire would make the provider's
+    ``load_vision_input`` raise and crash the whole turn — the same
+    failure class as #506. So we degrade gracefully here instead: drop
+    the dead image block, keep the text. When no image survives, collapse
+    to a plain text string so the message looks like an ordinary text
+    turn. ``url``/``raw`` blocks are left untouched (no local file to
+    check).
+    """
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return msg
+    kept: list = []
+    dropped = 0
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            src = block.get("source", {}) or {}
+            if src.get("kind") == "file":
+                ref = src.get("ref")
+                if not ref or not Path(ref).is_file():
+                    dropped += 1
+                    continue
+        kept.append(block)
+    if not dropped:
+        return msg
+    has_image = any(
+        isinstance(b, dict) and b.get("type") == "image" for b in kept
+    )
+    out = dict(msg)
+    if has_image:
+        out["content"] = kept
+    else:
+        texts = [
+            b.get("text", "") for b in kept
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        text = "\n".join(t for t in texts if t)
+        out["content"] = text or "[vision input no longer available]"
+    return out
 
 
 
@@ -188,6 +235,15 @@ class SessionLog:
             # Kept inside the try so a malformed block can't break the
             # method's "never blocks the loop" contract.
             if isinstance(content, list):
+                # #510: persist the canonical structure to raw_json so a
+                # resumed session can rehydrate the image (load_messages
+                # Priority 1). Canonical blocks carry only ref+digest,
+                # never base64, so this is disk-safe. Don't clobber a
+                # raw_json the caller already supplied.
+                if raw_json is None:
+                    raw_json = json.dumps(
+                        {"role": role, "content": content}, ensure_ascii=False
+                    )
                 content, metadata = _strip_vision_blocks(content, metadata)
 
             # #335 — secret redaction is applied at read time in
@@ -474,6 +530,10 @@ class SessionLog:
             if raw_json:
                 try:
                     parsed = json.loads(raw_json)
+                    # #510 — a rehydrated vision turn may reference image
+                    # files that no longer exist; drop those blocks before
+                    # they reach the wire (degrade to text, never crash).
+                    parsed = _drop_unreadable_image_refs(parsed)
                     # #335 — redact at the leaf level after parse so
                     # patterns can't accidentally chew through escaped
                     # quotes and break JSON.

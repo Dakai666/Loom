@@ -627,3 +627,115 @@ def png_path_for(tmp_path: Path) -> Path:
     p = tmp_path / "fixture.png"
     p.write_bytes(_make_png_bytes())
     return p
+
+
+async def _fresh_log(tmp_path: Path):
+    import aiosqlite
+    from loom.core.memory.session_log import SessionLog
+
+    conn = await aiosqlite.connect(str(tmp_path / "s.db"))
+    await conn.executescript(_SESSION_LOG_SCHEMA)
+    log = SessionLog(conn)
+    await log.create_session("s1", "test-model")
+    return conn, log
+
+
+def _user_msg(msgs: list) -> dict:
+    return [m for m in msgs if m["role"] == "user"][0]
+
+
+class TestVisionResumeReplay:
+    """#510: a vision turn must survive session resume.
+
+    The write side persists the canonical list to ``raw_json`` (refs +
+    digests, no base64); ``load_messages`` Priority-1 rehydrates it so the
+    image re-attaches on resume. When the referenced file is gone, replay
+    degrades to text instead of crashing the wire build.
+    """
+
+    async def test_vision_turn_survives_resume(self, tmp_path: Path) -> None:
+        conn, log = await _fresh_log(tmp_path)
+        p = png_path_for(tmp_path)
+        vi = vision.load_vision_input(p)
+        content = vision.build_user_content("看下這張", [vi])
+        await log.log_message("s1", 4, "user", content)
+
+        m = _user_msg(await log.load_messages("s1"))
+        assert isinstance(m["content"], list), "vision turn replayed as plain text, image lost"
+        img = [b for b in m["content"] if b.get("type") == "image"][0]
+        assert img["source"]["digest"] == vi.digest
+        assert img["source"]["ref"] == str(p)
+        await conn.close()
+
+    async def test_resume_degrades_when_file_missing(self, tmp_path: Path) -> None:
+        conn, log = await _fresh_log(tmp_path)
+        p = png_path_for(tmp_path)
+        vi = vision.load_vision_input(p)
+        content = vision.build_user_content("看下這張", [vi])
+        await log.log_message("s1", 4, "user", content)
+        p.unlink()  # file gone before resume (workspace cleaned, etc.)
+
+        m = _user_msg(await log.load_messages("s1"))
+        # Image dropped; text preserved; no dead file ref remains.
+        flat = json.dumps(m["content"], ensure_ascii=False)
+        assert "看下這張" in flat
+        if isinstance(m["content"], list):
+            assert all(b.get("type") != "image" for b in m["content"])
+        await conn.close()
+
+    async def test_resume_keeps_live_images_drops_dead(self, tmp_path: Path) -> None:
+        # #511 review P2-1: partial death — two images, only one file
+        # survives. The live one is kept (content stays a list), the dead
+        # one is dropped. Exercises the `has_image = any(...)` branch.
+        conn, log = await _fresh_log(tmp_path)
+        p1 = tmp_path / "a.png"
+        p1.write_bytes(_make_png_bytes(width=2))
+        p2 = tmp_path / "b.png"
+        p2.write_bytes(_make_png_bytes(width=8))
+        vi1 = vision.load_vision_input(p1)
+        vi2 = vision.load_vision_input(p2)
+        content = vision.build_user_content("兩張", [vi1, vi2])
+        await log.log_message("s1", 4, "user", content)
+        p1.unlink()  # kill only the first
+
+        m = _user_msg(await log.load_messages("s1"))
+        assert isinstance(m["content"], list)
+        imgs = [b for b in m["content"] if b.get("type") == "image"]
+        assert len(imgs) == 1
+        assert imgs[0]["source"]["digest"] == vi2.digest  # the survivor
+        await conn.close()
+
+    async def test_resume_redacts_secrets_in_rehydrated_text(self, tmp_path: Path) -> None:
+        # #511 review P2-4: a secret in a vision turn's text block must be
+        # redacted on replay, exactly like a plain-text turn — the
+        # raw_json rehydrate path must not bypass _redact_in_place.
+        conn, log = await _fresh_log(tmp_path)
+        p = png_path_for(tmp_path)
+        vi = vision.load_vision_input(p)
+        content = vision.build_user_content("token Bearer abcd1234efgh5678", [vi])
+        await log.log_message("s1", 4, "user", content)
+
+        m = _user_msg(await log.load_messages("s1"))
+        flat = json.dumps(m["content"], ensure_ascii=False)
+        assert "abcd1234efgh5678" not in flat
+        assert "[REDACTED]" in flat
+        await conn.close()
+
+    async def test_full_persist_replay_wire_roundtrip(self, tmp_path: Path) -> None:
+        # The end-to-end seam #506/#508/#509 never covered together:
+        # build -> persist -> load_messages -> wire, file present.
+        conn, log = await _fresh_log(tmp_path)
+        p = png_path_for(tmp_path)
+        vi = vision.load_vision_input(p)
+        content = vision.build_user_content("看下這張", [vi])
+        await log.log_message("s1", 4, "user", content)
+
+        m = _user_msg(await log.load_messages("s1"))
+        _, anth = _to_anthropic_messages([{"role": "user", "content": m["content"]}])
+        blocks = anth[0]["content"]
+        assert any(
+            isinstance(b, dict) and b.get("type") == "image"
+            and b["source"]["type"] == "base64"
+            for b in blocks
+        ), "image did not survive persist->replay->wire"
+        await conn.close()

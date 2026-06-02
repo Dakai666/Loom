@@ -35,6 +35,30 @@ Provider-neutral canonical block (used inside ``content`` list):
         "media_type": "image/png" | ...,
         "digest": "sha256:<hex>",
     }}
+
+Wiring touchpoints (keep this list current — it is the antidote to the
+#506 → #508 → #509 → #510 pattern, where the same feature shipped a
+"tested the unit, skipped the wiring" bug at four different seams in a
+row). Every place an image enters or leaves the harness, plus the test
+that drives that *seam end-to-end* (not the underlying module function
+in isolation):
+
+  1. CLI entry        session._detect_vision_paths_in_text → build_user_content
+                      test_vision_input.py::TestSessionVisionDetection,
+                      ::TestBuildUserContentRoundTrips
+  2. Discord entry    bot._handle_message → build_user_content
+                      ::TestBuildUserContentRoundTrips::test_discord_origin_round_trip
+  3. Single builder   make_image_block (the only canonical-block builder)
+                      ::TestMakeImageBlock
+  4. Provider wire    _to_anthropic_messages / _build_responses_content
+                      ::TestAnthropicMessages, ::TestResponsesContent
+  5. Persist (write)  session_log.log_message → _strip_vision_blocks + raw_json
+                      ::TestSessionLogVisionPersistence
+  6. Replay (read)    session_log.load_messages → _drop_unreadable_image_refs
+                      ::TestVisionResumeReplay (incl. full persist→replay→wire)
+
+When you add a new image source/sink, add its row here AND a test that
+exercises the real entry point, not just the helper it delegates to.
 """
 
 from __future__ import annotations
