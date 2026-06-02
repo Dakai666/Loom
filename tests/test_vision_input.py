@@ -281,6 +281,65 @@ class TestBuildUserContentRoundTrips:
         )
         assert anth[0]["content"][1]["source"]["type"] == "base64"
 
+    def test_discord_origin_round_trip(self, png_path: Path) -> None:
+        """Discord builds VisionInput(origin='discord') and must route
+        through the same build_user_content as the CLI (#507).
+
+        Previously the Discord handler hand-built the canonical block
+        inline, so a shape change in build_user_content would silently
+        skip the Discord path. After convergence both entry points share
+        one builder, and this round-trip proves the Discord shape reaches
+        the wire as base64.
+        """
+        vi = vision.load_vision_input(png_path, origin="discord")
+        content = vision.build_user_content("[系統通知：使用者上傳了圖片]", [vi])
+        _, anth = _to_anthropic_messages(
+            [{"role": "user", "content": content}]
+        )
+        assert anth[0]["content"][1]["source"]["type"] == "base64"
+
+
+class TestMakeImageBlock:
+    """make_image_block is the single canonical image-block builder (#507).
+
+    Every entry point (CLI, Discord, future MCP) must construct image
+    blocks through this one function so the canonical shape lives in
+    exactly one place. These tests pin the shape and the convergence
+    invariant — build_user_content delegates to make_image_block.
+    """
+
+    def test_file_block_shape(self, png_path: Path) -> None:
+        vi = vision.load_vision_input(png_path)
+        block = vision.make_image_block(vi)
+        assert block["type"] == "image"
+        assert block["source"]["kind"] == "file"
+        assert block["source"]["ref"] == str(png_path)
+        assert block["source"]["media_type"] == "image/png"
+        assert block["source"]["digest"] == vi.digest
+
+    def test_url_block_shape(self) -> None:
+        vi = vision.VisionInput(
+            source=vision.VisionSource(kind="url", ref="https://example.com/x.png"),
+        )
+        block = vision.make_image_block(vi)
+        assert block["source"]["kind"] == "url"
+        assert block["source"]["ref"] == "https://example.com/x.png"
+
+    def test_raw_ref_dropped(self, png_path: Path) -> None:
+        vi = vision.VisionInput(
+            source=vision.VisionSource(kind="raw", ref=png_path.read_bytes()),
+        )
+        block = vision.make_image_block(vi)
+        assert block["source"]["ref"] is None
+
+    def test_build_user_content_delegates(self, png_path: Path) -> None:
+        # Convergence invariant: the block build_user_content emits for an
+        # image is exactly what make_image_block produces. If these ever
+        # diverge, the two-builder drift that #507 closed has reopened.
+        vi = vision.load_vision_input(png_path)
+        out = vision.build_user_content("hi", [vi])
+        assert out[1] == vision.make_image_block(vi)
+
 
 # ---------------------------------------------------------------------------
 # CLI path detection
@@ -314,6 +373,76 @@ class TestExtractImagePaths:
         a.write_bytes(_make_png_bytes())
         paths = vision.extract_image_paths(f"{a} and again {a}", base=tmp_path)
         assert len(paths) == 1
+
+    def test_finds_path_at_start_of_string(self, tmp_path: Path) -> None:
+        # #507/E: a path token at the very start of the message (no leading
+        # whitespace/quote) must still be detected. The old regex required
+        # a preceding delimiter and silently missed leading paths.
+        a = tmp_path / "a.png"
+        a.write_bytes(_make_png_bytes())
+        paths = vision.extract_image_paths(f"{a} 看看這張", base=tmp_path)
+        assert a.resolve() in paths
+
+    def test_workspace_confinement_excludes_outside(self, tmp_path: Path) -> None:
+        # #507/C1: when restrict_to is given, a path resolving outside the
+        # workspace is excluded — defence-in-depth against traversal in
+        # free-form input (e.g. "~/../etc/x.png").
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        inside = workspace / "in.png"
+        inside.write_bytes(_make_png_bytes())
+        outside = tmp_path / "out.png"
+        outside.write_bytes(_make_png_bytes())
+        text = f"see {inside} and {outside}"
+        paths = vision.extract_image_paths(text, base=workspace, restrict_to=workspace)
+        assert inside.resolve() in paths
+        assert outside.resolve() not in paths
+
+    def test_never_raises_on_pathological_token(self, tmp_path: Path) -> None:
+        # Contract: extract_image_paths never raises. A token with an
+        # embedded null byte would make Path.is_file() raise ValueError;
+        # it must be skipped, not propagated (so the session caller can
+        # safely drop its defensive try/except — #507).
+        out = vision.extract_image_paths("see bad\x00name.png here", base=tmp_path)
+        assert out == []
+
+    def test_no_confinement_by_default(self, tmp_path: Path) -> None:
+        # Without restrict_to, behaviour is unchanged: absolute paths
+        # anywhere resolve. Preserves the existing CLI contract for callers
+        # that do not pass a workspace.
+        outside = tmp_path / "out.png"
+        outside.write_bytes(_make_png_bytes())
+        paths = vision.extract_image_paths(f"see {outside}", base=tmp_path / "ws")
+        assert outside.resolve() in paths
+
+
+class TestSessionVisionDetection:
+    """#507: _detect_vision_paths_in_text returns list[VisionInput], not
+    pre-built block dicts. The block shape must live only in
+    make_image_block/build_user_content, so the session helper hands back
+    descriptors and lets build_user_content do the shaping."""
+
+    def test_detect_returns_vision_inputs(self, png_path: Path) -> None:
+        from loom.core.session import _detect_vision_paths_in_text
+        out = _detect_vision_paths_in_text(
+            f"看 {png_path}", base_dir=png_path.parent
+        )
+        assert len(out) == 1
+        assert isinstance(out[0], vision.VisionInput)
+        assert out[0].origin == "user"
+        assert out[0].media_type == "image/png"
+
+    def test_detect_confined_to_base_dir(self, tmp_path: Path) -> None:
+        from loom.core.session import _detect_vision_paths_in_text
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        outside = tmp_path / "out.png"
+        outside.write_bytes(_make_png_bytes())
+        out = _detect_vision_paths_in_text(
+            f"看 {outside}", base_dir=workspace
+        )
+        # Path outside the session workspace is not auto-attached.
+        assert out == []
 
 
 # ---------------------------------------------------------------------------

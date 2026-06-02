@@ -550,7 +550,7 @@ class LoomDiscordBot:
         # vision inputs (canonical list content) instead of text notes.
         # Non-image attachments keep the old "saved to .discord_downloads"
         # text flow so we never silently drop user data.
-        attachment_images: list[dict] = []
+        attachment_images: list = []  # list[vision.VisionInput]
         attachment_notes: list[str] = []
         if getattr(message, "attachments", None):
             dl_dir = session.workspace / ".discord_downloads"
@@ -574,15 +574,10 @@ class LoomDiscordBot:
                         f"- {att.filename} (saved to .discord_downloads/{att.filename})"
                     )
                     continue
-                attachment_images.append({
-                    "type": "image",
-                    "source": {
-                        "kind": "file",
-                        "ref": str(dest),
-                        "media_type": vi.media_type,
-                        "digest": vi.digest,
-                    },
-                })
+                # #507: collect the VisionInput descriptor; the canonical
+                # block is shaped later by the shared build_user_content,
+                # not hand-built here.
+                attachment_images.append(vi)
 
         if attachment_images or attachment_notes:
             if attachment_images and attachment_notes:
@@ -593,13 +588,13 @@ class LoomDiscordBot:
                     content = "[系統通知：使用者上傳了圖片]"
                 else:
                     content = "[系統通知：使用者僅上傳了附件]"
-        # Build the user_input value: list content when we have images
-        # so the model sees real vision inputs; otherwise keep the str.
-        user_input_for_turn: "str | list[dict]" = content
-        if attachment_images:
-            user_input_for_turn = list(
-                [{"type": "text", "text": content}] if content.strip() else []
-            ) + attachment_images
+        # Build the user_input value: route through the single shared
+        # builder (#507) so the Discord path produces exactly the same
+        # canonical shape as the CLI path. Returns ``content`` unchanged
+        # when there are no images.
+        user_input_for_turn: "str | list[dict]" = _vision.build_user_content(
+            content, attachment_images or None
+        )
 
         if is_thread:
             await self._run_turn(message, user_input_for_turn, session)

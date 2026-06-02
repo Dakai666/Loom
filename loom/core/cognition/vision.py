@@ -296,33 +296,60 @@ def load_vision_input(
 # input" goal is about *not* requiring ``/see``, not about auto-attaching
 # every plausible path.
 _IMAGE_EXTS: Final[tuple[str, ...]] = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-_PATH_TOKEN: Final[re.Pattern[str]] = re.compile(r"[\s\"'`]([^\s\"'`]+\.[A-Za-z0-9]{2,5})")
+# A path token is bounded by start-of-string OR a whitespace/quote char.
+# The leading ``(?:^|...)`` (rather than a consuming ``[\s"'`]``) lets a
+# path at the very start of the message be detected too — see #507.
+_PATH_TOKEN: Final[re.Pattern[str]] = re.compile(r"(?:^|[\s\"'`])([^\s\"'`]+\.[A-Za-z0-9]{2,5})")
 
 
-def extract_image_paths(text: str, base: Path | None = None) -> list[Path]:
+def extract_image_paths(
+    text: str,
+    base: Path | None = None,
+    *,
+    restrict_to: Path | None = None,
+) -> list[Path]:
     """Return absolute paths to image files referenced in ``text``.
 
     A token is accepted if:
       * its extension is in :data:`_IMAGE_EXTS`, AND
       * it resolves to an existing file (relative to ``base`` or
-        absolute).
+        absolute), AND
+      * when ``restrict_to`` is given, the resolved path is contained
+        within it.
 
-    The function never raises — unresolvable or non-image tokens are
-    silently ignored. The caller is expected to feed the returned
-    paths through :func:`load_vision_input` so that magic-byte detection
-    gets a final say.
+    ``restrict_to`` is defence-in-depth (#507): the CLI runs this over
+    free-form user input, and a token like ``~/../etc/x.png`` would
+    otherwise resolve to an existing file outside the session workspace.
+    Callers that auto-attach detected images should confine to the
+    workspace; callers without a workspace pass ``None`` (no constraint).
+
+    The function never raises — unresolvable, out-of-bounds, or
+    non-image tokens are silently ignored. The caller is expected to feed
+    the returned paths through :func:`load_vision_input` so that
+    magic-byte detection gets a final say.
     """
     base = base or Path.cwd()
+    confine = restrict_to.resolve() if restrict_to is not None else None
     found: list[Path] = []
     seen: set[Path] = set()
     for match in _PATH_TOKEN.finditer(text):
         token = match.group(1)
         if not token.lower().endswith(_IMAGE_EXTS):
             continue
-        candidate = Path(token)
-        if not candidate.is_absolute():
-            candidate = (base / candidate).resolve()
-        if not candidate.is_file():
+        # Pathological tokens (embedded null bytes, over-long paths) can
+        # make the filesystem calls raise. The contract is "never raises",
+        # so a bad token is skipped here rather than propagated to the
+        # caller — which is what lets stream_turn drop its broad catch.
+        try:
+            candidate = Path(token)
+            if not candidate.is_absolute():
+                candidate = base / candidate
+            candidate = candidate.resolve()
+            if confine is not None and not candidate.is_relative_to(confine):
+                continue
+            if not candidate.is_file():
+                continue
+        except (OSError, ValueError):
             continue
         if candidate in seen:
             continue
@@ -402,6 +429,37 @@ def to_responses_image_block(v: VisionInput) -> dict[str, Any]:
     return {"type": "input_image", "image_url": block["image_url"]["url"]}
 
 
+def make_image_block(v: VisionInput) -> dict[str, Any]:
+    """The single canonical image-block builder (#507).
+
+    Every entry point — CLI path-detection, Discord attachments, and any
+    future source (e.g. an MCP tool artifact) — MUST construct image
+    blocks through this one function. The canonical shape lives here and
+    nowhere else, so when it grows a field there is exactly one place to
+    change and one builder test to update. (Before #507 the CLI and
+    Discord paths each hand-built this dict; the divergence is what let
+    the #506 ``ref=None`` bug ship on only one of them.)
+
+    ``file`` and ``url`` refs are both JSON-serialisable; file refs are
+    coerced to ``str`` so ``Path`` objects become a plain string. Only
+    ``raw`` (bytes) is dropped here — the ``session_log`` strip handles
+    persistence-time filtering, so we do not over-eagerly null file refs.
+    """
+    validated = validate_vision_input(v)
+    return {
+        "type": "image",
+        "source": {
+            "kind": validated.source.kind,
+            "ref": (
+                str(validated.source.ref)
+                if validated.source.kind in {"url", "file"} else None
+            ),
+            "media_type": validated.media_type,
+            "digest": validated.digest,
+        },
+    }
+
+
 def build_user_content(
     text: str,
     images: list[VisionInput] | None = None,
@@ -411,6 +469,10 @@ def build_user_content(
     Returns the original ``text`` when no images are provided so we don't
     perturb providers that handle list content poorly. With images, returns
     a list of blocks in the order ``[text, image, image, ...]``.
+
+    This is the single content assembler: both the CLI and Discord entry
+    points hand it a list of :class:`VisionInput` and let it shape the
+    blocks via :func:`make_image_block` (#507).
     """
     if not images:
         return text
@@ -418,25 +480,7 @@ def build_user_content(
     if text:
         blocks.append({"type": "text", "text": text})
     for img in images:
-        validated = validate_vision_input(img)
-        blocks.append({
-            "type": "image",
-            "source": {
-                "kind": validated.source.kind,
-                # ``file`` and ``url`` refs are both JSON-serialisable.
-                # File refs are coerced to str so Path objects (which
-                # callers may pass in) become a plain string. Only
-                # ``raw`` (bytes) is dropped at this stage — the
-                # session_log strip handles persistence-time filtering,
-                # so we do not need to over-eagerly null out file refs.
-                "ref": (
-                    str(validated.source.ref)
-                    if validated.source.kind in {"url", "file"} else None
-                ),
-                "media_type": validated.media_type,
-                "digest": validated.digest,
-            },
-        })
+        blocks.append(make_image_block(img))
     return blocks
 
 
@@ -449,6 +493,7 @@ __all__ = [
     "build_user_content",
     "extract_image_paths",
     "load_vision_input",
+    "make_image_block",
     "to_anthropic_image_block",
     "to_openai_image_block",
     "to_responses_image_block",

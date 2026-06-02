@@ -59,6 +59,7 @@ from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider
+from loom.core.cognition import vision as _vision
 from loom.core.cognition.responses_sse import ResponsesProviderError
 from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.judge import (
@@ -1787,19 +1788,10 @@ class LoomSession:
         # model receives a real vision input. We do not mutate the
         # caller's str when nothing was detected.
         if isinstance(user_input, str):
-            detected = _detect_vision_paths_in_text(
+            images = _detect_vision_paths_in_text(
                 user_input, base_dir=self.workspace
             )
-            if detected:
-                images = [
-                    _vision.VisionInput(
-                        source=_vision.VisionSource(kind="file", ref=d["source"]["ref"]),
-                        media_type=d["source"]["media_type"],
-                        digest=d["source"]["digest"],
-                        origin="user",
-                    )
-                    for d in detected
-                ]
+            if images:
                 user_input = _vision.build_user_content(user_input, images)
 
         # ── AgentLedger turn scope (Quest B Phase 2 Step 2 commit 6) ──
@@ -4658,32 +4650,29 @@ def _annotate_user_input(user_input, timestamp: str):
     return [{"type": "text", "text": f"[{timestamp}]"}, *user_input]
 
 
-def _detect_vision_paths_in_text(user_input: str, base_dir=None):
-    """Upgrade a free-form str to canonical list content when it
-    references local images on disk. Returns ``[]`` when no images are
-    found so the caller can keep the original str.
+def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:
+    """Detect local image references in free-form text and return them as
+    :class:`VisionInput` descriptors (``list[VisionInput]``).
+
+    Returns ``[]`` when no images are found so the caller can keep the
+    original str. The caller shapes these into canonical blocks via
+    :func:`vision.build_user_content` — this helper deliberately does NOT
+    build blocks itself, so the canonical image-block shape lives only in
+    :func:`vision.make_image_block` (#507).
+
+    Detection is confined to ``base_dir`` (the session workspace): a path
+    in free-form input that resolves outside the workspace is not
+    auto-attached (defence-in-depth, #507/C1).
     """
-    try:
-        paths = _vision.extract_image_paths(user_input, base=base_dir)
-    except Exception:
-        return []
-    if not paths:
-        return []
-    blocks = []
+    paths = _vision.extract_image_paths(
+        user_input, base=base_dir, restrict_to=base_dir
+    )
+    images = []
     for pp in paths:
         try:
-            vi = _vision.load_vision_input(pp, origin="user")
+            images.append(_vision.load_vision_input(pp, origin="user"))
         except _vision.VisionInputError:
             continue
-        blocks.append({
-            "type": "image",
-            "source": {
-                "kind": "file",
-                "ref": str(pp),
-                "media_type": vi.media_type,
-                "digest": vi.digest,
-            },
-        })
-    return blocks
+    return images
 
 
