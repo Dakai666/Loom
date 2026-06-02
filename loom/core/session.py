@@ -58,7 +58,7 @@ from loom.core.ledger import (
 from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
-from loom.core.cognition.providers import AnthropicProvider
+from loom.core.cognition.providers import AnthropicProvider, SensitiveContentError
 from loom.core.cognition import vision as _vision
 from loom.core.cognition.responses_sse import ResponsesProviderError
 from loom.core.cognition.counter_factual import CounterFactualReflector
@@ -1985,6 +1985,12 @@ class LoomSession:
             _stream_retry = 0         # counts back-to-back stream_none retries
             _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
             _stop_reason = "complete"  # tracks why the loop exits
+            # Self-heal guard: a provider may reject an image as sensitive
+            # (SensitiveContentError). We strip the image from history and
+            # retry text-only at most once per turn so a moderation refusal
+            # can't wedge the conversation (the persisted image would
+            # otherwise re-trigger the rejection every turn).
+            _vision_sensitive_healed = False
 
             # Issue #205: TaskList self-check. On end_turn we inject a reminder
             # at most once per stream_turn if the list still has active nodes,
@@ -2036,78 +2042,106 @@ class LoomSession:
                 # self.model (legacy behavior preserved).
                 _active_model = self._active_model()
 
-                async for chunk, final in self.router.stream_chat(
-                    model=_active_model,
-                    messages=self.messages,
-                    tools=tools,
-                    max_tokens=_resolve_output_max_tokens(
-                        self._loom_config, _active_model, router=self.router,
-                    ),
-                    abort_signal=abort_signal,
-                ):
-                    if final is None:
-                        if chunk:
-                            _tbuf += chunk
-                            out_parts: list[str] = []
-                            while _tbuf:
-                                if _think_in:
-                                    close_idx = _tbuf.find("</think>")
-                                    if close_idx >= 0:
-                                        _think_parts.append(_tbuf[:close_idx])
-                                        _think_in = False
-                                        _tbuf = _tbuf[close_idx + len("</think>"):]
-                                        if not _think_shown:
-                                            # Flush text accumulated before the think block,
-                                            # then emit a dedicated ThinkCollapsed event so
-                                            # each platform can render it in its own style.
-                                            if out_parts:
-                                                yield TextChunk(text="".join(out_parts))
-                                                out_parts = []
-                                            _think_full = "".join(
-                                                _think_parts[_current_think_start:]
-                                            ).strip()
-                                            _think_summary = _think_full[:120].replace("\n", " ")
-                                            yield ThinkCollapsed(
-                                                summary=_think_summary,
-                                                full=_think_full,
-                                            )
-                                            _think_shown = True
-                                    else:
-                                        # Partial </think> at end? Accumulate up to lookahead.
-                                        partial = _find_partial_tag_suffix(_tbuf, "</think>")
-                                        if partial:
-                                            _think_parts.append(_tbuf[: len(_tbuf) - partial])
-                                            _tbuf = _tbuf[len(_tbuf) - partial :]
+                try:
+                    async for chunk, final in self.router.stream_chat(
+                        model=_active_model,
+                        messages=self.messages,
+                        tools=tools,
+                        max_tokens=_resolve_output_max_tokens(
+                            self._loom_config, _active_model, router=self.router,
+                        ),
+                        abort_signal=abort_signal,
+                    ):
+                        if final is None:
+                            if chunk:
+                                _tbuf += chunk
+                                out_parts: list[str] = []
+                                while _tbuf:
+                                    if _think_in:
+                                        close_idx = _tbuf.find("</think>")
+                                        if close_idx >= 0:
+                                            _think_parts.append(_tbuf[:close_idx])
+                                            _think_in = False
+                                            _tbuf = _tbuf[close_idx + len("</think>"):]
+                                            if not _think_shown:
+                                                # Flush text accumulated before the think block,
+                                                # then emit a dedicated ThinkCollapsed event so
+                                                # each platform can render it in its own style.
+                                                if out_parts:
+                                                    yield TextChunk(text="".join(out_parts))
+                                                    out_parts = []
+                                                _think_full = "".join(
+                                                    _think_parts[_current_think_start:]
+                                                ).strip()
+                                                _think_summary = _think_full[:120].replace("\n", " ")
+                                                yield ThinkCollapsed(
+                                                    summary=_think_summary,
+                                                    full=_think_full,
+                                                )
+                                                _think_shown = True
                                         else:
-                                            _think_parts.append(_tbuf)
-                                            _tbuf = ""
-                                        break
-                                else:
-                                    open_idx = _tbuf.find("<think>")
-                                    if open_idx >= 0:
-                                        before = _tbuf[:open_idx]
-                                        if before:
-                                            out_parts.append(before)
-                                        _think_in = True
-                                        _current_think_start = len(_think_parts)
-                                        _tbuf = _tbuf[open_idx + len("<think>"):]
+                                            # Partial </think> at end? Accumulate up to lookahead.
+                                            partial = _find_partial_tag_suffix(_tbuf, "</think>")
+                                            if partial:
+                                                _think_parts.append(_tbuf[: len(_tbuf) - partial])
+                                                _tbuf = _tbuf[len(_tbuf) - partial :]
+                                            else:
+                                                _think_parts.append(_tbuf)
+                                                _tbuf = ""
+                                            break
                                     else:
-                                        # Partial <think> at end? Keep lookahead.
-                                        partial = _find_partial_tag_suffix(_tbuf, "<think>")
-                                        if partial:
-                                            before = _tbuf[: len(_tbuf) - partial]
+                                        open_idx = _tbuf.find("<think>")
+                                        if open_idx >= 0:
+                                            before = _tbuf[:open_idx]
                                             if before:
                                                 out_parts.append(before)
-                                            _tbuf = _tbuf[len(_tbuf) - partial :]
+                                            _think_in = True
+                                            _current_think_start = len(_think_parts)
+                                            _tbuf = _tbuf[open_idx + len("<think>"):]
                                         else:
-                                            out_parts.append(_tbuf)
-                                            _tbuf = ""
-                                        break
-                            text = "".join(out_parts)
-                            if text:
-                                yield TextChunk(text=text)
-                    else:
-                        response = final
+                                            # Partial <think> at end? Keep lookahead.
+                                            partial = _find_partial_tag_suffix(_tbuf, "<think>")
+                                            if partial:
+                                                before = _tbuf[: len(_tbuf) - partial]
+                                                if before:
+                                                    out_parts.append(before)
+                                                _tbuf = _tbuf[len(_tbuf) - partial :]
+                                            else:
+                                                out_parts.append(_tbuf)
+                                                _tbuf = ""
+                                            break
+                                text = "".join(out_parts)
+                                if text:
+                                    yield TextChunk(text=text)
+                        else:
+                            response = final
+                except SensitiveContentError as _sc_exc:
+                    # Provider refused an image as sensitive content.
+                    # Strip images from history and retry text-only,
+                    # at most once per turn, so the refusal can't wedge
+                    # the session (the persisted image would otherwise
+                    # re-trigger the rejection every turn).
+                    if not _vision_sensitive_healed:
+                        _removed = _strip_images_from_messages(self.messages)
+                        if _removed:
+                            _vision_sensitive_healed = True
+                            logger.warning(
+                                "provider rejected image as sensitive; stripped "
+                                "%d image block(s), retrying text-only: %s",
+                                _removed, _sc_exc,
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": _VISION_SENSITIVE_NOTE,
+                            })
+                            self._sanitize_history()
+                            yield TurnDropped(
+                                stop_reason="sensitive_image_stripped",
+                                retry_count=0,
+                                tool_count=tool_count,
+                            )
+                            continue
+                    raise
 
                 # Flush any buffered non-think content after each streaming call ends.
                 if _tbuf and not _think_in:
@@ -4648,6 +4682,44 @@ def _annotate_user_input(user_input, timestamp: str):
     if isinstance(user_input, str):
         return f"[{timestamp}]\n{user_input}"
     return [{"type": "text", "text": f"[{timestamp}]"}, *user_input]
+
+
+_VISION_SENSITIVE_NOTE = (
+    "[系統通知：剛才訊息中的圖片被模型供應商判定為敏感內容而拒絕，已從本次對話"
+    "移除，本輪改以純文字繼續。若你先前已觀察過該圖，可依記憶向使用者說明；否則"
+    "請告知使用者該圖無法被處理。]"
+)
+
+
+def _strip_images_from_messages(messages: list) -> int:
+    """Replace every image block in ``messages`` with a text marker.
+
+    Used by the session self-heal when a provider rejects an image as
+    sensitive content (see ``SensitiveContentError``). Mutates list
+    content in place, swapping each ``{"type": "image", ...}`` block for a
+    short text marker so the turn can be retried text-only and — because
+    the image is gone from history — subsequent turns don't re-trigger
+    the same rejection (the wedge). ``str`` content is left untouched.
+
+    Returns the number of image blocks removed.
+    """
+    removed = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_blocks: list = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image":
+                removed += 1
+                new_blocks.append({
+                    "type": "text",
+                    "text": "[圖片已移除：供應商判定為敏感內容]",
+                })
+            else:
+                new_blocks.append(block)
+        msg["content"] = new_blocks
+    return removed
 
 
 def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:

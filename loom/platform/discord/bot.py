@@ -1802,6 +1802,14 @@ class LoomDiscordBot:
                                 drop_msg = (
                                     f"-# ⚠️ 連線中斷，正在重試（第 {event.retry_count} 次）…"
                                 )
+                        elif event.stop_reason == "sensitive_image_stripped":
+                            # Self-heal, not a failure: the image was rejected by
+                            # the provider as sensitive; we removed it and retry
+                            # text-only. Frame it as recovery, not an abort.
+                            drop_msg = (
+                                "-# 🖼️ 圖片被供應商判定為敏感內容、已自動移除，"
+                                "正以純文字重試…"
+                            )
                         else:
                             drop_msg = (
                                 f"-# ⚠️ 任務中止：`stop_reason={event.stop_reason}` "
