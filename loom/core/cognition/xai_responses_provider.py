@@ -152,10 +152,20 @@ class XAIResponsesProvider(LLMProvider):
             if role == "tool":
                 call_id = msg.get("tool_call_id")
                 if call_id:
+                    # Vision tool results carry canonical list content
+                    # ([text, image]); function_call_output can't hold an
+                    # image, so reduce to text rather than a Python repr.
+                    if isinstance(content, list):
+                        out = "\n".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    else:
+                        out = str(content)
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": str(content),
+                        "output": out,
                     })
                 continue
             if role == "assistant":

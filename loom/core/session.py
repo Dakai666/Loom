@@ -2427,6 +2427,10 @@ class LoomSession:
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
                             )
+                            # see_image (#agent vision): if the tool returned an
+                            # image, rewrite content as [text, image_block] so
+                            # the model sees it in the tool_result.
+                            _attach_tool_vision(_tool_msg, result, tool_output)
                             _tool_msg["_emit_turn"] = self._turn_index
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
@@ -2512,6 +2516,10 @@ class LoomSession:
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
                             )
+                            # see_image (#agent vision): if the tool returned an
+                            # image, rewrite content as [text, image_block] so
+                            # the model sees it in the tool_result.
+                            _attach_tool_vision(_tool_msg, result, tool_output)
                             _tool_msg["_emit_turn"] = self._turn_index
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
@@ -4720,6 +4728,28 @@ def _strip_images_from_messages(messages: list) -> int:
                 new_blocks.append(block)
         msg["content"] = new_blocks
     return removed
+
+
+def _attach_tool_vision(tool_msg: dict, result, tool_output: str) -> dict:
+    """Rewrite a tool message's content as ``[text, image_block]`` when the
+    tool returned an image via ``result.metadata["vision_image"]``.
+
+    This is how an agent-initiated ``see_image`` tool injects vision: the
+    canonical image block rides the tool_result, and the provider's
+    ``_to_anthropic_messages`` tool branch converts it to a wire image
+    block (Anthropic accepts image blocks inside tool_result content).
+    Plain (non-vision) tool results are left as a string.
+    """
+    try:
+        block = (result.metadata or {}).get("vision_image")
+    except Exception:
+        block = None
+    if block:
+        tool_msg["content"] = [
+            {"type": "text", "text": tool_output or ""},
+            block,
+        ]
+    return tool_msg
 
 
 def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:

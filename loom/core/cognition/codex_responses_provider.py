@@ -152,10 +152,21 @@ class CodexResponsesProvider(LLMProvider):
             if role == "tool":
                 call_id = msg.get("tool_call_id")
                 if call_id:
+                    # A vision tool result carries canonical list content
+                    # ([text, image]). The Responses function_call_output
+                    # can't hold an image, so reduce to the text parts
+                    # rather than emitting a Python repr of the blocks.
+                    if isinstance(content, list):
+                        out = "\n".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    else:
+                        out = str(content)
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": str(content),
+                        "output": out,
                     })
                 continue
             if role == "assistant":
