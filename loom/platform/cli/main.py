@@ -1693,10 +1693,17 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                     console.print()
                     at_line_start = True
                 detail = event.provider_error_detail.strip()
-                message = f"turn dropped: stop_reason={event.stop_reason}"
-                if detail:
-                    message += f"; {detail}"
-                harness.inline(message, level="error")
+                if event.stop_reason == "sensitive_image_stripped":
+                    # Self-heal, not a failure — frame as recovery.
+                    harness.inline(
+                        "圖片被供應商判定為敏感、已移除，正以純文字重試…",
+                        level="warning",
+                    )
+                else:
+                    message = f"turn dropped: stop_reason={event.stop_reason}"
+                    if detail:
+                        message += f"; {detail}"
+                    harness.inline(message, level="error")
                 if (loom_app := getattr(session, "_loom_app", None)) is not None:
                     loom_app.stop_heartbeat(force=True)
 
