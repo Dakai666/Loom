@@ -583,6 +583,8 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
         # validation stack (magic-byte MIME, size cap, digest); the image
         # rides back as a canonical block in result.metadata and the
         # session attaches it to the tool_result.
+        # Local import: keep the vision module (and any heavy image deps)
+        # off the CLI-startup import path; only paid when see_image runs.
         from loom.core.cognition import vision as _vision
 
         raw = call.args.get("path", "")

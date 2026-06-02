@@ -5,7 +5,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .providers import LLMProvider, LLMResponse, ToolUse
+from .providers import LLMProvider, LLMResponse, ToolUse, _reduce_tool_result_to_text
 from . import vision as _vision
 from .responses_policy import normalize_reasoning_effort
 from .responses_sse import (
@@ -154,18 +154,11 @@ class XAIResponsesProvider(LLMProvider):
                 if call_id:
                     # Vision tool results carry canonical list content
                     # ([text, image]); function_call_output can't hold an
-                    # image, so reduce to text rather than a Python repr.
-                    if isinstance(content, list):
-                        out = "\n".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    else:
-                        out = str(content)
+                    # image, so reduce to text (shared helper).
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": out,
+                        "output": _reduce_tool_result_to_text(content),
                     })
                 continue
             if role == "assistant":

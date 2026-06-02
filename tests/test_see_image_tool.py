@@ -69,14 +69,30 @@ class TestToolVisionWire:
         block = {"type": "image", "source": {
             "kind": "file", "ref": "/x.png",
             "media_type": "image/png", "digest": "sha256:a"}}
+        # Reads the already-formatted tool content ("loaded"), not a raw arg.
         tool_msg = {"role": "tool", "tool_call_id": "t1", "content": "loaded"}
-        _attach_tool_vision(tool_msg, SimpleNamespace(metadata={"vision_image": block}), "loaded")
+        out = _attach_tool_vision(tool_msg, SimpleNamespace(metadata={"vision_image": block}))
+        assert out is None  # mutator, not transformer
         assert tool_msg["content"][0] == {"type": "text", "text": "loaded"}
         assert tool_msg["content"][1] == block
 
     def test_attach_noop_for_plain_tool(self) -> None:
         tool_msg = {"role": "tool", "tool_call_id": "t1", "content": "ok"}
-        _attach_tool_vision(tool_msg, SimpleNamespace(metadata={}), "ok")
+        _attach_tool_vision(tool_msg, SimpleNamespace(metadata={}))
+        assert tool_msg["content"] == "ok"
+
+    def test_attach_skips_malformed_block(self) -> None:
+        # A block missing source.ref must NOT be attached — otherwise it
+        # would crash at wire time in load_vision_input(None). Degrade to
+        # the text string instead.
+        bad = {"type": "image", "source": {}}
+        tool_msg = {"role": "tool", "tool_call_id": "t1", "content": "loaded"}
+        _attach_tool_vision(tool_msg, SimpleNamespace(metadata={"vision_image": bad}))
+        assert tool_msg["content"] == "loaded"
+
+    def test_attach_tolerates_non_dict_metadata(self) -> None:
+        tool_msg = {"role": "tool", "tool_call_id": "t1", "content": "ok"}
+        _attach_tool_vision(tool_msg, SimpleNamespace(metadata=None))
         assert tool_msg["content"] == "ok"
 
     def test_tool_result_image_reaches_wire_as_base64(self, tmp_path: Path) -> None:

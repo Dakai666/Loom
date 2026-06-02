@@ -79,6 +79,23 @@ def _is_sensitive_content_rejection(exc: BaseException) -> bool:
     return "sensitive" in msg or "(1026)" in msg
 
 
+def _reduce_tool_result_to_text(content: Any) -> str:
+    """Reduce tool_result content to a plain string.
+
+    The Responses API ``function_call_output`` can't carry an image, so a
+    vision tool result (canonical ``[text, image]`` list) is reduced to
+    its text parts; anything else is ``str()``-ed. Shared by the Codex and
+    xAI Responses providers so the degradation lives in one place. Defined
+    above the codex/xai imports below so they can import it at module load.
+    """
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(content)
+
+
 async def _retry_async(
     coro_fn,
     *,

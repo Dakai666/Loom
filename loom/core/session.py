@@ -2427,10 +2427,10 @@ class LoomSession:
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
                             )
-                            # see_image (#agent vision): if the tool returned an
+                            # see_image (agent vision): if the tool returned an
                             # image, rewrite content as [text, image_block] so
                             # the model sees it in the tool_result.
-                            _attach_tool_vision(_tool_msg, result, tool_output)
+                            _attach_tool_vision(_tool_msg, result)
                             _tool_msg["_emit_turn"] = self._turn_index
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
@@ -2516,10 +2516,10 @@ class LoomSession:
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id, tool_output, result.success,
                             )
-                            # see_image (#agent vision): if the tool returned an
+                            # see_image (agent vision): if the tool returned an
                             # image, rewrite content as [text, image_block] so
                             # the model sees it in the tool_result.
-                            _attach_tool_vision(_tool_msg, result, tool_output)
+                            _attach_tool_vision(_tool_msg, result)
                             _tool_msg["_emit_turn"] = self._turn_index
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
@@ -4730,26 +4730,41 @@ def _strip_images_from_messages(messages: list) -> int:
     return removed
 
 
-def _attach_tool_vision(tool_msg: dict, result, tool_output: str) -> dict:
-    """Rewrite a tool message's content as ``[text, image_block]`` when the
-    tool returned an image via ``result.metadata["vision_image"]``.
+def _attach_tool_vision(tool_msg: dict, result) -> None:
+    """Mutate ``tool_msg`` in place, rewriting its content as
+    ``[text, image_block]`` when the tool returned an image via
+    ``result.metadata["vision_image"]``. Returns ``None`` (mutator).
 
     This is how an agent-initiated ``see_image`` tool injects vision: the
     canonical image block rides the tool_result, and the provider's
     ``_to_anthropic_messages`` tool branch converts it to a wire image
     block (Anthropic accepts image blocks inside tool_result content).
-    Plain (non-vision) tool results are left as a string.
+    Plain (non-vision) tool results are left untouched.
+
+    The image block is validated before attaching — a malformed block
+    (missing ``source.ref``) would otherwise crash far away at wire time
+    inside ``load_vision_input`` (the #506 failure class). If it's bad we
+    log and leave the formatted string content, so the model still gets
+    the tool's text.
     """
-    try:
-        block = (result.metadata or {}).get("vision_image")
-    except Exception:
-        block = None
-    if block:
-        tool_msg["content"] = [
-            {"type": "text", "text": tool_output or ""},
-            block,
-        ]
-    return tool_msg
+    meta = result.metadata if isinstance(result.metadata, dict) else {}
+    block = meta.get("vision_image")
+    if not (
+        isinstance(block, dict)
+        and block.get("type") == "image"
+        and (block.get("source") or {}).get("ref")
+    ):
+        if block is not None:
+            logger.warning("see_image returned a malformed vision block; "
+                           "leaving tool result as text: %r", block)
+        return
+    # Read the *formatted* content from format_tool_result rather than the
+    # raw tool output, so any provider-specific formatting is preserved.
+    existing = tool_msg.get("content")
+    if isinstance(existing, list):
+        tool_msg["content"] = [*existing, block]
+    else:
+        tool_msg["content"] = [{"type": "text", "text": existing or ""}, block]
 
 
 def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:
