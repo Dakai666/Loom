@@ -552,3 +552,78 @@ class TestStripVisionBlocks:
         ], {})
         assert text == "[vision input: 1 image(s)]"
         assert len(md["vision_inputs"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Wiring: log_message must actually call _strip_vision_blocks
+# ---------------------------------------------------------------------------
+
+
+# NOTE: kept in sync by hand with the production schema in
+# loom/core/memory/store.py (CREATE TABLE session_log). If that schema
+# gains a column or changes a type, update this block too — there is no
+# shared single-source, so a mismatch would be silent (#509 review P2-3).
+_SESSION_LOG_SCHEMA = """
+CREATE TABLE sessions (
+    session_id TEXT, model TEXT, title TEXT,
+    started_at TEXT, last_active TEXT, turn_count INTEGER DEFAULT 0
+);
+CREATE TABLE session_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL, turn_index INTEGER NOT NULL,
+    role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+);
+"""
+
+
+class TestSessionLogVisionPersistence:
+    """#506 added _strip_vision_blocks but never wired it into log_message.
+
+    A real vision turn arrives at log_message as canonical *list* content;
+    SQLite cannot bind a list, so the write was silently dropped with
+    "Error binding parameter 4: type 'list' is not supported" (caught by
+    log_message's broad except). The earlier unit test exercised the
+    helper in isolation and never went through log_message — the same
+    "test the unit, skip the wiring" gap as the #508 dead-import bug.
+
+    This test drives the real write path.
+    """
+
+    async def test_list_content_persists_as_text_summary(self, tmp_path: Path) -> None:
+        import aiosqlite
+        from loom.core.memory.session_log import SessionLog
+
+        conn = await aiosqlite.connect(str(tmp_path / "s.db"))
+        await conn.executescript(_SESSION_LOG_SCHEMA)
+        log = SessionLog(conn)
+        await log.create_session("s1", "test-model")
+
+        vi = vision.load_vision_input(png_path_for(tmp_path))
+        content = vision.build_user_content("看下這張", [vi])
+        # This is the exact shape stream_turn appends + logs for a vision
+        # turn. Before the fix it raised inside log_message and dropped
+        # the row.
+        await log.log_message("s1", 4, "user", content)
+
+        cur = await conn.execute(
+            "SELECT content, metadata FROM session_log WHERE turn_index = 4"
+        )
+        row = await cur.fetchone()
+        assert row is not None, "vision turn row was dropped (list hit the SQL bind)"
+        text, meta_raw = row
+        assert isinstance(text, str)
+        assert "看下這張" in text
+        # No base64 / raw image bytes ever reach disk.
+        assert "base64" not in text
+        assert "iVBORw" not in text
+        meta = json.loads(meta_raw)
+        assert len(meta["vision_inputs"]) == 1
+        assert meta["vision_inputs"][0]["digest"] == vi.digest
+        await conn.close()
+
+
+def png_path_for(tmp_path: Path) -> Path:
+    p = tmp_path / "fixture.png"
+    p.write_bytes(_make_png_bytes())
+    return p
