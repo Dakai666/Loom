@@ -550,7 +550,7 @@ class LoomDiscordBot:
         # vision inputs (canonical list content) instead of text notes.
         # Non-image attachments keep the old "saved to .discord_downloads"
         # text flow so we never silently drop user data.
-        attachment_images: list = []  # list[vision.VisionInput]
+        attachment_images: list[_vision.VisionInput] = []
         attachment_notes: list[str] = []
         if getattr(message, "attachments", None):
             dl_dir = session.workspace / ".discord_downloads"

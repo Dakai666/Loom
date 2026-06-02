@@ -4663,6 +4663,13 @@ def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:
     Detection is confined to ``base_dir`` (the session workspace): a path
     in free-form input that resolves outside the workspace is not
     auto-attached (defence-in-depth, #507/C1).
+
+    Contract: the production caller (``stream_turn``) always passes
+    ``self.workspace``, which is a real ``Path`` (it falls back to
+    ``Path.cwd()`` at construction, never ``None``), so confinement is
+    always active on the live path. Passing ``base_dir=None`` here
+    *disables* confinement — only callers handing in already-trusted text
+    should do so.
     """
     paths = _vision.extract_image_paths(
         user_input, base=base_dir, restrict_to=base_dir
