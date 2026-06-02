@@ -163,7 +163,7 @@ class SessionLog:
         session_id: str,
         turn_index: int,
         role: str,
-        content: str,
+        content: str | list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
         raw_json: str | None = None,
     ) -> None:
@@ -178,6 +178,18 @@ class SessionLog:
             ``load_messages()`` will prefer this column for assistant-message replay.
         """
         try:
+            # Vision turns arrive as canonical *list* content
+            # (``[{type:text...}, {type:image...}]``). SQLite cannot bind
+            # a list, so reduce it to a text summary + image refs in
+            # metadata before the INSERT — no base64 ever reaches disk.
+            # #506 added ``_strip_vision_blocks`` for exactly this but
+            # never wired it in here, so the list hit the bind and the
+            # write was silently dropped ("type 'list' is not supported").
+            # Kept inside the try so a malformed block can't break the
+            # method's "never blocks the loop" contract.
+            if isinstance(content, list):
+                content, metadata = _strip_vision_blocks(content, metadata)
+
             # #335 — secret redaction is applied at read time in
             # ``load_messages``. Keeping the raw text on disk lets
             # future regex improvements re-redact older rows accurately
