@@ -79,6 +79,23 @@ def _is_sensitive_content_rejection(exc: BaseException) -> bool:
     return "sensitive" in msg or "(1026)" in msg
 
 
+def _reduce_tool_result_to_text(content: Any) -> str:
+    """Reduce tool_result content to a plain string.
+
+    The Responses API ``function_call_output`` can't carry an image, so a
+    vision tool result (canonical ``[text, image]`` list) is reduced to
+    its text parts; anything else is ``str()``-ed. Shared by the Codex and
+    xAI Responses providers so the degradation lives in one place. Defined
+    above the codex/xai imports below so they can import it at module load.
+    """
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(content)
+
+
 async def _retry_async(
     coro_fn,
     *,
@@ -959,6 +976,49 @@ class LMStudioProvider(_OpenAICompatibleBase):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _canonical_blocks_to_anthropic(content: list) -> list[dict]:
+    """Convert canonical list content (``[{type:text}, {type:image}, ...]``)
+    to Anthropic wire blocks.
+
+    Shared by the ``user`` and ``tool`` branches of
+    :func:`_to_anthropic_messages` — a user vision turn and a ``see_image``
+    tool result (#510-era vision + agent-initiated viewing) carry the exact
+    same canonical image block, so both go through one converter. ``image``
+    blocks become Anthropic ``image`` blocks (base64 for file/raw, url for
+    url); ``text`` blocks pass through; unknown blocks are kept verbatim.
+    """
+    anth_blocks: list[dict] = []
+    for block in content:
+        btype = block.get("type") if isinstance(block, dict) else None
+        if btype == "text":
+            anth_blocks.append({"type": "text", "text": block.get("text", "")})
+        elif btype == "image":
+            src = block.get("source", {}) or {}
+            if src.get("kind") == "url":
+                anth_blocks.append({
+                    "type": "image",
+                    "source": {"type": "url", "url": src.get("ref")},
+                })
+                continue
+            if src.get("kind") == "raw":
+                raw_bytes = src.get("ref")
+                vision_input = _vision.VisionInput(
+                    source=_vision.VisionSource(kind="raw", ref=raw_bytes),
+                    media_type=src.get("media_type", ""),
+                    size_bytes=len(raw_bytes) if raw_bytes else 0,
+                    digest=src.get("digest", ""),
+                )
+            else:
+                # file: use the ref path; we re-read at wire time.
+                vision_input = _vision.load_vision_input(src.get("ref"))
+            anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
+        else:
+            # Unknown block type — keep verbatim so we don't silently drop
+            # provider-specific extensions.
+            anth_blocks.append(block)
+    return anth_blocks
+
+
 def _to_anthropic_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -988,48 +1048,12 @@ def _to_anthropic_messages(
         elif role == "user":
             content = msg.get("content")
             if isinstance(content, list):
-                # Canonical list content: [{type, ...}, ...] where ``type`` is
-                # either "text" or "image" (provider-neutral, see
-                # ``loom.core.cognition.vision``). Convert ``image`` blocks to
-                # the Anthropic wire shape; pass ``text`` blocks through.
-                anth_blocks: list[dict] = []
-                for block in content:
-                    btype = block.get("type")
-                    if btype == "text":
-                        anth_blocks.append({"type": "text", "text": block.get("text", "")})
-                    elif btype == "image":
-                        src = block.get("source", {}) or {}
-                        if src.get("kind") == "url":
-                            anth_blocks.append({
-                                "type": "image",
-                                "source": {
-                                    "type": "url",
-                                    "url": src.get("ref"),
-                                },
-                            })
-                            continue
-                        # file / raw: re-validate and embed base64.
-                        if src.get("kind") == "raw":
-                            from io import BytesIO
-                            raw_bytes = src.get("ref")
-                            vision_input = _vision.VisionInput(
-                                source=_vision.VisionSource(kind="raw", ref=raw_bytes),
-                                media_type=src.get("media_type", ""),
-                                size_bytes=len(raw_bytes) if raw_bytes else 0,
-                                digest=src.get("digest", ""),
-                            )
-                        else:
-                            # file: use the ref path; we re-read at wire time.
-                            vision_input = _vision.load_vision_input(
-                                src.get("ref"),
-                                origin=msg.get("_vision_origin", "user"),
-                            )
-                        anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
-                    else:
-                        # Unknown block type — keep the dict verbatim so we
-                        # don't silently drop provider-specific extensions.
-                        anth_blocks.append(block)
-                result.append({"role": "user", "content": anth_blocks})
+                # Canonical list content (text + image blocks) → Anthropic
+                # wire blocks via the shared converter.
+                result.append({
+                    "role": "user",
+                    "content": _canonical_blocks_to_anthropic(content),
+                })
             else:
                 result.append({"role": "user", "content": content})
             i += 1
@@ -1058,10 +1082,18 @@ def _to_anthropic_messages(
             tool_results: list[dict] = []
             while i < len(messages) and messages[i]["role"] == "tool":
                 tr = messages[i]
+                tr_content = tr["content"]
+                # A tool (e.g. see_image) can return canonical list content
+                # carrying an image block. Anthropic accepts a list of
+                # text/image blocks as tool_result content — convert it the
+                # same way as a user vision turn. Plain string content
+                # (the common case) passes through untouched.
+                if isinstance(tr_content, list):
+                    tr_content = _canonical_blocks_to_anthropic(tr_content)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tr["tool_call_id"],
-                    "content": tr["content"],
+                    "content": tr_content,
                 })
                 i += 1
             result.append({"role": "user", "content": tool_results})

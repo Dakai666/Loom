@@ -5,7 +5,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .providers import LLMProvider, LLMResponse, ToolUse
+from .providers import LLMProvider, LLMResponse, ToolUse, _reduce_tool_result_to_text
 from . import vision as _vision
 from .responses_policy import normalize_reasoning_effort
 from .responses_sse import (
@@ -152,10 +152,13 @@ class CodexResponsesProvider(LLMProvider):
             if role == "tool":
                 call_id = msg.get("tool_call_id")
                 if call_id:
+                    # A vision tool result carries canonical list content
+                    # ([text, image]); function_call_output can't hold an
+                    # image, so reduce to text (shared helper).
                     input_items.append({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": str(content),
+                        "output": _reduce_tool_result_to_text(content),
                     })
                 continue
             if role == "assistant":

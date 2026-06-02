@@ -577,7 +577,61 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
 
+    async def _see_image(call: ToolCall) -> ToolResult:
+        # Agent-initiated vision: load a local image so the model can
+        # actually see its pixels (not just the path). Reuses the vision
+        # validation stack (magic-byte MIME, size cap, digest); the image
+        # rides back as a canonical block in result.metadata and the
+        # session attaches it to the tool_result.
+        # Local import: keep the vision module (and any heavy image deps)
+        # off the CLI-startup import path; only paid when see_image runs.
+        from loom.core.cognition import vision as _vision
+
+        raw = call.args.get("path", "")
+        path = _resolve_workspace_path(raw, workspace)
+        try:
+            vi = _vision.load_vision_input(path, origin="agent")
+        except _vision.VisionInputError as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"無法載入圖片：{exc}")
+        except Exception as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=f"讀取圖片失敗：{exc}")
+        block = _vision.make_image_block(vi)
+        kb = vi.size_bytes / 1024
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output=(
+                f"已載入圖片 {raw}（{vi.media_type}, {kb:.0f} KB）。"
+                f"圖片內容現在可被你直接看見——請描述或分析你所見。"
+            ),
+            metadata={"vision_image": block},
+        )
+
     return [
+        ToolDefinition(
+            name="see_image",
+            description=(
+                "View a local image file with your native multimodal vision — "
+                "you SEE the actual pixels, not just the path. Use this when "
+                "you need to look at an image you found, were given a path to, "
+                "or generated yourself (rather than routing through an external "
+                "image-understanding tool). Relative paths resolve inside the "
+                "workspace. Requires a vision-capable model (e.g. MiniMax-M3)."
+            ),
+            trust_level=TrustLevel.SAFE,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string",
+                             "description": "Image path (relative to workspace or absolute)"},
+                },
+                "required": ["path"],
+            },
+            executor=_see_image,
+            tags=["filesystem", "vision", "read"],
+            impact_scope="filesystem",
+        ),
         ToolDefinition(
             name="read_file",
             description=(

@@ -241,7 +241,7 @@ class TestBuiltinTools:
         bash_tool = make_run_bash_tool(tmp_workspace)
         assert bash_tool.name == "run_bash"
         fs_names = {t.name for t in make_filesystem_tools(tmp_workspace)}
-        assert fs_names == {"read_file", "write_file", "list_dir"}
+        assert fs_names == {"read_file", "write_file", "list_dir", "see_image"}
 
     def test_trust_levels_correct(self, tmp_workspace):
         from loom.core.harness.permissions import ToolCapability
