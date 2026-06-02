@@ -52,6 +52,33 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504, 529}
 
 
+class SensitiveContentError(RuntimeError):
+    """A provider rejected input as sensitive/disallowed content.
+
+    Distinct from a transient 5xx: retrying the identical payload can
+    never succeed, so this is non-retryable. The session layer catches
+    it to self-heal (strip the offending image from history and retry
+    text-only) rather than wedging the conversation.
+
+    Kept a ``RuntimeError`` subclass so existing broad handlers that
+    don't know about it still degrade gracefully.
+    """
+
+
+def _is_sensitive_content_rejection(exc: BaseException) -> bool:
+    """True when *exc* is a provider content-moderation rejection.
+
+    Conservative on purpose — a generic 5xx, timeout, or rate limit must
+    NOT match, or we'd wrongly skip retries on transient failures. Keys
+    off the MiniMax signature: the word ``sensitive`` (as in
+    ``"... image is sensitive ..."``) or its error code ``1026``. The
+    provider mislabels this as HTTP 500, so status alone can't classify
+    it — the message text is the only reliable signal.
+    """
+    msg = (str(exc) or "").lower()
+    return "sensitive" in msg or "(1026)" in msg
+
+
 async def _retry_async(
     coro_fn,
     *,
@@ -72,6 +99,11 @@ async def _retry_async(
             return await coro_fn()
         except BaseException as exc:
             last_exc = exc
+            # Content-moderation rejection: never retryable (the payload
+            # is deterministically refused). Re-raise typed so the session
+            # layer can self-heal instead of wedging.
+            if _is_sensitive_content_rejection(exc):
+                raise SensitiveContentError(str(exc)) from exc
             status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
             exc_name = type(exc).__name__.lower()
             retryable = (
@@ -490,6 +522,14 @@ class AnthropicProvider(LLMProvider):
                     _forensics_dumped = True
                 if _yielded_any:
                     raise  # mid-stream failure — can't retry safely
+                # Content-moderation rejection (e.g. MiniMax 1026 image is
+                # sensitive, mislabeled as 500): never retryable. Re-raise
+                # typed so the session layer self-heals (strip the image)
+                # instead of burning retries on a deterministically refused
+                # payload. Safe here because it fires before any token is
+                # yielded (_yielded_any is False).
+                if _is_sensitive_content_rejection(_exc):
+                    raise SensitiveContentError(str(_exc)) from _exc
                 exc_name = type(_exc).__name__.lower()
                 status = getattr(_exc, "status_code", None) or getattr(_exc, "status", None)
                 retryable = (
