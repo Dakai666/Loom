@@ -195,6 +195,15 @@ class AutonomyDaemon:
         to the planner's EXECUTE/SKIP/NOTIFY decision."""
         self._direct_handlers[name] = handler
 
+    def unregister_direct_handler(self, name: str) -> None:
+        """Drop the direct handler for trigger ``name`` (no-op if absent).
+
+        Symmetric with :meth:`register_direct_handler`. Used when a trigger is
+        torn down for good — e.g. circadian's dawn reload retires a rhythm
+        anchor that disappeared from the table — so the handler map doesn't
+        accumulate dead entries across renames."""
+        self._direct_handlers.pop(name, None)
+
     async def _on_trigger_fire(self, trigger, context):
         handler = self._direct_handlers.get(trigger.name)
         if handler is not None:
