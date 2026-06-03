@@ -393,6 +393,12 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
     close_cron = local_hhmm_to_utc_cron(config.sleep, config.timezone)
 
     async def _dawn_handler(_trigger: Any, _context: dict[str, Any]) -> None:
+        # Re-read the rhythm table at the top of each day so edits made since
+        # the daemon started take effect today without a restart (issue #477).
+        # The Discord daemon is long-lived; without this, a changed rhythm.toml
+        # would never be picked up. Runs before spawning today's session so the
+        # day opens with the current anchor set.
+        reload_rhythm_anchors(daemon, config)
         await ensure_today_session(
             datetime.now(timezone.utc), platform, config, evaluator=evaluator
         )
@@ -598,6 +604,44 @@ def register_rhythm_anchors(
             ", ".join(f"{a.name}@{a.time}" for a in anchors),
         )
     return len(anchors)
+
+
+# Prefix shared by every rhythm-anchor trigger (rhythm.py ``Anchor.trigger_name``
+# builds ``circadian:phase_<name>``). The dawn/close lifecycle triggers use
+# ``circadian:dawn_spawn`` / ``circadian:nightly_close`` and so are never matched
+# — letting reload reconcile anchors without touching the day's bookends.
+_PHASE_ANCHOR_PREFIX = "circadian:phase_"
+
+
+def reload_rhythm_anchors(daemon: Any, config: CircadianConfig) -> int:
+    """Re-read the rhythm table and reconcile the registered phase anchors.
+
+    Called at each dawn (issue #477) so edits to ``rhythm.toml`` take effect
+    the next day without restarting the daemon — the Discord daemon is a
+    long-lived process that would otherwise never pick up a changed table.
+
+    This is reconciliation, not a blind re-register: an anchor *removed* from
+    the table has its ``CronTrigger`` and direct handler torn down, so a deleted
+    phase stops firing instead of lingering as an orphan trigger. New or changed
+    anchors are (re)registered idempotently by :func:`register_rhythm_anchors`.
+    Only ``circadian:phase_*`` triggers are reconciled; the dawn/close triggers
+    are left untouched. A missing/malformed table yields zero anchors, which
+    simply retires every phase anchor — same tolerant contract as PR2.
+
+    Returns the number of anchors registered after reconciliation.
+    """
+    anchors = load_rhythm()
+    desired = {a.trigger_name for a in anchors}
+    stale = [
+        t.name
+        for t in daemon.evaluator.list()
+        if t.name.startswith(_PHASE_ANCHOR_PREFIX) and t.name not in desired
+    ]
+    for name in stale:
+        daemon.evaluator.unregister(name)
+        daemon.unregister_direct_handler(name)
+        logger.info("[circadian] rhythm reload — retired anchor no longer in table: %s", name)
+    return register_rhythm_anchors(daemon, config, anchors)
 
 
 async def setup_circadian(

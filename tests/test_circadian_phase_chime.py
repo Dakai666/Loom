@@ -23,6 +23,8 @@ from loom.autonomy.circadian.lifecycle import (
     CircadianConfig,
     ensure_today_session,
     register_rhythm_anchors,
+    register_triggers,
+    reload_rhythm_anchors,
     setup_circadian,
 )
 from loom.autonomy.circadian.rhythm import Anchor
@@ -559,3 +561,114 @@ class TestDawnRevisionReport:
 
         intent = deliveries[0].intent
         assert "昨夜" not in intent
+
+
+class TestReloadRhythmAnchors:
+    """Dawn-time reconciliation so rhythm.toml edits take effect next day
+    without restarting the long-lived daemon (issue #477)."""
+
+    def test_reload_registers_a_newly_added_anchor(self):
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+        ''')
+        daemon, _, _ = _make_daemon()
+        reload_rhythm_anchors(daemon, CFG)
+        # Author adds a second anchor and the day turns over.
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+
+            [[anchors]]
+            time = "14:00"
+            name = "deep_weave"
+            meaning = "深入"
+        ''')
+        count = reload_rhythm_anchors(daemon, CFG)
+        assert count == 2
+        names = {t.name for t in daemon.evaluator.list()}
+        assert {"circadian:phase_pet", "circadian:phase_deep_weave"} <= names
+
+    def test_reload_retires_a_removed_anchor(self):
+        # The invariant that justified this issue: a removed anchor must stop
+        # firing, not linger as an orphan trigger + dead handler.
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+
+            [[anchors]]
+            time = "11:00"
+            name = "curiosity"
+            meaning = "散步"
+        ''')
+        daemon, _, _ = _make_daemon()
+        reload_rhythm_anchors(daemon, CFG)
+        assert "circadian:phase_curiosity" in daemon._direct_handlers
+        # Author drops the curiosity walk.
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+        ''')
+        reload_rhythm_anchors(daemon, CFG)
+        names = {t.name for t in daemon.evaluator.list()}
+        assert "circadian:phase_curiosity" not in names
+        assert "circadian:phase_pet" in names
+        # Handler torn down too — no dead entry left behind.
+        assert "circadian:phase_curiosity" not in daemon._direct_handlers
+
+    def test_reload_leaves_dawn_close_triggers_untouched(self):
+        daemon, _, _ = _make_daemon()
+        register_triggers(daemon, FakePlatform(), CFG)
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+        ''')
+        reload_rhythm_anchors(daemon, CFG)
+        names = {t.name for t in daemon.evaluator.list()}
+        assert {"circadian:dawn_spawn", "circadian:nightly_close"} <= names
+
+    def test_reload_with_no_table_retires_all_anchors(self):
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+        ''')
+        daemon, _, _ = _make_daemon()
+        reload_rhythm_anchors(daemon, CFG)
+        # Table vanishes (deleted / unreadable) — tolerant contract: zero
+        # anchors, every phase anchor retired, no crash.
+        from pathlib import Path
+        Path("autonomy/circadian/rhythm.toml").unlink()
+        count = reload_rhythm_anchors(daemon, CFG)
+        assert count == 0
+        names = {t.name for t in daemon.evaluator.list()}
+        assert [n for n in names if n.startswith("circadian:phase_")] == []
+
+    async def test_dawn_fire_reloads_the_rhythm_table(self):
+        # End-to-end: the dawn trigger's direct handler runs reload, so a table
+        # edited while the daemon was up is live the moment the new day opens.
+        daemon, _, _ = _make_daemon()
+        register_triggers(daemon, FakePlatform(), CFG_ALWAYS)
+        _write_rhythm('''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "喵吉"
+        ''')
+        dawn = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:dawn_spawn"
+        )
+        await daemon._on_trigger_fire(dawn, {})
+        names = {t.name for t in daemon.evaluator.list()}
+        assert "circadian:phase_pet" in names
