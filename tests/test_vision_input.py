@@ -622,6 +622,29 @@ class TestSessionLogVisionPersistence:
         assert meta["vision_inputs"][0]["digest"] == vi.digest
         await conn.close()
 
+    async def test_list_content_does_not_record_session_log_write_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import aiosqlite
+        from loom.core.memory.health import MemoryHealthTracker
+        from loom.core.memory.session_log import SessionLog
+
+        conn = await aiosqlite.connect(str(tmp_path / "s.db"))
+        await conn.executescript(_SESSION_LOG_SCHEMA)
+        log = SessionLog(conn)
+        health = MemoryHealthTracker(conn, "s1")
+        log._health = health
+        await log.create_session("s1", "test-model")
+
+        vi = vision.load_vision_input(png_path_for(tmp_path))
+        content = vision.build_user_content("看下這張", [vi])
+        await log.log_message("s1", 4, "user", content)
+
+        report = health.report()
+        assert "session_log_write" not in report.operations
+        await conn.close()
+
 
 def png_path_for(tmp_path: Path) -> Path:
     p = tmp_path / "fixture.png"
