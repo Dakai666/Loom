@@ -111,6 +111,7 @@ skills/silky_chatgpt_draw
 silu-video-creator/
 skills/silky_hyperframes
 skills/wiki_maintenance
+autonomy/circadian/dreams
 
 # Personal config (use loom.toml.example as template)
 loom.toml

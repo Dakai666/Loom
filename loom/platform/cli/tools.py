@@ -165,9 +165,10 @@ def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
     - Escaping paths (e.g. ../../Windows) are rerouted back inside workspace
       to safely contain prompt injection and path traversal attempts.
     """
+    workspace = workspace.resolve()
     p = Path(raw)
     resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
-    
+
     try:
         resolved.relative_to(workspace)
         return resolved  # Check passed, securely inside workspace
