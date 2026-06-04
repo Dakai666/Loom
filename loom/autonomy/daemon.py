@@ -459,61 +459,79 @@ class AutonomyDaemon:
                 "Review autonomy/schedules.toml and restart to update the stored hash."
             )
 
+        # Per-entry tolerance: the loader guarantees well-typed tables, but a
+        # *semantically* bad entry (invalid cron -> ValueError, missing required
+        # key -> KeyError) must not abort the whole load. Mirror the schedule
+        # loader's contract — log the bad entry and keep registering siblings.
         count = 0
-        for sched in sched_cfg.get("schedules", []):
-            mode = sched.get("mode", "independent")
-            target = dict(sched.get("target", {}))
-            if mode == "chime":
-                _t_type = target.get("type")
-                if _t_type != "discord_thread":
-                    logger.warning(
-                        "[autonomy] schedule %r mode=chime requires "
-                        "target.type='discord_thread' (got %r); skipping",
-                        sched["name"], _t_type,
-                    )
-                    continue
-                if "id" not in target:
-                    logger.warning(
-                        "[autonomy] schedule %r mode=chime missing target.id; "
-                        "skipping", sched["name"],
-                    )
-                    continue
-                # Normalise id to string for label matching
-                target["id"] = str(target["id"])
-                target.setdefault("fallback", "skip")
-            trigger = CronTrigger(
-                name=sched["name"],
-                intent=sched["intent"],
-                cron=sched.get("cron", "0 9 * * 1-5"),
-                timezone=sched.get("timezone", "UTC"),
-                trust_level=_validate_trust_level(
-                    sched.get("trust_level", "guarded"), sched["name"],
-                ),
-                notify=sched.get("notify", True),
-                notify_thread_id=sched.get("notify_thread", 0),
-                allowed_tools=sched.get("allowed_tools", []),
-                scope_grants=sched.get("scope_grants", []),
-                attach_outputs=sched.get("attach_outputs", []),
-                mode=mode,
-                target=target,
-            )
+        for idx, sched in enumerate(sched_cfg.get("schedules", [])):
+            name = sched.get("name", f"<schedules[{idx}]>")
+            try:
+                mode = sched.get("mode", "independent")
+                target = dict(sched.get("target", {}))
+                if mode == "chime":
+                    _t_type = target.get("type")
+                    if _t_type != "discord_thread":
+                        logger.warning(
+                            "[autonomy] schedule %r mode=chime requires "
+                            "target.type='discord_thread' (got %r); skipping",
+                            name, _t_type,
+                        )
+                        continue
+                    if "id" not in target:
+                        logger.warning(
+                            "[autonomy] schedule %r mode=chime missing target.id; "
+                            "skipping", name,
+                        )
+                        continue
+                    # Normalise id to string for label matching
+                    target["id"] = str(target["id"])
+                    target.setdefault("fallback", "skip")
+                trigger = CronTrigger(
+                    name=sched["name"],
+                    intent=sched["intent"],
+                    cron=sched.get("cron", "0 9 * * 1-5"),
+                    timezone=sched.get("timezone", "UTC"),
+                    trust_level=_validate_trust_level(
+                        sched.get("trust_level", "guarded"), name,
+                    ),
+                    notify=sched.get("notify", True),
+                    notify_thread_id=sched.get("notify_thread", 0),
+                    allowed_tools=sched.get("allowed_tools", []),
+                    scope_grants=sched.get("scope_grants", []),
+                    attach_outputs=sched.get("attach_outputs", []),
+                    mode=mode,
+                    target=target,
+                )
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "[autonomy] schedule %r is malformed (%s); skipping", name, exc
+                )
+                continue
             self._evaluator.register(trigger)
             count += 1
 
-        for evt in sched_cfg.get("triggers", []):
-            trigger = EventTrigger(
-                name=evt["name"],
-                intent=evt["intent"],
-                event_name=evt.get("event", evt["name"]),
-                trust_level=_validate_trust_level(
-                    evt.get("trust_level", "guarded"), evt["name"],
-                ),
-                notify=evt.get("notify", True),
-                notify_thread_id=evt.get("notify_thread", 0),
-                allowed_tools=evt.get("allowed_tools", []),
-                scope_grants=evt.get("scope_grants", []),
-                attach_outputs=evt.get("attach_outputs", []),
-            )
+        for idx, evt in enumerate(sched_cfg.get("triggers", [])):
+            name = evt.get("name", f"<triggers[{idx}]>")
+            try:
+                trigger = EventTrigger(
+                    name=evt["name"],
+                    intent=evt["intent"],
+                    event_name=evt.get("event", evt["name"]),
+                    trust_level=_validate_trust_level(
+                        evt.get("trust_level", "guarded"), name,
+                    ),
+                    notify=evt.get("notify", True),
+                    notify_thread_id=evt.get("notify_thread", 0),
+                    allowed_tools=evt.get("allowed_tools", []),
+                    scope_grants=evt.get("scope_grants", []),
+                    attach_outputs=evt.get("attach_outputs", []),
+                )
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "[autonomy] event trigger %r is malformed (%s); skipping", name, exc
+                )
+                continue
             self._evaluator.register(trigger)
             count += 1
 

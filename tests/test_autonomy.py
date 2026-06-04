@@ -706,6 +706,55 @@ notify = true
         assert count == 1
         assert daemon.registered_triggers()[0]["kind"] == "event"
 
+    def test_bad_cron_schedule_skipped_siblings_still_load(self, tmp_path):
+        # Tolerance must hold at the daemon boundary too (#444 PR review P1):
+        # an invalid cron raises ValueError in CronTrigger — it must drop only
+        # that entry, not abort the load and strand later valid schedules.
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[schedules]]
+name = "before"
+cron = "0 9 * * 1-5"
+intent = "ok"
+
+[[schedules]]
+name = "bad_cron"
+cron = "not a cron"
+intent = "boom"
+
+[[schedules]]
+name = "after"
+cron = "0 2 * * 0"
+intent = "ok"
+""",
+        )
+        daemon = self._make_daemon()
+        count = daemon.load_config(config_file)
+        assert count == 2
+        names = {t["name"] for t in daemon.registered_triggers()}
+        assert names == {"before", "after"}
+
+    def test_trigger_missing_required_key_skipped(self, tmp_path):
+        # A trigger missing `name` raises KeyError — drop it, keep the sibling.
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[triggers]]
+event = "no_name_here"
+intent = "missing name"
+
+[[triggers]]
+name = "good"
+event = "fires"
+intent = "ok"
+""",
+        )
+        daemon = self._make_daemon()
+        count = daemon.load_config(config_file)
+        assert count == 1
+        assert daemon.registered_triggers()[0]["name"] == "good"
+
     @pytest.mark.asyncio
     async def test_execute_plan_safe_calls_agent(self):
         from loom.autonomy.daemon import AutonomyDaemon
