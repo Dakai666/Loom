@@ -40,7 +40,7 @@ or ``user_zone()``)::
     them via the user-zone tools above, never raw
   - Forensics / dreaming / counter_factual / autonomy audit timestamps
   - Cron scheduling: ``CronTrigger.should_fire(datetime.now(UTC))``;
-    cron strings in ``loom.toml [[autonomy.schedules]]`` are always
+    cron strings in ``autonomy/schedules.toml`` ``[[schedules]]`` are always
     written in UTC, the operator hand-converts from local time. The
     per-schedule ``timezone`` field is currently a no-op — do not rely
     on it (tracked separately).

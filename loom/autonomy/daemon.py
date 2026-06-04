@@ -28,6 +28,7 @@ from loom.autonomy.history import TriggerHistory
 from loom.autonomy.maintenance import DreamLoop, MaintenanceLoop
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
+from loom.autonomy.schedules import DEFAULT_SCHEDULES_PATH, load_schedules
 from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
@@ -41,16 +42,18 @@ caller should fall back per ``target['fallback']``."""
 
 
 # ---------------------------------------------------------------------------
-# Issue #91: autonomy config tamper detection
+# Issue #91: tamper detection. Since #444 the agent-writable mutation surface
+# is the schedule registry (autonomy/schedules.toml), not the loom.toml
+# [autonomy] section — so that's what we fingerprint.
 # ---------------------------------------------------------------------------
 
 _VALID_TRUST_LEVELS = {"safe", "guarded", "critical"}
-_CONFIG_HASH_PATH = Path.home() / ".loom" / "autonomy_config.hash"
+_CONFIG_HASH_PATH = Path.home() / ".loom" / "schedules.hash"
 
 
-def _hash_autonomy_section(autonomy_cfg: dict) -> str:
-    """Deterministic SHA-256 of the autonomy config section."""
-    canonical = _json.dumps(autonomy_cfg, sort_keys=True, ensure_ascii=False)
+def _hash_schedule_registry(sched_cfg: dict) -> str:
+    """Deterministic SHA-256 of the loaded schedule registry."""
+    canonical = _json.dumps(sched_cfg, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -117,19 +120,19 @@ def _resolve_attachments(
     return results
 
 
-def _check_config_integrity(autonomy_cfg: dict) -> bool:
+def _check_config_integrity(sched_cfg: dict) -> bool:
     """
-    Compare current config hash against stored hash.
+    Compare current schedule-registry hash against stored hash.
     Returns True if first load or match; False if mismatch.
     """
-    current_hash = _hash_autonomy_section(autonomy_cfg)
+    current_hash = _hash_schedule_registry(sched_cfg)
     try:
         if _CONFIG_HASH_PATH.exists():
             stored = _CONFIG_HASH_PATH.read_text().strip()
             if stored != current_hash:
                 logger.warning(
-                    "[autonomy] CONFIG CHANGE DETECTED — autonomy section hash "
-                    "mismatch. Stored=%s, Current=%s. Review loom.toml for tampering.",
+                    "[autonomy] SCHEDULE REGISTRY CHANGE DETECTED — hash mismatch. "
+                    "Stored=%s, Current=%s. Review autonomy/schedules.toml for tampering.",
                     stored[:12], current_hash[:12],
                 )
                 # Update hash after warning — the log entry is the audit trail.
@@ -413,7 +416,11 @@ class AutonomyDaemon:
 
     def load_config(self, config_path: str | Path) -> int:
         """
-        Load triggers from a loom.toml file.
+        Load autonomy triggers. The master switch (``[autonomy] enabled``) is
+        read from *config_path* (loom.toml); the schedule registry itself lives
+        in the sibling ``autonomy/schedules.toml`` (issue #444 — isolating the
+        agent-writable mutation surface from system config).
+
         Returns the number of triggers registered.
         """
         import tomllib
@@ -429,68 +436,102 @@ class AutonomyDaemon:
         if not autonomy_cfg.get("enabled", False):
             return 0
 
-        # Issue #91: tamper detection (fail-open by design — logs warning only)
-        if not _check_config_integrity(autonomy_cfg):
+        # Hard cut (#444): the schedule registry moved out of loom.toml. Inline
+        # [[autonomy.schedules]] / [[autonomy.triggers]] are no longer honoured —
+        # warn so a stale loom.toml doesn't look like it's still driving autonomy.
+        if autonomy_cfg.get("schedules") or autonomy_cfg.get("triggers"):
             logger.warning(
-                "[autonomy] Proceeding despite config change. "
-                "Review loom.toml and restart to update the stored hash."
+                "[autonomy] inline [[autonomy.schedules]]/[[autonomy.triggers]] in %s "
+                "are ignored since #444 — run `python -m loom.autonomy.migrate_schedules %s` "
+                "to move them into autonomy/schedules.toml",
+                path, path,
             )
 
-        count = 0
-        for sched in autonomy_cfg.get("schedules", []):
-            mode = sched.get("mode", "independent")
-            target = dict(sched.get("target", {}))
-            if mode == "chime":
-                _t_type = target.get("type")
-                if _t_type != "discord_thread":
-                    logger.warning(
-                        "[autonomy] schedule %r mode=chime requires "
-                        "target.type='discord_thread' (got %r); skipping",
-                        sched["name"], _t_type,
-                    )
-                    continue
-                if "id" not in target:
-                    logger.warning(
-                        "[autonomy] schedule %r mode=chime missing target.id; "
-                        "skipping", sched["name"],
-                    )
-                    continue
-                # Normalise id to string for label matching
-                target["id"] = str(target["id"])
-                target.setdefault("fallback", "skip")
-            trigger = CronTrigger(
-                name=sched["name"],
-                intent=sched["intent"],
-                cron=sched.get("cron", "0 9 * * 1-5"),
-                timezone=sched.get("timezone", "UTC"),
-                trust_level=_validate_trust_level(
-                    sched.get("trust_level", "guarded"), sched["name"],
-                ),
-                notify=sched.get("notify", True),
-                notify_thread_id=sched.get("notify_thread", 0),
-                allowed_tools=sched.get("allowed_tools", []),
-                scope_grants=sched.get("scope_grants", []),
-                attach_outputs=sched.get("attach_outputs", []),
-                mode=mode,
-                target=target,
+        # Resolve the registry relative to loom.toml's directory so launching
+        # from another cwd still finds the right per-workspace file.
+        sched_path = path.resolve().parent / DEFAULT_SCHEDULES_PATH
+        sched_cfg = load_schedules(sched_path)
+
+        # Issue #91: tamper detection on the registry (fail-open — logs only).
+        if not _check_config_integrity(sched_cfg):
+            logger.warning(
+                "[autonomy] Proceeding despite schedule registry change. "
+                "Review autonomy/schedules.toml and restart to update the stored hash."
             )
+
+        # Per-entry tolerance: the loader guarantees well-typed tables, but a
+        # *semantically* bad entry (invalid cron -> ValueError, missing required
+        # key -> KeyError) must not abort the whole load. Mirror the schedule
+        # loader's contract — log the bad entry and keep registering siblings.
+        count = 0
+        for idx, sched in enumerate(sched_cfg.get("schedules", [])):
+            name = sched.get("name", f"<schedules[{idx}]>")
+            try:
+                mode = sched.get("mode", "independent")
+                target = dict(sched.get("target", {}))
+                if mode == "chime":
+                    _t_type = target.get("type")
+                    if _t_type != "discord_thread":
+                        logger.warning(
+                            "[autonomy] schedule %r mode=chime requires "
+                            "target.type='discord_thread' (got %r); skipping",
+                            name, _t_type,
+                        )
+                        continue
+                    if "id" not in target:
+                        logger.warning(
+                            "[autonomy] schedule %r mode=chime missing target.id; "
+                            "skipping", name,
+                        )
+                        continue
+                    # Normalise id to string for label matching
+                    target["id"] = str(target["id"])
+                    target.setdefault("fallback", "skip")
+                trigger = CronTrigger(
+                    name=sched["name"],
+                    intent=sched["intent"],
+                    cron=sched.get("cron", "0 9 * * 1-5"),
+                    timezone=sched.get("timezone", "UTC"),
+                    trust_level=_validate_trust_level(
+                        sched.get("trust_level", "guarded"), name,
+                    ),
+                    notify=sched.get("notify", True),
+                    notify_thread_id=sched.get("notify_thread", 0),
+                    allowed_tools=sched.get("allowed_tools", []),
+                    scope_grants=sched.get("scope_grants", []),
+                    attach_outputs=sched.get("attach_outputs", []),
+                    mode=mode,
+                    target=target,
+                )
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "[autonomy] schedule %r is malformed (%s); skipping", name, exc
+                )
+                continue
             self._evaluator.register(trigger)
             count += 1
 
-        for evt in autonomy_cfg.get("triggers", []):
-            trigger = EventTrigger(
-                name=evt["name"],
-                intent=evt["intent"],
-                event_name=evt.get("event", evt["name"]),
-                trust_level=_validate_trust_level(
-                    evt.get("trust_level", "guarded"), evt["name"],
-                ),
-                notify=evt.get("notify", True),
-                notify_thread_id=evt.get("notify_thread", 0),
-                allowed_tools=evt.get("allowed_tools", []),
-                scope_grants=evt.get("scope_grants", []),
-                attach_outputs=evt.get("attach_outputs", []),
-            )
+        for idx, evt in enumerate(sched_cfg.get("triggers", [])):
+            name = evt.get("name", f"<triggers[{idx}]>")
+            try:
+                trigger = EventTrigger(
+                    name=evt["name"],
+                    intent=evt["intent"],
+                    event_name=evt.get("event", evt["name"]),
+                    trust_level=_validate_trust_level(
+                        evt.get("trust_level", "guarded"), name,
+                    ),
+                    notify=evt.get("notify", True),
+                    notify_thread_id=evt.get("notify_thread", 0),
+                    allowed_tools=evt.get("allowed_tools", []),
+                    scope_grants=evt.get("scope_grants", []),
+                    attach_outputs=evt.get("attach_outputs", []),
+                )
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "[autonomy] event trigger %r is malformed (%s); skipping", name, exc
+                )
+                continue
             self._evaluator.register(trigger)
             count += 1
 

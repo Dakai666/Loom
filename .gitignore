@@ -119,6 +119,8 @@ Agent.md
 SOUL.md
 loom.toml.bak
 
+# Per-agent schedule registry (issue #444) — copy from schedules.example.toml
+autonomy/schedules.toml
 # Per-agent rhythm table (issue #460) — copy from rhythm.example.toml
 autonomy/circadian/rhythm.toml
 # Per-agent daily weave plan (issue #461) — copy from daily_weave.example.md

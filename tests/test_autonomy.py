@@ -594,27 +594,43 @@ class TestAutonomyDaemonConfig:
         flow = ConfirmFlow(send_fn=send)
         return AutonomyDaemon(notify_router=router, confirm_flow=flow)
 
-    def test_load_config_enabled(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
+    def _write_config(self, tmp_path, *, enabled=True, schedules_toml="", loom_extra=""):
+        """Write a loom.toml (master switch) + autonomy/schedules.toml (registry).
 
-[[autonomy.schedules]]
+        Mirrors the #444 split: the daemon reads ``[autonomy] enabled`` from
+        loom.toml and the actual schedules from the sibling registry file.
+        """
+        config_file = tmp_path / "loom.toml"
+        config_file.write_text(
+            f"[autonomy]\nenabled = {str(enabled).lower()}\n{loom_extra}",
+            encoding="utf-8",
+        )
+        if schedules_toml:
+            (tmp_path / "autonomy").mkdir(exist_ok=True)
+            (tmp_path / "autonomy" / "schedules.toml").write_text(
+                schedules_toml, encoding="utf-8"
+            )
+        return config_file
+
+    def test_load_config_enabled(self, tmp_path):
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[schedules]]
 name = "daily_review"
 cron = "0 9 * * 1-5"
 intent = "Review progress"
 trust_level = "guarded"
 notify = true
 
-[[autonomy.schedules]]
+[[schedules]]
 name = "weekly_prune"
 cron = "0 2 * * 0"
 intent = "Prune old memories"
 trust_level = "safe"
 notify = false
-"""
-        config_file = tmp_path / "loom.toml"
-        config_file.write_text(toml_content, encoding="utf-8")
+""",
+        )
 
         daemon = self._make_daemon()
         count = daemon.load_config(config_file)
@@ -625,17 +641,16 @@ notify = false
         assert names == {"daily_review", "weekly_prune"}
 
     def test_load_config_disabled_returns_zero(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = false
-
-[[autonomy.schedules]]
+        config_file = self._write_config(
+            tmp_path,
+            enabled=False,
+            schedules_toml="""
+[[schedules]]
 name = "never_loaded"
 cron = "* * * * *"
 intent = "x"
-"""
-        config_file = tmp_path / "loom.toml"
-        config_file.write_text(toml_content, encoding="utf-8")
+""",
+        )
 
         daemon = self._make_daemon()
         count = daemon.load_config(config_file)
@@ -647,25 +662,98 @@ intent = "x"
         count = daemon.load_config(tmp_path / "nonexistent.toml")
         assert count == 0
 
-    def test_load_config_with_event_triggers(self, tmp_path):
-        toml_content = """
+    def test_load_config_missing_registry_returns_zero(self, tmp_path):
+        # Enabled in loom.toml but no autonomy/schedules.toml yet → no triggers,
+        # no crash (tolerant-by-contract loader).
+        config_file = self._write_config(tmp_path)
+        daemon = self._make_daemon()
+        assert daemon.load_config(config_file) == 0
+
+    def test_load_config_ignores_inline_schedules(self, tmp_path):
+        # Hard cut (#444): schedules left inline in loom.toml are NOT honoured.
+        config_file = tmp_path / "loom.toml"
+        config_file.write_text(
+            """
 [autonomy]
 enabled = true
 
-[[autonomy.triggers]]
+[[autonomy.schedules]]
+name = "stale_inline"
+cron = "* * * * *"
+intent = "should be ignored"
+""",
+            encoding="utf-8",
+        )
+        daemon = self._make_daemon()
+        assert daemon.load_config(config_file) == 0
+        assert daemon.registered_triggers() == []
+
+    def test_load_config_with_event_triggers(self, tmp_path):
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[triggers]]
 name = "on_error_spike"
 event = "error_rate_threshold"
 intent = "Analyse errors"
 trust_level = "guarded"
 notify = true
-"""
-        config_file = tmp_path / "loom.toml"
-        config_file.write_text(toml_content, encoding="utf-8")
+""",
+        )
 
         daemon = self._make_daemon()
         count = daemon.load_config(config_file)
         assert count == 1
         assert daemon.registered_triggers()[0]["kind"] == "event"
+
+    def test_bad_cron_schedule_skipped_siblings_still_load(self, tmp_path):
+        # Tolerance must hold at the daemon boundary too (#444 PR review P1):
+        # an invalid cron raises ValueError in CronTrigger — it must drop only
+        # that entry, not abort the load and strand later valid schedules.
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[schedules]]
+name = "before"
+cron = "0 9 * * 1-5"
+intent = "ok"
+
+[[schedules]]
+name = "bad_cron"
+cron = "not a cron"
+intent = "boom"
+
+[[schedules]]
+name = "after"
+cron = "0 2 * * 0"
+intent = "ok"
+""",
+        )
+        daemon = self._make_daemon()
+        count = daemon.load_config(config_file)
+        assert count == 2
+        names = {t["name"] for t in daemon.registered_triggers()}
+        assert names == {"before", "after"}
+
+    def test_trigger_missing_required_key_skipped(self, tmp_path):
+        # A trigger missing `name` raises KeyError — drop it, keep the sibling.
+        config_file = self._write_config(
+            tmp_path,
+            schedules_toml="""
+[[triggers]]
+event = "no_name_here"
+intent = "missing name"
+
+[[triggers]]
+name = "good"
+event = "fires"
+intent = "ok"
+""",
+        )
+        daemon = self._make_daemon()
+        count = daemon.load_config(config_file)
+        assert count == 1
+        assert daemon.registered_triggers()[0]["name"] == "good"
 
     @pytest.mark.asyncio
     async def test_execute_plan_safe_calls_agent(self):
@@ -863,19 +951,27 @@ class TestLoadConfigAttachOutputs:
         flow = ConfirmFlow(send_fn=send)
         return AutonomyDaemon(notify_router=router, confirm_flow=flow)
 
-    def test_schedule_attach_outputs_propagates_to_trigger(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
+    def _write_registry(self, tmp_path, schedules_toml):
+        (tmp_path / "loom.toml").write_text(
+            "[autonomy]\nenabled = true\n", encoding="utf-8"
+        )
+        (tmp_path / "autonomy").mkdir(exist_ok=True)
+        (tmp_path / "autonomy" / "schedules.toml").write_text(
+            schedules_toml, encoding="utf-8"
+        )
+        return tmp_path / "loom.toml"
 
-[[autonomy.schedules]]
+    def test_schedule_attach_outputs_propagates_to_trigger(self, tmp_path):
+        config_file = self._write_registry(
+            tmp_path,
+            """
+[[schedules]]
 name = "morning_briefing"
 cron = "0 9 * * *"
 intent = "News roundup"
 attach_outputs = ["news/*.md", "reports/*.pdf"]
-"""
-        config_file = tmp_path / "loom.toml"
-        config_file.write_text(toml_content, encoding="utf-8")
+""",
+        )
 
         daemon = self._make_daemon()
         daemon.load_config(config_file)
@@ -884,18 +980,16 @@ attach_outputs = ["news/*.md", "reports/*.pdf"]
         assert trigger.attach_outputs == ["news/*.md", "reports/*.pdf"]
 
     def test_event_trigger_attach_outputs_propagates(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
-
-[[autonomy.triggers]]
+        config_file = self._write_registry(
+            tmp_path,
+            """
+[[triggers]]
 name = "on_render_done"
 event = "render_complete"
 intent = "Upload renders"
 attach_outputs = ["renders/*.png"]
-"""
-        config_file = tmp_path / "loom.toml"
-        config_file.write_text(toml_content, encoding="utf-8")
+""",
+        )
 
         daemon = self._make_daemon()
         daemon.load_config(config_file)

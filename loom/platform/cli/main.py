@@ -2339,7 +2339,7 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
     console.print(
         Panel(
             f"[bold loom.accent]Loom Autonomy Daemon[/bold loom.accent]\n"
-            f"Loaded [loom.success]{n}[/loom.success] trigger(s) from [loom.muted]{config}[/loom.muted]\n"
+            f"Loaded [loom.success]{n}[/loom.success] trigger(s) from [loom.muted]autonomy/schedules.toml[/loom.muted]\n"
             f"Poll interval: {interval}s  |  model: {model}\n"
             f"[loom.muted]Press Ctrl-C to stop.[/loom.muted]",
             border_style="cyan",
@@ -2358,7 +2358,7 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
 @autonomy.command("status")
 @click.option("--config", default="loom.toml", show_default=True)
 def autonomy_status(config: str) -> None:
-    """Show registered triggers from loom.toml."""
+    """Show registered triggers from autonomy/schedules.toml (gated by loom.toml [autonomy] enabled)."""
     from loom.autonomy.daemon import AutonomyDaemon
     from loom.notify.router import NotificationRouter
     from loom.notify.confirm import ConfirmFlow

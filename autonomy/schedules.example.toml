@@ -1,0 +1,89 @@
+# Autonomy schedule registry — example (issue #444)
+#
+# Copy this to ``autonomy/schedules.toml`` in your workspace and edit freely.
+# This file is the *work-item* surface: agents add / remove / tweak schedules
+# here without ever touching ``loom.toml`` (cognition / memory / sandbox /
+# harness). The master on/off switch stays in loom.toml:
+#
+#   [autonomy]
+#   enabled = true        # <- in loom.toml, gates the whole daemon
+#
+# Per-agent isolation is by workspace (cwd), exactly like
+# ``autonomy/circadian/rhythm.toml``: a different agent runs in a different
+# workspace and sees a different registry, one shared daemon.
+#
+# Two table arrays:
+#   [[schedules]]  — cron-fired work items
+#   [[triggers]]   — event-fired work items (emitted via `loom autonomy emit`)
+#
+# Schedules must pre-declare the tools/scopes they need via ``allowed_tools`` /
+# ``scope_grants`` — otherwise a GUARDED run gets denied. ``cron`` strings are
+# UTC (hand-convert from local time); the per-schedule ``timezone`` field is
+# currently a no-op.
+
+# ── 範例 1: 每日記憶整理（dream + housekeeping） ─────────────────
+[[schedules]]
+name          = "memory_housekeeping"
+cron          = "0 19 * * 0"            # 19:00 UTC Sunday = 03:00 Asia/Taipei Monday
+intent        = """Run memory housekeeping. First call memory_prune with
+                   dry_run=true to preview decayed entries. If any qualify,
+                   call again with dry_run=false to delete them. Report:
+                   total examined, pruned, and retained."""
+trust_level   = "safe"
+notify        = false
+notify_thread = 0
+
+# ── 範例 2: 每日 free dream（補 themed 沒覆蓋到的 cross-domain） ────
+[[schedules]]
+name          = "offline_dreaming_free"
+cron          = "0 19 * * *"            # 19:00 UTC = 03:00 Asia/Taipei
+intent        = """Run a free cross-domain dream. Call dream_cycle with
+                   themed=false so the sample spans all four ontology
+                   domains at random."""
+trust_level   = "safe"
+notify        = false
+notify_thread = 0
+allowed_tools = ["dream_cycle", "memorize"]
+
+# ── 範例 3: weekly skill review ────────────────────────────────
+[[schedules]]
+name          = "skill_weekly_review"
+cron          = "0 2 * * 6"             # 02:00 UTC Saturday = 10:00 Asia/Taipei
+intent        = """Run `loom skill weekly` via run_bash, then read the
+                   generated report and surface items in the 該關注清單."""
+trust_level   = "safe"
+notify        = true
+notify_thread = 0
+allowed_tools = ["run_bash", "read_file"]
+scope_grants  = [
+  { resource = "exec", action = "execute", selector = "workspace" },
+  { resource = "path", action = "read",    selector = "outputs"   },
+]
+attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
+
+# ── 範例 4: chime schedule（在既有 Discord 討論串裡發聲，而非獨立 run） ──
+[[schedules]]
+name          = "morning_briefing"
+cron          = "0 1 * * *"
+intent        = "撰寫晨報並發到討論串。"
+trust_level   = "safe"
+mode          = "chime"
+allowed_tools = ["write_file", "web_search"]
+
+  [schedules.target]
+  type     = "discord_thread"
+  id       = "REPLACE_WITH_THREAD_ID"   # 部署細節（非 secret）；放本檔不入 git
+  fallback = "skip"
+
+# ── 範例 5: event trigger（外部訊號觸發） ─────────────────────────
+[[triggers]]
+name          = "deploy_check"
+event         = "deployment_done"        # 用 `loom autonomy emit deployment_done` 觸發
+intent        = "Run smoke tests and post results."
+trust_level   = "guarded"
+notify        = true
+notify_thread = 0
+allowed_tools = ["run_bash"]
+scope_grants  = [
+  { resource = "exec", action = "execute", selector = "workspace" },
+]
