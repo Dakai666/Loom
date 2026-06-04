@@ -998,6 +998,69 @@ attach_outputs = ["renders/*.png"]
         assert trigger.attach_outputs == ["renders/*.png"]
 
 
+class TestDreamLoopWiring:
+    @pytest.mark.asyncio
+    async def test_dream_fn_does_not_touch_retired_relational(self, monkeypatch):
+        # Regression: the daemon's dream loop passed `relational=memory.relational`
+        # to dream_cycle, but MemoryFacade.relational was retired in #451 phase B —
+        # so the Discord daemon crashed at runtime with
+        # "'MemoryFacade' object has no attribute 'relational'". The dream fn must
+        # build its dream_cycle call without ever touching .relational.
+        import types
+        from loom.autonomy.daemon import AutonomyDaemon
+        from loom.notify.router import NotificationRouter
+        from loom.notify.confirm import ConfirmFlow
+        import loom.autonomy.daemon as daemon_mod
+        import loom.core.config as config_mod
+        import loom.core.cognition.dreaming as dreaming_mod
+
+        # Mirror MemoryFacade post-#451: has .semantic, NO .relational.
+        fake_memory = types.SimpleNamespace(semantic=object())
+        fake_session = types.SimpleNamespace(
+            _db=object(), _memory=fake_memory, router=object(), model="m",
+        )
+
+        captured: dict = {}
+
+        async def fake_dream_cycle(**kwargs):
+            captured.update(kwargs)
+            return {"facts_sampled": 0}
+
+        monkeypatch.setattr(dreaming_mod, "dream_cycle", fake_dream_cycle)
+        monkeypatch.setattr(
+            config_mod, "load_loom_config",
+            lambda: {"memory": {"dream": {"enabled": True}}},
+        )
+
+        holder: dict = {}
+
+        class FakeDreamLoop:
+            def __init__(self, *, dream_fn, abort, interval_hours):
+                holder["fn"] = dream_fn
+                self._interval_seconds = 3600.0
+
+            def run_forever(self):
+                async def _noop():
+                    return None
+                return _noop()
+
+        monkeypatch.setattr(daemon_mod, "DreamLoop", FakeDreamLoop)
+
+        daemon = AutonomyDaemon(
+            notify_router=NotificationRouter(),
+            confirm_flow=ConfirmFlow(send_fn=lambda n: None),
+            loom_session=fake_session,
+        )
+
+        task = daemon._maybe_start_dream_loop()
+        assert task is not None
+        # Running the dream fn must not raise AttributeError on .relational.
+        result = await holder["fn"]()
+        assert result == {"facts_sampled": 0}
+        assert "relational" not in captured
+        assert captured["semantic"] is fake_memory.semantic
+
+
 class TestRunAgentAttachments:
     @pytest.mark.asyncio
     async def test_run_agent_attaches_files_produced_during_turn(self, tmp_path):

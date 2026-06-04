@@ -640,7 +640,6 @@ class AutonomyDaemon:
 
             return await dream_cycle(
                 semantic=memory.semantic,
-                relational=memory.relational,
                 llm_fn=_llm_fn,
                 sample_size=sample_size,
                 themed=True,
