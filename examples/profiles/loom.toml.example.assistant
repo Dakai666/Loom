@@ -14,9 +14,9 @@
 #   • GUARDED 用 session 緩存（預設行為，session 內第一次 prompt）
 #   • Dream cycle 預設開（背景知識整理）
 #
-# 註: autonomy 排程未來會獨立成獨立檔案管理（issue #444），避免
-#     agent 誤改 loom.toml 引發連鎖錯誤；目前先全關。需要時參考
-#     根目錄 loom.toml.example 的 [[autonomy.schedules]] 範例。
+# 註: autonomy 排程已獨立成 autonomy/schedules.toml 管理（issue #444），
+#     避免 agent 誤改 loom.toml 引發連鎖錯誤；本 profile 預設全關。
+#     需要時 `cp autonomy/schedules.example.toml autonomy/schedules.toml`。
 #
 # 完整 per-key 教學註解請看根目錄 loom.toml.example
 # 此檔僅標註 profile-specific 的取捨理由
@@ -120,8 +120,9 @@ allowed_domains = []
 # ─────────────────────────────────────────────
 # Autonomy —— ASSISTANT 預設關（bot 連著就好，不主動排任務）
 # ─────────────────────────────────────────────
-# 想啟用自動排程：把 enabled 改 true，再解註解需要的 schedule 範例
-# （完整範例見根目錄 loom.toml.example 的 [[autonomy.schedules]] 區塊）。
+# 想啟用自動排程：把 enabled 改 true，再
+# `cp autonomy/schedules.example.toml autonomy/schedules.toml` 編輯排程
+# （schedule 清單自 #444 起住在 autonomy/schedules.toml，不在本檔）。
 [autonomy]
 enabled = false
 

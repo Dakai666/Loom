@@ -588,6 +588,12 @@ backend = "none"   # "none" | "srt"
 [autonomy]
 enabled  = false           # set true to activate daemon
 
+# Schedule registry (cron / event work items) lives in its OWN file since
+# issue #444 — `autonomy/schedules.toml` — so editing a schedule never risks a
+# system-config key. This [autonomy] block holds only posture (the enabled
+# switch + circadian). To add schedules:
+#   cp autonomy/schedules.example.toml autonomy/schedules.toml
+
 # ── Circadian Autonomy — daily-life rhythm (milestone #14, doc/57) ────────────
 # Opens one daily Discord thread at `start` and closes it at `sleep` (close runs
 # the existing memory-finalization path). The thread is opened in the channel

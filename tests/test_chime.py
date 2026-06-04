@@ -254,24 +254,29 @@ class TestChimeExecution:
 
 
 class TestChimeConfigLoading:
-    def test_loads_chime_schedule(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
+    def _write(self, tmp_path, schedules_body):
+        """loom.toml master switch + autonomy/schedules.toml registry (#444)."""
+        cfg = tmp_path / "loom.toml"
+        cfg.write_text("[autonomy]\nenabled = true\n", encoding="utf-8")
+        (tmp_path / "autonomy").mkdir(exist_ok=True)
+        (tmp_path / "autonomy" / "schedules.toml").write_text(
+            schedules_body, encoding="utf-8"
+        )
+        return cfg
 
-[[autonomy.schedules]]
+    def test_loads_chime_schedule(self, tmp_path):
+        cfg = self._write(tmp_path, """
+[[schedules]]
 name = "morning_greeting"
 cron = "0 1 * * *"
 intent = "say hi"
 trust_level = "safe"
 mode = "chime"
 
-  [autonomy.schedules.target]
+  [schedules.target]
   type = "discord_thread"
   id = "12345"
-"""
-        cfg = tmp_path / "loom.toml"
-        cfg.write_text(toml_content, encoding="utf-8")
+""")
 
         daemon = _make_daemon()
         n = daemon.load_config(cfg)
@@ -286,21 +291,16 @@ mode = "chime"
         }
 
     def test_chime_without_target_id_is_skipped(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
-
-[[autonomy.schedules]]
+        cfg = self._write(tmp_path, """
+[[schedules]]
 name = "broken"
 cron = "0 1 * * *"
 intent = "x"
 mode = "chime"
 
-  [autonomy.schedules.target]
+  [schedules.target]
   type = "discord_thread"
-"""
-        cfg = tmp_path / "loom.toml"
-        cfg.write_text(toml_content, encoding="utf-8")
+""")
 
         daemon = _make_daemon()
         # Missing id ⇒ schedule is dropped with a warning, not a crash.
@@ -308,44 +308,34 @@ mode = "chime"
         assert n == 0
 
     def test_chime_wrong_target_type_is_skipped(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
-
-[[autonomy.schedules]]
+        cfg = self._write(tmp_path, """
+[[schedules]]
 name = "broken"
 cron = "0 1 * * *"
 intent = "x"
 mode = "chime"
 
-  [autonomy.schedules.target]
+  [schedules.target]
   type = "cli"
   id = "whatever"
-"""
-        cfg = tmp_path / "loom.toml"
-        cfg.write_text(toml_content, encoding="utf-8")
+""")
 
         daemon = _make_daemon()
         n = daemon.load_config(cfg)
         assert n == 0
 
     def test_integer_target_id_is_coerced_to_string(self, tmp_path):
-        toml_content = """
-[autonomy]
-enabled = true
-
-[[autonomy.schedules]]
+        cfg = self._write(tmp_path, """
+[[schedules]]
 name = "g"
 cron = "0 1 * * *"
 intent = "x"
 mode = "chime"
 
-  [autonomy.schedules.target]
+  [schedules.target]
   type = "discord_thread"
   id = 99999
-"""
-        cfg = tmp_path / "loom.toml"
-        cfg.write_text(toml_content, encoding="utf-8")
+""")
 
         daemon = _make_daemon()
         daemon.load_config(cfg)

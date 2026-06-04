@@ -121,63 +121,17 @@ allowed_domains = []
 # ─────────────────────────────────────────────
 # Autonomy —— AUTONOMOUS 全開
 # ─────────────────────────────────────────────
-# 三類 trigger（cron / event / condition）都通；schedule 必須在
-# allowed_tools / scope_grants 預先宣告權限，否則 GUARDED 會被 deny。
+# 只有總開關住在這裡。實際的 schedule / trigger 清單（cron / event）自
+# issue #444 起搬到獨立檔案 `autonomy/schedules.toml`，把「工作項目」這個
+# agent 會頻繁編輯的 mutation surface 跟系統 config 隔開。
+#
+# 設定 schedules：
+#   cp autonomy/schedules.example.toml autonomy/schedules.toml
+#   # 然後編輯 autonomy/schedules.toml（agents 也只動這個檔，不碰 loom.toml）
+#
+# schedule 必須在 allowed_tools / scope_grants 預先宣告權限，否則 GUARDED 會被 deny。
 [autonomy]
 enabled = true
-
-# ── 範例 1: 每日記憶整理（dream + housekeeping） ─────────────────
-# [[autonomy.schedules]]
-# name          = "memory_housekeeping"
-# cron          = "0 19 * * 0"            # 19:00 UTC Sunday = 03:00 Asia/Taipei Monday
-# intent        = """Run memory housekeeping. First call memory_prune with
-#                    dry_run=true to preview decayed entries. If any qualify,
-#                    call again with dry_run=false to delete them. Report:
-#                    total examined, pruned, and retained."""
-# trust_level   = "safe"
-# notify        = false
-# notify_thread = 0
-
-# ── 範例 2: 每日 free dream（補 themed 沒覆蓋到的 cross-domain） ────
-# [[autonomy.schedules]]
-# name          = "offline_dreaming_free"
-# cron          = "0 19 * * *"            # 19:00 UTC = 03:00 Asia/Taipei
-# intent        = """Run a free cross-domain dream. Call dream_cycle with
-#                    themed=false so the sample spans all four ontology
-#                    domains at random."""
-# trust_level   = "safe"
-# notify        = false
-# notify_thread = 0
-# allowed_tools = ["dream_cycle", "memorize"]
-
-# ── 範例 3: weekly skill review ────────────────────────────────
-# [[autonomy.schedules]]
-# name          = "skill_weekly_review"
-# cron          = "0 2 * * 6"             # 02:00 UTC Saturday = 10:00 Asia/Taipei
-# intent        = """Run `loom skill weekly` via run_bash, then read the
-#                    generated report and surface items in the 該關注清單."""
-# trust_level   = "safe"
-# notify        = true
-# notify_thread = 0
-# allowed_tools = ["run_bash", "read_file"]
-# scope_grants  = [
-#   { resource = "exec", action = "execute", selector = "workspace" },
-#   { resource = "path", action = "read",    selector = "outputs"   },
-# ]
-# attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
-
-# ── 範例 4: event trigger（外部訊號觸發） ─────────────────────────
-# [[autonomy.triggers]]
-# name          = "deploy_check"
-# event         = "deployment_done"        # 用 `loom autonomy emit deployment_done` 觸發
-# intent        = "Run smoke tests and post results."
-# trust_level   = "guarded"
-# notify        = true
-# notify_thread = 0
-# allowed_tools = ["run_bash"]
-# scope_grants  = [
-#   { resource = "exec", action = "execute", selector = "workspace" },
-# ]
 
 [notify]
 default_channel = "discord"
