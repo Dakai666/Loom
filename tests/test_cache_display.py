@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from loom.core.events import TurnDone
 from loom.core.cognition.providers import LLMResponse
-from loom.platform.cli.ui import status_bar
+from loom.platform.cli.ui import cli_animation_frame, status_bar, tool_running_line
 
 
 # ── TurnDone dataclass ──────────────────────────────────────────────────────
@@ -129,3 +129,17 @@ class TestStatusBarSegments:
         s = status_bar(0.5, 100, 50, 1234.0, 2).plain
         assert "context" in s
         assert "100in / 50out" in s
+
+
+class TestCLIAnimationFrames:
+    def test_known_animation_wraps_frames(self):
+        first = cli_animation_frame("classic_spinner", 0)
+        wrapped = cli_animation_frame("classic_spinner", 10)
+        assert first == "⠋"
+        assert wrapped == first
+
+    def test_unknown_animation_falls_back_to_classic_spinner(self):
+        assert cli_animation_frame("not-a-real-animation", 0) == "⠋"
+
+    def test_tool_running_line_uses_braille_spinner(self):
+        assert "[⠋] pytest running..." in tool_running_line("pytest", 0).plain

@@ -1208,7 +1208,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
         nonlocal frame_index
         clear_line()
         console.print(tool_running_line(active_tool or "", frame_index), end="")
-        frame_index = (frame_index + 1) % 4
+        frame_index += 1
 
     async def _spin_loop() -> None:
         """Background task: animate spinner while tool is running."""

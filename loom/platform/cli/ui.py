@@ -573,8 +573,25 @@ def response_panel(
     )
 
 
-# ASCII spinner frames (cp950 safe, Rich-markup safe — no backslash)
-_SPINNER_FRAMES = ["-", "~", "|", "+"]
+# Unicode Braille animation frames. Loom's live CLI surface already assumes a
+# UTF-8 terminal; keep these frames one terminal cell wide so running rows and
+# footer labels do not jitter.
+_ANIMATION_FRAMES: dict[str, tuple[str, ...]] = {
+    "classic_spinner": (
+        "⠋", "⠙", "⠹", "⠸", "⠼",
+        "⠴", "⠦", "⠧", "⠇", "⠏",
+    ),
+    "breathing_focus": ("⠂", "⠆", "⠇", "⠿", "⠇", "⠆"),
+    "cascade_drop": ("⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"),
+    "rising_columns": ("⣀", "⣤", "⣶", "⣿", "⣶", "⣤"),
+}
+_SPINNER_FRAMES = _ANIMATION_FRAMES["classic_spinner"]
+
+
+def cli_animation_frame(name: str, frame_index: int) -> str:
+    """Return one Braille animation frame by stable animation name."""
+    frames = _ANIMATION_FRAMES.get(name, _SPINNER_FRAMES)
+    return frames[frame_index % len(frames)]
 
 def tool_spinner_line(
     name: str,
@@ -583,17 +600,16 @@ def tool_spinner_line(
     width: int | None = None,
 ) -> Text:
     """
-    Rich Text for a tool-call-in-progress line with ASCII spinner.
-    Frame index 0 shows [- ], 1 shows [\\ ], etc.
+    Rich Text for a tool-call-in-progress line with Braille spinner.
 
     When ``width`` is given and the rendered line would overflow it,
     the args body wraps with a hanging indent so continuation lines
     align under the tool name instead of restarting at column 0.
     """
-    spinner = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
+    spinner = cli_animation_frame("classic_spinner", frame_index)
     args_preview = _format_args(args)
     body_plain = f"{name}{f'({args_preview})' if args_preview else ''}"
-    prefix_visual = "  [-] "  # 6 cells; spinner glyph is always 1 wide
+    prefix_visual = "  [·] "  # 6 cells; spinner glyph is always 1 wide
     indent = " " * len(prefix_visual)
 
     out = Text()
@@ -664,12 +680,12 @@ def tool_begin_line(
     justification = _smart_truncate(justification, 80)
     args_preview = _format_args(display_args)
     body_plain = f"{name}{f'({args_preview})' if args_preview else ''}"
-    prefix_visual = "  [-] "
+    prefix_visual = "  [·] "
     indent = " " * len(prefix_visual)
 
     out = Text()
     out.append("  [", style="loom.muted")
-    out.append("-", style="loom.warning")
+    out.append(cli_animation_frame("classic_spinner", 0), style="loom.warning")
     out.append("] ", style="loom.muted")
     out.append(justification, style="loom.text")
     out.append("\n")
@@ -701,7 +717,7 @@ def tool_running_line(name: str, frame_index: int = 0) -> Text:
     Rich Text for a tool that is currently executing.
     Shows animated spinner without args (args already shown at begin).
     """
-    spinner = _SPINNER_FRAMES[frame_index % len(_SPINNER_FRAMES)]
+    spinner = cli_animation_frame("classic_spinner", frame_index)
     return Text.from_markup(
         f"  [loom.muted][[/loom.muted][loom.warning]{spinner}[/loom.warning][loom.muted]][/loom.muted] "
         f"[loom.muted]{name} running...[/loom.muted]"

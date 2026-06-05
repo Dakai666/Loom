@@ -54,7 +54,11 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
 
 from loom.platform.cli.theme import active_palette
-from loom.platform.cli.ui import SLASH_COMMANDS, SlashCompleter
+from loom.platform.cli.ui import (
+    SLASH_COMMANDS,
+    SlashCompleter,
+    cli_animation_frame,
+)
 from loom.platform.interaction_language import LivenessSensor
 
 _CLI_PALETTE = active_palette()
@@ -769,8 +773,9 @@ class LoomApp:
         # If compacting: replace the middle area with the spinner
         # message so the user doesn't think the agent has hung
         if s.compacting:
+            frame = cli_animation_frame("cascade_drop", int(monotonic() * 2))
             parts.append(("class:footer", "  "))
-            parts.append(("class:footer.compaction", "⚡ 壓縮中…"))
+            parts.append(("class:footer.compaction", f"{frame} ⚡ 壓縮中…"))
             return FormattedText(parts)
 
         # Context % — always visible. Colour ladder: muted under 60%,
@@ -817,6 +822,7 @@ class LoomApp:
             from loom.platform.interaction_language import format_elapsed
 
             now = _t.monotonic()
+            frame_index = int(now * 2)
             elapsed = max(0.0, now - s.heartbeat_started_monotonic)
             # The stall DECISION delegates to the shared sensor's
             # non-latching ``is_stalled`` (threshold + observation timeline).
@@ -844,6 +850,15 @@ class LoomApp:
             if s.heartbeat_subject:
                 label += f" · {s.heartbeat_subject}"
             label += f" · {format_elapsed(elapsed)}"
+            if not stalled and s.heartbeat_state != "paused_blocking":
+                if s.heartbeat_state == "thinking":
+                    animation = "breathing_focus"
+                elif s.heartbeat_state == "long_tooling":
+                    animation = "rising_columns"
+                    frame_index //= 2
+                else:
+                    animation = "classic_spinner"
+                label = f"{cli_animation_frame(animation, frame_index)} {label}"
             parts.append(("class:footer", "  "))
             style = "class:footer.budget.warn" if stalled else "class:footer.envelope"
             parts.append((style, label))
@@ -935,6 +950,14 @@ class LoomApp:
             ("", "\n"),
             ("class:tasklist.title", f" 📋 task list  {done}/{total}\n"),
         ]
+        tasklist_animated = (
+            self.footer.heartbeat_state
+            and self.footer.heartbeat_state not in ("idle", "paused_blocking", "stalled")
+        )
+        active_frame = (
+            cli_animation_frame("breathing_focus", int(monotonic() * 2))
+            if tasklist_animated else "▸"
+        )
         for t in todos:
             status = (t.get("status") or "pending").lower()
             content = (t.get("content") or "").strip()
@@ -943,7 +966,7 @@ class LoomApp:
             if status == "completed":
                 glyph, cls = "✓", "class:tasklist.done"
             elif status == "in_progress":
-                glyph, cls = "▸", "class:tasklist.active"
+                glyph, cls = active_frame, "class:tasklist.active"
             else:
                 glyph, cls = "○", "class:tasklist.pending"
             parts.append((cls, f"   {glyph} {content}\n"))
