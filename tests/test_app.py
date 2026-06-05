@@ -29,6 +29,7 @@ import pytest
 from prompt_toolkit.history import InMemoryHistory
 
 from loom.core.events import TextChunk, TurnDropped
+from loom.platform.cli import app as cli_app_module
 from loom.platform.cli import main as cli_main
 from loom.platform.cli.app import (
     FooterState,
@@ -569,6 +570,24 @@ class TestTaskListPanel:
         assert "✓ first" in text
         assert "▸ second" in text
         assert "○ third" in text
+
+    def test_in_progress_row_breathes_only_while_heartbeat_active(
+        self, app: LoomApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli_app_module, "monotonic", lambda: 0.0)
+        app.update_tasklist([
+            {"id": "a", "content": "active", "status": "in_progress"},
+        ])
+
+        idle_text = _flat_text(app._render_tasklist())
+        assert "▸ active" in idle_text
+
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="Loom is thinking",
+        )
+        active_text = _flat_text(app._render_tasklist())
+        assert "⠂ active" in active_text
 
     def test_all_completed_collapses_to_one_liner(self, app: LoomApp) -> None:
         app.update_tasklist([
