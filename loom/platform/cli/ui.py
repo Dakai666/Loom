@@ -576,14 +576,31 @@ def response_panel(
 # Unicode Braille animation frames. Loom's live CLI surface already assumes a
 # UTF-8 terminal; keep these frames one terminal cell wide so running rows and
 # footer labels do not jitter.
+#
+# Each entry is one self-contained 1-cell loop. Loops are grouped into action
+# *families* by ``ANIMATION_FAMILIES`` in interaction_language.py — a family
+# shares a recognisable motion "feel" (so the user learns "scanning = 探查"),
+# while the variants inside it rotate per tool call for freshness. Most loops
+# are lifted from the battle-tested ``cli-spinners`` braille set, which keeps
+# every frame one terminal cell wide.
 _ANIMATION_FRAMES: dict[str, tuple[str, ...]] = {
-    "classic_spinner": (
-        "⠋", "⠙", "⠹", "⠸", "⠼",
-        "⠴", "⠦", "⠧", "⠇", "⠏",
-    ),
+    # ── think: gentle pulse ────────────────────────────────────────────
     "breathing_focus": ("⠂", "⠆", "⠇", "⠿", "⠇", "⠆"),
-    "cascade_drop": ("⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"),
+    "dots_grow": ("⠄", "⠆", "⠇", "⠋", "⠙", "⠸", "⠰", "⠠", "⠰", "⠸", "⠙", "⠋", "⠇", "⠆"),
+    # ── probe: scanning / searching ────────────────────────────────────
+    "classic_spinner": ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
+    "dots_wobble": ("⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠓"),
+    "dots_corner": ("⢄", "⢂", "⢁", "⡁", "⡈", "⡐", "⡠"),
+    # ── write: pen stroke / filling in ─────────────────────────────────
+    # Pen stroke sweeping up the left column then lifting off down the right
+    # — "writing a file" reads differently from the read spinner.
+    "pen_stroke": ("⡀", "⡄", "⡆", "⡇", "⢸", "⠸", "⠘", "⠈"),
     "rising_columns": ("⣀", "⣤", "⣶", "⣿", "⣶", "⣤"),
+    # ── execute: heavy churn ───────────────────────────────────────────
+    "dots_heavy": ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"),
+    "dots_edge": ("⢹", "⢺", "⢼", "⣸", "⣇", "⡧", "⡗", "⡏"),
+    # ── tidy: settle / drop into place ─────────────────────────────────
+    "cascade_drop": ("⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"),
 }
 _SPINNER_FRAMES = _ANIMATION_FRAMES["classic_spinner"]
 

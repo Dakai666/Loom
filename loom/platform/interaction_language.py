@@ -51,6 +51,38 @@ class HeartbeatState(str, Enum):
     PAUSED_BLOCKING = "paused_blocking"
 
 
+# Action families: the animation identity axis, orthogonal to HeartbeatState
+# (which drives stall/suppression semantics). ``resolve_tool_action`` tags
+# each tool with a family; the footer picks one variant from the family pool
+# per tool call (rotating for freshness) and holds it for that call's
+# duration. Family names are stable contract values — the CLI footer and
+# tests key off them.
+class ActionFamily(str, Enum):
+    THINK = "think"        # reasoning between tool calls
+    PROBE = "probe"        # read / search / inspect (read-only)
+    WRITE = "write"        # file + memory + task mutation
+    EXECUTE = "execute"    # run_bash and shell-shaped work
+    TIDY = "tidy"          # compaction / housekeeping
+    TOOL = "tool"          # generic fallback (MCP, unknown tools)
+
+
+# family -> ordered pool of animation names defined in
+# ``loom.platform.cli.ui._ANIMATION_FRAMES``. Order is the rotation order.
+ANIMATION_FAMILIES: dict[str, tuple[str, ...]] = {
+    ActionFamily.THINK.value:   ("breathing_focus", "dots_grow"),
+    ActionFamily.PROBE.value:   ("classic_spinner", "dots_wobble", "dots_corner"),
+    ActionFamily.WRITE.value:   ("pen_stroke", "rising_columns"),
+    ActionFamily.EXECUTE.value: ("dots_heavy", "dots_edge"),
+    ActionFamily.TIDY.value:    ("cascade_drop",),
+    ActionFamily.TOOL.value:    ("classic_spinner",),
+}
+
+
+def family_variants(family: str) -> tuple[str, ...]:
+    """Animation pool for a family, falling back to the generic TOOL pool."""
+    return ANIMATION_FAMILIES.get(family, ANIMATION_FAMILIES[ActionFamily.TOOL.value])
+
+
 class ParallelReason(str, Enum):
     SERIAL = "serial"
     FAN_OUT_REPLICAS = "fan_out_replicas"
@@ -66,6 +98,9 @@ class ToolAction:
     subject: str = ""
     stale_after_s: float = 30.0
     long_after_s: float = 30.0
+    # Animation family this action belongs to (drives the footer's
+    # variant pick). Defaults to the generic TOOL pool.
+    family: str = ActionFamily.TOOL.value
 
 
 _LONG_RUNNER_THRESHOLD_S = 90.0
@@ -150,30 +185,36 @@ def resolve_tool_action(tool_name: str, args: dict[str, Any] | None = None) -> T
     args = args or {}
     stale_after = stale_threshold_for_tool(tool_name)
 
+    _PROBE = ActionFamily.PROBE.value
+    _WRITE = ActionFamily.WRITE.value
+
     if tool_name == "read_file":
-        return ToolAction(_LABELS_ZH_TW["read_file"][0], _truncate(args.get("path")), stale_after)
+        return ToolAction(_LABELS_ZH_TW["read_file"][0], _truncate(args.get("path")), stale_after, family=_PROBE)
     if tool_name == "write_file":
-        return ToolAction(_LABELS_ZH_TW["write_file"][0], _truncate(args.get("path")), stale_after)
+        return ToolAction(_LABELS_ZH_TW["write_file"][0], _truncate(args.get("path")), stale_after, family=_WRITE)
     if tool_name in {"edit_file", "edit"}:
-        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("path")), stale_after)
+        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("path")), stale_after, family=_WRITE)
     if tool_name == "run_bash":
-        return ToolAction(_LABELS_ZH_TW["run_bash"][0], _command_root(str(args.get("command") or "")), stale_after)
+        return ToolAction(
+            _LABELS_ZH_TW["run_bash"][0], _command_root(str(args.get("command") or "")), stale_after,
+            family=ActionFamily.EXECUTE.value,
+        )
     if tool_name in {"grep", "ripgrep"}:
-        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after)
+        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after, family=_PROBE)
     if tool_name in {"find", "glob"}:
-        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after)
+        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("pattern")), stale_after, family=_PROBE)
     if tool_name == "list_dir":
-        return ToolAction(_LABELS_ZH_TW["list_dir"][0], _truncate(args.get("path")), stale_after)
+        return ToolAction(_LABELS_ZH_TW["list_dir"][0], _truncate(args.get("path")), stale_after, family=_PROBE)
     if tool_name.startswith("gitnexus_"):
-        return ToolAction(_LABELS_ZH_TW["gitnexus"][0], tool_name.removeprefix("gitnexus_"), stale_after)
+        return ToolAction(_LABELS_ZH_TW["gitnexus"][0], tool_name.removeprefix("gitnexus_"), stale_after, family=_PROBE)
     if tool_name in {"memorize", "governed_write"}:
-        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("type")), stale_after)
+        return ToolAction(_LABELS_ZH_TW[tool_name][0], _truncate(args.get("type")), stale_after, family=_WRITE)
     if tool_name == "task_write":
-        return ToolAction(_LABELS_ZH_TW["task_write"][0], "", stale_after)
+        return ToolAction(_LABELS_ZH_TW["task_write"][0], "", stale_after, family=_WRITE)
     if tool_name == "impact_analysis":
-        return ToolAction(_LABELS_ZH_TW["impact_analysis"][0], _truncate(args.get("target")), stale_after)
+        return ToolAction(_LABELS_ZH_TW["impact_analysis"][0], _truncate(args.get("target")), stale_after, family=_PROBE)
     if tool_name == "compact":
-        return ToolAction(_LABELS_ZH_TW["compact"][0], "", stale_after)
+        return ToolAction(_LABELS_ZH_TW["compact"][0], "", stale_after, family=ActionFamily.TIDY.value)
     if "__" in tool_name:
         return ToolAction(tool_name, _first_string_arg(args), stale_after)
     return ToolAction(tool_name, "", stale_after)

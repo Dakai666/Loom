@@ -141,5 +141,11 @@ class TestCLIAnimationFrames:
     def test_unknown_animation_falls_back_to_classic_spinner(self):
         assert cli_animation_frame("not-a-real-animation", 0) == "⠋"
 
+    def test_pen_stroke_animation_registered(self):
+        # The file-writing identity (chosen pen-stroke sweep). First frame
+        # is the bottom-left dot; the loop wraps after 8 frames.
+        assert cli_animation_frame("pen_stroke", 0) == "⡀"
+        assert cli_animation_frame("pen_stroke", 8) == cli_animation_frame("pen_stroke", 0)
+
     def test_tool_running_line_uses_braille_spinner(self):
         assert "[⠋] pytest running..." in tool_running_line("pytest", 0).plain
