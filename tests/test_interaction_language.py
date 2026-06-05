@@ -171,6 +171,14 @@ def test_advance_engagement_empty_family_resets_to_default() -> None:
     assert advance_engagement(Engagement(ActionFamily.WRITE.value, 5), "") == Engagement()
 
 
+def test_advance_engagement_empty_then_real_starts_fresh() -> None:
+    # An empty family fully resets, so the next real family starts a new
+    # run at 1 (not a continuation of the pre-empty run).
+    e = advance_engagement(Engagement(ActionFamily.WRITE.value, 5), "")
+    e = advance_engagement(e, ActionFamily.WRITE.value)
+    assert e == Engagement(ActionFamily.WRITE.value, 1)
+
+
 def test_heartbeat_state_names_are_stable() -> None:
     assert HeartbeatState.THINKING.value == "thinking"
     assert HeartbeatState.STALLED.value == "stalled"

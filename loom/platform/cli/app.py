@@ -430,6 +430,11 @@ class LoomApp:
         Called from the tool ToolBegin path only — thinking beats are not
         fed, so a run of same-family tools survives the think gaps between
         them. Read-only: nothing consumes this but the footer pip display.
+
+        No ``invalidate()`` here on purpose: the caller (``_start_tool_
+        heartbeat``) calls ``start_heartbeat`` immediately before this, and
+        that already invalidated. Keep this call ordered after it — that's
+        the invariant that lets this stay a pure state fold with no redraw.
         """
         self._engagement = advance_engagement(self._engagement, family)
 
