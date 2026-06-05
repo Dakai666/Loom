@@ -28,7 +28,7 @@ import asyncio
 import pytest
 from prompt_toolkit.history import InMemoryHistory
 
-from loom.core.events import TextChunk, TurnDropped
+from loom.core.events import ModelThinkingStarted, TextChunk, ToolEnd, TurnDropped
 from loom.platform.cli import app as cli_app_module
 from loom.platform.cli import main as cli_main
 from loom.platform.cli.app import (
@@ -652,6 +652,32 @@ class TestHeartbeatMinDwell:
 
         assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
         assert app.footer.heartbeat_pending_stop is False
+
+    def test_model_thinking_started_restores_heartbeat_after_tool_end(self, app: LoomApp) -> None:
+        class _Session:
+            _loom_app = app
+
+            async def stream_turn(self, _user_input: str):
+                yield ToolEnd(
+                    name="read_file",
+                    success=True,
+                    output="large file",
+                    duration_ms=42.0,
+                    call_id="call_read",
+                )
+                yield ModelThinkingStarted(phase="after_tool", tool_name="read_file")
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="讀取檔案",
+            subject="large.py",
+        )
+        app.footer.heartbeat_min_alive_until = 0.0
+
+        asyncio.run(cli_main._run_streaming_turn(_Session(), "hi"))
+
+        assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
+        assert "整理工具結果" in _flat_text(app._render_footer())
 
     def test_turn_dropped_renders_cli_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: list[tuple[str, str]] = []

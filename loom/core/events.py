@@ -25,6 +25,7 @@ add ``Producers:`` / ``Consumers:`` entries to the event's docstring.
 | ThinkCollapsed      |  ✓  |  ✓  |    ✓    |   no     |
 | TurnPaused          |  ✓  |  ✓  |    ✓    |   no     |
 | TurnDropped         |  ✓  |  —  |    ✓    |   no     |
+| ModelThinkingStarted |  ✓  |  —  |    —    |   no     |
 | ReasoningContinuation |  ✓  |  ✓  |    ✓    |   no     |
 | TierChanged         |  ✓  |  ✓  |    ✓    |   no     |
 | TierExpiryHint      |  ✓  |  ✓  |    ✓    |   no     |
@@ -249,6 +250,33 @@ class ReasoningContinuation:
     attempt: int
     max_attempts: int
     display_text: str = "有點複雜，我再繼續想想…"
+
+
+@dataclass
+class ModelThinkingStarted:
+    """A model round-trip has started or resumed inside an active turn.
+
+    This is a runtime liveness signal, not a reasoning-content event. It lets
+    platform UIs keep showing activity while the model digests tool results
+    between ``ToolEnd`` and the next visible ``TextChunk`` / ``ToolBegin``.
+
+    ``phase``     — ``"initial"`` for the first model call in a turn,
+                    ``"after_tool"`` when resuming after one or more tools
+    ``tool_name`` — the most recent completed tool, when ``phase`` is
+                    ``"after_tool"``
+
+    Producers:
+        LoomSession.stream_turn() — emitted immediately before each
+        ``router.stream_chat`` call.
+
+    Consumers:
+        CLI     ✓  switches the footer back to THINKING heartbeat
+        TUI     —  existing surfaces have their own liveness model
+        Discord —  typing/watchdog already covers this round-trip
+    """
+
+    phase: str = "initial"
+    tool_name: str = ""
 
 
 @dataclass
@@ -578,8 +606,9 @@ class EventConsumer(Protocol):
     Consumers may ignore these safely (``else: pass`` is correct behaviour).
     See the Consumer Map in the module docstring for platform-specific coverage:
 
-    ``ThinkCollapsed``, ``TurnPaused``, ``TurnDropped``, ``CompressDone``,
-    ``ActionStateChange``, ``ActionRolledBack``,
+    ``ThinkCollapsed``, ``TurnPaused``, ``TurnDropped``,
+    ``ModelThinkingStarted``, ``CompressDone``, ``ActionStateChange``,
+    ``ActionRolledBack``,
     ``EnvelopeStarted``, ``EnvelopeUpdated``, ``EnvelopeCompleted``,
     ``GrantsSnapshot``
     """
@@ -613,6 +642,7 @@ __all__ = [
     "ExecutionNodeView",
     "GrantSummary",
     "GrantsSnapshot",
+    "ModelThinkingStarted",
     "ReasoningContinuation",
     "TextChunk",
     "TierChanged",

@@ -62,6 +62,7 @@ from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    ModelThinkingStarted,
     ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
@@ -1469,7 +1470,24 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
 
     try:
         async for event in session.stream_turn(user_input):
-            if isinstance(event, TextChunk):
+            if isinstance(event, ModelThinkingStarted):
+                loom_app = getattr(session, "_loom_app", None)
+                if loom_app is not None:
+                    from loom.platform.interaction_language import ActionFamily, HeartbeatState
+
+                    loom_app.start_heartbeat(
+                        state=HeartbeatState.THINKING.value,
+                        label=(
+                            "整理工具結果"
+                            if event.phase == "after_tool"
+                            else "Loom is thinking"
+                        ),
+                        subject=event.tool_name if event.phase == "after_tool" else "",
+                        stale_after_s=30.0,
+                        family=ActionFamily.THINK.value,
+                    )
+
+            elif isinstance(event, TextChunk):
                 _clear_thinking_on_first_text()
                 _bump_output_seq()
                 _stream_pending += event.text

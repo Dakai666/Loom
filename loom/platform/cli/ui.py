@@ -57,6 +57,7 @@ from loom.core.events import (  # noqa: E402, F401
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    ModelThinkingStarted,
     ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
