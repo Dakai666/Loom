@@ -381,6 +381,78 @@ class TestFooterRender:
 # ---------------------------------------------------------------------------
 
 
+class TestEngagementPips:
+    """#521 v1: a read-only session-level 'sustained action' signal. The
+    footer grows ⟫ pips once the same action family runs ≥3 times in a row
+    so the user sees 'lots happening / still going' at a glance — even when
+    the agent never opened a TaskList. Pips only show on a tooling beat
+    (thinking gaps between tools don't carry them) and are capped."""
+
+    _PIP = "⟫"
+
+    def _write(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        app.note_tool_engagement(ActionFamily.WRITE.value)
+
+    def test_engagement_accumulates_same_family(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        for _ in range(3):
+            self._write(app)
+        assert app._engagement.run_length == 3
+        assert app._engagement.dominant_family == ActionFamily.WRITE.value
+
+    def test_engagement_resets_run_on_family_change(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        self._write(app)
+        self._write(app)
+        app.note_tool_engagement(ActionFamily.PROBE.value)
+        assert app._engagement.run_length == 1
+        assert app._engagement.dominant_family == ActionFamily.PROBE.value
+
+    def test_reset_engagement_clears(self, app: LoomApp) -> None:
+        self._write(app)
+        app.reset_engagement()
+        assert app._engagement.run_length == 0
+        assert app._engagement.dominant_family == ""
+
+    def _tooling(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value, label="編輯檔案",
+            subject="a.py", family=ActionFamily.WRITE.value,
+        )
+
+    def test_pips_appear_at_threshold(self, app: LoomApp) -> None:
+        self._tooling(app)
+        for _ in range(3):
+            self._write(app)
+        assert self._PIP * 3 in _flat_text(app._render_footer())
+
+    def test_no_pips_below_threshold(self, app: LoomApp) -> None:
+        self._tooling(app)
+        self._write(app)
+        self._write(app)  # run_length 2 — below the 3 threshold
+        assert self._PIP not in _flat_text(app._render_footer())
+
+    def test_pips_capped_at_ten(self, app: LoomApp) -> None:
+        self._tooling(app)
+        for _ in range(20):
+            self._write(app)
+        assert _flat_text(app._render_footer()).count(self._PIP) == 10
+
+    def test_no_pips_during_thinking_beat(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        for _ in range(5):
+            self._write(app)
+        # Same session, but the current beat is thinking (between tools):
+        # the sustained-action signal is for tool work, not think gaps.
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value, label="Loom is thinking",
+            family=ActionFamily.THINK.value,
+        )
+        assert self._PIP not in _flat_text(app._render_footer())
+
+
 class TestHeartbeatMinDwell:
     """Regression: short tool calls (< 1 s) were producing labels that
     appeared and disappeared before the user could read them. The dwell

@@ -591,6 +591,10 @@ async def _chat(
             finally:
                 current_turn_task = None
                 app.stop_heartbeat(force=True)
+                # Sustained-action signal is per-turn (#521): a new user
+                # turn is a fresh context, so the run-length resets here
+                # regardless of how the turn ended (done / error / cancel).
+                app.reset_engagement()
 
             # Update footer token budget + grants at each turn boundary
             # (per doc/49 decision: TTL refresh on turn edge, not per-
@@ -1181,6 +1185,10 @@ def _start_tool_heartbeat(loom_app: Any, name: str, args: dict[str, Any]) -> Non
         stale_after_s=action.stale_after_s,
         family=action.family,
     )
+    # Fold this tool beat into the sustained-action signal (#521). Tool
+    # beats only — the thinking heartbeat never calls this, so a run of
+    # same-family tools survives the think gaps between them.
+    loom_app.note_tool_engagement(action.family)
 
 
 async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
