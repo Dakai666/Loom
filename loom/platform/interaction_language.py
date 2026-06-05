@@ -83,6 +83,21 @@ def family_variants(family: str) -> tuple[str, ...]:
     return ANIMATION_FAMILIES.get(family, ANIMATION_FAMILIES[ActionFamily.TOOL.value])
 
 
+# Playback cadence (fps) per family — pulse-style families read better
+# slower, everything else gets a snappy spinner. Carried on the family (the
+# identity unit) rather than per-animation-name so a new variant added to a
+# family inherits its cadence automatically.
+_DEFAULT_FPS = 10.0
+FAMILY_FPS: dict[str, float] = {
+    ActionFamily.THINK.value: 6.0,
+}
+
+
+def family_fps(family: str) -> float:
+    """Playback fps for a family (default snappy 10 fps)."""
+    return FAMILY_FPS.get(family, _DEFAULT_FPS)
+
+
 class ParallelReason(str, Enum):
     SERIAL = "serial"
     FAN_OUT_REPLICAS = "fan_out_replicas"

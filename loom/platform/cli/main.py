@@ -1214,7 +1214,18 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     def _print_spinner() -> None:
         nonlocal frame_index
         clear_line()
-        console.print(tool_running_line(active_tool or "", frame_index), end="")
+        # Match the footer's resolved family variant so the inline running
+        # line animates in the same language as the heartbeat (probe scans,
+        # write strokes, …); fall back to the classic spinner if no app.
+        _la = getattr(session, "_loom_app", None)
+        animation = (
+            (_la.footer.heartbeat_animation or "classic_spinner")
+            if _la is not None else "classic_spinner"
+        )
+        console.print(
+            tool_running_line(active_tool or "", frame_index, animation=animation),
+            end="",
+        )
         frame_index += 1
 
     async def _spin_loop() -> None:
@@ -1595,10 +1606,14 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 loom_app = getattr(session, "_loom_app", None)
                 if loom_app is not None:
                     loom_app.touch_heartbeat()
-                    # Confirm-gated writes burn the dwell while the user
-                    # reads the diff, so the actual write finishes
-                    # instantly and the pen-stroke beat would never show.
-                    # Re-arm the dwell at apply time so "wrote X" lingers.
+                    # This fires at ToolEnd — i.e. right after the write
+                    # applied. Confirm-gated writes (write_file/edit_file)
+                    # burn the 1s dwell while the user reads the diff, so the
+                    # instant write would otherwise flash by with no beat;
+                    # re-arming here keeps "寫入檔案 X" legible. Non-gated
+                    # WRITE-family tools (memorize / task_write) don't burn
+                    # the dwell, so this just grants them the same ~1s
+                    # "done" courtesy — an accepted side effect, not a bug.
                     from loom.platform.interaction_language import ActionFamily
                     from loom.platform.cli.app import _HEARTBEAT_MIN_DWELL_S
                     if loom_app.footer.heartbeat_family == ActionFamily.WRITE.value:

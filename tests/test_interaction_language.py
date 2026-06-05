@@ -7,6 +7,7 @@ from loom.platform.interaction_language import (
     LivenessSensor,
     _LABELS_ZH_TW,
     derive_envelope_outcome,
+    family_fps,
     family_variants,
     format_elapsed,
     format_parallel_reason,
@@ -106,6 +107,15 @@ def test_animation_families_pools_are_registered() -> None:
 def test_family_variants_unknown_falls_back_to_tool_pool() -> None:
     assert family_variants("not-a-family") == ANIMATION_FAMILIES[ActionFamily.TOOL.value]
     assert family_variants(ActionFamily.PROBE.value) == ANIMATION_FAMILIES[ActionFamily.PROBE.value]
+
+
+def test_family_fps_pulse_is_gentle_rest_snappy() -> None:
+    # Cadence travels with the family: THINK pulses gently, everything
+    # else (and unknown families) gets the snappy default.
+    assert family_fps(ActionFamily.THINK.value) == 6.0
+    assert family_fps(ActionFamily.PROBE.value) == 10.0
+    assert family_fps(ActionFamily.WRITE.value) == 10.0
+    assert family_fps("not-a-family") == 10.0
 
 
 def test_labels_use_locale_registry_shape() -> None:

@@ -623,15 +623,17 @@ def tool_spinner_line(
     the args body wraps with a hanging indent so continuation lines
     align under the tool name instead of restarting at column 0.
     """
-    spinner = cli_animation_frame("classic_spinner", frame_index)
     args_preview = _format_args(args)
     body_plain = f"{name}{f'({args_preview})' if args_preview else ''}"
-    prefix_visual = "  [·] "  # 6 cells; spinner glyph is always 1 wide
+    prefix_visual = "  [·] "  # 6 cells; marker glyph is always 1 wide
     indent = " " * len(prefix_visual)
 
+    # Neutral · seed at begin — the live animation plays on the separate
+    # running line, and a frozen spinner frame here read as "stuck" once
+    # the tool finished. ``frame_index`` is kept for signature stability.
     out = Text()
     out.append("  [", style="loom.muted")
-    out.append(spinner, style="loom.warning")
+    out.append("·", style="loom.muted")
     out.append("] ", style="loom.muted")
 
     if width is None:
@@ -702,7 +704,7 @@ def tool_begin_line(
 
     out = Text()
     out.append("  [", style="loom.muted")
-    out.append(cli_animation_frame("classic_spinner", 0), style="loom.warning")
+    out.append("·", style="loom.muted")  # neutral seed; see tool_spinner_line
     out.append("] ", style="loom.muted")
     out.append(justification, style="loom.text")
     out.append("\n")
@@ -729,12 +731,18 @@ def tool_begin_line(
     return out
 
 
-def tool_running_line(name: str, frame_index: int = 0) -> Text:
+def tool_running_line(
+    name: str, frame_index: int = 0, animation: str = "classic_spinner"
+) -> Text:
     """
     Rich Text for a tool that is currently executing.
-    Shows animated spinner without args (args already shown at begin).
+    Shows the animated spinner without args (args already shown at begin).
+
+    ``animation`` selects which family loop to play — the caller passes the
+    footer's resolved variant so the inline running line stays in sync with
+    the heartbeat (probe scans, write strokes, execute churns, …).
     """
-    spinner = cli_animation_frame("classic_spinner", frame_index)
+    spinner = cli_animation_frame(animation, frame_index)
     return Text.from_markup(
         f"  [loom.muted][[/loom.muted][loom.warning]{spinner}[/loom.warning][loom.muted]][/loom.muted] "
         f"[loom.muted]{name} running...[/loom.muted]"
@@ -757,7 +765,7 @@ def tool_end_line(
       below the row (doc/49 §2 "完成即蒸發").
     """
     if frozen:
-        icon_word = "ok" if success else "!!"
+        icon_word = "✓" if success else "✗"
         status_word = "done" if success else "failed"
         # Build with Text.append rather than from_markup — bare ``[ok]``
         # in a markup string gets parsed as an (unknown) style tag and
@@ -768,7 +776,7 @@ def tool_end_line(
             style="loom.muted",
         )
         return out
-    icon = "[loom.success]ok[/loom.success]" if success else "[loom.error]!![/loom.error]"
+    icon = "[loom.success]✓[/loom.success]" if success else "[loom.error]✗[/loom.error]"
     status = "[loom.success]done[/loom.success]" if success else "[loom.error]failed[/loom.error]"
     return Text.from_markup(
         f"  [loom.muted][[/loom.muted]{icon}[loom.muted]][/loom.muted] "

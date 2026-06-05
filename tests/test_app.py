@@ -515,6 +515,23 @@ class TestHeartbeatMinDwell:
         # PROBE has 3 variants — three consecutive picks are all distinct.
         assert len(set(seen)) == 3
 
+    def test_family_rotation_wraps_around_pool(self, app: LoomApp) -> None:
+        # The rotation counter is mod the pool length, so the 4th PROBE
+        # beat returns to the first variant (rotation algorithm contract).
+        from loom.platform.interaction_language import ActionFamily, family_variants
+
+        picks = []
+        for _ in range(4):
+            app.start_heartbeat(
+                state=HeartbeatState.TOOLING.value,
+                label="搜尋",
+                family=ActionFamily.PROBE.value,
+            )
+            picks.append(app.footer.heartbeat_animation)
+        pool = family_variants(ActionFamily.PROBE.value)  # 3 variants
+        assert picks[3] == picks[0]
+        assert picks[:3] == list(pool)
+
     def test_write_linger_rearms_dwell_consumed_by_confirm(self, app: LoomApp) -> None:
         # Confirm-gated writes burn the original min-dwell while the user
         # reads the diff, so a plain ToolEnd stop would clear instantly —

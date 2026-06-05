@@ -83,10 +83,6 @@ Mode = Literal["input", "confirm", "pause", "redirect"]
 # to override instantly, which feels like a clean "replaced" transition.
 _HEARTBEAT_MIN_DWELL_S = 1.0
 
-# Pulse/breathing-style loops read better at a gentler cadence; every other
-# animation gets the snappy spinner fps. Names refer to ``ui._ANIMATION_FRAMES``.
-_GENTLE_ANIMATIONS = frozenset({"breathing_focus", "dots_grow"})
-
 
 # ---------------------------------------------------------------------------
 # Footer state
@@ -901,10 +897,11 @@ class LoomApp:
                 # family); here we only advance its frame. Frame index is
                 # sampled from wall-clock so the loop runs smoothly as long
                 # as the footer_ticker invalidates at ≥2× the fps (it runs
-                # ~20 Hz while a heartbeat is live). Pulse-style loops read
-                # better slower; everything else gets a snappy spinner fps.
+                # ~20 Hz while a heartbeat is live). Cadence travels with the
+                # family (pulse-style families read slower) — see family_fps.
+                from loom.platform.interaction_language import family_fps
                 animation = s.heartbeat_animation or "classic_spinner"
-                fps = 6.0 if animation in _GENTLE_ANIMATIONS else 10.0
+                fps = family_fps(s.heartbeat_family)
                 label = f"{cli_animation_frame(animation, int(now * fps))} {label}"
             parts.append(("class:footer", "  "))
             style = "class:footer.budget.warn" if stalled else "class:footer.envelope"
