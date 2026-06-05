@@ -59,7 +59,11 @@ from loom.platform.cli.ui import (
     SlashCompleter,
     cli_animation_frame,
 )
-from loom.platform.interaction_language import LivenessSensor
+from loom.platform.interaction_language import (
+    Engagement,
+    LivenessSensor,
+    advance_engagement,
+)
 
 _CLI_PALETTE = active_palette()
 _CLI_BG = _CLI_PALETTE["bg"]
@@ -121,7 +125,7 @@ class FooterState:
     compacting: bool = False
     # Runtime heartbeat — single liveness signal that replaced the raw
     # ``▸ run_bash`` envelope label (#418). States: idle / thinking /
-    # tooling / long_tooling / stalled / paused_blocking. Written by
+    # tooling / stalled / paused_blocking. Written by
     # stream-event handlers via ``LoomApp.start_heartbeat`` and friends.
     # ``heartbeat_last_event_monotonic`` is touched on every observable
     # stream event; ``stale_after_s`` controls when the footer adds the
@@ -310,6 +314,9 @@ class LoomApp:
         # Monotonic counter advancing one step per animated heartbeat, used
         # to rotate variants within an action family for visual freshness.
         self._anim_rotation = 0
+        # Read-only 'sustained action' signal (#521): consecutive same-family
+        # tool runs, folded at each tool ToolBegin, reset at turn end.
+        self._engagement = Engagement()
 
         # Runtime-liveness sensor (#418/#419) — shared stall-DECISION logic
         # with the Discord watchdog (#422). The footer owns the CLI
@@ -416,6 +423,24 @@ class LoomApp:
         if self.footer.heartbeat_state != "idle":
             self.footer.heartbeat_last_event_monotonic = monotonic()
             self.invalidate()
+
+    def note_tool_engagement(self, family: str) -> None:
+        """Fold one *tool* beat into the sustained-action signal (#521).
+
+        Called from the tool ToolBegin path only — thinking beats are not
+        fed, so a run of same-family tools survives the think gaps between
+        them. Read-only: nothing consumes this but the footer pip display.
+
+        No ``invalidate()`` here on purpose: the caller (``_start_tool_
+        heartbeat``) calls ``start_heartbeat`` immediately before this, and
+        that already invalidated. Keep this call ordered after it — that's
+        the invariant that lets this stay a pure state fold with no redraw.
+        """
+        self._engagement = advance_engagement(self._engagement, family)
+
+    def reset_engagement(self) -> None:
+        """Clear the sustained-action signal at a turn boundary."""
+        self._engagement = Engagement()
 
     def linger_heartbeat(self, seconds: float) -> None:
         """Re-arm the min-dwell window from *now*.
@@ -882,12 +907,19 @@ class LoomApp:
             stalled = (
                 s.heartbeat_state == "stalled"
                 or (
-                    s.heartbeat_state in ("tooling", "long_tooling")
+                    s.heartbeat_state == "tooling"
                     and self._liveness.is_stalled(now=now)
                 )
             )
             prefix = "still waiting · " if stalled else ""
             label = f"{prefix}{s.heartbeat_label}"
+            # Sustained-action pips (#521): once the same family has run ≥3
+            # tools in a row, grow ⟫ pips so "lots happening / still going"
+            # reads at a glance — even without a TaskList. Tooling beats only
+            # (think gaps don't carry pips); capped so the footer can't grow
+            # unbounded — exact count is for the agent, the user wants "many".
+            if s.heartbeat_state == "tooling" and self._engagement.run_length >= 3:
+                label += " " + "⟫" * min(self._engagement.run_length, 10)
             if s.heartbeat_subject:
                 label += f" · {s.heartbeat_subject}"
             label += f" · {format_elapsed(elapsed)}"

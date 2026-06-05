@@ -46,7 +46,6 @@ class HeartbeatState(str, Enum):
     IDLE = "idle"
     THINKING = "thinking"
     TOOLING = "tooling"
-    LONG_TOOLING = "long_tooling"
     STALLED = "stalled"
     PAUSED_BLOCKING = "paused_blocking"
 
@@ -96,6 +95,37 @@ FAMILY_FPS: dict[str, float] = {
 def family_fps(family: str) -> float:
     """Playback fps for a family (default snappy 10 fps)."""
     return FAMILY_FPS.get(family, _DEFAULT_FPS)
+
+
+@dataclass(frozen=True)
+class Engagement:
+    """Read-only 'sustained action' signal (#521 v1).
+
+    Session-level, computed live from the stream of *tool* beats — its
+    essence is "this moment" (in a flow of same-kind work vs scattered),
+    not a history readout. ``run_length`` is the number of consecutive
+    same-family tool calls; ``dominant_family`` is which family that is.
+    Frontend-agnostic on purpose so any surface (CLI footer today, Discord
+    later) can compute it the same way.
+    """
+
+    dominant_family: str = ""
+    run_length: int = 0
+
+
+def advance_engagement(prev: Engagement, family: str) -> Engagement:
+    """Fold one tool beat into the engagement signal.
+
+    Same family → run extends; a different family → run resets to 1 on the
+    new family; an empty family → reset to default. Thinking beats are NOT
+    fed here (callers only advance on tool ToolBegin), so a sustained run
+    survives the think gaps that naturally sit between tool calls.
+    """
+    if not family:
+        return Engagement()
+    if family == prev.dominant_family:
+        return Engagement(family, prev.run_length + 1)
+    return Engagement(family, 1)
 
 
 class ParallelReason(str, Enum):

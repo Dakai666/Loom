@@ -3,9 +3,11 @@ from __future__ import annotations
 from loom.platform.interaction_language import (
     ANIMATION_FAMILIES,
     ActionFamily,
+    Engagement,
     HeartbeatState,
     LivenessSensor,
     _LABELS_ZH_TW,
+    advance_engagement,
     derive_envelope_outcome,
     family_fps,
     family_variants,
@@ -143,6 +145,38 @@ def test_action_family_names_are_stable() -> None:
     assert ActionFamily.EXECUTE.value == "execute"
     assert ActionFamily.TIDY.value == "tidy"
     assert ActionFamily.TOOL.value == "tool"
+
+
+def test_long_tooling_state_removed() -> None:
+    # #521 Gap A: LONG_TOOLING was never assigned anywhere (dead branch);
+    # rising_columns moved to the WRITE family in #520. Removed.
+    assert not hasattr(HeartbeatState, "LONG_TOOLING")
+
+
+def test_advance_engagement_increments_same_family() -> None:
+    e = Engagement()
+    e = advance_engagement(e, ActionFamily.WRITE.value)
+    assert e == Engagement(ActionFamily.WRITE.value, 1)
+    e = advance_engagement(e, ActionFamily.WRITE.value)
+    e = advance_engagement(e, ActionFamily.WRITE.value)
+    assert e == Engagement(ActionFamily.WRITE.value, 3)
+
+
+def test_advance_engagement_resets_run_on_family_change() -> None:
+    prior = Engagement(ActionFamily.WRITE.value, 5)
+    assert advance_engagement(prior, ActionFamily.PROBE.value) == Engagement(ActionFamily.PROBE.value, 1)
+
+
+def test_advance_engagement_empty_family_resets_to_default() -> None:
+    assert advance_engagement(Engagement(ActionFamily.WRITE.value, 5), "") == Engagement()
+
+
+def test_advance_engagement_empty_then_real_starts_fresh() -> None:
+    # An empty family fully resets, so the next real family starts a new
+    # run at 1 (not a continuation of the pre-empty run).
+    e = advance_engagement(Engagement(ActionFamily.WRITE.value, 5), "")
+    e = advance_engagement(e, ActionFamily.WRITE.value)
+    assert e == Engagement(ActionFamily.WRITE.value, 1)
 
 
 def test_heartbeat_state_names_are_stable() -> None:
