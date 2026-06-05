@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from loom.platform.interaction_language import (
+    ANIMATION_FAMILIES,
+    ActionFamily,
     HeartbeatState,
     LivenessSensor,
     _LABELS_ZH_TW,
     derive_envelope_outcome,
+    family_fps,
+    family_variants,
     format_elapsed,
     format_parallel_reason,
     resolve_tool_action,
@@ -64,6 +68,54 @@ def test_resolve_tool_action_for_read_file_uses_path_subject() -> None:
     action = resolve_tool_action("read_file", {"path": "loom/platform/cli/app.py"})
     assert action.label == "查詢檔案"
     assert action.subject == "loom/platform/cli/app.py"
+    # Reading is a read-only probe — the scanning family.
+    assert action.family == ActionFamily.PROBE.value
+
+
+def test_resolve_tool_action_families_by_category() -> None:
+    # Each action category maps to a distinct animation family so the
+    # footer reads differently for writing vs searching vs executing.
+    assert resolve_tool_action("write_file", {"path": "a.py"}).family == ActionFamily.WRITE.value
+    assert resolve_tool_action("edit_file", {"path": "a.py"}).family == ActionFamily.WRITE.value
+    assert resolve_tool_action("edit", {"path": "a.py"}).family == ActionFamily.WRITE.value
+    assert resolve_tool_action("memorize", {"type": "x"}).family == ActionFamily.WRITE.value
+    assert resolve_tool_action("task_write", {}).family == ActionFamily.WRITE.value
+    assert resolve_tool_action("grep", {"pattern": "x"}).family == ActionFamily.PROBE.value
+    assert resolve_tool_action("glob", {"pattern": "x"}).family == ActionFamily.PROBE.value
+    assert resolve_tool_action("list_dir", {"path": "."}).family == ActionFamily.PROBE.value
+    assert resolve_tool_action("gitnexus_query", {}).family == ActionFamily.PROBE.value
+    assert resolve_tool_action("impact_analysis", {"target": "x"}).family == ActionFamily.PROBE.value
+    assert resolve_tool_action("run_bash", {"command": "ls"}).family == ActionFamily.EXECUTE.value
+    assert resolve_tool_action("compact", {}).family == ActionFamily.TIDY.value
+
+
+def test_resolve_tool_action_unknown_falls_back_to_tool_family() -> None:
+    assert resolve_tool_action("new_tool", {"v": "1"}).family == ActionFamily.TOOL.value
+    assert resolve_tool_action("server__mcp_thing", {"v": "1"}).family == ActionFamily.TOOL.value
+
+
+def test_animation_families_pools_are_registered() -> None:
+    from loom.platform.cli.ui import _ANIMATION_FRAMES
+
+    # Every family resolves to a non-empty pool of real animation names.
+    for family, pool in ANIMATION_FAMILIES.items():
+        assert pool, f"family {family} has an empty pool"
+        for name in pool:
+            assert name in _ANIMATION_FRAMES, f"{name} missing from _ANIMATION_FRAMES"
+
+
+def test_family_variants_unknown_falls_back_to_tool_pool() -> None:
+    assert family_variants("not-a-family") == ANIMATION_FAMILIES[ActionFamily.TOOL.value]
+    assert family_variants(ActionFamily.PROBE.value) == ANIMATION_FAMILIES[ActionFamily.PROBE.value]
+
+
+def test_family_fps_pulse_is_gentle_rest_snappy() -> None:
+    # Cadence travels with the family: THINK pulses gently, everything
+    # else (and unknown families) gets the snappy default.
+    assert family_fps(ActionFamily.THINK.value) == 6.0
+    assert family_fps(ActionFamily.PROBE.value) == 10.0
+    assert family_fps(ActionFamily.WRITE.value) == 10.0
+    assert family_fps("not-a-family") == 10.0
 
 
 def test_labels_use_locale_registry_shape() -> None:
@@ -81,6 +133,16 @@ def test_stale_threshold_defaults_and_long_runner_override() -> None:
     assert stale_threshold_for_tool("read_file") == 30.0
     assert stale_threshold_for_tool("run_bash") == 90.0
     assert stale_threshold_for_tool("gitnexus_query") == 90.0
+
+
+def test_action_family_names_are_stable() -> None:
+    # These are contract values the CLI footer + tests key off.
+    assert ActionFamily.THINK.value == "think"
+    assert ActionFamily.PROBE.value == "probe"
+    assert ActionFamily.WRITE.value == "write"
+    assert ActionFamily.EXECUTE.value == "execute"
+    assert ActionFamily.TIDY.value == "tidy"
+    assert ActionFamily.TOOL.value == "tool"
 
 
 def test_heartbeat_state_names_are_stable() -> None:

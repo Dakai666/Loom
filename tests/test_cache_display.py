@@ -141,5 +141,49 @@ class TestCLIAnimationFrames:
     def test_unknown_animation_falls_back_to_classic_spinner(self):
         assert cli_animation_frame("not-a-real-animation", 0) == "⠋"
 
+    def test_pen_stroke_animation_registered(self):
+        # The file-writing identity (chosen pen-stroke sweep). First frame
+        # is the bottom-left dot; the loop wraps after 8 frames.
+        assert cli_animation_frame("pen_stroke", 0) == "⡀"
+        assert cli_animation_frame("pen_stroke", 8) == cli_animation_frame("pen_stroke", 0)
+
     def test_tool_running_line_uses_braille_spinner(self):
         assert "[⠋] pytest running..." in tool_running_line("pytest", 0).plain
+
+    def test_tool_running_line_accepts_family_animation(self):
+        # The inline running line uses the resolved family variant so it
+        # matches the footer heartbeat (pen_stroke frame 0 = ⡀).
+        out = tool_running_line("write_file", 0, animation="pen_stroke").plain
+        assert "[⡀] write_file running..." in out
+
+
+class TestToolLineMarkers:
+    """The per-tool block reads as a start → done arc: a neutral · seed at
+    begin (not a frozen spinner frame, which looked 'stuck' after the tool
+    finished), and a ✓/✗ completion marker."""
+
+    def test_begin_line_uses_neutral_seed_not_frozen_spinner(self):
+        from loom.platform.cli.ui import tool_begin_line
+
+        out = tool_begin_line("run_bash", {"command": "ls"}).plain
+        assert "[·]" in out
+        assert "⠋" not in out  # no frozen start-frame snapshot
+
+    def test_begin_line_with_justification_uses_neutral_seed(self):
+        from loom.platform.cli.ui import tool_begin_line
+
+        out = tool_begin_line("run_bash", {"command": "ls", "justification": "檢查"}).plain
+        assert "[·]" in out
+        assert "⠋" not in out
+
+    def test_end_line_uses_check_and_cross(self):
+        from loom.platform.cli.ui import tool_end_line
+
+        assert "[✓]" in tool_end_line("run_bash", True, 526.0).plain
+        assert "[✗]" in tool_end_line("run_bash", False, 120.0).plain
+
+    def test_end_line_frozen_stage_uses_check_and_cross(self):
+        from loom.platform.cli.ui import tool_end_line
+
+        assert "[✓]" in tool_end_line("run_bash", True, 526.0, frozen=True).plain
+        assert "[✗]" in tool_end_line("run_bash", False, 120.0, frozen=True).plain

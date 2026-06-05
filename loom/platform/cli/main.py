@@ -572,11 +572,12 @@ async def _chat(
             # _run_streaming_turn transition it to TOOLING / PAUSED /
             # back to idle. If the turn crashes / aborts before any
             # event lands, the finally below still returns to idle.
-            from loom.platform.interaction_language import HeartbeatState
+            from loom.platform.interaction_language import ActionFamily, HeartbeatState
             app.start_heartbeat(
                 state=HeartbeatState.THINKING.value,
                 label="Loom is thinking",
                 stale_after_s=30.0,
+                family=ActionFamily.THINK.value,
             )
             current_turn_task = asyncio.create_task(
                 _run_streaming_turn(session, text)
@@ -623,18 +624,24 @@ async def _chat(
             app.invalidate()
 
     async def footer_ticker() -> None:
-        """Tick the footer at 2 Hz so live fields (heartbeat elapsed,
-        compaction spinner, transient hint expiry — #284) progress
-        visibly. Also promotes deferred heartbeat stops once the
-        min-dwell window elapses so short-lived tool labels finish
-        their reading time before fading."""
+        """Drive the footer's live fields (heartbeat elapsed, braille
+        animations, compaction spinner, transient hint expiry — #284) and
+        promote deferred heartbeat stops once the min-dwell elapses.
+
+        Cadence is adaptive: ~20 Hz while something is animating so the
+        braille loops (8–10 fps) render smoothly — sampling at <2× the fps
+        is what made the old fixed 2 Hz tick visibly choppy — and a lazy
+        2 Hz when idle so a quiet prompt isn't waking the loop 20×/s."""
         while not shutdown.is_set():
             app.maybe_finalize_pending_stop()
-            if (app.footer.heartbeat_state != "idle"
-                    or app.footer.compacting
-                    or app.footer.transient_hint is not None):
+            animating = (
+                app.footer.heartbeat_state != "idle"
+                or app.footer.compacting
+                or app.footer.transient_hint is not None
+            )
+            if animating:
                 app.invalidate()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05 if animating else 0.5)
 
     # patch_stdout makes console.print flow above the app's persistent
     # bottom region. raw=True passes escape sequences through so the
@@ -1158,14 +1165,13 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
 
 
 def _start_tool_heartbeat(loom_app: Any, name: str, args: dict[str, Any]) -> None:
-    """Resolve action-language label for ``name`` + ``args`` and push it
-    into the footer heartbeat as TOOLING. Stale threshold falls out of
-    ``resolve_tool_action`` (long-runners get 90s; everything else 30s).
+    """Resolve action-language label + animation family for ``name`` +
+    ``args`` and push it into the footer heartbeat as TOOLING. Stale
+    threshold falls out of ``resolve_tool_action`` (long-runners get 90s;
+    everything else 30s). The family (probe / write / execute / …) picks
+    which animation the footer rotates to for this call.
     """
-    from loom.platform.interaction_language import (
-        HeartbeatState,
-        resolve_tool_action,
-    )
+    from loom.platform.interaction_language import HeartbeatState, resolve_tool_action
 
     action = resolve_tool_action(name, args)
     loom_app.start_heartbeat(
@@ -1173,6 +1179,7 @@ def _start_tool_heartbeat(loom_app: Any, name: str, args: dict[str, Any]) -> Non
         label=action.label,
         subject=action.subject,
         stale_after_s=action.stale_after_s,
+        family=action.family,
     )
 
 
@@ -1207,7 +1214,18 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     def _print_spinner() -> None:
         nonlocal frame_index
         clear_line()
-        console.print(tool_running_line(active_tool or "", frame_index), end="")
+        # Match the footer's resolved family variant so the inline running
+        # line animates in the same language as the heartbeat (probe scans,
+        # write strokes, …); fall back to the classic spinner if no app.
+        _la = getattr(session, "_loom_app", None)
+        animation = (
+            (_la.footer.heartbeat_animation or "classic_spinner")
+            if _la is not None else "classic_spinner"
+        )
+        console.print(
+            tool_running_line(active_tool or "", frame_index, animation=animation),
+            end="",
+        )
         frame_index += 1
 
     async def _spin_loop() -> None:
@@ -1588,6 +1606,18 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 loom_app = getattr(session, "_loom_app", None)
                 if loom_app is not None:
                     loom_app.touch_heartbeat()
+                    # This fires at ToolEnd — i.e. right after the write
+                    # applied. Confirm-gated writes (write_file/edit_file)
+                    # burn the 1s dwell while the user reads the diff, so the
+                    # instant write would otherwise flash by with no beat;
+                    # re-arming here keeps "寫入檔案 X" legible. Non-gated
+                    # WRITE-family tools (memorize / task_write) don't burn
+                    # the dwell, so this just grants them the same ~1s
+                    # "done" courtesy — an accepted side effect, not a bug.
+                    from loom.platform.interaction_language import ActionFamily
+                    from loom.platform.cli.app import _HEARTBEAT_MIN_DWELL_S
+                    if loom_app.footer.heartbeat_family == ActionFamily.WRITE.value:
+                        loom_app.linger_heartbeat(_HEARTBEAT_MIN_DWELL_S)
                     loom_app.stop_heartbeat()
 
             elif isinstance(event, TurnPaused):

@@ -484,6 +484,86 @@ class TestHeartbeatMinDwell:
         assert app.footer.heartbeat_pending_stop is False
         assert app.footer.heartbeat_label == ""
 
+    def test_write_family_renders_a_write_animation(self, app: LoomApp) -> None:
+        # A write-family beat resolves to one of the write pool variants
+        # (pen_stroke / rising_columns), so "writing a file" reads
+        # differently from the probe spinner.
+        from loom.platform.interaction_language import ActionFamily, family_variants
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="寫入檔案",
+            subject="loom/core/session.py",
+            family=ActionFamily.WRITE.value,
+        )
+        assert app.footer.heartbeat_animation in family_variants(ActionFamily.WRITE.value)
+        assert app.footer.heartbeat_family == ActionFamily.WRITE.value
+
+    def test_family_variants_rotate_across_calls(self, app: LoomApp) -> None:
+        # Two consecutive probe beats pick different pool variants — the
+        # rotation that gives repeated same-family actions freshness.
+        from loom.platform.interaction_language import ActionFamily
+
+        seen = []
+        for _ in range(3):
+            app.start_heartbeat(
+                state=HeartbeatState.TOOLING.value,
+                label="搜尋",
+                family=ActionFamily.PROBE.value,
+            )
+            seen.append(app.footer.heartbeat_animation)
+        # PROBE has 3 variants — three consecutive picks are all distinct.
+        assert len(set(seen)) == 3
+
+    def test_family_rotation_wraps_around_pool(self, app: LoomApp) -> None:
+        # The rotation counter is mod the pool length, so the 4th PROBE
+        # beat returns to the first variant (rotation algorithm contract).
+        from loom.platform.interaction_language import ActionFamily, family_variants
+
+        picks = []
+        for _ in range(4):
+            app.start_heartbeat(
+                state=HeartbeatState.TOOLING.value,
+                label="搜尋",
+                family=ActionFamily.PROBE.value,
+            )
+            picks.append(app.footer.heartbeat_animation)
+        pool = family_variants(ActionFamily.PROBE.value)  # 3 variants
+        assert picks[3] == picks[0]
+        assert picks[:3] == list(pool)
+
+    def test_write_linger_rearms_dwell_consumed_by_confirm(self, app: LoomApp) -> None:
+        # Confirm-gated writes burn the original min-dwell while the user
+        # reads the diff, so a plain ToolEnd stop would clear instantly —
+        # the actual write moment would have no beat. ``linger_heartbeat``
+        # re-arms the dwell at apply time so the write beat lingers.
+        import time as _t
+
+        from loom.platform.interaction_language import ActionFamily
+
+        app.start_heartbeat(
+            state=HeartbeatState.TOOLING.value,
+            label="寫入檔案",
+            subject="loom/core/session.py",
+            family=ActionFamily.WRITE.value,
+        )
+        # Simulate the confirm dialog eating the dwell window.
+        app.footer.heartbeat_min_alive_until = _t.monotonic() - 5.0
+
+        # Apply-time re-arm (keyed off the write family), then the stop.
+        assert app.footer.heartbeat_family == ActionFamily.WRITE.value
+        app.linger_heartbeat(1.0)
+        app.stop_heartbeat()
+
+        assert app.footer.heartbeat_pending_stop is True
+        assert "寫入檔案" in _flat_text(app._render_footer())
+
+    def test_linger_heartbeat_is_noop_when_idle(self, app: LoomApp) -> None:
+        # Nothing to hold open when the footer is already idle.
+        app.linger_heartbeat(1.0)
+        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
+        assert app.footer.heartbeat_min_alive_until == 0.0
+
     def test_first_text_hard_boundary_clears_thinking_immediately(self, app: LoomApp) -> None:
         class _Session:
             _loom_app = app

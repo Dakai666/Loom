@@ -131,6 +131,13 @@ class FooterState:
     heartbeat_state: str = "idle"
     heartbeat_label: str = ""
     heartbeat_subject: str = ""
+    # Animation identity for this beat. ``heartbeat_family`` is the action
+    # family (think / probe / write / execute / tidy / tool);
+    # ``heartbeat_animation`` is the specific variant picked from that
+    # family's pool at start (held for the beat's duration so only the
+    # frame advances, not the variant). Empty when no animated beat.
+    heartbeat_family: str = ""
+    heartbeat_animation: str = ""
     heartbeat_started_monotonic: float = 0.0
     heartbeat_last_event_monotonic: float = 0.0
     heartbeat_stale_after_s: float = 30.0
@@ -300,6 +307,9 @@ class LoomApp:
 
         # Footer state
         self.footer = FooterState()
+        # Monotonic counter advancing one step per animated heartbeat, used
+        # to rotate variants within an action family for visual freshness.
+        self._anim_rotation = 0
 
         # Runtime-liveness sensor (#418/#419) — shared stall-DECISION logic
         # with the Discord watchdog (#422). The footer owns the CLI
@@ -368,11 +378,25 @@ class LoomApp:
         label: str,
         subject: str = "",
         stale_after_s: float = 30.0,
+        family: str | None = None,
     ) -> None:
         now = monotonic()
         self.footer.heartbeat_state = state
         self.footer.heartbeat_label = label
         self.footer.heartbeat_subject = subject
+        # Pick the animation variant for this beat. Within a family the
+        # pool rotates per call (the global counter advances every beat
+        # that names a family), so consecutive same-family actions don't
+        # look identical, while the family-level "feel" stays recognisable.
+        if family:
+            from loom.platform.interaction_language import family_variants
+            pool = family_variants(family)
+            self.footer.heartbeat_family = family
+            self.footer.heartbeat_animation = pool[self._anim_rotation % len(pool)]
+            self._anim_rotation += 1
+        else:
+            self.footer.heartbeat_family = ""
+            self.footer.heartbeat_animation = ""
         self.footer.heartbeat_started_monotonic = now
         self.footer.heartbeat_last_event_monotonic = now
         self.footer.heartbeat_stale_after_s = stale_after_s
@@ -392,6 +416,22 @@ class LoomApp:
         if self.footer.heartbeat_state != "idle":
             self.footer.heartbeat_last_event_monotonic = monotonic()
             self.invalidate()
+
+    def linger_heartbeat(self, seconds: float) -> None:
+        """Re-arm the min-dwell window from *now*.
+
+        Confirm-gated writes (write_file / edit_file) burn the original
+        dwell — armed at ``start_heartbeat`` on ToolBegin — while the user
+        reads the diff, so the actual write completes instantly and a plain
+        ``stop_heartbeat`` at ToolEnd would clear the label before the eye
+        registers it. Calling this just before the stop holds the
+        pen-stroke beat open for ``seconds`` so "wrote X" stays legible.
+
+        No-op when idle — there is nothing to hold open.
+        """
+        if self.footer.heartbeat_state == "idle":
+            return
+        self.footer.heartbeat_min_alive_until = monotonic() + seconds
 
     def stop_heartbeat(self, *, force: bool = False) -> None:
         """Clear the heartbeat. By default respects ``_HEARTBEAT_MIN_DWELL_S``
@@ -414,6 +454,8 @@ class LoomApp:
         self.footer.heartbeat_state = "idle"
         self.footer.heartbeat_label = ""
         self.footer.heartbeat_subject = ""
+        self.footer.heartbeat_family = ""
+        self.footer.heartbeat_animation = ""
         self.footer.heartbeat_started_monotonic = 0.0
         self.footer.heartbeat_last_event_monotonic = 0.0
         self.footer.heartbeat_min_alive_until = 0.0
@@ -773,7 +815,7 @@ class LoomApp:
         # If compacting: replace the middle area with the spinner
         # message so the user doesn't think the agent has hung
         if s.compacting:
-            frame = cli_animation_frame("cascade_drop", int(monotonic() * 2))
+            frame = cli_animation_frame("cascade_drop", int(monotonic() * 8))
             parts.append(("class:footer", "  "))
             parts.append(("class:footer.compaction", f"{frame} ⚡ 壓縮中…"))
             return FormattedText(parts)
@@ -822,7 +864,6 @@ class LoomApp:
             from loom.platform.interaction_language import format_elapsed
 
             now = _t.monotonic()
-            frame_index = int(now * 2)
             elapsed = max(0.0, now - s.heartbeat_started_monotonic)
             # The stall DECISION delegates to the shared sensor's
             # non-latching ``is_stalled`` (threshold + observation timeline).
@@ -851,14 +892,17 @@ class LoomApp:
                 label += f" · {s.heartbeat_subject}"
             label += f" · {format_elapsed(elapsed)}"
             if not stalled and s.heartbeat_state != "paused_blocking":
-                if s.heartbeat_state == "thinking":
-                    animation = "breathing_focus"
-                elif s.heartbeat_state == "long_tooling":
-                    animation = "rising_columns"
-                    frame_index //= 2
-                else:
-                    animation = "classic_spinner"
-                label = f"{cli_animation_frame(animation, frame_index)} {label}"
+                # Animation variant was picked per-call into
+                # ``heartbeat_animation`` (rotated within the action
+                # family); here we only advance its frame. Frame index is
+                # sampled from wall-clock so the loop runs smoothly as long
+                # as the footer_ticker invalidates at ≥2× the fps (it runs
+                # ~20 Hz while a heartbeat is live). Cadence travels with the
+                # family (pulse-style families read slower) — see family_fps.
+                from loom.platform.interaction_language import family_fps
+                animation = s.heartbeat_animation or "classic_spinner"
+                fps = family_fps(s.heartbeat_family)
+                label = f"{cli_animation_frame(animation, int(now * fps))} {label}"
             parts.append(("class:footer", "  "))
             style = "class:footer.budget.warn" if stalled else "class:footer.envelope"
             parts.append((style, label))
@@ -955,7 +999,7 @@ class LoomApp:
             and self.footer.heartbeat_state not in ("idle", "paused_blocking", "stalled")
         )
         active_frame = (
-            cli_animation_frame("breathing_focus", int(monotonic() * 2))
+            cli_animation_frame("breathing_focus", int(monotonic() * 6))
             if tasklist_animated else "▸"
         )
         for t in todos:
