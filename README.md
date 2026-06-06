@@ -424,6 +424,7 @@ The `doc/` directory contains full technical documentation for every subsystem:
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.3.9.0** | 2026-06-06 | Memory Consolidation Dream — convergent phase: read-only pass (P1 #488), merge primitive (P2 #489), reconcile + orphan cleanup (P3 #490), weekly read-only schedule (P4a #495); native vision input layer + agent-initiated `see_image` tool (PRs #505–513); CLI animation language (braille · action-family · sustained-action pips · #519–523); autonomy schedule registry extracted to `autonomy/schedules.toml` (#444); circadian rhythm hot-reload at dawn (#477); `session.py` convergence (TierManager #485) + CLI/Discord LivenessSensor (#483) |
 | **v0.3.8.2** | 2026-05-28 | Circadian autonomy lifecycle completed (PRs #459–463); cognition provider split (Codex/xAI) + model identity convergence (PR #474); CLI/Discord LivenessSensor convergence (PR #483); Discord confirm timeout fix (PR #484) |
 | **v0.3.8.1** | 2026-05-23 | Lens import family retired (`loom import` CLI · `Hermes`/`OpenAI` lenses removed); extensibility surface convergence to `@loom.tool` / `LoomPlugin` / MCP (PR #442) |
 | **v0.3.8.0** | 2026-05-21 | Interaction Language UI/UX overhaul (envelope intent/outcome render, CLI heartbeat, stalled-status proxy); TaskList v2 with `done_when` acceptance criterion; semantic-dup admission gate; three-round system audit; Textual TUI subsystem retired |
