@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from loom.core.infra import AbortController, wait_aborted
@@ -149,3 +150,109 @@ class DreamLoop:
                     logger.warning("[dream] warnings: %s", "; ".join(errors))
             except Exception as exc:  # never let dreaming crash the daemon
                 logger.warning("[dream] cycle failed: %s", exc)
+
+
+class ConvergentDreamLoop:
+    """Drives ``run_convergent_dream`` on a *weekly*, restart-safe cadence (#495).
+
+    The convergent (consolidation) dream is the counterpart to ``DreamLoop``'s
+    divergent dream, but its cadence is weekly rather than every few hours and
+    must survive restarts: a daemon bounce must neither reset the week nor
+    double-run. So due-ness is decided against a persisted
+    ``consolidation_dream.last_run`` in ``memory_meta`` — not an in-memory timer
+    like ``DreamLoop`` — mirroring ``dreaming.next_themed_domain``'s
+    restart-safe rotation.
+
+    The loop wakes on a short *check* interval and runs the dream only when
+    ``interval_days`` have elapsed since ``last_run``. ``last_run`` is marked
+    **only after a successful pass**, so a failed pass (e.g. LLM outage) retries
+    on the next check rather than silently skipping the week.
+
+    ``dream_fn`` is supplied by the daemon and decides read-only (P4a) vs
+    ``execute=True`` (P4b) — this loop only owns *when*, never *what*.
+    """
+
+    # Defer the first due-check so daemon startup isn't competing for the DB.
+    _FIRST_CHECK_DELAY_SECONDS = 300.0
+    # How often to re-check due-ness. The weekly cadence is enforced by the
+    # persisted last_run, so the check interval only bounds how soon after a
+    # due moment (or a restart) the run actually fires.
+    _CHECK_INTERVAL_SECONDS = 6 * 3600.0
+    _META_KEY_LAST_RUN = "consolidation_dream.last_run"
+
+    def __init__(
+        self,
+        dream_fn: Callable[[], Awaitable[Any]],
+        db: "aiosqlite.Connection",
+        abort: AbortController,
+        interval_days: float = 7.0,
+    ) -> None:
+        self._dream_fn = dream_fn
+        self._db = db
+        self._abort = abort
+        self._interval_seconds = max(60.0, interval_days * 86400.0)
+
+    async def _last_run(self) -> datetime | None:
+        cursor = await self._db.execute(
+            "SELECT value FROM memory_meta WHERE key = ?",
+            (self._META_KEY_LAST_RUN,),
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return datetime.fromisoformat(row[0])
+        except (ValueError, TypeError):
+            return None  # corrupt value → treat as never-run (re-runs, marks fresh)
+
+    async def _mark_run(self, now: datetime) -> None:
+        stamp = now.isoformat()
+        await self._db.execute(
+            "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at",
+            (self._META_KEY_LAST_RUN, stamp, stamp),
+        )
+        await self._db.commit()
+
+    async def maybe_run_once(self, now: datetime) -> bool:
+        """Run one convergent dream iff ``interval_days`` have elapsed.
+
+        Returns True if it ran. ``last_run`` is persisted only after the pass
+        succeeds, so a raising ``dream_fn`` propagates and leaves the week still
+        due (retry next check, never a silent skip).
+        """
+        last = await self._last_run()
+        if last is not None and (now - last).total_seconds() < self._interval_seconds:
+            return False
+        await self._dream_fn()       # may raise → last_run left unmarked
+        await self._mark_run(now)
+        return True
+
+    async def run_forever(self) -> None:
+        """Check due-ness ``_FIRST_CHECK_DELAY_SECONDS`` after start, then every
+        ``_CHECK_INTERVAL_SECONDS``. Returns when the abort signal fires."""
+        first_iter = True
+        while not self._abort.signal.is_set():
+            timeout = (
+                self._FIRST_CHECK_DELAY_SECONDS if first_iter
+                else self._CHECK_INTERVAL_SECONDS
+            )
+            first_iter = False
+            try:
+                await asyncio.wait_for(
+                    wait_aborted(self._abort.signal),
+                    timeout=timeout,
+                )
+                return  # abort signalled
+            except asyncio.TimeoutError:
+                pass  # check interval elapsed
+
+            try:
+                if await self.maybe_run_once(datetime.now(UTC)):
+                    logger.info(
+                        "[consolidation] convergent dream ran (interval=%.1fd)",
+                        self._interval_seconds / 86400.0,
+                    )
+            except Exception as exc:  # never let consolidation crash the daemon
+                logger.warning("[consolidation] cycle failed: %s", exc)
