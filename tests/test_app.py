@@ -452,6 +452,21 @@ class TestEngagementPips:
         )
         assert self._PIP not in _flat_text(app._render_footer())
 
+    def test_digest_beat_does_not_reset_write_engagement(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+        self._write(app)
+        self._write(app)
+        app.start_heartbeat(
+            state=HeartbeatState.THINKING.value,
+            label="整理工具結果",
+            family=ActionFamily.DIGEST.value,
+        )
+        self._write(app)
+        self._tooling(app)
+
+        assert app._engagement.run_length == 3
+        assert self._PIP * 3 in _flat_text(app._render_footer())
+
 
 class TestHeartbeatMinDwell:
     """Regression: short tool calls (< 1 s) were producing labels that
@@ -604,38 +619,6 @@ class TestHeartbeatMinDwell:
         assert picks[3] == picks[0]
         assert picks[:3] == list(pool)
 
-    def test_write_linger_rearms_dwell_consumed_by_confirm(self, app: LoomApp) -> None:
-        # Confirm-gated writes burn the original min-dwell while the user
-        # reads the diff, so a plain ToolEnd stop would clear instantly —
-        # the actual write moment would have no beat. ``linger_heartbeat``
-        # re-arms the dwell at apply time so the write beat lingers.
-        import time as _t
-
-        from loom.platform.interaction_language import ActionFamily
-
-        app.start_heartbeat(
-            state=HeartbeatState.TOOLING.value,
-            label="寫入檔案",
-            subject="loom/core/session.py",
-            family=ActionFamily.WRITE.value,
-        )
-        # Simulate the confirm dialog eating the dwell window.
-        app.footer.heartbeat_min_alive_until = _t.monotonic() - 5.0
-
-        # Apply-time re-arm (keyed off the write family), then the stop.
-        assert app.footer.heartbeat_family == ActionFamily.WRITE.value
-        app.linger_heartbeat(1.0)
-        app.stop_heartbeat()
-
-        assert app.footer.heartbeat_pending_stop is True
-        assert "寫入檔案" in _flat_text(app._render_footer())
-
-    def test_linger_heartbeat_is_noop_when_idle(self, app: LoomApp) -> None:
-        # Nothing to hold open when the footer is already idle.
-        app.linger_heartbeat(1.0)
-        assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
-        assert app.footer.heartbeat_min_alive_until == 0.0
-
     def test_first_text_hard_boundary_clears_thinking_immediately(self, app: LoomApp) -> None:
         class _Session:
             _loom_app = app
@@ -654,6 +637,8 @@ class TestHeartbeatMinDwell:
         assert app.footer.heartbeat_pending_stop is False
 
     def test_model_thinking_started_restores_heartbeat_after_tool_end(self, app: LoomApp) -> None:
+        from loom.platform.interaction_language import ActionFamily
+
         class _Session:
             _loom_app = app
 
@@ -677,6 +662,7 @@ class TestHeartbeatMinDwell:
         asyncio.run(cli_main._run_streaming_turn(_Session(), "hi"))
 
         assert app.footer.heartbeat_state == HeartbeatState.THINKING.value
+        assert app.footer.heartbeat_family == ActionFamily.DIGEST.value
         assert "整理工具結果" in _flat_text(app._render_footer())
 
     def test_turn_dropped_renders_cli_error(self, monkeypatch: pytest.MonkeyPatch) -> None:

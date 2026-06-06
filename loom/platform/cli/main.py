@@ -1475,16 +1475,21 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 if loom_app is not None:
                     from loom.platform.interaction_language import ActionFamily, HeartbeatState
 
+                    after_tool = event.phase == "after_tool"
                     loom_app.start_heartbeat(
                         state=HeartbeatState.THINKING.value,
                         label=(
                             "整理工具結果"
-                            if event.phase == "after_tool"
+                            if after_tool
                             else "Loom is thinking"
                         ),
-                        subject=event.tool_name if event.phase == "after_tool" else "",
+                        subject=event.tool_name if after_tool else "",
                         stale_after_s=30.0,
-                        family=ActionFamily.THINK.value,
+                        family=(
+                            ActionFamily.DIGEST.value
+                            if after_tool
+                            else ActionFamily.THINK.value
+                        ),
                     )
 
             elif isinstance(event, TextChunk):
@@ -1632,18 +1637,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                 loom_app = getattr(session, "_loom_app", None)
                 if loom_app is not None:
                     loom_app.touch_heartbeat()
-                    # This fires at ToolEnd — i.e. right after the write
-                    # applied. Confirm-gated writes (write_file/edit_file)
-                    # burn the 1s dwell while the user reads the diff, so the
-                    # instant write would otherwise flash by with no beat;
-                    # re-arming here keeps "寫入檔案 X" legible. Non-gated
-                    # WRITE-family tools (memorize / task_write) don't burn
-                    # the dwell, so this just grants them the same ~1s
-                    # "done" courtesy — an accepted side effect, not a bug.
-                    from loom.platform.interaction_language import ActionFamily
-                    from loom.platform.cli.app import _HEARTBEAT_MIN_DWELL_S
-                    if loom_app.footer.heartbeat_family == ActionFamily.WRITE.value:
-                        loom_app.linger_heartbeat(_HEARTBEAT_MIN_DWELL_S)
                     loom_app.stop_heartbeat()
 
             elif isinstance(event, TurnPaused):
