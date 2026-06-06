@@ -688,6 +688,12 @@ class AutonomyDaemon:
             return None
 
         execute = bool(cfg.get("execute", False))  # P4a default: read-only
+        # list_recent is newest-first, so corpus_limit caps coverage to the N
+        # most-recent facts — older ones are never scanned. Set it >= the total
+        # semantic entry count for full coverage. LLM cost stays bounded by
+        # max_clusters / max_review_clusters regardless; only local embedding
+        # work scales with this number (#524 review).
+        corpus_limit = int(cfg.get("corpus_limit", 2000))
         router = session.router
         model = session.model
 
@@ -702,7 +708,8 @@ class AutonomyDaemon:
                 return response.text or ""
 
             plan, report = await run_convergent_dream(
-                memory.semantic, _llm_fn, execute=execute,
+                memory.semantic, _llm_fn,
+                corpus_limit=corpus_limit, execute=execute,
             )
             append_consolidation_report(report)
             logger.info(
@@ -718,8 +725,9 @@ class AutonomyDaemon:
             interval_days=float(cfg.get("interval_days", 7.0)),
         )
         logger.info(
-            "[autonomy] convergent dream loop started (interval=%.1fd, execute=%s)",
-            loop._interval_seconds / 86400.0, execute,
+            "[autonomy] convergent dream loop started "
+            "(interval=%.1fd, corpus_limit=%d, execute=%s)",
+            loop._interval_seconds / 86400.0, corpus_limit, execute,
         )
         return asyncio.ensure_future(loop.run_forever())
 
