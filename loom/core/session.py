@@ -86,6 +86,7 @@ from loom.core.events import (
     ExecutionNodeView,
     GrantSummary,
     GrantsSnapshot,
+    ModelThinkingStarted,
     ReasoningContinuation,
     TextChunk,
     TierChanged,
@@ -1757,6 +1758,7 @@ class LoomSession:
         origin: str = "interactive",
     ) -> AsyncIterator[
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
+        | ModelThinkingStarted
         | ActionStateChange | ActionRolledBack
         | EnvelopeStarted | EnvelopeUpdated | EnvelopeCompleted
         | GrantsSnapshot
@@ -1981,6 +1983,7 @@ class LoomSession:
             _tbuf = ""                  # partial-tag lookahead buffer
             _think_parts: list[str] = []  # accumulates think content for /think command
             _current_think_start = 0    # index into _think_parts where current block began
+            _last_completed_tool_name = ""
 
             _stream_retry = 0         # counts back-to-back stream_none retries
             _MAX_STREAM_RETRIES = 2  # auto-retry up to 2 times on response=None
@@ -2041,6 +2044,10 @@ class LoomSession:
                 # When tiers aren't configured, _active_model() falls back to
                 # self.model (legacy behavior preserved).
                 _active_model = self._active_model()
+                yield ModelThinkingStarted(
+                    phase="after_tool" if tool_count > 0 else "initial",
+                    tool_name=_last_completed_tool_name,
+                )
 
                 try:
                     async for chunk, final in self.router.stream_chat(
@@ -2409,6 +2416,7 @@ class LoomSession:
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
                             )
+                            _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(
                                 tu.name, result=result, duration_ms=duration_ms,
                             )
@@ -2504,6 +2512,7 @@ class LoomSession:
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
                             )
+                            _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(
                                 tu.name, result=result, duration_ms=duration_ms,
                             )
@@ -4798,5 +4807,4 @@ def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:
         except _vision.VisionInputError:
             continue
     return images
-
 

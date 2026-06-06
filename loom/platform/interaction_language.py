@@ -58,6 +58,7 @@ class HeartbeatState(str, Enum):
 # tests key off them.
 class ActionFamily(str, Enum):
     THINK = "think"        # reasoning between tool calls
+    DIGEST = "digest"      # model digesting tool results
     PROBE = "probe"        # read / search / inspect (read-only)
     WRITE = "write"        # file + memory + task mutation
     EXECUTE = "execute"    # run_bash and shell-shaped work
@@ -69,6 +70,7 @@ class ActionFamily(str, Enum):
 # ``loom.platform.cli.ui._ANIMATION_FRAMES``. Order is the rotation order.
 ANIMATION_FAMILIES: dict[str, tuple[str, ...]] = {
     ActionFamily.THINK.value:   ("breathing_focus", "dots_grow"),
+    ActionFamily.DIGEST.value:  ("folding_focus", "braille_gather"),
     ActionFamily.PROBE.value:   ("classic_spinner", "dots_wobble", "dots_corner"),
     ActionFamily.WRITE.value:   ("pen_stroke", "rising_columns"),
     ActionFamily.EXECUTE.value: ("dots_heavy", "dots_edge"),
@@ -89,6 +91,7 @@ def family_variants(family: str) -> tuple[str, ...]:
 _DEFAULT_FPS = 10.0
 FAMILY_FPS: dict[str, float] = {
     ActionFamily.THINK.value: 6.0,
+    ActionFamily.DIGEST.value: 8.0,
 }
 
 

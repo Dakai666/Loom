@@ -442,22 +442,6 @@ class LoomApp:
         """Clear the sustained-action signal at a turn boundary."""
         self._engagement = Engagement()
 
-    def linger_heartbeat(self, seconds: float) -> None:
-        """Re-arm the min-dwell window from *now*.
-
-        Confirm-gated writes (write_file / edit_file) burn the original
-        dwell — armed at ``start_heartbeat`` on ToolBegin — while the user
-        reads the diff, so the actual write completes instantly and a plain
-        ``stop_heartbeat`` at ToolEnd would clear the label before the eye
-        registers it. Calling this just before the stop holds the
-        pen-stroke beat open for ``seconds`` so "wrote X" stays legible.
-
-        No-op when idle — there is nothing to hold open.
-        """
-        if self.footer.heartbeat_state == "idle":
-            return
-        self.footer.heartbeat_min_alive_until = monotonic() + seconds
-
     def stop_heartbeat(self, *, force: bool = False) -> None:
         """Clear the heartbeat. By default respects ``_HEARTBEAT_MIN_DWELL_S``
         so fast tools don't flash. Pass ``force=True`` to bypass the dwell

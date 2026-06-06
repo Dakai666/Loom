@@ -57,6 +57,7 @@ from loom.core.events import (  # noqa: E402, F401
     ActionRolledBack,
     ActionStateChange,
     CompressDone,
+    ModelThinkingStarted,
     ReasoningContinuation,
     TextChunk,
     ThinkCollapsed,
@@ -587,6 +588,9 @@ _ANIMATION_FRAMES: dict[str, tuple[str, ...]] = {
     # ── think: gentle pulse ────────────────────────────────────────────
     "breathing_focus": ("⠂", "⠆", "⠇", "⠿", "⠇", "⠆"),
     "dots_grow": ("⠄", "⠆", "⠇", "⠋", "⠙", "⠸", "⠰", "⠠", "⠰", "⠸", "⠙", "⠋", "⠇", "⠆"),
+    # ── digest: gathering / folding tool results ───────────────────────
+    "folding_focus": ("⠁", "⠃", "⠇", "⠧", "⠷", "⠧", "⠇", "⠃"),
+    "braille_gather": ("⠈", "⠘", "⠸", "⢰", "⣠", "⢰", "⠸", "⠘"),
     # ── probe: scanning / searching ────────────────────────────────────
     "classic_spinner": ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
     "dots_wobble": ("⠋", "⠙", "⠚", "⠞", "⠖", "⠦", "⠴", "⠲", "⠳", "⠓"),

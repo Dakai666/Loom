@@ -106,6 +106,12 @@ def test_animation_families_pools_are_registered() -> None:
             assert name in _ANIMATION_FRAMES, f"{name} missing from _ANIMATION_FRAMES"
 
 
+def test_digest_family_has_distinct_animation_pool() -> None:
+    assert ActionFamily.DIGEST.value == "digest"
+    assert family_variants(ActionFamily.DIGEST.value)
+    assert family_variants(ActionFamily.DIGEST.value) != family_variants(ActionFamily.THINK.value)
+
+
 def test_family_variants_unknown_falls_back_to_tool_pool() -> None:
     assert family_variants("not-a-family") == ANIMATION_FAMILIES[ActionFamily.TOOL.value]
     assert family_variants(ActionFamily.PROBE.value) == ANIMATION_FAMILIES[ActionFamily.PROBE.value]
@@ -115,6 +121,7 @@ def test_family_fps_pulse_is_gentle_rest_snappy() -> None:
     # Cadence travels with the family: THINK pulses gently, everything
     # else (and unknown families) gets the snappy default.
     assert family_fps(ActionFamily.THINK.value) == 6.0
+    assert family_fps(ActionFamily.DIGEST.value) == 8.0
     assert family_fps(ActionFamily.PROBE.value) == 10.0
     assert family_fps(ActionFamily.WRITE.value) == 10.0
     assert family_fps("not-a-family") == 10.0

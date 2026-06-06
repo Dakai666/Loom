@@ -48,6 +48,109 @@ class TestCoreSessionImport:
         assert CoreSession is CliSession
 
 
+class TestModelThinkingStarted:
+    @pytest.mark.asyncio
+    async def test_stream_turn_emits_after_tool_thinking_before_next_model_call(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from loom.core import session as session_module
+        from loom.core.cognition.providers import LLMResponse, ToolUse
+        from loom.core.events import ModelThinkingStarted, TextChunk, ToolEnd, TurnDone
+        from loom.core.harness.middleware import ToolResult
+        from loom.core.session import LoomSession
+
+        stream_calls = 0
+
+        async def fake_stream_chat(**kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield "", LLMResponse(
+                    text="",
+                    tool_uses=[
+                        ToolUse(id="call_read", name="read_file", args={"path": "big.py"})
+                    ],
+                    stop_reason="tool_use",
+                    raw_message={
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_read",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path":"big.py"}'},
+                        }],
+                    },
+                )
+            else:
+                yield "done", None
+                yield "", LLMResponse(
+                    text="done",
+                    tool_uses=[],
+                    stop_reason="end_turn",
+                    raw_message={"role": "assistant", "content": "done"},
+                )
+
+        router = SimpleNamespace(
+            stream_chat=fake_stream_chat,
+            native_max_tokens=lambda model: None,
+            format_tool_result=lambda model, call_id, content, success=True: {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": content,
+            },
+        )
+        monkeypatch.setattr(session_module, "build_router", lambda *args, **kwargs: router)
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        session = LoomSession(
+            model="test-model",
+            db_path=str(tmp_path / "loom.db"),
+            workspace=workspace,
+        )
+
+        class FakeEpisodic:
+            async def write(self, entry):
+                return None
+
+        session._memory = SimpleNamespace(episodic=FakeEpisodic())
+
+        async def fake_dispatch(name, args, call_id):
+            return ToolResult(
+                call_id=call_id,
+                tool_name=name,
+                success=True,
+                output="large file contents",
+            )
+
+        session._dispatch = fake_dispatch
+
+        async def passthrough_envelope(envelope, **kwargs):
+            return envelope
+
+        session._author_envelope_outcome_summary = passthrough_envelope
+
+        events = []
+        async for event in session.stream_turn("read big.py"):
+            events.append(event)
+            if isinstance(event, TurnDone):
+                break
+
+        thinking = [e for e in events if isinstance(e, ModelThinkingStarted)]
+        assert [(e.phase, e.tool_name) for e in thinking] == [
+            ("initial", ""),
+            ("after_tool", "read_file"),
+        ]
+        tool_end_index = next(i for i, e in enumerate(events) if isinstance(e, ToolEnd))
+        after_tool_index = next(
+            i for i, e in enumerate(events)
+            if isinstance(e, ModelThinkingStarted) and e.phase == "after_tool"
+        )
+        text_index = next(i for i, e in enumerate(events) if isinstance(e, TextChunk))
+        assert tool_end_index < after_tool_index < text_index
+
+
 class TestBuildRouter:
     def test_registers_openai_provider_from_env(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
