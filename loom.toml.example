@@ -295,6 +295,34 @@ interval_hours = 12     # cadence (first dream ~5min after daemon start)
 sample_size    = 15     # facts sampled per cycle (matches tool default)
 
 # ─────────────────────────────────────────────
+# Convergent dream (#495 P4) — Weekly memory consolidation
+# ─────────────────────────────────────────────
+# The consolidation counterpart to [memory.dream]'s divergent synthesis. Runs
+# ``run_convergent_dream`` on a *weekly* cadence inside the autonomy daemon:
+# it scans semantic memory for near-duplicate / contradicting / orphaned facts
+# and either reports them (read-only) or fuses them (execute). The cadence is
+# in DAYS, and due-ness is persisted in ``memory_meta``
+# (``consolidation_dream.last_run``) so a restart neither resets the week nor
+# double-runs.
+#
+# Staged rollout:
+#   • execute = false (P4a) — read-only: writes a 夢境鞏固 report to
+#     autonomy/circadian/dreams/YYYY-MM-DD.md, never touches the DB. Use this
+#     to observe report quality on the autonomous schedule first.
+#   • execute = true  (P4b) — autonomous consolidation: the approved, non-stale
+#     clusters are actually fused (self_review veto + the report remain the
+#     safety net). Only flip this once the read-only reports are trusted.
+[memory.consolidation_dream]
+enabled       = true    # set false to disable the weekly convergent dream
+interval_days = 7       # cadence in days (first check ~5min after daemon start)
+execute       = false   # P4a read-only; set true for autonomous writes (P4b)
+# Coverage cap. list_recent is newest-first, so this scans the N most-recent
+# facts — older ones are never looked at. Set it >= your total semantic entry
+# count for full coverage. LLM cost is bounded by max_clusters regardless; only
+# local embedding work scales with this number. Raise it as your corpus grows.
+corpus_limit  = 5000
+
+# ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
 # ─────────────────────────────────────────────
 # When a skill is activated via ``load_skill`` and the turn completes,

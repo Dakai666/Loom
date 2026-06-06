@@ -25,7 +25,9 @@ from typing import Awaitable, Callable
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.history import TriggerHistory
-from loom.autonomy.maintenance import DreamLoop, MaintenanceLoop
+from loom.autonomy.maintenance import (
+    ConvergentDreamLoop, DreamLoop, MaintenanceLoop,
+)
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
 from loom.autonomy.schedules import DEFAULT_SCHEDULES_PATH, load_schedules
@@ -559,6 +561,9 @@ class AutonomyDaemon:
         dream_task = self._maybe_start_dream_loop()
         if dream_task is not None:
             wait_set.append(dream_task)
+        consol_task = self._maybe_start_consolidation_loop()
+        if consol_task is not None:
+            wait_set.append(consol_task)
 
         done, pending = await asyncio.wait(
             wait_set, return_when=asyncio.FIRST_COMPLETED
@@ -654,6 +659,75 @@ class AutonomyDaemon:
         logger.info(
             "[autonomy] dream loop started (interval=%.1fh, sample=%d)",
             loop._interval_seconds / 3600.0, sample_size,
+        )
+        return asyncio.ensure_future(loop.run_forever())
+
+    def _maybe_start_consolidation_loop(self) -> asyncio.Task | None:
+        """Read [memory.consolidation_dream] and launch ConvergentDreamLoop (#495).
+
+        The weekly convergent (consolidation) dream — counterpart to the
+        divergent DreamLoop. P4a ships read-only by default (``execute=false``):
+        the schedule produces 夢境鞏固 reports without touching the DB so the
+        autonomous report quality can be observed before ``execute=true`` (P4b)
+        is ever set.
+        """
+        session = self._session
+        db = getattr(session, "_db", None) if session else None
+        if session is None or db is None:
+            return None
+        memory = getattr(session, "_memory", None)
+        if memory is None:
+            return None
+        try:
+            from loom.core.config import load_loom_config  # local import: lazy
+            cfg = load_loom_config().get("memory", {}).get("consolidation_dream", {})
+        except Exception as exc:
+            logger.debug("[autonomy] consolidation config load failed: %s", exc)
+            return None
+        if not cfg.get("enabled", False):  # opt-in: absent section → off
+            return None
+
+        execute = bool(cfg.get("execute", False))  # P4a default: read-only
+        # list_recent is newest-first, so corpus_limit caps coverage to the N
+        # most-recent facts — older ones are never scanned. Set it >= the total
+        # semantic entry count for full coverage. LLM cost stays bounded by
+        # max_clusters / max_review_clusters regardless; only local embedding
+        # work scales with this number (#524 review).
+        corpus_limit = int(cfg.get("corpus_limit", 2000))
+        router = session.router
+        model = session.model
+
+        async def _consolidate_once() -> Any:
+            from loom.core.cognition.consolidation import run_convergent_dream
+            from loom.autonomy.circadian.journal import append_consolidation_report
+
+            async def _llm_fn(messages: list[dict]) -> str:
+                response = await router.chat(
+                    model=model, messages=messages, max_tokens=2048,
+                )
+                return response.text or ""
+
+            plan, report = await run_convergent_dream(
+                memory.semantic, _llm_fn,
+                corpus_limit=corpus_limit, execute=execute,
+            )
+            append_consolidation_report(report)
+            logger.info(
+                "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
+                plan.pass_id, execute, plan.counts(), plan.deferred_to_next_pass,
+            )
+            return plan
+
+        loop = ConvergentDreamLoop(
+            dream_fn=_consolidate_once,
+            db=db,
+            abort=self._abort,
+            interval_days=float(cfg.get("interval_days", 7.0)),
+        )
+        logger.info(
+            "[autonomy] convergent dream loop started "
+            "(interval=%.1fd, corpus_limit=%d, execute=%s)",
+            loop._interval_seconds / 86400.0, corpus_limit, execute,
         )
         return asyncio.ensure_future(loop.run_forever())
 
