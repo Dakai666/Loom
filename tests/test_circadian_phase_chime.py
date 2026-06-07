@@ -197,6 +197,65 @@ class TestPhaseChimeFire:
         assert req.intent == "醒來成為今天的絲絲"
         assert req.target == {"type": "circadian_today", "fallback": "skip"}
 
+    async def test_fire_forwards_anchor_permissions_to_chime(self):
+        # Issue #525: the missing wire. _deliver_phase_chime must put the
+        # anchor's trust_level / allowed_tools / scope_grants onto the
+        # ChimeRequest, exactly like the schedule path (daemon.py) does — so
+        # bot._apply_chime_permissions can pre-authorise the phase's routine
+        # tools. Without this the fields are declared but silently dropped.
+        daemon, deliveries, _ = _make_daemon()
+        anchors = [
+            Anchor(
+                time="11:00",
+                name="curiosity",
+                meaning="好奇心散步",
+                trust_level="safe",
+                allowed_tools=("fetch_url", "write_file"),
+                scope_grants=(
+                    {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
+                ),
+            ),
+        ]
+        register_rhythm_anchors(daemon, CFG, anchors)
+
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+
+        trigger = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_curiosity"
+        )
+        await daemon._on_trigger_fire(trigger, {})
+
+        assert len(deliveries) == 1
+        req = deliveries[0]
+        assert req.trust_level == "safe"
+        assert req.allowed_tools == ("fetch_url", "write_file")
+        assert req.scope_grants == (
+            {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
+        )
+
+    async def test_fire_without_permissions_leaves_chime_defaults(self):
+        # A phase that declares no permission fields produces a ChimeRequest
+        # with the neutral defaults — unchanged behaviour for existing tables.
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="x"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+        trigger = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trigger, {})
+        req = deliveries[0]
+        assert req.trust_level is None
+        assert req.allowed_tools == ()
+        assert req.scope_grants == ()
+
     async def test_fire_bypasses_planner(self):
         daemon, _, _ = _make_daemon()
         register_rhythm_anchors(daemon, CFG, [

@@ -398,6 +398,18 @@ loader 把這種 block 展開成「每個有效時段一個 `Anchor`」，並只
 
 → 「同類但語義不同」的活動（例如想給早晚 pet 各自的 meaning）用**不同 name**（`pet` / `pet_evening`），各自一個 weave section；「同一件事重複」用 time list。
 
+**Phase 權限欄位（issue #525，2026-06-07）**：
+
+每天喚醒的 daily session 是新的 `PermissionContext`（grant 是 session-scoped 記憶體）。所以一個 phase 要做的 routine-safe 工具動作（早上查資料寫新聞心得、跑餵貓腳本）每天都會落回 GUARDED → 重問 DK → 在無限等授權下造成 phase drift。
+
+修法不是新系統，而是**接上既有管道**：`schedules.toml` 的 entry 早就能帶 `trust_level` / `allowed_tools` / `scope_grants`（#444），經 `CronTrigger → planner → ChimeRequest → bot._apply_chime_permissions` 預先授權整個 turn、turn 結束 revoke。circadian 的 **phase chime（`_deliver_phase_chime`）原本建 `ChimeRequest` 時沒帶這三欄** —— 這是唯一的斷點。
+
+- `Anchor` 新增 `trust_level` / `allowed_tools` / `scope_grants`，rhythm loader 經**共享的** `loom/autonomy/permission_fields.py::parse_permission_fields` 解析（schedules 載入也改用同一條，純 code 層統一）。
+- `_deliver_phase_chime` 把 `anchor.*` 轉進 `ChimeRequest`，完全比照 schedule 路徑。下游套用/撤銷全部沿用既有 bot 機制。
+- **單位是工具名 + 可選的 scope selector**：`allowed_tools = ["run_bash"]` 預授權 GUARDED 工具（含 EXEC，因為 `is_authorized` 對 pre-authorized 工具短路放行，morning_briefing 實證）；`scope_grants` 把工具收束到資源前綴（如 `write_file` 只能寫 `autonomy/circadian`）。
+- **安全底線不動**：CRITICAL 永遠重問（`is_authorized` 對 CRITICAL 恆 False，與 grant 無關）。grant 只在該 phase turn 存活、用完即撤。
+- **這是 agent 自主管理面**：絲絲想讓某 phase 多做一件事就在自己的 `rhythm.toml` 加欄位，晚上跟 DK 討論（reactive 但宣告式，跟 schedules.toml 同一套心智）。
+
 **不做**：
 - ❌ daily_weave.md 讀取（PR 3，但 gate 的 plan mtime check 用 stub 路徑）
 - ❌ nightly planning tool（PR 4）

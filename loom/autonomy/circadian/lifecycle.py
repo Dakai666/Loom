@@ -464,6 +464,14 @@ async def _deliver_phase_chime(
         intent=intent,
         fired_at=datetime.now(timezone.utc),
         target={"type": "circadian_today", "fallback": "skip"},
+        # Forward the anchor's declared permissions onto the chime (issue #525),
+        # exactly as the schedule path does in AutonomyDaemon. This is the wire
+        # that was missing: without it the fields parse into the Anchor but
+        # never reach bot._apply_chime_permissions, so every daily session
+        # re-asks DK for the same routine-safe phase action.
+        trust_level=anchor.trust_level,
+        allowed_tools=anchor.allowed_tools,
+        scope_grants=anchor.scope_grants,
     )
     delivered = await daemon.deliver_chime(req)
     outcome = "delivered" if delivered else "skipped"

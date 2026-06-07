@@ -245,6 +245,67 @@ class TestLoadRhythm:
         assert [a.name for a in anchors] == ["pet"]
         assert anchors[0].meaning == "first"
 
+    def test_anchor_carries_permission_fields(self, tmp_path):
+        # Issue #525: an anchor can declare the same trust_level / allowed_tools
+        # / scope_grants a schedules.toml entry uses, so a circadian phase can
+        # do routine tool work (research, write a draft, run the pet script)
+        # without re-asking DK every day. The fields ride through to the chime.
+        p = tmp_path / "perm.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "11:00"
+            name = "curiosity"
+            allowed_tools = ["fetch_url", "web_search", "write_file"]
+            scope_grants = [
+              { resource = "path", action = "write", selector = "autonomy/circadian" },
+            ]
+        ''')
+        a = load_rhythm(p)[0]
+        assert a.allowed_tools == ("fetch_url", "web_search", "write_file")
+        assert a.scope_grants == (
+            {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
+        )
+        assert a.trust_level is None  # no override declared
+
+    def test_anchor_without_permission_fields_defaults_empty(self, tmp_path):
+        p = tmp_path / "plain.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "09:00"
+            name = "dawn"
+        ''')
+        a = load_rhythm(p)[0]
+        assert a.allowed_tools == ()
+        assert a.scope_grants == ()
+        assert a.trust_level is None
+
+    def test_multi_time_anchor_shares_permission_fields(self, tmp_path):
+        # The permission fields are an attribute of the activity identity, so
+        # every expanded slot of a recurring activity carries the same grants.
+        p = tmp_path / "petperm.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["10:00", "19:00"]
+            name = "pet"
+            trust_level = "safe"
+            allowed_tools = ["run_bash"]
+        ''')
+        anchors = load_rhythm(p)
+        assert len(anchors) == 2
+        for a in anchors:
+            assert a.trust_level == "safe"
+            assert a.allowed_tools == ("run_bash",)
+
+    def test_anchor_invalid_trust_level_falls_back_guarded(self, tmp_path):
+        p = tmp_path / "badtrust.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "09:00"
+            name = "dawn"
+            trust_level = "paranoid"
+        ''')
+        assert load_rhythm(p)[0].trust_level == "guarded"
+
     def test_per_agent_isolation_via_separate_paths(self, tmp_path):
         sisi = tmp_path / "sisi" / "rhythm.toml"
         xiaoqing = tmp_path / "xiaoqing" / "rhythm.toml"

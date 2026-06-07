@@ -23,10 +23,25 @@
 #     phase degrades into a scheduler (doc/57 §"Phase chime prompt contract").
 #   - ``public`` is advisory metadata for now; reserved for future
 #     visibility rules (e.g. silent vs. always-speaking phases).
+#   - ``trust_level`` / ``allowed_tools`` / ``scope_grants`` (issue #525) are
+#     the SAME permission fields a ``schedules.toml`` entry uses. They let a
+#     phase do routine tool work — research, write a draft, run the pet
+#     script — WITHOUT re-asking DK every single day. They are pre-authorised
+#     for that phase's turn only, then revoked. This is the agent's own
+#     surface to manage: when you want a phase to do something new, add the
+#     tool here and talk it over with DK. CRITICAL tools always re-confirm
+#     regardless — these fields never widen *that* floor.
+#       · ``allowed_tools = ["fetch_url", "write_file"]`` — pre-authorise these
+#         GUARDED tools (run_bash included) for the phase turn.
+#       · ``scope_grants = [{ resource = "path", action = "write",
+#         selector = "autonomy/circadian" }]`` — bound a tool to a resource
+#         (write only under this prefix), same dict shape as schedules.toml.
+#       · ``trust_level`` is optional; omit it to keep normal per-tool gating.
 #
 # A missing or malformed file is tolerated: the dawn/close lifecycle from
 # PR1 still runs, the day just has no in-day anchors. A bad time (even one
-# slot inside a list) is dropped on its own, never silencing the rest.
+# slot inside a list) is dropped on its own, never silencing the rest; a
+# malformed scope_grant is dropped without voiding the others.
 
 [[anchors]]
 time    = "08:00"
@@ -56,6 +71,9 @@ meaning = """
 time    = ["10:00", "19:00"]
 name    = "pet"
 public  = true
+# Routine-safe tools for this phase (issue #525): the pet-care script runs via
+# run_bash without re-asking each day. Permissions ride along with both slots.
+allowed_tools = ["run_bash"]
 meaning = """
 喵吉照顧時間。
 白天維持生活感與照顧關係，晚餐後再順手確認一次飽食、清潔。
@@ -66,6 +84,10 @@ meaning = """
 time    = "11:00"
 name    = "curiosity"
 public  = false
+# Research + jot a note: read the web, write only under the circadian dir.
+# The scope_grant bounds write_file to a prefix instead of trusting it blanket.
+allowed_tools = ["fetch_url", "web_search", "write_file"]
+scope_grants  = [{ resource = "path", action = "write", selector = "autonomy/circadian" }]
 meaning = """
 絲絲自己的好奇心散步。
 挑你自己感興趣的，不是為了產出。

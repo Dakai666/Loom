@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from loom.autonomy.permission_fields import parse_permission_fields
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,15 @@ class Anchor:
     meaning: str    # markdown body the chime injects (the "why" of this phase)
     public: bool = True
     trigger_suffix: str = ""  # "@HHMM" disambiguator for multi-time activities
+
+    # Permission triple (issue #525) — the same fields a schedules.toml entry
+    # uses, so a phase can do routine tool work (research, write a draft, run
+    # the pet script) without re-asking DK every day. _deliver_phase_chime
+    # forwards these onto the ChimeRequest; bot._apply_chime_permissions then
+    # pre-authorises them for the phase turn (and revokes after).
+    trust_level: str | None = None              # None = no override (normal gating)
+    allowed_tools: tuple[str, ...] = ()
+    scope_grants: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     @property
     def trigger_name(self) -> str:
@@ -139,13 +151,24 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
 
         meaning = str(entry.get("meaning", "")).strip()
         public = bool(entry.get("public", True))
+        # Permission fields parse through the shared autonomy helper (issue
+        # #525) — same code path as schedules.toml — and belong to the activity
+        # identity, so every expanded slot of a recurring activity shares them.
+        perms = parse_permission_fields(entry, f"rhythm anchor {name!r}")
+        allowed_tools = tuple(perms["allowed_tools"])
+        scope_grants = tuple(perms["scope_grants"])
+        trust_level = perms["trust_level"]
         # Suffix the trigger only when the activity genuinely recurs: a single
         # surviving slot keeps the bare ``circadian:phase_<name>`` (backward
         # compatible), so the @HHMM form reflects reality, not declared intent.
         multi = len(slots) > 1
         for slot in slots:
             suffix = f"@{slot.replace(':', '')}" if multi else ""
-            anchors.append(Anchor(time=slot, name=name, meaning=meaning, public=public, trigger_suffix=suffix))
+            anchors.append(Anchor(
+                time=slot, name=name, meaning=meaning, public=public,
+                trigger_suffix=suffix, trust_level=trust_level,
+                allowed_tools=allowed_tools, scope_grants=scope_grants,
+            ))
         seen.add(name)
 
     return anchors
