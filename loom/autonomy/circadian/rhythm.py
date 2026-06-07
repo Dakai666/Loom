@@ -13,6 +13,14 @@ or malformed file logs a warning and returns ``[]`` so the dawn/close
 lifecycle from PR1 keeps working. Anchors with bad time strings or duplicate
 names are dropped individually, not whole-file rejected, so one typo never
 silences the rest of the day.
+
+An activity can recur (issue #526): ``time`` accepts a list, so one block
+(``name = "pet"``, ``time = ["10:00", "19:00"]``) fires at every slot while
+staying a single *identity* — one ``daily_weave`` section, one ``meaning``.
+The loader expands such a block into one :class:`Anchor` per slot, giving each
+a unique trigger name (``@HHMM`` suffix). Because recurrence has its own
+expression, ``name`` is still required to be unique *across blocks* — a
+duplicate block name remains a genuine error (keep-first).
 """
 
 from __future__ import annotations
@@ -41,13 +49,20 @@ class Anchor:
     """
 
     time: str       # "HH:MM" local wall-clock in [autonomy.circadian].timezone
-    name: str       # short identifier; becomes part of the cron trigger name
+    name: str       # the activity's *identity* — the join key into daily_weave
     meaning: str    # markdown body the chime injects (the "why" of this phase)
     public: bool = True
+    trigger_suffix: str = ""  # "@HHMM" disambiguator for multi-time activities
 
     @property
     def trigger_name(self) -> str:
-        return f"circadian:phase_{self.name}"
+        # ``name`` is the activity identity (one weave section per name), so it
+        # is NOT unique when an activity recurs (issue #526: pet at 10:00 and
+        # 19:00). The cron evaluator keys triggers by name, so each fire needs a
+        # unique trigger — the loader appends a per-slot ``@HHMM`` suffix when an
+        # activity has >1 time. Single-time activities keep the bare
+        # ``circadian:phase_<name>`` form (backward-compatible).
+        return f"circadian:phase_{self.name}{self.trigger_suffix}"
 
 
 def _validate_hhmm(value: str) -> bool:
@@ -66,6 +81,13 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
     absent, unreadable bytes, invalid TOML, missing ``[[anchors]]`` array.
     Per-anchor errors (missing fields, bad time, duplicate name) are logged
     and the bad anchor skipped — the rest of the table still loads.
+
+    ``time`` may be a scalar ``"HH:MM"`` or a list of them (issue #526). A
+    list expands to one anchor per *valid, distinct* slot, all sharing name +
+    meaning; invalid slots inside the list are dropped individually. When a
+    block contributes >1 slot, each anchor's trigger name carries an ``@HHMM``
+    suffix so the cron evaluator (which keys triggers by name) sees them as
+    distinct fires instead of silently collapsing them onto the first.
     """
     p = path or DEFAULT_RHYTHM_PATH
     if not p.exists():
@@ -90,20 +112,40 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
             logger.warning("[circadian] rhythm anchor #%d is not a table; skipping", idx)
             continue
         try:
-            time = str(entry["time"])
+            raw_time = entry["time"]
             name = str(entry["name"])
         except KeyError as exc:
             logger.warning("[circadian] rhythm anchor #%d missing required field %s; skipping", idx, exc)
             continue
-        if not _validate_hhmm(time):
-            logger.warning("[circadian] rhythm anchor %r has invalid time %r; skipping", name, time)
+
+        # ``time`` is a scalar or a list. Normalise to an ordered, de-duplicated
+        # list of valid HH:MM slots; bad slots are dropped individually so one
+        # typo in a list never silences the whole activity.
+        raw_slots = raw_time if isinstance(raw_time, list) else [raw_time]
+        slots: list[str] = []
+        for raw_slot in raw_slots:
+            slot = str(raw_slot)
+            if not _validate_hhmm(slot):
+                logger.warning("[circadian] rhythm anchor %r has invalid time %r; skipping that slot", name, slot)
+                continue
+            if slot not in slots:
+                slots.append(slot)
+        if not slots:
+            logger.warning("[circadian] rhythm anchor %r has no valid time; skipping", name)
             continue
         if name in seen:
             logger.warning("[circadian] rhythm anchor name=%r duplicated; keeping first occurrence", name)
             continue
+
         meaning = str(entry.get("meaning", "")).strip()
         public = bool(entry.get("public", True))
-        anchors.append(Anchor(time=time, name=name, meaning=meaning, public=public))
+        # Suffix the trigger only when the activity genuinely recurs: a single
+        # surviving slot keeps the bare ``circadian:phase_<name>`` (backward
+        # compatible), so the @HHMM form reflects reality, not declared intent.
+        multi = len(slots) > 1
+        for slot in slots:
+            suffix = f"@{slot.replace(':', '')}" if multi else ""
+            anchors.append(Anchor(time=slot, name=name, meaning=meaning, public=public, trigger_suffix=suffix))
         seen.add(name)
 
     return anchors

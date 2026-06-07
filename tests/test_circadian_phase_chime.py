@@ -149,6 +149,28 @@ class TestRegisterRhythmAnchors:
         assert count == 0
         assert daemon.evaluator.list() == []
 
+    def test_multi_time_activity_registers_distinct_triggers(self):
+        # Issue #526 end-to-end: a recurring activity (pet at 10:00 + 19:00)
+        # from a real rhythm.toml must register *two* triggers + two handlers,
+        # not silently collapse onto the first slot. The bug was a name
+        # collision (both → ``circadian:phase_pet``); the @HHMM suffix fixes it.
+        from loom.autonomy.circadian.rhythm import load_rhythm
+
+        daemon, _, _ = _make_daemon()
+        _write_rhythm('''
+            [[anchors]]
+            time = ["10:00", "19:00"]
+            name = "pet"
+            meaning = "喵吉照顧"
+        ''')
+        anchors = load_rhythm()
+        count = register_rhythm_anchors(daemon, CFG, anchors)
+        assert count == 2
+        names = {t.name for t in daemon.evaluator.list()}
+        assert names == {"circadian:phase_pet@1000", "circadian:phase_pet@1900"}
+        for n in names:
+            assert n in daemon._direct_handlers
+
 
 class TestPhaseChimeFire:
     async def test_fire_routes_to_deliver_chime_with_circadian_today(self):

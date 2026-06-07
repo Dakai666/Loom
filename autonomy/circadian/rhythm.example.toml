@@ -7,8 +7,17 @@
 # = different rhythm table, same circadian engine.
 #
 # Rules:
-#   - ``time`` is local wall-clock in [autonomy.circadian].timezone (HH:MM)
-#   - ``name`` becomes part of the cron trigger (circadian:phase_<name>)
+#   - ``time`` is local wall-clock in [autonomy.circadian].timezone (HH:MM).
+#     It can be ONE time ("10:00") or a LIST (["10:00", "19:00"]) when the
+#     same activity recurs through the day — see ``pet`` below (issue #526).
+#   - ``name`` is the activity's *identity*: it's the join key into
+#     daily_weave.md (one ``## <name>`` section per activity) and the base of
+#     the cron trigger (circadian:phase_<name>). A recurring activity keeps ONE
+#     name + ONE meaning + ONE weave section and just lists multiple times —
+#     so ``name`` must be UNIQUE across blocks. Two blocks with the same name
+#     is an error (the second is dropped); use a time-list for "same thing,
+#     many times", and distinct names (pet vs pet_evening) for "different
+#     things that happen to be similar".
 #   - ``meaning`` is the *body* of the <system_chime> the agent receives.
 #     Write it as the why of this phase, not as a task list — otherwise the
 #     phase degrades into a scheduler (doc/57 §"Phase chime prompt contract").
@@ -16,7 +25,8 @@
 #     visibility rules (e.g. silent vs. always-speaking phases).
 #
 # A missing or malformed file is tolerated: the dawn/close lifecycle from
-# PR1 still runs, the day just has no in-day anchors.
+# PR1 still runs, the day just has no in-day anchors. A bad time (even one
+# slot inside a list) is dropped on its own, never silencing the rest.
 
 [[anchors]]
 time    = "08:00"
@@ -38,13 +48,18 @@ meaning = """
 沒有也可以說沒有。
 """
 
+# Recurring activity (issue #526): one identity, several times. ``pet`` fires
+# at both 10:00 and 19:00 from a single block — one ``## pet`` weave section,
+# one meaning, two chimes. To give a slot its own meaning instead, split it
+# into a separate block with a distinct name (e.g. ``pet_evening``).
 [[anchors]]
-time    = "10:00"
+time    = ["10:00", "19:00"]
 name    = "pet"
 public  = true
 meaning = """
 喵吉照顧時間。
-維持生活感與照顧關係，不是 todo check。
+白天維持生活感與照顧關係，晚餐後再順手確認一次飽食、清潔。
+不是 todo check。
 """
 
 [[anchors]]

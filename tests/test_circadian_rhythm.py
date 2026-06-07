@@ -133,6 +133,118 @@ class TestLoadRhythm:
         anchors = load_rhythm(p)
         assert anchors[0].meaning == ""
 
+    def test_time_list_expands_to_one_anchor_per_slot(self, tmp_path):
+        # Issue #526: one activity, many time slots. ``time`` accepts a list;
+        # name is the *item identity* (the join key into daily_weave), not the
+        # trigger key. Both slots share name + meaning, fire independently.
+        p = tmp_path / "multi.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["10:00", "19:00"]
+            name = "pet"
+            meaning = "喵吉照顧"
+        ''')
+        anchors = load_rhythm(p)
+        assert [a.name for a in anchors] == ["pet", "pet"]
+        assert [a.time for a in anchors] == ["10:00", "19:00"]
+        assert [a.meaning for a in anchors] == ["喵吉照顧", "喵吉照顧"]
+        # Trigger names must be unique per slot or the second silently collides
+        # (the original #526 bug). Item identity (name) stays shared for weave.
+        assert [a.trigger_name for a in anchors] == [
+            "circadian:phase_pet@1000",
+            "circadian:phase_pet@1900",
+        ]
+
+    def test_single_element_time_list_keeps_plain_trigger(self, tmp_path):
+        # A one-element list is indistinguishable from a scalar time: no slot
+        # suffix, so the trigger name stays backward-compatible.
+        p = tmp_path / "one.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["09:00"]
+            name = "dawn"
+        ''')
+        anchors = load_rhythm(p)
+        assert len(anchors) == 1
+        assert anchors[0].trigger_name == "circadian:phase_dawn"
+
+    def test_scalar_time_unchanged(self, tmp_path):
+        # Backward compat: the overwhelming common case (scalar time) is one
+        # anchor with the plain, unsuffixed trigger name.
+        p = tmp_path / "scalar.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "08:00"
+            name = "dawn"
+        ''')
+        anchors = load_rhythm(p)
+        assert len(anchors) == 1
+        assert anchors[0].time == "08:00"
+        assert anchors[0].trigger_name == "circadian:phase_dawn"
+
+    def test_time_list_drops_invalid_slots_keeps_valid(self, tmp_path):
+        # Tolerant by contract (#460): a bad slot inside the list is dropped
+        # individually, the valid ones survive. With only one valid slot left,
+        # the suffix disappears (the trigger name reflects reality, not intent).
+        p = tmp_path / "partial_list.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["10:00", "25:00"]
+            name = "pet"
+        ''')
+        anchors = load_rhythm(p)
+        assert [a.time for a in anchors] == ["10:00"]
+        assert anchors[0].trigger_name == "circadian:phase_pet"
+
+    def test_time_list_all_invalid_drops_block(self, tmp_path):
+        p = tmp_path / "all_bad.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["25:00", "99:99"]
+            name = "pet"
+
+            [[anchors]]
+            time = "08:00"
+            name = "dawn"
+        ''')
+        anchors = load_rhythm(p)
+        assert [a.name for a in anchors] == ["dawn"]
+
+    def test_empty_time_list_drops_block(self, tmp_path):
+        p = tmp_path / "empty_list.toml"
+        _write(p, '''
+            [[anchors]]
+            time = []
+            name = "pet"
+
+            [[anchors]]
+            time = "08:00"
+            name = "dawn"
+        ''')
+        anchors = load_rhythm(p)
+        assert [a.name for a in anchors] == ["dawn"]
+
+    def test_duplicate_block_name_still_keeps_first(self, tmp_path):
+        # name uniqueness is still an invariant *across blocks* — multi-time is
+        # expressed via the list, so a duplicate block name is a genuine error
+        # (keep-first, same as before). Two pet *blocks* is wrong; one pet block
+        # with two times is right.
+        p = tmp_path / "dup_block.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "10:00"
+            name = "pet"
+            meaning = "first"
+
+            [[anchors]]
+            time = "19:00"
+            name = "pet"
+            meaning = "second — duplicate block, ignored"
+        ''')
+        anchors = load_rhythm(p)
+        assert [a.name for a in anchors] == ["pet"]
+        assert anchors[0].meaning == "first"
+
     def test_per_agent_isolation_via_separate_paths(self, tmp_path):
         sisi = tmp_path / "sisi" / "rhythm.toml"
         xiaoqing = tmp_path / "xiaoqing" / "rhythm.toml"

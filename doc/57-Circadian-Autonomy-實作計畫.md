@@ -376,6 +376,28 @@ loom/autonomy/circadian/watchdog.py     # ConditionTrigger state-drift watchdog
 
 `ChimeRequest.intent` 組裝順序：`{phase.meaning}\n\n{daily_weave.section_for(phase)}\n\n{user-defined trigger intent}`。
 
+**Anchor name 唯一性 + 多時段 contract**（issue #526，2026-06-07）：
+
+`anchor.name` 是活動的**身分（identity）**，不是觸發鍵。它同時是兩件事的 join key：
+
+1. **daily_weave 的接點** — `daily_weave.section_for(anchor.name)` 用純 `name` 去 match H2，所以 weave 裡每個活動只有**一個 `## <name>`** section。H2 標題不可帶時間後綴（`## pet（10:00）` 會 match 不到 `pet`，weave 內容靜默落空——這是 #526 一併修掉的第二個 bug）。
+2. **cron trigger 的基底** — `trigger_name = circadian:phase_<name>`。
+
+因為 evaluator 用 trigger name 當鍵，**`name` 必須跨 block 唯一**：兩個 `[[anchors]]` 共用同一個 `name`，第二個會 silently collide（只 match 第一個，後者永不觸發——#526 的原始症狀：`pet(19:00)` 從未跑過）。loader 對重複 block name 採 keep-first（與壞 time、缺欄位同樣 tolerant-by-contract，不整檔 reject）。
+
+「同一活動一天做好幾次」的**正規寫法是 time list**，不是重複 name：
+
+```toml
+[[anchors]]
+time = ["10:00", "19:00"]   # 一個身分、多個時段
+name = "pet"
+meaning = "..."             # 一份 meaning、一個 ## pet weave section
+```
+
+loader 把這種 block 展開成「每個有效時段一個 `Anchor`」，並只在活動**真的多時段**時給 trigger 加 `@HHMM` 後綴（`circadian:phase_pet@1000` / `@1900`），單時段維持裸 `circadian:phase_<name>`（向後相容）。list 裡的壞時段個別丟棄，不影響其他時段。
+
+→ 「同類但語義不同」的活動（例如想給早晚 pet 各自的 meaning）用**不同 name**（`pet` / `pet_evening`），各自一個 weave section；「同一件事重複」用 time list。
+
 **不做**：
 - ❌ daily_weave.md 讀取（PR 3，但 gate 的 plan mtime check 用 stub 路徑）
 - ❌ nightly planning tool（PR 4）
