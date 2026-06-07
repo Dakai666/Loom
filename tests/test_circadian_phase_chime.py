@@ -199,7 +199,7 @@ class TestPhaseChimeFire:
 
     async def test_fire_forwards_anchor_permissions_to_chime(self):
         # Issue #525: the missing wire. _deliver_phase_chime must put the
-        # anchor's trust_level / allowed_tools / scope_grants onto the
+        # anchor's allowed_tools / scope_grants onto the
         # ChimeRequest, exactly like the schedule path (daemon.py) does — so
         # bot._apply_chime_permissions can pre-authorise the phase's routine
         # tools. Without this the fields are declared but silently dropped.

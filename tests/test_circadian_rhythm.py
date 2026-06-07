@@ -246,22 +246,24 @@ class TestLoadRhythm:
         assert anchors[0].meaning == "first"
 
     def test_anchor_carries_permission_fields(self, tmp_path):
-        # Issue #525: an anchor can declare the same trust_level / allowed_tools
-        # / scope_grants a schedules.toml entry uses, so a circadian phase can
-        # do routine tool work (research, write a draft, run the pet script)
+        # Issue #525: an anchor declares allowed_tools / scope_grants (the same
+        # fields a schedules.toml entry uses) so a circadian phase can do
+        # routine tool work — research, write a draft, run the pet script —
         # without re-asking DK every day. The fields ride through to the chime.
+        # Blanket tools go in allowed_tools; a fenced tool (write_file) is
+        # authorised by the scope_grant alone, not co-listed in allowed_tools.
         p = tmp_path / "perm.toml"
         _write(p, '''
             [[anchors]]
             time = "11:00"
             name = "curiosity"
-            allowed_tools = ["fetch_url", "web_search", "write_file"]
+            allowed_tools = ["fetch_url", "web_search"]
             scope_grants = [
               { resource = "path", action = "write", selector = "autonomy/circadian" },
             ]
         ''')
         a = load_rhythm(p)[0]
-        assert a.allowed_tools == ("fetch_url", "web_search", "write_file")
+        assert a.allowed_tools == ("fetch_url", "web_search")
         assert a.scope_grants == (
             {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
         )

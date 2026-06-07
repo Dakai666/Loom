@@ -2,19 +2,23 @@
 Shared parser for autonomy permission fields — ``trust_level`` /
 ``allowed_tools`` / ``scope_grants`` (issue #525).
 
-These three fields describe *what an autonomous turn is pre-authorised to do*.
+These fields describe *what an autonomous turn is pre-authorised to do*.
 ``schedules.toml`` entries have carried them since #444; the circadian rhythm
-table (``rhythm.toml``) now declares the same fields through the same code path
-so a phase anchor and a cron schedule express their permissions identically
-(DK: "純 code 層統一"). Extracting the parser is the unification — both loaders
-import it instead of each re-reading the dict inline.
+loader (``rhythm.toml``) reuses the same parser so both express permissions
+through one code path (DK: "純 code 層統一"). Extracting the parser is the
+unification — both loaders import it instead of re-reading the dict inline.
+
+The two callers consume different subsets: a **schedule** uses all three
+(``trust_level`` gates the planner's notify/HOLD decision). A **phase anchor**
+uses only ``allowed_tools`` / ``scope_grants`` — the chime path has no planner
+gate, so ``trust_level`` is meaningless there and the rhythm loader ignores it.
+The parser still returns ``trust_level`` for the schedule caller.
 
 Contract is tolerant, like every other autonomy loader: a missing field yields
 a neutral default, a malformed one is dropped (never raised), so a single typo
-never silences the whole entry. The two callers differ only in the *default*
-they apply to a missing ``trust_level`` — a bare schedule wants ``"guarded"``,
-a bare anchor wants "no override" (``None``) — so the parser reports ``None``
-for absent and lets the caller choose.
+never silences the whole entry. ``trust_level`` is reported as ``None`` when
+absent so each caller applies its own default (a bare schedule wants
+``"guarded"``).
 """
 
 from __future__ import annotations
