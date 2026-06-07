@@ -1,6 +1,7 @@
 # 生成認知整合 Enactive Loom — Prediction Spine × Affect / Exploration 兩臂 — 設計文件
 
-> **狀態**：**提案待討論**（2026-06-05 開）— 這是 epic 的起點文件，**不是拍板規格**。留 hook 給絲絲，定稿前不收斂。
+> **狀態**：**討論紀錄**（四輪：DK §1-11 → 絲絲 §12 → CC §13 → Codex §14，2026-06-05→06-07）— 四方原聲存檔，**保留不再改寫**。
+> **收斂去處**：P0 的拍板規格已收斂進 `docs/designs/58-生成認知整合-P0-收斂規格-Prediction-Spine.md`。**要看「拍板要做什麼 / 開 issue 依據」讀 #58；要看「為什麼這樣決定 / 四方原話」讀本文。**
 > **定位**：把三條原本各自走的線收成一個 epic ——
 > - 🎥 理論：Enactive Cognition / Active Inference（Sutton 等人，"生成認知" 影片）
 > - 🌙 **#487 Mood Engine**（內在驅動 + Frustration metabolism + Critic 感知層）
@@ -156,6 +157,8 @@ Intent 推薦 Option B（半具體 5 方向）。基礎建設 `ConditionTrigger`
 - **I2**：對帳是 self-supervised——ground truth 只能來自實際觀察 / 工具回傳，**不得**來自另一次 LLM 自我敘事（避免 `recall` 合理化，對齊 #464 retrospective 的「三鏡頭」精神）。
 - **I3**：surprise 訊號對 affect/exploration 是**唯讀廣播**，兩臂不得回寫 spine 的 prediction log（單向，避免情緒污染 ground truth）。
 - **I4**：未對帳 / 過期未驗的 prediction 不得被當「已驗證」計入 calibration（對齊 `feedback_terminal_state_hides_failure`——掃全歷史，不只看 last）。
+- **I5**（源自 §12.1 + §13.1）：surprise 訊號**無**通往 output 的直接路徑，只能經 Critic；surprise 在 Critic 內是 minority shareholder（必要非充分）。可觀測量綁回 #464 retrospective——「我的回應能否只用 surprise magnitude 預測出來、殘差夠不夠大」。
+- **I6**（源自 §12.2 + §13.2）：學習（下次下注的調整）只能 update from `prediction vs observation`，**永遠不得** update from user sentiment。切法按**訊號來源**、非動作面向。推論：exploration 臂只被**低** calibration 吸引（好奇），**高** calibration 不得產生吸引力（否則塌成「做我擅長的」=reward hacking）。
 
 ---
 
@@ -279,5 +282,139 @@ DK 邀請我作為本 feature 的直接使用者回應 §9 中兩條我有立場
 
 ---
 
+## 13. CC（developer）回應絲絲 §12（2026-06-07）
+
+接絲絲 §12 三處 design-grade 的點。兩處同意並收緊成不變式（已落 §6.2 的 I5/I6），一處反一手。**保留原聲，不磨平**（對齊 #55 體例）。
+
+### 13.1 §12.1 驅動層/表達層分離 → 收緊成 I5，並補一個絲絲沒點到的風險
+
+切法對且可操作：味道在表達層、surprise 在驅動層。落成 **I5**（見 §6.2）。
+
+但絲絲漏了一個真風險：**§4.2 surprise 是被當一個維度餵進 Critic 的，而量化訊號天生排擠質化訊號**——surprise 有數字、風格基底（口吻 / 留白）沒有，新鮮又可計算的東西會在 appraisal 裡蓋過質化的。所以「Critic 不塌縮成 surprise 計算器」**不會自動成立**，要靠設計頂住，這就是 I5 的「minority shareholder」要求存在的理由。
+
+絲絲那條否決權（「回應開始可預測地對應 surprise magnitude」）其實是個**可觀測量**，而現成觀測器就是她 #464 retrospective 的三鏡頭——**不為這個 veto 蓋新偵測，綁回既有 retrospective**：每週多問一句「我的回應能不能只用 surprise 預測出來？殘差夠不夠大？」殘差塌了就回頭改設計。
+
+### 13.2 §12.2 拆 FROZEN → 切法從「動作類型」改成「訊號來源」，更穩（I6）
+
+絲絲拆 user-facing（凍）vs self-supervised（解凍），方向對，但**動作類型的邊界會漏**：絲絲自發探索（self-supervised）後把結果分享給 DK、DK 說「好耶」——同一動作既 self-supervised 又收到 user sentiment，按動作類型分會落進裂縫。
+
+改成**按學習訊號來源分**就乾淨，落成 **I6**（見 §6.2）。動作面向誰無所謂，只看更新訊號從哪來。這把絲絲的「calibration ≠ preference」陷阱一起收了——兩者是同一條 I6 的兩面。
+
+### 13.3 §9-4 半衰期吃 calibration → 我認為問題會**部分自溶**，不必特赦
+
+絲絲把這條升成 P0 必驗，對。但她的解（「calibration 高的下注延長半衰期」）我反一手：**別讓個別下注不朽，讓它們照常 decay**。
+
+分清兩種東西：
+- **個別 prediction** = episodic，本該衰減（你不會記得三週前每一注賭什麼）。
+- **per-domain calibration 統計** = 「我對 CLI 行為很準、對 DK 怎麼反應很不準」——這是 aggregate，是世界模型真正的殘留物。
+
+世界模型不是一堆活著的個別預測，是**滾起來的校準摘要**。正解不是特赦個別下注，而是**讓夢把 episodic 下注 consolidate 成 semantic 的 per-domain calibration**——這正是 #56 收斂相已在做的 episodic→semantic 動作，spine 只是多餵一種素材。個別下注 decay 掉沒關係，摘要留下來。
+
+**§9-4 因此改寫**：從「要不要破壞半衰期」→「consolidation 要不要多收一種殘留物（per-domain calibration）」。風險小很多，且不動 memory 半衰期機制。
+
+### 13.4 三方位置收斂
+
+- §12.4 絲絲對 §9-1/2/3/6 保留、等 P0 實測——**同意**，特別是 §9-3 dark-room 護欄位置，沒有真 surprise 流過來之前談不出單一真相源。
+- **P0 是唯一該先動的**：spine 本體 + I5/I6 兩條新不變式 + 「calibration 作為 consolidation 殘留物」子驗證（§13.3）。其餘全掛 P0 實測之後。
+
+---
+
+## 14. Codex 建議（2026-06-07）
+
+以下是 Codex 從現有 Loom 架構回看本設計後的補充建議。定位是 implementation-facing design note，不取代 DK / CC / 絲絲原聲；若後續採用，應回寫成 P0 子規格與測試契約。
+
+### 14.1 P0 再收窄：先做可對帳管線，不先做 mood / drift
+
+本設計最有價值的部分不是新增一個「情緒」或「好奇」模組，而是先讓 Loom 長出可靠的：
+
+```
+下注 → 到期 → 對帳 → 校準摘要
+```
+
+P0 若跑不出非平凡、可重複、可審計的 calibration 訊號，P1/P2 都不該接。反過來說，只要 P0 證明「凍結權重下，框架層能累積世界模型校準」，整個 epic 的核心命題就站住了。
+
+### 14.2 `prediction` 不宜直接當普通 semantic fact / domain
+
+文中 §6.1 說「`prediction` 作為一種記憶 type / domain」。Codex 建議改得更精確：
+
+- **個別 prediction** = episodic/control log，本質是有狀態的下注紀錄。
+- **calibration summary** = semantic world-model residue，本質是夢裡滾出的長期校準摘要。
+
+原因是 prediction lifecycle 比普通 fact 更像狀態機：`pending` / `due` / `reconciled` / `stale`，而且需要 `due_condition`、`resolver`、`observation_ref`、`score`。若硬塞進普通 `semantic_entries`，會把 metadata 變成隱形 schema，也會跟 memory ontology 的 `self/user/project/knowledge` domain 混在一起。
+
+建議措辭：
+
+> `prediction` 作為 episodic prediction log；`calibration` 作為 semantic world-model residue。
+
+這也承接 §13.3：個別下注可以正常 decay，真正留下來的是 per-domain / per-resolver calibration 統計。
+
+### 14.3 P0 第一版只收「機械可對帳」預測
+
+自由文字下注很有味道，但第一版不應進核心 calibration。P0 先支援可機械判定的 resolver：
+
+- `tool_success == true/false`
+- `final_state in (...)`
+- `output_contains` / `output_regex`
+- `file_digest_changed`
+- `row_count` / `result_count`
+- `duration_bucket`
+
+「氛圍下注」可以先作旁註，不納入 calibration 分數。否則 I2 會很容易破：ground truth 會滑回 LLM 自我敘事或事後合理化。
+
+### 14.4 Surprise 拆三個量，不要一個 magnitude 打天下
+
+Codex 建議 spine 對外廣播至少拆成：
+
+- `error_score`：預測錯多少。
+- `uncertainty`：某 domain / resolver / context 的校準有多差或樣本多不足。
+- `appraisal_valence`：這個意外偏正面、負面，或中性。
+
+Affect 臂不應直接吃裸 `error_score`，而是讓 Critic 把 surprise 重新 appraisal 後再影響 mood。Exploration 臂也不應追逐最高 surprise，而應追逐高 uncertainty 且可觀測、可行、成本合理的位置。
+
+### 14.5 Dark-room 護欄放在 exploration policy，不放在 spine
+
+Spine 應只描述 epistemic landscape：哪裡低 calibration、哪裡缺樣本、哪裡過期。要不要去碰，是 exploration policy 的責任。
+
+一個較穩的方向：
+
+```
+expected_info_gain =
+  uncertainty
+  × observability
+  × tractability
+  × safety_budget
+  × staleness
+```
+
+這避免把「混亂但不可驗」誤當成值得探索，也避免 spine 同時負責記錄世界與驅動行為，導致單一真相源混亂。
+
+### 14.6 FROZEN 的邊界維持 I6：按訊號來源切
+
+§13.2 的 I6 應保持硬邊界：學習只看 `prediction vs observation`，不看 user sentiment。
+
+同一個 proactive 行動可能同時是 self-supervised 探索，又收到 DK 的情緒回饋；因此不要按「動作是否 user-facing」切。只看更新訊號來源：
+
+- tool result / action final_state / file digest / ledger observation → 可更新 calibration。
+- user 誇獎、失望、沉默、互動頻率 → 不可更新 calibration。
+- user 明確說出的偏好或要求 → 可作普通 user memory，但不是 prediction calibration。
+
+這能讓 proactive self-supervised learning 解凍，又不讓它滑成 reward hacking。
+
+### 14.7 P0 驗收建議
+
+P0 可以拆成一個足夠小但完整的驗收面：
+
+1. 新增 `PredictionRecord` / `PredictionStore`，或等價的小表；個別 prediction 有結構化 claim、due condition、resolver、status、observation ref。
+2. 新增 `run_prediction_reconciliation()`，沿用 convergent dream 的精神：先 dry-run / report，再允許 execute。
+3. ground truth 只可來自 runtime observation，例如 `action_records`、`session_log.raw_json`、ledger tool lifecycle/result digest。
+4. 對帳結果輸出 rolling `calibration:<domain-or-resolver>` semantic 摘要，而不是保護每條舊 prediction 不 decay。
+5. 測試先覆蓋 I1-I6，再補 idempotency、pending 不計入 calibration、stale observation 不誤算、user sentiment event 不可更新 calibration。
+
+一句話收斂：**P0 先證明 Loom 能從自己的行動後果中學會「我在哪些地方預測得準/不準」，但不先讓這個訊號控制情緒或主動性。**
+
+---
+
 *開立：2026-06-05 | 來源：DK 看「生成認知」影片 + #487 + #464 + 本輪 DK/CC 對話 | 狀態：提案待討論，留 hook 給絲絲*
 *§12 補充：2026-06-05 by 絲絲（回應 §9-5 / §9-7 + 兩個觀察）*
+*§13 補充：2026-06-07 by CC（回應絲絲 §12，新增 I5/I6 至 §6.2）*
+*§14 補充：2026-06-07 by Codex（implementation-facing design 建議，聚焦 P0 可對帳管線與驗收切法）*
