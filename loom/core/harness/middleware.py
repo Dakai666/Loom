@@ -1032,14 +1032,21 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended)
+        # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended).
         #
-        # Legacy bridge: if the tool was pre-authorized by name (e.g. the
-        # autonomy daemon's allowed_tools list), honour that even though
-        # scope evaluation returned CONFIRM/EXPAND_SCOPE.  Without this,
-        # scope-resolved tools ignore session_authorized entirely, causing
-        # autonomy triggers to be denied despite explicit allowed_tools.
-        if self._perm.is_authorized(call.tool_name, call.trust_level):
+        # Legacy bridge (refined in #525): honour a name-level pre-authorization
+        # (e.g. the autonomy daemon's allowed_tools) ONLY on CONFIRM — i.e. when
+        # NO scope_grant was declared for this resource, so allowed_tools is the
+        # only stated authorization and the original bridge intent holds (an
+        # autonomy trigger shouldn't be denied despite explicit allowed_tools).
+        #
+        # EXPAND_SCOPE means the caller DID declare a scope_grant for this
+        # resource and this call exceeds its selector. Honouring the tool-name
+        # bypass there would silently void the very boundary the grant promised
+        # (e.g. ``allowed_tools=["write_file"]`` would blanket-authorise writes
+        # outside a ``selector="autonomy/circadian"`` grant). So on EXPAND_SCOPE
+        # the scope is authoritative and we fall through to confirm/deny.
+        if verdict == PV.CONFIRM and self._perm.is_authorized(call.tool_name, call.trust_level):
             self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized")
             return None  # proceed
 

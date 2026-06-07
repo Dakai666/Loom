@@ -402,13 +402,17 @@ loader 把這種 block 展開成「每個有效時段一個 `Anchor`」，並只
 
 每天喚醒的 daily session 是新的 `PermissionContext`（grant 是 session-scoped 記憶體）。所以一個 phase 要做的 routine-safe 工具動作（早上查資料寫新聞心得、跑餵貓腳本）每天都會落回 GUARDED → 重問 DK → 在無限等授權下造成 phase drift。
 
-修法不是新系統，而是**接上既有管道**：`schedules.toml` 的 entry 早就能帶 `trust_level` / `allowed_tools` / `scope_grants`（#444），經 `CronTrigger → planner → ChimeRequest → bot._apply_chime_permissions` 預先授權整個 turn、turn 結束 revoke。circadian 的 **phase chime（`_deliver_phase_chime`）原本建 `ChimeRequest` 時沒帶這三欄** —— 這是唯一的斷點。
+修法不是新系統，而是**接上既有管道**：`schedules.toml` 的 entry 早就能帶 `allowed_tools` / `scope_grants`（#444），經 `CronTrigger → planner → ChimeRequest → bot._apply_chime_permissions` 預先授權整個 turn、turn 結束 revoke。circadian 的 **phase chime（`_deliver_phase_chime`）原本建 `ChimeRequest` 時沒帶這些欄位** —— 這是唯一的斷點。
 
-- `Anchor` 新增 `trust_level` / `allowed_tools` / `scope_grants`，rhythm loader 經**共享的** `loom/autonomy/permission_fields.py::parse_permission_fields` 解析（schedules 載入也改用同一條，純 code 層統一）。
-- `_deliver_phase_chime` 把 `anchor.*` 轉進 `ChimeRequest`，完全比照 schedule 路徑。下游套用/撤銷全部沿用既有 bot 機制。
-- **單位是工具名 + 可選的 scope selector**：`allowed_tools = ["run_bash"]` 預授權 GUARDED 工具（含 EXEC，因為 `is_authorized` 對 pre-authorized 工具短路放行，morning_briefing 實證）；`scope_grants` 把工具收束到資源前綴（如 `write_file` 只能寫 `autonomy/circadian`）。
+- `Anchor` 新增 `allowed_tools` / `scope_grants`，rhythm loader 經**共享的** `loom/autonomy/permission_fields.py::parse_permission_fields` 解析（schedules 載入也改用同一條，純 code 層統一）。
+- `_deliver_phase_chime` 把 `anchor.*` 轉進 `ChimeRequest`，比照 schedule 路徑。下游套用/撤銷全部沿用既有 bot 機制。
+- **兩種授權單位，依工具選**（Codex review #527 釐清）：
+  - `allowed_tools = ["run_bash"]` 是**工具名 blanket** 預授權，整個 phase turn 內該工具不再問。`is_authorized` 對 pre-authorized 工具短路放行，含 EXEC（morning_briefing 實證）。適合 read-only 或本身已窄的工具。
+  - `scope_grants` 是**收束**：把一個寬工具 fence 在資源前綴內（`write_file` 只能寫 `autonomy/circadian`）。**不要**把被 fence 的工具同時放進 `allowed_tools` —— 那是 blanket 形式，會讓 fence 失效。
+- **`trust_level` 不是 phase 欄位**：chime path 不經 planner 的 notify/HOLD gate，放上去只是 inert 的假承諾。phase 授權只有 `allowed_tools` + `scope_grants`。
+- **harness 修正（#525 / Codex review）**：`BlastRadiusMiddleware._scope_aware_process` 的 legacy tool-name bypass 原本在 `CONFIRM` 跟 `EXPAND_SCOPE` 都套用，使「宣告了 scope_grant 又 blanket 了工具名」時 scope 形同虛設。改成 **bypass 只在 `CONFIRM`（沒宣告任何相關 grant）套用**；`EXPAND_SCOPE`（有宣告該 resource 的 grant、但這次超出 selector）時 scope 為準 → 超界拒絕。這讓 scope_grants 的安全承諾在 runtime 真正成立，且不影響只用 allowed_tools（無 scope）的 schedule。
 - **安全底線不動**：CRITICAL 永遠重問（`is_authorized` 對 CRITICAL 恆 False，與 grant 無關）。grant 只在該 phase turn 存活、用完即撤。
-- **這是 agent 自主管理面**：絲絲想讓某 phase 多做一件事就在自己的 `rhythm.toml` 加欄位，晚上跟 DK 討論（reactive 但宣告式，跟 schedules.toml 同一套心智）。
+- **這是 agent 自主管理面**：絲絲想讓某 phase 多做一件事就在自己的 `rhythm.toml` 加欄位，晚上跟 DK 討論（宣告式，跟 schedules.toml 同一套心智）。
 
 **不做**：
 - ❌ daily_weave.md 讀取（PR 3，但 gate 的 plan mtime check 用 stub 路徑）

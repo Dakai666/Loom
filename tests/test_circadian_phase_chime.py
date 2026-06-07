@@ -209,8 +209,7 @@ class TestPhaseChimeFire:
                 time="11:00",
                 name="curiosity",
                 meaning="好奇心散步",
-                trust_level="safe",
-                allowed_tools=("fetch_url", "write_file"),
+                allowed_tools=("fetch_url", "web_search"),
                 scope_grants=(
                     {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
                 ),
@@ -230,11 +229,12 @@ class TestPhaseChimeFire:
 
         assert len(deliveries) == 1
         req = deliveries[0]
-        assert req.trust_level == "safe"
-        assert req.allowed_tools == ("fetch_url", "write_file")
+        assert req.allowed_tools == ("fetch_url", "web_search")
         assert req.scope_grants == (
             {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
         )
+        # trust_level is not a phase field — never forwarded onto the chime.
+        assert req.trust_level is None
 
     async def test_fire_without_permissions_leaves_chime_defaults(self):
         # A phase that declares no permission fields produces a ChimeRequest

@@ -57,12 +57,14 @@ class Anchor:
     public: bool = True
     trigger_suffix: str = ""  # "@HHMM" disambiguator for multi-time activities
 
-    # Permission triple (issue #525) — the same fields a schedules.toml entry
-    # uses, so a phase can do routine tool work (research, write a draft, run
-    # the pet script) without re-asking DK every day. _deliver_phase_chime
-    # forwards these onto the ChimeRequest; bot._apply_chime_permissions then
-    # pre-authorises them for the phase turn (and revokes after).
-    trust_level: str | None = None              # None = no override (normal gating)
+    # Routine-safe permissions (issue #525) — a phase can do tool work
+    # (research, write a draft, run the pet script) without re-asking DK every
+    # day. _deliver_phase_chime forwards these onto the ChimeRequest;
+    # bot._apply_chime_permissions pre-authorises them for the phase turn (and
+    # revokes after). NOTE: ``trust_level`` is intentionally NOT an anchor field
+    # — the chime path doesn't run the planner notify/HOLD gate that gives
+    # ``trust_level`` meaning for schedules, so exposing it would be a false
+    # affordance. Phase authorisation is allowed_tools + scope_grants only.
     allowed_tools: tuple[str, ...] = ()
     scope_grants: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
@@ -157,7 +159,12 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
         perms = parse_permission_fields(entry, f"rhythm anchor {name!r}")
         allowed_tools = tuple(perms["allowed_tools"])
         scope_grants = tuple(perms["scope_grants"])
-        trust_level = perms["trust_level"]
+        if "trust_level" in entry:
+            logger.warning(
+                "[circadian] rhythm anchor %r sets trust_level, which is ignored "
+                "for phase anchors (the chime path has no planner gate); use "
+                "allowed_tools / scope_grants instead", name,
+            )
         # Suffix the trigger only when the activity genuinely recurs: a single
         # surviving slot keeps the bare ``circadian:phase_<name>`` (backward
         # compatible), so the @HHMM form reflects reality, not declared intent.
@@ -166,7 +173,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
             suffix = f"@{slot.replace(':', '')}" if multi else ""
             anchors.append(Anchor(
                 time=slot, name=name, meaning=meaning, public=public,
-                trigger_suffix=suffix, trust_level=trust_level,
+                trigger_suffix=suffix,
                 allowed_tools=allowed_tools, scope_grants=scope_grants,
             ))
         seen.add(name)

@@ -265,7 +265,6 @@ class TestLoadRhythm:
         assert a.scope_grants == (
             {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
         )
-        assert a.trust_level is None  # no override declared
 
     def test_anchor_without_permission_fields_defaults_empty(self, tmp_path):
         p = tmp_path / "plain.toml"
@@ -277,7 +276,6 @@ class TestLoadRhythm:
         a = load_rhythm(p)[0]
         assert a.allowed_tools == ()
         assert a.scope_grants == ()
-        assert a.trust_level is None
 
     def test_multi_time_anchor_shares_permission_fields(self, tmp_path):
         # The permission fields are an attribute of the activity identity, so
@@ -287,24 +285,28 @@ class TestLoadRhythm:
             [[anchors]]
             time = ["10:00", "19:00"]
             name = "pet"
-            trust_level = "safe"
             allowed_tools = ["run_bash"]
         ''')
         anchors = load_rhythm(p)
         assert len(anchors) == 2
         for a in anchors:
-            assert a.trust_level == "safe"
             assert a.allowed_tools == ("run_bash",)
 
-    def test_anchor_invalid_trust_level_falls_back_guarded(self, tmp_path):
-        p = tmp_path / "badtrust.toml"
+    def test_anchor_trust_level_is_ignored(self, tmp_path):
+        # trust_level is NOT a phase field (issue #525 / Codex review): the
+        # chime path has no planner notify/HOLD gate, so it would be inert.
+        # A rhythm anchor that sets it still loads (tolerant) but the Anchor
+        # carries no trust_level — exposing it would be a false affordance.
+        p = tmp_path / "trustset.toml"
         _write(p, '''
             [[anchors]]
             time = "09:00"
             name = "dawn"
-            trust_level = "paranoid"
+            trust_level = "safe"
         ''')
-        assert load_rhythm(p)[0].trust_level == "guarded"
+        a = load_rhythm(p)[0]
+        assert a.name == "dawn"
+        assert not hasattr(a, "trust_level")
 
     def test_per_agent_isolation_via_separate_paths(self, tmp_path):
         sisi = tmp_path / "sisi" / "rhythm.toml"

@@ -468,8 +468,8 @@ async def _deliver_phase_chime(
         # exactly as the schedule path does in AutonomyDaemon. This is the wire
         # that was missing: without it the fields parse into the Anchor but
         # never reach bot._apply_chime_permissions, so every daily session
-        # re-asks DK for the same routine-safe phase action.
-        trust_level=anchor.trust_level,
+        # re-asks DK for the same routine-safe phase action. trust_level is not
+        # forwarded — the chime path has no planner gate to honour it (#525).
         allowed_tools=anchor.allowed_tools,
         scope_grants=anchor.scope_grants,
     )

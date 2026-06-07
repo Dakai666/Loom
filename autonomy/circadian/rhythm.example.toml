@@ -23,20 +23,25 @@
 #     phase degrades into a scheduler (doc/57 §"Phase chime prompt contract").
 #   - ``public`` is advisory metadata for now; reserved for future
 #     visibility rules (e.g. silent vs. always-speaking phases).
-#   - ``trust_level`` / ``allowed_tools`` / ``scope_grants`` (issue #525) are
-#     the SAME permission fields a ``schedules.toml`` entry uses. They let a
-#     phase do routine tool work — research, write a draft, run the pet
-#     script — WITHOUT re-asking DK every single day. They are pre-authorised
-#     for that phase's turn only, then revoked. This is the agent's own
-#     surface to manage: when you want a phase to do something new, add the
-#     tool here and talk it over with DK. CRITICAL tools always re-confirm
-#     regardless — these fields never widen *that* floor.
-#       · ``allowed_tools = ["fetch_url", "write_file"]`` — pre-authorise these
-#         GUARDED tools (run_bash included) for the phase turn.
+#   - ``allowed_tools`` / ``scope_grants`` (issue #525) let a phase do routine
+#     tool work — research, write a draft, run the pet script — WITHOUT
+#     re-asking DK every single day. They are pre-authorised for that phase's
+#     turn only, then revoked. This is the agent's own surface to manage: when
+#     you want a phase to do something new, add the tool here and talk it over
+#     with DK. CRITICAL tools always re-confirm regardless — these fields never
+#     widen *that* floor. Pick the right one per tool:
+#       · ``allowed_tools = ["fetch_url", "web_search", "run_bash"]`` — a BLANKET
+#         pre-authorisation by tool name. Use for read-only or already-narrow
+#         tools (web reads, the pet script) where the whole-tool grant is fine.
 #       · ``scope_grants = [{ resource = "path", action = "write",
-#         selector = "autonomy/circadian" }]`` — bound a tool to a resource
-#         (write only under this prefix), same dict shape as schedules.toml.
-#       · ``trust_level`` is optional; omit it to keep normal per-tool gating.
+#         selector = "autonomy/circadian" }]`` — a BOUNDED grant. Use for a
+#         broad tool you want to fence (``write_file`` only under this prefix).
+#         The grant alone authorises in-scope calls; an out-of-scope call is
+#         denied. Do NOT also list a fenced tool in ``allowed_tools`` — the
+#         tool-name grant is the blanket form and makes the fence pointless.
+#       · There is no ``trust_level`` field for phases: the chime path has no
+#         planner notify/HOLD gate, so it would be inert. Authorisation here is
+#         allowed_tools + scope_grants only.
 #
 # A missing or malformed file is tolerated: the dawn/close lifecycle from
 # PR1 still runs, the day just has no in-day anchors. A bad time (even one
@@ -84,9 +89,10 @@ meaning = """
 time    = "11:00"
 name    = "curiosity"
 public  = false
-# Research + jot a note: read the web, write only under the circadian dir.
-# The scope_grant bounds write_file to a prefix instead of trusting it blanket.
-allowed_tools = ["fetch_url", "web_search", "write_file"]
+# Research + jot a note: blanket the read-only web tools, but FENCE writing —
+# the scope_grant lets write_file touch only autonomy/circadian, nothing else.
+# write_file is deliberately NOT in allowed_tools (that would un-fence it).
+allowed_tools = ["fetch_url", "web_search"]
 scope_grants  = [{ resource = "path", action = "write", selector = "autonomy/circadian" }]
 meaning = """
 絲絲自己的好奇心散步。
