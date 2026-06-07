@@ -24,6 +24,7 @@ from typing import Awaitable, Callable
 
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
+from loom.autonomy.permission_fields import parse_permission_fields
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.maintenance import (
     ConvergentDreamLoop, DreamLoop, MaintenanceLoop,
@@ -49,7 +50,6 @@ caller should fall back per ``target['fallback']``."""
 # [autonomy] section — so that's what we fingerprint.
 # ---------------------------------------------------------------------------
 
-_VALID_TRUST_LEVELS = {"safe", "guarded", "critical"}
 _CONFIG_HASH_PATH = Path.home() / ".loom" / "schedules.hash"
 
 
@@ -59,15 +59,9 @@ def _hash_schedule_registry(sched_cfg: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _validate_trust_level(value: str, trigger_name: str) -> str:
-    """Validate and return trust_level, defaulting to 'guarded' on invalid."""
-    if value not in _VALID_TRUST_LEVELS:
-        logger.warning(
-            "[autonomy] trigger %r has invalid trust_level=%r, defaulting to 'guarded'",
-            trigger_name, value,
-        )
-        return "guarded"
-    return value
+# trust_level / allowed_tools / scope_grants parsing lives in the shared
+# ``permission_fields`` helper (issue #525) so schedules and circadian rhythm
+# anchors validate their permissions through one code path.
 
 
 def _resolve_attachments(
@@ -489,18 +483,17 @@ class AutonomyDaemon:
                     # Normalise id to string for label matching
                     target["id"] = str(target["id"])
                     target.setdefault("fallback", "skip")
+                perms = parse_permission_fields(sched, name)
                 trigger = CronTrigger(
                     name=sched["name"],
                     intent=sched["intent"],
                     cron=sched.get("cron", "0 9 * * 1-5"),
                     timezone=sched.get("timezone", "UTC"),
-                    trust_level=_validate_trust_level(
-                        sched.get("trust_level", "guarded"), name,
-                    ),
+                    trust_level=perms["trust_level"] or "guarded",
                     notify=sched.get("notify", True),
                     notify_thread_id=sched.get("notify_thread", 0),
-                    allowed_tools=sched.get("allowed_tools", []),
-                    scope_grants=sched.get("scope_grants", []),
+                    allowed_tools=perms["allowed_tools"],
+                    scope_grants=perms["scope_grants"],
                     attach_outputs=sched.get("attach_outputs", []),
                     mode=mode,
                     target=target,
@@ -516,17 +509,16 @@ class AutonomyDaemon:
         for idx, evt in enumerate(sched_cfg.get("triggers", [])):
             name = evt.get("name", f"<triggers[{idx}]>")
             try:
+                perms = parse_permission_fields(evt, name)
                 trigger = EventTrigger(
                     name=evt["name"],
                     intent=evt["intent"],
                     event_name=evt.get("event", evt["name"]),
-                    trust_level=_validate_trust_level(
-                        evt.get("trust_level", "guarded"), name,
-                    ),
+                    trust_level=perms["trust_level"] or "guarded",
                     notify=evt.get("notify", True),
                     notify_thread_id=evt.get("notify_thread", 0),
-                    allowed_tools=evt.get("allowed_tools", []),
-                    scope_grants=evt.get("scope_grants", []),
+                    allowed_tools=perms["allowed_tools"],
+                    scope_grants=perms["scope_grants"],
                     attach_outputs=evt.get("attach_outputs", []),
                 )
             except (KeyError, ValueError) as exc:
