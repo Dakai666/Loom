@@ -137,6 +137,34 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
+-- Prediction Spine P0 (epic #528, spec docs/designs/58 §3.1): episodic
+-- prediction log. A bet the agent makes about the world; reconciled against
+-- runtime observation in the convergent dream. Individual records decay like
+-- episodic memory — the per-domain calibration *residue* lives in
+-- semantic_entries under key `calibration:<domain-or-resolver>` (§3.2).
+-- I1: (claim, due_condition, resolver) are mandatory (enforced in PredictionStore).
+-- I4: status is a state machine (pending → due → reconciled / stale); only a
+--     reconciled record carries a score + observation_ref.
+CREATE TABLE IF NOT EXISTS prediction_records (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL,
+    claim           TEXT NOT NULL,        -- what is predicted (structured/text)
+    due_condition   TEXT NOT NULL,        -- JSON: when it can be reconciled
+    resolver        TEXT NOT NULL,        -- JSON: how to mechanically judge
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending|due|reconciled|stale
+    domain          TEXT NOT NULL DEFAULT 'knowledge',
+    context         TEXT,                 -- optional free context label
+    observation_ref TEXT,                 -- ground-truth pointer, set at reconcile
+    score           REAL,                 -- error_score, NULL until reconciled
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL,
+    reconciled_at   TEXT                  -- NULL until reconciled
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_status ON prediction_records(status);
+CREATE INDEX IF NOT EXISTS idx_prediction_domain ON prediction_records(domain);
+CREATE INDEX IF NOT EXISTS idx_prediction_session ON prediction_records(session_id);
+
 -- Issue #142: Agent self-observability snapshots (one row per dimension per session)
 CREATE TABLE IF NOT EXISTS agent_telemetry (
     dimension   TEXT NOT NULL,
