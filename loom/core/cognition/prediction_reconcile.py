@@ -57,9 +57,14 @@ class ReconcileSkip:
     reason ∈ {"not_settled" (no terminal observation yet),
               "observation_gone" (ref row vanished),
               "unresolvable" (resolver cannot read its field — no silent pass)}
+
+    ``domain`` is carried so slice 4 can attribute skips per-domain (e.g.
+    high ``unresolvable`` in one domain = a resolver-spec bug) without re-joining
+    prediction_records (絲絲 review).
     """
     prediction_id: str
     reason: str
+    domain: str = ""
 
 
 @dataclass
@@ -104,18 +109,18 @@ async def run_prediction_reconciliation(
     for pred in candidates:
         ref = await find_settling_observation(db, pred.due_condition)
         if ref is None:
-            skipped.append(ReconcileSkip(pred.id, "not_settled"))
+            skipped.append(ReconcileSkip(pred.id, "not_settled", pred.domain))
             continue
         observation = await resolve_observation_ref(db, ref)
         if observation is None:
-            skipped.append(ReconcileSkip(pred.id, "observation_gone"))
+            skipped.append(ReconcileSkip(pred.id, "observation_gone", pred.domain))
             continue
         try:
             result = resolve(pred.resolver, observation)
         except (KeyError, ValueError):
             # resolver cannot read the field it needs against this observation —
             # unresolvable, not a free 0.0 (no silent pass; pairs with I4).
-            skipped.append(ReconcileSkip(pred.id, "unresolvable"))
+            skipped.append(ReconcileSkip(pred.id, "unresolvable", pred.domain))
             continue
         proposals.append(
             ReconcileProposal(

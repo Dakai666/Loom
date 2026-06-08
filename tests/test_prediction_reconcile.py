@@ -109,6 +109,7 @@ class TestDryRunReportShape:
         assert report.proposals == []
         assert len(report.skipped) == 1
         assert report.skipped[0].reason == "not_settled"
+        assert report.skipped[0].domain == "cli"  # carried for slice-4 attribution
 
 
 # ---------------------------------------------------------------------------
