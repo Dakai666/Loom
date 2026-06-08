@@ -43,7 +43,7 @@ class PredictionRecord:
     claim: str                                  # what is predicted
     due_condition: dict[str, Any]               # when it can be reconciled
     resolver: dict[str, Any]                     # how to mechanically judge
-    domain: str = "knowledge"
+    domain: str = "knowledge"   # "knowledge"|"cli"|"git"|... — enum/normalize in slice 4
     context: str | None = None
     status: str = "pending"
     observation_ref: str | None = None          # set at reconcile

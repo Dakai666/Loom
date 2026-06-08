@@ -67,7 +67,12 @@ def resolve(resolver: dict, observation: dict) -> ResolverResult:
 
     if kind == "final_state":
         actual = observation["final_state"]
-        expect_in = resolver.get("expect_in", [])
+        expect_in = resolver.get("expect_in") or []
+        if not expect_in:
+            # Fail-fast: an empty expect_in would silently judge every state
+            # wrong (x in [] is always False). A resolver spec that forgot its
+            # set is a write-time mistake, not a 100%-error prediction (絲絲 review).
+            raise ValueError("final_state resolver requires a non-empty expect_in")
         return _binary(actual in expect_in, f"final_state={actual}")
 
     if kind == "output_contains":

@@ -66,6 +66,13 @@ class TestFinalState:
         assert r.matched is False
         assert r.error_score == 1.0
 
+    def test_empty_expect_in_raises(self):
+        """絲絲 review: a forgotten expect_in is a write-time bug, not 100% error."""
+        with pytest.raises(ValueError):
+            resolve({"kind": "final_state"}, {"final_state": "completed"})
+        with pytest.raises(ValueError):
+            resolve({"kind": "final_state", "expect_in": []}, {"final_state": "ok"})
+
 
 class TestOutputContains:
     def test_needle_present_as_expected(self):
@@ -139,6 +146,12 @@ class TestRowCount:
         r = resolve({"kind": "row_count", "expect": 10}, {"row_count": 15})
         assert r.matched is False
         assert 0.0 < r.error_score <= 1.0
+
+    def test_expect_zero_outside_tolerance_caps_at_one(self):
+        """絲絲 review: pin the expect=0 boundary — delta/max(1,0) caps at 1.0."""
+        r = resolve({"kind": "row_count", "expect": 0}, {"row_count": 5})
+        assert r.matched is False
+        assert r.error_score == 1.0
 
 
 class TestDurationBucket:
