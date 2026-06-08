@@ -161,6 +161,10 @@ class TestResolveSessionLog:
 
 class TestFailureStateDriftGuard:
     def test_local_mirror_matches_harness(self):
-        from loom.core.harness.lifecycle import _FAILURE_STATES
-        from loom.core.memory.observation import _FAILURE_STATE_VALUES
+        from loom.core.harness.lifecycle import _FAILURE_STATES, _TERMINAL_STATES
+        from loom.core.memory.observation import (
+            _FAILURE_STATE_VALUES,
+            _TERMINAL_STATE_VALUES,
+        )
         assert _FAILURE_STATE_VALUES == {s.value for s in _FAILURE_STATES}
+        assert _TERMINAL_STATE_VALUES == {s.value for s in _TERMINAL_STATES}

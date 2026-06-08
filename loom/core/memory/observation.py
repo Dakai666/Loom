@@ -41,10 +41,11 @@ OBSERVATION_SOURCES = ("action", "session_log")
 
 _PREFIX_TO_TABLE = {"action": "action_records", "session_log": "session_log"}
 
-# Local mirror of harness ActionState._FAILURE_STATES values (see
-# loom/core/harness/lifecycle.py). Duplicated rather than imported to preserve
-# the one-way memory-layer dependency. Drift-guarded in the test suite.
+# Local mirror of harness ActionState._FAILURE_STATES / _TERMINAL_STATES values
+# (see loom/core/harness/lifecycle.py). Duplicated rather than imported to
+# preserve the one-way memory-layer dependency. Both drift-guarded in the suite.
 _FAILURE_STATE_VALUES = frozenset({"denied", "aborted", "timed_out", "reverted"})
+_TERMINAL_STATE_VALUES = frozenset({"memorialized", "denied", "aborted", "timed_out"})
 
 _REF_RE = re.compile(r"^(?P<prefix>[a-z_]+):(?P<row_id>.+)$")
 
@@ -90,6 +91,34 @@ async def resolve_observation_ref(
     if source == "action":
         return await _resolve_action(db, row_id)
     return await _resolve_session_log(db, row_id)
+
+
+async def find_settling_observation(
+    db: aiosqlite.Connection, due_condition: dict
+) -> str | None:
+    """Find the observation_ref that *settles* a bet, or ``None`` if not yet.
+
+    P0 supports ``after_action``: the bet settles once the named tool call has a
+    **terminal** action_records row. Returns that row's ref (the latest one).
+    An unknown due_condition kind raises (whitelist, like resolvers).
+    """
+    kind = due_condition.get("kind")
+    if kind != "after_action":
+        raise ValueError(
+            f"unknown due_condition kind {kind!r}; P0 supports 'after_action'"
+        )
+    call_id = due_condition.get("call_id")
+    if not call_id:
+        raise ValueError("after_action due_condition requires call_id")
+    placeholders = ",".join("?" * len(_TERMINAL_STATE_VALUES))
+    cur = await db.execute(
+        f"SELECT id FROM action_records WHERE call_id = ? "
+        f"AND final_state IN ({placeholders}) "
+        "ORDER BY created_at DESC LIMIT 1",
+        (call_id, *sorted(_TERMINAL_STATE_VALUES)),
+    )
+    r = await cur.fetchone()
+    return make_observation_ref("action", r[0]) if r else None
 
 
 async def _resolve_action(db: aiosqlite.Connection, row_id: str) -> dict | None:
