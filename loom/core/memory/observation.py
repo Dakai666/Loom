@@ -93,20 +93,11 @@ async def resolve_observation_ref(
     return await _resolve_session_log(db, row_id)
 
 
-async def find_settling_observation(
+async def _find_after_action(
     db: aiosqlite.Connection, due_condition: dict
 ) -> str | None:
-    """Find the observation_ref that *settles* a bet, or ``None`` if not yet.
-
-    P0 supports ``after_action``: the bet settles once the named tool call has a
-    **terminal** action_records row. Returns that row's ref (the latest one).
-    An unknown due_condition kind raises (whitelist, like resolvers).
-    """
-    kind = due_condition.get("kind")
-    if kind != "after_action":
-        raise ValueError(
-            f"unknown due_condition kind {kind!r}; P0 supports 'after_action'"
-        )
+    """Settle once the named tool call has a **terminal** action_records row.
+    Returns the latest such row's ref, or ``None`` if not settled yet."""
     call_id = due_condition.get("call_id")
     if not call_id:
         raise ValueError("after_action due_condition requires call_id")
@@ -119,6 +110,32 @@ async def find_settling_observation(
     )
     r = await cur.fetchone()
     return make_observation_ref("action", r[0]) if r else None
+
+
+# due_condition kind → finder. The extension point: adding ``at_time`` /
+# ``within_window`` (slice 3 second cut) is a registry entry, not an if/elif
+# chain (絲絲 review, PR #532 OQ1).
+DUE_CONDITION_KINDS = {
+    "after_action": _find_after_action,
+}
+
+
+async def find_settling_observation(
+    db: aiosqlite.Connection, due_condition: dict
+) -> str | None:
+    """Find the observation_ref that *settles* a bet, or ``None`` if not yet.
+
+    Dispatches on ``due_condition['kind']`` via ``DUE_CONDITION_KINDS``. An
+    unknown kind raises (whitelist, like resolvers).
+    """
+    kind = due_condition.get("kind")
+    finder = DUE_CONDITION_KINDS.get(kind)
+    if finder is None:
+        raise ValueError(
+            f"unknown due_condition kind {kind!r}; "
+            f"P0 supports {sorted(DUE_CONDITION_KINDS)}"
+        )
+    return await finder(db, due_condition)
 
 
 async def _resolve_action(db: aiosqlite.Connection, row_id: str) -> dict | None:

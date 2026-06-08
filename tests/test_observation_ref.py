@@ -159,6 +159,33 @@ class TestResolveSessionLog:
 # Drift guard — local failure-state mirror must match harness
 # ---------------------------------------------------------------------------
 
+class TestDueConditionDispatch:
+    """OQ1 (絲絲): due_condition kinds resolve via a dispatch table, so adding
+    at_time / within_window later is a registry entry, not another if/elif."""
+
+    def test_dispatch_table_is_the_extension_point(self):
+        from loom.core.memory.observation import DUE_CONDITION_KINDS
+        assert "after_action" in DUE_CONDITION_KINDS
+        assert callable(DUE_CONDITION_KINDS["after_action"])
+
+    async def test_unknown_kind_raises(self, db_conn):
+        from loom.core.memory.observation import find_settling_observation
+        with pytest.raises(ValueError):
+            await find_settling_observation(db_conn, {"kind": "at_time", "iso": "2026-01-01"})
+
+    async def test_after_action_dispatches(self, db_conn):
+        from loom.core.memory.observation import find_settling_observation
+        await _insert_action(
+            db_conn, id="a1", final_state="memorialized",
+            history_to_states=["committed", "memorialized"],
+        )
+        # call_id matched below
+        await db_conn.execute("UPDATE action_records SET call_id = 'cx' WHERE id = 'a1'")
+        await db_conn.commit()
+        ref = await find_settling_observation(db_conn, {"kind": "after_action", "call_id": "cx"})
+        assert ref == "action:a1"
+
+
 class TestFailureStateDriftGuard:
     def test_local_mirror_matches_harness(self):
         from loom.core.harness.lifecycle import _FAILURE_STATES, _TERMINAL_STATES

@@ -113,6 +113,30 @@ class TestDryRunReportShape:
 
 
 # ---------------------------------------------------------------------------
+# Report serialization  (OQ3 — the dream adapter logs this)
+# ---------------------------------------------------------------------------
+
+class TestReportSerialization:
+    async def test_to_dict_shape(self, db_conn):
+        ps = PredictionStore(db_conn)
+        good = _prediction(call_id="c-ok")
+        bad = _prediction(call_id="c-none")  # never settles
+        await ps.write(good)
+        await ps.write(bad)
+        await _settled_ok_action(db_conn, call_id="c-ok", id="act-ok")
+
+        report = await run_prediction_reconciliation(ps, db_conn, execute=False)
+        d = report.to_dict()
+        assert d["executed"] is False
+        assert d["counts"] == {"proposed": 1, "skipped": 1}
+        assert isinstance(d["proposals"], list)
+        assert d["proposals"][0]["observation_ref"] == "action:act-ok"
+        assert isinstance(d["skipped"], list)
+        assert d["skipped"][0]["reason"] == "not_settled"
+        assert d["skipped"][0]["domain"] == "cli"
+
+
+# ---------------------------------------------------------------------------
 # I3 at the function level — dry-run is read-only by construction
 # ---------------------------------------------------------------------------
 

@@ -1161,6 +1161,7 @@ class LoomSession:
             make_convergent_dream_tool,
             make_dream_cycle_tool,
             make_memory_prune_tool,
+            make_prediction_reconcile_tool,
         )
 
         async def _dream_llm_fn(messages: list[dict]) -> str:
@@ -1181,6 +1182,10 @@ class LoomSession:
         self.registry.register(
             make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
         )
+        # Epic #528 (slice 3.5): prediction_reconcile — convergent-dream sibling
+        # that closes the Prediction Spine loop. Read-only by default (dry_run);
+        # judges matured bets against runtime observation, writes a report.
+        self.registry.register(make_prediction_reconcile_tool(db=self._db))
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))

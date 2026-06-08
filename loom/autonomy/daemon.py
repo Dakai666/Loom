@@ -144,6 +144,39 @@ def _check_config_integrity(sched_cfg: dict) -> bool:
         return True  # fail-open
 
 
+async def _run_scheduled_reconcile(db, *, enabled: bool, execute: bool) -> None:
+    """Run the Prediction Spine reconciliation step of the weekly dream (#528 3.5).
+
+    Additive to the consolidation pass, and **isolated**: a reconcile failure
+    must not abort ``_consolidate_once`` — that would roll back the consolidation
+    that already ran (its ``last_run`` would go unmarked and re-fire next check).
+    So failures are swallowed + logged and the weekly loop continues (絲絲 review
+    PR #533 P2). No-op when ``enabled`` is False — the schedule default.
+    """
+    if not enabled:
+        return
+    try:
+        from loom.core.cognition.prediction_reconcile import (
+            run_prediction_reconciliation,
+        )
+        from loom.core.memory.prediction import PredictionStore
+        from loom.autonomy.circadian.journal import append_consolidation_report
+
+        report = await run_prediction_reconciliation(
+            PredictionStore(db), db, execute=execute,
+        )
+        append_consolidation_report(report.render())
+        logger.info(
+            "[consolidation] prediction reconcile execute=%s proposed=%d skipped=%d",
+            execute, len(report.proposals), len(report.skipped),
+        )
+    except Exception as exc:  # noqa: BLE001 — schedule isolation, never veto the loop
+        logger.exception(
+            "[consolidation] prediction reconcile failed; continuing weekly loop: %s",
+            exc,
+        )
+
+
 class AutonomyDaemon:
     """
     Manages the full autonomy lifecycle:
@@ -708,6 +741,16 @@ class AutonomyDaemon:
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
                 plan.pass_id, execute, plan.counts(), plan.deferred_to_next_pass,
             )
+
+            # Epic #528 slice 3.5: the Prediction Spine reconciliation parasitizes
+            # the same weekly cadence (isolated so its failure can't poison the
+            # consolidation pass — see _run_scheduled_reconcile).
+            await _run_scheduled_reconcile(
+                db,
+                enabled=cfg.get("reconcile_enabled", False),
+                execute=bool(cfg.get("reconcile_execute", False)),
+            )
+
             return plan
 
         loop = ConvergentDreamLoop(
