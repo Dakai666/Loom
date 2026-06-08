@@ -708,6 +708,31 @@ class AutonomyDaemon:
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
                 plan.pass_id, execute, plan.counts(), plan.deferred_to_next_pass,
             )
+
+            # Epic #528 slice 3.5: the Prediction Spine reconciliation parasitizes
+            # the same weekly cadence. Its execute gate is INDEPENDENT of the
+            # consolidation one — consolidation execute merges facts (destructive),
+            # reconcile execute only records observation-derived scores (benign), so
+            # reconcile can go execute=true while consolidation stays read-only.
+            # Both default False (P4a): the schedule never writes the spine until
+            # reconcile_execute is deliberately set.
+            if cfg.get("reconcile_enabled", False):
+                from loom.core.cognition.prediction_reconcile import (
+                    run_prediction_reconciliation,
+                )
+                from loom.core.memory.prediction import PredictionStore
+
+                reconcile_execute = bool(cfg.get("reconcile_execute", False))
+                rreport = await run_prediction_reconciliation(
+                    PredictionStore(db), db, execute=reconcile_execute,
+                )
+                append_consolidation_report(rreport.render())
+                logger.info(
+                    "[consolidation] prediction reconcile execute=%s "
+                    "proposed=%d skipped=%d",
+                    reconcile_execute, len(rreport.proposals), len(rreport.skipped),
+                )
+
             return plan
 
         loop = ConvergentDreamLoop(

@@ -77,6 +77,28 @@ class ReconcileReport:
     def settleable(self) -> int:
         return len(self.proposals)
 
+    def render(self) -> str:
+        """Render as a 夢境鞏固-style body for the dream journal (slice 3.5).
+
+        Both the ``prediction_reconcile`` tool and the daemon's weekly loop
+        write this to the circadian dreams file.
+        """
+        lines = [self.summary(), ""]
+        if self.proposals:
+            lines.append("Proposals:")
+            verb = "reconciled" if self.executed else "would reconcile"
+            for p in self.proposals:
+                lines.append(
+                    f"  - [{p.domain}] {verb} {p.prediction_id} vs "
+                    f"{p.observation_ref} ({p.resolver_kind}): "
+                    f"error={p.error_score:.3f} — {p.detail}"
+                )
+        if self.skipped:
+            lines.append("Skipped:")
+            for s in self.skipped:
+                lines.append(f"  - [{s.domain}] {s.prediction_id}: {s.reason}")
+        return "\n".join(lines)
+
     def to_dict(self) -> dict:
         """Serialize for logging by the dream maintenance adapter (slice 3.5)."""
         return {

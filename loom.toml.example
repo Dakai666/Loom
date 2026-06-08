@@ -321,6 +321,14 @@ execute       = false   # P4a read-only; set true for autonomous writes (P4b)
 # count for full coverage. LLM cost is bounded by max_clusters regardless; only
 # local embedding work scales with this number. Raise it as your corpus grows.
 corpus_limit  = 5000
+# Prediction Spine reconciliation (epic #528 slice 3.5). The convergent dream's
+# sibling: judges matured predictions against runtime observation and writes a
+# reconcile report to the same dreams file. Its execute gate is INDEPENDENT of
+# the consolidation ``execute`` above — consolidation execute merges facts
+# (destructive); reconcile execute only records observation-derived scores
+# (benign), so you can flip reconcile on while consolidation stays read-only.
+reconcile_enabled = false   # opt-in: run prediction reconciliation each weekly pass
+reconcile_execute = false   # P4a read-only; set true to commit scores (mark_reconciled)
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer

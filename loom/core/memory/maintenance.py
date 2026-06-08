@@ -333,3 +333,72 @@ def make_convergent_dream_tool(
         executor=_executor,
         trust_level=TrustLevel.SAFE,
     )
+
+
+def make_prediction_reconcile_tool(
+    db: "aiosqlite.Connection",
+    *,
+    timezone: str = "Asia/Taipei",
+    dreams_dir=None,
+) -> ToolDefinition:
+    """Build the ``prediction_reconcile`` ToolDefinition (epic #528, slice 3.5).
+
+    The convergent-dream sibling that closes the Prediction Spine loop on the
+    dream schedule: matured bets are judged against runtime ground truth and a
+    reconcile report is written to the dreams journal.
+
+    **Read-only by default (I3 at the schedule level).** ``dry_run`` defaults to
+    True — the scheduled/triggered pass proposes and reports without writing the
+    spine. Only ``dry_run=false`` commits scores via ``mark_reconciled``, the
+    single write path. This mirrors the convergent dream's P4a discipline so the
+    spine is never written speculatively by a schedule.
+    """
+    from loom.core.cognition.prediction_reconcile import run_prediction_reconciliation
+    from loom.core.memory.prediction import PredictionStore
+    from loom.autonomy.circadian.journal import append_consolidation_report
+
+    async def _executor(call) -> ToolResult:
+        dry_run = bool(call.args.get("dry_run", True))  # P4a: read-only default
+
+        store = PredictionStore(db)
+        report = await run_prediction_reconciliation(store, db, execute=not dry_run)
+
+        path = append_consolidation_report(
+            report.render(),
+            timezone=timezone, dreams_dir=dreams_dir,
+        )
+
+        verb = "reconciled" if report.executed else "would reconcile (dry-run)"
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output=(
+                f"prediction reconcile: {verb} {len(report.proposals)}, "
+                f"skipped {len(report.skipped)}\n  Report: {path}"
+            ),
+        )
+
+    return ToolDefinition(
+        name="prediction_reconcile",
+        description=(
+            "Reconcile matured predictions against runtime observation and write "
+            "a report to the circadian dream journal. Read-only by default "
+            "(dry_run=true): proposes scores without writing the spine. Set "
+            "dry_run=false to commit reconciliation. Counterpart to "
+            "convergent_dream (which consolidates facts)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "Propose without writing the spine (default true). "
+                        "Set false to commit scores via mark_reconciled."
+                    ),
+                    "default": True,
+                },
+            },
+        },
+        executor=_executor,
+        trust_level=TrustLevel.SAFE,
+    )
