@@ -24,7 +24,7 @@ skipped, never silently scored 0.0.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from loom.core.memory.observation import (
     find_settling_observation,
@@ -76,6 +76,18 @@ class ReconcileReport:
     @property
     def settleable(self) -> int:
         return len(self.proposals)
+
+    def to_dict(self) -> dict:
+        """Serialize for logging by the dream maintenance adapter (slice 3.5)."""
+        return {
+            "executed": self.executed,
+            "counts": {
+                "proposed": len(self.proposals),
+                "skipped": len(self.skipped),
+            },
+            "proposals": [asdict(p) for p in self.proposals],
+            "skipped": [asdict(s) for s in self.skipped],
+        }
 
     def summary(self) -> str:
         verb = "reconciled" if self.executed else "would reconcile"
