@@ -39,7 +39,7 @@ is P2); they are computed and broadcast, never acted on here.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from loom.core.memory.ontology import DOMAIN_KNOWLEDGE, TEMPORAL_RECENT
 from loom.core.memory.semantic import SemanticEntry
@@ -82,6 +82,55 @@ class CalibrationSummary:
             "uncertainty": round(self.uncertainty, 4),
             "appraisal_valence": round(self.appraisal_valence, 4),
             "calibration_score": round(self.calibration_score, 4),
+        }
+
+    def to_dict(self) -> dict:
+        """Explicit serialization — every field named, so a future
+        datetime/UUID field can't silently leak through ``asdict`` (絲絲 #532
+        OQ3 carryover). The dream adapter logs this."""
+        return {
+            "domain": self.domain,
+            "key": self.key,
+            "n": self.n,
+            "error_score": round(self.error_score, 4),
+            "uncertainty": round(self.uncertainty, 4),
+            "appraisal_valence": round(self.appraisal_valence, 4),
+            "calibration_score": round(self.calibration_score, 4),
+        }
+
+
+@dataclass
+class CalibrationReport:
+    """Auditable projection of one calibration pass — the dream-journal view.
+
+    ``written`` records whether the residue was actually persisted (execute) or
+    merely computed (dry-run). The per-domain summaries carry the §6 quantities.
+    """
+    written: bool
+    summaries: list = field(default_factory=list)
+
+    def summary(self) -> str:
+        verb = "wrote" if self.written else "would write (dry-run)"
+        return f"calibration: {verb} {len(self.summaries)} domain residue(s)"
+
+    def render(self) -> str:
+        lines = [self.summary()]
+        if self.summaries:
+            lines.append("")
+            verb = "wrote" if self.written else "would write"
+            for s in sorted(self.summaries, key=lambda x: x.domain):
+                lines.append(
+                    f"  - {verb} {s.key}: score={s.calibration_score:.2f} "
+                    f"(n={s.n}, error={s.error_score:.2f}, "
+                    f"uncertainty={s.uncertainty:.2f}, valence={s.appraisal_valence:+.2f})"
+                )
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        return {
+            "written": self.written,
+            "counts": {"domains": len(self.summaries)},
+            "summaries": [s.to_dict() for s in self.summaries],
         }
 
 
@@ -181,3 +230,28 @@ async def write_calibration(
         )
         written.append(s.key)
     return written
+
+
+# Roll the whole reconciled corpus, not just one pass — calibration is a
+# rolling aggregate. Generous so a low-volume P0 store gets everything; ASC by
+# created_at means oldest-first, which is irrelevant when we take them all.
+_CALIBRATION_CORPUS_LIMIT = 5000
+
+
+async def run_calibration_pass(
+    store, semantic, *, execute: bool = False
+) -> CalibrationReport:
+    """Roll every reconciled bet into per-domain calibration residue.
+
+    The slice-4.5 orchestration that rides the convergent dream's cadence. It is
+    independent of whether *this* dream's reconcile scored anything new (絲絲 PR
+    #534): it aggregates the standing reconciled corpus. ``execute=False`` (the
+    default) computes the summaries for the journal but writes nothing (I3);
+    ``execute=True`` persists them via :func:`write_calibration`.
+    """
+    records = await store.list_by_status(
+        "reconciled", limit=_CALIBRATION_CORPUS_LIMIT
+    )
+    summaries = compute_calibration(records)
+    await write_calibration(semantic, summaries, execute=execute)
+    return CalibrationReport(written=execute and bool(summaries), summaries=summaries)

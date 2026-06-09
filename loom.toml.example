@@ -329,6 +329,11 @@ corpus_limit  = 5000
 # (benign), so you can flip reconcile on while consolidation stays read-only.
 reconcile_enabled = false   # opt-in: run prediction reconciliation each weekly pass
 reconcile_execute = false   # P4a read-only; set true to commit scores (mark_reconciled)
+# Calibration residue (epic #528 slice 4.5): rolls reconciled bets into a
+# per-domain ``calibration:<domain>`` semantic summary (the spine's world-model
+# residue). Its write gate is INDEPENDENT of reconcile_execute — flipping
+# reconcile on does NOT start writing calibration. Off by default.
+calibration_write_enabled = false  # opt-in: persist calibration residue each weekly pass
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer

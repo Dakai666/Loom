@@ -35,10 +35,13 @@ from loom.core.memory.store import SQLiteStore
 from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.prediction import PredictionRecord
 from loom.core.memory.ontology import DOMAIN_KNOWLEDGE, TEMPORAL_RECENT
+from loom.core.memory.prediction import PredictionStore
 from loom.core.cognition.calibration import (
     CalibrationSummary,
+    CalibrationReport,
     compute_calibration,
     write_calibration,
+    run_calibration_pass,
     SAMPLE_FLOOR,
 )
 
@@ -191,6 +194,20 @@ class TestAppraisalValence:
         # ...but it still counts toward error_score / calibration
         assert s.error_score == pytest.approx(1.0)
 
+    def test_boundary_n_one_surprising_failure(self):
+        """絲絲 PR #534 P3: pin the −1.0 extreme — a lone, fully-surprising
+        failure saturates appraisal_valence at the bottom of its range."""
+        s = compute_calibration([_reconciled("cli", score=1.0, expect=True)])[0]
+        assert s.n == 1
+        assert s.appraisal_valence == pytest.approx(-1.0)
+
+    def test_boundary_n_one_surprising_success(self):
+        """絲絲 PR #534 P3: pin the +1.0 extreme — a lone, fully-surprising
+        success saturates appraisal_valence at the top of its range."""
+        s = compute_calibration([_reconciled("cli", score=1.0, expect=False)])[0]
+        assert s.n == 1
+        assert s.appraisal_valence == pytest.approx(1.0)
+
 
 class TestQuantityRanges:
     def test_all_quantities_in_range(self):
@@ -329,3 +346,99 @@ class TestDecayBehaviorOptionA:
         assert active == pytest.approx(0.9, abs=0.01)   # untouched by decay
         assert abandoned < active
         assert abandoned < 0.15                          # crossed toward prune
+
+
+# ---------------------------------------------------------------------------
+# Serialization — CalibrationSummary / CalibrationReport (#532 OQ3 carryover)
+# ---------------------------------------------------------------------------
+
+class TestSerialization:
+    def test_summary_to_dict_is_explicit(self):
+        """絲絲 #532 OQ3: explicit serialization, not asdict — every field is
+        named, so a future datetime/UUID field can't silently leak unserialized."""
+        s = compute_calibration([_reconciled("cli", score=0.25, kind="row_count")])[0]
+        d = s.to_dict()
+        assert d == {
+            "domain": "cli",
+            "key": "calibration:cli",
+            "n": 1,
+            "error_score": pytest.approx(0.25),
+            "uncertainty": pytest.approx(0.8),
+            "appraisal_valence": pytest.approx(0.0),
+            "calibration_score": pytest.approx(0.75),
+        }
+
+    def test_report_to_dict_shape(self):
+        report = CalibrationReport(
+            written=False,
+            summaries=compute_calibration([
+                _reconciled("cli", score=0.0),
+                _reconciled("git", score=1.0),
+            ]),
+        )
+        d = report.to_dict()
+        assert d["written"] is False
+        assert d["counts"]["domains"] == 2
+        assert isinstance(d["summaries"], list)
+        assert {s["domain"] for s in d["summaries"]} == {"cli", "git"}
+
+    def test_report_render_is_nonempty(self):
+        report = CalibrationReport(
+            written=True,
+            summaries=compute_calibration([_reconciled("cli", score=0.0)]),
+        )
+        body = report.render()
+        assert "calibration" in body.lower()
+        assert "cli" in body
+
+
+# ---------------------------------------------------------------------------
+# run_calibration_pass — the rolling pass over the store (slice 4.5)
+# ---------------------------------------------------------------------------
+
+async def _seed_reconciled(store, domain, *, score, n=1):
+    for _ in range(n):
+        pred = PredictionRecord(
+            session_id="s", claim="bet",
+            due_condition={"kind": "after_action", "call_id": "c"},
+            resolver={"kind": "tool_success", "expect": True},
+            domain=domain,
+        )
+        await store.write(pred)
+        await store.mark_reconciled(pred.id, score=score, observation_ref="action:a1")
+
+
+class TestRunCalibrationPass:
+    async def test_dry_run_is_read_only(self, store):
+        async with store.connect() as db:
+            ps = PredictionStore(db)
+            sem = SemanticMemory(db)
+            await _seed_reconciled(ps, "cli", score=0.0, n=2)
+
+            report = await run_calibration_pass(ps, sem, execute=False)
+            assert isinstance(report, CalibrationReport)
+            assert report.written is False
+            assert len(report.summaries) == 1            # computed for the report
+            assert await sem.get("calibration:cli") is None   # but nothing written
+
+    async def test_execute_writes_residue(self, store):
+        async with store.connect() as db:
+            ps = PredictionStore(db)
+            sem = SemanticMemory(db)
+            await _seed_reconciled(ps, "cli", score=0.0, n=2)
+            await _seed_reconciled(ps, "git", score=1.0, n=2)
+
+            report = await run_calibration_pass(ps, sem, execute=True)
+            assert report.written is True
+            assert (await sem.get("calibration:cli")).confidence == pytest.approx(1.0)
+            assert (await sem.get("calibration:git")).confidence == pytest.approx(0.0, abs=0.05)
+
+    async def test_pending_only_store_writes_nothing(self, store):
+        """I4 end-to-end: a store with no reconciled bets yields no residue."""
+        async with store.connect() as db:
+            ps = PredictionStore(db)
+            sem = SemanticMemory(db)
+            await ps.write(_pending("cli"))
+            report = await run_calibration_pass(ps, sem, execute=True)
+            assert report.summaries == []
+            assert await sem.get("calibration:cli") is None

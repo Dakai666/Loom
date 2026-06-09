@@ -108,3 +108,53 @@ class TestReconcileTool:
         assert after.status == "reconciled"
         assert after.score == 0.0
         assert after.observation_ref == "action:act-1"
+
+    async def test_calibration_write_is_independent_of_dry_run(self, db_conn, tmp_path):
+        """絲絲 PR #534: the calibration write is gated on its own arg, NOT folded
+        into reconcile's execute. dry_run=false commits scores but writes NO
+        calibration unless write_calibration=true is set deliberately."""
+        from loom.core.memory.maintenance import make_prediction_reconcile_tool
+        from loom.core.memory.semantic import SemanticMemory
+        await _seed_settleable(db_conn)
+
+        tool = make_prediction_reconcile_tool(db_conn, dreams_dir=tmp_path)
+        # reconcile commits, but calibration stays unwritten
+        await tool.executor(_make_call({"dry_run": False}))
+        assert await SemanticMemory(db_conn).get("calibration:cli") is None
+
+    async def test_write_calibration_persists_residue(self, db_conn, tmp_path):
+        from loom.core.memory.maintenance import make_prediction_reconcile_tool
+        from loom.core.memory.semantic import SemanticMemory
+        await _seed_settleable(db_conn)
+
+        tool = make_prediction_reconcile_tool(db_conn, dreams_dir=tmp_path)
+        await tool.executor(_make_call({"dry_run": False, "write_calibration": True}))
+        entry = await SemanticMemory(db_conn).get("calibration:cli")
+        assert entry is not None
+        assert entry.confidence == pytest.approx(1.0)
+
+    async def test_calibration_writes_while_reconcile_stays_dry(self, db_conn, tmp_path):
+        """絲絲 PR #535 P3: the *reverse* independence — reconcile can be a no-op
+        dry-run while calibration still writes, because calibration rolls the
+        *standing* reconciled corpus, not this pass's new scores."""
+        from loom.core.memory.maintenance import make_prediction_reconcile_tool
+        from loom.core.memory.semantic import SemanticMemory
+        # one bet already reconciled in a prior pass (the standing corpus)...
+        prior = PredictionRecord(
+            session_id="s1", claim="bet",
+            due_condition={"kind": "after_action", "call_id": "old"},
+            resolver={"kind": "tool_success", "expect": True}, domain="cli",
+        )
+        await PredictionStore(db_conn).write(prior)
+        await PredictionStore(db_conn).mark_reconciled(
+            prior.id, score=0.0, observation_ref="action:old")
+        # ...plus a fresh settleable bet that this dry-run must NOT score
+        fresh = await _seed_settleable(db_conn)
+
+        tool = make_prediction_reconcile_tool(db_conn, dreams_dir=tmp_path)
+        await tool.executor(_make_call({"dry_run": True, "write_calibration": True}))
+
+        # reconcile stayed read-only: the fresh bet is untouched
+        assert (await PredictionStore(db_conn).get(fresh.id)).status == "pending"
+        # calibration still wrote, from the standing corpus
+        assert (await SemanticMemory(db_conn).get("calibration:cli")) is not None
