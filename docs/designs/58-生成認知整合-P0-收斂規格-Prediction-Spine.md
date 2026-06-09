@@ -1,6 +1,7 @@
 # 生成認知整合 P0 收斂規格 — Prediction Spine
 
-> **狀態**：**收斂規格（P0 拍板範圍）** — 這是 epic 第一階段的單一規格，**issue 開發依據**。
+> **狀態**：**✅ P0 已落地（2026-06-09）** — slice 1/2/3/3.5/4/4.5 全 merge 進 master，spine 全鏈成立：下注 → 對帳 → rolling calibration residue + surprise 三量。**仍預設零行為**——三道 gate（`reconcile_enabled` / `reconcile_execute` / `calibration_write_enabled`）全預設 `false`，要人為翻 `loom.toml` 才寫。**P0 acceptance gate（跑出非平凡/可重複/可審計的 calibration 訊號）需翻開 gate 觀察數週確認後，P1/P2 才啟動。** PR 序列：#529（slice 1+2）、#532（3，含 #531 契約）、#533（3.5）、#534（4）、#535（4.5）；decay tier 拍板見 #530（Option A）。
+> **狀態（原始）**：**收斂規格（P0 拍板範圍）** — 這是 epic 第一階段的單一規格，**issue 開發依據**。
 > **權威分工**：本文是 P0「**做什麼 / 怎麼驗**」的單一真相源；「**為什麼這樣決定 / 四方原話**」讀討論紀錄 `docs/designs/57-生成認知整合-Enactive-Loom-Prediction-Spine-設計.md`。
 > **收斂來源**：#57 四輪討論 —— DK（§1-11）、絲絲（§12）、CC（§13）、Codex（§14）。本文只收**四方已對齊**的部分；尚未對齊的列入 §9 deferred。
 > **參與者**：DK（創意源頭）、CC（developer）、絲絲（Loom Agent，本 feature 直接使用者，修正請求視為 user requirement）、Codex（implementation-facing 交叉設計）。
