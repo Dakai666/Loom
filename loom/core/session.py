@@ -952,6 +952,13 @@ class LoomSession:
 
         # Issue #43: Memory Governance — always-on
         _memory_cfg = _load_loom_config().get("memory", {})
+        # Prediction Spine (#537) — the auto-betting "mouth". Grouped under
+        # [memory.consolidation_dream] with the reconcile/calibration gates so the
+        # whole observation ramp lives in one place, though betting itself is a
+        # session-level (per-tool) input, not a dream activity. Off by default.
+        self._auto_predict_enabled = bool(
+            _memory_cfg.get("consolidation_dream", {}).get("auto_predict_enabled", False)
+        )
         _gov_cfg = dict(_memory_cfg.get("governance", {}))
         # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
         # but also gates session.stop()'s run_decay_cycle path, so plumb
@@ -4009,6 +4016,15 @@ class LoomSession:
             await self._db.commit()
         except Exception:
             pass  # DB write must never crash the pipeline
+
+        # Prediction Spine (#537): co-write the implicit "this tool will succeed"
+        # bet for the action just persisted. Gated (auto_predict_enabled) and
+        # executed-only + self-isolated inside co_write_implicit_bet, so a betting
+        # failure never crashes the lifecycle persistence it rides beside.
+        from loom.core.harness.auto_predict import co_write_implicit_bet
+        await co_write_implicit_bet(
+            self._db, record, enabled=self._auto_predict_enabled
+        )
 
     async def _on_state_change(
         self, record: ActionRecord, old_state: str, new_state: str
