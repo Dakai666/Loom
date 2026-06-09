@@ -354,17 +354,29 @@ def make_prediction_reconcile_tool(
     spine is never written speculatively by a schedule.
     """
     from loom.core.cognition.prediction_reconcile import run_prediction_reconciliation
+    from loom.core.cognition.calibration import run_calibration_pass
     from loom.core.memory.prediction import PredictionStore
+    from loom.core.memory.semantic import SemanticMemory
     from loom.autonomy.circadian.journal import append_consolidation_report
 
     async def _executor(call) -> ToolResult:
         dry_run = bool(call.args.get("dry_run", True))  # P4a: read-only default
+        # Calibration write is gated on its OWN arg, independent of reconcile's
+        # execute (絲絲 PR #534): dry_run=false commits scores but writes no
+        # residue unless write_calibration=true is set deliberately.
+        write_cal = bool(call.args.get("write_calibration", False))
 
         store = PredictionStore(db)
         report = await run_prediction_reconciliation(store, db, execute=not dry_run)
 
+        # Roll reconciled bets into calibration residue. Always computed so the
+        # report shows the landscape; written only when write_calibration=true.
+        cal_report = await run_calibration_pass(
+            store, SemanticMemory(db), execute=write_cal,
+        )
+
         path = append_consolidation_report(
-            report.render(),
+            report.render() + "\n\n" + cal_report.render(),
             timezone=timezone, dreams_dir=dreams_dir,
         )
 
@@ -373,7 +385,8 @@ def make_prediction_reconcile_tool(
             call_id=call.id, tool_name=call.tool_name, success=True,
             output=(
                 f"prediction reconcile: {verb} {len(report.proposals)}, "
-                f"skipped {len(report.skipped)}\n  Report: {path}"
+                f"skipped {len(report.skipped)}; {cal_report.summary()}"
+                f"\n  Report: {path}"
             ),
         )
 
@@ -396,6 +409,15 @@ def make_prediction_reconcile_tool(
                         "Set false to commit scores via mark_reconciled."
                     ),
                     "default": True,
+                },
+                "write_calibration": {
+                    "type": "boolean",
+                    "description": (
+                        "Persist the per-domain calibration residue (default "
+                        "false). Independent of dry_run — calibration always "
+                        "appears in the report, but is only written when true."
+                    ),
+                    "default": False,
                 },
             },
         },
