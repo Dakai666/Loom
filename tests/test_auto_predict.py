@@ -82,6 +82,12 @@ class TestExecutedOnly:
         rec = _record(states=_EXECUTED, call=False)
         assert implicit_bet_for(rec, enabled=True) is None
 
+    def test_sessionless_call_is_not_bet_on(self):
+        """絲絲 PR #538 P3: no session → no bet. A session-less bet would be an
+        orphan to per-session audit; don't write orphan data at volume."""
+        assert implicit_bet_for(_record(states=_EXECUTED, session=""), enabled=True) is None
+        assert implicit_bet_for(_record(states=_EXECUTED, session=None), enabled=True) is None
+
 
 class TestBetShape:
     def test_flat_tool_success_bet(self):

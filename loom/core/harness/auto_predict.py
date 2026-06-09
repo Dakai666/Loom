@@ -54,9 +54,17 @@ def implicit_bet_for(record: ActionRecord, *, enabled: bool) -> PredictionRecord
     if not executed:
         return None
 
+    # No session → no bet. A session-less bet would reconcile fine (it settles by
+    # call_id) but be an orphan to any per-session audit — and this writes
+    # autonomously at volume, so "don't bet rather than write orphan data" keeps
+    # the spine's own hygiene clean (絲絲 PR #538 P3). Drops the empty fallback.
+    session_id = record.call.session_id
+    if not session_id:
+        return None
+
     tool = record.call.tool_name
     return PredictionRecord(
-        session_id=record.call.session_id or "",
+        session_id=session_id,
         claim=f"{tool} will succeed",
         due_condition={"kind": "after_action", "call_id": record.call.id},
         resolver={"kind": "tool_success", "expect": True},
