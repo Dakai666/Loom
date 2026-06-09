@@ -327,6 +327,14 @@ corpus_limit  = 5000
 # the consolidation ``execute`` above — consolidation execute merges facts
 # (destructive); reconcile execute only records observation-derived scores
 # (benign), so you can flip reconcile on while consolidation stays read-only.
+# Auto-betting "mouth" (epic #528 P0.5-a / #537): co-write an implicit
+# "this tool will succeed" bet for every tool action that actually executed,
+# settled later by reconcile. This is the spine's INPUT — without it the
+# reconcile schedule chews an empty table. Session-level (per tool call), not a
+# dream activity, but grouped here so the whole observation ramp is in one place.
+# Observation ramp (flip top-down, watch dreams/ reports between each):
+#   auto_predict_enabled → reconcile_enabled → reconcile_execute → calibration_write_enabled
+auto_predict_enabled = false  # opt-in: start making implicit per-tool bets
 reconcile_enabled = false   # opt-in: run prediction reconciliation each weekly pass
 reconcile_execute = false   # P4a read-only; set true to commit scores (mark_reconciled)
 # Calibration residue (epic #528 slice 4.5): rolls reconciled bets into a
