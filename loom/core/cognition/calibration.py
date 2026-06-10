@@ -40,9 +40,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from loom.core.memory.ontology import DOMAIN_KNOWLEDGE, TEMPORAL_RECENT
 from loom.core.memory.semantic import SemanticEntry
+
+if TYPE_CHECKING:
+    # Forward-ref only: calibration_health imports SAMPLE_FLOOR from here, so a
+    # runtime import would cycle. The string annotation keeps the type precise
+    # without the import (絲絲 PR #542 P3).
+    from loom.core.cognition.calibration_health import CalibrationHealthReport
 
 # Below this many reconciled bets, a domain is "sample-insufficient": you have
 # not exercised it enough to trust its calibration, regardless of accuracy.
@@ -110,7 +117,7 @@ class CalibrationReport:
     summaries: list = field(default_factory=list)
     # P0.5-b (#539): the read-only health verdict over this snapshot. Optional so
     # existing constructions stay back-compatible; populated by run_calibration_pass.
-    health: object | None = None
+    health: "CalibrationHealthReport | None" = None
 
     def summary(self) -> str:
         verb = "wrote" if self.written else "would write (dry-run)"

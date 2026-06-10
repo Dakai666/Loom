@@ -139,6 +139,20 @@ class TestMonoculture:
         report = assess_calibration_health([_summary("run_bash")], records)
         assert report.monoculture is False
 
+    def test_summaries_with_empty_records_flag_monoculture_false(self):
+        """絲絲 PR #542 P2: a caller that computes summaries then hands records=[]
+        (the natural shape if the two are fetched separately) must not crash and
+        must not cry monoculture — diversity is unjudgeable with no records, while
+        each domain still classifies by its own n/score/valence."""
+        report = assess_calibration_health([
+            _summary("run_bash", n=20, error=0.0, valence=0.0),   # low_information
+            _summary("git_push", n=20, error=0.4, valence=-0.3),  # genuine
+        ], [])
+        assert report.monoculture is False
+        assert "too few" in report.monoculture_detail
+        assert _by_domain(report, "run_bash").classification == LOW_INFORMATION
+        assert _by_domain(report, "git_push").classification == GENUINE_SIGNAL
+
     def test_monoculture_ignores_unreconciled_records(self):
         """Only reconciled bets count toward the diversity judgment (I4-adjacent):
         a pile of pending explicit bets must not 'clear' monoculture before they

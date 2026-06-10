@@ -43,8 +43,15 @@ a-priori values, not yet tuned.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from loom.core.cognition.calibration import SAMPLE_FLOOR
+
+if TYPE_CHECKING:
+    # Annotation-only imports — kept out of runtime to avoid coupling the health
+    # layer's import graph to the record/summary modules (絲絲 PR #542 P3).
+    from loom.core.cognition.calibration import CalibrationSummary
+    from loom.core.memory.prediction import PredictionRecord
 
 # At/above this calibration_score a domain is "near-perfect". Combined with flat
 # valence and adequate sample, near-perfect reads as uninformative, not skilful.
@@ -131,7 +138,7 @@ class CalibrationHealthReport:
         }
 
 
-def _classify(summary) -> tuple[str, str]:
+def _classify(summary: "CalibrationSummary") -> tuple[str, str]:
     """Verdict + human reason for one domain. Sample-sufficiency is checked
     first: you cannot call a barely-sampled domain 'uninformative' (you haven't
     looked enough), only 'unstable'."""
@@ -150,7 +157,7 @@ def _classify(summary) -> tuple[str, str]:
     )
 
 
-def _detect_monoculture(records) -> tuple[bool, str]:
+def _detect_monoculture(records: "list[PredictionRecord]") -> tuple[bool, str]:
     """True when every reconciled bet is implicit (``auto:``) with none explicit.
 
     Only *reconciled* bets count (I4-adjacent): a pile of still-pending explicit
@@ -171,7 +178,10 @@ def _detect_monoculture(records) -> tuple[bool, str]:
     return False, f"{explicit}/{n} reconciled bets are explicit wagers"
 
 
-def assess_calibration_health(summaries, records) -> CalibrationHealthReport:
+def assess_calibration_health(
+    summaries: "list[CalibrationSummary]",
+    records: "list[PredictionRecord]",
+) -> CalibrationHealthReport:
     """Assess one calibration snapshot. Pure, read-only (spec §12.4).
 
     ``summaries`` is the per-domain :class:`CalibrationSummary` roll-up;
