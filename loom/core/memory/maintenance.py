@@ -424,3 +424,129 @@ def make_prediction_reconcile_tool(
         executor=_executor,
         trust_level=TrustLevel.SAFE,
     )
+
+
+def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
+    """Build the ``predict`` ToolDefinition (epic #528, P0.5-a slice A, #537).
+
+    The deliberate counterpart to the involuntary heartbeat (``auto_predict``):
+    where the heartbeat only ever bets ``tool_success @ True``, this lets Loom
+    make confidence-varying, resolver-rich wagers about its *next* use of a named
+    tool — the non-trivial signal the §8 acceptance gate needs.
+
+    SAFE: it writes one ``pending`` meta-memory bet and drives no behaviour. The
+    bet binds by ``next_action`` (session + tool + ``after`` anchor), so the
+    existing reconcile settles it against the next ``action_records`` row — no
+    ``call_id`` needed at bet time. The resolver kind is validated against the
+    P0 whitelist *before* writing: P0 refuses to score what it cannot judge
+    mechanically (I2), and refusing at write time beats persisting an
+    unresolvable bet that silently rots.
+    """
+    from datetime import datetime, UTC
+
+    from loom.core.memory.prediction import PredictionRecord, PredictionStore
+    from loom.core.memory.resolvers import KNOWN_RESOLVERS
+
+    # Provenance — tells a deliberate wager apart from the heartbeat's ``auto:``
+    # bets in later analysis (slice B uses ``auto:implicit_tool_success``).
+    _EXPLICIT_CONTEXT = "explicit:predict_tool"
+
+    def _fail(call, msg: str) -> ToolResult:
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=False, output=f"predict refused: {msg}")
+
+    async def _executor(call) -> ToolResult:
+        claim = (call.args.get("claim") or "").strip()
+        tool = (call.args.get("tool") or "").strip()
+        resolver = call.args.get("resolver")
+        if not claim:
+            return _fail(call, "claim is required (I1)")
+        if not tool:
+            return _fail(call, "tool is required — name the tool you're betting on")
+        if not isinstance(resolver, dict) or not resolver.get("kind"):
+            return _fail(call, "resolver is required (I1): a {kind, ...} object")
+        kind = resolver["kind"]
+        if kind not in KNOWN_RESOLVERS:
+            return _fail(
+                call,
+                f"unknown resolver kind {kind!r}; P0 judges only the mechanical "
+                f"whitelist {sorted(KNOWN_RESOLVERS)} (I2 — no free-text vibe bets)",
+            )
+
+        after = datetime.now(UTC).isoformat()
+        bet = PredictionRecord(
+            session_id=call.session_id,
+            claim=claim,
+            due_condition={
+                "kind": "next_action",
+                "session_id": call.session_id,
+                "tool": tool,
+                "after": after,
+            },
+            resolver=resolver,
+            domain=(call.args.get("domain") or tool),
+            context=call.args.get("context") or _EXPLICIT_CONTEXT,
+        )
+        await PredictionStore(db).write(bet)
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output=(
+                f"prediction logged: «{claim}» — settles against the next "
+                f"{tool} action via {kind}. (id={bet.id})"
+            ),
+        )
+
+    return ToolDefinition(
+        name="predict",
+        description=(
+            "Make a falsifiable prediction about the NEXT time a named tool runs "
+            "this session, judged mechanically against the observed action. Use "
+            "to bet on a concrete, checkable outcome — not a vibe. The bet is "
+            "settled later by the reconcile pass and rolled into your per-domain "
+            "calibration. Examples: predict the next run_bash returns 0 rows "
+            "(resolver row_count, expect 0); the next fetch_url output contains "
+            "'200 OK' (output_contains); the next git push will succeed "
+            "(tool_success)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "claim": {
+                    "type": "string",
+                    "description": "Plain-language statement of what you predict.",
+                },
+                "tool": {
+                    "type": "string",
+                    "description": (
+                        "The tool whose next invocation this bet is about "
+                        "(e.g. 'run_bash', 'fetch_url'). Also the default domain."
+                    ),
+                },
+                "resolver": {
+                    "type": "object",
+                    "description": (
+                        "How to judge the bet mechanically. {kind, ...} where "
+                        "kind ∈ {tool_success, final_state, output_contains, "
+                        "output_regex, file_digest_changed, row_count, "
+                        "duration_bucket}. Carry the kind's params, e.g. "
+                        "{kind:'row_count', expect:0} or "
+                        "{kind:'output_contains', needle:'PASS'}."
+                    ),
+                },
+                "domain": {
+                    "type": "string",
+                    "description": (
+                        "Calibration domain to attribute this bet to "
+                        "(default: the tool name)."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional free-text provenance note.",
+                },
+            },
+            "required": ["claim", "tool", "resolver"],
+        },
+        executor=_executor,
+        trust_level=TrustLevel.SAFE,
+    )

@@ -182,6 +182,7 @@ expected_info_gain =
 | **P2 — exploration 臂（#464）** | drift 選向接 `uncertainty` landscape；`expected_info_gain` policy；dark-room 護欄定位 | P0 acceptance gate 通過 |
 | **P3 — 自我維持指標** | 把恆定變量從情緒擴到資源（cost / memory 矛盾度 / process 連續性 / trust）；#57 §9-6 指標清單 | P1 + P2 跑出實測 |
 | 軟判層 | 自由文字「氛圍下注」的 Critic 軟對帳（#57 §9-1 上層） | P0 機械對帳穩定後 |
+| **事件結算下注（`on_event` due）** | 對外部事件（CI 完成 / PR merge / 排程觸發）下注 + 結算 | **撞 I2 邊界**，見 §12.3 — 需先決定「事件如何落成 observation row」 |
 
 ---
 
@@ -195,4 +196,40 @@ expected_info_gain =
 
 ---
 
-*收斂：2026-06-07 | 來源：#57 四輪討論（DK / 絲絲 / CC / Codex）| 狀態：P0 拍板規格，issue 開發依據*
+## 12. P0.5-a 補遺 — 下注入口（the mouth）
+
+> **狀態**：slice B ✅ 落地（#538）；slice A 開發中（本節為依據）。
+> **背景**：P0 建好了「胃」（store → reconcile → calibrate），卻**沒有任何東西在下注**——對帳排程在啃空表。P0.5-a 補上「嘴」。issue #537。
+
+### 12.1 slice B — involuntary heartbeat（已落地）
+
+每個**實際執行過**的 tool action 在 lifecycle 持久化縫（`_on_lifecycle`）留下一注平注 `tool_success @ expect=True`，由既有 reconcile 對 `action_records` 結算。`loom/core/harness/auto_predict.py`，gate = `auto_predict_enabled`。
+
+兩條契約決定：**executed-only**（沒到 `EXECUTING` 不下注——權限拒絕不是世界模型失誤，會用 permission 雜訊污染 calibration）；**per-tool grain**（`domain=tool_name`）。
+
+> 侷限：訊號太平。永遠賭成功 → calibration 只量「原始失敗率」,信心不變化。撐不起 §8 acceptance gate 要的**非平凡**訊號。這是 slice A 的事。
+
+### 12.2 slice A — 顯式 `predict` 工具（本次）
+
+讓 Loom **主動**下信心有差異、resolver 有變化的賭：
+
+> 「我預測這個 grep 回 0 行」(`row_count, expect=0`)、「output 含 PASS」(`output_contains`)、「這次會慢」(`duration_bucket`)。
+
+- **新 due-condition kind `next_action`**：顯式賭在「動作執行前」下,此時還沒有 `call_id`。`due_condition = {kind: "next_action", session_id, tool, after}` 在對帳時找該 session 下、該 tool、`after` 之後的**第一筆 terminal** `action_records` row 結算。`DUE_CONDITION_KINDS` 的一筆 registry entry,結算對 `action_records` → **I2 乾淨**。要求具名 `tool`:給乾淨 domain、天然排除 predict 自身那筆 call。
+- **`predict` 工具**（memory 層,`make_predict_tool`,SAFE,與 `prediction_reconcile` 同層）:`claim` + 目標 `tool` + 結構化 `resolver`(寫入前驗 kind ∈ 白名單,fail-fast)。複用完整 7 resolver palette。
+- **gate `predict_tool_enabled`**(預設 false):延續「每道 spine 能力各自 gate、預設關、非寄生」紀律。納入 ramp,`loom.toml.example` dual-write。
+
+成果:calibration 開始吃到**信心會錯**的賭——不只是「會不會成功」,而是「我對這工具的行為猜得準不準」。
+
+### 12.3 為何 event-settled 賭不在 slice A（I2 邊界)
+
+DK 原構想含「接 `EventTrigger` 做事件結算賭」。摸接點查出兩點:
+
+1. **`TriggerEvaluator.emit()` 是幽靈** — 只在 `EventTrigger` docstring 被提及,全 codebase 無實作。autonomy daemon 用別的方式 dispatch EventTrigger。
+2. **`on_event` 撞 I2**:reconcile 每個 score 必須指向 I2 白名單表(`action_records` / `session_log`)的 row。但外部事件(CI 完成、PR merge)**不是這兩張表的 row**。要嘛 (a) 讓事件先落一筆 observation row 再用既有 reconcile 結算,要嘛 (b) 放寬 I2 白名單加 `events` 來源——動到 spec 視為神聖的 I2 邊界。
+
+這是該 DK 刻意決定的取捨,不混進 slice A。→ 獨立 issue,§10 Deferred 已列。
+
+---
+
+*收斂：2026-06-07 | 來源：#57 四輪討論（DK / 絲絲 / CC / Codex）| 狀態：P0 拍板規格，issue 開發依據 | P0.5-a 補遺：2026-06-10*

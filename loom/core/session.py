@@ -959,6 +959,12 @@ class LoomSession:
         self._auto_predict_enabled = bool(
             _memory_cfg.get("consolidation_dream", {}).get("auto_predict_enabled", False)
         )
+        # slice A (#537): the explicit `predict` tool — deliberate, confidence-
+        # varying wagers. Its own gate, default off, so nothing in the spine acts
+        # until DK flips it (same opt-in discipline as the heartbeat/reconcile).
+        self._predict_tool_enabled = bool(
+            _memory_cfg.get("consolidation_dream", {}).get("predict_tool_enabled", False)
+        )
         _gov_cfg = dict(_memory_cfg.get("governance", {}))
         # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
         # but also gates session.stop()'s run_decay_cycle path, so plumb
@@ -1168,6 +1174,7 @@ class LoomSession:
             make_convergent_dream_tool,
             make_dream_cycle_tool,
             make_memory_prune_tool,
+            make_predict_tool,
             make_prediction_reconcile_tool,
         )
 
@@ -1193,6 +1200,11 @@ class LoomSession:
         # that closes the Prediction Spine loop. Read-only by default (dry_run);
         # judges matured bets against runtime observation, writes a report.
         self.registry.register(make_prediction_reconcile_tool(db=self._db))
+        # Epic #528 (P0.5-a slice A): predict — the deliberate betting mouth.
+        # Gated (predict_tool_enabled, default off): registered only when DK has
+        # opted the spine in, so the tool never appears to the model otherwise.
+        if self._predict_tool_enabled:
+            self.registry.register(make_predict_tool(db=self._db))
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
