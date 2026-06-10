@@ -112,11 +112,44 @@ async def _find_after_action(
     return make_observation_ref("action", r[0]) if r else None
 
 
+async def _find_next_action(
+    db: aiosqlite.Connection, due_condition: dict
+) -> str | None:
+    """Settle against the *next* terminal action for a (session, tool) pair.
+
+    The explicit ``predict`` tool (P0.5-a slice A) bets *before* its target runs,
+    so it has no ``call_id`` to key on like ``after_action`` does. It binds by
+    ``session_id`` + ``tool`` + an ``after`` anchor instead, and settles against
+    the **earliest terminal** ``action_records`` row for that pair created
+    *strictly after* the anchor — i.e. the very next time that tool runs. The
+    predicting tool-call's own row is created at/before the anchor, so the
+    ``created_at > after`` guard excludes it. Still I2-clean: ground truth is an
+    ``action_records`` row, never an LLM narrative.
+    """
+    session_id = due_condition.get("session_id")
+    tool = due_condition.get("tool")
+    after = due_condition.get("after")
+    if not session_id or not tool or not after:
+        raise ValueError(
+            "next_action due_condition requires session_id, tool, and after"
+        )
+    placeholders = ",".join("?" * len(_TERMINAL_STATE_VALUES))
+    cur = await db.execute(
+        f"SELECT id FROM action_records WHERE session_id = ? AND tool_name = ? "
+        f"AND created_at > ? AND final_state IN ({placeholders}) "
+        "ORDER BY created_at ASC LIMIT 1",
+        (session_id, tool, after, *sorted(_TERMINAL_STATE_VALUES)),
+    )
+    r = await cur.fetchone()
+    return make_observation_ref("action", r[0]) if r else None
+
+
 # due_condition kind → finder. The extension point: adding ``at_time`` /
-# ``within_window`` (slice 3 second cut) is a registry entry, not an if/elif
-# chain (絲絲 review, PR #532 OQ1).
+# ``within_window`` later is a registry entry, not an if/elif chain (絲絲
+# review, PR #532 OQ1). ``next_action`` (P0.5-a slice A) joined here.
 DUE_CONDITION_KINDS = {
     "after_action": _find_after_action,
+    "next_action": _find_next_action,
 }
 
 

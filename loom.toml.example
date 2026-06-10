@@ -334,7 +334,13 @@ corpus_limit  = 5000
 # dream activity, but grouped here so the whole observation ramp is in one place.
 # Observation ramp (flip top-down, watch dreams/ reports between each):
 #   auto_predict_enabled → reconcile_enabled → reconcile_execute → calibration_write_enabled
+# predict_tool_enabled is orthogonal — flip it whenever you want Loom to make
+# deliberate, confidence-varying wagers (richer signal than the flat heartbeat).
+# NOTE: either betting gate ON while reconcile_enabled is OFF means bets pile up
+# pending and never settle — a dead-letter backlog, not learning. When you flip a
+# betting gate to observe, flip reconcile_enabled within the same ramp window.
 auto_predict_enabled = false  # opt-in: start making implicit per-tool bets
+predict_tool_enabled = false  # opt-in (slice A #537): expose the explicit `predict` tool
 reconcile_enabled = false   # opt-in: run prediction reconciliation each weekly pass
 reconcile_execute = false   # P4a read-only; set true to commit scores (mark_reconciled)
 # Calibration residue (epic #528 slice 4.5): rolls reconciled bets into a
