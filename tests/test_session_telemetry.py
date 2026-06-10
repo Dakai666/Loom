@@ -49,7 +49,7 @@ class FakeToolCallDim:
 class FakeTelemetry:
     """模擬 AgentTelemetryTracker 的 get() 與 mark_dirty()。"""
 
-    def __init__(self, tool_call_dim: FakeToolCallDim | None = FakeToolCallDim()) -> None:
+    def __init__(self, tool_call_dim: FakeToolCallDim | None = None) -> None:
         self._dims: dict[str, Any] = {}
         if tool_call_dim is not None:
             self._dims["tool_call"] = tool_call_dim
@@ -123,6 +123,23 @@ class TestTelemetryRecordToolSuccessPath:
         }
         # mark_dirty 應被觸發一次
         assert telemetry.mark_dirty_count == 1
+
+    def test_success_with_stray_error_suppresses_error_msg(self):
+        """success=True 但 result.error 意外有值時，error_msg 仍應為 None
+        （production 是 `result.error if not result.success else None`）。"""
+        dim = FakeToolCallDim()
+        telemetry = FakeTelemetry(tool_call_dim=dim)
+        session_shell = _make_session_shell(telemetry)
+        result = ToolResult(
+            call_id="c1", tool_name="read_file", success=True, error="stray",
+        )
+
+        LoomSession._telemetry_record_tool(
+            session_shell, "read_file", result=result, duration_ms=5.0,
+        )
+
+        assert dim.calls[0]["success"] is True
+        assert dim.calls[0]["error_msg"] is None
 
     def test_mark_dirty_fires_after_record(self):
         dim = FakeToolCallDim()

@@ -51,12 +51,20 @@ class FakeInstallCounter:
         return 1  # 假設每次裝一個
 
 
+_UNSET = object()
+
+
 def _make_session_shell(
     workspace: Path,
-    memory: FakeMemory | None = FakeMemory(),
+    memory: FakeMemory | None = _UNSET,
 ) -> SimpleNamespace:
     """最小 session 殼：_memory、workspace、registry 是 _load_plugins 唯一讀的屬性。
-    _get_default_registry() / _get_default_plugin_registry() 由 patch_registries fixture mock。"""
+    _get_default_registry() / _get_default_plugin_registry() 由 patch_registries fixture mock。
+
+    memory 預設值用 _UNSET sentinel：不傳時每次 new 一個 FakeMemory（避免共享可變預設值），
+    顯式傳 None 時保留 None（測 _memory is None 短路）。"""
+    if memory is _UNSET:
+        memory = FakeMemory()
     return SimpleNamespace(
         _memory=memory,
         registry=SimpleNamespace(),  # install_into 會被傳入，target 不需有內容
