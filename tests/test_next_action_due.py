@@ -111,6 +111,43 @@ class TestStrictlyAfter:
         assert ref == "action:next"  # the *next* action, not just any later one
 
 
+class TestUtcIsoStringOrdering:
+    """絲絲 PR #540 P3: ``created_at > after`` is a SQLite *string* comparison,
+    so it only equals time order while every timestamp is the same-zone, fixed-
+    width ISO form. Pin that invariant — a future tz change (e.g. Asia/Taipei for
+    display) leaking into stored created_at would silently break next_action.
+    """
+
+    def test_utc_iso_lexicographic_order_equals_chronological(self):
+        from datetime import datetime, UTC, timedelta
+        base = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+        # spans second/minute/hour rollovers + sub-second precision — the spots
+        # naive string compare would trip if the field weren't zero-padded.
+        dts = [
+            base,
+            base + timedelta(microseconds=1),
+            base + timedelta(seconds=1),
+            base + timedelta(seconds=9),
+            base + timedelta(seconds=10),
+            base + timedelta(minutes=1),
+            base + timedelta(minutes=59, seconds=59),
+            base + timedelta(hours=1),
+        ]
+        isos = [d.isoformat() for d in dts]
+        assert sorted(isos) == isos                     # lexicographic == input
+        assert isos == [d.isoformat() for d in sorted(dts)]  # == chronological
+
+    async def test_finder_respects_anchor_across_second_rollover(self, db_conn):
+        """A bona-fide finder check at the rollover boundary the string compare
+        is most likely to fumble (…:09 vs …:10)."""
+        await _insert_action(db_conn, id="t09", created_at="2026-06-10T12:00:09+00:00")
+        await _insert_action(db_conn, id="t10", created_at="2026-06-10T12:00:10+00:00")
+        # anchored just after :09 — only :10 should settle
+        ref = await find_settling_observation(
+            db_conn, _due(after="2026-06-10T12:00:09.500000+00:00"))
+        assert ref == "action:t10"
+
+
 # ---------------------------------------------------------------------------
 # Session + tool scoping
 # ---------------------------------------------------------------------------
