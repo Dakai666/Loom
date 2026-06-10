@@ -230,6 +230,28 @@ DK 原構想含「接 `EventTrigger` 做事件結算賭」。摸接點查出兩�
 
 這是該 DK 刻意決定的取捨,不混進 slice A。→ 獨立 issue,§10 Deferred 已列。
 
+### 12.4 P0.5-b — calibration 自我監測（免疫系統，#539）
+
+> **狀態**：機制開發中（本節為依據）。issue #539。
+> **動機**：DK 要全自動、不靠人讀 audit 報告。P0 的結構防線（I2/I6/I4/rolling 覆寫/namespaced 衰減）保證「**能寫什麼**」乾淨;缺的是「**有沒有寫歪**」的自我監測。免疫系統長在機制裡、不長在人身上。
+
+**唯讀分析層**，看顧 spine 自己的 `calibration:<domain>` 殘留。**不寫、不驅動行為、不需新 gate**（report-only 本就安全;延續「開關別再多」）。I5/I6 不退步:只讀 calibration + reconciled 記錄,不自創價值判斷、無 sentiment 通道。
+
+**首要驗收點（絲絲 #538 review）**:把「**沒意義的高 calibration**」報告出來。flat 隱式賭下多數 domain calibration 趨近 1.0,這種高分**不是 insight**（是 tool 本來就會成功）。用 domain-stats 區分「平凡趨平」vs「真訊號」。
+
+**本刀做（無狀態旗標,純函式 `assess_calibration_health(summaries, records)`）**:
+- `low_information`(趨平):`calibration_score ≥ HIGH_CAL` 且 `|valence| ≤ FLAT_VALENCE` 且 `n ≥ SAMPLE_FLOOR` → 高但無資訊,消費者不必關注。← **首要驗收點**
+- `sample_insufficient`:`n < SAMPLE_FLOOR` → 統計不穩,顯式提醒別讀 calibration_score。
+- `genuine_signal`:其餘（calibration 明顯偏離 1.0、或 valence 非平）→ 值得消費者注意。
+- `monoculture`（corpus 級）:reconciled 全是 `auto:` 隱式賭、零 `explicit:` → calibration 只在量 tool 可靠度、非預測技巧;**解釋了純 slice-B 階段為何全趨平**,等顯式賭流動後自清。
+
+**整合**:health 在 `run_calibration_pass` 內**一律計算**（唯讀,不受 `calibration_write_enabled` gate 影響）,掛進 `CalibrationReport.render()`,故 `prediction_reconcile` 工具/dream journal 自動顯示。
+
+**Deferred（門檻 + 進階旗標,6/17 真資料後）**:
+- `anomalous_jump`（異常跳變）:需 calibration **歷史快照**,但 rolling 覆寫銷毀歷史 → 要先決定怎麼留前值（讀覆寫前的 entry metadata 比對）。
+- `fragmentation`（domain 碎片化）:同義標籤分裂偵測太 fuzzy,需真資料校準 false-positive。
+- 門檻（`HIGH_CAL`/`FLAT_VALENCE`/`SAMPLE_FLOOR`）現為先驗保守值,觀察 1-2 週後依真分布調。
+
 ---
 
 *收斂：2026-06-07 | 來源：#57 四輪討論（DK / 絲絲 / CC / Codex）| 狀態：P0 拍板規格，issue 開發依據 | P0.5-a 補遺：2026-06-10*

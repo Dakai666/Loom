@@ -108,6 +108,9 @@ class CalibrationReport:
     """
     written: bool
     summaries: list = field(default_factory=list)
+    # P0.5-b (#539): the read-only health verdict over this snapshot. Optional so
+    # existing constructions stay back-compatible; populated by run_calibration_pass.
+    health: object | None = None
 
     def summary(self) -> str:
         verb = "wrote" if self.written else "would write (dry-run)"
@@ -124,14 +127,20 @@ class CalibrationReport:
                     f"(n={s.n}, error={s.error_score:.2f}, "
                     f"uncertainty={s.uncertainty:.2f}, valence={s.appraisal_valence:+.2f})"
                 )
+        if self.health is not None:
+            lines.append("")
+            lines.append(self.health.render())
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "written": self.written,
             "counts": {"domains": len(self.summaries)},
             "summaries": [s.to_dict() for s in self.summaries],
         }
+        if self.health is not None:
+            out["health"] = self.health.to_dict()
+        return out
 
 
 def _record_valence(record) -> float:
@@ -249,9 +258,18 @@ async def run_calibration_pass(
     default) computes the summaries for the journal but writes nothing (I3);
     ``execute=True`` persists them via :func:`write_calibration`.
     """
+    # Local import avoids a module-level cycle: calibration_health imports
+    # SAMPLE_FLOOR from here. The health pass is pure/read-only (spec §12.4) and
+    # computed unconditionally — it rides the report regardless of the write gate,
+    # so the immune verdict shows up in dry-run journals too.
+    from loom.core.cognition.calibration_health import assess_calibration_health
+
     records = await store.list_by_status(
         "reconciled", limit=_CALIBRATION_CORPUS_LIMIT
     )
     summaries = compute_calibration(records)
     await write_calibration(semantic, summaries, execute=execute)
-    return CalibrationReport(written=execute and bool(summaries), summaries=summaries)
+    health = assess_calibration_health(summaries, records)
+    return CalibrationReport(
+        written=execute and bool(summaries), summaries=summaries, health=health,
+    )
