@@ -171,7 +171,7 @@ _meta/
 | 技能 | 分工 |
 |------|------|
 | `deep_researcher` | 執行研究（多維度並行抓資料、寫報告） |
-| `memory_hygiene` | 維護絲絲的 Semantic Memory 健康（去重、清理過期） |
+| 收斂夢 + `loom memory health` | 維護絲絲的 Semantic Memory 健康：去重/矛盾由收斂夢承接，健康快照走 `loom memory health`（取代 retired `memory_hygiene`，#504） |
 | `wiki_maintenance` | 維護 Research Library（蒸餾、lint、整理文件） |
 
 三者各有所屬：**研究執行 → 蒸餾 → Semantic Memory**，形成完整的知識處理流水線。
