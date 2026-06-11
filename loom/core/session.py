@@ -1693,6 +1693,7 @@ class LoomSession:
                         turn_count=self._turn_index,
                         last_active=datetime.now(UTC).isoformat(),
                         title=title,
+                        model=self.current_model(),
                     )
                 except Exception as exc:
                     logger.warning("Session log update failed: %s", exc)
