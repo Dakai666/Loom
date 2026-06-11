@@ -1852,6 +1852,16 @@ class LoomSession:
                 logger.exception(
                     "ledger turn_start emit failed; continuing"
                 )
+        # #469 — bind the names the except/finally handlers read *before* the
+        # try, so a provider error raised during setup (ahead of the in-loop
+        # re-init below) still finds them. Replaces the defensive
+        # locals().get("_stream_retry"/"tool_count", 0) in the except block.
+        # _provider_error carries the caught ResponsesProviderError into the
+        # finally: by then the except has consumed sys.exc_info(), so the
+        # outcome derivation would otherwise misread the failure as "clean".
+        _provider_error: ResponsesProviderError | None = None
+        tool_count = 0
+        _stream_retry = 0
         try:
             self._current_origin = origin
 
@@ -2724,11 +2734,17 @@ class LoomSession:
                 stop_reason=_stop_reason,
             )
         except ResponsesProviderError as exc:
+            # #469 — record the failure so the finally below marks the turn
+            # "error" in the ledger instead of "clean". Streaming consumers see
+            # this as a TurnDropped; non-streaming router.chat() consumers still
+            # receive the raw ResponsesProviderError by design (they own their
+            # own error handling and don't pass through this generator).
+            _provider_error = exc
             logger.error("stream_turn: provider error: %s", exc)
             yield TurnDropped(
                 stop_reason=f"provider_{exc.failure_type}",
-                retry_count=locals().get("_stream_retry", 0),
-                tool_count=locals().get("tool_count", 0),
+                retry_count=_stream_retry,
+                tool_count=tool_count,
                 exhausted=True,
                 provider_error_detail=str(exc),
             )
@@ -2738,7 +2754,12 @@ class LoomSession:
                 if self._ledger_emitter is not None and _ledger_turn_token is not None:
                     import sys as _sys
                     _exc_type = _sys.exc_info()[0]
-                    if _exc_type is None:
+                    if _provider_error is not None:
+                        # #469 — provider error was caught above and turned into
+                        # a TurnDropped, so exc_info() is already cleared here;
+                        # without this branch the turn would record as "clean".
+                        _outcome = "error"
+                    elif _exc_type is None:
                         _outcome = "clean"
                     elif isinstance(_exc_type, type) and issubclass(
                         _exc_type, asyncio.CancelledError
