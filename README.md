@@ -226,6 +226,16 @@ v0.3.6+ introduced a structured decay matrix keyed by `(domain, temporal)`:
 
 `dream_cycle` now supports themed sampling: the sampler rotates through non-empty domains on each call, ensuring relational facts are grounded in diverse fact-types rather than over-sampled from a single domain.
 
+### Consolidation Dream — Memory That Tidies Itself
+
+Sampling is only half of sleep. On a weekly rhythm Loom also runs a **consolidation dream**: it reviews its own memory and proposes housekeeping — merge near-duplicate facts, reconcile contradictions, clear dangling references — then writes a dated report of what it found. Merges preserve the losing fact's wording verbatim so nothing is silently lost, and the pass is read-only by default: it shows its work before it's trusted to act on it.
+
+You can check the store's health any time with a one-shot `loom memory health` — a plain snapshot of fact counts, confidence, uncompressed sessions, and database size.
+
+### Prediction Spine — Learning From Being Wrong *(foundational)*
+
+Loom is starting to keep track of its own expectations: when it acts, it can quietly note what it expected to happen, then later check reality against that and record the gap. Those prediction-vs-outcome residues are reconciled during the consolidation dream and feed a self-calibration signal. This layer is foundational in this release — it observes and records, and does not yet steer behavior — but it's the groundwork for an agent that notices when its model of the world is off.
+
 ---
 
 ## Skills — Procedural Memory with Self-Evolution
@@ -296,6 +306,8 @@ The critical design point: autonomous sessions use the **same `MiddlewarePipelin
 An `ActionPlanner` maps the current trust level and context to a decision path. The agent never silently escalates its own permissions, and autonomous actions are always written to memory for post-hoc inspection.
 
 `MaintenanceLoop` runs decay cycles and housekeeping tasks on a daemon-cron schedule, with a `run()` throttle that prevents overlapping executions.
+
+**Circadian rhythm.** Loom keeps a day — dawn, day, dusk, night phases on its own clock. Each phase can carry its own mood and its own routine-safe permissions, so the agent behaves differently at 3am than at noon without a human flipping switches. Sleep is when the consolidation dream runs; waking re-reads the rhythm config so edits take effect at the next dawn rather than on restart.
 
 ---
 
@@ -424,6 +436,7 @@ The `doc/` directory contains full technical documentation for every subsystem:
 
 | Version | Date | Highlights |
 |---------|------|-----------|
+| **v0.4.0.0** | 2026-06-12 | **Prediction Spine** (Enactive Loom epic #528) — P0 foundation: prediction-record store + resolver whitelist (#529), pure reconciliation pipeline (#532), calibration residue + surprise quantities (#534) wired into the dream schedule (#535); P0.5 — implicit auto-betting mouth + explicit `predict` tool (#537/#538) and calibration self-monitoring / immune system (#539); signal-only — does not yet steer behavior. Circadian phase anchors carry routine-safe permissions (#525) + multi-time rhythm anchors (#526). `memory_hygiene` skill retired → one-shot `loom memory health` CLI (#504). Persisted `sessions.model` no longer goes stale on tier/`/model` switch (#475). Provider telemetry: codex idle watchdog defaults to 300s to catch silent stalls (#470) + provider-error turns recorded as `error` not `clean` (#469). Test-coverage bucket — artifact extractors, plugin safety gate, telemetry hot-path (#543) |
 | **v0.3.9.0** | 2026-06-06 | Memory Consolidation Dream — convergent phase: read-only pass (P1 #488), merge primitive (P2 #489), reconcile + orphan cleanup (P3 #490), weekly read-only schedule (P4a #495); native vision input layer + agent-initiated `see_image` tool (PRs #505–513); CLI animation language (braille · action-family · sustained-action pips · #519–523); autonomy schedule registry extracted to `autonomy/schedules.toml` (#444); circadian rhythm hot-reload at dawn (#477); `session.py` convergence (TierManager #485) + CLI/Discord LivenessSensor (#483) |
 | **v0.3.8.2** | 2026-05-28 | Circadian autonomy lifecycle completed (PRs #459–463); cognition provider split (Codex/xAI) + model identity convergence (PR #474); CLI/Discord LivenessSensor convergence (PR #483); Discord confirm timeout fix (PR #484) |
 | **v0.3.8.1** | 2026-05-23 | Lens import family retired (`loom import` CLI · `Hermes`/`OpenAI` lenses removed); extensibility surface convergence to `@loom.tool` / `LoomPlugin` / MCP (PR #442) |
