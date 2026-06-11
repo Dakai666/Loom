@@ -127,10 +127,12 @@ reminder_after_turns = 10
 #                                      # event before declaring a ttfb_timeout. Default 45s.
 #                                      # Set 0 to disable (e.g. if the backend buffers and emits
 #                                      # no early event on very heavy reasoning turns).
-# idle_event_timeout  = 0.0            # SSE watchdog: max seconds between events after the first
-#                                      # one before declaring an idle_timeout. Default 0 = off,
-#                                      # so long reasoning gaps don't false-trip; the overall
-#                                      # ``timeout`` above still bounds the request.
+# idle_event_timeout  = 300.0          # SSE watchdog: max seconds between events after the first
+#                                      # one before declaring an idle_timeout. Default 300s for
+#                                      # codex (#470): reasoning legitimately runs ~5 min, but a
+#                                      # true hang (observed 7.7-min silent stall) would otherwise
+#                                      # sit invisible until manual cancel. 300s converts it into
+#                                      # a structured idle_timeout. Set 0 to disable.
 
 # [providers.xai_oauth]
 # enabled          = true              # optional; explicit --model xai/... also registers it

@@ -188,6 +188,45 @@ async def test_emit_turn_end_links_to_turn_start(
         await session.stop()
 
 
+async def test_provider_error_turn_records_error_not_clean(
+    monkeypatch, tmp_path, session_module
+):
+    """#469 — a ResponsesProviderError is caught and turned into TurnDropped, so
+    by the time the finally derives the turn outcome from sys.exc_info() the
+    exception is already consumed. Without the explicit _provider_error flag the
+    turn would be misrecorded as ``clean``; it must be ``error``."""
+    from loom.core.cognition.responses_sse import ResponsesProviderError
+    from loom.core.events import TurnDropped
+
+    session = await _start_session(monkeypatch, tmp_path, session_module)
+    try:
+        async def _boom(*args, **kwargs):
+            raise ResponsesProviderError(
+                provider="codex", model="codex/gpt-5.5",
+                failure_type="idle_timeout", phase="reasoning",
+                detail="silent stall",
+            )
+            yield  # pragma: no cover — marks this an async generator
+
+        session.router.stream_chat = _boom
+
+        captured: list[str] = []
+        orig_end = session._emit_ledger_turn_end
+
+        async def _spy_end(turn_id, outcome, duration_ms):
+            captured.append(outcome)
+            return await orig_end(turn_id, outcome, duration_ms)
+
+        session._emit_ledger_turn_end = _spy_end
+
+        events = [ev async for ev in session.stream_turn("hello")]
+
+        assert any(isinstance(ev, TurnDropped) for ev in events)
+        assert captured == ["error"]
+    finally:
+        await session.stop()
+
+
 # ---------------------------------------------------------------------------
 # Step 5 cutover — _build_envelope_view delegates to LedgerEnvelopeProjector
 # ---------------------------------------------------------------------------
