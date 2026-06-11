@@ -10,7 +10,6 @@ from . import vision as _vision
 from .responses_policy import normalize_reasoning_effort
 from .responses_sse import (
     DEFAULT_FIRST_EVENT_TIMEOUT,
-    DEFAULT_IDLE_EVENT_TIMEOUT,
     ResponsesProviderError,
     ResponsesStreamState,
     _ReasoningStreamWrapper,
@@ -91,6 +90,12 @@ class CodexResponsesProvider(LLMProvider):
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
     DEFAULT_TIMEOUT = 600.0
+    # #470: codex reasoning legitimately runs ~5 min; a true hang (observed
+    # 7.7-min silent stall, turn_0b965add0990) would otherwise sit invisible
+    # because the shared idle default is 0/off. 300s converts the silent stall
+    # into a structured idle_timeout while leaving normal deep reasoning room.
+    # codex-specific — xai keeps the shared 0.0 default unless shown to need it.
+    DEFAULT_CODEX_IDLE_EVENT_TIMEOUT = 300.0
     SUPPORTS_MAX_OUTPUT_TOKENS = False
 
     def __init__(
@@ -112,7 +117,7 @@ class CodexResponsesProvider(LLMProvider):
             else first_event_timeout
         )
         self._idle_event_timeout = (
-            DEFAULT_IDLE_EVENT_TIMEOUT
+            self.DEFAULT_CODEX_IDLE_EVENT_TIMEOUT
             if idle_event_timeout is None or idle_event_timeout < 0
             else idle_event_timeout
         )

@@ -144,6 +144,22 @@ def test_codex_provider_default_timeout_is_600_seconds():
     assert overridden._timeout == 900.0
 
 
+def test_codex_provider_idle_event_timeout_defaults_to_300():
+    """#470: codex defaults idle_event_timeout to 300s so a silent reasoning
+    stall (observed 7.7-min hang) becomes a structured idle_timeout instead of
+    sitting invisible. xai keeps the shared 0/off default."""
+    provider = CodexResponsesProvider(model="codex/gpt-5.5")
+    assert provider._idle_event_timeout == 300.0
+    # Explicit config (wired from [providers.codex].idle_event_timeout) wins,
+    # including 0 to opt back out.
+    assert CodexResponsesProvider(
+        model="codex/gpt-5.5", idle_event_timeout=0.0
+    )._idle_event_timeout == 0.0
+    assert CodexResponsesProvider(
+        model="codex/gpt-5.5", idle_event_timeout=120.0
+    )._idle_event_timeout == 120.0
+
+
 def test_codex_provider_first_event_timeout_can_be_disabled():
     provider = CodexResponsesProvider(
         model="codex/gpt-5.5",
