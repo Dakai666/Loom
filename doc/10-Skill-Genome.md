@@ -46,7 +46,6 @@ precondition_checks:
 skills/
 ├── code_weaver/              ← loom_engineer + systematic_code_analyst 合併（v0.3.6.0）
 ├── task_list/
-├── memory_hygiene/
 ├── meta-skill-engineer/
 ├── async_jobs/
 ├── audio_transcriber/

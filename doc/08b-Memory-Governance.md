@@ -170,7 +170,7 @@ admitted_facts = [
 2. **Time-window admission gate** — 短時間窗（預設 30 秒）內，同一條 source 對相同主題的重複寫入會被 throttle，避免 LLM 在多輪 reasoning 連續產出 near-dup
 3. **三層 prompt** — 寫入時若偵測到 near-dup，給 agent 三種選項：merge / replace / skip，而不是直接靜默 drop（讓 agent 有決策視野）
 
-實作配合的 `memorize` 工具也在寫入時自動 surface near-duplicate hint（PR #409），同時 `skills/memory_hygiene/` 提供批次 dedup 入口（PR #410+#413）。
+實作配合的 `memorize` 工具也在寫入時自動 surface near-duplicate hint（PR #409）。批次 dedup 已改由收斂夢的 MERGE 臂承接（epic #491），取代退役的 `memory_hygiene` 技能（#504）；store 快照改用一次性的 `loom memory health` 指令查看。
 
 設計討論見 issue #411；存量 dedup 跑過後 semantic facts 從 6.6k 降到 5.7k（-13.8%）。
 

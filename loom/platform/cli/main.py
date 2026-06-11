@@ -2118,6 +2118,101 @@ async def _memory_list(db: str, limit: int) -> None:
         )
 
 
+async def _gather_memory_health(conn) -> dict:
+    """Read-only health snapshot over the live memory schema (#504).
+
+    Slimmed from the retired ``memory_hygiene`` skill's stage-1 diagnostic.
+    Pure aggregation — never mutates. ``relational`` metrics are gone (the
+    relational layer retired in #451); triples now live in semantic.
+    """
+    sem = SemanticMemory(conn)
+
+    total = await sem.count()
+    compressed_sessions = await sem.count_compressed_sessions()
+
+    cur = await conn.execute(
+        "SELECT COUNT(*) FROM semantic_entries WHERE confidence < 0.3"
+    )
+    low_conf = (await cur.fetchone())[0]
+
+    cur = await conn.execute("SELECT MIN(updated_at) FROM semantic_entries")
+    oldest = (await cur.fetchone())[0]
+
+    cur = await conn.execute(
+        "SELECT domain, COUNT(*) FROM semantic_entries GROUP BY domain "
+        "ORDER BY COUNT(*) DESC"
+    )
+    by_domain = await cur.fetchall()
+
+    cur = await conn.execute(
+        "SELECT COUNT(DISTINCT session_id) FROM episodic_entries "
+        "WHERE compressed_at IS NULL"
+    )
+    uncompressed = (await cur.fetchone())[0]
+
+    pr = ProceduralMemory(conn)
+    skills = await pr.list_active()
+    low_conf_skills = [s.name for s in skills if s.confidence < 0.5]
+
+    return {
+        "semantic_total": total,
+        "semantic_low_conf": low_conf,
+        "semantic_oldest": oldest,
+        "semantic_by_domain": by_domain,
+        "episodic_uncompressed_sessions": uncompressed,
+        "compressed_sessions": compressed_sessions,
+        "skills_active": len(skills),
+        "skills_low_conf": low_conf_skills,
+    }
+
+
+@memory.command("health")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+def memory_health(db: str) -> None:
+    """One-shot memory health snapshot (counts, confidence, DB size)."""
+    asyncio.run(_memory_health(db))
+
+
+async def _memory_health(db: str) -> None:
+    from rich.table import Table
+
+    store = SQLiteStore(db)
+    await store.initialize()
+    async with store.connect() as conn:
+        h = await _gather_memory_health(conn)
+
+    db_path = Path(db).expanduser()
+    db_mb = db_path.stat().st_size / 1e6 if db_path.is_file() else 0.0
+    wal = db_path.with_suffix(db_path.suffix + "-wal")
+    wal_mb = wal.stat().st_size / 1e6 if wal.is_file() else 0.0
+
+    table = Table(title="Memory Health", show_header=True, header_style="loom.accent")
+    table.add_column("指標")
+    table.add_column("數值", justify="right")
+    table.add_column("狀態")
+
+    def status(ok: bool) -> str:
+        return "[green]OK[/green]" if ok else "[yellow]WARNING[/yellow]"
+
+    table.add_row("Semantic 條目數", str(h["semantic_total"]), status(h["semantic_total"] < 1000))
+    table.add_row("低 confidence (<0.3)", str(h["semantic_low_conf"]), status(h["semantic_low_conf"] == 0))
+    table.add_row("最舊條目", h["semantic_oldest"] or "—", "")
+    table.add_row("未壓縮 episodic sessions", str(h["episodic_uncompressed_sessions"]),
+                  status(h["episodic_uncompressed_sessions"] < 10))
+    table.add_row("已壓縮 sessions", str(h["compressed_sessions"]), "")
+    skill_names = ", ".join(h["skills_low_conf"]) or "—"
+    table.add_row("低信心技能 (<0.5)", skill_names, status(not h["skills_low_conf"]))
+    table.add_row("DB 大小", f"{db_mb:.1f} MB", status(db_mb < 100))
+    table.add_row("WAL 大小", f"{wal_mb:.1f} MB", status(wal_mb < 50))
+
+    console.print(table)
+
+    if h["semantic_by_domain"]:
+        console.print(Rule("[loom.accent]Domain 分布[/loom.accent]"))
+        for domain, count in h["semantic_by_domain"]:
+            console.print(f"  [loom.muted]{domain or '—'}[/loom.muted]  {count}")
+
+
 # ---------------------------------------------------------------------------
 
 

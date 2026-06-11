@@ -192,7 +192,7 @@ session end
   └─ Decay Cycle: episodic TTL prune · semantic low-confidence prune · relational dreaming decay
 ```
 
-Semantic-dup detection and the time-window admission gate landed in v0.3.8.0 (PR #411); the existing `memorize` tool also surfaces near-duplicate hints at write time. Batch dedup is available through the `skills/memory_hygiene/` skill — running the cleanup against existing stores brought semantic fact counts down 6.6k → 5.7k (-13.8%).
+Semantic-dup detection and the time-window admission gate landed in v0.3.8.0 (PR #411); the existing `memorize` tool also surfaces near-duplicate hints at write time. Batch dedup is now handled by the consolidation dream's MERGE arm (epic #491), which supersedes the retired `memory_hygiene` skill (#504); a one-shot `loom memory health` reports a store snapshot on demand.
 
 Trust tiers (highest → lowest): `user_explicit` → `tool_verified` → `agent_memorize` → `session_compress` → `counter_factual` → `agent_inferred` → `skill_evolution` → `dreaming` → `external`
 
