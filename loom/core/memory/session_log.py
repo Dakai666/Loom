@@ -286,16 +286,22 @@ class SessionLog:
         turn_count: int,
         last_active: str,
         title: str | None,
+        model: str | None = None,
     ) -> None:
         """Update metadata after each turn or on stop().
-        COALESCE(title, ?) preserves the title once it has been set."""
+
+        COALESCE(title, ?) preserves the title once it has been set.
+        ``model`` tracks the active model so the persisted row reflects what
+        actually served (tier escalation / ``/model``); COALESCE(?, model)
+        means omitting it (or passing None) keeps the stored value (#475)."""
         await self._db.execute(
             """
             UPDATE sessions
-            SET turn_count = ?, last_active = ?, title = COALESCE(title, ?)
+            SET turn_count = ?, last_active = ?, title = COALESCE(title, ?),
+                model = COALESCE(?, model)
             WHERE session_id = ?
             """,
-            (turn_count, last_active, title, session_id),
+            (turn_count, last_active, title, model, session_id),
         )
         await self._db.commit()
 
