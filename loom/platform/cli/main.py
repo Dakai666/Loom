@@ -2791,6 +2791,29 @@ async def _discord_with_autonomy(
     session = LoomSession(model=model, db_path=db)
     await session.start()
 
+    # The autonomy session has no bound thread, so the per-thread Discord
+    # tools aren't registered here. Give it the two that create / verify their
+    # own destination: forum publish + forum read. This is the publish path
+    # for schedules like the daily morning briefing. We only register —
+    # per-schedule `allowed_tools` does the authorize/revoke. Gated on
+    # DISCORD_NEWS_FORUM_ID: unset ⇒ don't register (honest tool-not-found
+    # rather than a runtime error inside a schedule run).
+    from loom.platform.discord.tools import (
+        make_create_discord_forum_post_tool,
+        make_read_discord_forum_tool,
+        resolve_news_forum_id,
+    )
+    _forum_id = resolve_news_forum_id()
+    if _forum_id is not None:
+        session.registry.register(
+            make_create_discord_forum_post_tool(
+                bot._client, session.workspace, default_forum_id=_forum_id,
+            )
+        )
+        session.registry.register(
+            make_read_discord_forum_tool(bot._client, default_forum_id=_forum_id)
+        )
+
     # Patch autonomy session's confirm → Discord notify channel button,
     # same as thread sessions. Without this, GUARDED tool confirmations
     # fall through to the CLI prompt (Allow? [y/N]:) on shutdown.
