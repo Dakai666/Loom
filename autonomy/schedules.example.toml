@@ -20,6 +20,11 @@
 # ``scope_grants`` — otherwise a GUARDED run gets denied. ``cron`` strings are
 # UTC (hand-convert from local time); the per-schedule ``timezone`` field is
 # currently a no-op.
+#
+# Discord forum publishing: a schedule with no bound thread can still publish
+# by creating a forum post via ``create_discord_forum_post`` (allowed_tools).
+# The target forum defaults to ``DISCORD_NEWS_FORUM_ID`` in ``.env``; pass
+# ``forum_channel_id`` to the tool to override. See 範例 4b below.
 
 # ── 範例 1: 每日記憶整理（dream + housekeeping） ─────────────────
 [[schedules]]
@@ -74,6 +79,26 @@ allowed_tools = ["write_file", "web_search"]
   type     = "discord_thread"
   id       = "REPLACE_WITH_THREAD_ID"   # 部署細節（非 secret）；放本檔不入 git
   fallback = "skip"
+
+# ── 範例 4b: 論壇發布（自建貼文，無需綁定討論串） ─────────────────
+# 一般 planner 排程（非 chime），跑在 autonomy session 上。寫完文件後呼叫
+# create_discord_forum_post 把「說明＋新聞文件」發成一則論壇貼文。
+# 論壇預設取 .env 的 DISCORD_NEWS_FORUM_ID。
+[[schedules]]
+name          = "news_forum_post"
+cron          = "0 1 * * *"
+intent        = """產製今日晨報，寫入 news/YYYY-MM-DD/ 後，呼叫
+  create_discord_forum_post(
+    title="YYYY-MM-DD 晨報",
+    content=<晨報導讀摘要>,
+    files=["news/YYYY-MM-DD/daily_briefing.md", ...其餘分軌檔],
+  )
+把說明文字＋新聞文件一次發成論壇貼文（forum 取 .env 預設）。"""
+trust_level   = "safe"
+allowed_tools = ["write_file", "web_search", "create_discord_forum_post"]
+scope_grants  = [
+  { resource = "path", action = "write", selector = "news" },
+]
 
 # ── 範例 5: event trigger（外部訊號觸發） ─────────────────────────
 [[triggers]]
