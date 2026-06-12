@@ -97,9 +97,12 @@ from loom.platform.cli.ui import (
 from loom.autonomy.chime import ChimeRequest, format_chime_content
 from loom.platform.discord.tools import (
     make_add_discord_reaction_tool,
+    make_create_discord_forum_post_tool,
+    make_read_discord_forum_tool,
     make_send_discord_embed_tool,
     make_send_discord_file_tool,
     make_send_discord_select_tool,
+    resolve_news_forum_id,
 )
 from loom.platform.discord.reactions import REACTION
 
@@ -694,6 +697,25 @@ class LoomDiscordBot:
         session.perm.authorize("send_discord_embed")
         session.perm.authorize("send_discord_select")
         session.perm.authorize("add_discord_reaction")
+
+        # Forum publish + read (issue: thread-session 絲絲 also needs to post to
+        # and verify the news forum, not just the autonomy daemon). Gated on
+        # DISCORD_NEWS_FORUM_ID being configured. The read tool is SAFE and
+        # pre-authorized like the other read-ish Discord tools; the publish
+        # tool stays GUARDED and is *not* pre-authorized — creating a public
+        # forum post warrants the human confirm button, unlike sending a file
+        # into the current thread.
+        _forum_id = resolve_news_forum_id()
+        if _forum_id is not None:
+            session.registry.register(
+                make_create_discord_forum_post_tool(
+                    self._client, session.workspace, default_forum_id=_forum_id,
+                )
+            )
+            session.registry.register(
+                make_read_discord_forum_tool(self._client, default_forum_id=_forum_id)
+            )
+            session.perm.authorize("read_discord_forum")
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:

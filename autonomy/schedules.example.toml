@@ -84,6 +84,11 @@ allowed_tools = ["write_file", "web_search"]
 # 一般 planner 排程（非 chime），跑在 autonomy session 上。寫完文件後呼叫
 # create_discord_forum_post 把「說明＋新聞文件」發成一則論壇貼文。
 # 論壇預設取 .env 的 DISCORD_NEWS_FORUM_ID。
+#
+# 註：create_discord_forum_post 本身是 GUARDED 工具。schedule 的
+# trust_level = "safe" 不會降低它的等級——autonomy session 會把 confirm 導到
+# Discord notify channel 按鈕，所以發布前仍走授權（與 schedule trust level 不衝突）。
+# 也因此 schedule 必須在 allowed_tools 明列它才會被授權。
 [[schedules]]
 name          = "news_forum_post"
 cron          = "0 1 * * *"
@@ -93,9 +98,10 @@ intent        = """產製今日晨報，寫入 news/YYYY-MM-DD/ 後，呼叫
     content=<晨報導讀摘要>,
     files=["news/YYYY-MM-DD/daily_briefing.md", ...其餘分軌檔],
   )
-把說明文字＋新聞文件一次發成論壇貼文（forum 取 .env 預設）。"""
+把說明文字＋新聞文件一次發成論壇貼文（forum 取 .env 預設），
+再用 read_discord_forum（list 模式）確認貼文出現在論壇清單。"""
 trust_level   = "safe"
-allowed_tools = ["write_file", "web_search", "create_discord_forum_post"]
+allowed_tools = ["write_file", "web_search", "create_discord_forum_post", "read_discord_forum"]
 scope_grants  = [
   { resource = "path", action = "write", selector = "news" },
 ]

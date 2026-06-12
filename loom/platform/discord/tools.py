@@ -6,6 +6,8 @@ Provides capabilities to send files and rich embeds directly to the Discord thre
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -15,6 +17,31 @@ if TYPE_CHECKING:
 from loom.core.harness.registry import ToolDefinition
 from loom.core.harness.permissions import TrustLevel
 from loom.core.harness.middleware import ToolCall, ToolResult
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_news_forum_id() -> int | None:
+    """Read ``DISCORD_NEWS_FORUM_ID`` from env as an int, else ``None``.
+
+    Shared by the autonomy-session and per-thread-session wiring so both
+    decide "register the forum tools at all?" identically: a missing or
+    malformed value means **don't register** (an honest tool-not-found at
+    call time, matching how other env-gated tools behave) rather than a
+    runtime error deep inside a schedule run.
+    """
+    raw = os.getenv("DISCORD_NEWS_FORUM_ID")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "DISCORD_NEWS_FORUM_ID is set but not a valid int: %r — "
+            "forum tools will not be registered",
+            raw,
+        )
+        return None
 
 
 # Discord SelectMenu hard limits — surface as constants so callers and tests
@@ -607,7 +634,9 @@ def make_create_discord_forum_post_tool(
                 error=f"Channel {forum_id} is not a forum channel ({type(forum).__name__}).",
             )
 
-        title: str = call.args["title"].strip()[:_FORUM_TITLE_MAX]
+        raw_title: str = call.args["title"].strip()
+        title = raw_title[:_FORUM_TITLE_MAX]
+        title_truncated = len(raw_title) > _FORUM_TITLE_MAX
         chunks = _chunk_content(call.args["content"])
 
         # Match requested tag names against the forum's available tags
@@ -616,7 +645,7 @@ def make_create_discord_forum_post_tool(
         requested = {str(t).lower() for t in (call.args.get("tags") or [])}
         if requested:
             applied_tags = [
-                t for t in getattr(forum, "available_tags", [])
+                t for t in forum.available_tags
                 if t.name.lower() in requested
             ]
 
@@ -651,13 +680,20 @@ def make_create_discord_forum_post_tool(
                 output={
                     "thread_id": thread.id,
                     "jump_url": getattr(thread, "jump_url", None),
+                    "title": title,
+                    "title_truncated": title_truncated,
                     "warning": f"Post created but a follow-up message failed: {e}",
                 },
             )
 
         return ToolResult(
             call.id, call.tool_name, True,
-            output={"thread_id": thread.id, "jump_url": getattr(thread, "jump_url", None)},
+            output={
+                "thread_id": thread.id,
+                "jump_url": getattr(thread, "jump_url", None),
+                "title": title,
+                "title_truncated": title_truncated,
+            },
         )
 
     return ToolDefinition(
@@ -699,6 +735,153 @@ def make_create_discord_forum_post_tool(
                 },
             },
             "required": ["title", "content"],
+        },
+        executor=executor,
+    )
+
+
+def make_read_discord_forum_tool(
+    client: discord.Client,
+    *,
+    default_forum_id: int | None = None,
+) -> ToolDefinition:
+    """Tool factory for ``read_discord_forum`` — the verify side of
+    ``create_discord_forum_post``.
+
+    Two modes:
+    - **list** (no ``thread_id``): the most recent posts in the forum, so the
+      agent can confirm its own post landed (title / id / url / created_at).
+      Active threads plus recent archived threads, newest first.
+    - **detail** (``thread_id`` given): that post's title, url, and starter
+      message body — so the agent can read back what it actually published.
+
+    Read-only ⇒ ``TrustLevel.SAFE``. Forum defaults to DISCORD_NEWS_FORUM_ID.
+    """
+    async def executor(call: ToolCall) -> ToolResult:
+        import discord as _discord
+
+        raw_fid = call.args.get("forum_channel_id")
+        try:
+            forum_id = int(raw_fid) if raw_fid is not None else (
+                int(default_forum_id) if default_forum_id is not None else None
+            )
+        except (TypeError, ValueError):
+            return ToolResult(call.id, call.tool_name, False, error="Invalid 'forum_channel_id'.")
+        if forum_id is None:
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error="No forum channel — pass 'forum_channel_id' or set DISCORD_NEWS_FORUM_ID.",
+            )
+
+        # Detail mode: read one post back.
+        thread_id = call.args.get("thread_id")
+        if thread_id is not None:
+            try:
+                tid = int(thread_id)
+            except (TypeError, ValueError):
+                return ToolResult(call.id, call.tool_name, False, error="Invalid 'thread_id'.")
+            thread = client.get_channel(tid)
+            if thread is None:
+                try:
+                    thread = await client.fetch_channel(tid)
+                except Exception as e:
+                    return ToolResult(
+                        call.id, call.tool_name, False,
+                        error=f"Post {tid} not found or inaccessible: {e}",
+                    )
+            # The starter message of a forum post shares the thread's id.
+            content = ""
+            try:
+                msg = getattr(thread, "starter_message", None)
+                if msg is None:
+                    msg = await thread.fetch_message(tid)
+                content = msg.content if msg else ""
+            except Exception:
+                content = ""
+            return ToolResult(
+                call.id, call.tool_name, True,
+                output={
+                    "thread_id": getattr(thread, "id", tid),
+                    "title": getattr(thread, "name", None),
+                    "jump_url": getattr(thread, "jump_url", None),
+                    "content": content,
+                },
+            )
+
+        # List mode: recent posts in the forum.
+        limit = call.args.get("limit", 10)
+        try:
+            limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            limit = 10
+
+        forum = client.get_channel(forum_id)
+        if forum is None:
+            try:
+                forum = await client.fetch_channel(forum_id)
+            except Exception as e:
+                return ToolResult(
+                    call.id, call.tool_name, False,
+                    error=f"Forum channel {forum_id} not found or inaccessible: {e}",
+                )
+        if not isinstance(forum, _discord.ForumChannel):
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error=f"Channel {forum_id} is not a forum channel ({type(forum).__name__}).",
+            )
+
+        def _row(t, *, archived: bool) -> dict[str, Any]:
+            created = getattr(t, "created_at", None)
+            return {
+                "thread_id": getattr(t, "id", None),
+                "title": getattr(t, "name", None),
+                "jump_url": getattr(t, "jump_url", None),
+                "created_at": created.isoformat() if created else None,
+                "archived": archived,
+            }
+
+        posts: list[dict[str, Any]] = [_row(t, archived=False) for t in list(forum.threads)]
+        try:
+            async for t in forum.archived_threads(limit=limit):
+                posts.append(_row(t, archived=True))
+        except Exception:
+            # Missing read-history permission etc. — active threads still useful.
+            pass
+
+        # Newest first; None created_at sinks to the bottom deterministically.
+        posts.sort(key=lambda p: p["created_at"] or "", reverse=True)
+        return ToolResult(
+            call.id, call.tool_name, True,
+            output={"forum_channel_id": forum_id, "count": len(posts[:limit]), "posts": posts[:limit]},
+        )
+
+    return ToolDefinition(
+        name="read_discord_forum",
+        description=(
+            "Read a Discord forum channel — list its most recent posts "
+            "(title / id / url / created_at, newest first), or pass "
+            "'thread_id' to read one post's title and starter-message body. "
+            "Use this to verify a post you created with "
+            "create_discord_forum_post actually landed. Forum defaults to "
+            "DISCORD_NEWS_FORUM_ID; pass 'forum_channel_id' to read another."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "forum_channel_id": {
+                    "type": "integer",
+                    "description": "Optional. Forum channel id; defaults to DISCORD_NEWS_FORUM_ID.",
+                },
+                "thread_id": {
+                    "type": "integer",
+                    "description": "Optional. If given, read this post's body instead of listing.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "List mode only. Max posts to return (1–50, default 10).",
+                },
+            },
         },
         executor=executor,
     )
