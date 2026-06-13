@@ -22,7 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_news_forum_id() -> int | None:
-    """Read ``DISCORD_NEWS_FORUM_ID`` from env as an int, else ``None``.
+    """Read ``DISCORD_NEWS_FORUM_ID`` as an int, else ``None``.
+
+    Reads ``.env`` via ``_load_env()`` — the same source every other CLI
+    entry point uses (DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, …). The project
+    loads ``.env`` with ``dotenv_values()`` into a dict, **not** into
+    ``os.environ``, so a plain ``os.getenv`` would always miss the value and
+    silently skip registration (the v0.4.0.0 morning-briefing regression).
+    ``os.getenv`` is kept only as a fallback for a truly exported var.
 
     Shared by the autonomy-session and per-thread-session wiring so both
     decide "register the forum tools at all?" identically: a missing or
@@ -30,7 +37,9 @@ def resolve_news_forum_id() -> int | None:
     call time, matching how other env-gated tools behave) rather than a
     runtime error deep inside a schedule run.
     """
-    raw = os.getenv("DISCORD_NEWS_FORUM_ID")
+    from loom.core.session_support import _load_env
+
+    raw = _load_env().get("DISCORD_NEWS_FORUM_ID") or os.getenv("DISCORD_NEWS_FORUM_ID")
     if not raw:
         return None
     try:

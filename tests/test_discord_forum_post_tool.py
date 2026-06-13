@@ -323,18 +323,36 @@ def test_chunk_prefers_newline_boundaries():
 # ── resolve_news_forum_id (review P2 — env-gated registration) ───────────────
 
 
-def test_resolve_forum_id_unset(monkeypatch):
+def _patch_env(monkeypatch, dotenv: dict, os_env: dict | None = None):
+    # resolve_news_forum_id reads .env via _load_env() (NOT os.environ), so
+    # the regression test must patch that source — patching os.environ alone
+    # would let the real project .env leak in.
+    import loom.core.session_support as _ss
+
+    monkeypatch.setattr(_ss, "_load_env", lambda *a, **k: dict(dotenv))
     monkeypatch.delenv("DISCORD_NEWS_FORUM_ID", raising=False)
+    for k, v in (os_env or {}).items():
+        monkeypatch.setenv(k, v)
+
+
+def test_resolve_forum_id_unset(monkeypatch):
+    _patch_env(monkeypatch, {})
     assert resolve_news_forum_id() is None
 
 
-def test_resolve_forum_id_valid(monkeypatch):
-    monkeypatch.setenv("DISCORD_NEWS_FORUM_ID", "1515038365085470781")
+def test_resolve_forum_id_from_dotenv(monkeypatch):
+    # The regression: value lives in .env (dict), not os.environ.
+    _patch_env(monkeypatch, {"DISCORD_NEWS_FORUM_ID": "1515038365085470781"})
     assert resolve_news_forum_id() == 1515038365085470781
 
 
+def test_resolve_forum_id_os_env_fallback(monkeypatch):
+    _patch_env(monkeypatch, {}, {"DISCORD_NEWS_FORUM_ID": "42"})
+    assert resolve_news_forum_id() == 42
+
+
 def test_resolve_forum_id_malformed_returns_none(monkeypatch):
-    monkeypatch.setenv("DISCORD_NEWS_FORUM_ID", "not-an-int")
+    _patch_env(monkeypatch, {"DISCORD_NEWS_FORUM_ID": "not-an-int"})
     assert resolve_news_forum_id() is None
 
 
