@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import hashlib
 import os
 import time
 import uuid
@@ -204,6 +205,32 @@ Output as flowing prose. Be dense and accurate. Do not include any preamble.
 """
 
 
+def _session_fact_key(session_id: str, ts: str, fact: str) -> str:
+    """Content-addressed key for a single session-compression fact.
+
+    The leaf is a hash of the fact *content*, not a positional index. This
+    makes re-compression idempotent: the same fact always maps to the same
+    key, so a second pass over the same session (e.g. a background
+    compaction in-flight while ``stop()`` runs its own compress, both
+    landing in the same second and thus sharing ``ts``) no longer collides
+    slot-by-slot. Identical facts coincide on an identical key *and* value
+    (a no-op upsert); distinct facts get distinct keys.
+
+    Root cause of the drain-supersede false-positive chain (pursuit
+    ``drain-supersede-fp-tracking``, 11 logged events): positional
+    ``fact:<i>`` keys plus a second-resolution ``ts`` turned a shifted
+    re-extraction (the admission gate drops facts the first pass already
+    wrote, shifting the remainder up one slot) into N spurious tier-1
+    ``supersede`` contradictions — each slot's old value equalled the
+    previous slot's new value, the "off-by-one chain".
+
+    The first three segments (``session:<id>:<ts>``) are unchanged, so
+    ``consolidation._is_session_sibling`` grouping still holds.
+    """
+    digest = hashlib.sha1(fact.encode("utf-8")).hexdigest()[:12]
+    return f"session:{session_id}:{ts}:fact:{digest}"
+
+
 async def compress_session(
     session_id: str,
     episodic: EpisodicMemory,
@@ -257,12 +284,15 @@ async def compress_session(
         )
         facts = [r.fact for r in admission_results if r.admitted]
 
-    # Use a timestamp suffix so repeated compressions don't overwrite each other
+    # Timestamp groups one compression's facts under a shared provenance
+    # prefix; the per-fact leaf is content-addressed (see _session_fact_key)
+    # so a repeated/concurrent compression in the same second is idempotent
+    # rather than a chain of false tier-1 supersede contradictions.
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     source = f"session:{session_id}"
-    for i, fact in enumerate(facts):
+    for fact in facts:
         entry = SemanticEntry(
-            key=f"session:{session_id}:{ts}:fact:{i}",
+            key=_session_fact_key(session_id, ts, fact),
             value=fact,
             confidence=0.8,
             source=source,
