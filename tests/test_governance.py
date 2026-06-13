@@ -844,6 +844,104 @@ class TestCompressWithGovernance:
 
 
 # ===========================================================================
+# 7b. Regression: content-addressed session-fact keys
+#     (pursuit drain-supersede-fp-tracking — 11 logged false positives)
+# ===========================================================================
+
+class TestSessionFactKeyContentAddressed:
+    """Root-cause fix for the drain-supersede false-positive chain.
+
+    The compress path used ``session:<id>:<ts>:fact:<i>`` — a *positional*
+    index plus a *second-resolution* timestamp. When the same session was
+    compressed twice in the same second (e.g. a background compaction
+    in-flight while ``stop()`` runs its own compress), the second pass
+    re-extracted a fact list shifted by one position (the admission gate
+    drops facts the first pass already wrote). Every positional slot then
+    held a different value → a chain of spurious tier-1 ``supersede``
+    contradictions. Content-addressed keys make re-extraction idempotent.
+    """
+
+    def test_key_is_deterministic_for_same_fact(self):
+        from loom.core.session import _session_fact_key
+
+        k1 = _session_fact_key("sess", "20260613T020407", "DK 偏好 TypeScript")
+        k2 = _session_fact_key("sess", "20260613T020407", "DK 偏好 TypeScript")
+        assert k1 == k2
+
+    def test_distinct_facts_get_distinct_keys(self):
+        from loom.core.session import _session_fact_key
+
+        ts = "20260613T020407"
+        k_a = _session_fact_key("sess", ts, "fact about news pipeline")
+        k_b = _session_fact_key("sess", ts, "fact about DK health")
+        assert k_a != k_b
+
+    def test_key_preserves_session_sibling_prefix(self):
+        """consolidation._is_session_sibling groups by the first three
+        segments (``session:<id>:<ts>``). The content hash lives in the
+        leaf, so sibling grouping must be unaffected."""
+        from loom.core.session import _session_fact_key
+        from loom.core.cognition.consolidation import _is_session_sibling
+
+        ts = "20260613T020407"
+        k_a = _session_fact_key("sess", ts, "fact A")
+        k_b = _session_fact_key("sess", ts, "fact B")
+        assert k_a.startswith(f"session:sess:{ts}:fact:")
+        assert _is_session_sibling(k_a, k_b)
+
+    @pytest.mark.asyncio
+    async def test_recompression_same_second_no_false_supersede(
+        self, db, semantic, episodic
+    ):
+        """The regression itself: two compressions of one session in the
+        same second, where the second pass re-extracts a list shifted by
+        one position, must NOT clobber/supersede the first pass's facts.
+
+        Under the old positional scheme this produced N same-key value
+        changes (the FP chain). With content-addressed keys, each distinct
+        fact owns its own key, so the union survives intact.
+        """
+        from loom.core.session import compress_session, _session_fact_key
+
+        session_id = "recompress-sess"
+        pinned_ts = "20260613T020407"
+
+        async def run_once(facts: list[str]) -> None:
+            await episodic.write(EpisodicEntry(
+                session_id=session_id, event_type="user",
+                content="some session content to compress",
+            ))
+            mock_router = MagicMock()
+            mock_response = MagicMock()
+            mock_response.text = "".join(f"FACT: {f}\n" for f in facts)
+            mock_router.chat = AsyncMock(return_value=mock_response)
+            with patch("loom.core.session.datetime") as mock_dt:
+                mock_dt.now.return_value.strftime.return_value = pinned_ts
+                await compress_session(
+                    session_id, episodic, semantic,
+                    mock_router, "test-model",
+                )
+
+        first = ["fact alpha about news", "fact beta about health",
+                 "fact gamma about circadian"]
+        # Shifted by one: alpha dropped (already stored), delta appended.
+        shifted = ["fact beta about health", "fact gamma about circadian",
+                   "fact delta about philosophy"]
+
+        await run_once(first)
+        await run_once(shifted)
+
+        # Every distinct fact must occupy its own content-addressed key,
+        # holding exactly its own value — no slot clobbered another fact.
+        for fact in set(first) | set(shifted):
+            entry = await semantic.get(
+                _session_fact_key(session_id, pinned_ts, fact)
+            )
+            assert entry is not None, f"fact lost: {fact!r}"
+            assert entry.value == fact
+
+
+# ===========================================================================
 # 8. Backward Compatibility
 # ===========================================================================
 
