@@ -36,6 +36,7 @@ Design decisions
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -246,6 +247,127 @@ def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Cross-pass skip suppression (#553)
+# ---------------------------------------------------------------------------
+#
+# The dream re-derives the same clusters from the whole corpus every pass, so
+# without memory a per-pass cap leaves the overflow permanently unreachable and
+# stable skips get re-reviewed forever. We persist a *content-addressed*
+# signature for every cluster 絲絲 actually reviewed and skipped; later passes
+# filter those out (before the cap, so the backlog can drain). The signature
+# carries each member's ``updated_at``, so any edit to a member yields a new
+# signature and the cluster is automatically re-admitted for review.
+
+_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips"
+_SUPPRESS_RETENTION_DAYS = 90.0   # aligns with the memory half-life
+
+
+def _cluster_signature(members) -> str:
+    """Stable, order-independent signature of a cluster's members.
+
+    Keyed by ``key@updated_at`` so a content change (which bumps ``updated_at``)
+    produces a different signature — the suppression auto-expires on edit.
+    """
+    parts = sorted(f"{m.key}@{m.updated_at.isoformat()}" for m in members)
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+async def load_suppressed_signatures(db) -> set[str]:
+    """Read the persisted skip-suppression set from ``memory_meta`` (#553).
+
+    Tolerant by contract: a missing or corrupt row reads as the empty set, so a
+    bad value can never wedge the dream into suppressing nothing-or-everything.
+    """
+    cursor = await db.execute(
+        "SELECT value FROM memory_meta WHERE key = ?", (_META_KEY_SUPPRESSED,)
+    )
+    row = await cursor.fetchone()
+    if not row or not row[0]:
+        return set()
+    try:
+        data = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {str(k) for k in data}
+
+
+async def record_suppressed_signatures(
+    db,
+    signatures: set[str],
+    *,
+    now: datetime | None = None,
+    retention_days: float = _SUPPRESS_RETENTION_DAYS,
+) -> None:
+    """Merge ``signatures`` into the persisted set, pruning stale entries (#553).
+
+    Stored as ``{signature: recorded_iso}``; entries older than
+    ``retention_days`` are dropped on write so dead signatures (whose facts have
+    since changed and will never recur) don't accumulate unboundedly.
+    """
+    now = now or datetime.now(UTC)
+    stamp = now.isoformat()
+
+    cursor = await db.execute(
+        "SELECT value FROM memory_meta WHERE key = ?", (_META_KEY_SUPPRESSED,)
+    )
+    row = await cursor.fetchone()
+    stored: dict[str, str] = {}
+    if row and row[0]:
+        try:
+            loaded = json.loads(row[0])
+            if isinstance(loaded, dict):
+                stored = {str(k): str(v) for k, v in loaded.items()}
+        except (json.JSONDecodeError, TypeError):
+            stored = {}
+
+    for sig in signatures:
+        stored[sig] = stamp
+
+    cutoff = now.timestamp() - retention_days * 86400.0
+    pruned: dict[str, str] = {}
+    for sig, recorded in stored.items():
+        try:
+            ts = datetime.fromisoformat(recorded).timestamp()
+        except (ValueError, TypeError):
+            ts = now.timestamp()   # unparseable stamp → treat as fresh, keep
+        if ts >= cutoff:
+            pruned[sig] = recorded
+
+    payload = json.dumps(pruned)
+    await db.execute(
+        "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = excluded.updated_at",
+        (_META_KEY_SUPPRESSED, payload, stamp),
+    )
+    await db.commit()
+
+
+def _genuine_skip_signatures(plan: "ConsolidationPlan") -> set[str]:
+    """Signatures of clusters 絲絲 reviewed and skipped — the stable judgments.
+
+    Excludes (a) non-skip verdicts and (b) diff-inventory tooling auto-skips
+    (``mergeable=False``): the latter is a tool failure, not a judgment, and
+    must be free to retry next pass (#554) rather than be buried by suppression.
+    """
+    sigs: set[str] = set()
+    for cluster in plan.clusters:
+        d = plan.decision_for(cluster.cluster_id)
+        if d is None or d.verdict != VERDICT_SKIP:
+            continue
+        if (
+            cluster.kind == KIND_MERGE
+            and cluster.diff is not None
+            and not cluster.diff.mergeable
+        ):
+            continue
+        sigs.add(_cluster_signature(cluster.members))
+    return sigs
+
+
+# ---------------------------------------------------------------------------
 # Step 2 — plan (read-only candidate discovery)
 # ---------------------------------------------------------------------------
 
@@ -255,6 +377,7 @@ async def build_plan(
     corpus_limit: int = 2000,
     min_similarity: float = 0.85,
     max_clusters: int = 20,
+    suppress_signatures: set[str] | None = None,
 ) -> ConsolidationPlan:
     """Scan the semantic store and propose merge / reconcile / clean clusters.
 
@@ -306,6 +429,16 @@ async def build_plan(
         )
     merge_groups.sort(key=_group_score, reverse=True)
 
+    # Drop clusters already adjudicated 'skip' in a prior pass — BEFORE the cap,
+    # so stable skips free quota for the backlog instead of permanently blocking
+    # it (#553). Content-addressed: re-admitted automatically when a member edits.
+    if suppress_signatures:
+        merge_groups = [
+            g for g in merge_groups
+            if _cluster_signature([by_key[k] for k in g if k in by_key])
+            not in suppress_signatures
+        ]
+
     if len(merge_groups) > max_clusters:
         plan.deferred_to_next_pass = len(merge_groups) - max_clusters
         plan.notes.append(
@@ -350,6 +483,10 @@ async def build_plan(
             if entry.key == c.existing.key or pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
+            if suppress_signatures and _cluster_signature(
+                [c.existing, entry]
+            ) in suppress_signatures:
+                continue  # adjudicated 'skip' in a prior pass (#553)
             plan.clusters.append(CandidateCluster(
                 cluster_id=f"reconcile-{uuid.uuid4().hex[:8]}",
                 kind=KIND_RECONCILE,
@@ -369,6 +506,10 @@ async def build_plan(
         if not _is_stub(entry) or _is_dreaming(entry):
             continue
         if await semantic.resolve_redirect(entry.key) is None:
+            if suppress_signatures and _cluster_signature(
+                [entry]
+            ) in suppress_signatures:
+                continue  # adjudicated 'skip' in a prior pass (#553)
             plan.clusters.append(CandidateCluster(
                 cluster_id=f"clean-{uuid.uuid4().hex[:8]}",
                 kind=KIND_CLEAN,
@@ -419,8 +560,49 @@ Return ONLY the JSON object — no preamble, no markdown fences.
 """
 
 
-async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInventory:
-    """Run the LLM difference-inventory gate on a merge cluster (spec §6.4)."""
+async def diff_inventory(
+    cluster: CandidateCluster, llm_fn: LLMFn, *, max_attempts: int = 2,
+) -> DiffInventory:
+    """Run the LLM difference-inventory gate on a merge cluster (spec §6.4).
+
+    The gate is a hard fail-safe (#493): untrustworthy output never marks a
+    cluster mergeable. A single retry (``max_attempts=2``) absorbs *transient*
+    LLM format jitter — an exception, an unparseable body, a malformed
+    ``unique_by_key`` shape, or a key set that fails to cover the cluster — so a
+    large near-duplicate cluster isn't permanently stuck on one bad response
+    (#554). A clean verdict (mergeable true OR a real "both unique" false) is a
+    trustworthy answer and is returned on the first attempt — never retried.
+    Two bad attempts still fail safe.
+    """
+    last: DiffInventory | None = None
+    attempts = 0
+    for attempt in range(1, max(1, max_attempts) + 1):
+        attempts = attempt
+        result, retryable = await _diff_inventory_attempt(cluster, llm_fn)
+        if not retryable:
+            return result
+        last = result
+    # Exhausted retries on a transient-looking failure — annotate for
+    # observability (#554) so a maintainer can tell jitter from a structural
+    # limit (e.g. a cluster too large for one JSON response) and fail safe.
+    assert last is not None  # the loop runs ≥1 time, so a failure is recorded
+    suffix = f" (members={len(cluster.members)}, attempts={attempts})"
+    return DiffInventory(
+        unique_by_key=last.unique_by_key,
+        mergeable=False,
+        rationale=last.rationale + suffix,
+    )
+
+
+async def _diff_inventory_attempt(
+    cluster: CandidateCluster, llm_fn: LLMFn,
+) -> tuple[DiffInventory, bool]:
+    """One diff-inventory call. Returns ``(result, retryable)``.
+
+    ``retryable`` is True only for untrustworthy output (exception / unparseable
+    / malformed shape / coverage miss) — a clean parsed verdict is never
+    retryable, even when it is mergeable=False.
+    """
     facts_block = "\n".join(
         f'- key="{m.key}"  source="{m.source}"  value="{m.value}"'
         for m in cluster.members
@@ -434,11 +616,11 @@ async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInvent
     except Exception as exc:
         logger.warning("[convergent-dream] diff_inventory LLM failed: %s", exc)
         # Fail safe: if we cannot inventory differences, do NOT mark mergeable.
-        return DiffInventory(mergeable=False, rationale=f"diff-inventory unavailable: {exc}")
+        return DiffInventory(mergeable=False, rationale=f"diff-inventory unavailable: {exc}"), True
 
     data = _parse_json_object(raw)
     if data is None:
-        return DiffInventory(mergeable=False, rationale="diff-inventory output unparseable")
+        return DiffInventory(mergeable=False, rationale="diff-inventory output unparseable"), True
 
     # unique_by_key must be an object; a list/string/None would crash .items()
     # — fail safe rather than raise (Codex re-review #493).
@@ -447,7 +629,7 @@ async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInvent
         return DiffInventory(
             mergeable=False,
             rationale="diff-inventory unique_by_key was not an object — failing safe",
-        )
+        ), True
     unique_by_key = {str(k): str(v) for k, v in raw_ubk.items()}
     # Only an explicit JSON boolean true counts. bool("false") is True, so a
     # stringified verdict must NOT slip through — anything other than real
@@ -468,9 +650,10 @@ async def diff_inventory(cluster: CandidateCluster, llm_fn: LLMFn) -> DiffInvent
                 f"diff-inventory keys {sorted(unique_by_key)} did not cover "
                 f"cluster members {sorted(expected)} — failing safe"
             ),
-        )
+        ), True
 
-    return DiffInventory(unique_by_key=unique_by_key, mergeable=mergeable, rationale=rationale)
+    # Clean, covered verdict — a trustworthy answer, mergeable or not. Done.
+    return DiffInventory(unique_by_key=unique_by_key, mergeable=mergeable, rationale=rationale), False
 
 
 # ---------------------------------------------------------------------------
@@ -748,11 +931,16 @@ async def run_convergent_dream(
     non-stale merge clusters are then consolidated via ``execute_plan`` and the
     report gains an execution-outcome section.
     """
+    # Cross-pass skip suppression: filter clusters 絲絲 already reviewed and
+    # skipped so the deferred backlog can drain instead of looping forever (#553).
+    suppress = await load_suppressed_signatures(semantic._db)
+
     plan = await build_plan(
         semantic,
         corpus_limit=corpus_limit,
         min_similarity=min_similarity,
         max_clusters=max_clusters,
+        suppress_signatures=suppress,
     )
 
     # diff-inventory gate on merge clusters only (spec §6.4)
@@ -765,6 +953,11 @@ async def run_convergent_dream(
         batch_size=review_batch_size,
         max_review_clusters=max_review_clusters,
     )
+
+    # Persist this pass's genuine skip judgments so they don't re-surface (#553).
+    new_skips = _genuine_skip_signatures(plan)
+    if new_skips:
+        await record_suppressed_signatures(semantic._db, new_skips)
 
     execute_result = None
     if execute:
