@@ -20,6 +20,15 @@ returns the bet to write, or ``None``. TDD-first contract:
 * **shape** — a flat ``tool_success`` bet, ``domain=tool_name``, born
   ``pending``, due ``after_action(call_id)`` so the existing reconcile settles it
   against the very action_record being persisted.
+
+A second, orthogonal heartbeat rides the same seam (#528 acceptance-gate work):
+``implicit_duration_bet_for`` predicts the *latency* bucket — the naive prior
+"this tool will respond fast (<1s)" against ``duration_bucket``. It shares every
+eligibility guard above but carries a distinct ``@latency`` domain so its residue
+(``calibration:<tool>@latency``) never blends into the reliability axis. The bare
+``tool_success`` bet is near-degenerate (tools almost always succeed); the latency
+bet is where per-domain variance lives — ``read_file`` is always fast (0 surprise),
+``recall`` is a coin-flip — exactly the non-trivial signal the P0 gate wants.
 """
 
 from datetime import datetime, UTC
@@ -30,7 +39,11 @@ import pytest_asyncio
 from loom.core.harness.lifecycle import ActionRecord, ActionState, StateTransition
 from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import TrustLevel
-from loom.core.harness.auto_predict import implicit_bet_for, co_write_implicit_bet
+from loom.core.harness.auto_predict import (
+    implicit_bet_for,
+    implicit_duration_bet_for,
+    co_write_implicit_bet,
+)
 from loom.core.memory.store import SQLiteStore
 from loom.core.memory.prediction import PredictionStore
 
@@ -110,6 +123,45 @@ class TestBetShape:
         assert implicit_bet_for(rec, enabled=True) is not None
 
 
+class TestDurationBetShape:
+    """The latency heartbeat — orthogonal axis, same eligibility, distinct domain."""
+
+    def test_duration_bucket_bet_shape(self):
+        rec = _record(tool="run_bash", session="sess-9", states=_EXECUTED)
+        bet = implicit_duration_bet_for(rec, enabled=True)
+        assert bet.resolver == {"kind": "duration_bucket", "expect": "fast"}
+        assert bet.due_condition == {"kind": "after_action", "call_id": "c1"}
+        # distinct @latency domain so it never blends into reliability calibration
+        assert bet.domain == "run_bash@latency"
+        assert bet.session_id == "sess-9"
+        assert bet.status == "pending"
+        assert bet.score is None
+        # distinct provenance from the tool_success heartbeat
+        assert bet.context == "auto:implicit_duration_bucket"
+        assert bet.context != implicit_bet_for(rec, enabled=True).context
+
+    def test_duration_bet_shares_eligibility_guards(self):
+        # gated
+        assert implicit_duration_bet_for(_record(states=_EXECUTED), enabled=False) is None
+        # executed-only
+        assert implicit_duration_bet_for(_record(states=_DENIED), enabled=True) is None
+        # callless
+        assert implicit_duration_bet_for(_record(states=_EXECUTED, call=False), enabled=True) is None
+        # sessionless
+        assert implicit_duration_bet_for(_record(states=_EXECUTED, session=""), enabled=True) is None
+
+    def test_latency_domain_is_orthogonal_to_reliability_domain(self):
+        """The two heartbeats must land in separate calibration domains, else
+        compute_calibration (groups by domain) blends latency-miss into
+        success-miss and the residue becomes meaningless."""
+        rec = _record(tool="fetch_url", states=_EXECUTED)
+        success = implicit_bet_for(rec, enabled=True)
+        latency = implicit_duration_bet_for(rec, enabled=True)
+        assert success.domain == "fetch_url"
+        assert latency.domain == "fetch_url@latency"
+        assert success.domain != latency.domain
+
+
 # ---------------------------------------------------------------------------
 # co_write_implicit_bet — the isolated IO half (no Session needed)
 # ---------------------------------------------------------------------------
@@ -127,15 +179,17 @@ async def store(tmp_db):
 
 
 class TestCoWrite:
-    async def test_executed_action_persists_one_pending_bet(self, store):
+    async def test_executed_action_persists_both_heartbeat_bets(self, store):
         async with store.connect() as db:
             rec = _record(tool="run_bash", states=_EXECUTED)
             wrote = await co_write_implicit_bet(db, rec, enabled=True)
             assert wrote is True
             pending = await PredictionStore(db).list_by_status("pending")
-            assert len(pending) == 1
-            assert pending[0].domain == "run_bash"
-            assert pending[0].context.startswith("auto:")
+            # both heartbeats: tool_success + duration_bucket
+            assert len(pending) == 2
+            domains = {p.domain for p in pending}
+            assert domains == {"run_bash", "run_bash@latency"}
+            assert all(p.context.startswith("auto:") for p in pending)
 
     async def test_disabled_persists_nothing(self, store):
         async with store.connect() as db:

@@ -182,7 +182,8 @@ expected_info_gain =
 | **P2 — exploration 臂（#464）** | drift 選向接 `uncertainty` landscape；`expected_info_gain` policy；dark-room 護欄定位 | P0 acceptance gate 通過 |
 | **P3 — 自我維持指標** | 把恆定變量從情緒擴到資源（cost / memory 矛盾度 / process 連續性 / trust）；#57 §9-6 指標清單 | P1 + P2 跑出實測 |
 | 軟判層 | 自由文字「氛圍下注」的 Critic 軟對帳（#57 §9-1 上層） | P0 機械對帳穩定後 |
-| **事件結算下注（`on_event` due）** | 對外部事件（CI 完成 / PR merge / 排程觸發）下注 + 結算 | **撞 I2 邊界**，見 §12.3 — 需先決定「事件如何落成 observation row」 |
+| **事件結算下注（`on_event` due）** | 對外部事件（CI 完成 / PR merge / 排程觸發）下注 + 結算 | **撞 I2 邊界**，見 §12.3 / #541 — 需先決定「事件如何落成 observation row」 |
+| **語義型觀察面擴張** | 餵飽 action observation（`output` / digest / `row_count`），讓 `output_contains` / `file_digest_changed` 等白名單 resolver 可對「動作結算」下注 | **撞 I2 邊界**，討論稿見 `docs/designs/59` — 同 (a)/(b) 取捨，傾向 (a) 先落可對帳 row |
 
 ---
 
