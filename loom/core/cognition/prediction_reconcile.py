@@ -72,6 +72,10 @@ class ReconcileReport:
     executed: bool
     proposals: list[ReconcileProposal] = field(default_factory=list)
     skipped: list[ReconcileSkip] = field(default_factory=list)
+    # #557 drain-loop audit: how many open bets the pass walked, and whether it
+    # stopped on the scan budget with more still waiting (no silent cap).
+    scanned: int = 0
+    truncated: bool = False
 
     @property
     def settleable(self) -> int:
@@ -106,7 +110,9 @@ class ReconcileReport:
             "counts": {
                 "proposed": len(self.proposals),
                 "skipped": len(self.skipped),
+                "scanned": self.scanned,
             },
+            "truncated": self.truncated,
             "proposals": [asdict(p) for p in self.proposals],
             "skipped": [asdict(s) for s in self.skipped],
         }
@@ -114,9 +120,10 @@ class ReconcileReport:
     def summary(self) -> str:
         verb = "reconciled" if self.executed else "would reconcile"
         tail = "" if self.executed else " (dry-run)"
+        cap = " [TRUNCATED: scan budget hit, backlog remains]" if self.truncated else ""
         return (
             f"prediction reconcile: {verb} {len(self.proposals)}, "
-            f"skipped {len(self.skipped)}{tail}"
+            f"skipped {len(self.skipped)} (scanned {self.scanned}){tail}{cap}"
         )
 
 
@@ -125,55 +132,93 @@ class ReconcileReport:
 # ---------------------------------------------------------------------------
 
 async def run_prediction_reconciliation(
-    store, db, *, execute: bool = False
+    store,
+    db,
+    *,
+    execute: bool = False,
+    batch_size: int = 200,
+    max_scan: int = 50_000,
 ) -> ReconcileReport:
-    """Reconcile every settleable pending/due bet. See module docstring.
+    """Reconcile the settleable pending/due backlog. See module docstring.
 
     ``store`` is a ``PredictionStore``; ``db`` an open connection. With
     ``execute=False`` (default) nothing is written — the report says what *would*
-    happen. With ``execute=True`` each proposal is committed via
-    ``mark_reconciled``.
+    happen. With ``execute=True`` each settled bet is committed via
+    ``mark_reconciled`` as it is judged.
+
+    **Drains the whole backlog, not one batch (#557).** A naive single
+    ``LIMIT 200`` pull settles at most 200 pending + 200 due per weekly pass —
+    below the bet-generation rate once both implicit heartbeats are on, so the
+    open set grows unbounded and the oldest-200 window starves newer bets. This
+    loops via ``list_open_after`` keyset pagination over ``(created_at, id)``,
+    walking the entire open set once per pass. Keyset (not OFFSET) keeps the
+    cursor stable as ``mark_reconciled`` removes settled bets mid-walk. The
+    ``max_scan`` budget bounds a pathological backlog; hitting it sets
+    ``truncated`` rather than silently capping.
     """
     proposals: list[ReconcileProposal] = []
     skipped: list[ReconcileSkip] = []
+    cursor = None  # (created_at, id) keyset cursor; advanced each batch
+    scanned = 0
+    truncated = False
 
-    candidates = await store.list_by_status("pending")
-    candidates += await store.list_by_status("due")
+    while True:
+        if scanned >= max_scan:
+            # Budget exhausted — probe whether anything still waits past it so the
+            # report can flag a partial drain instead of looking complete.
+            remainder = await store.list_open_after(after=cursor, limit=1)
+            truncated = bool(remainder)
+            break
 
-    for pred in candidates:
-        ref = await find_settling_observation(db, pred.due_condition)
-        if ref is None:
-            skipped.append(ReconcileSkip(pred.id, "not_settled", pred.domain))
-            continue
-        observation = await resolve_observation_ref(db, ref)
-        if observation is None:
-            skipped.append(ReconcileSkip(pred.id, "observation_gone", pred.domain))
-            continue
-        try:
-            result = resolve(pred.resolver, observation)
-        except (KeyError, ValueError):
-            # resolver cannot read the field it needs against this observation —
-            # unresolvable, not a free 0.0 (no silent pass; pairs with I4).
-            skipped.append(ReconcileSkip(pred.id, "unresolvable", pred.domain))
-            continue
-        proposals.append(
-            ReconcileProposal(
-                prediction_id=pred.id,
-                domain=pred.domain,
-                observation_ref=ref,
-                resolver_kind=pred.resolver["kind"],
-                matched=result.matched,
-                error_score=result.error_score,
-                detail=result.detail,
+        want = min(batch_size, max_scan - scanned)
+        batch = await store.list_open_after(after=cursor, limit=want)
+        if not batch:
+            break
+
+        for pred in batch:
+            ref = await find_settling_observation(db, pred.due_condition)
+            if ref is None:
+                skipped.append(ReconcileSkip(pred.id, "not_settled", pred.domain))
+                continue
+            observation = await resolve_observation_ref(db, ref)
+            if observation is None:
+                skipped.append(ReconcileSkip(pred.id, "observation_gone", pred.domain))
+                continue
+            try:
+                result = resolve(pred.resolver, observation)
+            except (KeyError, ValueError):
+                # resolver cannot read the field it needs against this observation
+                # — unresolvable, not a free 0.0 (no silent pass; pairs with I4).
+                skipped.append(ReconcileSkip(pred.id, "unresolvable", pred.domain))
+                continue
+            proposals.append(
+                ReconcileProposal(
+                    prediction_id=pred.id,
+                    domain=pred.domain,
+                    observation_ref=ref,
+                    resolver_kind=pred.resolver["kind"],
+                    matched=result.matched,
+                    error_score=result.error_score,
+                    detail=result.detail,
+                )
             )
-        )
+            if execute:
+                # Settle as we go: the bet leaves the open set immediately, which
+                # the keyset cursor already steps past — bounding memory and making
+                # the drain observable mid-pass.
+                await store.mark_reconciled(
+                    pred.id, score=result.error_score, observation_ref=ref
+                )
 
-    if execute:
-        for prop in proposals:
-            await store.mark_reconciled(
-                prop.prediction_id,
-                score=prop.error_score,
-                observation_ref=prop.observation_ref,
-            )
+        scanned += len(batch)
+        cursor = (batch[-1].created_at, batch[-1].id)
+        if len(batch) < want:
+            break  # short page — open set past the cursor is exhausted
 
-    return ReconcileReport(executed=execute, proposals=proposals, skipped=skipped)
+    return ReconcileReport(
+        executed=execute,
+        proposals=proposals,
+        skipped=skipped,
+        scanned=scanned,
+        truncated=truncated,
+    )

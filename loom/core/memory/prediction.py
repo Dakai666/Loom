@@ -146,6 +146,46 @@ class PredictionStore:
         )
         return [_row_to_record(r) for r in await cur.fetchall()]
 
+    async def list_open_after(
+        self,
+        *,
+        after: tuple[datetime | str, str] | None = None,
+        limit: int = 200,
+    ) -> list[PredictionRecord]:
+        """Keyset page over the OPEN (``pending`` | ``due``) set (#557 drain-loop).
+
+        Ordered by ``(created_at, id)`` and returning rows strictly *after* the
+        ``(created_at, id)`` cursor (``None`` starts from the beginning). Keyset —
+        not ``OFFSET`` — so that ``mark_reconciled`` removing settled bets from the
+        open set during a drain never shifts rows out from under the cursor: we
+        advance by ``(created_at, id)``, which reconciled bets no longer match
+        anyway. A short page (``< limit``) means the open set past the cursor is
+        exhausted.
+
+        The cursor's timestamp may be a ``datetime`` or the stored ISO string; it
+        is normalized to the exact ISO-8601 text the column holds. ``created_at``
+        is stored as ISO-8601 UTC, whose lexicographic order == chronological
+        order, so plain TEXT comparison is correct (don't let aiosqlite adapt a
+        raw datetime — its format would not match the stored text).
+        """
+        sql = (
+            f"SELECT {_COLUMNS} FROM prediction_records "
+            "WHERE status IN ('pending', 'due')"
+        )
+        params: list[Any] = []
+        if after is not None:
+            ts, rid = after
+            ts = ts.isoformat() if isinstance(ts, datetime) else ts
+            # (created_at, id) tuple comparison, spelled out for SQLite: a later
+            # timestamp, or the same timestamp with a higher id (tie-break so the
+            # dual heartbeat's two same-instant bets each page exactly once).
+            sql += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+            params += [ts, ts, rid]
+        sql += " ORDER BY created_at ASC, id ASC LIMIT ?"
+        params.append(limit)
+        cur = await self._db.execute(sql, tuple(params))
+        return [_row_to_record(r) for r in await cur.fetchall()]
+
     # -- transitions (I4 state machine) -----------------------------------
 
     async def mark_due(self, prediction_id: str) -> None:

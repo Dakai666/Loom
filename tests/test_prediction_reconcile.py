@@ -128,7 +128,8 @@ class TestReportSerialization:
         report = await run_prediction_reconciliation(ps, db_conn, execute=False)
         d = report.to_dict()
         assert d["executed"] is False
-        assert d["counts"] == {"proposed": 1, "skipped": 1}
+        assert d["counts"] == {"proposed": 1, "skipped": 1, "scanned": 2}
+        assert d["truncated"] is False
         assert isinstance(d["proposals"], list)
         assert d["proposals"][0]["observation_ref"] == "action:act-ok"
         assert isinstance(d["skipped"], list)
@@ -224,3 +225,86 @@ class TestExecute:
         assert len(report.skipped) == 1
         assert report.skipped[0].reason == "unresolvable"
         assert (await ps.get(pred.id)).status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Drain-loop — #557: a pass must drain the whole settleable backlog, not a
+# single ≤limit batch. Keyset pagination over (created_at, id) so it sees past
+# the window without re-processing, and so concurrent mark_reconciled (settled
+# bets leaving the open set) never shifts rows out from under the cursor.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, UTC, timedelta
+
+
+def _pred_at(call_id, *, seconds, **over):
+    """A bet with an explicit, ordered created_at so keyset order is deterministic."""
+    p = _prediction(call_id=call_id, **over)
+    p.created_at = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC) + timedelta(seconds=seconds)
+    return p
+
+
+class TestDrainLoop:
+    async def test_drains_backlog_beyond_one_batch(self, db_conn):
+        """5 settleable bets, batch_size=2: a naive single-batch caps at 2; the
+        drain-loop reconciles all 5 in one pass."""
+        ps = PredictionStore(db_conn)
+        for i in range(5):
+            await ps.write(_pred_at(f"c{i}", seconds=i))
+            await _settled_ok_action(db_conn, call_id=f"c{i}", id=f"act-{i}")
+
+        report = await run_prediction_reconciliation(
+            ps, db_conn, execute=True, batch_size=2
+        )
+        assert len(report.proposals) == 5
+        assert report.truncated is False
+        assert await ps.list_by_status("pending") == []          # fully drained
+        assert len(await ps.list_by_status("reconciled")) == 5
+
+    async def test_keyset_does_not_starve_newer_settleable_behind_unsettleable(self, db_conn):
+        """The oldest bet is permanently unsettleable (its action never ran). A
+        naive limit-1 window would see only that head and never reach the newer
+        settleable bet; keyset advances past it."""
+        ps = PredictionStore(db_conn)
+        await ps.write(_pred_at("never-ran", seconds=0))
+        await ps.write(_pred_at("ran", seconds=1))
+        await _settled_ok_action(db_conn, call_id="ran", id="act-ran")
+
+        report = await run_prediction_reconciliation(
+            ps, db_conn, execute=True, batch_size=1
+        )
+        assert len(report.proposals) == 1
+        # the settleable bet drained; the unsettleable one remains pending
+        pend = await ps.list_by_status("pending")
+        assert len(pend) == 1
+        assert pend[0].due_condition["call_id"] == "never-ran"
+
+    async def test_dry_run_pages_through_all_without_writing(self, db_conn):
+        """Dry-run reports the full backlog picture (not a single-batch sample)
+        yet writes nothing — keyset advances the cursor regardless of marking."""
+        ps = PredictionStore(db_conn)
+        for i in range(5):
+            await ps.write(_pred_at(f"c{i}", seconds=i))
+            await _settled_ok_action(db_conn, call_id=f"c{i}", id=f"act-{i}")
+
+        report = await run_prediction_reconciliation(
+            ps, db_conn, execute=False, batch_size=2
+        )
+        assert len(report.proposals) == 5                        # full picture
+        assert len(await ps.list_by_status("pending")) == 5      # nothing written (I3)
+        assert await ps.list_by_status("reconciled") == []
+
+    async def test_max_scan_budget_marks_truncated(self, db_conn):
+        """A budget cap stops the drain and surfaces truncated — no silent cap."""
+        ps = PredictionStore(db_conn)
+        for i in range(5):
+            await ps.write(_pred_at(f"c{i}", seconds=i))
+            await _settled_ok_action(db_conn, call_id=f"c{i}", id=f"act-{i}")
+
+        report = await run_prediction_reconciliation(
+            ps, db_conn, execute=True, batch_size=2, max_scan=2
+        )
+        assert report.truncated is True
+        assert report.scanned <= 2
+        assert len(await ps.list_by_status("reconciled")) <= 2
+        assert len(await ps.list_by_status("pending")) >= 3       # backlog remains
