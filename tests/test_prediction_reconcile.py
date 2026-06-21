@@ -246,8 +246,11 @@ def _pred_at(call_id, *, seconds, **over):
 
 class TestDrainLoop:
     async def test_drains_backlog_beyond_one_batch(self, db_conn):
-        """5 settleable bets, batch_size=2: a naive single-batch caps at 2; the
-        drain-loop reconciles all 5 in one pass."""
+        """5 settleable bets, batch_size=2 + the (large) default max_scan: a naive
+        single-batch caps at 2; the drain-loop walks 3 batches ([c0,c1] [c2,c3]
+        [c4]) and reconciles all 5 in one pass. ``scanned == 5`` is the proof the
+        loop went *beyond* one batch — max_scan is left at its default so the
+        budget never fires (that path is test_max_scan_budget_marks_truncated)."""
         ps = PredictionStore(db_conn)
         for i in range(5):
             await ps.write(_pred_at(f"c{i}", seconds=i))
@@ -256,6 +259,7 @@ class TestDrainLoop:
         report = await run_prediction_reconciliation(
             ps, db_conn, execute=True, batch_size=2
         )
+        assert report.scanned == 5          # walked every open bet across 3 batches
         assert len(report.proposals) == 5
         assert report.truncated is False
         assert await ps.list_by_status("pending") == []          # fully drained
@@ -308,3 +312,24 @@ class TestDrainLoop:
         assert report.scanned <= 2
         assert len(await ps.list_by_status("reconciled")) <= 2
         assert len(await ps.list_by_status("pending")) >= 3       # backlog remains
+
+    async def test_truncated_set_when_max_scan_aligned_with_batch_boundary(self, db_conn):
+        """Edge case (絲絲 PR #558 P2): when a full batch consumes exactly the
+        remaining budget, the budget check fires at the *next* loop top — distinct
+        from a short-page exhaustion. The remainder probe must still detect the
+        leftover backlog and set truncated. 5 items, batch_size=4, max_scan=4:
+        batch 1 fetches 4 (== budget), loop 2 sees scanned==max_scan, probes, finds
+        c4 → truncated. Guards the bool(remainder) probe against regression."""
+        ps = PredictionStore(db_conn)
+        for i in range(5):
+            await ps.write(_pred_at(f"c{i}", seconds=i))
+            await _settled_ok_action(db_conn, call_id=f"c{i}", id=f"act-{i}")
+
+        report = await run_prediction_reconciliation(
+            ps, db_conn, execute=True, batch_size=4, max_scan=4
+        )
+        assert report.truncated is True
+        assert report.scanned == 4
+        assert len(report.proposals) == 4
+        assert len(await ps.list_by_status("reconciled")) == 4
+        assert len(await ps.list_by_status("pending")) == 1       # exactly c4 remains

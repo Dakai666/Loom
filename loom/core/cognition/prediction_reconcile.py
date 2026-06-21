@@ -159,7 +159,7 @@ async def run_prediction_reconciliation(
     proposals: list[ReconcileProposal] = []
     skipped: list[ReconcileSkip] = []
     cursor = None  # (created_at, id) keyset cursor; advanced each batch
-    scanned = 0
+    scanned = 0  # total open bets *fetched* — includes skipped/unsettleable, NOT a reconciled count
     truncated = False
 
     while True:
