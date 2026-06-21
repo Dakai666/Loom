@@ -90,6 +90,8 @@ P0 第一版**只支援可機械判定**的 resolver：
 - `row_count` / `result_count`
 - `duration_bucket`
 
+> ⚠️ **這些 resolver 在白名單裡，不代表都能用**：`output_contains` / `output_regex` / `file_digest_changed` / `row_count` 要的欄位（`output` / digest / `row_count`）**今天的 action observation 沒供應**，故對「動作結算」下注全部餓死、落 `unresolvable`。已可用的只有 `tool_success` / `final_state` / `duration_bucket`。餓死分析與「餵飽觀察面」提案見 `docs/designs/59`。
+
 **自由文字「氛圍下注」**：P0 可作旁註，**不納入 calibration 分數**。否則 I2 極易破——ground truth 會滑回 LLM 自我敘事 / 事後合理化。
 
 > （這就地處理了 #57 §9-1「預測解析度」：P0 先劃 minimal subset = 機械可對帳；軟判層 deferred。）
