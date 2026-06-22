@@ -41,6 +41,10 @@ from loom.core.memory.resolvers import resolve
 # report split deliberate ``predict``-tool bets from the involuntary heartbeat so
 # the #560 nudge's effect on the ``auto:`` monoculture is observable at a glance.
 _KNOWN_PROVENANCE = ("auto", "explicit")
+# Fixed display order for the summary split (絲絲 PR #561 review): intentional,
+# not alphabetical — a future fourth provenance slots in here deliberately rather
+# than landing wherever ``sorted()`` happens to put it. ``other`` always trails.
+_PROVENANCE_DISPLAY_ORDER = (*_KNOWN_PROVENANCE, "other")
 
 
 def bet_provenance(context: str | None) -> str:
@@ -150,9 +154,10 @@ class ReconcileReport:
         # Provenance split rides on the proposed count so the dream journal shows
         # explicit-vs-auto flow inline (omitted when nothing settled).
         prov = self.provenance_counts()
+        ordered = [k for k in _PROVENANCE_DISPLAY_ORDER if k in prov]
         split = (
-            " (" + ", ".join(f"{k} {prov[k]}" for k in sorted(prov)) + ")"
-            if prov else ""
+            " (" + ", ".join(f"{k} {prov[k]}" for k in ordered) + ")"
+            if ordered else ""
         )
         return (
             f"prediction reconcile: {verb} {len(self.proposals)}{split}, "

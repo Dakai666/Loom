@@ -201,6 +201,27 @@ class TestProvenanceCounts:
         report = ReconcileReport(executed=False, proposals=[], scanned=0)
         assert "auto" not in report.summary()
 
+    def test_render_carries_provenance_split(self):
+        # render() is what lands in the dream journal — pin that it inherits the
+        # split, so a future render() divergence from summary() can't drop it
+        # silently (絲絲 PR #561 review P3).
+        report = ReconcileReport(
+            executed=True,
+            proposals=[self._prop("auto"), self._prop("explicit")],
+            scanned=2,
+        )
+        assert "(auto 1, explicit 1)" in report.render()
+
+    def test_summary_display_order_is_fixed_not_alphabetical(self):
+        # auto before explicit before other — intentional order, and `other`
+        # trails even though it sorts last alphabetically too (絲絲 review P1).
+        report = ReconcileReport(
+            executed=True,
+            proposals=[self._prop("other"), self._prop("explicit"), self._prop("auto")],
+            scanned=3,
+        )
+        assert "(auto 1, explicit 1, other 1)" in report.summary()
+
 
 # ---------------------------------------------------------------------------
 # I3 at the function level — dry-run is read-only by construction
