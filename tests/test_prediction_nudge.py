@@ -57,3 +57,14 @@ class TestNudgeSuppressed:
 
     def test_subagent_origin_not_nudged(self):
         assert prediction_nudge_body("subagent", predict_tool_enabled=True) is None
+
+    def test_missing_attr_falls_back_to_suppress(self):
+        """The stream_turn call site reads the flag via getattr(self, ..., False),
+        so a partially-constructed session that never set _predict_tool_enabled
+        suppresses the nudge rather than raising — mirrors the nearby
+        hasattr(self, "_legitimacy_guard") guard (絲絲 PR #560 review)."""
+        class _BareSession:  # no _predict_tool_enabled attribute
+            pass
+
+        enabled = getattr(_BareSession(), "_predict_tool_enabled", False)
+        assert prediction_nudge_body("autonomy", predict_tool_enabled=enabled) is None
