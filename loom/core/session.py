@@ -149,6 +149,7 @@ from loom.core.session_support import (  # noqa: F401  (re-export)
     _load_env,
     _parse_skill_frontmatter,
     _resolve_output_max_tokens,
+    prediction_nudge_body,
 )
 
 console = Console(highlight=False)
@@ -1994,6 +1995,18 @@ class LoomSession:
                     _log_record(record)
             self._pending_verdicts.clear()
             self._pending_pulses.clear()
+
+            # Epic #528 (P0.5-a follow-up): on self-driven turns invite one
+            # deliberate `predict` bet so explicit, confidence-varying wagers
+            # flow instead of the auto-heartbeat monoculture. Origin-gated to the
+            # autonomy path (never human chat) and suppressed when the predict
+            # tool isn't registered. Soft + behaviour-neutral (I5).
+            _nudge = prediction_nudge_body(
+                origin,
+                predict_tool_enabled=getattr(self, "_predict_tool_enabled", False),
+            )
+            if _nudge is not None:
+                _emit_reminder(_nudge)
 
             await self._memory.episodic.write(
                 EpisodicEntry(

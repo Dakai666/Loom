@@ -49,6 +49,43 @@ _OUTCOME_MARKERS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Prediction Spine — autonomy-path betting nudge (epic #528, P0.5-a follow-up)
+# ---------------------------------------------------------------------------
+
+# Origins whose turns are Loom acting on its own (scheduled chime / daemon-planned
+# autonomy), as opposed to a human speaking (interactive / user / discord / mcp)
+# or a sub-agent doing context isolation (subagent). The betting nudge fires only
+# here — keeping the human chat path DK already steers free of spine prompting,
+# per the "emergent mechanisms live in the autonomy path" principle.
+_SELF_DRIVEN_ORIGINS = frozenset({"chime", "autonomy"})
+
+
+def prediction_nudge_body(origin: str, *, predict_tool_enabled: bool) -> str | None:
+    """The ``<system-reminder>`` body inviting one deliberate ``predict`` bet,
+    or ``None`` when this turn should not be nudged.
+
+    The ``predict`` tool (#537) is passive — nothing makes the agent use it, so
+    the corpus was a 100% ``auto:`` heartbeat monoculture. This invites a wager
+    on self-driven turns so explicit, confidence-varying bets actually flow (the
+    non-trivial signal the §8 acceptance gate needs). Suppressed when the tool is
+    not registered (``predict_tool_enabled`` off) and on every human / subagent
+    origin. Wording is optional + behaviour-neutral on purpose: a bet must never
+    change which action the agent takes (I5 — prediction has no path to output).
+    """
+    if not predict_tool_enabled or origin not in _SELF_DRIVEN_ORIGINS:
+        return None
+    return (
+        "You are acting autonomously this turn. Before your next consequential "
+        "tool call, consider placing one falsifiable `predict` bet about its "
+        "outcome — a concrete, mechanically-checkable claim (e.g. row_count, "
+        "tool_success, output_contains), not a vibe. The reconcile pass settles "
+        "it against what actually happens and folds it into your calibration. "
+        "This is optional and must not change which action you take — it only "
+        "sharpens your sense of where you predict well or poorly."
+    )
+
+
 def _clean_envelope_metadata_line(text: str, *, max_len: int = 140) -> str:
     line = " ".join(str(text or "").strip().split())
     if len(line) <= max_len:
