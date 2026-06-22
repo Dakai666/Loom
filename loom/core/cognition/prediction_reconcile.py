@@ -37,6 +37,21 @@ from loom.core.memory.resolvers import resolve
 # Report shape — the auditable projection 絲絲 reviews
 # ---------------------------------------------------------------------------
 
+# Bet provenance — coarse origin of a wager, by ``context`` prefix. Lets the
+# report split deliberate ``predict``-tool bets from the involuntary heartbeat so
+# the #560 nudge's effect on the ``auto:`` monoculture is observable at a glance.
+_KNOWN_PROVENANCE = ("auto", "explicit")
+
+
+def bet_provenance(context: str | None) -> str:
+    """Classify a bet by its ``context`` prefix: ``auto`` (heartbeat),
+    ``explicit`` (predict tool), or ``other`` (free-text / unset). Splitting on
+    the first ``:`` keeps it robust to the suffix (``auto:implicit_tool_success``
+    vs ``auto:implicit_duration_bucket`` both fold to ``auto``)."""
+    prefix = (context or "").split(":", 1)[0]
+    return prefix if prefix in _KNOWN_PROVENANCE else "other"
+
+
 @dataclass
 class ReconcileProposal:
     """One matured bet, judged. The unit of audit: *this* prediction was scored
@@ -48,6 +63,7 @@ class ReconcileProposal:
     matched: bool
     error_score: float
     detail: str = ""
+    provenance: str = "other"  # auto / explicit / other — see bet_provenance
 
 
 @dataclass
@@ -81,6 +97,15 @@ class ReconcileReport:
     def settleable(self) -> int:
         return len(self.proposals)
 
+    def provenance_counts(self) -> dict:
+        """Settled proposals grouped by bet provenance (auto / explicit / other).
+        The #560 nudge is meant to lift ``explicit`` off zero — this is the
+        number that says whether it's working. Only non-zero buckets appear."""
+        counts: dict[str, int] = {}
+        for p in self.proposals:
+            counts[p.provenance] = counts.get(p.provenance, 0) + 1
+        return counts
+
     def render(self) -> str:
         """Render as a 夢境鞏固-style body for the dream journal (slice 3.5).
 
@@ -111,6 +136,7 @@ class ReconcileReport:
                 "proposed": len(self.proposals),
                 "skipped": len(self.skipped),
                 "scanned": self.scanned,
+                "by_provenance": self.provenance_counts(),
             },
             "truncated": self.truncated,
             "proposals": [asdict(p) for p in self.proposals],
@@ -121,8 +147,15 @@ class ReconcileReport:
         verb = "reconciled" if self.executed else "would reconcile"
         tail = "" if self.executed else " (dry-run)"
         cap = " [TRUNCATED: scan budget hit, backlog remains]" if self.truncated else ""
+        # Provenance split rides on the proposed count so the dream journal shows
+        # explicit-vs-auto flow inline (omitted when nothing settled).
+        prov = self.provenance_counts()
+        split = (
+            " (" + ", ".join(f"{k} {prov[k]}" for k in sorted(prov)) + ")"
+            if prov else ""
+        )
         return (
-            f"prediction reconcile: {verb} {len(self.proposals)}, "
+            f"prediction reconcile: {verb} {len(self.proposals)}{split}, "
             f"skipped {len(self.skipped)} (scanned {self.scanned}){tail}{cap}"
         )
 
@@ -200,6 +233,7 @@ async def run_prediction_reconciliation(
                     matched=result.matched,
                     error_score=result.error_score,
                     detail=result.detail,
+                    provenance=bet_provenance(pred.context),
                 )
             )
             if execute:

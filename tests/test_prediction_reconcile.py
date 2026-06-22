@@ -24,6 +24,7 @@ from loom.core.cognition.prediction_reconcile import (
     run_prediction_reconciliation,
     ReconcileReport,
     ReconcileProposal,
+    bet_provenance,
 )
 
 
@@ -102,6 +103,16 @@ class TestDryRunReportShape:
         assert prop.error_score == 0.0
         assert prop.detail  # non-empty resolver detail
 
+    async def test_proposal_carries_provenance_from_bet_context(self, db_conn):
+        ps = PredictionStore(db_conn)
+        pred = _prediction()
+        pred.context = "explicit:predict_tool"  # a deliberate wager, not a heartbeat
+        await ps.write(pred)
+        await _settled_ok_action(db_conn, id="act-1")
+
+        report = await run_prediction_reconciliation(ps, db_conn, execute=False)
+        assert report.proposals[0].provenance == "explicit"
+
     async def test_unsettled_bet_is_skipped_with_reason(self, db_conn):
         ps = PredictionStore(db_conn)
         await ps.write(_prediction(call_id="never-ran"))
@@ -128,13 +139,67 @@ class TestReportSerialization:
         report = await run_prediction_reconciliation(ps, db_conn, execute=False)
         d = report.to_dict()
         assert d["executed"] is False
-        assert d["counts"] == {"proposed": 1, "skipped": 1, "scanned": 2}
+        assert d["counts"] == {
+            "proposed": 1, "skipped": 1, "scanned": 2,
+            "by_provenance": {"other": 1},  # default-context bet (no auto:/explicit: prefix)
+        }
         assert d["truncated"] is False
         assert isinstance(d["proposals"], list)
         assert d["proposals"][0]["observation_ref"] == "action:act-ok"
         assert isinstance(d["skipped"], list)
         assert d["skipped"][0]["reason"] == "not_settled"
         assert d["skipped"][0]["domain"] == "cli"
+
+
+# ---------------------------------------------------------------------------
+# Provenance split — measure explicit (predict tool) vs auto (heartbeat) flow
+# so the nudge's effect on the monoculture is observable (#560 follow-up)
+# ---------------------------------------------------------------------------
+
+class TestBetProvenance:
+    def test_auto_heartbeat_contexts(self):
+        assert bet_provenance("auto:implicit_tool_success") == "auto"
+        assert bet_provenance("auto:implicit_duration_bucket") == "auto"
+
+    def test_explicit_predict_tool_context(self):
+        assert bet_provenance("explicit:predict_tool") == "explicit"
+
+    def test_unknown_or_missing_context_is_other(self):
+        assert bet_provenance("") == "other"
+        assert bet_provenance(None) == "other"
+        assert bet_provenance("freeform note") == "other"
+
+
+class TestProvenanceCounts:
+    def _prop(self, provenance):
+        return ReconcileProposal(
+            prediction_id="p", domain="cli", observation_ref="action:a",
+            resolver_kind="tool_success", matched=True, error_score=0.0,
+            provenance=provenance,
+        )
+
+    def test_summary_breaks_down_proposals_by_provenance(self):
+        report = ReconcileReport(
+            executed=False,
+            proposals=[self._prop("auto"), self._prop("auto"), self._prop("explicit")],
+            scanned=3,
+        )
+        # at-a-glance signal in the dream journal: is the nudge pulling bets?
+        assert "auto 2" in report.summary()
+        assert "explicit 1" in report.summary()
+
+    def test_to_dict_carries_by_provenance(self):
+        report = ReconcileReport(
+            executed=False,
+            proposals=[self._prop("auto"), self._prop("explicit")],
+            scanned=2,
+        )
+        assert report.to_dict()["counts"]["by_provenance"] == {"auto": 1, "explicit": 1}
+
+    def test_no_proposals_omits_breakdown(self):
+        # zero settled bets — keep the summary line clean, no "(auto 0, explicit 0)"
+        report = ReconcileReport(executed=False, proposals=[], scanned=0)
+        assert "auto" not in report.summary()
 
 
 # ---------------------------------------------------------------------------
