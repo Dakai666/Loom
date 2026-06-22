@@ -33,6 +33,9 @@ KNOWN_RESOLVERS = {
 
 # duration_bucket thresholds (ms). A bet names the bucket it expects.
 _DURATION_BUCKETS = (("fast", 1_000.0), ("medium", 10_000.0))  # else "slow"
+# Ordered bucket scale — distance between predicted/actual grades the error so a
+# one-bucket miss is half-wrong, not as wrong as a two-bucket miss (#528 §6).
+_DURATION_ORDER = ("fast", "medium", "slow")
 
 
 @dataclass
@@ -98,6 +101,18 @@ def resolve(resolver: dict, observation: dict) -> ResolverResult:
         error_score = 0.0 if matched else min(1.0, delta / max(1, abs(expect)))
         return ResolverResult(matched, error_score, f"expect={expect} actual={actual}")
 
-    # duration_bucket
+    # duration_bucket — graded by ordinal bucket distance (was binary). A flat
+    # match/no-match collapses the latency heartbeat to a near-constant 0.0
+    # corpus that can't carry the §8 non-triviality gate; distance/range keeps
+    # ``matched`` exact-hit only while letting error_score grade the magnitude.
     actual_bucket = _bucket_for(observation["duration_ms"])
-    return _binary(actual_bucket == resolver["expect"], f"bucket={actual_bucket}")
+    expect_bucket = resolver["expect"]
+    distance = abs(
+        _DURATION_ORDER.index(actual_bucket) - _DURATION_ORDER.index(expect_bucket)
+    )
+    error_score = distance / (len(_DURATION_ORDER) - 1)
+    return ResolverResult(
+        matched=actual_bucket == expect_bucket,
+        error_score=error_score,
+        detail=f"bucket={actual_bucket} expect={expect_bucket}",
+    )

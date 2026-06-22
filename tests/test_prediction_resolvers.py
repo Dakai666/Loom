@@ -161,8 +161,22 @@ class TestDurationBucket:
             {"duration_ms": 200},
         )
         assert r.matched is True
+        assert r.error_score == 0.0
+
+    def test_bucket_off_by_one_is_graded(self):
+        """Graded by ordinal bucket distance (#528 acceptance-gate signal): a
+        fast-vs-medium miss is half-wrong, not the binary 1.0 a slow miss is.
+        Without this the latency heartbeat collapses to a near-constant 0.0
+        corpus that can't carry the §8 non-triviality gate."""
+        r = resolve(
+            {"kind": "duration_bucket", "expect": "fast"},
+            {"duration_ms": 5_000},  # medium — one bucket off
+        )
+        assert r.matched is False
+        assert r.error_score == 0.5
 
     def test_bucket_misses_expectation(self):
+        """Two buckets off (fast vs slow) is the max distance → still 1.0."""
         r = resolve(
             {"kind": "duration_bucket", "expect": "fast"},
             {"duration_ms": 60_000},
