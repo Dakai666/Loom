@@ -738,6 +738,23 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 #   { resource = "exec", action = "execute", selector = "workspace" },
 # ]
 
+# ── Example: subscribe to a circadian lifecycle event (issue #472) ────────────
+# Circadian emits these events from inside the daily lifecycle — no extra
+# wiring needed, just listen by name:
+#   • circadian:day_started    {date, thread_id, session_id}    — daily session opened
+#   • circadian:day_closed     {date, thread_id, closed_at}     — daily session closed
+#   • circadian:weave_applied  {date, applied_from, rationale}  — last night's
+#       weave_revise applied; the revised plan drives behaviour from this dawn
+# There is no built-in subscriber by design — add one only when you have a
+# real use (e.g. archive yesterday's pursuits when the day closes). Example:
+# [[autonomy.triggers]]
+# name          = "on_day_closed"
+# event         = "circadian:day_closed"
+# intent        = "Archive completed pursuits and note tomorrow's first thread."
+# trust_level   = "safe"
+# notify        = false
+# notify_thread = 0
+
 # ── Example: free-dream supplement (pair with [memory.dream]) ──────────────────
 # Themed rotation is owned by ``[memory.dream]`` (daemon-level, no LLM
 # intent). This schedule is the recommended complement: a single daily
