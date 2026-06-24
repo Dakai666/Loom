@@ -753,3 +753,101 @@ class TestReloadRhythmAnchors:
         await daemon._on_trigger_fire(dawn, {})
         names = {t.name for t in daemon.evaluator.list()}
         assert "circadian:phase_pet" in names
+
+
+class TestWeaveAppliedEmit:
+    """Issue #472: dawn emits ``circadian:weave_applied`` when last night's
+    weave_revise actually applied (the revised plan starts driving today).
+    The shipped weave_revise proposes-and-applies atomically, so this single
+    dawn-detected event is the honest 'weave changed, now in effect' signal —
+    there is no separate evening 'proposed' event."""
+
+    def _write_applied_proposal(self, *, rationale: str = "養生：晚睡改早睡"):
+        """Persist yesterday's applied proposal artifact and return its date."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        from loom.autonomy.circadian.proposal import (
+            APPLIED_SUBDIR,
+            PROPOSALS_DIR,
+            Change,
+            WeaveProposal,
+            _save_proposal_toml,
+            proposal_path,
+        )
+
+        yesterday = (
+            datetime.now(ZoneInfo(TZ)) - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        proposal = WeaveProposal(
+            date=yesterday, phase="evening_closure", based_on_mtime=0,
+            rationale=rationale,
+            changes=[Change(section="check_in", action="replace", new_body="x")],
+        )
+        _save_proposal_toml(proposal, proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR))
+        return yesterday
+
+    async def _spy_emits(self, daemon):
+        """Wrap the daemon's evaluator.emit to record (name, payload)."""
+        emitted: list[tuple[str, dict]] = []
+        orig = daemon.evaluator.emit
+
+        async def _rec(name, payload):
+            emitted.append((name, dict(payload)))
+            return await orig(name, payload)
+
+        daemon.evaluator.emit = _rec
+        return emitted
+
+    async def _fire(self, daemon, trigger_name):
+        trig = next(t for t in daemon.evaluator.list() if t.name == trigger_name)
+        await daemon._on_trigger_fire(trig, {})
+
+    async def test_dawn_emits_weave_applied_when_proposal_applied(self):
+        yesterday = self._write_applied_proposal(rationale="養生：晚睡改早睡")
+        daemon, _, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        emitted = await self._spy_emits(daemon)
+
+        await self._fire(daemon, "circadian:phase_dawn")
+
+        applied = [p for n, p in emitted if n == "circadian:weave_applied"]
+        assert len(applied) == 1
+        assert applied[0]["applied_from"] == yesterday
+        assert applied[0]["rationale"] == "養生：晚睡改早睡"
+        assert applied[0]["date"]  # today's stamp present
+
+    async def test_dawn_no_emit_when_no_proposal(self):
+        daemon, _, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        emitted = await self._spy_emits(daemon)
+
+        await self._fire(daemon, "circadian:phase_dawn")
+
+        assert not [n for n, _ in emitted if n == "circadian:weave_applied"]
+
+    async def test_non_dawn_phase_does_not_emit_weave_applied(self):
+        # Even with an applied proposal present, only dawn emits — other
+        # phases firing must not re-announce the weave change.
+        self._write_applied_proposal()
+        daemon, _, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="11:00", name="curiosity", meaning="散步"),
+        ])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        emitted = await self._spy_emits(daemon)
+
+        await self._fire(daemon, "circadian:phase_curiosity")
+
+        assert not [n for n, _ in emitted if n == "circadian:weave_applied"]

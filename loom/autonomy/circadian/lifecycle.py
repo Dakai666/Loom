@@ -478,6 +478,25 @@ async def _deliver_phase_chime(
     reason = None if delivered else "no_today_session"
     _record_phase_outcome(anchor.name, outcome, reason, config.timezone)
 
+    # Issue #472: when dawn fires and last night's weave_revise actually
+    # applied, the revised plan starts driving behaviour *today* — that is the
+    # moment the change takes effect, so we emit the lifecycle event here.
+    # NB: the shipped weave_revise (PR4 #462) proposes-and-applies atomically
+    # in evening_closure — there is no separate dawn "confirm" step the
+    # original issue assumed, and therefore no distinct evening "proposed"
+    # state to emit. This single dawn-detected event is the honest "weave
+    # changed and is now in effect" signal. Subscribers wire in via
+    # [[autonomy.triggers]] on circadian:weave_applied; no internal subscriber
+    # lands here by design (issue #472 "不做").
+    if anchor.name == "dawn":
+        applied = _yesterday_applied_proposal(config.timezone)
+        if applied is not None:
+            await _emit(daemon.evaluator, "circadian:weave_applied", {
+                "date": _today_str(config.timezone),
+                "applied_from": applied.date,
+                "rationale": applied.rationale,
+            })
+
 
 def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
     """Stitch rhythm meaning + today's weave section into the chime body.
@@ -513,6 +532,19 @@ def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
     return "\n\n".join(parts)
 
 
+def _yesterday_applied_proposal(tz: str):
+    """Yesterday's evening_closure proposal *iff* it applied cleanly (i.e. it
+    landed under ``proposals/applied/``, not parked under ``conflicts/``).
+
+    Shared by the dawn chime「昨夜你改了什麼」layer and the
+    ``circadian:weave_applied`` emit (#472) so both read the same artifact.
+    Returns ``None`` when no clean revision happened overnight."""
+    yesterday = (
+        datetime.now(ZoneInfo(tz)) - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    return load_proposal(proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR))
+
+
 def _yesterday_revision_report(tz: str) -> str | None:
     """Look up yesterday's evening_closure proposal artifact and turn it
     into the 「昨夜你改了什麼」 chime layer.
@@ -530,10 +562,9 @@ def _yesterday_revision_report(tz: str) -> str | None:
         datetime.now(ZoneInfo(tz)) - timedelta(days=1)
     ).strftime("%Y-%m-%d")
 
-    applied = proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR)
     conflict = proposal_path(yesterday, PROPOSALS_DIR / CONFLICTS_SUBDIR)
 
-    proposal = load_proposal(applied)
+    proposal = _yesterday_applied_proposal(tz)
     if proposal is not None:
         summary = "\n".join(f"- {line}" for line in proposal.summary_lines())
         return (
