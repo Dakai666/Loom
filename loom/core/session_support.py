@@ -72,17 +72,30 @@ def prediction_nudge_body(origin: str, *, predict_tool_enabled: bool) -> str | N
     not registered (``predict_tool_enabled`` off) and on every human / subagent
     origin. Wording is optional + behaviour-neutral on purpose: a bet must never
     change which action the agent takes (I5 — prediction has no path to output).
+
+    **Hardened 2026-07-03 (uncertainty-targeted).** The original soft "consider
+    …" invitation fired on every autonomy turn for ~10 days and produced zero
+    explicit bets — the agent read it as skippable noise. Worse, the origins that
+    *do* fire are routine (daily-life / pet-care / dreaming), so an obeyed-but-
+    undiscriminating nudge would only manufacture a *second* trivial-bet
+    monoculture. So the wording now carries the judgement itself: bet when the
+    outcome is genuinely uncertain, skip the sure things (the heartbeat already
+    records those). Same criterion Agent.md gives the agent for the chat path.
     """
     if not predict_tool_enabled or origin not in _SELF_DRIVEN_ORIGINS:
         return None
     return (
-        "You are acting autonomously this turn. Before your next consequential "
-        "tool call, consider placing one falsifiable `predict` bet about its "
-        "outcome — a concrete, mechanically-checkable claim (e.g. row_count, "
-        "tool_success, output_contains), not a vibe. The reconcile pass settles "
-        "it against what actually happens and folds it into your calibration. "
-        "This is optional and must not change which action you take — it only "
-        "sharpens your sense of where you predict well or poorly."
+        "You are acting autonomously this turn. If your next consequential tool "
+        "call has a genuinely uncertain outcome — a command you're unsure will "
+        "work, an unfamiliar tool, a 'will this actually do it' moment — place "
+        "one falsifiable `predict` bet about it: a concrete, mechanically-"
+        "checkable claim (e.g. row_count, tool_success, output_contains), not a "
+        "vibe. Skip it when you already know the action will succeed — those bets "
+        "are as trivial as betting the sun will rise and teach nothing; the "
+        "implicit heartbeat already records those. The reconcile pass settles "
+        "your bet against what actually happens and folds it into your "
+        "calibration. This is optional and must not change which action you take "
+        "— it only sharpens your sense of where you predict well or poorly."
     )
 
 

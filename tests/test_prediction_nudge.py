@@ -44,6 +44,21 @@ class TestNudgeFires:
         # explicitly disclaims steering the action
         assert "must not change" in body or "without changing" in body
 
+    def test_nudge_targets_uncertain_actions(self):
+        """Hardened 2026-07-03 (#528): the original soft "consider …" wording
+        fired for ~10 days on autonomy turns and yielded zero explicit bets, and
+        the origins that fire are routine — so an obeyed nudge would just make a
+        second trivial-bet monoculture. The wording now carries the judgement:
+        bet when the outcome is genuinely uncertain, skip the sure things (the
+        heartbeat already records those). Same criterion as Agent.md's chat-path
+        guidance."""
+        body = prediction_nudge_body("autonomy", predict_tool_enabled=True).lower()
+        # steer toward genuine uncertainty
+        assert "uncertain" in body
+        # and explicitly tell it to skip sure-thing routine bets
+        assert "skip" in body
+        assert "already know" in body
+
 
 class TestNudgeSuppressed:
     def test_tool_disabled_suppresses_nudge(self):
