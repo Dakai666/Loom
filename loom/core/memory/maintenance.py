@@ -451,6 +451,26 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
     # bets in later analysis (slice B uses ``auto:implicit_tool_success``).
     _EXPLICIT_CONTEXT = "explicit:predict_tool"
 
+    def _explicit_context(user_ctx: str | None) -> str:
+        """Stamp the ``explicit:`` provenance prefix on the stored context.
+
+        Both ``bet_provenance()`` and the MONOCULTURE health check classify a
+        bet by whether its context starts with ``explicit:``. When 絲絲 follows
+        the Agent.md guidance and fills ``context`` with her own reasoning, a
+        naive ``context or _EXPLICIT_CONTEXT`` would *overwrite* the prefix, so
+        the deliberate wager lands in the ``other`` bucket and the very metric
+        built to see explicit bets flow stays blind to it (found 2026-08-25:
+        14 real wagers, all misclassified as ``other``). Preserve her reasoning
+        *and* the provenance by prefixing; leave an already-tagged context be so
+        the default and idempotent re-tag don't double up.
+        """
+        ctx = (user_ctx or "").strip()
+        if not ctx:
+            return _EXPLICIT_CONTEXT
+        if ctx.startswith("explicit:"):
+            return ctx
+        return f"explicit:{ctx}"
+
     def _fail(call, msg: str) -> ToolResult:
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=False, output=f"predict refused: {msg}")
@@ -485,7 +505,7 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
             },
             resolver=resolver,
             domain=(call.args.get("domain") or tool),
-            context=call.args.get("context") or _EXPLICIT_CONTEXT,
+            context=_explicit_context(call.args.get("context")),
         )
         await PredictionStore(db).write(bet)
         return ToolResult(
