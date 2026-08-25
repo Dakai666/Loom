@@ -143,6 +143,48 @@ class TestWritesBet:
         bet = await _only_bet(db_conn)
         assert bet.context and not bet.context.startswith("auto:")
 
+    async def test_default_context_is_explicit_predict_tool(self, db_conn):
+        """No user context → the stable default provenance tag (unchanged)."""
+        from loom.core.memory.maintenance import make_predict_tool
+        tool = make_predict_tool(db_conn)
+        await tool.executor(_make_call({
+            "claim": "x", "tool": "run_bash",
+            "resolver": {"kind": "tool_success", "expect": True},
+        }))
+        assert (await _only_bet(db_conn)).context == "explicit:predict_tool"
+
+    async def test_free_text_context_keeps_explicit_prefix(self, db_conn):
+        """The bug fixed 2026-08-25: when the agent fills ``context`` with its
+        own reasoning (per Agent.md guidance), the ``explicit:`` provenance
+        prefix must survive — otherwise ``bet_provenance`` files the deliberate
+        wager under ``other`` and the MONOCULTURE health check (which counts
+        ``.startswith("explicit:")``) stays blind to explicit bets flowing."""
+        from loom.core.memory.maintenance import make_predict_tool
+        from loom.core.cognition.prediction_reconcile import bet_provenance
+        tool = make_predict_tool(db_conn)
+        await tool.executor(_make_call({
+            "claim": "next fetch_url returns the article body",
+            "tool": "fetch_url",
+            "resolver": {"kind": "output_contains", "expect": "200"},
+            "context": "好奇心散步：深挖開源模型 1/100 成本擊敗旗艦",
+        }))
+        bet = await _only_bet(db_conn)
+        assert bet.context == "explicit:好奇心散步：深挖開源模型 1/100 成本擊敗旗艦"
+        assert bet.context.startswith("explicit:")      # health check counts this
+        assert bet_provenance(bet.context) == "explicit"  # reconcile split too
+
+    async def test_already_tagged_context_not_double_prefixed(self, db_conn):
+        """Idempotent: a context that already carries the prefix isn't re-tagged
+        into ``explicit:explicit:…``."""
+        from loom.core.memory.maintenance import make_predict_tool
+        tool = make_predict_tool(db_conn)
+        await tool.executor(_make_call({
+            "claim": "x", "tool": "run_bash",
+            "resolver": {"kind": "tool_success", "expect": True},
+            "context": "explicit:predict_tool",
+        }))
+        assert (await _only_bet(db_conn)).context == "explicit:predict_tool"
+
 
 # ---------------------------------------------------------------------------
 # Fail-fast validation — no half-written bets
