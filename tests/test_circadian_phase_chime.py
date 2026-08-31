@@ -465,8 +465,15 @@ class TestWeaveCompositionInChime:
     async def test_weave_missing_for_phase_falls_back_to_meaning(self):
         _write_weave("## shared_learning\n- 讀 HN top 10\n")  # no dawn section
         daemon, deliveries, _ = _make_daemon()
+        # Both phases are registered so shared_learning stays phase-scoped.
+        # With only `dawn` in the roster it would be an *unclaimed* section
+        # and therefore part of the day's global layer (#565) — a different
+        # case, covered by TestDawnGlobalWeaveLayer. What this test pins is
+        # narrower and unchanged: a phase whose own section is absent gets
+        # meaning alone, with no empty 今日織程 heading.
         register_rhythm_anchors(daemon, CFG, [
             Anchor(time="08:00", name="dawn", meaning="醒來"),
+            Anchor(time="09:00", name="shared_learning", meaning="讀點東西"),
         ])
         plat = FakePlatform()
         await ensure_today_session(
@@ -853,91 +860,109 @@ class TestWeaveAppliedEmit:
         assert not [n for n, _ in emitted if n == "circadian:weave_applied"]
 
 
-class TestWeaveJoinDiagnostic:
-    """Issue #565: when the weave file's H2 headings stop matching any
-    anchor name, the 今日織程 layer vanishes from every chime. Absence is
-    not a signal the agent can reason about — so the dawn chime says it
-    outright, once a day, and the daemon log records it for DK."""
+class TestDawnGlobalWeaveLayer:
+    """Issue #565: weave sections claimed by no phase are the day's global
+    layer (今日 Program / 長線事項 carry / …). They are delivered once, at
+    dawn — not at every chime.
 
-    async def test_dawn_chime_reports_dead_join(self):
-        _write_weave("## 今日 Program\n- default\n\n## 今日重點\n- 喵吉\n")
-        # The dawn layer reads the rhythm *table* (same source the anchor
-        # registry is built from), so the file has to be on disk here.
-        _write_rhythm(
-            '[[anchors]]\ntime = "08:00"\nname = "dawn"\nmeaning = "醒來"\n\n'
-            '[[anchors]]\ntime = "10:00"\nname = "pet"\nmeaning = "照顧喵吉"\n'
-        )
+    DK's reasoning for dawn-only: the other phases fire on environmental
+    cues and what the agent needs there is "how do I walk *this* stretch";
+    the day's shape is already established by the dawn intent. A
+    phase_curiosity chime at 11:00 carrying the full 長線事項 again is
+    interference, not context.
+    """
+
+    def _setup(self, weave: str, anchors: list[Anchor]):
+        _write_weave(weave)
         daemon, deliveries, _ = _make_daemon()
-        register_rhythm_anchors(daemon, CFG, [
-            Anchor(time="08:00", name="dawn", meaning="醒來"),
-            Anchor(time="10:00", name="pet", meaning="照顧喵吉"),
-        ])
+        register_rhythm_anchors(daemon, CFG, anchors)
+        return daemon, deliveries
+
+    async def _fire(self, daemon, phase: str):
         plat = FakePlatform()
         await ensure_today_session(
             datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
         )
-
         trig = next(
-            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+            t for t in daemon.evaluator.list() if t.name == f"circadian:phase_{phase}"
         )
         await daemon._on_trigger_fire(trig, {})
 
-        intent = deliveries[0].intent
-        assert "醒來" in intent          # meaning layer survives
-        assert "今日 Program" in intent  # names the file's actual headings
-        assert "dawn" in intent          # …and what they should have been
+    ANCHORS = [
+        Anchor(time="08:00", name="dawn", meaning="醒來"),
+        Anchor(time="11:00", name="curiosity", meaning="隨意走走"),
+    ]
 
-    async def test_non_dawn_chime_does_not_repeat_the_warning(self):
-        """One report per day, at dawn. Repeating it at every phase would
-        train the agent to skim past it."""
-        _write_weave("## 今日 Program\n- default\n")
-        daemon, deliveries, _ = _make_daemon()
-        register_rhythm_anchors(daemon, CFG, [
-            Anchor(time="08:00", name="dawn", meaning="醒來"),
-            Anchor(time="10:00", name="pet", meaning="照顧喵吉"),
-        ])
-        plat = FakePlatform()
-        await ensure_today_session(
-            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+    async def test_dawn_carries_the_global_layer_with_headings(self):
+        """The headings themselves carry meaning — that was the whole reason
+        for keeping this layout — so they ride along verbatim."""
+        daemon, deliveries = self._setup(
+            "## 今日 Program\n- default 節奏\n\n## 長線事項 carry\n- taste 形成機制\n",
+            self.ANCHORS,
         )
-
-        trig = next(
-            t for t in daemon.evaluator.list() if t.name == "circadian:phase_pet"
-        )
-        await daemon._on_trigger_fire(trig, {})
+        await self._fire(daemon, "dawn")
 
         intent = deliveries[0].intent
-        assert "照顧喵吉" in intent
+        assert "醒來" in intent
+        assert "## 今日 Program" in intent
+        assert "default 節奏" in intent
+        assert "## 長線事項 carry" in intent
+        assert "taste 形成機制" in intent
+
+    async def test_non_dawn_phase_does_not_get_the_global_layer(self):
+        daemon, deliveries = self._setup(
+            "## 今日 Program\n- default 節奏\n\n## 長線事項 carry\n- taste\n",
+            self.ANCHORS,
+        )
+        await self._fire(daemon, "curiosity")
+
+        intent = deliveries[0].intent
+        assert "隨意走走" in intent
         assert "今日 Program" not in intent
+        assert "長線事項" not in intent
 
-    async def test_healthy_join_adds_nothing(self):
-        _write_weave("## dawn\n- 早安\n")
-        daemon, deliveries, _ = _make_daemon()
-        register_rhythm_anchors(daemon, CFG, [
-            Anchor(time="08:00", name="dawn", meaning="醒來"),
-        ])
-        plat = FakePlatform()
-        await ensure_today_session(
-            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+    async def test_phase_scoped_section_still_wins_at_its_own_phase(self):
+        """The global layer is additive — it must not disturb the existing
+        per-phase contract."""
+        daemon, deliveries = self._setup(
+            "## curiosity\n- 讀 arXiv\n\n## 今日 Program\n- default\n",
+            self.ANCHORS,
         )
-
-        trig = next(
-            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
-        )
-        await daemon._on_trigger_fire(trig, {})
+        await self._fire(daemon, "curiosity")
 
         intent = deliveries[0].intent
         assert "**今日織程**" in intent
-        assert "join key" not in intent
+        assert "讀 arXiv" in intent
+        assert "今日 Program" not in intent
 
-    async def test_registration_logs_the_dead_join(self, caplog):
-        """DK reads logs, the agent reads chimes — both get told."""
-        import logging
-        _write_weave("## 今日 Program\n- default\n")
-        daemon, _, _ = _make_daemon()
-        with caplog.at_level(logging.WARNING, logger="loom.autonomy.circadian.lifecycle"):
-            register_rhythm_anchors(daemon, CFG, [
-                Anchor(time="08:00", name="dawn", meaning="醒來"),
-            ])
-        assert any("join key" in r.message or "對得上" in r.getMessage()
-                   for r in caplog.records)
+    async def test_dawn_shows_both_layers_distinctly(self):
+        daemon, deliveries = self._setup(
+            "## dawn\n- recall 記憶\n\n## 今日 Program\n- default\n",
+            self.ANCHORS,
+        )
+        await self._fire(daemon, "dawn")
+
+        intent = deliveries[0].intent
+        assert "**今日織程**" in intent and "recall 記憶" in intent
+        assert "**今日織程（全局）**" in intent and "今日 Program" in intent
+        # Phase-specific first, day-wide context after it.
+        assert intent.index("**今日織程**") < intent.index("**今日織程（全局）**")
+
+    async def test_nothing_global_adds_nothing(self):
+        daemon, deliveries = self._setup("## dawn\n- recall 記憶\n", self.ANCHORS)
+        await self._fire(daemon, "dawn")
+
+        intent = deliveries[0].intent
+        assert "全局" not in intent
+
+    async def test_all_global_file_still_reaches_dawn(self):
+        """The real-world shape since 2026-07-16: not one heading is an
+        anchor name. Previously that delivered nothing at all."""
+        daemon, deliveries = self._setup(
+            "## 今日 Program\n- default\n\n## 喵吉持續關注\n- 碗 8 次\n",
+            self.ANCHORS,
+        )
+        await self._fire(daemon, "dawn")
+
+        intent = deliveries[0].intent
+        assert "碗 8 次" in intent

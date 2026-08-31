@@ -33,7 +33,7 @@ from loom.autonomy.circadian.proposal import (
 )
 from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
-from loom.autonomy.circadian.weave import diagnose_join, load_weave
+from loom.autonomy.circadian.weave import load_weave
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -424,7 +424,12 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
     )
 
 
-def _make_phase_handler(daemon: Any, config: CircadianConfig, anchor: Anchor):
+def _make_phase_handler(
+    daemon: Any,
+    config: CircadianConfig,
+    anchor: Anchor,
+    peer_names: tuple[str, ...] = (),
+):
     """Build the cron handler for one rhythm anchor.
 
     Bound as a default arg so closing over the loop variable in
@@ -433,13 +438,16 @@ def _make_phase_handler(daemon: Any, config: CircadianConfig, anchor: Anchor):
     """
 
     async def _phase_handler(_trigger: Any, _context: dict[str, Any]) -> None:
-        await _deliver_phase_chime(daemon, config, anchor)
+        await _deliver_phase_chime(daemon, config, anchor, peer_names)
 
     return _phase_handler
 
 
 async def _deliver_phase_chime(
-    daemon: Any, config: CircadianConfig, anchor: Anchor
+    daemon: Any,
+    config: CircadianConfig,
+    anchor: Anchor,
+    peer_names: tuple[str, ...] = (),
 ) -> None:
     """Fire one phase chime: build the request, route via the daemon's chime
     callback, append the outcome to ``phase_log``.
@@ -458,7 +466,7 @@ async def _deliver_phase_chime(
     False) we still log a ``skipped`` outcome so phase_log is a complete
     audit trail.
     """
-    intent = _compose_chime_intent(anchor, config)
+    intent = _compose_chime_intent(anchor, config, peer_names)
     req = ChimeRequest(
         schedule_name=anchor.trigger_name,
         intent=intent,
@@ -498,7 +506,9 @@ async def _deliver_phase_chime(
             })
 
 
-def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
+def _compose_chime_intent(
+    anchor: Anchor, config: CircadianConfig, peer_names: tuple[str, ...] = ()
+) -> str:
     """Stitch rhythm meaning + today's weave section into the chime body.
 
     Layers (composed in order, each optional):
@@ -526,15 +536,23 @@ def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
         revision_report = _yesterday_revision_report(config.timezone)
         if revision_report:
             parts.append(revision_report)
-        # Issue #565: a weave file whose H2s no longer match any anchor name
-        # makes the 今日織程 layer disappear from *every* chime, and absence
-        # is not something the agent can reason about — it previously read
-        # the silence as a failed write and filed a bug against the wrong
-        # subsystem. Say it plainly instead, once a day at dawn (repeating it
-        # at every phase would just train the agent to skim past it).
-        join_warning = diagnose_join(weave, [a.name for a in load_rhythm()])
-        if join_warning:
-            parts.append(f"**⚠️ daily_weave 對接不上**\n{join_warning}")
+        # Issue #565: sections claimed by no phase are the day's *global*
+        # layer — 今日 Program, 長線事項 carry, 喵吉持續關注. The weave file
+        # has been written global-first since 2026-07-16, and a per-phase-only
+        # delivery model dropped every one of them: a full file producing
+        # empty chimes for six weeks.
+        #
+        # Dawn-only, deliberately. The other phases fire on environmental
+        # cues and what the agent needs there is "how do I walk *this*
+        # stretch"; the day's shape is already established by the dawn
+        # intent. A phase_curiosity chime at 11:00 re-reading the full
+        # 長線事項 is interference, not context.
+        globals_ = weave.global_sections(peer_names)
+        if globals_:
+            body = "\n\n".join(
+                f"## {name}\n{text}" for name, text in globals_.items()
+            )
+            parts.append(f"**今日織程（全局）**\n{body}")
 
     if not parts:
         return f"Circadian phase: {anchor.name}"
@@ -633,6 +651,12 @@ def register_rhythm_anchors(
     of truth governs them all. Returns the number of anchors wired.
     """
     evaluator = daemon.evaluator
+    # The phase roster is captured here rather than re-read at chime time:
+    # a handler must classify weave sections against the anchors it was
+    # actually registered with. Re-reading rhythm.toml per chime would let a
+    # missing or mid-edit table silently reclassify every phase-scoped
+    # section as global (issue #565).
+    peer_names = tuple(a.name for a in anchors)
     for anchor in anchors:
         cron = local_hhmm_to_utc_cron(anchor.time, config.timezone)
         evaluator.register(CronTrigger(
@@ -643,7 +667,8 @@ def register_rhythm_anchors(
             notify=False,
         ))
         daemon.register_direct_handler(
-            anchor.trigger_name, _make_phase_handler(daemon, config, anchor)
+            anchor.trigger_name,
+            _make_phase_handler(daemon, config, anchor, peer_names),
         )
     if anchors:
         logger.info(
@@ -651,13 +676,20 @@ def register_rhythm_anchors(
             len(anchors),
             ", ".join(f"{a.name}@{a.time}" for a in anchors),
         )
-        # Registration is the one moment we hold both halves of the weave
-        # join key, so it is where a dead join gets caught (issue #565).
-        # Runs at daemon start and again at every dawn reload, which is the
-        # cadence DK actually reads logs at.
-        join_warning = diagnose_join(load_weave(), [a.name for a in anchors])
-        if join_warning:
-            logger.warning("[circadian] weave join key is dead — %s", join_warning)
+        # Registration holds both halves of the weave split, so it is where
+        # we can say how today's file will actually be delivered (issue
+        # #565). Descriptive, not a warning: an all-global file is the
+        # normal shape, and it now has somewhere to land.
+        weave = load_weave()
+        globals_ = weave.global_sections(a.name for a in anchors)
+        if weave.sections:
+            logger.info(
+                "[circadian] daily weave: %d phase-scoped section(s), "
+                "%d global section(s) delivered at dawn (%s)",
+                len(weave.sections) - len(globals_),
+                len(globals_),
+                ", ".join(globals_) or "none",
+            )
     return len(anchors)
 
 

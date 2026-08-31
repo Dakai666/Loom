@@ -14,7 +14,6 @@ from pathlib import Path
 from loom.autonomy.circadian.weave import (
     DEFAULT_WEAVE_PATH,
     WeavePlan,
-    diagnose_join,
     load_weave,
 )
 
@@ -202,67 +201,65 @@ class TestFencedCodeBlockIsolation:
         assert "## looks_like_phase" in plan.section_for("dawn")
 
 
-class TestDiagnoseJoin:
-    """Issue #565: the weave file's H2 headings are the join key onto
-    ``rhythm.toml`` anchor names. On 2026-07-16 the file's layout was
-    reworked to program-shaped headings (今日 Program / 今日重點 / …) and
-    the join silently went dead for six weeks — every phase chime quietly
-    fell through to ``meaning`` alone, and the agent, seeing only the
-    absence, diagnosed a *write* failure that never happened.
+class TestGlobalSections:
+    """Issue #565: a weave section whose name matches no anchor is not a
+    mistake — it is *global* content (今日 Program / 長線事項 carry / …),
+    written for the whole day rather than one phase.
 
-    A full miss on a non-empty file is the one unambiguous signature of
-    that break, so that is exactly what we report — nothing else, to keep
-    the warning free of false positives.
+    The original per-phase-only delivery model had nowhere to put those, so
+    they were parsed and then silently dropped. ``global_sections`` names
+    the leftover set; the dawn chime is where it gets delivered.
     """
 
     ANCHORS = ["dawn", "shared_learning", "pet", "curiosity", "evening_closure"]
 
-    def test_full_miss_on_non_empty_file_is_reported(self, tmp_path):
+    def test_unclaimed_sections_are_global(self, tmp_path):
         p = tmp_path / "weave.md"
-        _write(p, "## 今日 Program\n- default\n\n## 今日重點\n- 喵吉\n")
+        _write(p, "## 今日 Program\n- default\n\n## 長線事項 carry\n- taste\n")
         plan = load_weave(p)
 
-        warning = diagnose_join(plan, self.ANCHORS)
+        assert list(plan.global_sections(self.ANCHORS)) == [
+            "今日 Program", "長線事項 carry",
+        ]
 
-        assert warning is not None
-        # Names both sides of the broken join so the reader can act.
-        assert "今日 Program" in warning
-        assert "dawn" in warning
-
-    def test_partial_match_is_healthy(self, tmp_path):
-        """A phase with no section is normal and must not warn — only a
-        *total* miss indicates the join key itself is wrong."""
+    def test_anchor_named_sections_are_not_global(self, tmp_path):
+        """A phase-scoped section belongs to its phase and must not also be
+        broadcast at dawn, or the agent reads it twice in one day."""
         p = tmp_path / "weave.md"
-        _write(p, "## dawn\n- 早安\n\n## 今日重點\n- 喵吉\n")
+        _write(p, "## dawn\n- 早安\n\n## 今日 Program\n- default\n")
         plan = load_weave(p)
 
-        assert diagnose_join(plan, self.ANCHORS) is None
+        assert list(plan.global_sections(self.ANCHORS)) == ["今日 Program"]
+        assert plan.section_for("dawn") == "- 早安"
 
-    def test_full_match_is_healthy(self, tmp_path):
+    def test_file_order_is_preserved(self, tmp_path):
+        """The agent wrote these in a deliberate order; keep it."""
+        p = tmp_path / "weave.md"
+        _write(p, "".join(f"## 區段{i}\n- x\n\n" for i in range(6)))
+
+        assert list(load_weave(p).global_sections(self.ANCHORS)) == [
+            f"區段{i}" for i in range(6)
+        ]
+
+    def test_empty_body_sections_are_dropped(self, tmp_path):
+        """A heading with nothing under it is a placeholder, not content."""
+        p = tmp_path / "weave.md"
+        _write(p, "## 今日 Program\n\n## 長線事項\n- taste\n")
+
+        assert list(load_weave(p).global_sections(self.ANCHORS)) == ["長線事項"]
+
+    def test_all_anchors_leaves_nothing_global(self, tmp_path):
         p = tmp_path / "weave.md"
         _write(p, "## dawn\n- 早安\n\n## pet\n- 喵吉\n")
-        plan = load_weave(p)
 
-        assert diagnose_join(plan, self.ANCHORS) is None
+        assert load_weave(p).global_sections(self.ANCHORS) == {}
 
-    def test_empty_plan_does_not_warn(self, tmp_path):
-        """Missing file / no H2s is a supported state (fresh install) and
-        load_weave already logs it — warning again would be noise."""
-        assert diagnose_join(load_weave(tmp_path / "absent.md"), self.ANCHORS) is None
-
-    def test_no_anchors_does_not_warn(self, tmp_path):
-        """No rhythm table means there is no join to be broken."""
+    def test_no_anchors_makes_everything_global(self, tmp_path):
+        """No rhythm table → nothing is phase-scoped, so it is all global."""
         p = tmp_path / "weave.md"
         _write(p, "## 今日 Program\n- default\n")
-        assert diagnose_join(load_weave(p), []) is None
 
-    def test_warning_is_bounded(self, tmp_path):
-        """The weave file can hold a lot of sections; the warning must stay
-        a warning and not paste the whole table of contents."""
-        p = tmp_path / "weave.md"
-        _write(p, "".join(f"## 區段{i}\n- x\n\n" for i in range(40)))
+        assert list(load_weave(p).global_sections([])) == ["今日 Program"]
 
-        warning = diagnose_join(load_weave(p), self.ANCHORS)
-
-        assert warning is not None
-        assert len(warning) < 700
+    def test_empty_plan_has_no_globals(self, tmp_path):
+        assert load_weave(tmp_path / "absent.md").global_sections(self.ANCHORS) == {}
