@@ -54,6 +54,28 @@ class WeavePlan:
         body = self.sections.get(phase_name)
         return body if body else None
 
+    def global_sections(self, anchor_names: Iterable[str]) -> dict[str, str]:
+        """Sections claimed by no phase — the day's *global* layer.
+
+        ``section_for`` answers "what does this phase look like today". But
+        the weave file in practice is written global-first: 今日 Program,
+        長線事項 carry, 喵吉持續關注 — content about the whole day, not one
+        phase. Under a per-phase-only delivery model those were parsed and
+        then silently dropped, which is how issue #565's six-week blackout
+        stayed invisible: the file was full and every chime was empty.
+
+        Anything whose heading is not an anchor name is therefore global by
+        definition, rather than a naming mistake to be corrected. File order
+        is preserved (the agent wrote them in a deliberate sequence) and
+        empty-bodied headings are dropped as placeholders.
+        """
+        claimed = set(str(a) for a in anchor_names)
+        return {
+            name: body
+            for name, body in self.sections.items()
+            if name not in claimed and body.strip()
+        }
+
 
 def load_weave_for_revision(
     path: Path | None = None,
@@ -143,53 +165,6 @@ def load_weave(path: Path | None = None) -> WeavePlan:
         logger.warning("[circadian] daily weave at %s unreadable (%s)", p, exc)
         return WeavePlan()
     return WeavePlan(sections=_parse_h2_sections(text))
-
-
-# How many names each side of a broken join we quote before eliding. The
-# warning has to fit inside a chime body next to the real content, so it
-# names enough to be actionable and stops there.
-_DIAGNOSE_SAMPLE = 5
-
-
-def diagnose_join(plan: WeavePlan, anchor_names: Iterable[str]) -> str | None:
-    """Report a *dead join key* between the weave file and the rhythm table.
-
-    ``section_for`` looks sections up by ``anchor.name``, and a phase with no
-    section is a supported, everyday state — the chime just falls through to
-    ``meaning``. That tolerance is right, but it also means a file whose
-    headings stopped being anchor names at all degrades into permanent
-    silence with no distinguishable signal. Issue #565: the layout was
-    reworked to program-shaped headings on 2026-07-16 and every chime lost
-    its 今日織程 layer for six weeks; the only visible symptom was absence,
-    which the agent then misread as a *write* failure and filed as such.
-
-    A non-empty file whose section names overlap the anchor names *not at
-    all* is the one unambiguous signature of that break — partial overlap is
-    ordinary and must stay silent, or the warning becomes noise and gets
-    tuned out. Returns the warning text, or ``None`` when the join is fine.
-    """
-    anchors = [str(a) for a in anchor_names]
-    if not plan.sections or not anchors:
-        return None
-    if set(plan.sections) & set(anchors):
-        return None
-
-    def _sample(names: list[str]) -> str:
-        shown = ", ".join(names[:_DIAGNOSE_SAMPLE])
-        extra = len(names) - _DIAGNOSE_SAMPLE
-        return f"{shown}…（另 {extra} 個）" if extra > 0 else shown
-
-    return (
-        f"daily_weave.md 有 {len(plan.sections)} 個 H2 section"
-        f"（{_sample(list(plan.sections))}），"
-        f"但沒有一個對得上 rhythm.toml 的 anchor name"
-        f"（{_sample(anchors)}）。\n"
-        "H2 標題就是兩邊的 join key —— 對不上時每個 phase chime 只會拿到 "
-        "rhythm 的 meaning，讀不到今日織程。這是讀取端對不上，不是寫入失敗："
-        "weave_revise 每條失敗路徑都會回明確錯誤。\n"
-        "修法：把 daily_weave.md 的 H2 改成 anchor name（或用 weave_revise "
-        "的 rename action）。"
-    )
 
 
 def _parse_h2_sections(text: str) -> dict[str, str]:
