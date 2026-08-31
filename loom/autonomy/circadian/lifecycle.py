@@ -33,7 +33,7 @@ from loom.autonomy.circadian.proposal import (
 )
 from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
-from loom.autonomy.circadian.weave import load_weave
+from loom.autonomy.circadian.weave import diagnose_join, load_weave
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -526,6 +526,15 @@ def _compose_chime_intent(anchor: Anchor, config: CircadianConfig) -> str:
         revision_report = _yesterday_revision_report(config.timezone)
         if revision_report:
             parts.append(revision_report)
+        # Issue #565: a weave file whose H2s no longer match any anchor name
+        # makes the 今日織程 layer disappear from *every* chime, and absence
+        # is not something the agent can reason about — it previously read
+        # the silence as a failed write and filed a bug against the wrong
+        # subsystem. Say it plainly instead, once a day at dawn (repeating it
+        # at every phase would just train the agent to skim past it).
+        join_warning = diagnose_join(weave, [a.name for a in load_rhythm()])
+        if join_warning:
+            parts.append(f"**⚠️ daily_weave 對接不上**\n{join_warning}")
 
     if not parts:
         return f"Circadian phase: {anchor.name}"
@@ -642,6 +651,13 @@ def register_rhythm_anchors(
             len(anchors),
             ", ".join(f"{a.name}@{a.time}" for a in anchors),
         )
+        # Registration is the one moment we hold both halves of the weave
+        # join key, so it is where a dead join gets caught (issue #565).
+        # Runs at daemon start and again at every dawn reload, which is the
+        # cadence DK actually reads logs at.
+        join_warning = diagnose_join(load_weave(), [a.name for a in anchors])
+        if join_warning:
+            logger.warning("[circadian] weave join key is dead — %s", join_warning)
     return len(anchors)
 
 

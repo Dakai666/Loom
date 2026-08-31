@@ -851,3 +851,93 @@ class TestWeaveAppliedEmit:
         await self._fire(daemon, "circadian:phase_curiosity")
 
         assert not [n for n, _ in emitted if n == "circadian:weave_applied"]
+
+
+class TestWeaveJoinDiagnostic:
+    """Issue #565: when the weave file's H2 headings stop matching any
+    anchor name, the 今日織程 layer vanishes from every chime. Absence is
+    not a signal the agent can reason about — so the dawn chime says it
+    outright, once a day, and the daemon log records it for DK."""
+
+    async def test_dawn_chime_reports_dead_join(self):
+        _write_weave("## 今日 Program\n- default\n\n## 今日重點\n- 喵吉\n")
+        # The dawn layer reads the rhythm *table* (same source the anchor
+        # registry is built from), so the file has to be on disk here.
+        _write_rhythm(
+            '[[anchors]]\ntime = "08:00"\nname = "dawn"\nmeaning = "醒來"\n\n'
+            '[[anchors]]\ntime = "10:00"\nname = "pet"\nmeaning = "照顧喵吉"\n'
+        )
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+            Anchor(time="10:00", name="pet", meaning="照顧喵吉"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "醒來" in intent          # meaning layer survives
+        assert "今日 Program" in intent  # names the file's actual headings
+        assert "dawn" in intent          # …and what they should have been
+
+    async def test_non_dawn_chime_does_not_repeat_the_warning(self):
+        """One report per day, at dawn. Repeating it at every phase would
+        train the agent to skim past it."""
+        _write_weave("## 今日 Program\n- default\n")
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+            Anchor(time="10:00", name="pet", meaning="照顧喵吉"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_pet"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "照顧喵吉" in intent
+        assert "今日 Program" not in intent
+
+    async def test_healthy_join_adds_nothing(self):
+        _write_weave("## dawn\n- 早安\n")
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        plat = FakePlatform()
+        await ensure_today_session(
+            datetime.now(timezone.utc), plat, CFG, evaluator=FakeEvaluator()
+        )
+
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "**今日織程**" in intent
+        assert "join key" not in intent
+
+    async def test_registration_logs_the_dead_join(self, caplog):
+        """DK reads logs, the agent reads chimes — both get told."""
+        import logging
+        _write_weave("## 今日 Program\n- default\n")
+        daemon, _, _ = _make_daemon()
+        with caplog.at_level(logging.WARNING, logger="loom.autonomy.circadian.lifecycle"):
+            register_rhythm_anchors(daemon, CFG, [
+                Anchor(time="08:00", name="dawn", meaning="醒來"),
+            ])
+        assert any("join key" in r.message or "對得上" in r.getMessage()
+                   for r in caplog.records)

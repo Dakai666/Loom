@@ -14,6 +14,7 @@ from pathlib import Path
 from loom.autonomy.circadian.weave import (
     DEFAULT_WEAVE_PATH,
     WeavePlan,
+    diagnose_join,
     load_weave,
 )
 
@@ -199,3 +200,69 @@ class TestFencedCodeBlockIsolation:
         plan = load_weave(p)
         assert set(plan.sections) == {"dawn"}
         assert "## looks_like_phase" in plan.section_for("dawn")
+
+
+class TestDiagnoseJoin:
+    """Issue #565: the weave file's H2 headings are the join key onto
+    ``rhythm.toml`` anchor names. On 2026-07-16 the file's layout was
+    reworked to program-shaped headings (今日 Program / 今日重點 / …) and
+    the join silently went dead for six weeks — every phase chime quietly
+    fell through to ``meaning`` alone, and the agent, seeing only the
+    absence, diagnosed a *write* failure that never happened.
+
+    A full miss on a non-empty file is the one unambiguous signature of
+    that break, so that is exactly what we report — nothing else, to keep
+    the warning free of false positives.
+    """
+
+    ANCHORS = ["dawn", "shared_learning", "pet", "curiosity", "evening_closure"]
+
+    def test_full_miss_on_non_empty_file_is_reported(self, tmp_path):
+        p = tmp_path / "weave.md"
+        _write(p, "## 今日 Program\n- default\n\n## 今日重點\n- 喵吉\n")
+        plan = load_weave(p)
+
+        warning = diagnose_join(plan, self.ANCHORS)
+
+        assert warning is not None
+        # Names both sides of the broken join so the reader can act.
+        assert "今日 Program" in warning
+        assert "dawn" in warning
+
+    def test_partial_match_is_healthy(self, tmp_path):
+        """A phase with no section is normal and must not warn — only a
+        *total* miss indicates the join key itself is wrong."""
+        p = tmp_path / "weave.md"
+        _write(p, "## dawn\n- 早安\n\n## 今日重點\n- 喵吉\n")
+        plan = load_weave(p)
+
+        assert diagnose_join(plan, self.ANCHORS) is None
+
+    def test_full_match_is_healthy(self, tmp_path):
+        p = tmp_path / "weave.md"
+        _write(p, "## dawn\n- 早安\n\n## pet\n- 喵吉\n")
+        plan = load_weave(p)
+
+        assert diagnose_join(plan, self.ANCHORS) is None
+
+    def test_empty_plan_does_not_warn(self, tmp_path):
+        """Missing file / no H2s is a supported state (fresh install) and
+        load_weave already logs it — warning again would be noise."""
+        assert diagnose_join(load_weave(tmp_path / "absent.md"), self.ANCHORS) is None
+
+    def test_no_anchors_does_not_warn(self, tmp_path):
+        """No rhythm table means there is no join to be broken."""
+        p = tmp_path / "weave.md"
+        _write(p, "## 今日 Program\n- default\n")
+        assert diagnose_join(load_weave(p), []) is None
+
+    def test_warning_is_bounded(self, tmp_path):
+        """The weave file can hold a lot of sections; the warning must stay
+        a warning and not paste the whole table of contents."""
+        p = tmp_path / "weave.md"
+        _write(p, "".join(f"## 區段{i}\n- x\n\n" for i in range(40)))
+
+        warning = diagnose_join(load_weave(p), self.ANCHORS)
+
+        assert warning is not None
+        assert len(warning) < 700
