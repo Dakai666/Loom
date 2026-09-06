@@ -4066,13 +4066,30 @@ class LoomSession:
             envelope_id = (
                 f"e{self._envelope_counter}" if self._envelope_counter else ""
             )
+            # #569 semantic observation surface: capture the tool's raw
+            # world-reply on the action row so semantic resolvers
+            # (output_contains / output_regex / row_count) can settle. The
+            # canonical text mirrors exactly what the agent saw in-conversation
+            # (str(output) on success, error text on failure) — world-generated,
+            # never LLM narrative (I2). No result (never executed) → NULLs.
+            from loom.core.memory.observation import capture_output_fields
+            if record.result is not None:
+                cap = capture_output_fields(
+                    record.result.output,
+                    success=record.result.success,
+                    error=record.result.error,
+                )
+            else:
+                cap = {"output_prefix": None, "output_digest": None,
+                       "output_len": None, "output_rows": None}
             await self._db.execute(
                 """
                 INSERT OR REPLACE INTO action_records
                     (id, envelope_id, session_id, turn_index, tool_name, call_id,
                      final_state, intent_summary, scope, duration_ms,
-                     state_history, has_rollback, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     state_history, has_rollback, created_at,
+                     output_prefix, output_digest, output_len, output_rows)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -4088,6 +4105,10 @@ class LoomSession:
                     _json.dumps(record.history_dicts(), ensure_ascii=False),
                     1 if record.rollback_result is not None else 0,
                     record.created_at.isoformat(),
+                    cap["output_prefix"],
+                    cap["output_digest"],
+                    cap["output_len"],
+                    cap["output_rows"],
                 ),
             )
             await self._db.commit()

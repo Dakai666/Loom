@@ -1,6 +1,6 @@
 # 生成認知整合 — 語義型觀察面擴張（Semantic Observation-Surface Expansion）
 
-> **狀態**：🟠 討論稿 → **升級為 explicit 路徑 blocker（2026-09-06 生產資料驗證，見 §8）**。仍需四方輪替定拍板點（§6），但「要不要做」已由實測回答：**要**。追蹤 issue：**#569**。
+> **狀態**：🟢 **已拍板（2026-09-06，見 §9）**——§6 六點以四方視角（DK 產品節奏 / Codex 硬契約 / 絲絲 end-user / CC 架構）收斂定案，DK 保留否決權；實作隨 issue #569 的 PR 進行。追蹤 issue：**#569**。
 > **上游**：epic #528 / P0 收斂規格 `docs/designs/58`（§4 resolver 白名單、§5 I2 硬約束、§10 Deferred）
 > **觸發（原）**：P0 acceptance gate 觀察期實測——reliability 軸近乎退化（1570/1572 error=0.0），逼出「訊號從哪來」的真問題
 > **觸發（升級，2026-09-06）**：絲絲自發採用 explicit `predict` 工具後，**14 筆賭裡 13 筆（93%）用語義 resolver（output_contains/output_regex），全部餓死永不結算 → 學習迴路零閉合 → 她 8/19 停止下注**。本文從「隱式賭的 nice-to-have 增量」變成「explicit 路徑能不能活」的前提。詳見 §8。
@@ -163,3 +163,26 @@ resolver-kind 完美預測結算與否。**13/14（93%）落在本文 §1 說的
 - **Q4（自由輸出工具納不納語義軸）**：**應納**。絲絲對 `run_bash`/`fetch_url`/`dream_cycle` 都下了 output_contains 賭——把它們排除等於排除她 79% 的賭。難點在「先驗 X 從哪來」：可考慮讓 **explicit 賭由 agent 自帶 expect**（她下注時已寫明「含 valid triples」），隱式賭才需要固定先驗。這條 explicit/implicit 分流是 6/21 沒想到的。
 - **Q2（存什麼粒度）**：explicit 賭多為「輸出**含**某字串」→ 存 **digest + 截斷前綴** 對多數命中布林已足夠；全文只在 regex 需要時。仍傾向不吞整包（`project_compression_belongs_in_autonomy_path`）。
 - **次要坑（非本文主症但同層）**：`next_action` 綁定是同 session 的——絲絲對「下一次 dream_cycle」下注，但排程夢常在別的 session，即使 resolver 可對帳也會 orphan。§6 收斂 observation-row primitive 時應一併看跨 session 結算（#541 事件結算的近親）。
+
+---
+
+## 9. 拍板記錄（2026-09-06）
+
+§6 六點定案。每點附證據與否決代價；DK 保留否決權。實測補充證據（拍板時撈生產庫）：**12 筆餓死賭中 10 筆同 session 有 settling row**——真根因確定是缺 output 欄位，不是跨 session orphan；絲絲 14 筆的 needle/pattern 全長 **4–27 字元**。
+
+| # | 拍板 | 理由（濃縮） |
+|---|---|---|
+| Q1 | **走 (a)：擴 `action_records` 欄** | I2 白名單（`OBSERVATION_SOURCES`）一字不動，row 變寬即可。(b) 的 session_log 是對話形狀、無結算索引；其 raw_json 變體也輸在可審計性（一 row = 一 action = 一 observation 才是乾淨的 observation_ref）。 |
+| Q2 | **截斷前綴（16K chars）+ sha256 digest + 全長 + row count；不存全文** | 真 needle 全是短字串，前綴幾乎必中；digest+全長讓「needle 沒中且被截斷」誠實落 `unresolvable` 而非假 `absent`（no-silent-pass 一致）。全文 forensics 已由 session_log 承擔——**不引入新的隱私暴露類別**，也不吞 DB。 |
+| Q3 | **before-snapshot defer**；但 `predict` 工具**寫入時拒收** `file_digest_changed` | 生產用量 0/14；動作前快照推進 lifecycle 是真 slice（TOCTTOU，`feedback_snapshot_guards_inputs`）。拒收訊息給出可用替代——**寫入時拒絕勝過讓賭爛在 pending**，那正是趕走絲絲的失敗模式。 |
+| Q4 | **自由輸出工具應納語義軸；explicit 賭自帶 expect，隱式賭不配先驗** | 她 79% 的賭在 run_bash/fetch_url/dream_cycle；needle 本來就在 resolver spec 裡，「先驗從哪來」對 explicit 路徑是偽問題。 |
+| Q5 | **不加第三條隱式心跳** | blocker 是 explicit 餓死，不是 implicit 量不足；再加 auto 量只會加深 MONOCULTURE。reliability+latency 雙注不動，語義軸只走 explicit。等 explicit 訊號質量被證實後再議。 |
+| Q6 | **不預建單一 observation-row primitive** | `action_records` 本身就是 observation row（fat structure 形狀已對，convergence-over-abstraction）。#541 按其自訂啟動條件仍休眠；它醒來時複製「事件先落一筆可對帳 row」的**慣例**，不是現在共建一張表。跨 session 結算同樣 defer（實測 10/12 同 session 可結算，是次要坑）。 |
+
+### 9.1 語義細則（實作契約）
+
+- **正規字串** = agent 在對話中看到的同一份世界回覆：`str(result.output)`（成功）/ `error` 字串（失敗）。失敗時的 error 也是世界回的（如 429 文本），可被 output_contains 對帳。
+- **row_count 的機械定義**：list/tuple → `len()`；字串 → `splitlines()` 行數。純世界函數，不猜語義。
+- **截斷語義**：needle/pattern **沒中**且捕捉被截斷 → `unresolvable`（走既有 skip 稽核路徑），永不誤判為「不含」。中了就是中了（前綴中 = 全文必中）。
+- **舊 row（無捕捉欄）** → 語義 resolver 照舊 `unresolvable`，不回填、不假分。
+- **收尾 ops**：部署後將 12 筆已餓死的 explicit 賭一次性 `mark_stale`（需 DK 授權），讓 `unresolvable` skip 指標成為本修復的乾淨觀測訊號。
