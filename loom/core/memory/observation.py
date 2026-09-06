@@ -30,6 +30,7 @@ guard in ``tests/test_observation_ref.py`` keeps the mirror honest.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -48,6 +49,41 @@ _FAILURE_STATE_VALUES = frozenset({"denied", "aborted", "timed_out", "reverted"}
 _TERMINAL_STATE_VALUES = frozenset({"memorialized", "denied", "aborted", "timed_out"})
 
 _REF_RE = re.compile(r"^(?P<prefix>[a-z_]+):(?P<row_id>.+)$")
+
+# Semantic observation surface (#569, spec docs/designs/59 §9 Q2): how much of a
+# tool's raw return the action row keeps verbatim. The digest + full length are
+# always kept, so a needle that misses a truncated capture is *unresolvable*
+# (honest), never a false "absent". Full text stays in session_log — this cap is
+# about not doubling multi-MB outputs into every action row.
+OUTPUT_PREFIX_MAX_CHARS = 16_384
+
+
+def capture_output_fields(
+    output: object, *, success: bool, error: str | None
+) -> dict:
+    """Project a tool's raw return into the action-row capture columns (#569).
+
+    The canonical text is the same world-reply the agent saw in-conversation
+    (``str(result.output)`` on success, the error string on failure — an error
+    body like a 429 is world-generated too, and bettable). ``output_rows`` is a
+    pure world function: element count for list/tuple, line count for text —
+    no semantic guessing (I2).
+    """
+    if success:
+        raw = output
+        text = "" if raw is None else (raw if isinstance(raw, str) else str(raw))
+        rows = len(raw) if isinstance(raw, (list, tuple)) else len(text.splitlines())
+    else:
+        text = error or ""
+        rows = len(text.splitlines())
+    return {
+        "output_prefix": text[:OUTPUT_PREFIX_MAX_CHARS],
+        "output_digest": hashlib.sha256(
+            text.encode("utf-8", "replace")
+        ).hexdigest(),
+        "output_len": len(text),
+        "output_rows": rows,
+    }
 
 
 def make_observation_ref(source: str, row_id: object) -> str:
@@ -173,7 +209,8 @@ async def find_settling_observation(
 
 async def _resolve_action(db: aiosqlite.Connection, row_id: str) -> dict | None:
     cur = await db.execute(
-        "SELECT id, tool_name, final_state, duration_ms, state_history "
+        "SELECT id, tool_name, final_state, duration_ms, state_history, "
+        "output_prefix, output_digest, output_len, output_rows "
         "FROM action_records WHERE id = ?",
         (row_id,),
     )
@@ -187,13 +224,25 @@ async def _resolve_action(db: aiosqlite.Connection, row_id: str) -> dict | None:
     failed = r[2] in _FAILURE_STATE_VALUES or any(
         t.get("to") in _FAILURE_STATE_VALUES for t in history
     )
-    return {
+    obs = {
         "observation_ref": make_observation_ref("action", r[0]),
         "tool_name": r[1],
         "final_state": r[2],
         "tool_success": not failed,
         "duration_ms": r[3],
     }
+    # #569 capture columns. A legacy row (NULL output_len) must NOT grow fake
+    # fields — semantic resolvers stay unresolvable against it, never
+    # retro-scored (spec 59 §9.1).
+    if r[7] is not None:
+        prefix = r[5] or ""
+        obs["output"] = prefix
+        obs["output_truncated"] = r[7] > len(prefix)
+        obs["output_digest"] = r[6]
+        obs["output_len"] = r[7]
+    if r[8] is not None:
+        obs["row_count"] = r[8]
+    return obs
 
 
 async def _resolve_session_log(db: aiosqlite.Connection, row_id: str) -> dict | None:

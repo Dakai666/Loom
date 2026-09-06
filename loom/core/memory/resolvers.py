@@ -31,6 +31,13 @@ KNOWN_RESOLVERS = {
     "duration_bucket",
 }
 
+# Resolver kinds whose required fields the action observation surface does NOT
+# capture yet (#569 Q3: before/after file digests need a pre-action snapshot —
+# a real lifecycle slice, deferred). The predict tool refuses these at write
+# time: a bet that can never settle rots ``pending`` forever, and that silent
+# rot is the exact failure mode that starved the explicit path (spec 59 §8).
+ACTION_UNOBSERVABLE_RESOLVERS = frozenset({"file_digest_changed"})
+
 # duration_bucket thresholds (ms). A bet names the bucket it expects.
 _DURATION_BUCKETS = (("fast", 1_000.0), ("medium", 10_000.0))  # else "slow"
 # Ordered bucket scale — distance between predicted/actual grades the error so a
@@ -81,11 +88,18 @@ def resolve(resolver: dict, observation: dict) -> ResolverResult:
     if kind == "output_contains":
         output = observation["output"]
         present = resolver["needle"] in output
+        # A miss against a truncated capture proves nothing either way — the
+        # needle may live past the cap. Unresolvable, never a false "absent"
+        # (#569, spec 59 §9.1). A hit in the prefix is a hit in the full text.
+        if not present and observation.get("output_truncated"):
+            raise KeyError("needle not found in truncated output capture")
         return _binary(present == resolver.get("expect", True), f"present={present}")
 
     if kind == "output_regex":
         output = observation["output"]
         hit = re.search(resolver["pattern"], output) is not None
+        if not hit and observation.get("output_truncated"):
+            raise KeyError("pattern not found in truncated output capture")
         return _binary(hit == resolver.get("expect", True), f"regex_hit={hit}")
 
     if kind == "file_digest_changed":

@@ -117,6 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_session_log_role    ON session_log(session_id, ro
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 
 -- Issue #42: Action lifecycle records
+-- #569 semantic observation surface: output_* columns capture the tool's raw
+-- world-reply (capped prefix + sha256 of the full text + length + row count)
+-- so semantic resolvers (output_contains / output_regex / row_count) can
+-- settle. NULL output_len marks a pre-#569 row — no capture, no retro-scoring.
 CREATE TABLE IF NOT EXISTS action_records (
     id             TEXT PRIMARY KEY,
     envelope_id    TEXT NOT NULL,
@@ -130,7 +134,11 @@ CREATE TABLE IF NOT EXISTS action_records (
     duration_ms    REAL NOT NULL DEFAULT 0.0,
     state_history  TEXT NOT NULL DEFAULT '[]',
     has_rollback   INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    output_prefix  TEXT,
+    output_digest  TEXT,
+    output_len     INTEGER,
+    output_rows    INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
@@ -270,6 +278,12 @@ class SQLiteStore:
                 "ALTER TABLE relational_entries ADD COLUMN domain TEXT NOT NULL DEFAULT 'knowledge'",
                 "ALTER TABLE relational_entries ADD COLUMN temporal TEXT NOT NULL DEFAULT 'recent'",
                 "ALTER TABLE relational_entries ADD COLUMN last_accessed_at TEXT",
+                # #569 semantic observation surface: output capture columns on
+                # action rows (see the action_records schema comment above).
+                "ALTER TABLE action_records ADD COLUMN output_prefix TEXT",
+                "ALTER TABLE action_records ADD COLUMN output_digest TEXT",
+                "ALTER TABLE action_records ADD COLUMN output_len INTEGER",
+                "ALTER TABLE action_records ADD COLUMN output_rows INTEGER",
             ]:
                 try:
                     await db.execute(_migration)

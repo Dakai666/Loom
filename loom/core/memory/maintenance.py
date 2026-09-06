@@ -445,7 +445,10 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
     from datetime import datetime, UTC
 
     from loom.core.memory.prediction import PredictionRecord, PredictionStore
-    from loom.core.memory.resolvers import KNOWN_RESOLVERS
+    from loom.core.memory.resolvers import (
+        ACTION_UNOBSERVABLE_RESOLVERS,
+        KNOWN_RESOLVERS,
+    )
 
     # Provenance — tells a deliberate wager apart from the heartbeat's ``auto:``
     # bets in later analysis (slice B uses ``auto:implicit_tool_success``).
@@ -491,6 +494,20 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
                 call,
                 f"unknown resolver kind {kind!r}; P0 judges only the mechanical "
                 f"whitelist {sorted(KNOWN_RESOLVERS)} (I2 — no free-text vibe bets)",
+            )
+        # #569: refuse a bet the observation surface cannot settle — a bet that
+        # can never reconcile rots `pending` forever and you never learn from it
+        # (that silent rot starved the explicit path once already, spec 59 §8).
+        # Steer to kinds that DO settle rather than just slamming the door.
+        if kind in ACTION_UNOBSERVABLE_RESOLVERS:
+            return _fail(
+                call,
+                f"resolver {kind!r} needs observation fields the action surface "
+                "does not capture yet (before/after file digests — deferred, "
+                "#569 Q3), so the bet would stay pending forever. Bet on the "
+                "same outcome through the captured output instead: "
+                "output_contains / output_regex / row_count / tool_success all "
+                "settle against the next action's recorded output.",
             )
 
         after = datetime.now(UTC).isoformat()
