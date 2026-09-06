@@ -1,8 +1,9 @@
 # 生成認知整合 — 語義型觀察面擴張（Semantic Observation-Surface Expansion）
 
-> **狀態**：🟡 討論稿（四方輪替 review，**未定稿、不進 code**）
+> **狀態**：🟠 討論稿 → **升級為 explicit 路徑 blocker（2026-09-06 生產資料驗證，見 §8）**。仍需四方輪替定拍板點（§6），但「要不要做」已由實測回答：**要**。追蹤 issue：**#569**。
 > **上游**：epic #528 / P0 收斂規格 `docs/designs/58`（§4 resolver 白名單、§5 I2 硬約束、§10 Deferred）
-> **觸發**：P0 acceptance gate 觀察期實測——reliability 軸近乎退化（1570/1572 error=0.0），逼出「訊號從哪來」的真問題
+> **觸發（原）**：P0 acceptance gate 觀察期實測——reliability 軸近乎退化（1570/1572 error=0.0），逼出「訊號從哪來」的真問題
+> **觸發（升級，2026-09-06）**：絲絲自發採用 explicit `predict` 工具後，**14 筆賭裡 13 筆（93%）用語義 resolver（output_contains/output_regex），全部餓死永不結算 → 學習迴路零閉合 → 她 8/19 停止下注**。本文從「隱式賭的 nice-to-have 增量」變成「explicit 路徑能不能活」的前提。詳見 §8。
 > **先行落地（本輪 code，非本文範圍）**：latency heartbeat（`duration_bucket @ <tool>@latency`），證明**不動觀察面**就能取非平凡訊號。本文談的是**下一階增量**——那一階非動觀察面不可。
 
 ---
@@ -125,3 +126,40 @@ I2（`docs/designs/58` §2 / §5）：**ground truth 只可來自 runtime observ
 - ❌ 不在擴張裡引入任何「軟判 / 氛圍」對帳（那是 58 §10 的軟判層，另案）。
 - ❌ 本階仍不接兩臂、不驅動行為——只是把 calibration 訊號從「延遲可預測性」加上「語義正確性」一軸。
 - ❌ 未過 review、未定稿前不進 code。
+
+---
+
+## 8. 實測驗證（2026-09-06）— 本文從「增量」升級為「blocker」
+
+本文 6/21 寫成時，explicit `predict` 工具剛上線、**零真實下注**，論證只能靠隱式賭的理論增量。9/6 對帳撈出生產資料，把假設變成事實，並揭露一個 6/21 沒預見的維度：**驅動力不是隱式賭，是 explicit 工具 + agent 的自然傾向**。
+
+### 8.1 絲絲自發採用了 predict——然後停了
+
+- **採用**：8/06→8/19 絲絲自發下了 **14 筆** explicit 賭（無人強迫，早於 8/25 nudge 硬化 merge）。品質正是 #528 原意——不確定性導向、真判斷（「這次夢會不會解析出有效 triples」「Dakai 會不會夜間修好根因」「fetch 會不會回文章原文」）。
+- **停止**：8/19 後**至今（9/6，18 天）零新增**。不是重啟或 config 弄壞——她就是不再下注了。
+
+### 8.2 根因：她自然抓的 resolver，正是本文說餓死的那批
+
+| resolver kind | 筆數 | 結算 | 命運 |
+|---|---|---|---|
+| `tool_success` | 2 | **2/2 reconciled** ✓ | 有 `final_state` 可讀 |
+| `output_contains` | 11 | **0/11 永遠 pending** ✗ | action observation 無 output 欄位 |
+| `output_regex` | 1 | **0/1 永遠 pending** ✗ | 同上 |
+
+resolver-kind 完美預測結算與否。**13/14（93%）落在本文 §1 說的 unresolvable 虛空。** 她只有 2 筆得到回饋，其餘 12 筆 score=None 永遠 pending。
+
+> 這印證了本文 §4 的開放問題答案：agent **自然伸手抓的是語義型 resolver**（`output_contains` 是表達「真內容預測」最直覺的方式），而非 reliability/latency。所以「語義軸只給結構化結果工具、自由輸出工具退回 reliability+latency」的保守選項（§4 開放問題）**會砍掉 agent 最想下的那種賭**——這是本文原本低估的。
+
+### 8.3 對 roadmap 的意義
+
+- explicit 路徑（真正的 prediction-skill 訊號、eval 支柱的核心）**從一開始就餓死在 resolver 層**。7/2 acceptance gate 的「過關」是 auto latency 軸撐的，explicit 路徑其實沒活過。
+- 因此「翻 `calibration_write_enabled`」這一步**過早**——幾乎沒有可信 explicit 訊號可校準。**本文（#59）才是 explicit 路徑的真前置。**
+- 8/25 的 provenance 修復（`explicit:` 前綴保留、PR #564）雖正確，但當下 moot——沒有新 explicit 賭可分類，MONOCULTURE 不會靠它消退，因為卡點在更深的 observation 層。
+
+### 8.4 §6 待拍板點的實測傾向
+
+實測資料對 §6 幾個問題給了方向（仍待輪替確認）：
+
+- **Q4（自由輸出工具納不納語義軸）**：**應納**。絲絲對 `run_bash`/`fetch_url`/`dream_cycle` 都下了 output_contains 賭——把它們排除等於排除她 79% 的賭。難點在「先驗 X 從哪來」：可考慮讓 **explicit 賭由 agent 自帶 expect**（她下注時已寫明「含 valid triples」），隱式賭才需要固定先驗。這條 explicit/implicit 分流是 6/21 沒想到的。
+- **Q2（存什麼粒度）**：explicit 賭多為「輸出**含**某字串」→ 存 **digest + 截斷前綴** 對多數命中布林已足夠；全文只在 regex 需要時。仍傾向不吞整包（`project_compression_belongs_in_autonomy_path`）。
+- **次要坑（非本文主症但同層）**：`next_action` 綁定是同 session 的——絲絲對「下一次 dream_cycle」下注，但排程夢常在別的 session，即使 resolver 可對帳也會 orphan。§6 收斂 observation-row primitive 時應一併看跨 session 結算（#541 事件結算的近親）。
