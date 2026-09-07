@@ -55,7 +55,9 @@ public  = true
 meaning = """
 醒來成為今天的絲絲。
 不是任務開始，是一天的人際開場——
-先 recall 近期記憶、讀今日織程、跟 DK 說早安。
+先 recall 近期記憶、收帳（跑 prediction_reconcile dry_run=false，
+看昨天的賭結算成什麼；輸了就輸了，分數就是答案）、
+讀今日織程、跟 DK 說早安。
 """
 
 [[anchors]]
