@@ -44,6 +44,7 @@ Requirements
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -60,6 +61,59 @@ try:
     _MCP_AVAILABLE = True
 except ImportError:
     _MCP_AVAILABLE = False
+
+
+# Logger the MCP SDK's stdio transport uses for its stdout reader
+# (``mcp/client/stdio/__init__.py`` — ``logging.getLogger(__name__)``).
+_STDIO_LOGGER_NAME = "mcp.client.stdio"
+
+
+def _demote_stdio_noise(record: logging.LogRecord) -> bool:
+    """Rewrite one stdio-reader record down to DEBUG, keeping it in the log.
+
+    Demotion rather than a drop: ``mcp.client.stdio`` is a single
+    process-wide logger shared by every client, and Loom runs one session
+    (with its own MCP clients) per Discord thread.  A filter installed while
+    thread A tears down is live for thread B too, so discarding records
+    outright could swallow a genuine parse error from a server that really
+    is corrupting its channel.  At DEBUG the record stops reaching console
+    handlers but still lands anywhere debug logging is configured.
+    """
+    record.levelno = logging.DEBUG
+    record.levelname = "DEBUG"
+    return True
+
+
+@contextlib.contextmanager
+def _quiet_stdio_reader():
+    """Demote the MCP SDK's stdio-reader output for the length of a teardown.
+
+    Servers that ``print()`` a banner to stdout instead of stderr violate the
+    stdio contract (stdout is JSON-RPC only), but the violation only becomes
+    visible on the way out: a piped stdout is block-buffered, so the banner is
+    flushed when the subprocess exits — while we are closing it — and the SDK's
+    ``stdout_reader`` answers with a full ``logger.exception`` traceback for a
+    line it cannot parse.  Observed with ``minimax-mcp`` and
+    ``minimax-coding-plan-mcp`` (both do ``print("Starting Minimax MCP
+    server")`` in ``main()``), where it lands right after the "Compressing
+    session to memory…" rule and reads as if the memory pipeline had failed.
+
+    Both places that close a ``stdio_client`` — ``disconnect()`` and the
+    failed-handshake cleanup in ``_ensure_connected()`` — flush that banner,
+    so both are wrapped.
+
+    A filter rather than ``setLevel()``: it neither clobbers a level the user
+    configured nor mis-restores one if two clients tear down at once.  The
+    window is deliberately narrow, and nothing is discarded — see
+    ``_demote_stdio_noise`` for why a shared logger must not be silenced
+    outright.
+    """
+    log = logging.getLogger(_STDIO_LOGGER_NAME)
+    log.addFilter(_demote_stdio_noise)
+    try:
+        yield
+    finally:
+        log.removeFilter(_demote_stdio_noise)
 
 
 def _check_mcp() -> None:
@@ -287,11 +341,17 @@ class LoomMCPClient:
           in unrelated async contexts) do not propagate
         - Session shutdown is never derailed by a failing MCP cleanup
         See: "an error occurred during closing of async generator stdio_client"
+
+        The SDK's stdio-reader output is demoted for the same window — see
+        ``_quiet_stdio_reader`` — because a server that buffered a stdout
+        banner flushes it exactly here, and the resulting parse traceback is
+        noise from a session that is already finished with the server.
         """
         if self._cm is not None:
             cm, self._cm = self._cm, None
             try:
-                await cm.__aexit__(None, None, None)
+                with _quiet_stdio_reader():
+                    await cm.__aexit__(None, None, None)
             except BaseException:
                 # Catch everything: Exception + GeneratorExit + CancelledError.
                 # The anyio task group inside stdio_client may attempt cleanup
@@ -331,8 +391,14 @@ class LoomMCPClient:
                 # orphaned.  An un-exited anyio task group inside the CM
                 # would later crash when Python's async-generator GC
                 # finalises it in a different task.
+                #
+                # A server that printed a stdout banner flushes it here too
+                # (the subprocess dies on this __aexit__), so this path needs
+                # the same quieting as disconnect() — otherwise a failed
+                # handshake buries its real cause under a parse traceback.
                 try:
-                    await cm.__aexit__(None, None, None)
+                    with _quiet_stdio_reader():
+                        await cm.__aexit__(None, None, None)
                 except Exception:
                     pass
                 raise
