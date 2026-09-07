@@ -44,6 +44,7 @@ Requirements
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -60,6 +61,47 @@ try:
     _MCP_AVAILABLE = True
 except ImportError:
     _MCP_AVAILABLE = False
+
+
+# Logger the MCP SDK's stdio transport uses for its stdout reader
+# (``mcp/client/stdio/__init__.py`` — ``logging.getLogger(__name__)``).
+_STDIO_LOGGER_NAME = "mcp.client.stdio"
+
+
+class _DropAllFilter(logging.Filter):
+    """Drops every record — used to mute one logger for a short window."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        return False
+
+
+@contextlib.contextmanager
+def _mute_stdio_reader():
+    """Silence the MCP SDK's stdio reader for the duration of a teardown.
+
+    Servers that ``print()`` a banner to stdout instead of stderr violate the
+    stdio contract (stdout is JSON-RPC only), but the violation only becomes
+    visible on the way out: a piped stdout is block-buffered, so the banner is
+    flushed when the subprocess exits — during ``disconnect()`` — and the SDK's
+    ``stdout_reader`` answers with a full ``logger.exception`` traceback for a
+    line it cannot parse.  Observed with ``minimax-mcp`` and
+    ``minimax-coding-plan-mcp`` (both do ``print("Starting Minimax MCP
+    server")`` in ``main()``), where it lands right after the "Compressing
+    session to memory…" rule and reads as if the memory pipeline had failed.
+
+    A filter rather than ``setLevel()``: it neither clobbers a level the user
+    configured nor mis-restores one if two clients ever tear down at once.
+    The window is deliberately narrow — parse noise *during a live session*
+    still surfaces, because that would mean a server is actually corrupting
+    the channel.
+    """
+    log = logging.getLogger(_STDIO_LOGGER_NAME)
+    muted = _DropAllFilter()
+    log.addFilter(muted)
+    try:
+        yield
+    finally:
+        log.removeFilter(muted)
 
 
 def _check_mcp() -> None:
@@ -287,11 +329,17 @@ class LoomMCPClient:
           in unrelated async contexts) do not propagate
         - Session shutdown is never derailed by a failing MCP cleanup
         See: "an error occurred during closing of async generator stdio_client"
+
+        The SDK's stdio logger is muted for the same window — see
+        ``_mute_stdio_reader`` — because a server that buffered a stdout
+        banner flushes it exactly here, and the resulting parse traceback is
+        noise from a session that is already finished with the server.
         """
         if self._cm is not None:
             cm, self._cm = self._cm, None
             try:
-                await cm.__aexit__(None, None, None)
+                with _mute_stdio_reader():
+                    await cm.__aexit__(None, None, None)
             except BaseException:
                 # Catch everything: Exception + GeneratorExit + CancelledError.
                 # The anyio task group inside stdio_client may attempt cleanup
