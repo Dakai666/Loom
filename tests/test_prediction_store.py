@@ -196,6 +196,30 @@ class TestStatusLifecycle:
         assert {r.id for r in due} == {b.id}
         assert {r.id for r in reconciled} == {c.id}
 
+    async def test_list_by_status_newest_first_window(self, db_conn):
+        """When the corpus outgrows the limit, ``newest_first=True`` must return
+        the *most recent* rows — the calibration pass reads a rolling recency
+        window, and an oldest-first window silently freezes it at the corpus's
+        birth (found live: 14k reconciled vs a 5k oldest-first window that
+        never saw the first explicit wagers)."""
+        from datetime import datetime, UTC, timedelta
+
+        ps = PredictionStore(db_conn)
+        t0 = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC)
+        recs = []
+        for i in range(4):
+            r = _record()
+            r.created_at = t0 + timedelta(days=i)
+            await ps.write(r)
+            await ps.mark_reconciled(r.id, score=0.0, observation_ref="action:x")
+            recs.append(r)
+
+        newest = await ps.list_by_status("reconciled", limit=2, newest_first=True)
+        assert [r.id for r in newest] == [recs[3].id, recs[2].id]
+        # default stays oldest-first (backward compatible)
+        oldest = await ps.list_by_status("reconciled", limit=2)
+        assert [r.id for r in oldest] == [recs[0].id, recs[1].id]
+
 
 # ---------------------------------------------------------------------------
 # list_open_after — keyset pagination over the open (pending|due) set (#557).

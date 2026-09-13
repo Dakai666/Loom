@@ -135,13 +135,19 @@ class PredictionStore:
         return _row_to_record(row) if row else None
 
     async def list_by_status(
-        self, status: str, *, limit: int = 200
+        self, status: str, *, limit: int = 200, newest_first: bool = False
     ) -> list[PredictionRecord]:
+        """List records in one status. ``newest_first=True`` returns the most
+        recent ``limit`` rows — the shape a rolling recency window needs once
+        the corpus outgrows the limit (oldest-first silently freezes such a
+        window at the corpus's birth; bit the calibration pass live, 2026-09-13).
+        """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}; expected {VALID_STATUSES}")
+        order = "DESC" if newest_first else "ASC"
         cur = await self._db.execute(
             f"SELECT {_COLUMNS} FROM prediction_records "
-            "WHERE status = ? ORDER BY created_at ASC LIMIT ?",
+            f"WHERE status = ? ORDER BY created_at {order}, id {order} LIMIT ?",
             (status, limit),
         )
         return [_row_to_record(r) for r in await cur.fetchall()]
