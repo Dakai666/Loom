@@ -248,14 +248,19 @@ async def write_calibration(
     return written
 
 
-# Roll the whole reconciled corpus, not just one pass — calibration is a
-# rolling aggregate. Generous so a low-volume P0 store gets everything; ASC by
-# created_at means oldest-first, which is irrelevant when we take them all.
+# Rolling recency window over the reconciled corpus. The original "generous
+# enough to take them all" assumption expired once the implicit heartbeats
+# outgrew it (14k+ reconciled by 2026-09): an oldest-first LIMIT silently froze
+# calibration at the corpus's birth and left the monoculture check blind to the
+# explicit wagers that had started flowing. Most-recent-N is also the right
+# semantics on its own terms — calibration should reflect recent capability,
+# mirroring the 90d半衰期 philosophy (#530 Option A).
 _CALIBRATION_CORPUS_LIMIT = 5000
 
 
 async def run_calibration_pass(
-    store, semantic, *, execute: bool = False
+    store, semantic, *, execute: bool = False,
+    corpus_limit: int = _CALIBRATION_CORPUS_LIMIT,
 ) -> CalibrationReport:
     """Roll every reconciled bet into per-domain calibration residue.
 
@@ -272,7 +277,7 @@ async def run_calibration_pass(
     from loom.core.cognition.calibration_health import assess_calibration_health
 
     records = await store.list_by_status(
-        "reconciled", limit=_CALIBRATION_CORPUS_LIMIT
+        "reconciled", limit=corpus_limit, newest_first=True
     )
     summaries = compute_calibration(records)
     await write_calibration(semantic, summaries, execute=execute)

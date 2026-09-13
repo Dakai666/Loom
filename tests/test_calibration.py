@@ -433,6 +433,49 @@ class TestRunCalibrationPass:
             assert (await sem.get("calibration:cli")).confidence == pytest.approx(1.0)
             assert (await sem.get("calibration:git")).confidence == pytest.approx(0.0, abs=0.05)
 
+    async def test_corpus_window_is_recent_not_oldest(self, store):
+        """When the reconciled corpus outgrows the window, the pass must roll
+        the *most recent* bets. The oldest-first window froze calibration at a
+        June snapshot and left the monoculture check blind to the explicit
+        wagers that had started flowing (found live 2026-09-13: 14,490
+        reconciled vs a 5,000 oldest-first window)."""
+        from datetime import datetime, UTC, timedelta
+
+        async with store.connect() as db:
+            ps = PredictionStore(db)
+            sem = SemanticMemory(db)
+            t0 = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC)
+
+            # 6 old implicit bets in domain "old", then 1 recent explicit in "new"
+            for i in range(6):
+                pred = PredictionRecord(
+                    session_id="s", claim="bet",
+                    due_condition={"kind": "after_action", "call_id": "c"},
+                    resolver={"kind": "tool_success", "expect": True},
+                    domain="old", context="auto:implicit_tool_success",
+                )
+                pred.created_at = t0 + timedelta(days=i)
+                await ps.write(pred)
+                await ps.mark_reconciled(pred.id, score=0.0, observation_ref="action:a1")
+            expl = PredictionRecord(
+                session_id="s", claim="deliberate wager",
+                due_condition={"kind": "after_action", "call_id": "c"},
+                resolver={"kind": "tool_success", "expect": True},
+                domain="new", context="explicit:predict_tool",
+            )
+            expl.created_at = t0 + timedelta(days=30)
+            await ps.write(expl)
+            await ps.mark_reconciled(expl.id, score=1.0, observation_ref="action:a1")
+
+            report = await run_calibration_pass(
+                ps, sem, execute=False, corpus_limit=5
+            )
+            # the recent explicit bet is inside the window …
+            assert any(s.domain == "new" for s in report.summaries)
+            # … so the immune system sees explicit flow instead of crying
+            # monoculture over a stale snapshot
+            assert report.health.monoculture is False
+
     async def test_pending_only_store_writes_nothing(self, store):
         """I4 end-to-end: a store with no reconciled bets yields no residue."""
         async with store.connect() as db:
