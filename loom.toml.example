@@ -350,6 +350,11 @@ reconcile_execute = false   # P4a read-only; set true to commit scores (mark_rec
 # residue). Its write gate is INDEPENDENT of reconcile_execute — flipping
 # reconcile on does NOT start writing calibration. Off by default.
 calibration_write_enabled = false  # opt-in: persist calibration residue each weekly pass
+# P1 affect arm (#487, spec docs/designs/60): attach the environment_friction
+# note — a decaying arousal reading fed only by prediction error — to every
+# prediction_reconcile result (the circadian dawn settle beat). Read-only toward
+# the spine; the agent can also pull it any time via the affect_read tool.
+affect_dawn_note = true  # set false to drop the note from reconcile output
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer

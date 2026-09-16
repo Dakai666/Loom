@@ -1,6 +1,6 @@
 # 生成認知整合 P1 — Affect 臂（Mood Engine × Prediction Spine）
 
-> **狀態**：📝 **草案 rev1（2026-09-16）**——rev0（CC，PR #577）已經 Loom Agent review（[`60a`](60a-P1-Affect臂-Loom-Agent-review.md)，**不否決，附兩條必修 + 命名 + 成功驗收**），rev1 收進 review。§6 決策點 D1–D7 全數收斂（D7 DK 拍板 2026-09-16）；待 Codex 輪替後進 §4 契約測試。
+> **狀態**：🔧 **rev2 — 實作中（2026-09-16，待 Loom Agent PR review）**——rev0（CC，PR #577）已經 Loom Agent review（[`60a`](60a-P1-Affect臂-Loom-Agent-review.md)，**不否決，附兩條必修 + 命名 + 成功驗收**），rev1 收進 review。§6 決策點 D1–D7 全數收斂（D7 DK 拍板 2026-09-16）。**rev2（實作同 PR）**：以 9 月實測資料校準公式，三處修正見 §3.2 / §8；review 流程為 CC ↔ Loom Agent（Codex 暫時下台）。
 >
 > **上游**：epic #528、issue #487；spec 57（§4 affect 接點、§12 立場、§13 I5/I6 由來）、spec 58（I1–I6、§6 三個量、§12.4 免疫系統）、spec 59（語義觀察面）。
 >
@@ -94,22 +94,25 @@ explicit 3 / 5000。MONOCULTURE 旗標雖已消退，**有效上仍是 monocultu
    **與既有判定的關係**（review 六-2）：`_detect_monoculture`（`calibration_health.py:160`）維持 `explicit == 0` 二元判定不動——那是免疫系統對「完全沒有顯式賭」的警報語義。1% 門檻是 **affect 消費端自己的、更嚴格的補強**，只決定 `model` 軌是否出讀數，不回寫、不改 health verdict。兩者並存但語義不同，於實作處註明。
 5. `environment` 與 `model` **分開計量，不相加**——§1.1 指涉差異的結構化保存。
 
-### 3.2 Metabolism（rev1：review 必修兩條）
+### 3.2 Metabolism（rev1 必修兩條 + rev2 實測修正）
 
 ```
-w_i              = e^(−λ·(now − reconciled_at_i))                 # per-record 時間老化
-mean_domain      = Σ w_i·score_i / Σ w_i                          # 時間加權平均
-n_eff            = Σ w_i
-surprise_domain  = max(0, mean_domain − baseline_domain) · n_eff/(n_eff + n₀),   n₀ = 5
-injection        = (1/D) · Σ_domain surprise_domain                # per-domain 等權
-arousal(now)     = clamp( arousal(t₀)·e^(−λ·(now − t₀)) + k·injection_new, 0, 1 )
+standing         = corpus − window                                 # 基準取「窗口之前」
+baseline_d       = error_score_d(standing)                         # health verdict，thin 排除
+w_i              = e^(−λ·(now − created_at_i))                     # per-event 老化（事件時間）
+mean_d           = Σ w_i·score_i / Σ w_i
+n_eff_d          = Σ w_i
+surprise_d       = max(0, mean_d − baseline_d) · n_eff_d/(n_eff_d + n₀),   n₀ = 5
+injection        = Σ_d surprise_d                                  # per-domain 等權加總
+arousal(now)     = clamp( arousal(t₀)·e^(−λ·(now − t₀)) + injection, 0, 1 )
+window           = { r : t₀ < reconciled_at_r ≤ now }，t₀ 至多回溯 72h
 ```
 
-- **per-event 老化**（必修一）：rev0 以 window 平均注入，同一 window 內 23:00 與 08:59 的慢權重相同，在每日一次讀取的節拍下 12h 半衰期淪為裝飾。rev1 對每筆以 `reconciled_at` 指數加權，schema 既有欄位、零額外成本。
-- **per-domain 等權 + shrinkage**（必修二）：`w(n)` 若隨 n 遞增，arousal 退化為「`run_bash`（佔 corpus 13.5%）今天順不順」；若遞減，n=1 一票當十票。S1 已處理天生慢，不再用 n 調權；small-n 以 `n/(n+n₀)` 收變異，`n₀ = 5` 對齊 `SAMPLE_FLOOR`。
-- `injection_new` 只計 `reconciled_at > t₀` 的記錄，避免重讀時重複注入；λ 初值半衰期 12h。
-- **`D` = window 內有新結算記錄的 domain 數**，不是全部 domain。若除以全部（~28 個 n≥5 latency domain），多數安靜 domain 會把持續偏離也稀釋到不可見（`memorize` 持續 +0.2 → ≈0.004），C2-b 的「持續有感」端就失效。`k` 初值待實作時以 9 月實測資料校準，須同時滿足 C2-b 兩端。
-- 結算時機：讀取時 lazy 結算，不另開背景 loop。
+- **per-event 老化**（必修一）。**rev2 修正：老化用 `created_at`（下注≈事件時間），不是 `reconciled_at`**——對帳在 dawn 批次跑（實測 09-15 210 筆、09-16 146 筆全落 `01:01`），同一批的 `reconciled_at` 相同，用它老化等於沒老化。`reconciled_at` 只負責劃窗口（防重複注入，M3）。
+- **per-domain 等權 + shrinkage**（必修二）：volume 只經 shrinkage 進來，不經權重（W1/W2）。
+- **rev2 修正：domain 間用加總，不用平均**。rev1 的 `(1/D)·Σ` 以實測回放：日均讀數 ≈0.005，持續偏離也被安靜 domain 稀釋到不可見，C2-b「持續有感」端失效。加總後日注入 0.06–0.19（§8）。加總同時語義正確：多個工具各慢一點 = 世界整體黏，本就該累加。
+- **rev2 修正：基準取窗口之前的 corpus**。基準若含窗口本身，持續偏離會把基準拉向自己、自我抵消。
+- 無額外增益常數 `k`（少一個旋鈕）；λ 半衰期 12h；讀取時 lazy 結算。
 
 ### 3.3 Critic v0 註記（rev1：review Q2）
 
@@ -136,7 +139,7 @@ confidence: low (explicit 3/5000)
 
 ### 3.5 出口與控制（D2 / D4 收斂）
 
-- **(a) dawn 收帳附帶**：`prediction_reconcile` 結果尾端附一次 §3.3 註記（常態顯示）。config key 可關：`[prediction_spine] affect_dawn_note = true`（新 key 須同 PR 雙寫 `loom.toml.example`）。
+- **(a) dawn 收帳附帶**：`prediction_reconcile` 結果尾端附一次 §3.3 註記（常態顯示）。config key 可關：`[memory.consolidation_dream] affect_dawn_note = true`（預設 true，與 spine 其他 key 同區；已雙寫 `loom.toml.example`）。dry_run=true 的收帳只投影不推進狀態，與對帳本身同步。
 - **(b) `affect_read` 工具**：她自己拉。**預設 `dry_run=true`——純看，不推進 `affect.state`**；`dry_run=false` 才結算寫回。
 - **(c) 每 turn 推送：不做**（Loom Agent 以否決權擋）。
 - 不加總 gate：review 指出「read-only 所以不用 gate」不成立（它寫 `memory_meta`、注入 context），故以「工具預設 dry_run + dawn 註記可關」兩條取代總 gate。
@@ -157,8 +160,9 @@ confidence: low (explicit 3/5000)
 | C2-b | 一次性偏移無感、持續偏離有感（D7） | LOW_INFO domain 單筆慢 → `environment` 讀數低於顯示精度；同 domain 連續多筆慢 → 讀數可見 |
 | C3 | explicit < 1% → `model` 渲染 `n/a` | 3/5000 corpus → `model` 為 `n/a (3 …)` 非 `0.00`；`_detect_monoculture` 結果不受影響 |
 | S1 | 偏離常態，非絕對值 | baseline 0.99 的 domain 再錯一次 → surprise≈0 |
-| T1 | per-event 老化 | 同 window 內新近的慢貢獻 > 較舊的慢 |
-| W1 | per-domain 等權 | n=600 domain 與 n=10 domain 同幅偏離 → 貢獻差僅來自 shrinkage |
+| T1 | per-event 老化（事件時間） | 同批 `reconciled_at`、不同 `created_at`：新近的慢貢獻 > 較舊的慢 |
+| W1 | per-domain 等權 | n=600 domain 與 n=40 domain 同幅偏離 → 貢獻差僅來自 shrinkage |
+| B1 | 窗口上界 | `reconciled_at > now` 的記錄不入窗（rev2） |
 | W2 | shrinkage | n=1 偏離貢獻 ≤ `1/(1+n₀)` 倍 |
 | M1 | 無新注入時單調衰減、非負 | Δt 遞增 → 遞減收斂 0 |
 | M2 | clamp `[0,1]` | 極端注入不溢出 |
@@ -210,9 +214,9 @@ explicit 佔比過 1%、或出現 polar resolver 的非零 valence 時，回頭�
 - **(b) 拆開契約 C2 的兩個用途**：LOW_INFORMATION 仍**不得當能力證據**（契約原意，#538 對「高分無資訊」的防線），但**可以當 S1 的偏離基準**——「一直都快」正是穩定基準，偏離它才是真 surprise。
 - **CC 建議 (b)**。契約 2 原本防的是「把 1.0 讀成我很會」，不是「不准注意到它壞了」；(b) 不動該防線。
 - **✅ DK 拍板 (b)，附語義定位**：低資訊 domain 對人類也沒什麼感覺——它們只是**偶爾的偏移量**，真的偏了一次也不太有感。所以 (b) 的預期行為不是「恆快工具一慢就警報」，而是：
-  - **一次性失誤 ≈ 無感**：n_eff≈1 時 shrinkage 壓到 `1/(1+n₀)`，再經 per-domain 等權 1/D 稀釋，讀數近乎不可見
+  - **一次性失誤 ≈ 無感**：一次慢淹沒在該工具的正常使用中，domain 內時間加權平均先稀釋、shrinkage 再壓；窗口內只用一次的單筆慢則由 shrinkage 上限 `1/(1+n₀)` 壓低（殘餘情境見 §8）
   - **持續偏離才有感**：n_eff 累積、shrinkage 放開，才浮出讀數
-  - 這是 (b) 的**驗收性質**而非副作用，補契約測試 C2-b（見 §4）。`k` 的校準須保證「單次失誤不可見、持續偏離可見」兩端同時成立
+  - 這是 (b) 的**驗收性質**而非副作用，補契約測試 C2-b（見 §4）。rev2 以實測回放校準，兩端同時成立的證據見 §8
 
 ---
 
@@ -235,7 +239,26 @@ explicit 佔比過 1%、或出現 polar resolver 的非零 valence 時，回頭�
 
 ---
 
-## 8. 不做 / 邊界
+## 8. 實作紀錄與實測校準（rev2，2026-09-16）
+
+**落點**：`loom/core/cognition/affect.py`（`compute_surprise` 純函式 / `AffectState` / `settle_friction` / `render_friction_note` = Critic）；`loom/core/memory/maintenance.py`（`make_affect_read_tool`、`make_prediction_reconcile_tool(friction_note=…)`）；`loom/core/session.py` 註冊；`tests/test_affect_friction.py` 30 條契約測試（§4 全表 + 持久化損毀容錯），red→green。
+
+**實測回放**（真實 DB 快照、每日 dawn 01:05 UTC settle 一次、commit）：
+
+| 日 | environment | 當日注入 | 前二 driver（surprise, n） |
+|---|---|---|---|
+| 09-09 | 0.18 | 0.178 | write_file 0.088 (41) · recall 0.034 (27) |
+| 09-10 | 0.12 | 0.073 | run_bash 0.051 (11) · create_discord_forum_post 0.009 (1) |
+| 09-11 | 0.16 | 0.133 | fetch_url 0.033 (5) · run_bash 0.032 (12) |
+| 09-12 | 0.13 | 0.090 | run_bash 0.054 (9) · send_discord_file 0.021 (1) |
+| 09-13 | 0.09 | 0.062 | web_search 0.041 (9) · run_bash 0.016 (5) |
+| 09-14 | 0.17 | 0.146 | write_file 0.062 (**1**) · memorize 0.032 (2) |
+| 09-15 | 0.23 | 0.187 | run_bash 0.074 (13) · web_search 0.042 (2) |
+| 09-16 | 0.17 | 0.111 | memorize 0.048 (**1**) · run_bash 0.029 (21) |
+
+**留給 Loom Agent review 的調參問題**：n=1 的單筆大偏離（09-14 `write_file`、09-16 `memorize`）仍能排進前二 driver——shrinkage 上限 `1/(1+n₀)` ≈ 0.17 擋住了「一筆灌滿」，但沒讓它「近乎無感」。C2-b 在「一次失誤淹沒在正常使用中」的情境成立（契約測試覆蓋），在「窗口內該工具只用了一次且慢了」的情境只是被壓低。要不要再壓（n₀ 調大、或 n=1 不列 driver）交給使用者手感決定，不預先拍板。
+
+## 9. 不做 / 邊界
 
 - ❌ 不引入 RL / reward / 權重更新（epic 硬約束）
 - ❌ 不發明 valence（§1.3）；不宣稱 P1 產生情緒

@@ -996,6 +996,13 @@ class LoomSession:
         self._predict_tool_enabled = bool(
             _memory_cfg.get("consolidation_dream", {}).get("predict_tool_enabled", False)
         )
+        # P1 #487 (spec 60 §3.5a): attach the environment_friction note to
+        # prediction_reconcile (the dawn settle beat). On by default — the note
+        # is read-only toward the spine; this key lets Loom switch the dawn copy
+        # off if it fails the two-week acceptance (spec 60 §5.1).
+        self._affect_dawn_note = bool(
+            _memory_cfg.get("consolidation_dream", {}).get("affect_dawn_note", True)
+        )
         _gov_cfg = dict(_memory_cfg.get("governance", {}))
         # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
         # but also gates session.stop()'s run_decay_cycle path, so plumb
@@ -1204,6 +1211,7 @@ class LoomSession:
         from loom.core.memory.maintenance import (
             make_convergent_dream_tool,
             make_dream_cycle_tool,
+            make_affect_read_tool,
             make_memory_prune_tool,
             make_predict_tool,
             make_prediction_reconcile_tool,
@@ -1230,7 +1238,12 @@ class LoomSession:
         # Epic #528 (slice 3.5): prediction_reconcile — convergent-dream sibling
         # that closes the Prediction Spine loop. Read-only by default (dry_run);
         # judges matured bets against runtime observation, writes a report.
-        self.registry.register(make_prediction_reconcile_tool(db=self._db))
+        self.registry.register(make_prediction_reconcile_tool(
+            db=self._db, friction_note=self._affect_dawn_note,
+        ))
+        # P1 #487 (spec 60 §3.5b): affect_read — the pull-side exit of the
+        # environment_friction reading. dry_run by default; never writes the spine.
+        self.registry.register(make_affect_read_tool(db=self._db))
         # Epic #528 (P0.5-a slice A): predict — the deliberate betting mouth.
         # Gated (predict_tool_enabled, default off): registered only when DK has
         # opted the spine in, so the tool never appears to the model otherwise.

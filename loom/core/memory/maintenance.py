@@ -340,6 +340,7 @@ def make_prediction_reconcile_tool(
     *,
     timezone: str = "Asia/Taipei",
     dreams_dir=None,
+    friction_note: bool = False,
 ) -> ToolDefinition:
     """Build the ``prediction_reconcile`` ToolDefinition (epic #528, slice 3.5).
 
@@ -352,6 +353,12 @@ def make_prediction_reconcile_tool(
     spine. Only ``dry_run=false`` commits scores via ``mark_reconciled``, the
     single write path. This mirrors the convergent dream's P4a discipline so the
     spine is never written speculatively by a schedule.
+
+    ``friction_note`` (P1 #487, spec 60 §3.5a): append the ``environment_friction``
+    Critic note after reconciling, so the dawn settle beat carries it. Rendered
+    on every call, even when quiet (O1) — a note that only shows up when loud
+    would itself become a hidden signal. The friction state advances only when
+    ``dry_run=false``, in step with the reconcile it follows.
     """
     from loom.core.cognition.prediction_reconcile import run_prediction_reconciliation
     from loom.core.cognition.calibration import run_calibration_pass
@@ -375,19 +382,33 @@ def make_prediction_reconcile_tool(
             store, SemanticMemory(db), execute=write_cal,
         )
 
+        body = report.render() + "\n\n" + cal_report.render()
+        note = ""
+        if friction_note:
+            from datetime import UTC, datetime
+
+            from loom.core.cognition.affect import render_friction_note, settle_friction
+
+            state, reading = await settle_friction(
+                db, now=datetime.now(UTC), commit=not dry_run,
+            )
+            note = render_friction_note(state, reading)
+            body += "\n\n" + note
+
         path = append_consolidation_report(
-            report.render() + "\n\n" + cal_report.render(),
-            timezone=timezone, dreams_dir=dreams_dir,
+            body, timezone=timezone, dreams_dir=dreams_dir,
         )
 
         verb = "reconciled" if report.executed else "would reconcile (dry-run)"
+        output = (
+            f"prediction reconcile: {verb} {len(report.proposals)}, "
+            f"skipped {len(report.skipped)}; {cal_report.summary()}"
+            f"\n  Report: {path}"
+        )
+        if note:
+            output += "\n\n" + note
         return ToolResult(
-            call_id=call.id, tool_name=call.tool_name, success=True,
-            output=(
-                f"prediction reconcile: {verb} {len(report.proposals)}, "
-                f"skipped {len(report.skipped)}; {cal_report.summary()}"
-                f"\n  Report: {path}"
-            ),
+            call_id=call.id, tool_name=call.tool_name, success=True, output=output,
         )
 
     return ToolDefinition(
@@ -418,6 +439,61 @@ def make_prediction_reconcile_tool(
                         "appears in the report, but is only written when true."
                     ),
                     "default": False,
+                },
+            },
+        },
+        executor=_executor,
+        trust_level=TrustLevel.SAFE,
+    )
+
+
+def make_affect_read_tool(
+    db: "aiosqlite.Connection",
+    *,
+    clock=None,
+) -> ToolDefinition:
+    """Build the ``affect_read`` ToolDefinition (P1 #487, spec 60 §3.5b).
+
+    The pull-side exit of the ``environment_friction`` reading: Loom looks when
+    she wants to, instead of it being pushed every turn (vetoed, spec 60 D2c).
+    ``dry_run`` defaults to True — a look never advances the state; only
+    ``dry_run=false`` absorbs the window and persists it to ``memory_meta``.
+    Never writes the spine (I3).
+    """
+    from datetime import UTC, datetime
+
+    from loom.core.cognition.affect import render_friction_note, settle_friction
+
+    now_fn = clock or (lambda: datetime.now(UTC))
+
+    async def _executor(call) -> ToolResult:
+        dry_run = bool(call.args.get("dry_run", True))
+        state, reading = await settle_friction(db, now=now_fn(), commit=not dry_run)
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output=render_friction_note(state, reading),
+        )
+
+    return ToolDefinition(
+        name="affect_read",
+        description=(
+            "Read your environment_friction: a decaying arousal reading fed only "
+            "by prediction error since your last settle (mostly tools running "
+            "slower than bet). Metabolism, not emotion — the note gives readings, "
+            "drivers, attribution and confidence, and leaves interpretation to "
+            "you. dry_run=true (default) just looks; dry_run=false absorbs the "
+            "window and advances the state."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": (
+                        "Look without advancing the friction state (default "
+                        "true). Set false to absorb and persist."
+                    ),
+                    "default": True,
                 },
             },
         },
