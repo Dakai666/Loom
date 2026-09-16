@@ -1,6 +1,6 @@
 # 生成認知整合 P1 — Affect 臂（Mood Engine × Prediction Spine）
 
-> **狀態**：📝 **草案 rev1（2026-09-16）**——rev0（CC，PR #577）已經 Loom Agent review（[`60a`](60a-P1-Affect臂-Loom-Agent-review.md)，**不否決，附兩條必修 + 命名 + 成功驗收**），rev1 收進 review。仍待 DK 拍板 §6（D1–D6 已有 Loom Agent 立場；**D7 為 rev1 新增**）、Codex 輪替。
+> **狀態**：📝 **草案 rev1（2026-09-16）**——rev0（CC，PR #577）已經 Loom Agent review（[`60a`](60a-P1-Affect臂-Loom-Agent-review.md)，**不否決，附兩條必修 + 命名 + 成功驗收**），rev1 收進 review。§6 決策點 D1–D7 全數收斂（D7 DK 拍板 2026-09-16）；待 Codex 輪替後進 §4 契約測試。
 >
 > **上游**：epic #528、issue #487；spec 57（§4 affect 接點、§12 立場、§13 I5/I6 由來）、spec 58（I1–I6、§6 三個量、§12.4 免疫系統）、spec 59（語義觀察面）。
 >
@@ -88,7 +88,7 @@ explicit 3 / 5000。MONOCULTURE 旗標雖已消退，**有效上仍是 monocultu
 `read_surprise(db, *, now) -> SurpriseReading`，**純讀**：
 
 1. **讀 health verdict，不讀裸 residue**（契約 1）：以 newest-5000 reconciled corpus 現算 `assess_calibration_health`（與 weekly pass 同窗，#574），取每 domain 的 classification + baseline `error_score`。
-2. **排除規則**（契約 2）：SAMPLE_INSUFFICIENT 排除。LOW_INFORMATION 的處理見 **D7**（rev0 為全排除，rev1 建議改為「不當能力證據、但可當偏離基準」）。
+2. **排除規則**（契約 2）：SAMPLE_INSUFFICIENT 排除。LOW_INFORMATION **不當能力證據、但當偏離基準**（D7，DK 拍板）——恆快是穩定基準，偶爾一次偏移近乎無感，持續偏離才浮出。
 3. **surprise = 偏離自己的常態**（S1）：`dream_cycle@latency` 常態就慢，再慢一次不是意外；`read_file@latency` 常態 0，突然慢才是。
 4. **有效 monoculture fallback**（契約 3）：explicit 佔比 < 1% 時，explicit 賭不構成 `model` 軌讀數，`model` 軌渲染 `n/a`。
    **與既有判定的關係**（review 六-2）：`_detect_monoculture`（`calibration_health.py:160`）維持 `explicit == 0` 二元判定不動——那是免疫系統對「完全沒有顯式賭」的警報語義。1% 門檻是 **affect 消費端自己的、更嚴格的補強**，只決定 `model` 軌是否出讀數，不回寫、不改 health verdict。兩者並存但語義不同，於實作處註明。
@@ -151,7 +151,9 @@ confidence: low (explicit 3/5000)
 | I5-b | 不影響 tarot 語氣模板選擇 | 相同日期 seed，任意 `affect.state` 下 `daily_draw` 結果不變 |
 | I6 | 輸入簽名無 sentiment 通道 | `read_surprise` / `AffectState.update` 參數僅 db / 時間 / reading |
 | C1 | 讀 health verdict 不讀裸 residue | 只有 residue、無 reconciled 記錄時 reading 為空 |
-| C2 | thin domain 貢獻 0；LOW_INFO 依 D7 | n<5 高 error domain 不推升 arousal；D7 定案後補 LOW_INFO 一條 |
+| C2 | thin domain 貢獻 0 | n<5 高 error domain 不推升 arousal |
+| C2-a | LOW_INFO 可當偏離基準、不當能力證據（D7） | baseline 0 domain 持續變慢 → 推升 arousal；其 calibration_score 不出現在註記的能力陳述 |
+| C2-b | 一次性偏移無感、持續偏離有感（D7） | LOW_INFO domain 單筆慢 → `environment` 讀數低於顯示精度；同 domain 連續多筆慢 → 讀數可見 |
 | C3 | explicit < 1% → `model` 渲染 `n/a` | 3/5000 corpus → `model` 為 `n/a (3 …)` 非 `0.00`；`_detect_monoculture` 結果不受影響 |
 | S1 | 偏離常態，非絕對值 | baseline 0.99 的 domain 再錯一次 → surprise≈0 |
 | T1 | per-event 老化 | 同 window 內新近的慢貢獻 > 較舊的慢 |
@@ -199,13 +201,17 @@ explicit 佔比過 1%、或出現 polar resolver 的非零 valence 時，回頭�
 | **D4** | gate | rev0：(b) 不加 | (b) 但兩條硬要求：工具預設 dry_run、dawn 註記可關 | 收斂為 §3.5 |
 | **D5** | `connection` drive | (b) 另案 | (b) 另案 | ✅ 兩方一致 |
 | **D6** | 易經 64 卦 | (b) deferred | (b)；要做就是第二隨機語氣源，不進 P1 | ✅ 兩方一致 |
-| **D7** | **LOW_INFORMATION domain 能否當偏離基準？**（rev1 新增） | 見下 | 未表態（rev1 新問題） | ⏳ |
+| **D7** | **LOW_INFORMATION domain 能否當偏離基準？**（rev1 新增） | (b) | 未表態（rev1 新問題） | ✅ **DK 拍板 (b)**（2026-09-16） |
 
 **D7 說明**：review Q1 指出恆快的 13 個 domain「在 S1 下永遠不可能 surprise」。CC 複驗後病灶不在 S1——`max(0, mean − 0)` 對 baseline 0 反而最敏感——而在契約 C2 把 LOW_INFORMATION **全排除**。結果是：`read_file` 突然變慢這種**最有資訊量的意外**被擋掉，arousal 只剩原本就慢、偏離空間小的 domain 承載。
 
 - **(a) 維持全排除**：保守，但 P1 對「平常很穩的東西出事」失明。
 - **(b) 拆開契約 C2 的兩個用途**：LOW_INFORMATION 仍**不得當能力證據**（契約原意，#538 對「高分無資訊」的防線），但**可以當 S1 的偏離基準**——「一直都快」正是穩定基準，偏離它才是真 surprise。
-- **CC 建議 (b)**。契約 2 原本防的是「把 1.0 讀成我很會」，不是「不准注意到它壞了」；(b) 不動該防線。代價：恆快 domain 偶發一次慢就會有明顯讀數，由 shrinkage（n_eff 小）與 per-domain 等權（1/D）節制。
+- **CC 建議 (b)**。契約 2 原本防的是「把 1.0 讀成我很會」，不是「不准注意到它壞了」；(b) 不動該防線。
+- **✅ DK 拍板 (b)，附語義定位**：低資訊 domain 對人類也沒什麼感覺——它們只是**偶爾的偏移量**，真的偏了一次也不太有感。所以 (b) 的預期行為不是「恆快工具一慢就警報」，而是：
+  - **一次性失誤 ≈ 無感**：n_eff≈1 時 shrinkage 壓到 `1/(1+n₀)`，再經 per-domain 等權 1/D 稀釋，讀數近乎不可見
+  - **持續偏離才有感**：n_eff 累積、shrinkage 放開，才浮出讀數
+  - 這是 (b) 的**驗收性質**而非副作用，補契約測試 C2-b（見 §4）。`k` 的校準須保證「單次失誤不可見、持續偏離可見」兩端同時成立
 
 ---
 
