@@ -14,6 +14,8 @@ NOT pollute the agent-facing ``journal_append`` tool's ``kind`` enum.
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -69,10 +71,12 @@ class TestAppendConsolidationReport:
 class TestSeparateFromLifeJournal:
     """2d: the dream report must not share a file with the life journal."""
 
+    @pytest.mark.live_circadian_dirs
     def test_default_dreams_dir_distinct_from_journal_dir(self):
         assert DEFAULT_DREAMS_DIR != DEFAULT_JOURNAL_DIR
         assert DEFAULT_DREAMS_DIR.name == "dreams"
         assert DEFAULT_JOURNAL_DIR.name == "journal"
 
+    @pytest.mark.live_circadian_dirs
     def test_dream_path_for_uses_dreams_dir_by_default(self):
         assert dream_path_for("2026-06-01") == DEFAULT_DREAMS_DIR / "2026-06-01.md"

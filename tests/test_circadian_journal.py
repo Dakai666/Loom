@@ -175,6 +175,7 @@ class TestValidation:
 
 
 class TestJournalPath:
+    @pytest.mark.live_circadian_dirs
     def test_default_base(self):
         assert journal_path_for("2026-05-28") == DEFAULT_JOURNAL_DIR / "2026-05-28.md"
 
