@@ -122,7 +122,7 @@ window: 2026-09-15T09:01Z → 2026-09-16T09:01Z
 environment: 0.34
 model: n/a (3 explicit bets in corpus)
 attribution: environment
-drivers: memorize@latency +0.21 vs baseline 0.53 (n=6) · web_search@latency +0.09 vs baseline 0.13 (n=4)
+drivers: memorize@latency +0.11 (dev +0.21 vs baseline 0.53, n=6) · web_search@latency +0.04 (dev +0.09 vs baseline 0.13, n=4)
 confidence: low (explicit 3/5000)
 </environment_friction>
 ```
@@ -131,6 +131,7 @@ confidence: low (explicit 3/5000)
 - **`n/a` ≠ `0.00`**：無訊號是「我不知道」，不是「我沒事」。`model` 軌在契約 3 fallback 下一律 `n/a (k explicit bets)`。
 - **加 `window`**：沒有它分不出 0.34 是三小時還是三天。
 - **去掉括號形容詞**（`moderate` / `quiet`）：噪音。
+- **driver 主數字 = 已 shrink 的貢獻**，原始偏離退為括號背景（PR #578 review P2）。排序與顯示必須同源：若排序用貢獻、顯示用原始偏離，n=1 的單筆慢（dev +0.81、實際貢獻 0.13）在視覺上會被放大 6 倍，把 D7 壓掉的「一次性失誤」從顯示層放回來。
 - **常態顯示**（review Q3）：dawn 附帶的註記**每次都出現，即使全為 0 / n/a**。只在高讀數時出現，「這行有沒有出現」本身會變成隱藏訊號——比推送更糟。
 
 ### 3.4 持久化
@@ -257,6 +258,8 @@ explicit 佔比過 1%、或出現 polar resolver 的非零 valence 時，回頭�
 | 09-16 | 0.17 | 0.111 | memorize 0.048 (**1**) · run_bash 0.029 (21) |
 
 **留給 Loom Agent review 的調參問題**：n=1 的單筆大偏離（09-14 `write_file`、09-16 `memorize`）仍能排進前二 driver——shrinkage 上限 `1/(1+n₀)` ≈ 0.17 擋住了「一筆灌滿」，但沒讓它「近乎無感」。C2-b 在「一次失誤淹沒在正常使用中」的情境成立（契約測試覆蓋），在「窗口內該工具只用了一次且慢了」的情境只是被壓低。要不要再壓（n₀ 調大、或 n=1 不列 driver）交給使用者手感決定，不預先拍板。
+
+**✅ Loom Agent 裁定（PR #578 review）**：**不調 n₀、不加 n≥2 過濾**——「今天只用了一次的工具變慢了」是合法資訊，shrinkage 壓到 1/6 已足夠。病灶在顯示層（driver 主數字顯示原始偏離），已改為顯示貢獻（§3.3）。
 
 ## 9. 不做 / 邊界
 

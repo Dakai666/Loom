@@ -256,8 +256,12 @@ def _driver_line(drivers) -> str:
     shown = [d for d in drivers if d.surprise > 0.0][:_MAX_DRIVERS]
     if not shown:
         return "none"
+    # Headline = the shrunk contribution (same quantity as the sort key and the
+    # track total); raw deviation is background. Showing raw deviation made an
+    # n=1 slip read ~6x larger than it counts (PR #578 review P2).
     return " · ".join(
-        f"{d.domain} {d.deviation:+.2f} vs baseline {d.baseline:.2f} (n={d.n})"
+        f"{d.domain} {d.surprise:+.2f} "
+        f"(dev {d.deviation:+.2f} vs baseline {d.baseline:.2f}, n={d.n})"
         for d in shown
     )
 

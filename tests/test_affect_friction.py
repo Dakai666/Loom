@@ -355,6 +355,21 @@ class TestExits:
         for field in ("window:", "environment: 0.00", "model: n/a", "attribution:", "confidence:"):
             assert field in note
 
+    def test_driver_headline_is_shrunk_contribution_not_raw_deviation(self):
+        """PR #578 review P2: sorting by shrunk surprise but displaying raw
+        deviation made an n=1 slip read as a 6x larger event than it counts."""
+        corpus = history("write_file@latency", 0.0, 50)
+        window = [rec("write_file@latency", 1.0, hours_ago=0.01)]
+        reading = surprise_of(corpus, window)
+        d = reading.environment.drivers[0]
+        note = render_friction_note(AffectState().absorb(reading), reading)
+        line = next(l for l in note.splitlines() if l.startswith("drivers:"))
+        assert line == (
+            f"drivers: write_file@latency +{d.surprise:.2f} "
+            f"(dev +{d.deviation:.2f} vs baseline {d.baseline:.2f}, n=1)"
+        )
+        assert d.surprise < d.deviation
+
     def test_note_has_no_interpreting_prose(self):
         reading = compute_surprise([], [], since=NOW - timedelta(hours=24), now=NOW)
         note = render_friction_note(AffectState(), reading)
