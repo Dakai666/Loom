@@ -108,6 +108,7 @@ arousal(now)     = clamp( arousal(t₀)·e^(−λ·(now − t₀)) + k·injectio
 - **per-event 老化**（必修一）：rev0 以 window 平均注入，同一 window 內 23:00 與 08:59 的慢權重相同，在每日一次讀取的節拍下 12h 半衰期淪為裝飾。rev1 對每筆以 `reconciled_at` 指數加權，schema 既有欄位、零額外成本。
 - **per-domain 等權 + shrinkage**（必修二）：`w(n)` 若隨 n 遞增，arousal 退化為「`run_bash`（佔 corpus 13.5%）今天順不順」；若遞減，n=1 一票當十票。S1 已處理天生慢，不再用 n 調權；small-n 以 `n/(n+n₀)` 收變異，`n₀ = 5` 對齊 `SAMPLE_FLOOR`。
 - `injection_new` 只計 `reconciled_at > t₀` 的記錄，避免重讀時重複注入；λ 初值半衰期 12h。
+- **`D` = window 內有新結算記錄的 domain 數**，不是全部 domain。若除以全部（~28 個 n≥5 latency domain），多數安靜 domain 會把持續偏離也稀釋到不可見（`memorize` 持續 +0.2 → ≈0.004），C2-b 的「持續有感」端就失效。`k` 初值待實作時以 9 月實測資料校準，須同時滿足 C2-b 兩端。
 - 結算時機：讀取時 lazy 結算，不另開背景 loop。
 
 ### 3.3 Critic v0 註記（rev1：review Q2）
