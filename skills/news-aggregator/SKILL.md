@@ -41,18 +41,13 @@ Loom/
 
 ## 🔄 工作流程
 
-### 步驟 1：建立寫入上下文（先後次序重要）
-
+### 步驟 1：前置準備（建立寫入上下文）
+```bash
+# 在任何 write_file 之前，先執行這行建立 news/ 目錄的 Legitimacy Guard 上下文
+list_dir("news/")
 ```
-1. list_dir("news/")                          # 建立 news/ 的 Legitimacy Guard 上下文
-2. run_bash("mkdir -p news/YYYY-MM-DD")       # 創建當日目錄（不走 fetch_news.py）
-3. list_dir("news/YYYY-MM-DD/")                # ★ 關鍵：建立日期目錄的上下文
-```
-
-> ⚠️ **為什麼步驟 3 不可省略**：`run_bash mkdir` 創建新目錄後，Loom 的 Legitimacy Guard
-> 需要該目錄的 `list_dir` 記錄才能允許後續 `write_file` 寫入該目錄內的檔案。
-> 只做 `list_dir("news/")` 是不夠的——那建立了 `news/` 的上下文，不是 `news/YYYY-MM-DD/` 的。
-> **過去連續 20+ 天的 LEGITIMACY_GUARD blocked 就是因為漏掉了這一步。**
+> ⚠️ **重要性**：fetch_news.py 由 run_bash subprocess 執行，無法建立 Loom 的 Legitimacy Guard 上下文。
+> 若跳過此步驟，後續 `write_file` 到 `news/YYYY-MM-DD/*.md` 會被 Guard 擋住（看似成功但實際被 block）。
 
 ### 步驟 2：抓取（fetch）
 ```bash
