@@ -44,7 +44,9 @@ loom/autonomy/circadian/     ← Python code，我看不見也別動
 
 autonomy/circadian/          ← 我的生活 artifacts，這層才是「我能編、能讀」的東西
 ├── rhythm.toml              我這隻 agent 的節律表（per-agent 客製）
-├── daily_weave.md           今天的織程內容（rolling，每天就地改）
+├── daily_weave.md           今天的織程內容（rolling，每天就地改；只放一天——
+│                            同一個 H2 出現兩次，那段不會進 chime、weave_revise 也會拒絕）
+├── daily_weave/             想留舊版就另存這（<date>.md），不要疊進 daily_weave.md
 ├── journal/                 個人生活日誌（dated，每天一檔，append-only）
 │   └── 2026-05-28.md
 ├── proposals/               weave_revise 的 audit trail

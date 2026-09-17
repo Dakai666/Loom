@@ -38,6 +38,31 @@ DEFAULT_WEAVE_PATH = Path("autonomy/circadian/daily_weave.md")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 
 
+def describe_duplicates(duplicates: dict[str, int]) -> str:
+    """Agent-facing explanation of a stacked weave file (issue #583).
+
+    Shared by the revise tool's refusal and the dawn warning so both say the
+    same thing: what repeated, why that happens, and how to repair it."""
+    listed = "、".join(f"`{name}`×{n}" for name, n in duplicates.items())
+    return (
+        f"daily_weave.md 裡這些 H2 標題出現不只一次：{listed}。"
+        "這份檔只放一天的織程——通常是把好幾天的內容疊在同一檔。"
+        "把舊的日子移到 `autonomy/circadian/daily_weave/<date>.md`，"
+        "讓每個標題只出現一次。"
+    )
+
+
+class DuplicateWeaveSectionsError(ValueError):
+    """The weave file repeats an H2 heading, so no section map is trustworthy.
+
+    Raised by :func:`load_weave_for_revision`: rewriting from a collapsed map
+    is what destroyed seven stacked days on 2026-09-17 (issue #583)."""
+
+    def __init__(self, duplicates: dict[str, int]) -> None:
+        self.duplicates = dict(duplicates)
+        super().__init__(describe_duplicates(self.duplicates))
+
+
 @dataclass(frozen=True)
 class WeavePlan:
     """Parsed daily weave: phase name → markdown body for that section.
@@ -49,6 +74,9 @@ class WeavePlan:
     """
 
     sections: dict[str, str] = field(default_factory=dict)
+    # Heading → occurrence count for every H2 that appears more than once.
+    # Those names are withheld from ``sections`` (issue #583).
+    duplicates: dict[str, int] = field(default_factory=dict)
 
     def section_for(self, phase_name: str) -> str | None:
         body = self.sections.get(phase_name)
@@ -101,8 +129,10 @@ def load_weave_for_revision(
     tool would silently overwrite DK's edit.
 
     Returns ``None`` when the file doesn't exist, is unreadable, or
-    changed mid-snapshot. Fence-aware H2 boundary detection (same lesson
-    as PR3 review).
+    changed mid-snapshot. Raises :class:`DuplicateWeaveSectionsError` when an
+    H2 heading repeats — the section map would be lossy, and a rewrite from
+    it deletes every other copy (issue #583). Fence-aware H2 boundary
+    detection (same lesson as PR3 review).
     """
     p = path or DEFAULT_WEAVE_PATH
     if not p.exists():
@@ -140,7 +170,9 @@ def load_weave_for_revision(
     prelude = "\n".join(prelude_lines)
     if prelude and not prelude.endswith("\n"):
         prelude += "\n"
-    sections = _parse_h2_sections("\n".join(rest_lines))
+    sections, duplicates = _parse_h2_sections("\n".join(rest_lines))
+    if duplicates:
+        raise DuplicateWeaveSectionsError(duplicates)
     return prelude, sections, mtime
 
 
@@ -164,10 +196,17 @@ def load_weave(path: Path | None = None) -> WeavePlan:
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning("[circadian] daily weave at %s unreadable (%s)", p, exc)
         return WeavePlan()
-    return WeavePlan(sections=_parse_h2_sections(text))
+    sections, duplicates = _parse_h2_sections(text)
+    if duplicates:
+        logger.warning(
+            "[circadian] daily weave at %s repeats H2 heading(s) %s; "
+            "withheld from chimes",
+            p, duplicates,
+        )
+    return WeavePlan(sections=sections, duplicates=duplicates)
 
 
-def _parse_h2_sections(text: str) -> dict[str, str]:
+def _parse_h2_sections(text: str) -> tuple[dict[str, str], dict[str, int]]:
     """Walk the markdown line-by-line, slicing it on H2 boundaries.
 
     Body is every line between this H2 and the next (or EOF), with leading
@@ -181,12 +220,13 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
     markdown example would lose every line after the fake heading. The
     fence delimiter lines themselves remain part of the body.
 
-    Duplicate H2 names: last one wins with a warning. The agent's nightly
-    weave proposal could in theory produce a duplicate, but the proposal
-    flow is supposed to overwrite a section in place; a duplicate is a bug
-    upstream and the user should see it in logs.
+    Duplicate H2 names (issue #583): returned as ``(sections, duplicates)``
+    where a repeated name is dropped from ``sections`` and counted in
+    ``duplicates``. There is no right copy to pick — whether the top or the
+    bottom block is today's depends on how the days were stacked, and the old
+    last-wins rule quietly served the oldest one for nine days.
     """
-    sections: dict[str, str] = {}
+    occurrences: list[tuple[str, str]] = []
     current_name: str | None = None
     current_body: list[str] = []
     in_fence = False
@@ -195,13 +235,7 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
         nonlocal current_name
         if current_name is None:
             return
-        body = "\n".join(current_body).strip()
-        if current_name in sections:
-            logger.warning(
-                "[circadian] daily weave: H2 '%s' duplicated; keeping latest",
-                current_name,
-            )
-        sections[current_name] = body
+        occurrences.append((current_name, "\n".join(current_body).strip()))
 
     for line in text.splitlines():
         stripped = line.lstrip()
@@ -220,4 +254,12 @@ def _parse_h2_sections(text: str) -> dict[str, str]:
         if current_name is not None:
             current_body.append(line)
     _flush()
-    return sections
+
+    counts: dict[str, int] = {}
+    for name, _ in occurrences:
+        counts[name] = counts.get(name, 0) + 1
+    duplicates = {name: n for name, n in counts.items() if n > 1}
+    sections = {
+        name: body for name, body in occurrences if name not in duplicates
+    }
+    return sections, duplicates

@@ -469,7 +469,7 @@ loader 把這種 block 展開成「每個有效時段一個 `Anchor`」，並只
   - `render_weave_markdown(prelude, sections)` — 重組成 markdown，prelude 原樣保留（DK 自定 header / mood / 雜記不被洗掉）
   - **`weave_revise` tool** (trust=SAFE, cap=MUTATES)：
     1. stable snapshot daily_weave.md：`stat-before → read → stat-after`，若 `st_mtime_ns` 不一致視為 torn read → tool 回 error、檔案不動
-    2. 寫 proposal artifact 到 `proposals/<date>-evening.toml`
+    2. 寫 proposal artifact 到 `proposals/<date>-evening.toml`（#583 後改為 `<date>-<HHMMSSffffff>.toml`，同日多次不互蓋）
     3. `apply_changes` 套用、失敗 → all-or-nothing 退回
     4. **mtime guard**：atomic write 前再讀 `st_mtime_ns_B`、若 ≠ snapshot 的 `st_mtime_ns_A` → proposal 移到 `proposals/conflicts/`、daily_weave.md 不動、回 error
     5. atomic write daily_weave.md
@@ -576,7 +576,7 @@ PR 1 + PR 2 合併後，DK 應該能看到這樣的一天：
        </system_chime>
        絲絲：道晚安、決定今天哪些值得留下、產出隔天 weave proposal
        絲絲呼叫 weave_revise：
-         - proposal 寫入 autonomy/circadian/proposals/2026-05-26-evening.toml
+         - proposal 寫入 autonomy/circadian/proposals/2026-05-26-<HHMMSSffffff>.toml（#583 前為 -evening）
          - stable snapshot + mtime guard 通過 → daily_weave.md 立即 atomic update
          - 若 DK 同時手改 → proposal 移 conflicts/，daily_weave.md 不動
        不 emit weave event；proposal artifact 本身就是 durable trace（未來 issue #472 再接 subscriber）

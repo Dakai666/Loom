@@ -561,7 +561,7 @@ class TestDawnRevisionReport:
                 section=changes_summary_token, action="add", new_body="- x",
             )],
         )
-        _save_proposal_toml(p, proposal_path(date, target_dir))
+        _save_proposal_toml(p, proposal_path(date, target_dir, stamp="evening"))
 
     async def test_dawn_reports_applied_proposal(self):
         from loom.autonomy.circadian.proposal import APPLIED_SUBDIR
@@ -790,7 +790,10 @@ class TestWeaveAppliedEmit:
             rationale=rationale,
             changes=[Change(section="check_in", action="replace", new_body="x")],
         )
-        _save_proposal_toml(proposal, proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR))
+        _save_proposal_toml(
+            proposal,
+            proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR, stamp="evening"),
+        )
         return yesterday
 
     async def _spy_emits(self, daemon):
@@ -966,3 +969,123 @@ class TestDawnGlobalWeaveLayer:
 
         intent = deliveries[0].intent
         assert "碗 8 次" in intent
+
+
+class TestDawnDuplicateWeaveWarning:
+    """Issue #583: from 2026-09-09 to 09-17 every dawn chime delivered the
+    oldest stacked block's 明日重點, and the only signal was a log line the
+    agent never sees. Duplicated headings are now withheld and named."""
+
+    ANCHORS = [
+        Anchor(time="08:00", name="dawn", meaning="醒來"),
+        Anchor(time="11:00", name="curiosity", meaning="隨意走走"),
+    ]
+
+    async def _fire(self, daemon, phase: str):
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(
+            t for t in daemon.evaluator.list() if t.name == f"circadian:phase_{phase}"
+        )
+        await daemon._on_trigger_fire(trig, {})
+
+    STACKED = (
+        "## 明日重點\n- 今天的\n\n## 長線事項 carry\n- taste\n\n"
+        "## 明日重點\n- 很舊的\n"
+    )
+
+    async def test_dawn_names_duplicates_and_withholds_their_content(self):
+        _write_weave(self.STACKED)
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, self.ANCHORS)
+        await self._fire(daemon, "dawn")
+
+        intent = deliveries[0].intent
+        assert "⚠️" in intent and "明日重點" in intent and "×2" in intent
+        assert "daily_weave/" in intent
+        assert "今天的" not in intent and "很舊的" not in intent
+        # Unambiguous sections still arrive.
+        assert "taste" in intent
+
+    async def test_non_dawn_phase_gets_no_duplicate_warning(self):
+        _write_weave(self.STACKED)
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, self.ANCHORS)
+        await self._fire(daemon, "curiosity")
+
+        assert "⚠️" not in deliveries[0].intent
+
+
+class TestDawnReportsEveryRevisionOfYesterday:
+    @staticmethod
+    def _seed(stamp: str, rationale: str, section: str, subdir: str = "applied"):
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        from loom.autonomy.circadian.proposal import (
+            PROPOSALS_DIR, Change, WeaveProposal,
+            _save_proposal_toml, proposal_path,
+        )
+        y = (datetime.now(ZoneInfo(TZ)) - timedelta(days=1)).strftime("%Y-%m-%d")
+        _save_proposal_toml(
+            WeaveProposal(
+                date=y, phase="adhoc", based_on_mtime=0, rationale=rationale,
+                changes=[Change(section=section, action="add", new_body="- x")],
+            ),
+            proposal_path(y, PROPOSALS_DIR / subdir, stamp=stamp),
+        )
+        return f"{y}-{stamp}.toml"
+
+    async def _dawn_intent(self) -> str:
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn")
+        await daemon._on_trigger_fire(trig, {})
+        return deliveries[0].intent
+
+    async def test_applied_does_not_hide_a_parked_conflict(self):
+        """PR #585 review P2: with several artifacts per day, a morning revise
+        that applied and an evening one parked by DK's hand-edit can coexist.
+        The parked one is the signal DK most needs; it must not be shadowed."""
+        self._seed("094000000000", "早上套用成功", "spec_align")
+        parked = self._seed("230100000000", "晚上被擋", "errand", subdir="conflicts")
+
+        intent = await self._dawn_intent()
+        assert "**昨夜你改了什麼**" in intent and "早上套用成功" in intent
+        assert "擋下" in intent and "晚上被擋" in intent
+        # The exact artifact, not just the directory (review P3).
+        assert parked in intent
+
+    async def test_morning_and_evening_revisions_both_reported(self):
+        self._seed("094000", "早上暫緩 L0", "spec_align")
+        self._seed("230100", "晚上排明天", "errand")
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        emitted: list[tuple[str, dict]] = []
+        orig = daemon.evaluator.emit
+
+        async def _rec(name, payload):
+            emitted.append((name, dict(payload)))
+            return await orig(name, payload)
+
+        daemon.evaluator.emit = _rec
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn")
+        await daemon._on_trigger_fire(trig, {})
+
+        intent = deliveries[0].intent
+        assert "早上暫緩 L0" in intent and "晚上排明天" in intent
+        assert "spec_align" in intent and "errand" in intent
+        assert intent.index("早上暫緩 L0") < intent.index("晚上排明天")
+        applied = [p for n, p in emitted if n == "circadian:weave_applied"]
+        assert len(applied) == 1
+        assert applied[0]["rationale"] == "晚上排明天"  # latest revision in effect

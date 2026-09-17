@@ -13,7 +13,7 @@
 anchor.name 從 `rhythm.toml` 來（`dawn`、`shared_learning`、`pet`、
 `curiosity`、`deep_weave`、`check_in`、`evening_closure`）。
 
-**三件要知道的事：**
+**四件要知道的事：**
 
 1. **標題取名自由。** 對不上 anchor.name 不是錯誤，是宣告「這段屬於整天」。
    heading 本身承載語義，會原樣送進 chime，取一個讀得懂的名字。
@@ -21,6 +21,9 @@ anchor.name 從 `rhythm.toml` 來（`dawn`、`shared_learning`、`pet`、
    怎麼走」；一天的形狀在 dawn 就建立好了，下午再收一次完整長線事項是干擾。
 3. **第一個 H2 之前的內容（prelude）不會進任何 chime。** 那裡放給人看的 header
    和 `date:`，要讓 agent 讀到的東西一律放進 H2 區段。
+4. **這份檔只放一天。** 想留前一天的版本，另存到 `daily_weave/<date>.md`，
+   不要疊在這裡。同一個 H2 標題出現兩次時，該段不會進任何 chime（dawn 會
+   提醒），`weave_revise` 也會拒絕修改——疊起來的檔沒有「哪份才是今天」的答案。
 
 `weave_revise` 工具以 H2 標題為單位增刪改，audit trail 進
 `proposals/applied/`。
