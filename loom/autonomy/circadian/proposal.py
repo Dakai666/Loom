@@ -237,22 +237,28 @@ def render_weave_markdown(prelude: str, sections: dict[str, str]) -> str:
 # Disk IO
 # ---------------------------------------------------------------------------
 
-def proposal_path(
-    date_str: str, base_dir: Path | None = None, *, stamp: str = "evening"
-) -> Path:
-    """Artifact path ``{date}-{stamp}.toml``. The tool stamps ``HHMMSS`` so a
-    second revise on the same day no longer overwrites the first one's audit
-    trail (#583); ``evening`` is the pre-#583 name, still read at dawn."""
+def proposal_path(date_str: str, base_dir: Path | None = None, *, stamp: str) -> Path:
+    """Artifact path ``{date}-{stamp}.toml``. The tool stamps ``HHMMSSffffff``
+    so repeated revises on one day — even back-to-back within a second — keep
+    separate audit trails (#583, PR #585 review). ``evening`` is the pre-#583
+    name; dawn still reads it."""
     return (base_dir or PROPOSALS_DIR) / f"{date_str}-{stamp}.toml"
 
 
-def load_proposals_for_date(date_str: str, base_dir: Path) -> list[WeaveProposal]:
-    """Every readable proposal artifact for ``date_str`` under ``base_dir``,
-    in the order the revisions happened (``HHMMSS`` stamps sort in time)."""
+def load_proposals_for_date(
+    date_str: str, base_dir: Path
+) -> list[tuple[Path, WeaveProposal]]:
+    """Every readable ``(artifact, proposal)`` for ``date_str`` under
+    ``base_dir``, in the order the revisions happened (stamps sort in time;
+    a legacy ``-evening`` artifact sorts last, as it was the night's)."""
     if not base_dir.is_dir():
         return []
-    found = (load_proposal(f) for f in sorted(base_dir.glob(f"{date_str}-*.toml")))
-    return [p for p in found if p is not None]
+    found = []
+    for artifact in sorted(base_dir.glob(f"{date_str}-*.toml")):
+        proposal = load_proposal(artifact)
+        if proposal is not None:
+            found.append((artifact, proposal))
+    return found
 
 
 def _save_proposal_toml(proposal: WeaveProposal, target: Path) -> None:
@@ -335,14 +341,18 @@ def _archive_proposal(src: Path, subdir: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def _last_fired_phase(timezone: str) -> str | None:
-    """The most recent phase logged for today, as the revise's phase label.
+    """The most recent phase delivered today, as the revise's phase label.
 
     The tool is callable at any time (09:40 on 2026-09-17 was a dawn-hours
-    fix), so a hardcoded ``evening_closure`` mislabelled the audit trail."""
+    fix), so a hardcoded ``evening_closure`` mislabelled the audit trail.
+    ``skipped`` fires never reached the agent, so they don't count."""
     state = CircadianState.load()
-    if state is None or not state.is_for_today(timezone) or not state.phase_log:
+    if state is None or not state.is_for_today(timezone):
         return None
-    return state.phase_log[-1].get("phase")
+    for entry in reversed(state.phase_log):
+        if entry.get("outcome") == "delivered":
+            return entry.get("phase")
+    return None
 
 
 def make_weave_revise_tool(
@@ -435,7 +445,7 @@ def make_weave_revise_tool(
         # Always persist the proposal artifact first — even if apply fails
         # downstream, DK can see what was attempted.
         artifact = proposal_path(
-            date_str, target_proposals, stamp=now.strftime("%H%M%S"),
+            date_str, target_proposals, stamp=now.strftime("%H%M%S%f"),
         )
         try:
             _save_proposal_toml(proposal, artifact)

@@ -561,7 +561,7 @@ class TestDawnRevisionReport:
                 section=changes_summary_token, action="add", new_body="- x",
             )],
         )
-        _save_proposal_toml(p, proposal_path(date, target_dir))
+        _save_proposal_toml(p, proposal_path(date, target_dir, stamp="evening"))
 
     async def test_dawn_reports_applied_proposal(self):
         from loom.autonomy.circadian.proposal import APPLIED_SUBDIR
@@ -790,7 +790,10 @@ class TestWeaveAppliedEmit:
             rationale=rationale,
             changes=[Change(section="check_in", action="replace", new_body="x")],
         )
-        _save_proposal_toml(proposal, proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR))
+        _save_proposal_toml(
+            proposal,
+            proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR, stamp="evening"),
+        )
         return yesterday
 
     async def _spy_emits(self, daemon):
@@ -1016,11 +1019,11 @@ class TestDawnDuplicateWeaveWarning:
 
 class TestDawnReportsEveryRevisionOfYesterday:
     @staticmethod
-    def _seed(stamp: str, rationale: str, section: str):
+    def _seed(stamp: str, rationale: str, section: str, subdir: str = "applied"):
         from datetime import timedelta
         from zoneinfo import ZoneInfo
         from loom.autonomy.circadian.proposal import (
-            APPLIED_SUBDIR, PROPOSALS_DIR, Change, WeaveProposal,
+            PROPOSALS_DIR, Change, WeaveProposal,
             _save_proposal_toml, proposal_path,
         )
         y = (datetime.now(ZoneInfo(TZ)) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1029,8 +1032,34 @@ class TestDawnReportsEveryRevisionOfYesterday:
                 date=y, phase="adhoc", based_on_mtime=0, rationale=rationale,
                 changes=[Change(section=section, action="add", new_body="- x")],
             ),
-            proposal_path(y, PROPOSALS_DIR / APPLIED_SUBDIR, stamp=stamp),
+            proposal_path(y, PROPOSALS_DIR / subdir, stamp=stamp),
         )
+        return f"{y}-{stamp}.toml"
+
+    async def _dawn_intent(self) -> str:
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn")
+        await daemon._on_trigger_fire(trig, {})
+        return deliveries[0].intent
+
+    async def test_applied_does_not_hide_a_parked_conflict(self):
+        """PR #585 review P2: with several artifacts per day, a morning revise
+        that applied and an evening one parked by DK's hand-edit can coexist.
+        The parked one is the signal DK most needs; it must not be shadowed."""
+        self._seed("094000000000", "早上套用成功", "spec_align")
+        parked = self._seed("230100000000", "晚上被擋", "errand", subdir="conflicts")
+
+        intent = await self._dawn_intent()
+        assert "**昨夜你改了什麼**" in intent and "早上套用成功" in intent
+        assert "擋下" in intent and "晚上被擋" in intent
+        # The exact artifact, not just the directory (review P3).
+        assert parked in intent
 
     async def test_morning_and_evening_revisions_both_reported(self):
         self._seed("094000", "早上暫緩 L0", "spec_align")

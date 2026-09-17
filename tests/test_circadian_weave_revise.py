@@ -10,6 +10,7 @@ revises tomorrow's daily_weave.md and writes a TOML audit artifact under
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -526,7 +527,8 @@ class TestProposalArtifactIdentity:
             "changes": [{"section": "dawn", "action": "replace", "new_body": "- a2"}],
         }))
         assert r1.success, r1.error
-        time.sleep(1.05)  # artifact names carry second resolution
+        # No sleep: back-to-back calls within one second must not collide
+        # (PR #585 review P3).
         r2 = await tool.executor(_call({
             "rationale": "second",
             "changes": [{"section": "pet", "action": "replace", "new_body": "- b2"}],
@@ -558,3 +560,32 @@ class TestProposalArtifactIdentity:
         assert r.success, r.error
         (artifact,) = (PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml")
         assert load_proposal(artifact).phase == "adhoc"
+
+
+class TestDefaultPhaseResolver:
+    def _state_with(self, entries):
+        from loom.autonomy.circadian.state import CircadianState
+        s = CircadianState.new_for_today(
+            thread_id=1, session_id="s", channel_id=2,
+            now=datetime.now(), tz="Asia/Taipei",
+        )
+        s.phase_log = entries
+        s.save_atomic()
+
+    async def test_skipped_phase_is_not_the_label(self):
+        """PR #585 review P3: phase_log also records ``skipped`` fires (no live
+        thread). A phase that never reached the agent is not where it was."""
+        self._state_with([
+            {"phase": "check_in", "fired_at": "x", "outcome": "delivered"},
+            {"phase": "pet", "fired_at": "y", "outcome": "skipped",
+             "reason": "no_today_session"},
+        ])
+        _seed_weave("## dawn\n- a\n")
+        tool = make_weave_revise_tool()
+        r = await tool.executor(_call({
+            "rationale": "x",
+            "changes": [{"section": "dawn", "action": "replace", "new_body": "- b"}],
+        }))
+        assert r.success, r.error
+        (artifact,) = (PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml")
+        assert load_proposal(artifact).phase == "check_in"

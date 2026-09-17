@@ -515,9 +515,14 @@ def _compose_chime_intent(
     Layers (composed in order, each optional):
       1. ``anchor.meaning`` — rhythm.toml, the *why* of this phase (PR2)
       2. ``**今日織程**\\n{section}`` — daily_weave.md, today's *what* (PR3)
-      3. ``**昨夜你改了什麼**\\n…`` — yesterday's weave_revise summary,
+      3. ``**⚠️ daily_weave 標題重複**`` — dawn-only (#583). Repeated H2
+         headings are withheld from every layer; this names them once.
+      4. ``**昨夜你改了什麼**\\n…`` — yesterday's weave_revise summary,
          dawn-anchor only (PR4 #462). Lets DK find out about overnight
-         self-revisions without a confirm round-trip.
+         self-revisions without a confirm round-trip. A parked-conflict
+         layer may follow it.
+      5. ``**今日織程（全局）**`` — dawn-only (#565). Sections claimed by no
+         phase.
 
     When every layer is empty we fall back to a generic intent so the chime
     is never an empty string (agents handle that poorly). Each sub-heading
@@ -581,15 +586,13 @@ def _yesterday_applied_proposals(tz: str) -> list:
     ``circadian:weave_applied`` emit (#472) so both read the same artifacts.
     A list since #583: the tool may run more than once a day (a morning fix
     plus the evening plan). Empty when no clean revision happened."""
-    return load_proposals_for_date(_yesterday_str(tz), PROPOSALS_DIR / APPLIED_SUBDIR)
+    applied_dir = PROPOSALS_DIR / APPLIED_SUBDIR
+    return [p for _, p in load_proposals_for_date(_yesterday_str(tz), applied_dir)]
 
 
-def _format_proposals(proposals: list, rationale_label: str) -> str:
-    blocks = []
-    for p in proposals:
-        summary = "\n".join(f"- {line}" for line in p.summary_lines())
-        blocks.append(f"{summary}\n\n_{rationale_label}_：{p.rationale}")
-    return "\n\n".join(blocks)
+def _format_proposal(proposal: Any, rationale_label: str) -> str:
+    summary = "\n".join(f"- {line}" for line in proposal.summary_lines())
+    return f"{summary}\n\n_{rationale_label}_：{proposal.rationale}"
 
 
 def _yesterday_revision_report(tz: str) -> str | None:
@@ -603,28 +606,38 @@ def _yesterday_revision_report(tz: str) -> str | None:
         was parked, daily_weave.md untouched
 
     Returns ``None`` when neither has anything (no revision yesterday).
-    The applied case nudges the agent to brief DK; the conflicts case
-    surfaces the parked attempt so DK can decide what to do.
+    Both layers can appear together since #583 made several artifacts per day
+    reachable: an applied morning fix must not hide an evening revise that
+    DK's hand-edit parked (PR #585 review P2). The applied layer nudges the
+    agent to brief DK; the conflicts layer names each parked artifact so DK
+    can decide what to do.
     """
+    layers: list[str] = []
+
     applied = _yesterday_applied_proposals(tz)
     if applied:
-        return (
+        blocks = "\n\n".join(_format_proposal(p, "理由") for p in applied)
+        layers.append(
             "**昨夜你改了什麼**\n"
-            f"{_format_proposals(applied, '理由')}\n"
+            f"{blocks}\n"
             "\n→ 開場時跟 DK 簡述一下你昨夜對明天織程的調整。"
         )
 
-    conflicts_dir = PROPOSALS_DIR / CONFLICTS_SUBDIR
-    parked = load_proposals_for_date(_yesterday_str(tz), conflicts_dir)
+    parked = load_proposals_for_date(
+        _yesterday_str(tz), PROPOSALS_DIR / CONFLICTS_SUBDIR,
+    )
     if parked:
-        return (
+        blocks = "\n\n".join(
+            f"{_format_proposal(p, '當時的理由')}\n_park 在_：{artifact}"
+            for artifact, p in parked
+        )
+        layers.append(
             "**昨夜的調整被擋下了（DK 半夜手改過 daily_weave.md）**\n"
-            f"{_format_proposals(parked, '當時的理由')}\n"
-            f"_park 在_：{conflicts_dir}\n"
+            f"{blocks}\n"
             "\n→ 告訴 DK 這件事，問他要不要重 propose 或直接跳過。"
         )
 
-    return None
+    return "\n\n".join(layers) or None
 
 
 def _record_phase_outcome(
