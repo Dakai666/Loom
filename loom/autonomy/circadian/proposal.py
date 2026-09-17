@@ -36,11 +36,14 @@ import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from loom.autonomy.circadian.state import CircadianState
 from loom.autonomy.circadian.weave import (
     DEFAULT_WEAVE_PATH,
+    DuplicateWeaveSectionsError,
     load_weave_for_revision,
 )
 from loom.core.harness.middleware import ToolCall, ToolResult
@@ -91,7 +94,7 @@ class WeaveProposal:
     for DK at dawn-of-tomorrow."""
 
     date: str                 # the day evening_closure fired (audit timestamp)
-    phase: str                # "evening_closure" — fixed for now
+    phase: str                # last phase fired before the revise, or "adhoc" (#583)
     based_on_mtime: int       # daily_weave.md st_mtime_ns at snapshot (PR #481 P1)
     rationale: str
     changes: list[Change] = field(default_factory=list)
@@ -234,8 +237,22 @@ def render_weave_markdown(prelude: str, sections: dict[str, str]) -> str:
 # Disk IO
 # ---------------------------------------------------------------------------
 
-def proposal_path(date_str: str, base_dir: Path | None = None) -> Path:
-    return (base_dir or PROPOSALS_DIR) / f"{date_str}-evening.toml"
+def proposal_path(
+    date_str: str, base_dir: Path | None = None, *, stamp: str = "evening"
+) -> Path:
+    """Artifact path ``{date}-{stamp}.toml``. The tool stamps ``HHMMSS`` so a
+    second revise on the same day no longer overwrites the first one's audit
+    trail (#583); ``evening`` is the pre-#583 name, still read at dawn."""
+    return (base_dir or PROPOSALS_DIR) / f"{date_str}-{stamp}.toml"
+
+
+def load_proposals_for_date(date_str: str, base_dir: Path) -> list[WeaveProposal]:
+    """Every readable proposal artifact for ``date_str`` under ``base_dir``,
+    in the order the revisions happened (``HHMMSS`` stamps sort in time)."""
+    if not base_dir.is_dir():
+        return []
+    found = (load_proposal(f) for f in sorted(base_dir.glob(f"{date_str}-*.toml")))
+    return [p for p in found if p is not None]
 
 
 def _save_proposal_toml(proposal: WeaveProposal, target: Path) -> None:
@@ -317,11 +334,23 @@ def _archive_proposal(src: Path, subdir: str) -> Path:
 # Tool
 # ---------------------------------------------------------------------------
 
+def _last_fired_phase(timezone: str) -> str | None:
+    """The most recent phase logged for today, as the revise's phase label.
+
+    The tool is callable at any time (09:40 on 2026-09-17 was a dawn-hours
+    fix), so a hardcoded ``evening_closure`` mislabelled the audit trail."""
+    state = CircadianState.load()
+    if state is None or not state.is_for_today(timezone) or not state.phase_log:
+        return None
+    return state.phase_log[-1].get("phase")
+
+
 def make_weave_revise_tool(
     *,
     timezone: str = "Asia/Taipei",
     weave_path: Path | None = None,
     proposals_dir: Path | None = None,
+    phase_resolver: Callable[[], str | None] | None = None,
 ) -> ToolDefinition:
     """Build the ``weave_revise`` tool. Trust = SAFE because DK explicitly
     designed this to run unattended (no confirm, "just report"); the safety
@@ -333,6 +362,7 @@ def make_weave_revise_tool(
     """
     target_weave = weave_path or DEFAULT_WEAVE_PATH
     target_proposals = proposals_dir or PROPOSALS_DIR
+    resolve_phase = phase_resolver or (lambda: _last_fired_phase(timezone))
 
     async def _weave_revise(call: ToolCall) -> ToolResult:
         rationale = str(call.args.get("rationale", "")).strip()
@@ -366,7 +396,13 @@ def make_weave_revise_tool(
                 error=f"change spec malformed: {exc}",
             )
 
-        snapshot = load_weave_for_revision(target_weave)
+        try:
+            snapshot = load_weave_for_revision(target_weave)
+        except DuplicateWeaveSectionsError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=f"{exc} 修好之前不能 revise——檔案未變動。",
+            )
         if snapshot is None:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
@@ -379,10 +415,11 @@ def make_weave_revise_tool(
             )
         prelude, sections, mtime_before = snapshot
 
-        date_str = datetime.now(ZoneInfo(timezone)).strftime("%Y-%m-%d")
+        now = datetime.now(ZoneInfo(timezone))
+        date_str = now.strftime("%Y-%m-%d")
         proposal = WeaveProposal(
             date=date_str,
-            phase="evening_closure",
+            phase=resolve_phase() or "adhoc",
             based_on_mtime=mtime_before,
             rationale=rationale,
             changes=changes,
@@ -397,7 +434,9 @@ def make_weave_revise_tool(
 
         # Always persist the proposal artifact first — even if apply fails
         # downstream, DK can see what was attempted.
-        artifact = proposal_path(date_str, target_proposals)
+        artifact = proposal_path(
+            date_str, target_proposals, stamp=now.strftime("%H%M%S"),
+        )
         try:
             _save_proposal_toml(proposal, artifact)
         except OSError as exc:
@@ -449,14 +488,16 @@ def make_weave_revise_tool(
     return ToolDefinition(
         name="weave_revise",
         description=(
-            "Atomically revise tomorrow's daily_weave.md (add / remove / "
-            "rename / replace H2 sections) and write an audit-trail TOML "
-            "proposal under autonomy/circadian/proposals/applied/. "
-            "Call this in the evening_closure phase when you want to adjust "
-            "the next day's plan. DK does not confirm — your rationale is "
-            "what reaches them at next dawn. If daily_weave.md changed "
-            "between read and write (DK hand-edit), the proposal is parked "
-            "under proposals/conflicts/ and the file is left untouched."
+            "Atomically revise daily_weave.md (add / remove / rename / "
+            "replace H2 sections) and write an audit-trail TOML proposal "
+            "under autonomy/circadian/proposals/applied/. The file holds a "
+            "single day: in evening_closure it becomes tomorrow's plan. "
+            "Sections you don't name are kept as-is. DK does not confirm — "
+            "your rationale is what reaches them at next dawn. Refused "
+            "without changes if an H2 heading repeats (days stacked in one "
+            "file). If daily_weave.md changed between read and write (DK "
+            "hand-edit), the proposal is parked under proposals/conflicts/ "
+            "and the file is left untouched."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.MUTATES,

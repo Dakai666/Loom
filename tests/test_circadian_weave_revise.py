@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from loom.autonomy.circadian import state as st
 from loom.autonomy.circadian.proposal import (
     APPLIED_SUBDIR,
     CONFLICTS_SUBDIR,
@@ -26,7 +27,10 @@ from loom.autonomy.circadian.proposal import (
     proposal_path,
     render_weave_markdown,
 )
-from loom.autonomy.circadian.weave import load_weave_for_revision
+from loom.autonomy.circadian.weave import (
+    DuplicateWeaveSectionsError,
+    load_weave_for_revision,
+)
 from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import TrustLevel
 
@@ -34,7 +38,10 @@ from loom.core.harness.permissions import TrustLevel
 @pytest.fixture(autouse=True)
 def _workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # The default phase resolver reads CircadianState — keep it off ~/.loom.
+    st.set_dir_for_test(tmp_path / "circadian")
     yield
+    st.set_dir_for_test(None)
 
 
 def _seed_weave(body: str) -> Path:
@@ -233,7 +240,7 @@ class TestToolHappyPath:
         assert "date: 2026-05-28" in new_text
         # Proposal archived to applied/
         applied = PROPOSALS_DIR / APPLIED_SUBDIR
-        archived = list(applied.glob("*-evening.toml"))
+        archived = list(applied.glob("*.toml"))
         assert len(archived) == 1
         p = load_proposal(archived[0])
         assert p.rationale == "HN 沒看 — 改 reading_block"
@@ -333,8 +340,8 @@ class TestMtimeConflict:
         # Proposal landed in conflicts/, not applied/
         conflicts = PROPOSALS_DIR / CONFLICTS_SUBDIR
         applied = PROPOSALS_DIR / APPLIED_SUBDIR
-        assert list(conflicts.glob("*-evening.toml"))
-        assert not (applied.exists() and list(applied.glob("*-evening.toml")))
+        assert list(conflicts.glob("*.toml"))
+        assert not (applied.exists() and list(applied.glob("*.toml")))
 
     async def test_handedit_during_snapshot_read_blocks_revise(self, monkeypatch):
         """PR #481 review P1: DK's edit lands *during* the snapshot read —
@@ -372,7 +379,7 @@ class TestMtimeConflict:
         assert wp.read_text(encoding="utf-8") == "## dawn\n- DK HAND EDIT\n"
         # No applied artifact was created — the tool refused before write
         applied = PROPOSALS_DIR / APPLIED_SUBDIR
-        assert not (applied.exists() and list(applied.glob("*-evening.toml")))
+        assert not (applied.exists() and list(applied.glob("*.toml")))
 
 
 # ===========================================================================
@@ -441,3 +448,113 @@ class TestLoadWeaveForRevision:
 
     def test_missing_returns_none(self, tmp_path):
         assert load_weave_for_revision(tmp_path / "absent.md") is None
+
+    def test_duplicate_h2_raises_with_counts(self):
+        wp = _seed_weave("## a\nx\n\n## b\ny\n\n## a\nz\n\n## a\nw\n")
+        with pytest.raises(DuplicateWeaveSectionsError) as exc:
+            load_weave_for_revision(wp)
+        assert exc.value.duplicates == {"a": 3}
+
+
+# ===========================================================================
+# Issue #583: stacked days / duplicate H2 must be refused, never collapsed
+# ===========================================================================
+
+
+STACKED = """---
+
+# 明日織程 — 2026-09-17
+
+## Program
+> default
+
+## 明日重點
+- 今天的重點
+
+## 今日收獲（2026-09-16）
+- 16 號的收穫
+
+---
+
+# 明日織程 — 2026-09-16
+
+## Program
+> light
+
+## 明日重點
+- 昨天的重點
+
+## 今日收獲（2026-09-15）
+- 15 號的收穫
+"""
+
+
+class TestDuplicateSectionsRefused:
+    async def test_stacked_file_is_refused_and_left_byte_identical(self):
+        """The 2026-09-17 09:40 incident: one replace on 明日重點 rewrote a
+        321-line stacked file down to 128 lines and reported success."""
+        wp = _seed_weave(STACKED)
+        before = wp.read_bytes()
+        tool = make_weave_revise_tool(phase_resolver=lambda: "dawn")
+
+        result = await tool.executor(_call({
+            "rationale": "L0 暫緩",
+            "changes": [{"section": "明日重點", "action": "replace",
+                         "new_body": "- 改過的重點"}],
+        }))
+
+        assert not result.success
+        assert wp.read_bytes() == before
+        # The error has to let the agent repair the file on its own.
+        assert "Program" in result.error and "明日重點" in result.error
+        assert "×2" in result.error
+        assert "daily_weave/" in result.error
+        assert "未變動" in result.error
+        # Nothing claims to have been applied or attempted.
+        assert not PROPOSALS_DIR.exists() or not list(PROPOSALS_DIR.rglob("*.toml"))
+
+
+class TestProposalArtifactIdentity:
+    async def test_two_revisions_same_day_keep_both_artifacts(self):
+        """proposal_path used to be date-only, so a second revise on the same
+        day overwrote the first one's audit trail."""
+        _seed_weave("## dawn\n- a\n\n## pet\n- b\n")
+        tool = make_weave_revise_tool(phase_resolver=lambda: None)
+
+        r1 = await tool.executor(_call({
+            "rationale": "first",
+            "changes": [{"section": "dawn", "action": "replace", "new_body": "- a2"}],
+        }))
+        assert r1.success, r1.error
+        time.sleep(1.05)  # artifact names carry second resolution
+        r2 = await tool.executor(_call({
+            "rationale": "second",
+            "changes": [{"section": "pet", "action": "replace", "new_body": "- b2"}],
+        }))
+        assert r2.success, r2.error
+
+        archived = sorted((PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml"))
+        assert len(archived) == 2
+        assert [load_proposal(a).rationale for a in archived] == ["first", "second"]
+
+    async def test_phase_is_the_last_fired_phase_not_hardcoded(self):
+        _seed_weave("## dawn\n- a\n")
+        tool = make_weave_revise_tool(phase_resolver=lambda: "dawn")
+        r = await tool.executor(_call({
+            "rationale": "morning fix",
+            "changes": [{"section": "dawn", "action": "replace", "new_body": "- b"}],
+        }))
+        assert r.success, r.error
+        (artifact,) = (PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml")
+        assert load_proposal(artifact).phase == "dawn"
+
+    async def test_phase_unknown_when_no_phase_fired_today(self):
+        _seed_weave("## dawn\n- a\n")
+        tool = make_weave_revise_tool(phase_resolver=lambda: None)
+        r = await tool.executor(_call({
+            "rationale": "x",
+            "changes": [{"section": "dawn", "action": "replace", "new_body": "- b"}],
+        }))
+        assert r.success, r.error
+        (artifact,) = (PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml")
+        assert load_proposal(artifact).phase == "adhoc"

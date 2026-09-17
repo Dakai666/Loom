@@ -93,11 +93,34 @@ def x(): pass
         plan = load_weave(p)
         assert plan.sections == {}
 
-    def test_duplicate_h2_last_wins(self, tmp_path):
+    def test_duplicate_h2_is_withheld_and_reported(self, tmp_path):
+        """Issue #583: a repeated heading is ambiguous — which copy is today's
+        depends on whether days were stacked newest-first or appended. The
+        old last-wins rule silently delivered the *oldest* block for nine
+        dawns. Never pick; withhold the name and report it."""
         p = tmp_path / "dupes.md"
-        _write(p, "## dawn\n- first version\n\n## dawn\n- second version\n")
+        _write(
+            p,
+            "## dawn\n- first version\n\n## 長線\n- carry\n\n"
+            "## dawn\n- second version\n",
+        )
         plan = load_weave(p)
-        assert plan.section_for("dawn") == "- second version"
+        assert plan.section_for("dawn") is None
+        assert plan.duplicates == {"dawn": 2}
+        assert plan.section_for("長線") == "- carry"
+        assert "dawn" not in plan.global_sections([])
+
+    def test_h2_inside_fence_is_not_a_duplicate(self, tmp_path):
+        p = tmp_path / "fenced.md"
+        _write(p, "## dawn\n```\n## dawn\n```\n")
+        plan = load_weave(p)
+        assert plan.duplicates == {}
+        assert plan.section_for("dawn") == "```\n## dawn\n```"
+
+    def test_clean_file_has_no_duplicates(self, tmp_path):
+        p = tmp_path / "clean.md"
+        _write(p, "## a\nx\n\n## b\ny\n")
+        assert load_weave(p).duplicates == {}
 
     def test_h2_with_trailing_whitespace_in_heading(self, tmp_path):
         p = tmp_path / "ws.md"

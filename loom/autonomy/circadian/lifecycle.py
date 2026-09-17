@@ -28,12 +28,11 @@ from loom.autonomy.circadian.proposal import (
     APPLIED_SUBDIR,
     CONFLICTS_SUBDIR,
     PROPOSALS_DIR,
-    load_proposal,
-    proposal_path,
+    load_proposals_for_date,
 )
 from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
-from loom.autonomy.circadian.weave import load_weave
+from loom.autonomy.circadian.weave import describe_duplicates, load_weave
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -497,12 +496,14 @@ async def _deliver_phase_chime(
     # [[autonomy.triggers]] on circadian:weave_applied; no internal subscriber
     # lands here by design (issue #472 "不做").
     if anchor.name == "dawn":
-        applied = _yesterday_applied_proposal(config.timezone)
-        if applied is not None:
+        applied = _yesterday_applied_proposals(config.timezone)
+        if applied:
+            # One event per dawn: the latest revision is the plan in effect.
+            latest = applied[-1]
             await _emit(daemon.evaluator, "circadian:weave_applied", {
                 "date": _today_str(config.timezone),
-                "applied_from": applied.date,
-                "rationale": applied.rationale,
+                "applied_from": latest.date,
+                "rationale": latest.rationale,
             })
 
 
@@ -533,6 +534,15 @@ def _compose_chime_intent(
         parts.append(f"**今日織程**\n{section}")
 
     if anchor.name == "dawn":
+        # Issue #583: repeated headings are withheld from every layer (there
+        # is no right copy to pick). Say so once, at dawn, where the agent can
+        # still repair the file before the day runs on a partial weave.
+        if weave.duplicates:
+            parts.append(
+                "**⚠️ daily_weave 標題重複**\n"
+                f"{describe_duplicates(weave.duplicates)}\n"
+                "這些段落今天沒有送進 chime；需要內容就直接讀檔。"
+            )
         revision_report = _yesterday_revision_report(config.timezone)
         if revision_report:
             parts.append(revision_report)
@@ -559,56 +569,58 @@ def _compose_chime_intent(
     return "\n\n".join(parts)
 
 
-def _yesterday_applied_proposal(tz: str):
-    """Yesterday's evening_closure proposal *iff* it applied cleanly (i.e. it
-    landed under ``proposals/applied/``, not parked under ``conflicts/``).
+def _yesterday_str(tz: str) -> str:
+    return (datetime.now(ZoneInfo(tz)) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _yesterday_applied_proposals(tz: str) -> list:
+    """Yesterday's proposals that applied cleanly (landed under
+    ``proposals/applied/``, not parked under ``conflicts/``), oldest first.
 
     Shared by the dawn chime「昨夜你改了什麼」layer and the
-    ``circadian:weave_applied`` emit (#472) so both read the same artifact.
-    Returns ``None`` when no clean revision happened overnight."""
-    yesterday = (
-        datetime.now(ZoneInfo(tz)) - timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-    return load_proposal(proposal_path(yesterday, PROPOSALS_DIR / APPLIED_SUBDIR))
+    ``circadian:weave_applied`` emit (#472) so both read the same artifacts.
+    A list since #583: the tool may run more than once a day (a morning fix
+    plus the evening plan). Empty when no clean revision happened."""
+    return load_proposals_for_date(_yesterday_str(tz), PROPOSALS_DIR / APPLIED_SUBDIR)
+
+
+def _format_proposals(proposals: list, rationale_label: str) -> str:
+    blocks = []
+    for p in proposals:
+        summary = "\n".join(f"- {line}" for line in p.summary_lines())
+        blocks.append(f"{summary}\n\n_{rationale_label}_：{p.rationale}")
+    return "\n\n".join(blocks)
 
 
 def _yesterday_revision_report(tz: str) -> str | None:
-    """Look up yesterday's evening_closure proposal artifact and turn it
-    into the 「昨夜你改了什麼」 chime layer.
+    """Look up yesterday's weave_revise artifacts and turn them into the
+    「昨夜你改了什麼」 chime layer.
 
-    Two possible artifacts:
-      - ``proposals/applied/{yesterday}-evening.toml`` — revise succeeded
-      - ``proposals/conflicts/{yesterday}-evening.toml`` — DK hand-edit
-        won the mtime race; proposal was parked, daily_weave.md untouched
+    Two possible artifact dirs, each holding ``{yesterday}-{HHMMSS}.toml``
+    (or the pre-#583 ``{yesterday}-evening.toml``):
+      - ``proposals/applied/`` — revise succeeded
+      - ``proposals/conflicts/`` — DK hand-edit won the mtime race; proposal
+        was parked, daily_weave.md untouched
 
-    Returns ``None`` when neither exists (no overnight revision happened).
+    Returns ``None`` when neither has anything (no revision yesterday).
     The applied case nudges the agent to brief DK; the conflicts case
     surfaces the parked attempt so DK can decide what to do.
     """
-    yesterday = (
-        datetime.now(ZoneInfo(tz)) - timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-
-    conflict = proposal_path(yesterday, PROPOSALS_DIR / CONFLICTS_SUBDIR)
-
-    proposal = _yesterday_applied_proposal(tz)
-    if proposal is not None:
-        summary = "\n".join(f"- {line}" for line in proposal.summary_lines())
+    applied = _yesterday_applied_proposals(tz)
+    if applied:
         return (
             "**昨夜你改了什麼**\n"
-            f"{summary}\n"
-            f"\n_理由_：{proposal.rationale}\n"
+            f"{_format_proposals(applied, '理由')}\n"
             "\n→ 開場時跟 DK 簡述一下你昨夜對明天織程的調整。"
         )
 
-    parked = load_proposal(conflict)
-    if parked is not None:
-        summary = "\n".join(f"- {line}" for line in parked.summary_lines())
+    conflicts_dir = PROPOSALS_DIR / CONFLICTS_SUBDIR
+    parked = load_proposals_for_date(_yesterday_str(tz), conflicts_dir)
+    if parked:
         return (
             "**昨夜的調整被擋下了（DK 半夜手改過 daily_weave.md）**\n"
-            f"{summary}\n"
-            f"\n_當時的理由_：{parked.rationale}\n"
-            f"_park 在_：{conflict}\n"
+            f"{_format_proposals(parked, '當時的理由')}\n"
+            f"_park 在_：{conflicts_dir}\n"
             "\n→ 告訴 DK 這件事，問他要不要重 propose 或直接跳過。"
         )
 
