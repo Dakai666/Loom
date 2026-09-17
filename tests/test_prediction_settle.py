@@ -195,7 +195,9 @@ class TestSessionWiring:
 
         assert "HIT" in session._bet_settlements["call-probe"][0]
 
-    async def test_disabled_tool_does_not_settle(self, db):
+    async def test_settles_even_when_predict_tool_disabled(self, db):
+        """Betting is optional, settling is not: a bet already placed (e.g. in a
+        resumed session before the tool was switched off) still gets closed."""
         from loom.core.harness.lifecycle import ActionRecord, ActionState
         from loom.core.harness.middleware import ToolCall, ToolResult
         from loom.core.harness.permissions import TrustLevel
@@ -217,5 +219,56 @@ class TestSessionWiring:
             result=ToolResult(call_id="c", tool_name="run_bash", success=True,
                               output="INJECTION_ALLOWED"),
         ))
-        assert session._bet_settlements == {}
-        assert (await PredictionStore(db).get(bet.id)).status == "pending"
+        assert "HIT" in session._bet_settlements["c"][0]
+        assert (await PredictionStore(db).get(bet.id)).status == "reconciled"
+
+
+class TestLostRace:
+    async def test_one_failed_transition_does_not_drop_the_batch(self, db, monkeypatch):
+        """Parallel same-name tools can race on one bet; the loser's transition
+        raises. That bet is skipped — the other verdicts still come back."""
+        first = await _bet(db, claim="first")
+        await _bet(db, claim="second")
+        await _action(db)
+
+        real = PredictionStore.mark_reconciled
+
+        async def flaky(self, prediction_id, **kw):
+            if prediction_id == first.id:
+                raise ValueError("cannot move prediction from 'reconciled'")
+            return await real(self, prediction_id, **kw)
+
+        monkeypatch.setattr(PredictionStore, "mark_reconciled", flaky)
+        lines = await settle_bets_for_action(db, session_id="sess", tool_name="run_bash")
+        assert len(lines) == 1 and "second" in lines[0]
+
+
+class TestExpireOpenBets:
+    async def test_old_open_bets_go_stale_fresh_and_terminal_untouched(self, db):
+        """Pending needs an exit: a bet whose target never ran would rot forever.
+        Old open bets expire; fresh ones (a resumed session may still settle
+        them) and already-settled ones are left alone."""
+        from datetime import UTC, datetime, timedelta
+
+        from loom.core.memory.prediction_settle import expire_stale_bets
+
+        now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+        store = PredictionStore(db)
+        old = PredictionRecord(session_id="s", claim="old", resolver={"kind": "tool_success", "expect": True},
+                               due_condition={"kind": "next_action", "session_id": "s", "tool": "run_bash", "after": ANCHOR},
+                               created_at=now - timedelta(hours=30))
+        fresh = PredictionRecord(session_id="s", claim="fresh", resolver={"kind": "tool_success", "expect": True},
+                                 due_condition={"kind": "next_action", "session_id": "s", "tool": "run_bash", "after": ANCHOR},
+                                 created_at=now - timedelta(hours=2))
+        done = PredictionRecord(session_id="s", claim="done", resolver={"kind": "tool_success", "expect": True},
+                                due_condition={"kind": "next_action", "session_id": "s", "tool": "run_bash", "after": ANCHOR},
+                                created_at=now - timedelta(hours=30))
+        for r in (old, fresh, done):
+            await store.write(r)
+        await store.mark_reconciled(done.id, score=0.0, observation_ref="action:x")
+
+        assert await expire_stale_bets(db, now=now) == 1
+        assert (await store.get(old.id)).status == "stale"
+        assert (await store.get(old.id)).score is None
+        assert (await store.get(fresh.id)).status == "pending"
+        assert (await store.get(done.id)).status == "reconciled"

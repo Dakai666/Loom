@@ -19,12 +19,20 @@ goes ``stale`` with an explicit line — never a silent score.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from loom.core.memory.observation import (
     find_settling_observation,
     resolve_observation_ref,
 )
 from loom.core.memory.prediction import PredictionStore
 from loom.core.memory.resolvers import resolve
+
+# An open bet older than this is expired at session start. Long enough that a
+# resumed session (Discord threads resume under the same session_id after a
+# restart) can still settle its bets; short enough that a bet whose target tool
+# never ran doesn't rot ``pending`` forever.
+OPEN_BET_TTL = timedelta(hours=24)
 
 
 async def settle_bets_for_action(db, *, session_id: str, tool_name: str) -> list[str]:
@@ -48,13 +56,16 @@ async def settle_bets_for_action(db, *, session_id: str, tool_name: str) -> list
                 raise KeyError("observation_gone")
             result = resolve(bet.resolver, observation)
         except (KeyError, ValueError):
-            await store.mark_stale(bet.id)
-            lines.append(
-                f"«{bet.claim}» — could not judge ({bet.resolver.get('kind')} "
-                f"can't read this {tool_name} run); marked stale"
-            )
+            if await _transition(store.mark_stale(bet.id)):
+                lines.append(
+                    f"«{bet.claim}» — could not judge ({bet.resolver.get('kind')} "
+                    f"can't read this {tool_name} run); marked stale"
+                )
             continue
-        await store.mark_reconciled(bet.id, score=result.error_score, observation_ref=ref)
+        if not await _transition(store.mark_reconciled(
+            bet.id, score=result.error_score, observation_ref=ref,
+        )):
+            continue
         if result.error_score == 0.0:
             verdict = "HIT"
         elif result.error_score >= 1.0:
@@ -64,6 +75,37 @@ async def settle_bets_for_action(db, *, session_id: str, tool_name: str) -> list
         detail = f" — {result.detail}" if result.detail else ""
         lines.append(f"«{bet.claim}» — {verdict}{detail}")
     return lines
+
+
+async def _transition(coro) -> bool:
+    """Run one state transition; False when the bet is no longer open.
+
+    Parallel runs of the same tool can both pick up one open bet — the loser's
+    transition raises on the state-machine check. Skip that bet instead of
+    letting it unwind the whole batch and drop the other verdicts.
+    """
+    try:
+        await coro
+    except ValueError:
+        return False
+    return True
+
+
+async def expire_stale_bets(db, *, now: datetime | None = None) -> int:
+    """Mark every open bet older than ``OPEN_BET_TTL`` stale; return the count.
+
+    The exit for a bet whose target tool never ran. Runs at session start, so it
+    doesn't depend on the ``predict`` tool being enabled or on ``stop()`` (which
+    fires on bot shutdown for sessions that later resume).
+    """
+    cutoff = ((now or datetime.now(UTC)) - OPEN_BET_TTL).isoformat()
+    cur = await db.execute(
+        "UPDATE prediction_records SET status = 'stale' "
+        "WHERE status IN ('pending', 'due') AND created_at < ?",
+        (cutoff,),
+    )
+    await db.commit()
+    return cur.rowcount
 
 
 def format_settlement_suffix(lines: list[str]) -> str:

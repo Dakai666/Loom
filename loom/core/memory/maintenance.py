@@ -462,8 +462,7 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
                     "description": (
                         "How to judge the bet mechanically. {kind, ...} where "
                         "kind ∈ {tool_success, final_state, output_contains, "
-                        "output_regex, file_digest_changed, row_count, "
-                        "duration_bucket}. Carry the kind's params, e.g. "
+                        "output_regex, row_count, duration_bucket}. Carry the kind's params, e.g. "
                         "{kind:'row_count', expect:0} or "
                         "{kind:'output_contains', needle:'PASS'}."
                     ),
@@ -471,7 +470,7 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
                 "domain": {
                     "type": "string",
                     "description": (
-                        "Calibration domain to attribute this bet to "
+                        "Free-text tag stored on the bet "
                         "(default: the tool name)."
                     ),
                 },

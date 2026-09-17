@@ -22,7 +22,7 @@
 ## 留下什麼
 
 - `predict` 工具 + `PredictionRecord` / `PredictionStore`：Agent 在不確定的動作前寫下可被推翻的斷言。
-- `loom/core/memory/prediction_settle.py`：目標工具下次執行時當場結算，HIT / MISS 附在該工具的回傳上。
+- `loom/core/memory/prediction_settle.py`：目標工具下次執行時當場結算，HIT / MISS 附在該工具的回傳上。結算不受 `predict_tool_enabled` 控制（下注可選，收尾不可選）；超過 24 小時仍未結算的賭在 session start 時標 stale，讓 pending 有出口。
 - `action_records` 的 output capture 與 resolver 白名單（#569）。
 
 ## 拆掉什麼

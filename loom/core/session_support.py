@@ -77,7 +77,7 @@ def prediction_nudge_body(origin: str, *, predict_tool_enabled: bool) -> str | N
     return (
         "Acting autonomously. If your next consequential tool call has a genuinely "
         "uncertain outcome, first write it as a claim that can be proven wrong: "
-        "one `predict` bet (output_contains / output_regex / row_count / "
+        "one `predict` bet (e.g. output_contains / output_regex / row_count / "
         "tool_success). Skip it when you already know the outcome. Optional, and "
         "it must not change which action you take; the verdict comes back on that "
         "tool's result."

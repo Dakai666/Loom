@@ -1223,9 +1223,15 @@ class LoomSession:
         self.registry.register(
             make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
         )
-        # Epic #528 (P0.5-a slice A): predict — the deliberate betting mouth.
-        # Gated (predict_tool_enabled, default off): registered only when DK has
-        # opted the spine in, so the tool never appears to the model otherwise.
+        # #528: give rotting bets an exit — expire open bets older than the TTL
+        # (target tool never ran). Runs regardless of predict_tool_enabled.
+        try:
+            from loom.core.memory.prediction_settle import expire_stale_bets
+            await expire_stale_bets(self._db)
+        except Exception:
+            logger.debug("expire_stale_bets failed (suppressed)", exc_info=True)
+        # #537: predict — a falsifiable assertion before an uncertain call.
+        # Gated (predict_tool_enabled, default off): registered only when opted in.
         if self._predict_tool_enabled:
             self.registry.register(make_predict_tool(db=self._db))
 
@@ -4118,15 +4124,16 @@ class LoomSession:
         # #528: settle this session's `predict` bets on this tool against the
         # run just persisted. Verdicts are buffered by call id and appended to
         # the tool result in stream_turn (memorialize completes before _dispatch
-        # returns), so the agent sees them while still present.
-        if getattr(self, "_predict_tool_enabled", False) and record.call is not None:
+        # returns), so the agent sees them while still present. Not gated on
+        # predict_tool_enabled: betting is optional, closing a placed bet is not.
+        if record.call is not None:
             try:
                 from loom.core.memory.prediction_settle import settle_bets_for_action
                 lines = await settle_bets_for_action(
                     self._db, session_id=self.session_id, tool_name=record.tool_name,
                 )
                 if lines:
-                    self._bet_settlements[record.call.id] = lines
+                    self._bet_settlements.setdefault(record.call.id, []).extend(lines)
             except Exception:
                 pass  # settling must never crash the pipeline
 
