@@ -160,6 +160,8 @@ logger = logging.getLogger(__name__)
 # Session compression (episodic → semantic)
 # ---------------------------------------------------------------------------
 
+COMPRESS_BATCH_SIZE = 60
+
 COMPRESS_PROMPT = """\
 Below are tool calls from an agent session.
 Extract 0-7 reusable INSIGHTS that would be valuable in future sessions.
@@ -257,8 +259,11 @@ async def compress_session(
     entries = await episodic.read_session(session_id, uncompressed_only=True)
     if not entries:
         return 0
+    # One LLM call reads at most this many entries; the rest stay uncompressed
+    # and are picked up by the next trigger rather than marked unread.
+    entries = entries[:COMPRESS_BATCH_SIZE]
 
-    log_text = "\n".join(f"[{e.event_type}] {e.content}" for e in entries[:60])
+    log_text = "\n".join(f"[{e.event_type}] {e.content}" for e in entries)
 
     response = await router.chat(
         model=model,

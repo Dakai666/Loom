@@ -391,6 +391,36 @@ class TestSessionCompression:
         assert any("tests/" in v for v in values)
 
     @pytest.mark.asyncio
+    async def test_compress_marks_only_entries_sent_to_llm(self, db_conn):
+        """Only the batch the LLM actually read is marked compressed; the rest
+        stays uncompressed for the next run instead of being silently skipped."""
+        em = EpisodicMemory(db_conn)
+        sm = SemanticMemory(db_conn)
+        for i in range(70):
+            await em.write(EpisodicEntry(
+                session_id="big", event_type="message", content=f"User: msg {i}",
+            ))
+        seen = []
+
+        async def mock_chat(**kwargs):
+            seen.append(kwargs["messages"][0]["content"])
+            return LLMResponse(text="", tool_uses=[], stop_reason="end_turn")
+
+        router = MagicMock()
+        router.chat = mock_chat
+
+        await compress_session(session_id="big", episodic=em, semantic=sm,
+                               router=router, model="MiniMax-M2.7")
+        left = await em.read_session("big", uncompressed_only=True)
+        assert len(left) == 10
+        assert "msg 60" not in seen[0]
+
+        await compress_session(session_id="big", episodic=em, semantic=sm,
+                               router=router, model="MiniMax-M2.7")
+        assert await em.read_session("big", uncompressed_only=True) == []
+        assert "msg 69" in seen[1]
+
+    @pytest.mark.asyncio
     async def test_compress_empty_session_returns_zero(self, db_conn):
         em = EpisodicMemory(db_conn)
         sm = SemanticMemory(db_conn)
