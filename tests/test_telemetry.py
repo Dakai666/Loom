@@ -94,20 +94,16 @@ def test_memory_compression_yield_math():
     assert abs(dim.recent_yield - 0.35) < 0.01
 
 
-def test_memory_compression_anomaly_needs_min_runs():
-    """Even with 0% yield, first 2 runs should not fire anomaly."""
+def test_memory_compression_never_raises_anomaly():
+    """Yield's denominator is only the user messages in a batch (often ~3), so
+    the ratio swings 0%↔200% on noise. It stays visible in the snapshot /
+    detail view but must never push a system-reminder into the agent's context."""
     dim = MemoryCompressionDimension()
-    dim.record(entries=10, facts=0)
-    dim.record(entries=10, facts=0)
+    for _ in range(5):
+        dim.record(entries=20, facts=0, tool_events=17)
+    assert dim.recent_yield == 0.0
     assert dim.has_anomaly() is False
-
-
-def test_memory_compression_anomaly_fires_low_yield():
-    dim = MemoryCompressionDimension()
-    for _ in range(3):
-        dim.record(entries=20, facts=1)  # 5% yield
-    assert dim.has_anomaly() is True
-    assert "compression yield" in dim.describe_anomaly()
+    assert dim.describe_anomaly() is None
 
 
 def test_memory_compression_rolling_window_bounded():

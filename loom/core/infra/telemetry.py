@@ -238,13 +238,14 @@ class MemoryCompressionDimension(DimensionTracker):
     the yield denominator (#173): they record operational side-effects, not
     knowledge, so a low facts/entries ratio on a tool-heavy session is
     semantically correct and shouldn't fire an anomaly.
+
+    No anomaly at all (2026-09-17): what remains in the denominator is only the
+    user messages of a batch — often ~3 — so yield swings 0%↔200% on noise and
+    the alert pushed false "facts are being lost" reminders into the agent's
+    context. The numbers stay available on demand via snapshot / detail.
     """
 
     name = "memory_compression"
-
-    #: Anomaly threshold — fires when rolling yield ratio drops below this.
-    LOW_YIELD_THRESHOLD = 0.2
-    MIN_RUNS_FOR_ANOMALY = 3
 
     def __init__(self) -> None:
         self._runs: int = 0
@@ -328,28 +329,7 @@ class MemoryCompressionDimension(DimensionTracker):
             lines.append(
                 f"- runs skipped (tool-only, no knowledge entries): {self._skipped_runs}"
             )
-        if self.has_anomaly():
-            lines.append(
-                "- ⚠ yield is low — LLM extractor may be missing content. "
-                "Original entries are soft-deleted (#158) and remain on disk "
-                "until TTL prune."
-            )
         return "\n".join(lines)
-
-    def has_anomaly(self) -> bool:
-        return (
-            len(self._recent_yields) >= self.MIN_RUNS_FOR_ANOMALY
-            and self.recent_yield < self.LOW_YIELD_THRESHOLD
-        )
-
-    def describe_anomaly(self) -> str | None:
-        if not self.has_anomaly():
-            return None
-        return (
-            f"compression yield {self.recent_yield:.0%} over last "
-            f"{len(self._recent_yields)} runs — facts are being lost in "
-            f"extraction."
-        )
 
 
 # ── Dimension: context_layout ─────────────────────────────────────────────
