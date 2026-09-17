@@ -335,188 +335,16 @@ def make_convergent_dream_tool(
     )
 
 
-def make_prediction_reconcile_tool(
-    db: "aiosqlite.Connection",
-    *,
-    timezone: str = "Asia/Taipei",
-    dreams_dir=None,
-    friction_note: bool = False,
-) -> ToolDefinition:
-    """Build the ``prediction_reconcile`` ToolDefinition (epic #528, slice 3.5).
-
-    The convergent-dream sibling that closes the Prediction Spine loop on the
-    dream schedule: matured bets are judged against runtime ground truth and a
-    reconcile report is written to the dreams journal.
-
-    **Read-only by default (I3 at the schedule level).** ``dry_run`` defaults to
-    True — the scheduled/triggered pass proposes and reports without writing the
-    spine. Only ``dry_run=false`` commits scores via ``mark_reconciled``, the
-    single write path. This mirrors the convergent dream's P4a discipline so the
-    spine is never written speculatively by a schedule.
-
-    ``friction_note`` (P1 #487, spec 60 §3.5a): append the ``environment_friction``
-    Critic note after reconciling, so the dawn settle beat carries it. Rendered
-    on every call, even when quiet (O1) — a note that only shows up when loud
-    would itself become a hidden signal. The friction state advances only when
-    ``dry_run=false``, in step with the reconcile it follows.
-    """
-    from loom.core.cognition.prediction_reconcile import run_prediction_reconciliation
-    from loom.core.cognition.calibration import run_calibration_pass
-    from loom.core.memory.prediction import PredictionStore
-    from loom.core.memory.semantic import SemanticMemory
-    from loom.autonomy.circadian.journal import append_consolidation_report
-
-    async def _executor(call) -> ToolResult:
-        dry_run = bool(call.args.get("dry_run", True))  # P4a: read-only default
-        # Calibration write is gated on its OWN arg, independent of reconcile's
-        # execute (絲絲 PR #534): dry_run=false commits scores but writes no
-        # residue unless write_calibration=true is set deliberately.
-        write_cal = bool(call.args.get("write_calibration", False))
-
-        store = PredictionStore(db)
-        report = await run_prediction_reconciliation(store, db, execute=not dry_run)
-
-        # Roll reconciled bets into calibration residue. Always computed so the
-        # report shows the landscape; written only when write_calibration=true.
-        cal_report = await run_calibration_pass(
-            store, SemanticMemory(db), execute=write_cal,
-        )
-
-        body = report.render() + "\n\n" + cal_report.render()
-        note = ""
-        if friction_note:
-            from datetime import UTC, datetime
-
-            from loom.core.cognition.affect import render_friction_note, settle_friction
-
-            state, reading = await settle_friction(
-                db, now=datetime.now(UTC), commit=not dry_run,
-            )
-            note = render_friction_note(state, reading)
-            body += "\n\n" + note
-
-        path = append_consolidation_report(
-            body, timezone=timezone, dreams_dir=dreams_dir,
-        )
-
-        verb = "reconciled" if report.executed else "would reconcile (dry-run)"
-        output = (
-            f"prediction reconcile: {verb} {len(report.proposals)}, "
-            f"skipped {len(report.skipped)}; {cal_report.summary()}"
-            f"\n  Report: {path}"
-        )
-        if note:
-            output += "\n\n" + note
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name, success=True, output=output,
-        )
-
-    return ToolDefinition(
-        name="prediction_reconcile",
-        description=(
-            "Reconcile matured predictions against runtime observation and write "
-            "a report to the circadian dream journal. Read-only by default "
-            "(dry_run=true): proposes scores without writing the spine. Set "
-            "dry_run=false to commit reconciliation. Counterpart to "
-            "convergent_dream (which consolidates facts)."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "dry_run": {
-                    "type": "boolean",
-                    "description": (
-                        "Propose without writing the spine (default true). "
-                        "Set false to commit scores via mark_reconciled."
-                    ),
-                    "default": True,
-                },
-                "write_calibration": {
-                    "type": "boolean",
-                    "description": (
-                        "Persist the per-domain calibration residue (default "
-                        "false). Independent of dry_run — calibration always "
-                        "appears in the report, but is only written when true."
-                    ),
-                    "default": False,
-                },
-            },
-        },
-        executor=_executor,
-        trust_level=TrustLevel.SAFE,
-    )
-
-
-def make_affect_read_tool(
-    db: "aiosqlite.Connection",
-    *,
-    clock=None,
-) -> ToolDefinition:
-    """Build the ``affect_read`` ToolDefinition (P1 #487, spec 60 §3.5b).
-
-    The pull-side exit of the ``environment_friction`` reading: Loom looks when
-    she wants to, instead of it being pushed every turn (vetoed, spec 60 D2c).
-    ``dry_run`` defaults to True — a look never advances the state; only
-    ``dry_run=false`` absorbs the window and persists it to ``memory_meta``.
-    Never writes the spine (I3).
-    """
-    from datetime import UTC, datetime
-
-    from loom.core.cognition.affect import render_friction_note, settle_friction
-
-    now_fn = clock or (lambda: datetime.now(UTC))
-
-    async def _executor(call) -> ToolResult:
-        dry_run = bool(call.args.get("dry_run", True))
-        state, reading = await settle_friction(db, now=now_fn(), commit=not dry_run)
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name, success=True,
-            output=render_friction_note(state, reading),
-        )
-
-    return ToolDefinition(
-        name="affect_read",
-        description=(
-            "Read your environment_friction: a decaying arousal reading fed only "
-            "by prediction error since your last settle (mostly tools running "
-            "slower than bet). Metabolism, not emotion — the note gives readings, "
-            "drivers, attribution and confidence, and leaves interpretation to "
-            "you. dry_run=true (default) just looks; dry_run=false absorbs the "
-            "window and advances the state."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "dry_run": {
-                    "type": "boolean",
-                    "description": (
-                        "Look without advancing the friction state (default "
-                        "true). Set false to absorb and persist."
-                    ),
-                    "default": True,
-                },
-            },
-        },
-        executor=_executor,
-        trust_level=TrustLevel.SAFE,
-    )
-
-
 def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
-    """Build the ``predict`` ToolDefinition (epic #528, P0.5-a slice A, #537).
+    """Build the ``predict`` ToolDefinition (#537; reshaped by the #528 retirement).
 
-    The deliberate counterpart to the involuntary heartbeat (``auto_predict``):
-    where the heartbeat only ever bets ``tool_success @ True``, this lets Loom
-    make confidence-varying, resolver-rich wagers about its *next* use of a named
-    tool — the non-trivial signal the §8 acceptance gate needs.
-
-    SAFE: it writes one ``pending`` meta-memory bet and drives no behaviour. The
-    bet binds by ``next_action`` (session + tool + ``after`` anchor), so the
-    existing reconcile settles it against the next ``action_records`` row — no
-    ``call_id`` needed at bet time. The resolver kind is validated against the
-    P0 whitelist *before* writing: P0 refuses to score what it cannot judge
-    mechanically (I2), and refusing at write time beats persisting an
-    unresolvable bet that silently rots.
+    A falsifiable assertion written *before* acting: the value is in forcing a
+    vague hunch into a claim that can be proven wrong. SAFE — it writes one
+    ``pending`` bet and drives no behaviour. The bet binds by ``next_action``
+    (session + tool + ``after`` anchor) and settles in-session the next time that
+    tool runs (``prediction_settle``); the verdict is appended to that tool's
+    result. The resolver kind is validated against the mechanical whitelist
+    before writing: a bet that can't be judged is refused up front (I2).
     """
     from datetime import datetime, UTC
 
@@ -526,22 +354,16 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
         KNOWN_RESOLVERS,
     )
 
-    # Provenance — tells a deliberate wager apart from the heartbeat's ``auto:``
-    # bets in later analysis (slice B uses ``auto:implicit_tool_success``).
+    # Provenance — every bet this tool writes carries an ``explicit:`` context
+    # prefix. The retired auto-heartbeat wrote ``auto:`` bets into the same
+    # table (archived 2026-09-17); the prefix keeps the corpus classifiable.
     _EXPLICIT_CONTEXT = "explicit:predict_tool"
 
     def _explicit_context(user_ctx: str | None) -> str:
-        """Stamp the ``explicit:`` provenance prefix on the stored context.
-
-        Both ``bet_provenance()`` and the MONOCULTURE health check classify a
-        bet by whether its context starts with ``explicit:``. When 絲絲 follows
-        the Agent.md guidance and fills ``context`` with her own reasoning, a
-        naive ``context or _EXPLICIT_CONTEXT`` would *overwrite* the prefix, so
-        the deliberate wager lands in the ``other`` bucket and the very metric
-        built to see explicit bets flow stays blind to it (found 2026-08-25:
-        14 real wagers, all misclassified as ``other``). Preserve her reasoning
-        *and* the provenance by prefixing; leave an already-tagged context be so
-        the default and idempotent re-tag don't double up.
+        """Stamp the ``explicit:`` provenance prefix on the stored context,
+        preserving the agent's own reasoning (found 2026-08-25: a naive
+        ``context or _EXPLICIT_CONTEXT`` dropped the prefix on 14 real bets).
+        An already-tagged context is left as-is so re-tagging is idempotent.
         """
         ctx = (user_ctx or "").strip()
         if not ctx:
@@ -573,7 +395,7 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
             )
         # #569: refuse a bet the observation surface cannot settle — a bet that
         # can never reconcile rots `pending` forever and you never learn from it
-        # (that silent rot starved the explicit path once already, spec 59 §8).
+        # (that silent rot starved the explicit path once already, docs/retired/prediction-spine/59 §8).
         # Steer to kinds that DO settle rather than just slamming the door.
         if kind in ACTION_UNOBSERVABLE_RESOLVERS:
             return _fail(
@@ -614,9 +436,9 @@ def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
         description=(
             "Make a falsifiable prediction about the NEXT time a named tool runs "
             "this session, judged mechanically against the observed action. Use "
-            "to bet on a concrete, checkable outcome — not a vibe. The bet is "
-            "settled later by the reconcile pass and rolled into your per-domain "
-            "calibration. Examples: predict the next run_bash returns 0 rows "
+            "to turn a hunch into a concrete, checkable claim before acting — not "
+            "a vibe. The verdict (HIT / MISS) is appended to that tool's result "
+            "when it runs. Examples: predict the next run_bash returns 0 rows "
             "(resolver row_count, expect 0); the next fetch_url output contains "
             "'200 OK' (output_contains); the next git push will succeed "
             "(tool_success)."

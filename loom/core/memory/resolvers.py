@@ -35,7 +35,7 @@ KNOWN_RESOLVERS = {
 # capture yet (#569 Q3: before/after file digests need a pre-action snapshot —
 # a real lifecycle slice, deferred). The predict tool refuses these at write
 # time: a bet that can never settle rots ``pending`` forever, and that silent
-# rot is the exact failure mode that starved the explicit path (spec 59 §8).
+# rot is the exact failure mode that starved the explicit path (docs/retired/prediction-spine/59 §8).
 ACTION_UNOBSERVABLE_RESOLVERS = frozenset({"file_digest_changed"})
 
 # duration_bucket thresholds (ms). A bet names the bucket it expects.
@@ -90,7 +90,7 @@ def resolve(resolver: dict, observation: dict) -> ResolverResult:
         present = resolver["needle"] in output
         # A miss against a truncated capture proves nothing either way — the
         # needle may live past the cap. Unresolvable, never a false "absent"
-        # (#569, spec 59 §9.1). A hit in the prefix is a hit in the full text.
+        # (#569, docs/retired/prediction-spine/59 §9.1). A hit in the prefix is a hit in the full text.
         if not present and observation.get("output_truncated"):
             raise KeyError("needle not found in truncated output capture")
         return _binary(present == resolver.get("expect", True), f"present={present}")

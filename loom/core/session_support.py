@@ -62,42 +62,26 @@ _SELF_DRIVEN_ORIGINS = frozenset({"chime", "autonomy"})
 
 
 def prediction_nudge_body(origin: str, *, predict_tool_enabled: bool) -> str | None:
-    """The ``<system-reminder>`` body inviting one deliberate ``predict`` bet,
-    or ``None`` when this turn should not be nudged.
+    """The ``<system-reminder>`` body inviting one ``predict`` assertion, or
+    ``None`` when this turn should not be nudged.
 
-    The ``predict`` tool (#537) is passive — nothing makes the agent use it, so
-    the corpus was a 100% ``auto:`` heartbeat monoculture. This invites a wager
-    on self-driven turns so explicit, confidence-varying bets actually flow (the
-    non-trivial signal the §8 acceptance gate needs). Suppressed when the tool is
-    not registered (``predict_tool_enabled`` off) and on every human / subagent
-    origin. Wording is optional + behaviour-neutral on purpose: a bet must never
-    change which action the agent takes (I5 — prediction has no path to output).
-
-    **Hardened 2026-07-03 (uncertainty-targeted).** The original soft "consider
-    …" invitation fired on every autonomy turn for ~10 days and produced zero
-    explicit bets — the agent read it as skippable noise. Worse, the origins that
-    *do* fire are routine (daily-life / pet-care / dreaming), so an obeyed-but-
-    undiscriminating nudge would only manufacture a *second* trivial-bet
-    monoculture. So the wording now carries the judgement itself: bet when the
-    outcome is genuinely uncertain, skip the sure things (the heartbeat already
-    records those). Same criterion Agent.md gives the agent for the chat path.
+    Fires only on self-driven turns (never human chat / subagents) and only when
+    the tool is registered. Kept after the #528 retirement at the end user's
+    request (Loom Agent verdict 2026-09-17): the value of a bet is the moment it
+    forces a hunch into a claim that can be proven wrong, and it settles in the
+    same session. Behaviour-neutral wording: a bet must never change which action
+    the agent takes.
     """
     if not predict_tool_enabled or origin not in _SELF_DRIVEN_ORIGINS:
         return None
     return (
-        "You are acting autonomously this turn. If your next consequential tool "
-        "call has a genuinely uncertain outcome — a command you're unsure will "
-        "work, an unfamiliar tool, a 'will this actually do it' moment — place "
-        "one falsifiable `predict` bet about it: a concrete, mechanically-"
-        "checkable claim (e.g. row_count, tool_success, output_contains), not a "
-        "vibe. Skip it when you already know the action will succeed — those bets "
-        "are as trivial as betting the sun will rise and teach nothing; the "
-        "implicit heartbeat already records those. The reconcile pass settles "
-        "your bet against what actually happens and folds it into your "
-        "calibration. This is optional and must not change which action you take "
-        "— it only sharpens your sense of where you predict well or poorly."
+        "Acting autonomously. If your next consequential tool call has a genuinely "
+        "uncertain outcome, first write it as a claim that can be proven wrong: "
+        "one `predict` bet (output_contains / output_regex / row_count / "
+        "tool_success). Skip it when you already know the outcome. Optional, and "
+        "it must not change which action you take; the verdict comes back on that "
+        "tool's result."
     )
-
 
 def _clean_envelope_metadata_line(text: str, *, max_len: int = 140) -> str:
     line = " ".join(str(text or "").strip().split())

@@ -323,38 +323,12 @@ execute       = false   # P4a read-only; set true for autonomous writes (P4b)
 # count for full coverage. LLM cost is bounded by max_clusters regardless; only
 # local embedding work scales with this number. Raise it as your corpus grows.
 corpus_limit  = 5000
-# Prediction Spine reconciliation (epic #528 slice 3.5). The convergent dream's
-# sibling: judges matured predictions against runtime observation and writes a
-# reconcile report to the same dreams file. Its execute gate is INDEPENDENT of
-# the consolidation ``execute`` above — consolidation execute merges facts
-# (destructive); reconcile execute only records observation-derived scores
-# (benign), so you can flip reconcile on while consolidation stays read-only.
-# Auto-betting "mouth" (epic #528 P0.5-a / #537): co-write an implicit
-# "this tool will succeed" bet for every tool action that actually executed,
-# settled later by reconcile. This is the spine's INPUT — without it the
-# reconcile schedule chews an empty table. Session-level (per tool call), not a
-# dream activity, but grouped here so the whole observation ramp is in one place.
-# Observation ramp (flip top-down, watch dreams/ reports between each):
-#   auto_predict_enabled → reconcile_enabled → reconcile_execute → calibration_write_enabled
-# predict_tool_enabled is orthogonal — flip it whenever you want Loom to make
-# deliberate, confidence-varying wagers (richer signal than the flat heartbeat).
-# NOTE: either betting gate ON while reconcile_enabled is OFF means bets pile up
-# pending and never settle — a dead-letter backlog, not learning. When you flip a
-# betting gate to observe, flip reconcile_enabled within the same ramp window.
-auto_predict_enabled = false  # opt-in: start making implicit per-tool bets
-predict_tool_enabled = false  # opt-in (slice A #537): expose the explicit `predict` tool
-reconcile_enabled = false   # opt-in: run prediction reconciliation each weekly pass
-reconcile_execute = false   # P4a read-only; set true to commit scores (mark_reconciled)
-# Calibration residue (epic #528 slice 4.5): rolls reconciled bets into a
-# per-domain ``calibration:<domain>`` semantic summary (the spine's world-model
-# residue). Its write gate is INDEPENDENT of reconcile_execute — flipping
-# reconcile on does NOT start writing calibration. Off by default.
-calibration_write_enabled = false  # opt-in: persist calibration residue each weekly pass
-# P1 affect arm (#487, spec docs/designs/60): attach the environment_friction
-# note — a decaying arousal reading fed only by prediction error — to every
-# prediction_reconcile result (the circadian dawn settle beat). Read-only toward
-# the spine; the agent can also pull it any time via the affect_read tool.
-affect_dawn_note = true  # set false to drop the note from reconcile output
+# Explicit `predict` tool (#537): Loom writes a falsifiable assertion before an
+# uncertain tool call; it settles in-session against that tool's next run and the
+# verdict (HIT / MISS) is appended to the tool's result. (The implicit heartbeat,
+# weekly reconcile, calibration residue and affect layers were retired 2026-09-17,
+# #528 — their keys are no longer read.)
+predict_tool_enabled = false  # opt-in: expose the explicit `predict` tool
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer

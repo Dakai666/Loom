@@ -145,11 +145,9 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
--- Prediction Spine P0 (epic #528, spec docs/designs/58 §3.1): episodic
--- prediction log. A bet the agent makes about the world; reconciled against
--- runtime observation in the convergent dream. Individual records decay like
--- episodic memory — the per-domain calibration *residue* lives in
--- semantic_entries under key `calibration:<domain-or-resolver>` (§3.2).
+-- Prediction log (#537; batch reconcile/calibration retired 2026-09-17, #528):
+-- explicit `predict` bets, settled in-session against the target tool's next
+-- action_records row (loom/core/memory/prediction_settle.py).
 -- I1: (claim, due_condition, resolver) are mandatory (enforced in PredictionStore).
 -- I4: status is a state machine (pending → due → reconciled / stale); only a
 --     reconciled record carries a score + observation_ref.

@@ -196,81 +196,14 @@ class TestStatusLifecycle:
         assert {r.id for r in due} == {b.id}
         assert {r.id for r in reconciled} == {c.id}
 
-    async def test_list_by_status_newest_first_window(self, db_conn):
-        """When the corpus outgrows the limit, ``newest_first=True`` must return
-        the *most recent* rows — the calibration pass reads a rolling recency
-        window, and an oldest-first window silently freezes it at the corpus's
-        birth (found live: 14k reconciled vs a 5k oldest-first window that
-        never saw the first explicit wagers)."""
-        from datetime import datetime, UTC, timedelta
 
+class TestListOpenForSession:
+    async def test_only_open_bets_of_that_session(self, db_conn):
         ps = PredictionStore(db_conn)
-        t0 = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC)
-        recs = []
-        for i in range(4):
-            r = _record()
-            r.created_at = t0 + timedelta(days=i)
+        mine = _record(session_id="me")
+        done = _record(session_id="me")
+        other = _record(session_id="them")
+        for r in (mine, done, other):
             await ps.write(r)
-            await ps.mark_reconciled(r.id, score=0.0, observation_ref="action:x")
-            recs.append(r)
-
-        newest = await ps.list_by_status("reconciled", limit=2, newest_first=True)
-        assert [r.id for r in newest] == [recs[3].id, recs[2].id]
-        # default stays oldest-first (backward compatible)
-        oldest = await ps.list_by_status("reconciled", limit=2)
-        assert [r.id for r in oldest] == [recs[0].id, recs[1].id]
-
-
-# ---------------------------------------------------------------------------
-# list_open_after — keyset pagination over the open (pending|due) set (#557).
-# The drain-loop's read primitive: ordered by (created_at, id), exclusive after
-# a cursor, so a pass can page the whole backlog past the limit-window without
-# OFFSET shifting under concurrent mark_reconciled.
-# ---------------------------------------------------------------------------
-
-from datetime import datetime, UTC, timedelta
-
-
-def _at(seconds, **over) -> PredictionRecord:
-    r = _record(**over)
-    r.created_at = datetime(2026, 6, 8, 0, 0, 0, tzinfo=UTC) + timedelta(seconds=seconds)
-    return r
-
-
-class TestListOpenAfter:
-    async def test_covers_both_pending_and_due_ordered(self, db_conn):
-        ps = PredictionStore(db_conn)
-        a, b, c = _at(0), _at(1), _at(2)
-        for r in (a, b, c):
-            await ps.write(r)
-        await ps.mark_due(b.id)                       # b is 'due', still open
-        await ps.mark_reconciled(c.id, score=0.0, observation_ref="action:x")  # c leaves open
-
-        page = await ps.list_open_after(limit=10)
-        assert [r.id for r in page] == [a.id, b.id]   # ordered, reconciled excluded
-
-    async def test_cursor_is_exclusive_and_pages(self, db_conn):
-        ps = PredictionStore(db_conn)
-        recs = [_at(i) for i in range(5)]
-        for r in recs:
-            await ps.write(r)
-
-        first = await ps.list_open_after(limit=2)
-        assert [r.id for r in first] == [recs[0].id, recs[1].id]
-        cursor = (first[-1].created_at, first[-1].id)
-        second = await ps.list_open_after(after=cursor, limit=2)
-        assert [r.id for r in second] == [recs[2].id, recs[3].id]
-        third = await ps.list_open_after(after=(second[-1].created_at, second[-1].id), limit=2)
-        assert [r.id for r in third] == [recs[4].id]   # short page = exhausted
-
-    async def test_tie_on_created_at_breaks_by_id(self, db_conn):
-        """Two open bets sharing created_at (the dual heartbeat writes both at
-        once) must still page deterministically — keyset breaks ties by id."""
-        ps = PredictionStore(db_conn)
-        x, y = _at(0), _at(0)
-        lo, hi = sorted([x, y], key=lambda r: r.id)
-        await ps.write(x)
-        await ps.write(y)
-
-        page = await ps.list_open_after(after=(lo.created_at, lo.id), limit=10)
-        assert [r.id for r in page] == [hi.id]         # lo excluded, hi seen once
+        await ps.mark_stale(done.id)
+        assert [r.id for r in await ps.list_open_for_session("me")] == [mine.id]
