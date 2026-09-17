@@ -146,8 +146,10 @@ meaning = """
 #   label        — short name with an emoji
 #   personality  — what kind of day this is
 #   notes        — anything worth remembering when choosing it
-#   per_week     — suggested times per week. A suggestion, never enforced:
-#                  it exists so a scarce day (deep, travel) feels scarce.
+#   per_week     — suggested frequency. A suggestion, never enforced: it
+#                  exists so a scarce day (deep, travel) feels scarce. An
+#                  integer (2 → 建議每週 2 次) or your own words when no
+#                  integer fits ("隔週一次" → 建議：隔週一次).
 # Any other field is your own note to yourself; the engine ignores it.
 
 [programs.default]

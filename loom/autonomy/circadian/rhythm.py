@@ -90,7 +90,8 @@ class Program:
     The menu is the agent's own — it writes and grows it. The engine only
     shows it where tomorrow gets chosen; the choice itself stays prose in
     ``daily_weave.md``. ``per_week`` is a suggestion the menu displays, never
-    a quota anything enforces (DK, 2026-09-17: soft by design). Other fields
+    a quota anything enforces — an integer, or the agent's own words for a
+    rhythm no integer states honestly ("隔週一次" for a travel day) (DK, 2026-09-17: soft by design). Other fields
     in the table (``morning_weight``…) are the agent's notes to itself and
     are not read here.
     """
@@ -99,15 +100,15 @@ class Program:
     label: str = ""
     personality: str = ""
     notes: str = ""
-    per_week: int | None = None
+    per_week: int | str | None = None
 
 
 def load_programs(path: Path | None = None) -> list[Program]:
     """Read ``[programs.*]`` from the rhythm table, in declaration order.
 
     Tolerant like :func:`load_rhythm`: a missing or broken file yields ``[]``
-    (no menu layer), a non-table entry is skipped, a non-integer ``per_week``
-    is ignored.
+    (no menu layer), a non-table entry is skipped, a ``per_week`` that is
+    neither an integer nor non-blank text is ignored.
     """
     p = path or DEFAULT_RHYTHM_PATH
     if not p.exists():
@@ -127,8 +128,13 @@ def load_programs(path: Path | None = None) -> list[Program]:
             logger.warning("[circadian] rhythm program %r is not a table; skipping", key)
             continue
         per_week = entry.get("per_week")
-        if per_week is not None and (isinstance(per_week, bool) or not isinstance(per_week, int)):
-            logger.warning("[circadian] rhythm program %r has non-integer per_week %r; ignored", key, per_week)
+        if isinstance(per_week, str):
+            per_week = per_week.strip() or None
+        elif per_week is not None and (isinstance(per_week, bool) or not isinstance(per_week, int)):
+            logger.warning(
+                "[circadian] rhythm program %r has per_week %r; use an integer "
+                "or text like \"隔週一次\" — ignored", key, per_week,
+            )
             per_week = None
         programs.append(Program(
             key=str(key),

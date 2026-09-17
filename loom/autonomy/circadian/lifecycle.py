@@ -605,7 +605,9 @@ def _program_menu_layer(tz: str) -> str | None:
         head = f"- `{prog.key}`" + (f" {prog.label}" if prog.label else "")
         if prog.personality:
             head += f" — {prog.personality}"
-        if prog.per_week is not None:
+        if isinstance(prog.per_week, str):
+            head += f"（建議：{prog.per_week}）"
+        elif prog.per_week is not None:
             head += f"（建議每週 {prog.per_week} 次）"
         lines.append(head)
         if prog.notes:

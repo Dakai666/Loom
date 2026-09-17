@@ -360,10 +360,26 @@ class TestLoadPrograms:
     def test_bad_entries_are_dropped_individually(self, tmp_path):
         p = tmp_path / "rhythm.toml"
         _write(p, '''
-            programs = { broken = "not a table", light = { label = "🌿 輕日", per_week = "two" } }
+            programs = { broken = "not a table", light = { label = "🌿 輕日", per_week = 1.5 } }
         ''')
-        # Non-table entry skipped; a non-integer per_week is ignored, not fatal.
+        # Non-table entry skipped; an unusable per_week is ignored, not fatal.
         assert load_programs(p) == [Program(key="light", label="🌿 輕日")]
+
+    def test_per_week_accepts_free_text(self, tmp_path):
+        """A travel day is every other week — no integer says that honestly
+        (Loom Agent, 2026-09-17). The suggestion is the agent's own words."""
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            [programs.journey]
+            per_week = "隔週一次"
+
+            [programs.blank]
+            per_week = "  "
+        ''')
+        assert load_programs(p) == [
+            Program(key="journey", per_week="隔週一次"),
+            Program(key="blank"),
+        ]
 
     def test_invalid_toml_returns_empty(self, tmp_path):
         p = tmp_path / "rhythm.toml"

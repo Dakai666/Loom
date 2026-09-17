@@ -1107,6 +1107,10 @@ per_week = 2
 [programs.default]
 label = "🔄 默認日"
 personality = "均衡"
+
+[programs.journey]
+label = "🧭 旅行日"
+per_week = "隔週一次"
 """
 
     def _rhythm(self, programs: str = PROGRAMS):
@@ -1138,6 +1142,7 @@ personality = "均衡"
         assert "14:00–20:00 是保護區" in intent
         assert "每週 2 次" in intent
         assert "🔄 默認日" in intent
+        assert "（建議：隔週一次）" in intent
         # Guidance: where the choice goes, and that nothing is enforced.
         assert "daily_weave" in intent
         assert "不會擋" in intent
