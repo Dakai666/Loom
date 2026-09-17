@@ -1,26 +1,23 @@
 """
-Prediction Spine — explicit ``predict`` tool (epic #528, P0.5-a slice A, #537).
+Explicit ``predict`` tool (#537; reshaped by the #528 retirement, 2026-09-17).
 
-slice B's heartbeat only ever bets ``tool_success @ expect=True`` — flat, always
-optimistic, one-dimensional. The ``predict`` tool lets Loom make *deliberate*,
-confidence-varying, resolver-rich wagers ("this grep returns 0 rows", "output
-contains PASS", "this will be slow") — the non-trivial signal the §8 acceptance
-gate needs. It is the memory-layer sibling of ``prediction_reconcile``: SAFE,
-writes one ``pending`` bet, settled later by the existing reconcile via the new
-``next_action`` due-condition.
+The ``predict`` tool lets Loom write a falsifiable assertion before acting ("this
+grep returns 0 rows", "output contains PASS"). SAFE: it writes one ``pending``
+bet, settled in-session against the target tool's next run via the
+``next_action`` due-condition (``prediction_settle``).
 
 Contract pinned here (red first):
 
 * **SAFE, named** — writes a meta-memory bet, drives no behaviour.
 * **next_action due** — built from the *call's* ``session_id``, the named
-  ``tool``, and an ``after`` anchor, so the existing reconcile settles it
+  ``tool``, and an ``after`` anchor, so in-session settlement judges it
   against the next ``action_records`` row (I2-clean; no ``call_id`` needed).
 * **resolver fail-fast** — an unknown resolver kind is refused (no bet written):
   P0 refuses to score what it cannot judge mechanically (I2), and refusing at
   *write* time beats writing an unresolvable bet that silently rots.
 * **provenance** — an explicit bet is tagged distinctly from the heartbeat so
   later analysis can tell deliberate wagers apart.
-* **round-trip** — predict → the tool runs → reconcile scores it against the
+* **round-trip** — predict → the tool runs → settlement scores it against the
   observed action.
 """
 
@@ -156,11 +153,8 @@ class TestWritesBet:
     async def test_free_text_context_keeps_explicit_prefix(self, db_conn):
         """The bug fixed 2026-08-25: when the agent fills ``context`` with its
         own reasoning (per Agent.md guidance), the ``explicit:`` provenance
-        prefix must survive — otherwise ``bet_provenance`` files the deliberate
-        wager under ``other`` and the MONOCULTURE health check (which counts
-        ``.startswith("explicit:")``) stays blind to explicit bets flowing."""
+        prefix must survive so the corpus stays classifiable."""
         from loom.core.memory.maintenance import make_predict_tool
-        from loom.core.cognition.prediction_reconcile import bet_provenance
         tool = make_predict_tool(db_conn)
         await tool.executor(_make_call({
             "claim": "next fetch_url returns the article body",
@@ -170,8 +164,7 @@ class TestWritesBet:
         }))
         bet = await _only_bet(db_conn)
         assert bet.context == "explicit:好奇心散步：深挖開源模型 1/100 成本擊敗旗艦"
-        assert bet.context.startswith("explicit:")      # health check counts this
-        assert bet_provenance(bet.context) == "explicit"  # reconcile split too
+        assert bet.context.startswith("explicit:")
 
     async def test_already_tagged_context_not_double_prefixed(self, db_conn):
         """Idempotent: a context that already carries the prefix isn't re-tagged
@@ -230,13 +223,13 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip — predict → action → reconcile
+# Round-trip — predict → action → in-session settlement
 # ---------------------------------------------------------------------------
 
 class TestRoundTrip:
-    async def test_predict_then_reconcile_scores_the_bet(self, db_conn):
+    async def test_predict_then_settle_scores_the_bet(self, db_conn):
         from loom.core.memory.maintenance import make_predict_tool
-        from loom.core.cognition.prediction_reconcile import run_prediction_reconciliation
+        from loom.core.memory.prediction_settle import settle_bets_for_action
 
         tool = make_predict_tool(db_conn)
         await tool.executor(_make_call({
@@ -252,9 +245,9 @@ class TestRoundTrip:
         await _insert_action(db_conn, id="ran", session="sess-rt",
                              tool="run_bash", created_at=later)
 
-        report = await run_prediction_reconciliation(
-            PredictionStore(db_conn), db_conn, execute=True)
-        assert report.executed
+        lines = await settle_bets_for_action(
+            db_conn, session_id="sess-rt", tool_name="run_bash")
+        assert len(lines) == 1 and "HIT" in lines[0]
         scored = await PredictionStore(db_conn).get(bet.id)
         assert scored.status == "reconciled"
         assert scored.score == 0.0                     # predicted success, got success

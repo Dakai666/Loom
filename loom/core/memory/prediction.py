@@ -1,25 +1,20 @@
 """
-Prediction Spine — episodic prediction log (epic #528, spec docs/designs/58 §3.1).
+Prediction log — explicit ``predict`` bets (#537; reshaped by the #528 retirement).
 
-A ``PredictionRecord`` is a bet the agent makes about the world: *I expect this
-command to succeed / this PR to merge / this output to contain X*. Bets are
-reconciled against **runtime observation** (never LLM self-narrative — I2) in
-the convergent dream, producing a per-domain calibration residue that lives in
-semantic memory. Individual records decay like any episodic entry; the rolled-up
-``calibration:<domain-or-resolver>`` summary is what persists (§3.2).
+A ``PredictionRecord`` is a falsifiable assertion the agent writes before acting:
+*I expect this command's output to contain X*. It settles in-session against the
+target tool's next run (``prediction_settle``), judged by the mechanical resolver
+whitelist against **runtime observation** — never LLM self-narrative (I2).
 
-This module is the data layer only — slice 1. The reconciliation pipeline
-(``run_prediction_reconciliation``) and the resolver whitelist land in later
-slices. Everything here enforces the structural seeds of the lifeline
-invariants:
+The batch reconcile → ``calibration:<domain>`` residue → affect layers built on
+this table were retired 2026-09-17; their corpus is archived. Invariants kept:
 
 * **I1** — the ``(claim, due_condition, resolver)`` triple is mandatory; a
   record missing any leg cannot be written.
 * **I4** — ``status`` is an explicit state machine. A bet is born ``pending``;
   only a *reconciled* record carries a ``score`` and an ``observation_ref``.
   Reconcile and stale are terminal-aware transitions, so a verified bet cannot
-  be re-scored (idempotency seed) and an unverified bet cannot masquerade as
-  verified.
+  be re-scored and an unverified bet cannot masquerade as verified.
 """
 
 from __future__ import annotations
@@ -135,61 +130,27 @@ class PredictionStore:
         return _row_to_record(row) if row else None
 
     async def list_by_status(
-        self, status: str, *, limit: int = 200, newest_first: bool = False
+        self, status: str, *, limit: int = 200
     ) -> list[PredictionRecord]:
-        """List records in one status. ``newest_first=True`` returns the most
-        recent ``limit`` rows — the shape a rolling recency window needs once
-        the corpus outgrows the limit (oldest-first silently freezes such a
-        window at the corpus's birth; bit the calibration pass live, 2026-09-13).
-        """
+        """List records in one status, oldest first."""
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status {status!r}; expected {VALID_STATUSES}")
-        order = "DESC" if newest_first else "ASC"
         cur = await self._db.execute(
             f"SELECT {_COLUMNS} FROM prediction_records "
-            f"WHERE status = ? ORDER BY created_at {order}, id {order} LIMIT ?",
+            "WHERE status = ? ORDER BY created_at ASC, id ASC LIMIT ?",
             (status, limit),
         )
         return [_row_to_record(r) for r in await cur.fetchall()]
 
-    async def list_open_after(
-        self,
-        *,
-        after: tuple[datetime | str, str] | None = None,
-        limit: int = 200,
-    ) -> list[PredictionRecord]:
-        """Keyset page over the OPEN (``pending`` | ``due``) set (#557 drain-loop).
-
-        Ordered by ``(created_at, id)`` and returning rows strictly *after* the
-        ``(created_at, id)`` cursor (``None`` starts from the beginning). Keyset —
-        not ``OFFSET`` — so that ``mark_reconciled`` removing settled bets from the
-        open set during a drain never shifts rows out from under the cursor: we
-        advance by ``(created_at, id)``, which reconciled bets no longer match
-        anyway. A short page (``< limit``) means the open set past the cursor is
-        exhausted.
-
-        The cursor's timestamp may be a ``datetime`` or the stored ISO string; it
-        is normalized to the exact ISO-8601 text the column holds. ``created_at``
-        is stored as ISO-8601 UTC, whose lexicographic order == chronological
-        order, so plain TEXT comparison is correct (don't let aiosqlite adapt a
-        raw datetime — its format would not match the stored text).
-        """
-        sql = (
+    async def list_open_for_session(self, session_id: str) -> list[PredictionRecord]:
+        """Open (``pending`` | ``due``) bets of one session, oldest first — the
+        in-session settle path (``prediction_settle``)."""
+        cur = await self._db.execute(
             f"SELECT {_COLUMNS} FROM prediction_records "
-            "WHERE status IN ('pending', 'due')"
+            "WHERE session_id = ? AND status IN ('pending', 'due') "
+            "ORDER BY created_at ASC, id ASC",
+            (session_id,),
         )
-        params: list[Any] = []
-        if after is not None:
-            ts, rid = after
-            ts = ts.isoformat() if isinstance(ts, datetime) else ts
-            # (created_at, id) tuple comparison, spelled out for SQLite: a later
-            # timestamp, or the same timestamp with a higher id (tie-break so the
-            # dual heartbeat's two same-instant bets each page exactly once).
-            sql += " AND (created_at > ? OR (created_at = ? AND id > ?))"
-            params += [ts, ts, rid]
-        sql += " ORDER BY created_at ASC, id ASC LIMIT ?"
-        params.append(limit)
-        cur = await self._db.execute(sql, tuple(params))
         return [_row_to_record(r) for r in await cur.fetchall()]
 
     # -- transitions (I4 state machine) -----------------------------------

@@ -246,11 +246,9 @@ class TestPredictToolRefusesUnobservable:
 # ---------------------------------------------------------------------------
 
 class TestExplicitSemanticBetSettles:
-    async def test_output_contains_bet_reconciles_against_captured_action(self, db):
+    async def test_output_contains_bet_settles_against_captured_action(self, db):
         from loom.core.memory.prediction import PredictionRecord, PredictionStore
-        from loom.core.cognition.prediction_reconcile import (
-            run_prediction_reconciliation,
-        )
+        from loom.core.memory.prediction_settle import settle_bets_for_action
 
         pstore = PredictionStore(db)
         bet = PredictionRecord(
@@ -274,21 +272,18 @@ class TestExplicitSemanticBetSettles:
             created_at="2026-09-06T01:00:00+00:00", capture=cap,
         )
 
-        report = await run_prediction_reconciliation(pstore, db, execute=True)
-        assert report.settleable == 1
-        p = report.proposals[0]
-        assert p.resolver_kind == "output_contains"
-        assert p.matched is True
-        assert p.observation_ref == "action:a-dream"
-        assert p.provenance == "explicit"
+        lines = await settle_bets_for_action(db, session_id="sess", tool_name="dream_cycle")
+        assert len(lines) == 1 and "HIT" in lines[0]
+        settled = await pstore.get(bet.id)
+        assert settled.status == "reconciled"
+        assert settled.score == 0.0
+        assert settled.observation_ref == "action:a-dream"
 
-    async def test_legacy_action_row_leaves_bet_unresolvable(self, db):
+    async def test_legacy_action_row_leaves_bet_unjudgeable(self, db):
         """The 12 starved production bets: settling row exists but carries no
-        capture → skip 'unresolvable', never a silent score."""
+        capture → judged unjudgeable (stale), never a silent score."""
         from loom.core.memory.prediction import PredictionRecord, PredictionStore
-        from loom.core.cognition.prediction_reconcile import (
-            run_prediction_reconciliation,
-        )
+        from loom.core.memory.prediction_settle import settle_bets_for_action
 
         pstore = PredictionStore(db)
         await pstore.write(PredictionRecord(
@@ -307,6 +302,7 @@ class TestExplicitSemanticBetSettles:
             created_at="2026-09-06T01:00:00+00:00", capture=None,
         )
 
-        report = await run_prediction_reconciliation(pstore, db, execute=False)
-        assert report.settleable == 0
-        assert [s.reason for s in report.skipped] == ["unresolvable"]
+        lines = await settle_bets_for_action(db, session_id="sess", tool_name="fetch_url")
+        assert len(lines) == 1 and "could not judge" in lines[0]
+        [bet] = await pstore.list_by_status("stale")
+        assert bet.score is None

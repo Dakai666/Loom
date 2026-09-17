@@ -233,7 +233,7 @@ async def _resolve_action(db: aiosqlite.Connection, row_id: str) -> dict | None:
     }
     # #569 capture columns. A legacy row (NULL output_len) must NOT grow fake
     # fields — semantic resolvers stay unresolvable against it, never
-    # retro-scored (spec 59 §9.1).
+    # retro-scored (docs/retired/prediction-spine/59 §9.1).
     if r[7] is not None:
         prefix = r[5] or ""
         obs["output"] = prefix

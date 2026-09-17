@@ -126,6 +126,7 @@ from loom.core.memory.pulse import (
     fold_contradiction_pulses,
 )
 from loom.core.memory.search import MemorySearch
+from loom.core.memory.prediction_settle import format_settlement_suffix
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
 from loom.core.memory.store import SQLiteStore
@@ -762,6 +763,8 @@ class LoomSession:
         # Verdicts produced async land here; drained as <system-reminder>
         # at the start of the next stream_turn.
         self._pending_verdicts: list[str] = []
+        # #528: in-session `predict` verdicts keyed by the settling call id.
+        self._bet_settlements: dict[str, list[str]] = {}
         # Issue #281 P3 Hook G/A — MemoryPulse appends PulseRecords here,
         # drained as <system-reminder> alongside verdicts in stream_turn.
         # Records (vs. bare strings) so Issue #377 can persist pulse_type
@@ -983,25 +986,12 @@ class LoomSession:
 
         # Issue #43: Memory Governance — always-on
         _memory_cfg = _load_loom_config().get("memory", {})
-        # Prediction Spine (#537) — the auto-betting "mouth". Grouped under
-        # [memory.consolidation_dream] with the reconcile/calibration gates so the
-        # whole observation ramp lives in one place, though betting itself is a
-        # session-level (per-tool) input, not a dream activity. Off by default.
-        self._auto_predict_enabled = bool(
-            _memory_cfg.get("consolidation_dream", {}).get("auto_predict_enabled", False)
-        )
-        # slice A (#537): the explicit `predict` tool — deliberate, confidence-
-        # varying wagers. Its own gate, default off, so nothing in the spine acts
-        # until DK flips it (same opt-in discipline as the heartbeat/reconcile).
+        # #537: the explicit `predict` tool — a falsifiable assertion written
+        # before acting, settled in-session against the target tool's next run
+        # (#528 retirement: the auto-heartbeat / batch reconcile / calibration /
+        # affect layers are gone). Default off.
         self._predict_tool_enabled = bool(
             _memory_cfg.get("consolidation_dream", {}).get("predict_tool_enabled", False)
-        )
-        # P1 #487 (spec 60 §3.5a): attach the environment_friction note to
-        # prediction_reconcile (the dawn settle beat). On by default — the note
-        # is read-only toward the spine; this key lets Loom switch the dawn copy
-        # off if it fails the two-week acceptance (spec 60 §5.1).
-        self._affect_dawn_note = bool(
-            _memory_cfg.get("consolidation_dream", {}).get("affect_dawn_note", True)
         )
         _gov_cfg = dict(_memory_cfg.get("governance", {}))
         # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
@@ -1211,10 +1201,8 @@ class LoomSession:
         from loom.core.memory.maintenance import (
             make_convergent_dream_tool,
             make_dream_cycle_tool,
-            make_affect_read_tool,
             make_memory_prune_tool,
             make_predict_tool,
-            make_prediction_reconcile_tool,
         )
 
         async def _dream_llm_fn(messages: list[dict]) -> str:
@@ -1235,18 +1223,15 @@ class LoomSession:
         self.registry.register(
             make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
         )
-        # Epic #528 (slice 3.5): prediction_reconcile — convergent-dream sibling
-        # that closes the Prediction Spine loop. Read-only by default (dry_run);
-        # judges matured bets against runtime observation, writes a report.
-        self.registry.register(make_prediction_reconcile_tool(
-            db=self._db, friction_note=self._affect_dawn_note,
-        ))
-        # P1 #487 (spec 60 §3.5b): affect_read — the pull-side exit of the
-        # environment_friction reading. dry_run by default; never writes the spine.
-        self.registry.register(make_affect_read_tool(db=self._db))
-        # Epic #528 (P0.5-a slice A): predict — the deliberate betting mouth.
-        # Gated (predict_tool_enabled, default off): registered only when DK has
-        # opted the spine in, so the tool never appears to the model otherwise.
+        # #528: give rotting bets an exit — expire open bets older than the TTL
+        # (target tool never ran). Runs regardless of predict_tool_enabled.
+        try:
+            from loom.core.memory.prediction_settle import expire_stale_bets
+            await expire_stale_bets(self._db)
+        except Exception:
+            logger.debug("expire_stale_bets failed (suppressed)", exc_info=True)
+        # #537: predict — a falsifiable assertion before an uncertain call.
+        # Gated (predict_tool_enabled, default off): registered only when opted in.
         if self._predict_tool_enabled:
             self.registry.register(make_predict_tool(db=self._db))
 
@@ -2524,7 +2509,11 @@ class LoomSession:
                             # changes that, _emit_turn / _tool_name MUST be
                             # preserved — they're the data basis of masking.
                             _tool_msg = self.router.format_tool_result(
-                                self.model, tu.id, tool_output, result.success,
+                                self.model, tu.id,
+                                tool_output + format_settlement_suffix(
+                                    getattr(self, "_bet_settlements", {}).pop(tu.id, [])
+                                ),
+                                result.success,
                             )
                             # see_image (agent vision): if the tool returned an
                             # image, rewrite content as [text, image_block] so
@@ -2614,7 +2603,11 @@ class LoomSession:
                             yield EnvelopeUpdated(envelope=await self._build_envelope_view(_batch_t0))
                             # Issue #197 Phase 2: tag for observation masking.
                             _tool_msg = self.router.format_tool_result(
-                                self.model, tu.id, tool_output, result.success,
+                                self.model, tu.id,
+                                tool_output + format_settlement_suffix(
+                                    getattr(self, "_bet_settlements", {}).pop(tu.id, [])
+                                ),
+                                result.success,
                             )
                             # see_image (agent vision): if the tool returned an
                             # image, rewrite content as [text, image_block] so
@@ -4128,14 +4121,21 @@ class LoomSession:
         except Exception:
             pass  # DB write must never crash the pipeline
 
-        # Prediction Spine (#537): co-write the implicit "this tool will succeed"
-        # bet for the action just persisted. Gated (auto_predict_enabled) and
-        # executed-only + self-isolated inside co_write_implicit_bet, so a betting
-        # failure never crashes the lifecycle persistence it rides beside.
-        from loom.core.harness.auto_predict import co_write_implicit_bet
-        await co_write_implicit_bet(
-            self._db, record, enabled=self._auto_predict_enabled
-        )
+        # #528: settle this session's `predict` bets on this tool against the
+        # run just persisted. Verdicts are buffered by call id and appended to
+        # the tool result in stream_turn (memorialize completes before _dispatch
+        # returns), so the agent sees them while still present. Not gated on
+        # predict_tool_enabled: betting is optional, closing a placed bet is not.
+        if record.call is not None:
+            try:
+                from loom.core.memory.prediction_settle import settle_bets_for_action
+                lines = await settle_bets_for_action(
+                    self._db, session_id=self.session_id, tool_name=record.tool_name,
+                )
+                if lines:
+                    self._bet_settlements.setdefault(record.call.id, []).extend(lines)
+            except Exception:
+                pass  # settling must never crash the pipeline
 
     async def _on_state_change(
         self, record: ActionRecord, old_state: str, new_state: str

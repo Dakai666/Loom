@@ -144,73 +144,6 @@ def _check_config_integrity(sched_cfg: dict) -> bool:
         return True  # fail-open
 
 
-async def _run_scheduled_reconcile(db, *, enabled: bool, execute: bool) -> None:
-    """Run the Prediction Spine reconciliation step of the weekly dream (#528 3.5).
-
-    Additive to the consolidation pass, and **isolated**: a reconcile failure
-    must not abort ``_consolidate_once`` — that would roll back the consolidation
-    that already ran (its ``last_run`` would go unmarked and re-fire next check).
-    So failures are swallowed + logged and the weekly loop continues (絲絲 review
-    PR #533 P2). No-op when ``enabled`` is False — the schedule default.
-    """
-    if not enabled:
-        return
-    try:
-        from loom.core.cognition.prediction_reconcile import (
-            run_prediction_reconciliation,
-        )
-        from loom.core.memory.prediction import PredictionStore
-        from loom.autonomy.circadian.journal import append_consolidation_report
-
-        report = await run_prediction_reconciliation(
-            PredictionStore(db), db, execute=execute,
-        )
-        append_consolidation_report(report.render())
-        logger.info(
-            "[consolidation] prediction reconcile execute=%s proposed=%d skipped=%d",
-            execute, len(report.proposals), len(report.skipped),
-        )
-    except Exception as exc:  # noqa: BLE001 — schedule isolation, never veto the loop
-        logger.exception(
-            "[consolidation] prediction reconcile failed; continuing weekly loop: %s",
-            exc,
-        )
-
-
-async def _run_scheduled_calibration(db, *, enabled: bool) -> None:
-    """Roll reconciled bets into ``calibration:<domain>`` residue (#528 slice 4.5).
-
-    Gated on ``calibration_write_enabled`` — **independent** of
-    ``reconcile_execute`` (絲絲 PR #534): flipping reconcile's execute must not
-    start writing calibration, and vice versa. It aggregates the standing
-    reconciled corpus, so it is meaningful even on a pass where reconcile scored
-    nothing new. Like the reconcile step it is **isolated**: a failure here is
-    swallowed + logged so it can't roll back the consolidation/reconcile that
-    already ran. No-op when ``enabled`` is False — the schedule default.
-    """
-    if not enabled:
-        return
-    try:
-        from loom.core.cognition.calibration import run_calibration_pass
-        from loom.core.memory.prediction import PredictionStore
-        from loom.core.memory.semantic import SemanticMemory
-        from loom.autonomy.circadian.journal import append_consolidation_report
-
-        report = await run_calibration_pass(
-            PredictionStore(db), SemanticMemory(db), execute=True,
-        )
-        append_consolidation_report(report.render())
-        logger.info(
-            "[consolidation] calibration written=%s domains=%d",
-            report.written, len(report.summaries),
-        )
-    except Exception as exc:  # noqa: BLE001 — schedule isolation, never veto the loop
-        logger.exception(
-            "[consolidation] calibration pass failed; continuing weekly loop: %s",
-            exc,
-        )
-
-
 class AutonomyDaemon:
     """
     Manages the full autonomy lifecycle:
@@ -774,23 +707,6 @@ class AutonomyDaemon:
             logger.info(
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
                 plan.pass_id, execute, plan.counts(), plan.deferred_to_next_pass,
-            )
-
-            # Epic #528 slice 3.5: the Prediction Spine reconciliation parasitizes
-            # the same weekly cadence (isolated so its failure can't poison the
-            # consolidation pass — see _run_scheduled_reconcile).
-            await _run_scheduled_reconcile(
-                db,
-                enabled=cfg.get("reconcile_enabled", False),
-                execute=bool(cfg.get("reconcile_execute", False)),
-            )
-
-            # Epic #528 slice 4.5: roll reconciled bets into calibration residue.
-            # Its own gate (calibration_write_enabled), independent of reconcile's
-            # execute, and isolated the same way (絲絲 PR #534).
-            await _run_scheduled_calibration(
-                db,
-                enabled=bool(cfg.get("calibration_write_enabled", False)),
             )
 
             return plan

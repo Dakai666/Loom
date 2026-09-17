@@ -1,7 +1,7 @@
 """
 Prediction Spine — ``next_action`` due-condition (epic #528, P0.5-a slice A, #537).
 
-slice B's heartbeat bets *after* an action, so it has the ``call_id`` and uses
+A bet made *after* an action has its ``call_id`` and uses
 ``after_action``. The explicit ``predict`` tool bets *before* the action runs —
 there is no ``call_id`` yet. ``next_action`` closes that gap: a bet names the
 *session*, the *tool*, and an *after* timestamp, and settles against the first
