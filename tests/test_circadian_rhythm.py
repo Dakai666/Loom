@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
+from loom.autonomy.circadian.rhythm import Anchor, Program, load_programs, load_rhythm
 
 
 def _write(path: Path, body: str) -> None:
@@ -327,3 +327,63 @@ class TestLoadRhythm:
         ''')
         assert load_rhythm(sisi)[0].name == "dawn"
         assert load_rhythm(xiaoqing)[0].name == "morning_ledger"
+
+
+# ===========================================================================
+# Issue #584: program menu — the agent's own 課表, surfaced where it chooses
+# ===========================================================================
+
+
+class TestLoadPrograms:
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert load_programs(tmp_path / "missing.toml") == []
+
+    def test_parses_programs_in_declaration_order(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            [programs.deep]
+            label = "🧠 深度日"
+            personality = "單一主題研究到底"
+            notes = "14:00–20:00 是保護區"
+            per_week = 2
+            morning_weight = "low"
+
+            [programs.default]
+            label = "🔄 默認日"
+        ''')
+        assert load_programs(p) == [
+            Program(key="deep", label="🧠 深度日", personality="單一主題研究到底",
+                    notes="14:00–20:00 是保護區", per_week=2),
+            Program(key="default", label="🔄 默認日"),
+        ]
+
+    def test_bad_entries_are_dropped_individually(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            programs = { broken = "not a table", light = { label = "🌿 輕日", per_week = "two" } }
+        ''')
+        # Non-table entry skipped; a non-integer per_week is ignored, not fatal.
+        assert load_programs(p) == [Program(key="light", label="🌿 輕日")]
+
+    def test_invalid_toml_returns_empty(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, "[programs.x\nlabel = ")
+        assert load_programs(p) == []
+
+
+class TestProgramMenuFlag:
+    def test_anchor_program_menu_defaults_false_and_parses_true(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "09:00"
+            name = "dawn"
+
+            [[anchors]]
+            time = "23:00"
+            name = "evening_closure"
+            program_menu = true
+        ''')
+        dawn, evening = load_rhythm(p)
+        assert dawn.program_menu is False
+        assert evening.program_menu is True

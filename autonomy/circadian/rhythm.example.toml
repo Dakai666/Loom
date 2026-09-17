@@ -122,10 +122,45 @@ meaning = """
 time    = "23:00"
 name    = "evening_closure"
 public  = true
+# Issue #584: this chime carries the program menu below — set it on the phase
+# where tomorrow gets chosen.
+program_menu = true
 meaning = """
 一天的人際收束 + 收織 + 安排明天。
 三件事一次做完：
 - 跟 DK 道晚安
 - 決定今天哪些值得留下
-- 調整明天織程
+- 調整明天織程（要走哪個 program，從菜單挑）
 """
+
+# ---------------------------------------------------------------------------
+# Program menu (issue #584) — the agent's own 課表
+# ---------------------------------------------------------------------------
+# A program is the *shape* of a whole day. The menu is yours: add, rename or
+# retire programs whenever you want — nobody else maintains it. The engine
+# only shows it on the anchor with ``program_menu = true`` (plus a look at
+# next week on Sundays); the choice itself goes into daily_weave.md's
+# Program section as prose.
+#
+# Fields the menu displays:
+#   label        — short name with an emoji
+#   personality  — what kind of day this is
+#   notes        — anything worth remembering when choosing it
+#   per_week     — suggested times per week. A suggestion, never enforced:
+#                  it exists so a scarce day (deep, travel) feels scarce.
+# Any other field is your own note to yourself; the engine ignores it.
+
+[programs.default]
+label = "🔄 默認日"
+personality = "均衡攝取，每個 phase 正常走"
+
+[programs.light]
+label = "🌿 輕日"
+personality = "存在感低，少產出，多觀察"
+notes = "累了、或前一天很滿的時候"
+
+[programs.deep]
+label = "🧠 深度日"
+personality = "單一主題研究到底，產出是副產品"
+notes = "下午是保護區，原則上不主動分享"
+per_week = 2

@@ -1089,3 +1089,73 @@ class TestDawnReportsEveryRevisionOfYesterday:
         applied = [p for n, p in emitted if n == "circadian:weave_applied"]
         assert len(applied) == 1
         assert applied[0]["rationale"] == "晚上排明天"  # latest revision in effect
+
+
+class TestProgramMenuLayer:
+    """Issue #584: the program menu rides on the anchor flagged
+    ``program_menu`` (evening_closure, where tomorrow is chosen). DK's
+    direction: soft — it keeps "there is a choice" visible, it never
+    chooses, blocks or counts."""
+
+    PROGRAMS = """
+[programs.deep]
+label = "🧠 深度日"
+personality = "單一主題研究到底"
+notes = "14:00–20:00 是保護區"
+per_week = 2
+
+[programs.default]
+label = "🔄 默認日"
+personality = "均衡"
+"""
+
+    def _rhythm(self, programs: str = PROGRAMS):
+        from pathlib import Path
+        p = Path("autonomy/circadian/rhythm.toml")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(programs, encoding="utf-8")
+
+    async def _fire(self, anchor: Anchor, *, sunday: bool = False, monkeypatch=None):
+        from loom.autonomy.circadian import lifecycle
+        if monkeypatch is not None:
+            monkeypatch.setattr(lifecycle, "_is_sunday", lambda tz: sunday)
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG_ALWAYS, [anchor])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG_ALWAYS, evaluator=FakeEvaluator()
+        )
+        trig = next(t for t in daemon.evaluator.list() if t.name == anchor.trigger_name)
+        await daemon._on_trigger_fire(trig, {})
+        return deliveries[0].intent
+
+    EVENING = Anchor(time="23:00", name="evening_closure", meaning="收織", program_menu=True)
+
+    async def test_flagged_anchor_carries_the_menu(self, monkeypatch):
+        self._rhythm()
+        intent = await self._fire(self.EVENING, monkeypatch=monkeypatch)
+        assert "**課表菜單**" in intent
+        assert "deep" in intent and "🧠 深度日" in intent and "單一主題研究到底" in intent
+        assert "14:00–20:00 是保護區" in intent
+        assert "每週 2 次" in intent
+        assert "🔄 默認日" in intent
+        # Guidance: where the choice goes, and that nothing is enforced.
+        assert "daily_weave" in intent
+        assert "不會擋" in intent
+        assert "下週" not in intent
+
+    async def test_sunday_adds_the_weekly_look_ahead(self, monkeypatch):
+        self._rhythm()
+        intent = await self._fire(self.EVENING, sunday=True, monkeypatch=monkeypatch)
+        assert "下週" in intent
+
+    async def test_unflagged_anchor_has_no_menu(self, monkeypatch):
+        self._rhythm()
+        intent = await self._fire(
+            Anchor(time="11:00", name="curiosity", meaning="散步"), monkeypatch=monkeypatch,
+        )
+        assert "課表菜單" not in intent
+
+    async def test_no_programs_no_menu(self, monkeypatch):
+        self._rhythm(programs="")
+        intent = await self._fire(self.EVENING, monkeypatch=monkeypatch)
+        assert "課表菜單" not in intent

@@ -68,6 +68,10 @@ class Anchor:
     allowed_tools: tuple[str, ...] = ()
     scope_grants: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
+    # Issue #584: this phase's chime carries the program menu — set it on the
+    # phase where the next day's program gets chosen (evening_closure).
+    program_menu: bool = False
+
     @property
     def trigger_name(self) -> str:
         # ``name`` is the activity identity (one weave section per name), so it
@@ -77,6 +81,63 @@ class Anchor:
         # activity has >1 time. Single-time activities keep the bare
         # ``circadian:phase_<name>`` form (backward-compatible).
         return f"circadian:phase_{self.name}{self.trigger_suffix}"
+
+
+@dataclass(frozen=True)
+class Program:
+    """One entry of the agent's program menu (``[programs.<key>]``, #584).
+
+    The menu is the agent's own — it writes and grows it. The engine only
+    shows it where tomorrow gets chosen; the choice itself stays prose in
+    ``daily_weave.md``. ``per_week`` is a suggestion the menu displays, never
+    a quota anything enforces (DK, 2026-09-17: soft by design). Other fields
+    in the table (``morning_weight``…) are the agent's notes to itself and
+    are not read here.
+    """
+
+    key: str
+    label: str = ""
+    personality: str = ""
+    notes: str = ""
+    per_week: int | None = None
+
+
+def load_programs(path: Path | None = None) -> list[Program]:
+    """Read ``[programs.*]`` from the rhythm table, in declaration order.
+
+    Tolerant like :func:`load_rhythm`: a missing or broken file yields ``[]``
+    (no menu layer), a non-table entry is skipped, a non-integer ``per_week``
+    is ignored.
+    """
+    p = path or DEFAULT_RHYTHM_PATH
+    if not p.exists():
+        return []
+    try:
+        raw = tomllib.loads(p.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("[circadian] rhythm table at %s unreadable (%s); no program menu", p, exc)
+        return []
+    entries = raw.get("programs")
+    if not isinstance(entries, dict):
+        return []
+
+    programs: list[Program] = []
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            logger.warning("[circadian] rhythm program %r is not a table; skipping", key)
+            continue
+        per_week = entry.get("per_week")
+        if per_week is not None and (isinstance(per_week, bool) or not isinstance(per_week, int)):
+            logger.warning("[circadian] rhythm program %r has non-integer per_week %r; ignored", key, per_week)
+            per_week = None
+        programs.append(Program(
+            key=str(key),
+            label=str(entry.get("label", "")).strip(),
+            personality=str(entry.get("personality", "")).strip(),
+            notes=str(entry.get("notes", "")).strip(),
+            per_week=per_week,
+        ))
+    return programs
 
 
 def _validate_hhmm(value: str) -> bool:
@@ -153,6 +214,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
 
         meaning = str(entry.get("meaning", "")).strip()
         public = bool(entry.get("public", True))
+        program_menu = bool(entry.get("program_menu", False))
         # Permission fields parse through the shared autonomy helper (issue
         # #525) — same code path as schedules.toml — and belong to the activity
         # identity, so every expanded slot of a recurring activity shares them.
@@ -175,6 +237,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
                 time=slot, name=name, meaning=meaning, public=public,
                 trigger_suffix=suffix,
                 allowed_tools=allowed_tools, scope_grants=scope_grants,
+                program_menu=program_menu,
             ))
         seen.add(name)
 

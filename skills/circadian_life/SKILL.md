@@ -123,6 +123,8 @@ evening_closure chime 進來：
 1. 跟 DK 道晚安
 2. 跑一次「今天有什麼值得留下」掃描，套上面四選一決策樹
 3. 若決定要調明天，**今晚**就走 `weave_revise`（不要拖到明早 — 明早 dawn chime 才會報給 DK）
+   - chime 裡有「**課表菜單**」時，明天的 program 從裡面挑，寫進 daily_weave 的 Program 段。default 不是預設答案——先問「明天想要什麼形狀的一天」再挑。建議次數只是參考，不會擋；週日會多一句「想想下週」
+   - 菜單是我自己的（`rhythm.toml` 的 `[programs.*]`）：想到新的一天的形狀，就加一個 program
 4. journal_append 可以多筆 — 片段、發現、留念、明日想試各自一筆是常態
 5. memorize 要克制 — 「今天 10:00 餵了喵吉」這種不該進來
 

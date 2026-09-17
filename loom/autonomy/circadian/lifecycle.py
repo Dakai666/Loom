@@ -30,7 +30,7 @@ from loom.autonomy.circadian.proposal import (
     PROPOSALS_DIR,
     load_proposals_for_date,
 )
-from loom.autonomy.circadian.rhythm import Anchor, load_rhythm
+from loom.autonomy.circadian.rhythm import Anchor, load_programs, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
 from loom.autonomy.circadian.weave import describe_duplicates, load_weave
 from loom.autonomy.triggers import CronTrigger
@@ -523,6 +523,8 @@ def _compose_chime_intent(
          layer may follow it.
       5. ``**今日織程（全局）**`` — dawn-only (#565). Sections claimed by no
          phase.
+      6. ``**課表菜單**`` — anchors flagged ``program_menu`` (#584). The
+         agent's own ``[programs.*]``, shown where tomorrow is chosen.
 
     When every layer is empty we fall back to a generic intent so the chime
     is never an empty string (agents handle that poorly). Each sub-heading
@@ -569,9 +571,54 @@ def _compose_chime_intent(
             )
             parts.append(f"**今日織程（全局）**\n{body}")
 
+    if anchor.program_menu:
+        menu = _program_menu_layer(config.timezone)
+        if menu:
+            parts.append(menu)
+
     if not parts:
         return f"Circadian phase: {anchor.name}"
     return "\n\n".join(parts)
+
+
+def _is_sunday(tz: str) -> bool:
+    return datetime.now(ZoneInfo(tz)).weekday() == 6
+
+
+def _program_menu_layer(tz: str) -> str | None:
+    """The 課表菜單 chime layer (issue #584).
+
+    Its job is only that choosing stays *visible*: 38 sampled days before
+    this had 33 default and never once maintenance / deep / intense, while
+    the only prompt said "program 預設是 default". It lists the agent's own
+    menu and says where a choice goes. It does not choose, count or block —
+    DK's call (2026-09-17): soft quota, the menu is the agent's to think
+    about. Sunday adds a look at the coming week, which is all that remains
+    of doc/56 §13 Q5's weekly planning.
+    """
+    programs = load_programs()
+    if not programs:
+        return None
+
+    lines = []
+    for prog in programs:
+        head = f"- `{prog.key}`" + (f" {prog.label}" if prog.label else "")
+        if prog.personality:
+            head += f" — {prog.personality}"
+        if prog.per_week is not None:
+            head += f"（建議每週 {prog.per_week} 次）"
+        lines.append(head)
+        if prog.notes:
+            lines.append(f"  {prog.notes}")
+
+    guidance = (
+        "明天想走哪一個？寫進 daily_weave 的 Program 段就算數。"
+        "default 不是預設答案；建議次數只是參考，不會擋。"
+        "菜單是你的——想加新課表就直接改 rhythm.toml。"
+    )
+    if _is_sunday(tz):
+        guidance += "\n今天週日：順便想想下週想怎麼排。"
+    return "**課表菜單**\n" + "\n".join(lines) + "\n\n" + guidance
 
 
 def _yesterday_str(tz: str) -> str:
