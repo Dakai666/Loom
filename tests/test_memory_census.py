@@ -85,8 +85,11 @@ class TestComposition:
         await _row(db, value="")
         await _row(db, value="  ...  ")
         await _row(db, value="十個字以上的一般內容，這筆不算短")
+        await _row(db, value="在本地")             # CJK fragment, width 6
+        await _row(db, value="用戶偏好繁體中文")   # 8 chars, width 16: a fact
+        await _row(db, value="ok thanks!")        # width 10: not short
         c = await take_census(db, now=NOW)
-        assert c.short_values == 2
+        assert c.short_values == 3
 
 
 class TestDuplicateDensity:
@@ -138,6 +141,13 @@ class TestLifespanAndUse:
         }
         assert c.due_archive == 1
         assert c.due_delete == 1
+
+    async def test_next_prune_counts_only_rows_prune_touches(self, db):
+        """Lifecycle demotes recent / milestone only; a decayed ephemeral row
+        is not archived by the next prune, so it isn't counted as due."""
+        await _row(db, confidence=0.8, days_old=400, temporal="ephemeral")
+        c = await take_census(db, now=NOW)
+        assert (c.due_archive, c.due_delete) == (0, 0)
 
     async def test_access_freshness(self, db):
         await _row(db, accessed_days_ago=1)

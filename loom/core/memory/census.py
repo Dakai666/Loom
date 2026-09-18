@@ -25,14 +25,21 @@ trends.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from wcwidth import wcswidth
+
 from loom.core.memory.lifecycle import effective_confidence
-from loom.core.memory.ontology import TEMPORAL_ARCHIVED
+from loom.core.memory.ontology import (
+    TEMPORAL_ARCHIVED,
+    TEMPORAL_MILESTONE,
+    TEMPORAL_RECENT,
+)
 from loom.core.memory.semantic import classify_source
 
 if TYPE_CHECKING:
@@ -46,7 +53,9 @@ DUP_SIMILARITY = 0.85
 DUP_GROUP_MIN = 3
 #: Lifecycle's default demote/delete threshold (``MemoryLifecycle``).
 PRUNE_THRESHOLD = 0.1
-SHORT_VALUE_CHARS = 10
+#: Display width, so a CJK character counts 2: '在本地' is short,
+#: '用戶偏好繁體中文' is a fact (PR #589 review).
+SHORT_VALUE_WIDTH = 10
 BASELINE_DAYS = 7
 
 _MACHINE_TIERS = {"session_compress", "dreaming"}
@@ -153,7 +162,7 @@ class CorpusCensus:
             f"- accessed ≤7d {self.access['7d']}, ≤30d {self.access['30d']}, "
             f"never {self.access['never']} ({self._never_share():.0%})"
             f"{delta(self.access['never'], b and b.access['never'])}",
-            f"- short values (<{SHORT_VALUE_CHARS} chars): {self.short_values}",
+            f"- short values (display width <{SHORT_VALUE_WIDTH}): {self.short_values}",
         ]
         if b is None:
             lines.append(f"- trend: no snapshot ≥{BASELINE_DAYS}d old yet")
@@ -187,7 +196,13 @@ async def take_census(
         "last_accessed_at, domain, temporal, embedding FROM semantic_entries"
     )
     rows = await cursor.fetchall()
+    # Everything after the fetch is CPU work over ~10k rows (JSON parsing, a
+    # matmul); keep it off the event loop the Discord / autonomy sessions
+    # share (PR #589 review).
+    return await asyncio.to_thread(_census_from_rows, rows, now)
 
+
+def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
     by_source: dict[str, int] = {}
     archived_by_source: dict[str, int] = {}
     decay = {label: 0 for _, label in _DECAY_EDGES} | {"≥0.8": 0}
@@ -202,7 +217,8 @@ async def take_census(
         tier, _ = classify_source(source)
         machine += tier in _MACHINE_TIERS
         hand += tier in _HAND_TIERS
-        if len((value or "").strip()) < SHORT_VALUE_CHARS:
+        stripped = (value or "").strip()
+        if max(wcswidth(stripped), len(stripped)) < SHORT_VALUE_WIDTH:
             short += 1
 
         updated_at = _parse_ts(updated) or now
@@ -220,10 +236,12 @@ async def take_census(
                 break
         else:
             decay["≥0.8"] += 1
+        # The same row sets the next prune acts on (lifecycle
+        # _process_table_delete / _process_table_demote).
         if temporal == TEMPORAL_ARCHIVED:
             archived_by_source[family] = archived_by_source.get(family, 0) + 1
             due_delete += eff < PRUNE_THRESHOLD
-        else:
+        elif temporal in (TEMPORAL_RECENT, TEMPORAL_MILESTONE):
             due_archive += eff < PRUNE_THRESHOLD
 
         if accessed_at is None:
@@ -267,13 +285,15 @@ def _duplicate_density(
     at once. Blocked matmul keeps memory at ~block × N floats."""
     import numpy as np
 
-    vectors: list[list[float]] = []
+    # Convert each row to float32 as it is parsed — a list of Python floats
+    # costs ~8× the memory of the array it becomes.
+    vectors: list[Any] = []
     values: list[str] = []
     for value, raw in rows:
         try:
-            vectors.append(json.loads(raw))
+            vectors.append(np.asarray(json.loads(raw), dtype=np.float32))
             values.append(value)
-        except ValueError:
+        except (ValueError, TypeError):
             unembedded += 1
     if not vectors:
         return DupDensity(0, 0, 0, "", 0, unembedded)
@@ -288,7 +308,8 @@ def _duplicate_density(
     if len(keep) < len(vectors):
         notes.append(f"{len(vectors) - len(keep)} embeddings of another dimension not clustered")
         unembedded += len(vectors) - len(keep)
-    m = np.asarray([vectors[i] for i in keep], dtype=np.float32)
+    m = np.stack([vectors[i] for i in keep])
+    del vectors
     values = [values[i] for i in keep]
     norms = np.linalg.norm(m, axis=1, keepdims=True)
     m /= np.where(norms == 0, 1, norms)
