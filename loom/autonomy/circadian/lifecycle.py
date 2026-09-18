@@ -20,6 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,7 @@ from loom.autonomy.circadian.proposal import (
     APPLIED_SUBDIR,
     CONFLICTS_SUBDIR,
     PROPOSALS_DIR,
+    WeaveProposal,
     load_proposals_for_date,
 )
 from loom.autonomy.circadian.rhythm import Anchor, load_programs, load_rhythm
@@ -499,7 +501,15 @@ async def _deliver_phase_chime(
         applied = _yesterday_applied_proposals(config.timezone)
         if applied:
             # One event per dawn: the latest revision is the plan in effect.
-            latest = applied[-1]
+            # If that one can't be read, stay quiet rather than announce the
+            # superseded plan before it (#586); the chime names the artifact.
+            artifact, latest = applied[-1]
+            if latest is None:
+                logger.warning(
+                    "[circadian] weave_applied not emitted: latest revision "
+                    "%s is unreadable", artifact,
+                )
+                return
             await _emit(daemon.evaluator, "circadian:weave_applied", {
                 "date": _today_str(config.timezone),
                 "applied_from": latest.date,
@@ -627,21 +637,28 @@ def _yesterday_str(tz: str) -> str:
     return (datetime.now(ZoneInfo(tz)) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-def _yesterday_applied_proposals(tz: str) -> list:
+def _yesterday_applied_proposals(
+    tz: str,
+) -> list[tuple[Path, WeaveProposal | None]]:
     """Yesterday's proposals that applied cleanly (landed under
     ``proposals/applied/``, not parked under ``conflicts/``), oldest first.
 
     Shared by the dawn chime「昨夜你改了什麼」layer and the
     ``circadian:weave_applied`` emit (#472) so both read the same artifacts.
     A list since #583: the tool may run more than once a day (a morning fix
-    plus the evening plan). Empty when no clean revision happened."""
+    plus the evening plan). Empty when no clean revision happened; an
+    unreadable artifact is kept as ``None`` (#586)."""
     applied_dir = PROPOSALS_DIR / APPLIED_SUBDIR
-    return [p for _, p in load_proposals_for_date(_yesterday_str(tz), applied_dir)]
+    return load_proposals_for_date(_yesterday_str(tz), applied_dir, tz)
 
 
 def _format_proposal(proposal: Any, rationale_label: str) -> str:
     summary = "\n".join(f"- {line}" for line in proposal.summary_lines())
     return f"{summary}\n\n_{rationale_label}_：{proposal.rationale}"
+
+
+def _format_unreadable(artifact: Path) -> str:
+    return f"- ⚠️ 讀不回來：{artifact}（壞在哪看 daemon log）"
 
 
 def _yesterday_revision_report(tz: str) -> str | None:
@@ -665,7 +682,10 @@ def _yesterday_revision_report(tz: str) -> str | None:
 
     applied = _yesterday_applied_proposals(tz)
     if applied:
-        blocks = "\n\n".join(_format_proposal(p, "理由") for p in applied)
+        blocks = "\n\n".join(
+            (_format_proposal(p, "理由") if p else _format_unreadable(artifact))
+            for artifact, p in applied
+        )
         layers.append(
             "**昨夜你改了什麼**\n"
             f"{blocks}\n"
@@ -673,11 +693,12 @@ def _yesterday_revision_report(tz: str) -> str | None:
         )
 
     parked = load_proposals_for_date(
-        _yesterday_str(tz), PROPOSALS_DIR / CONFLICTS_SUBDIR,
+        _yesterday_str(tz), PROPOSALS_DIR / CONFLICTS_SUBDIR, tz,
     )
     if parked:
         blocks = "\n\n".join(
-            f"{_format_proposal(p, '當時的理由')}\n_park 在_：{artifact}"
+            (f"{_format_proposal(p, '當時的理由')}\n_park 在_：{artifact}"
+             if p else _format_unreadable(artifact))
             for artifact, p in parked
         )
         layers.append(

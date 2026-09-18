@@ -1090,6 +1090,66 @@ class TestDawnReportsEveryRevisionOfYesterday:
         assert len(applied) == 1
         assert applied[0]["rationale"] == "晚上排明天"  # latest revision in effect
 
+    async def _dawn_with_emits(self):
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="醒來"),
+        ])
+        emitted: list[tuple[str, dict]] = []
+        orig = daemon.evaluator.emit
+
+        async def _rec(name, payload):
+            emitted.append((name, dict(payload)))
+            return await orig(name, payload)
+
+        daemon.evaluator.emit = _rec
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trig = next(t for t in daemon.evaluator.list() if t.name == "circadian:phase_dawn")
+        await daemon._on_trigger_fire(trig, {})
+        weave_applied = [p for n, p in emitted if n == "circadian:weave_applied"]
+        return deliveries[0].intent, weave_applied
+
+    async def test_legacy_evening_from_the_morning_is_not_the_plan_in_effect(self):
+        """Issue #586: the pre-µs ``-evening`` artifact of 2026-09-17 was a
+        09:40 fix. It sorted last by name and the emit reported it as the
+        plan in effect, over the real 23:00 revision."""
+        import os
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        from loom.autonomy.circadian.proposal import PROPOSALS_DIR
+        legacy = self._seed("evening", "早上的修補", "spec_align")
+        y = datetime.now(ZoneInfo(TZ)) - timedelta(days=1)
+        at_0940 = y.replace(hour=9, minute=40, second=0, microsecond=0).timestamp()
+        os.utime(PROPOSALS_DIR / "applied" / legacy, (at_0940, at_0940))
+        self._seed("230057073546", "晚上的計畫 🛠️", "errand")
+
+        intent, weave_applied = await self._dawn_with_emits()
+        assert intent.index("早上的修補") < intent.index("晚上的計畫 🛠️")
+        assert [p["rationale"] for p in weave_applied] == ["晚上的計畫 🛠️"]
+
+    async def test_unreadable_artifact_is_named_not_silently_dropped(self):
+        """Issue #586: 'no revision yesterday' and 'a revision nobody can
+        read' must not look the same at dawn."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        from loom.autonomy.circadian.proposal import PROPOSALS_DIR
+        self._seed("094000000000", "早上套用成功", "spec_align")
+        y = (datetime.now(ZoneInfo(TZ)) - timedelta(days=1)).strftime("%Y-%m-%d")
+        for subdir in ("applied", "conflicts"):
+            broken = PROPOSALS_DIR / subdir / f"{y}-230000000000.toml"
+            broken.parent.mkdir(parents=True, exist_ok=True)
+            broken.write_text("rationale = \n", encoding="utf-8")
+
+        intent, weave_applied = await self._dawn_with_emits()
+        assert "早上套用成功" in intent
+        assert intent.count("讀不回來") == 2
+        assert intent.count(f"{y}-230000000000.toml") == 2
+        # The latest revision is unreadable: emitting the morning one would
+        # announce a superseded plan as the one in effect.
+        assert weave_applied == []
+
 
 class TestProgramMenuLayer:
     """Issue #584: the program menu rides on the anchor flagged
