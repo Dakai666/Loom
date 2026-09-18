@@ -1031,3 +1031,20 @@ class TestAuditLogIntegration:
             assert trust_level == "GOVERNANCE"
             details = json.loads(details_json)
             assert isinstance(details, dict)
+
+
+class TestEmptyValueGate:
+    """#587: '' and '...' entered the corpus at the same weight as a fact."""
+
+    async def test_value_without_content_is_refused(self, governor, semantic):
+        for i, value in enumerate(["...", "  ", "—！？"]):
+            entry = SemanticEntry(key=f"blank:{i}", value=value, source="session:s:fact:0")
+            result = await governor.governed_upsert(entry)
+            assert not result.written and result.resolution == "empty"
+            assert await semantic.get(f"blank:{i}") is None
+
+    async def test_short_but_real_value_still_admitted(self, governor, semantic):
+        entry = SemanticEntry(key="short:cjk", value="黑咖啡", source="memorize")
+        result = await governor.governed_upsert(entry)
+        assert result.written
+        assert await semantic.get("short:cjk") is not None

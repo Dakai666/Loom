@@ -83,6 +83,7 @@ async def _terminate_proc_group(proc: asyncio.subprocess.Process) -> None:
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    import aiosqlite
     from loom.core.ledger import LedgerEmitter, LedgerStore
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.memory.facade import MemoryFacade
@@ -1580,6 +1581,12 @@ def make_memorize_tool(
 
         gov_result = await memory.memorize(entry)
 
+        if gov_result.resolution == "empty":
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=f"Memorize refused for {key!r}: the value has no content "
+                      "(no letters, digits or CJK characters). Write the fact itself.",
+            )
         if not gov_result.written:
             msg = (
                 f"Memorize skipped for {key!r}: existing entry has higher trust "
@@ -1714,36 +1721,64 @@ def make_memorize_tool(
     )
 
 
-def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
+def make_memory_health_tool(
+    governor: "MemoryGovernor", db: "aiosqlite.Connection | None" = None,
+) -> ToolDefinition:
     """
     Create a SAFE ``memory_health`` tool for agent self-diagnosis.
 
-    Returns the current and recent-historical health status of all
-    memory subsystems so the agent can detect and report issues.
+    ``view="ops"`` (default): success/failure of memory operations this
+    session. ``view="corpus"`` (#587): a census of what the semantic store is
+    made of — composition, duplicate groups, decay, access — with the change
+    since the snapshot a week earlier. Each corpus view saves that day's
+    snapshot, which is what later trends compare against.
     """
     async def _memory_health(call: ToolCall) -> ToolResult:
-        report = governor.health.report()
-        summary = report.render_summary()
+        if call.args.get("view") == "corpus":
+            if db is None:
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=False,
+                    error="corpus census needs the memory database; not wired here.",
+                )
+            from loom.core.memory.census import (
+                load_baseline, save_snapshot, take_census,
+            )
+            baseline = await load_baseline(db)
+            census = await take_census(db)
+            await save_snapshot(db, census)
+            output = census.render_summary() + "\n\n" + census.render_detail(baseline)
+        else:
+            output = governor.health.report().render_summary()
         return ToolResult(
             call_id=call.id,
             tool_name=call.tool_name,
             success=True,
-            output=summary,
+            output=output,
         )
 
     return ToolDefinition(
         name="memory_health",
         description=(
-            "Check the health of your memory subsystems. Shows success/failure "
-            "rates for embedding writes, semantic search, session compression, "
-            "and other memory operations. Use this to self-diagnose when you "
-            "suspect memory issues, or periodically to ensure memories are "
-            "being saved correctly."
+            "Check the health of your memory. Default view 'ops': success/"
+            "failure rates for embedding writes, semantic search, session "
+            "compression and other memory operations this session. View "
+            "'corpus': what the semantic store is made of — source mix "
+            "(machine vs hand-written), duplicate groups consolidation missed, "
+            "decay and what the next prune removes, how much is never recalled "
+            "— with the change over the past week. Use 'corpus' before "
+            "drawing conclusions about the memory store as a whole."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "view": {
+                    "type": "string",
+                    "enum": ["ops", "corpus"],
+                    "description": "ops (default) or corpus.",
+                    "default": "ops",
+                },
+            },
         },
         executor=_memory_health,
         tags=["memory", "health", "diagnostic"],

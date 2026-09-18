@@ -17,7 +17,7 @@ import aiosqlite
 @dataclass
 class EpisodicEntry:
     session_id: str
-    event_type: str          # "tool_call" | "tool_result" | "message" | "system"
+    event_type: str          # "message" (user turns) | "tool_result" — the only two written
     content: str             # Human-readable description of what happened
     metadata: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))

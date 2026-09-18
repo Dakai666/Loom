@@ -12,6 +12,7 @@ dependencies = [
     "openai>=2.0.0",
     "aiosqlite>=0.20.0",
     "sqlite-vec>=0.1.9",
+    "numpy>=1.26",  # memory corpus census (#587)
     "rich>=13.0.0",
     "click>=8.1.0",
     "python-dotenv>=1.0.0",
