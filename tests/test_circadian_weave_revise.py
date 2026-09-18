@@ -589,3 +589,95 @@ class TestDefaultPhaseResolver:
         assert r.success, r.error
         (artifact,) = (PROPOSALS_DIR / APPLIED_SUBDIR).glob("*.toml")
         assert load_proposal(artifact).phase == "check_in"
+
+
+class TestArtifactEncoding:
+    """Issue #586: ``json.dumps`` wrote emoji as UTF-16 surrogate-pair escapes
+    (``\\ud83d\\udee0``) — legal JSON, illegal TOML. 20 of 28 real artifacts
+    could not be read back, and every reader degraded silently."""
+
+    EMOJI = "🛠️ 修 bug 🐈‍⬛"
+
+    def test_emoji_round_trips(self, tmp_path):
+        from loom.autonomy.circadian.proposal import _save_proposal_toml
+        p = WeaveProposal(
+            date="2026-09-17", phase="evening_closure", based_on_mtime=0,
+            rationale=self.EMOJI,
+            changes=[
+                Change(section="🌅 dawn", action="rename", to="🌄 dawn",
+                       new_body=f"- {self.EMOJI}\n- \"引號\" \\ 反斜線\t\x7f"),
+            ],
+        )
+        target = tmp_path / "p.toml"
+        _save_proposal_toml(p, target)
+        back = load_proposal(target)
+        assert back is not None
+        assert back.rationale == self.EMOJI
+        assert back.changes[0] == p.changes[0]
+
+    def test_legacy_surrogate_escapes_still_read(self, tmp_path):
+        """The pre-fix artifacts are the audit trail; they must be readable
+        as-is. A surrogate pair is just another spelling of the codepoint."""
+        target = tmp_path / "legacy.toml"
+        target.write_text(
+            'date = "2026-09-17"\nphase = "evening_closure"\n'
+            'based_on_mtime = 0\n'
+            'rationale = "\\ud83d\\udee0\\ufe0f \\u539f\\u56e0"\n',
+            encoding="utf-8",
+        )
+        back = load_proposal(target)
+        assert back is not None
+        assert back.rationale == "🛠️ 原因"
+
+    def test_escaped_backslash_is_not_mistaken_for_a_surrogate(self, tmp_path):
+        target = tmp_path / "literal.toml"
+        target.write_text(
+            'date = "d"\nphase = "p"\nbased_on_mtime = 0\n'
+            'rationale = "\\\\ud83d\\\\udee0"\n',
+            encoding="utf-8",
+        )
+        back = load_proposal(target)
+        assert back is not None
+        assert back.rationale == "\\ud83d\\udee0"
+
+
+class TestLoadProposalsForDate:
+    TZ = "Asia/Taipei"
+
+    @staticmethod
+    def _save(base: Path, stamp: str, rationale: str) -> Path:
+        from loom.autonomy.circadian.proposal import _save_proposal_toml
+        target = proposal_path("2026-09-17", base, stamp=stamp)
+        _save_proposal_toml(
+            WeaveProposal(date="2026-09-17", phase="adhoc", based_on_mtime=0,
+                          rationale=rationale),
+            target,
+        )
+        return target
+
+    def test_legacy_evening_orders_by_mtime_not_name(self, tmp_path):
+        """Issue #586: 2026-09-17-evening.toml was written at 09:40, before
+        µs stamps existed. By name it sorts after -230057…, which made the
+        dawn emit report the superseded plan."""
+        import os
+        from zoneinfo import ZoneInfo
+        from loom.autonomy.circadian.proposal import load_proposals_for_date
+        morning = self._save(tmp_path, "evening", "早上 09:40 那筆")
+        at_0940 = datetime(2026, 9, 17, 9, 40, tzinfo=ZoneInfo(self.TZ)).timestamp()
+        os.utime(morning, (at_0940, at_0940))
+        self._save(tmp_path, "230057073546", "晚上的計畫")
+
+        found = load_proposals_for_date("2026-09-17", tmp_path, self.TZ)
+        assert [p.rationale for _, p in found] == ["早上 09:40 那筆", "晚上的計畫"]
+
+    def test_unreadable_artifact_is_reported_not_dropped(self, tmp_path):
+        from loom.autonomy.circadian.proposal import load_proposals_for_date
+        self._save(tmp_path, "094000000000", "讀得到")
+        broken = proposal_path("2026-09-17", tmp_path, stamp="230000000000")
+        broken.write_text("rationale = \n", encoding="utf-8")
+
+        found = load_proposals_for_date("2026-09-17", tmp_path, self.TZ)
+        assert [(a.name, p is None) for a, p in found] == [
+            ("2026-09-17-094000000000.toml", False),
+            ("2026-09-17-230000000000.toml", True),
+        ]

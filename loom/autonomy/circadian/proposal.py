@@ -31,6 +31,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -246,19 +247,37 @@ def proposal_path(date_str: str, base_dir: Path | None = None, *, stamp: str) ->
 
 
 def load_proposals_for_date(
-    date_str: str, base_dir: Path
-) -> list[tuple[Path, WeaveProposal]]:
-    """Every readable ``(artifact, proposal)`` for ``date_str`` under
-    ``base_dir``, in the order the revisions happened (stamps sort in time;
-    a legacy ``-evening`` artifact sorts last, as it was the night's)."""
+    date_str: str, base_dir: Path, tz: str
+) -> list[tuple[Path, WeaveProposal | None]]:
+    """Every ``(artifact, proposal)`` for ``date_str`` under ``base_dir``, in
+    the order the revisions happened. An unreadable artifact stays in the
+    list with ``None`` (#586): "no revision" and "a revision nobody can read"
+    must not look the same to the reader."""
     if not base_dir.is_dir():
         return []
-    found = []
-    for artifact in sorted(base_dir.glob(f"{date_str}-*.toml")):
-        proposal = load_proposal(artifact)
-        if proposal is not None:
-            found.append((artifact, proposal))
-    return found
+    artifacts = sorted(
+        base_dir.glob(f"{date_str}-*.toml"),
+        key=lambda a: _revised_at(a, date_str, tz),
+    )
+    return [(a, load_proposal(a)) for a in artifacts]
+
+
+def _revised_at(artifact: Path, date_str: str, tz: str) -> float:
+    """When the revision happened, as an epoch. The ``HHMMSS[ffffff]`` stamp
+    says so directly. A pre-#583 ``-evening`` artifact says nothing — the
+    name was hardcoded, and 2026-09-17's was written at 09:40 (#586) — so
+    its mtime answers instead (``os.replace`` into applied/ keeps it)."""
+    stamp = artifact.stem[len(date_str) + 1:]
+    if stamp.isdigit() and len(stamp) >= 6:
+        with contextlib.suppress(ValueError):
+            return datetime.strptime(
+                f"{date_str} {stamp[:6]}{stamp[6:12].ljust(6, '0')}",
+                "%Y-%m-%d %H%M%S%f",
+            ).replace(tzinfo=ZoneInfo(tz)).timestamp()
+    try:
+        return artifact.stat().st_mtime
+    except OSError:
+        return float("inf")
 
 
 def _save_proposal_toml(proposal: WeaveProposal, target: Path) -> None:
@@ -279,26 +298,51 @@ def _save_proposal_toml(proposal: WeaveProposal, target: Path) -> None:
         raise
 
 
+def _toml_str(value: str) -> str:
+    """A TOML basic string. JSON's escapes (``\\n \\t \\" \\\\ \\uXXXX``) are
+    TOML's too — except that ``ensure_ascii`` writes astral characters (emoji)
+    as surrogate pairs, which TOML rejects (#586). So: raw UTF-8, plus DEL,
+    the one control character JSON leaves bare and TOML refuses."""
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def _render_proposal_toml(proposal: WeaveProposal) -> str:
-    """Minimal TOML writer for WeaveProposal. JSON-encodes strings so embedded
-    quotes / newlines round-trip safely through tomllib on read."""
+    """Minimal TOML writer for WeaveProposal. Strings go through
+    ``_toml_str`` so quotes / newlines / emoji round-trip through tomllib."""
     lines: list[str] = [
-        f"date = {json.dumps(proposal.date)}",
-        f"phase = {json.dumps(proposal.phase)}",
+        f"date = {_toml_str(proposal.date)}",
+        f"phase = {_toml_str(proposal.phase)}",
         f"based_on_mtime = {proposal.based_on_mtime!r}",
-        f"rationale = {json.dumps(proposal.rationale)}",
+        f"rationale = {_toml_str(proposal.rationale)}",
         "",
     ]
     for c in proposal.changes:
         lines.append("[[changes]]")
-        lines.append(f"section = {json.dumps(c.section)}")
-        lines.append(f"action = {json.dumps(c.action)}")
+        lines.append(f"section = {_toml_str(c.section)}")
+        lines.append(f"action = {_toml_str(c.action)}")
         if c.to is not None:
-            lines.append(f"to = {json.dumps(c.to)}")
+            lines.append(f"to = {_toml_str(c.to)}")
         if c.new_body is not None:
-            lines.append(f"new_body = {json.dumps(c.new_body)}")
+            lines.append(f"new_body = {_toml_str(c.new_body)}")
         lines.append("")
     return "\n".join(lines)
+
+
+# A ``\uD8xx\uDCxx`` pair not preceded by an escaping backslash. Never valid
+# TOML, so rewriting it can't change what a valid artifact means.
+_SURROGATE_PAIR = re.compile(
+    r"(?<!\\)((?:\\\\)*)\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})", re.I,
+)
+
+
+def _join_surrogate_escapes(text: str) -> str:
+    """Rewrite pre-#586 surrogate-pair escapes as the ``\\UXXXXXXXX`` TOML
+    accepts — the same codepoint, spelled legally. Artifacts written before
+    the fix are the audit trail and stay on disk as they are."""
+    def _join(m: re.Match[str]) -> str:
+        hi, lo = int(m[2], 16), int(m[3], 16)
+        return f"{m[1]}\\U{0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00):08X}"
+    return _SURROGATE_PAIR.sub(_join, text)
 
 
 def load_proposal(path: Path) -> WeaveProposal | None:
@@ -306,7 +350,8 @@ def load_proposal(path: Path) -> WeaveProposal | None:
     if not path.exists():
         return None
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        text = _join_surrogate_escapes(path.read_text(encoding="utf-8"))
+        raw = tomllib.loads(text)
         return WeaveProposal.from_toml_dict(raw)
     except (OSError, tomllib.TOMLDecodeError, KeyError, ValueError) as exc:
         logger.warning("[circadian] proposal at %s unreadable (%s)", path, exc)
