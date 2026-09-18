@@ -106,13 +106,16 @@ def effective_confidence(
     last_accessed_at: datetime | None,
     domain: str,
     temporal: str,
+    *,
+    now: datetime | None = None,
 ) -> float:
     """Time-decayed confidence using the (domain, temporal) half-life.
 
     The decay clock starts from ``max(updated_at, last_accessed_at)`` —
     a fact that's been recalled recently doesn't decay even if it hasn't
     been re-written. Returns at least 0.01 so a fully-decayed fact stays
-    visible to audits.
+    visible to audits. ``now`` defaults to the wall clock; the corpus census
+    passes its own so a snapshot is computed at one instant (#587).
     """
     half = half_life_for(domain, temporal)
     if half == math.inf:
@@ -120,7 +123,7 @@ def effective_confidence(
     anchor = updated_at
     if last_accessed_at is not None and last_accessed_at > anchor:
         anchor = last_accessed_at
-    days = (datetime.now(UTC) - anchor).total_seconds() / 86400.0
+    days = ((now or datetime.now(UTC)) - anchor).total_seconds() / 86400.0
     decayed = confidence * _decay_factor(half, days)
     return max(0.01, round(decayed, 4))
 

@@ -157,13 +157,20 @@ summary = report.render_summary()
 agent_context = report.render_agent_context()
 ```
 
-tool 註冊不是獨立的 `memory_health.py` 模組；`MemoryGovernor` 建立 `MemoryHealthTracker`，`LoomSession.start()` 把相關 memory maintenance tools 註冊進 session registry。工具回傳的是 tracker 產生的健康摘要字串。
+tool 註冊不是獨立的 `memory_health.py` 模組；`MemoryGovernor` 建立 `MemoryHealthTracker`，`LoomSession.start()` 把 `memory_health` 註冊進 session registry。
 
 ```python
-# loom/core/memory/maintenance.py
-def make_memory_health_tool(governor: "MemoryGovernor") -> ToolDefinition:
+# loom/platform/cli/tools.py
+def make_memory_health_tool(
+    governor: "MemoryGovernor", db: "aiosqlite.Connection | None" = None,
+) -> ToolDefinition:
     ...
 ```
+
+兩個 view：
+
+- `view="ops"`（預設）— tracker 產生的健康摘要字串（本 session 記憶操作的成敗）。
+- `view="corpus"`（#587）— `loom/core/memory/census.py` 的語料庫普查：來源組成與 machine:hand、consolidation 沒接住的重複版本群（cos ≥ 0.85、≥ 3 版）、effective confidence 分布與下次 prune 會動的筆數、存取新鮮度、各層 archived、短值。每次呼叫把當天快照存進 `memory_meta`（`census:YYYY-MM-DD`），明細附與 ≥ 7 天前快照的差值。需要 `db`；計算在 worker thread 跑，不佔 event loop。
 
 平台在 session 啟動時注入 `render_agent_context()` 的內容（如果有 prior issues）。
 

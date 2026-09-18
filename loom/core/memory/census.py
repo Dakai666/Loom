@@ -223,12 +223,8 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
 
         updated_at = _parse_ts(updated) or now
         accessed_at = _parse_ts(accessed)
-        # lifecycle.effective_confidence reads the wall clock; shift the
-        # anchors so ``now`` stands in for it (tests, snapshots in the past).
-        shift = datetime.now(UTC) - now
         eff = effective_confidence(
-            conf, updated_at + shift,
-            accessed_at + shift if accessed_at else None, domain, temporal,
+            conf, updated_at, accessed_at, domain, temporal, now=now,
         )
         for edge, label in _DECAY_EDGES:
             if eff < edge:
