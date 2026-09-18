@@ -1186,7 +1186,7 @@ class LoomSession:
         self.registry.register(make_relate_tool(self._memory))
         # #451 phase B: ``query_relations`` tool retired — relational
         # triples surface through ``recall`` (single agent verb).
-        self.registry.register(make_memory_health_tool(self._governor))
+        self.registry.register(make_memory_health_tool(self._governor, self._db))
 
         # Issue #147 Phase C.1: facade-aware cognition wiring.
         # ReflectionAPI / CounterFactualReflector previously took

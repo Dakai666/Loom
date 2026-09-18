@@ -62,7 +62,7 @@ class GovernedWriteResult:
     trust_tier: str
     adjusted_confidence: float
     contradictions_found: int
-    resolution: str | None = None  # "replaced" | "superseded" | "kept" | None
+    resolution: str | None = None  # "replaced" | "superseded" | "kept" | "empty" | None
 
 
 @dataclass
@@ -194,6 +194,17 @@ class MemoryGovernor:
         6. Log governance event to audit_log
         """
         tier_name, tier_confidence = classify_source(entry.source)
+
+        # #587: a value with no letter, digit or CJK character ('', '...')
+        # carries nothing; don't let it in at the same weight as a fact.
+        if not any(ch.isalnum() for ch in entry.value):
+            return GovernedWriteResult(
+                written=False,
+                trust_tier=tier_name,
+                adjusted_confidence=entry.confidence,
+                contradictions_found=0,
+                resolution="empty",
+            )
 
         # Ensure confidence is at least the trust tier's default
         # (but don't lower an explicitly-set high confidence)

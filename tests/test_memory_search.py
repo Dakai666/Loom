@@ -835,3 +835,23 @@ class TestMemorizeNearDupHint:
 
         assert result.success is True
         assert "near-duplicate" not in result.output.lower()
+
+
+async def test_memorize_names_empty_value_refusal():
+    """#587: the governor refuses content-free values; the agent must hear
+    why, not the generic 'existing entry has higher trust'."""
+    from loom.core.memory.governance import GovernedWriteResult
+
+    memory = MagicMock()
+    memory.semantic.find_near_duplicates = AsyncMock(return_value=[])
+    memory.memorize = AsyncMock(return_value=GovernedWriteResult(
+        written=False, trust_tier="agent_memorize", adjusted_confidence=0.85,
+        contradictions_found=0, resolution="empty",
+    ))
+    tool = make_memorize_tool(memory)
+    r = await tool.executor(ToolCall(
+        tool_name="memorize", args={"key": "k", "value": "..."},
+        trust_level=TrustLevel.SAFE, session_id="s",
+    ))
+    assert not r.success
+    assert "no content" in r.error and "higher trust" not in r.error
