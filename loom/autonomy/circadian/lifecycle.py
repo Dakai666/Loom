@@ -683,7 +683,7 @@ def _yesterday_revision_report(tz: str) -> str | None:
     applied = _yesterday_applied_proposals(tz)
     if applied:
         blocks = "\n\n".join(
-            _format_proposal(p, "理由") if p else _format_unreadable(artifact)
+            (_format_proposal(p, "理由") if p else _format_unreadable(artifact))
             for artifact, p in applied
         )
         layers.append(
@@ -697,8 +697,8 @@ def _yesterday_revision_report(tz: str) -> str | None:
     )
     if parked:
         blocks = "\n\n".join(
-            f"{_format_proposal(p, '當時的理由')}\n_park 在_：{artifact}"
-            if p else _format_unreadable(artifact)
+            (f"{_format_proposal(p, '當時的理由')}\n_park 在_：{artifact}"
+             if p else _format_unreadable(artifact))
             for artifact, p in parked
         )
         layers.append(
