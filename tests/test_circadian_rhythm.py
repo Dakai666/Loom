@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from loom.autonomy.circadian.rhythm import Anchor, Program, load_programs, load_rhythm
 
 
@@ -403,3 +405,46 @@ class TestProgramMenuFlag:
         dawn, evening = load_rhythm(p)
         assert dawn.program_menu is False
         assert evening.program_menu is True
+
+
+class TestAnchorModelTier:
+    # A phase can pin the LLM tier it runs on (e.g. deep_weave / evening
+    # closure on the deep-reasoning tier, everything else on the daily one).
+    def test_model_tier_parses_and_defaults_none(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            [[anchors]]
+            time = "11:00"
+            name = "curiosity"
+
+            [[anchors]]
+            time = "14:00"
+            name = "deep_weave"
+            model_tier = 2
+        ''')
+        curiosity, deep = load_rhythm(p)
+        assert curiosity.model_tier is None
+        assert deep.model_tier == 2
+
+    @pytest.mark.parametrize("bad", ['"2"', "0", "-1", "true", "1.5"])
+    def test_invalid_model_tier_is_ignored_but_anchor_loads(self, tmp_path, bad):
+        p = tmp_path / "rhythm.toml"
+        _write(p, f'''
+            [[anchors]]
+            time = "14:00"
+            name = "deep_weave"
+            model_tier = {bad}
+        ''')
+        anchors = load_rhythm(p)
+        assert len(anchors) == 1
+        assert anchors[0].model_tier is None
+
+    def test_multi_time_anchor_shares_model_tier(self, tmp_path):
+        p = tmp_path / "rhythm.toml"
+        _write(p, '''
+            [[anchors]]
+            time = ["10:00", "19:00"]
+            name = "pet"
+            model_tier = 1
+        ''')
+        assert [a.model_tier for a in load_rhythm(p)] == [1, 1]

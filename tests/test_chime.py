@@ -728,3 +728,108 @@ class TestChimePermissions:
             f"observed revoked={revoked}"
         )
         assert len(revoke_matching_calls) == 1
+
+
+def _make_tier_session_stub(default_tier=1, sticky=None):
+    """Session mock backed by a real TierManager, wired the way the Discord
+    /tier command and request_model_tier tool touch it."""
+    from loom.core.tier_manager import TierManager
+
+    session = _make_chime_session_stub([], [], [], [])
+    tm = TierManager(
+        base_model_getter=lambda: "base-model",
+        tier_models={1: "minimax-m2.7", 2: "deepseek-flash"},
+        default_tier=default_tier,
+        reminder_after_turns=10,
+    )
+    if sticky is not None:
+        tm.set_sticky(sticky, reason="prior phase", source="circadian")
+    session._tier = tm
+    session._tier_models = tm.tier_models
+    session._active_tier = tm.active_tier
+    session._active_model = tm.active_model
+    session._set_sticky_tier = (
+        lambda t, *, reason, source: tm.set_sticky(t, reason=reason, source=source)
+    )
+    session._lifecycle_events = asyncio.Queue()
+    return session
+
+
+class TestChimeModelTier:
+    """Circadian phase chimes set the LLM tier for the phase: the anchor's
+    ``model_tier``, or the default tier when the anchor declares none. The
+    tier stays after the chime turn — it belongs to the phase, not the turn —
+    until the next phase chime resets it."""
+
+    async def _run(self, session, req):
+        bot = _make_bot_stub()
+        bot._sessions[111] = session
+        seen: dict = {}
+
+        async def stream_capture(content, *, origin):
+            seen["tier"] = session._active_tier()
+            seen["model"] = session._active_model()
+            if False:
+                yield  # pragma: no cover
+        channel = _patch_channel_and_stream(bot, session, stream_impl=stream_capture)
+        assert await bot.deliver_chime(req)
+        for _ in range(50):
+            if not bot._chime_dispatcher and not bot._chime_pending:
+                break
+            await asyncio.sleep(0)
+        return seen, channel
+
+    def _req(self, **kw):
+        from loom.autonomy.chime import ChimeRequest
+        return ChimeRequest(
+            schedule_name="circadian:phase_x",
+            intent="hi",
+            fired_at=datetime.now(timezone.utc),
+            target={"type": "discord_thread", "id": "111"},
+            **kw,
+        )
+
+    async def test_phase_tier_applies_before_turn_and_persists_after(self):
+        session = _make_tier_session_stub()
+        seen, channel = await self._run(
+            session, self._req(model_tier=2, resets_tier=True),
+        )
+        assert seen == {"tier": 2, "model": "deepseek-flash"}
+        # Phase-scoped: still tier 2 after the chime turn ends.
+        assert session._active_tier() == 2
+        ev = session._lifecycle_events.get_nowait()
+        assert (ev.from_tier, ev.to_tier, ev.source) == (1, 2, "circadian")
+        # The switch is visible to DK in the chime marker line.
+        marker = channel.send.await_args_list[0].args[0]
+        assert "Tier 2" in marker and "deepseek-flash" in marker
+
+    async def test_phase_without_tier_resets_previous_phase_tier(self):
+        session = _make_tier_session_stub(sticky=2)
+        seen, _ = await self._run(
+            session, self._req(model_tier=None, resets_tier=True),
+        )
+        assert seen["tier"] == 1
+        assert session._tier.sticky_tier is None
+
+    async def test_plain_schedule_chime_leaves_tier_alone(self):
+        # schedules.toml chimes don't carry phase semantics — no reset.
+        session = _make_tier_session_stub(sticky=2)
+        seen, channel = await self._run(session, self._req())
+        assert seen["tier"] == 2
+        assert session._lifecycle_events.empty()
+        assert "Tier" not in channel.send.await_args_list[0].args[0]
+
+    async def test_unconfigured_tier_falls_back_to_default(self):
+        session = _make_tier_session_stub(sticky=2)
+        seen, _ = await self._run(
+            session, self._req(model_tier=3, resets_tier=True),
+        )
+        assert seen["tier"] == 1
+
+    async def test_same_tier_is_silent(self):
+        session = _make_tier_session_stub()
+        _, channel = await self._run(
+            session, self._req(model_tier=None, resets_tier=True),
+        )
+        assert session._lifecycle_events.empty()
+        assert "Tier" not in channel.send.await_args_list[0].args[0]
