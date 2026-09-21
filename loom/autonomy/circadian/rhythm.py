@@ -72,6 +72,11 @@ class Anchor:
     # phase where the next day's program gets chosen (evening_closure).
     program_menu: bool = False
 
+    # The LLM tier this phase runs on ([cognition.tiers] in loom.toml). Every
+    # phase chime sets the tier for its phase: this value, or the default tier
+    # when ``None`` — so a deep phase's tier never leaks into the next one.
+    model_tier: int | None = None
+
     @property
     def trigger_name(self) -> str:
         # ``name`` is the activity identity (one weave section per name), so it
@@ -155,6 +160,21 @@ def _validate_hhmm(value: str) -> bool:
     return 0 <= h < 24 and 0 <= m < 60
 
 
+def _parse_model_tier(entry: dict[str, Any], name: str) -> int | None:
+    """``model_tier`` must be a positive int; anything else is dropped with a
+    warning so the anchor still loads on the default tier."""
+    raw = entry.get("model_tier")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        logger.warning(
+            "[circadian] rhythm anchor %r has invalid model_tier %r (want a "
+            "positive int); phase runs on the default tier", name, raw,
+        )
+        return None
+    return raw
+
+
 def load_rhythm(path: Path | None = None) -> list[Anchor]:
     """Read the rhythm table, returning anchors in declaration order.
 
@@ -221,6 +241,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
         meaning = str(entry.get("meaning", "")).strip()
         public = bool(entry.get("public", True))
         program_menu = bool(entry.get("program_menu", False))
+        model_tier = _parse_model_tier(entry, name)
         # Permission fields parse through the shared autonomy helper (issue
         # #525) — same code path as schedules.toml — and belong to the activity
         # identity, so every expanded slot of a recurring activity shares them.
@@ -243,7 +264,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
                 time=slot, name=name, meaning=meaning, public=public,
                 trigger_suffix=suffix,
                 allowed_tools=allowed_tools, scope_grants=scope_grants,
-                program_menu=program_menu,
+                program_menu=program_menu, model_tier=model_tier,
             ))
         seen.add(name)
 

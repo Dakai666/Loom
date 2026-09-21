@@ -42,6 +42,14 @@
 #       · There is no ``trust_level`` field for phases: the chime path has no
 #         planner notify/HOLD gate, so it would be inert. Authorisation here is
 #         allowed_tools + scope_grants only.
+#   - ``model_tier`` picks the LLM tier this phase runs on (an int key of
+#     ``[cognition.tiers]`` in loom.toml). Every phase chime sets the tier for
+#     its phase: the declared value, or ``default_tier`` when omitted — so a
+#     deep phase's tier never leaks into the next phase. Mid-phase escalation
+#     (a skill with ``model_tier``, request_model_tier, /tier) still works and
+#     lasts until the next phase chime — which also clears a manual /model
+#     override, so the phase's tier always wins. An unconfigured tier falls
+#     back to the default.
 #
 # A missing or malformed file is tolerated: the dawn/close lifecycle from
 # PR1 still runs, the day just has no in-day anchors. A bad time (even one
@@ -104,6 +112,7 @@ meaning = """
 time    = "14:00"
 name    = "deep_weave"
 public  = false
+model_tier = 2   # deep research runs on the deep-reasoning tier
 meaning = """
 從興趣裡挑一個值得深入的小主題。
 產出可能是 note / wiki draft，但「深入」是目的，產出是副產品。
@@ -125,6 +134,7 @@ public  = true
 # Issue #584: this chime carries the program menu below — set it on the phase
 # where tomorrow gets chosen.
 program_menu = true
+model_tier = 2   # closing the weave + planning tomorrow deserves the deep tier
 meaning = """
 一天的人際收束 + 收織 + 安排明天。
 三件事一次做完：

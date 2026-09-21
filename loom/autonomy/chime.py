@@ -30,6 +30,13 @@ class ChimeRequest:
     trust_level: str | None = None
     allowed_tools: tuple[str, ...] = ()
     scope_grants: tuple[dict[str, Any], ...] = ()
+    model_tier: int | None = None
+    """LLM tier to switch the session to before this chime's turn."""
+    resets_tier: bool = False
+    """Phase semantics (circadian): set the tier even when ``model_tier`` is
+    ``None`` — i.e. fall back to the default tier. The tier then holds until
+    the next phase chime, not just for this turn. Plain schedule chimes leave
+    this False and never touch the tier."""
 
 
 def format_chime_content(req: ChimeRequest) -> str:

@@ -292,8 +292,10 @@ class TierChanged:
                                    tiers via ``[cognition.tiers]``.
     ``source``                   — ``"skill"`` (auto-escalate from skill
                                    metadata), ``"agent"`` (request_model_tier
-                                   tool), ``"user"`` (``/tier`` command), or
-                                   ``"clear"`` (sticky cleared).
+                                   tool), ``"user"`` (``/tier`` command),
+                                   ``"clear"`` (sticky cleared), or
+                                   ``"circadian"`` (a phase chime setting the
+                                   phase's tier from rhythm.toml).
     ``reason``                   — free-form caller-supplied note; lands in
                                    envelope log for graphify analysis.
 

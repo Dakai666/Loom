@@ -481,6 +481,10 @@ async def _deliver_phase_chime(
         # forwarded — the chime path has no planner gate to honour it (#525).
         allowed_tools=anchor.allowed_tools,
         scope_grants=anchor.scope_grants,
+        # Each phase sets its own tier (the anchor's, or the default) so a
+        # deep phase's tier doesn't carry into the phases after it.
+        model_tier=anchor.model_tier,
+        resets_tier=True,
     )
     delivered = await daemon.deliver_chime(req)
     outcome = "delivered" if delivered else "skipped"

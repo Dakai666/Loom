@@ -3628,7 +3628,7 @@ class LoomSession:
         when the active tier actually moved, else None.
 
         ``source`` is one of ``"skill"`` / ``"agent"`` / ``"user"`` / ``"clear"``
-        and lands in the event for telemetry / graphify analysis.
+        / ``"circadian"`` and lands in the event for telemetry / graphify analysis.
         """
         ev = self._tier.set_sticky(new_tier, reason=reason, source=source)
         if ev is not None:
@@ -3636,6 +3636,17 @@ class LoomSession:
             # stays consistent with start / set_model.
             self._refresh_runtime_identity()
         return ev
+
+    def _clear_manual_model_override(self) -> bool:
+        """Let the tier govern the model again after a manual ``/model``.
+
+        Returns whether an override was cleared; runtime_identity is refreshed
+        when the serving model changes as a result.
+        """
+        cleared = self._tier.clear_manual_override()
+        if cleared:
+            self._refresh_runtime_identity()
+        return cleared
 
     def _tick_tier_counter(self) -> "TierExpiryHint | None":
         """Increment the per-turn counter for the active tier and return a

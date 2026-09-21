@@ -256,6 +256,37 @@ class TestPhaseChimeFire:
         assert req.allowed_tools == ()
         assert req.scope_grants == ()
 
+    async def _fire_one(self, anchor):
+        daemon, deliveries, _ = _make_daemon()
+        register_rhythm_anchors(daemon, CFG, [anchor])
+        await ensure_today_session(
+            datetime.now(timezone.utc), FakePlatform(), CFG, evaluator=FakeEvaluator()
+        )
+        trigger = next(
+            t for t in daemon.evaluator.list() if t.name == anchor.trigger_name
+        )
+        await daemon._on_trigger_fire(trigger, {})
+        return deliveries[0]
+
+    async def test_fire_forwards_anchor_model_tier(self):
+        # A phase chime carries the anchor's tier and asks the bot to set it
+        # for the phase.
+        req = await self._fire_one(
+            Anchor(time="14:00", name="deep_weave", meaning="x", model_tier=2),
+        )
+        assert req.model_tier == 2
+        assert req.resets_tier is True
+
+    async def test_fire_without_model_tier_still_resets_tier(self):
+        # No model_tier on the anchor means "this phase runs on the default
+        # tier" — the chime still resets, so a previous phase's tier never
+        # leaks into this one.
+        req = await self._fire_one(
+            Anchor(time="16:00", name="check_in", meaning="x"),
+        )
+        assert req.model_tier is None
+        assert req.resets_tier is True
+
     async def test_fire_bypasses_planner(self):
         daemon, _, _ = _make_daemon()
         register_rhythm_anchors(daemon, CFG, [
