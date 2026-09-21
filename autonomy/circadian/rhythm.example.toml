@@ -47,8 +47,9 @@
 #     its phase: the declared value, or ``default_tier`` when omitted — so a
 #     deep phase's tier never leaks into the next phase. Mid-phase escalation
 #     (a skill with ``model_tier``, request_model_tier, /tier) still works and
-#     lasts until the next phase chime. An unconfigured tier falls back to the
-#     default.
+#     lasts until the next phase chime — which also clears a manual /model
+#     override, so the phase's tier always wins. An unconfigured tier falls
+#     back to the default.
 #
 # A missing or malformed file is tolerated: the dawn/close lifecycle from
 # PR1 still runs, the day just has no in-day anchors. A bad time (even one

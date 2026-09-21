@@ -1044,32 +1044,36 @@ class LoomDiscordBot:
         self,
         req: ChimeRequest,
         session: "LoomSession | None",
-    ) -> "TierChanged | None":
+    ) -> bool:
         """Set the session's LLM tier for a phase chime.
 
         Unlike permissions this is NOT revoked after the turn: the tier
         belongs to the phase and holds until the next phase chime resets it.
         ``resets_tier`` with no (or an unconfigured) ``model_tier`` returns
-        the session to its default tier. Returns the ``TierChanged`` event
-        when the tier actually moved, else ``None``.
+        the session to its default tier, and a mid-phase ``/model`` override
+        is cleared so the phase's tier always wins. Returns whether the
+        serving model changed.
         """
         if session is None or not session._tier_models:
-            return None
+            return False
         if req.model_tier is None and not req.resets_tier:
-            return None
+            return False
         tier = req.model_tier
+        reason = f"chime {req.schedule_name}"
         if tier is not None and tier not in session._tier_models:
             logger.warning(
                 "chime %s asks for unconfigured tier %s; using default tier",
                 req.schedule_name, tier,
             )
+            reason += f" (unconfigured tier {tier} → default)"
             tier = None
-        ev = session._set_sticky_tier(
-            tier, reason=f"chime {req.schedule_name}", source="circadian",
+        cleared = (
+            session._clear_manual_model_override() if req.resets_tier else False
         )
+        ev = session._set_sticky_tier(tier, reason=reason, source="circadian")
         if ev is not None:
             session._lifecycle_events.put_nowait(ev)
-        return ev
+        return ev is not None or cleared
 
     def _revoke_chime_permissions(
         self,
@@ -1122,10 +1126,9 @@ class LoomDiscordBot:
 
         added_tools, grant_source = self._apply_chime_permissions(req, session)
         try:
-            tier_ev = self._apply_chime_tier(req, session)
             tier_note = (
-                f" · 🎚️ Tier {tier_ev.to_tier} `{tier_ev.to_model}`"
-                if tier_ev is not None else ""
+                f" · 🎚️ Tier {session._active_tier()} `{session._active_model()}`"
+                if self._apply_chime_tier(req, session) else ""
             )
             await _safe_send(
                 channel,

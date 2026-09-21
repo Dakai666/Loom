@@ -732,7 +732,11 @@ class TestChimePermissions:
 
 def _make_tier_session_stub(default_tier=1, sticky=None):
     """Session mock backed by a real TierManager, wired the way the Discord
-    /tier command and request_model_tier tool touch it."""
+    /tier command and request_model_tier tool touch it.
+
+    Stub-only: the session's tier methods are shadowed by instance attributes
+    bound to the real TierManager — fine for a MagicMock, not a pattern for
+    a real LoomSession."""
     from loom.core.tier_manager import TierManager
 
     session = _make_chime_session_stub([], [], [], [])
@@ -752,6 +756,7 @@ def _make_tier_session_stub(default_tier=1, sticky=None):
         lambda t, *, reason, source: tm.set_sticky(t, reason=reason, source=source)
     )
     session._lifecycle_events = asyncio.Queue()
+    session._clear_manual_model_override = tm.clear_manual_override
     return session
 
 
@@ -810,6 +815,8 @@ class TestChimeModelTier:
         )
         assert seen["tier"] == 1
         assert session._tier.sticky_tier is None
+        ev = session._lifecycle_events.get_nowait()
+        assert (ev.from_tier, ev.to_tier) == (2, 1)
 
     async def test_plain_schedule_chime_leaves_tier_alone(self):
         # schedules.toml chimes don't carry phase semantics — no reset.
@@ -825,6 +832,39 @@ class TestChimeModelTier:
             session, self._req(model_tier=3, resets_tier=True),
         )
         assert seen["tier"] == 1
+        ev = session._lifecycle_events.get_nowait()
+        assert "unconfigured tier 3" in ev.reason
+
+    async def test_explicit_default_tier_is_silent(self):
+        # model_tier = default_tier behaves exactly like omitting it.
+        session = _make_tier_session_stub()
+        seen, channel = await self._run(
+            session, self._req(model_tier=1, resets_tier=True),
+        )
+        assert seen["tier"] == 1
+        assert session._lifecycle_events.empty()
+        assert "Tier" not in channel.send.await_args_list[0].args[0]
+
+    @pytest.mark.parametrize("sticky", [None, 2])
+    async def test_phase_chime_clears_manual_model_override(self, sticky):
+        # The tier belongs to the phase: a mid-phase /model selection is
+        # cleared by the next phase chime regardless of the previous phase's
+        # tier (set_sticky alone only clears it when the tier moves).
+        session = _make_tier_session_stub(sticky=sticky)
+        session._tier.mark_manual_override()
+        assert session._active_model() == "base-model"
+        seen, channel = await self._run(
+            session, self._req(model_tier=None, resets_tier=True),
+        )
+        assert seen == {"tier": 1, "model": "minimax-m2.7"}
+        assert session._tier.manual_override is False
+        assert "minimax-m2.7" in channel.send.await_args_list[0].args[0]
+
+    async def test_plain_schedule_chime_keeps_manual_model_override(self):
+        session = _make_tier_session_stub()
+        session._tier.mark_manual_override()
+        seen, _ = await self._run(session, self._req())
+        assert seen["model"] == "base-model"
 
     async def test_same_tier_is_silent(self):
         session = _make_tier_session_stub()

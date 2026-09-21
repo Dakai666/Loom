@@ -106,7 +106,8 @@ class TierManager:
         the active tier actually moved, else ``None``.
 
         ``source`` is one of ``"skill"`` / ``"agent"`` / ``"user"`` /
-        ``"clear"`` and lands in the event for telemetry / graphify analysis.
+        ``"clear"`` / ``"circadian"`` (a circadian phase chime setting the
+        phase's tier) and lands in the event for telemetry / graphify analysis.
         """
         base = self._base_model()
         old_tier = self.active_tier()
@@ -161,6 +162,18 @@ class TierManager:
     def mark_manual_override(self) -> None:
         """Record that a manual ``/model`` selection now governs the model."""
         self.manual_override = True
+
+    def clear_manual_override(self) -> bool:
+        """Drop a manual ``/model`` override so the tier governs again.
+
+        ``set_sticky`` only clears the override when the sticky tier moves;
+        callers that need the tier to win unconditionally (circadian phase
+        chimes) call this first. Returns whether an override was cleared.
+        """
+        if not self.manual_override:
+            return False
+        self.manual_override = False
+        return True
 
     def skill_max_tier(self, activated_names: Iterable[str]) -> int:
         """Max ``model_tier`` across the currently-activated skills.
