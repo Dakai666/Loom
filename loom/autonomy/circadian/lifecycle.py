@@ -845,6 +845,8 @@ async def setup_circadian(
        for "what does today look like"). A missing/malformed table logs a
        warning and leaves circadian to dawn + close only — the lifecycle
        still runs.
+    2b. Register the room tick when ``autonomy/circadian/room.toml`` exists
+       (furniture signals → wakes; spec outputs/doc/circadian_room).
     3. Recover leftover state (resume same-day, force-close stale yesterday).
     4. Catch-up spawn: if we came up during active hours, run the idempotent
        ``ensure_today_session`` so a daemon/bot that started after dawn still
@@ -858,6 +860,14 @@ async def setup_circadian(
     register_triggers(daemon, platform, config)
     anchors = load_rhythm()
     register_rhythm_anchors(daemon, config, anchors)
+    # The room (furniture-driven wakes) is optional: no room.toml ⇒ no tick.
+    # Imported here because room.py imports this module at load time. A
+    # broken room must never cost the day its recovery / catch-up spawn.
+    from loom.autonomy.circadian import room
+    try:
+        room.register_room(daemon, config)
+    except Exception:  # noqa: BLE001
+        logger.exception("[circadian] room registration failed; continuing without it")
     await recover_on_startup(platform, config, evaluator=daemon.evaluator)
     if is_in_active_hours(datetime.now(ZoneInfo(config.timezone)), config):
         logger.info("[circadian] startup is within active hours — ensuring today's session")
