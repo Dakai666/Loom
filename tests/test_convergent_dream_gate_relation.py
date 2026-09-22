@@ -44,6 +44,7 @@ from loom.core.cognition.consolidation import (
     _META_KEY_SUPPRESSED,
     diff_inventory,
     load_suppressed_signatures,
+    record_suppressed_signatures,
     render_report,
     self_review,
     synthesize_merge,
@@ -204,6 +205,16 @@ class TestExtendsSynthesis:
         syn = await synthesize_merge(cluster, _stub('{"refined_value": "core", "rationale": "r"}'))
         assert syn is not None and syn.refined_value == "core"
 
+    async def test_survivor_bullet_is_dropped(self):
+        # The survivor anchors the core; a bullet for it would repeat the core.
+        resp = ('{"refined_value": "core", "rationale": "r", "details": ['
+                '{"from_key": "a", "detail": "survivor restated"},'
+                '{"from_key": "b", "detail": "x"}, {"from_key": "c", "detail": "y"}]}')
+        syn = await synthesize_merge(self._extends_cluster(), _stub(resp))
+        assert syn is not None
+        assert "survivor restated" not in syn.refined_value
+        assert len(syn.refined_value.splitlines()) == 3   # core + b + c
+
     async def test_extends_prompt_carries_inventory(self):
         seen = {}
 
@@ -258,3 +269,16 @@ async def test_old_binary_gate_skips_are_not_loaded(db_conn):
     )
     await db_conn.commit()
     assert await load_suppressed_signatures(db_conn) == set()
+
+
+async def test_record_drops_legacy_binary_gate_key(db_conn):
+    # The pre-v2 key would otherwise sit orphaned in memory_meta forever.
+    await db_conn.execute(
+        "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?)",
+        ("consolidation_dream.suppressed_skips", '{"oldsig": "x"}', "2026-09-20T00:00:00"),
+    )
+    await db_conn.commit()
+    await record_suppressed_signatures(db_conn, {"newsig"})
+    cursor = await db_conn.execute(
+        "SELECT key FROM memory_meta WHERE key LIKE 'consolidation_dream.suppressed_skips%'")
+    assert [r[0] for r in await cursor.fetchall()] == [_META_KEY_SUPPRESSED]

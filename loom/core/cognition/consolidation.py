@@ -287,6 +287,7 @@ def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
 # the four-way gate would merge — bumping the key lets every cluster be judged
 # once more under the current rules instead of staying buried for 90 days.
 _META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips.v2"
+_LEGACY_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips"
 _SUPPRESS_RETENTION_DAYS = 90.0   # aligns with the memory half-life
 
 
@@ -369,6 +370,11 @@ async def record_suppressed_signatures(
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
         "updated_at = excluded.updated_at",
         (_META_KEY_SUPPRESSED, payload, stamp),
+    )
+    # Drop pre-v2 sets on the write path (load stays read-only) so they don't
+    # sit orphaned in memory_meta forever.
+    await db.execute(
+        "DELETE FROM memory_meta WHERE key = ?", (_LEGACY_META_KEY_SUPPRESSED,)
     )
     await db.commit()
 
@@ -1173,8 +1179,8 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
             text = str(item.get("detail", "")).strip()
             if key not in by_key:
                 return None       # phantom key — untrustworthy output
-            if not text:
-                continue
+            if not text or key == survivor.key:
+                continue          # survivor's content lives in the anchored core
             src = by_key[key]
             tier, _ = classify_source(src.source)
             bullets.append(f"- {text}（{src.created_at.strftime('%Y-%m-%d')} · {tier}）")
