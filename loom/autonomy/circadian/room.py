@@ -8,6 +8,7 @@ lives with (喵吉, later the window, the calendar …).
 
 Shape of one tick (every few minutes, a deterministic direct handler):
 
+    re-decide queue ─┐
     furniture peek → signals → dedupe → wake matrix → one chime (or queue)
 
 Contracts worth knowing before editing:
@@ -20,18 +21,28 @@ Contracts worth knowing before editing:
 - **The furniture decides what is a signal; the room decides whether it
   wakes.** Priority comes from ``room.toml`` (per-furniture mapping +
   default), so the agent can retune it without touching either side.
+- **A signal is first seen once, but decided every tick.** Dedupe stops a
+  re-emitted key from being *added* twice; it does not freeze the decision.
+  Everything queued is re-run through the wake matrix each tick, so a signal
+  held back by sleep, the gap, or a failed delivery goes out as soon as it
+  may (PR #591 review P0: "queued" must not mean "demoted to ambient").
 - **The chime only describes the world.** Signal text is passed through
   verbatim; the room never writes the agent's first person (spec §1 red
   line 5), and silence is always a legal answer.
-- **Nothing is dropped silently.** A signal that doesn't wake is queued and
-  rides along with the next wake; an undelivered wake stays queued; queued
-  entries expire only by age (``queue_ttl_hours``) and the expiry is logged.
+- **Nothing is dropped silently.** Queued entries leave only by being
+  delivered or by age (``queue_ttl_hours``), and both are logged.
 - **Every decision is logged raw** to ``~/.loom/circadian/log/room-*.jsonl``
-  so DK can read what happened without an agent summary.
+  (peeks included, so a quiet furniture is visibly alive) and emitted as
+  ``circadian:room_signal`` for in-process subscribers.
 
-Activity (``sleeping`` / ``free`` / ``focused`` / ``tending``) is derived from
-active hours for now; ``RoomState.activity`` is the override slot a later
-``room`` tool will write when the agent declares what she's doing.
+Awake means: inside active hours, today's daily session not closed, and —
+when the rhythm table has a ``dawn`` anchor — dawn already delivered today.
+The thread opens at ``start`` but she wakes at dawn; the room doesn't speak
+first. ``RoomState.activity`` is the override slot a later ``room`` tool
+will write (``focused`` / ``tending``); until then an awake agent is ``free``.
+
+Known gaps (spec §5.5): the chime doesn't carry the current activity or
+today's Program yet — Program has no structured source until §6 lands.
 """
 
 from __future__ import annotations
@@ -50,7 +61,9 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from loom.autonomy.chime import ChimeRequest
-from loom.autonomy.circadian.state import _dir, _log_dir
+from loom.autonomy.circadian.lifecycle import is_in_active_hours
+from loom.autonomy.circadian.rhythm import load_rhythm
+from loom.autonomy.circadian.state import CircadianState, _dir, _log_dir
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -58,8 +71,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_ROOM_PATH = Path("autonomy/circadian/room.toml")
 TICK_TRIGGER = "circadian:room_tick"
 CHIME_NAME = "circadian:room"
+SIGNAL_EVENT = "circadian:room_signal"
 TICK_CRON = "*/5 * * * *"
 RUN_TIMEOUT_S = 30.0
+
+# Bounds. A furniture is local code, but one bug must not flood a session.
+MAX_OUTPUT_BYTES = 64 * 1024        # furniture stdout; larger ⇒ ignored
+MAX_SIGNALS_PER_PEEK = 20           # extra signals in one peek are dropped (logged)
+MAX_CHIME_LINES = 10                # the rest are counted, not listed
+NEXT_CHECK_MAX = timedelta(hours=12)  # a furniture is re-peeked at least this often
+# Dedupe memory, least-recently-seen evicted first. A key still being
+# re-emitted is refreshed on every sighting, so only keys gone quiet age out.
 SEEN_CAP = 500
 
 PRIORITIES = ("urgent", "normal", "ambient")
@@ -92,13 +114,17 @@ class RoomConfig:
     furniture: tuple[Furniture, ...] = ()
 
 
+def _is_str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
 def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
     name = entry.get("name")
     command = entry.get("command")
     if not isinstance(name, str) or not name:
         logger.warning("[room] furniture[%d] has no name; skipped", idx)
         return None
-    if not (isinstance(command, list) and command and all(isinstance(c, str) for c in command)):
+    if not (_is_str_list(command) and command):
         logger.warning("[room] furniture %r has no valid command; skipped", name)
         return None
     default = entry.get("default_priority", "normal")
@@ -108,21 +134,25 @@ def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
     ):
         logger.warning("[room] furniture %r has an unknown priority; skipped", name)
         return None
-    tools = entry.get("allowed_tools") or []
+    tools = entry.get("allowed_tools", [])
+    if not _is_str_list(tools):
+        logger.warning("[room] furniture %r allowed_tools must be a list; skipped", name)
+        return None
     return Furniture(
         name=name,
         label=str(entry.get("label", name)),
         command=tuple(command),
         priorities={str(k): v for k, v in raw_prios.items()},
         default_priority=default,
-        allowed_tools=tuple(str(t) for t in tools),
+        allowed_tools=tuple(tools),
     )
 
 
 def load_room(path: Path | None = None) -> RoomConfig:
     """Read ``room.toml``. Tolerant by contract (same as the rhythm table): a
     missing or broken file means "no room", never an exception; one bad
-    furniture is dropped without silencing the rest."""
+    furniture is dropped without silencing the rest. Duplicate furniture
+    names keep the first — they would share dedupe and schedule state."""
     p = path or DEFAULT_ROOM_PATH
     if not p.exists():
         return RoomConfig()
@@ -131,18 +161,32 @@ def load_room(path: Path | None = None) -> RoomConfig:
     except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         logger.warning("[room] %s unreadable (%s); room disabled", p, exc)
         return RoomConfig()
-    head = raw.get("room") or {}
-    furniture = tuple(
-        f for i, e in enumerate(raw.get("furniture") or [])
-        if isinstance(e, dict) and (f := _parse_furniture(e, i)) is not None
-    )
+    head = raw.get("room", {})
+    entries = raw.get("furniture", [])
+    if not isinstance(head, dict) or not isinstance(entries, list):
+        logger.warning("[room] %s: [room] must be a table, [[furniture]] an array; room disabled", p)
+        return RoomConfig()
+    enabled = head.get("enabled", False)
+    if not isinstance(enabled, bool):
+        logger.warning("[room] %s: enabled must be true/false; room disabled", p)
+        return RoomConfig()
+
+    furniture: list[Furniture] = []
+    for i, e in enumerate(entries):
+        f = _parse_furniture(e, i) if isinstance(e, dict) else None
+        if f is None:
+            continue
+        if any(x.name == f.name for x in furniture):
+            logger.warning("[room] duplicate furniture %r; keeping the first", f.name)
+            continue
+        furniture.append(f)
     try:
         return RoomConfig(
-            enabled=bool(head.get("enabled", False)),
+            enabled=enabled,
             daily_budget=int(head.get("daily_budget", 6)),
             min_gap_minutes=int(head.get("min_gap_minutes", 45)),
             queue_ttl_hours=int(head.get("queue_ttl_hours", 12)),
-            furniture=furniture,
+            furniture=tuple(furniture),
         )
     except (TypeError, ValueError) as exc:
         logger.warning("[room] %s has a bad [room] value (%s); room disabled", p, exc)
@@ -189,7 +233,8 @@ def parse_furniture_output(
     if not isinstance(data, dict):
         return [], None
     signals: list[Signal] = []
-    for item in data.get("signals") or []:
+    items = data.get("signals")
+    for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
         sid, key = item.get("id"), item.get("key")
@@ -212,8 +257,9 @@ Runner = Callable[[Furniture, datetime], Awaitable[tuple[list[Signal], datetime 
 async def run_furniture(
     furniture: Furniture, now: datetime
 ) -> tuple[list[Signal], datetime | None]:
-    """Run one furniture command from the workspace root. Any failure — not
-    found, non-zero exit, timeout — yields no signals (logged)."""
+    """Run one furniture command from the daemon's cwd (the workspace, same
+    convention as ``rhythm.toml`` commands). Any failure — not found,
+    non-zero exit, timeout, oversized output — yields no signals (logged)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *furniture.command,
@@ -236,6 +282,12 @@ async def run_furniture(
             furniture.name, proc.returncode, err.decode(errors="replace")[-300:],
         )
         return [], None
+    if len(out) > MAX_OUTPUT_BYTES:
+        logger.warning(
+            "[room] %s printed %d bytes (limit %d); ignored",
+            furniture.name, len(out), MAX_OUTPUT_BYTES,
+        )
+        return [], None
     return parse_furniture_output(furniture, out.decode(errors="replace"))
 
 
@@ -251,7 +303,7 @@ def room_state_path() -> Path:
 class RoomState:
     date: str = ""
     activity: str | None = None
-    """Declared activity override; ``None`` ⇒ derived from active hours."""
+    """Declared activity override; ``None`` ⇒ ``free`` while awake."""
     wakes_today: int = 0
     last_wake_at: str | None = None
     queue: list[dict[str, Any]] = field(default_factory=list)
@@ -260,16 +312,37 @@ class RoomState:
 
     @classmethod
     def load(cls) -> "RoomState":
+        """Read ``room.json``. Each field is type-checked and falls back to
+        its default on its own, so one bad field (hand edit, a future writer)
+        never kills every tick."""
         p = room_state_path()
         if not p.exists():
             return cls()
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
-            known = {k: raw[k] for k in cls.__dataclass_fields__ if k in raw}
-            return cls(**known)
-        except (OSError, json.JSONDecodeError, TypeError) as exc:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.warning("[room] room.json unreadable (%s); starting fresh", exc)
             return cls()
+        if not isinstance(raw, dict):
+            return cls()
+
+        def opt_str(v: Any) -> str | None:
+            return v if isinstance(v, str) else None
+
+        wakes = raw.get("wakes_today")
+        queue, seen, nxt = raw.get("queue"), raw.get("seen"), raw.get("next_check")
+        return cls(
+            date=raw.get("date") if isinstance(raw.get("date"), str) else "",
+            activity=opt_str(raw.get("activity")),
+            wakes_today=wakes if isinstance(wakes, int) and not isinstance(wakes, bool) else 0,
+            last_wake_at=opt_str(raw.get("last_wake_at")),
+            queue=[q for q in queue if isinstance(q, dict)] if isinstance(queue, list) else [],
+            seen=[s for s in seen if isinstance(s, str)] if isinstance(seen, list) else [],
+            next_check=(
+                {k: v for k, v in nxt.items() if isinstance(v, str)}
+                if isinstance(nxt, dict) else {}
+            ),
+        )
 
     def save(self) -> None:
         p = room_state_path()
@@ -289,10 +362,26 @@ class RoomState:
 # Policy
 # ---------------------------------------------------------------------------
 
-def current_activity(state: RoomState, now: datetime, circadian: Any) -> str:
-    from loom.autonomy.circadian.lifecycle import is_in_active_hours
+def _awake(now: datetime, circadian: Any) -> bool:
+    local = now.astimezone(ZoneInfo(circadian.timezone))
+    if not is_in_active_hours(local, circadian):
+        return False
+    day = CircadianState.load()
+    if day is None or day.date != local.strftime("%Y-%m-%d"):
+        # No session today: a wake can't be delivered anyway and stays queued.
+        return True
+    if day.closed_at is not None:
+        return False
+    if any(a.name == "dawn" for a in load_rhythm()):
+        return any(
+            e.get("phase") == "dawn" and e.get("outcome") == "delivered"
+            for e in day.phase_log
+        )
+    return True
 
-    if not is_in_active_hours(now.astimezone(ZoneInfo(circadian.timezone)), circadian):
+
+def current_activity(state: RoomState, now: datetime, circadian: Any) -> str:
+    if not _awake(now, circadian):
         return "sleeping"
     if state.activity in ACTIVITIES and state.activity != "sleeping":
         return state.activity
@@ -308,7 +397,7 @@ def decide(
     normal  → wakes only in ``free``, within budget and min gap
     ambient → never wakes on its own
     """
-    if activity == "sleeping" or priority == "ambient":
+    if activity == "sleeping" or priority not in ("urgent", "normal"):
         return "queue"
     if priority == "urgent":
         return "wake"
@@ -329,15 +418,22 @@ def decide(
 def compose_intent(
     woken: list[dict[str, Any]], merged: list[dict[str, Any]], labels: dict[str, str]
 ) -> str:
-    """World description only: furniture text, verbatim, under its label."""
+    """World description only: furniture text, verbatim, under its label.
+    At most ``MAX_CHIME_LINES`` lines; the rest are counted (and logged)."""
 
     def line(s: dict[str, Any]) -> str:
-        label = labels.get(s["source"], s["source"])
-        return f"- {label}：{s.get('text') or s['id']}"
+        label = labels.get(s.get("source", ""), s.get("source", ""))
+        return f"- {label}：{s.get('text') or s.get('id', '')}"
 
-    parts = ["**房間**", *(line(s) for s in woken)]
-    if merged:
-        parts += ["", "**稍早（排隊中）**", *(line(s) for s in merged)]
+    shown_woken = woken[:MAX_CHIME_LINES]
+    shown_merged = merged[:max(0, MAX_CHIME_LINES - len(shown_woken))]
+    hidden = len(woken) + len(merged) - len(shown_woken) - len(shown_merged)
+
+    parts = ["**房間**", *(line(s) for s in shown_woken)]
+    if shown_merged:
+        parts += ["", "**稍早（排隊中）**", *(line(s) for s in shown_merged)]
+    if hidden:
+        parts += ["", f"（還有 {hidden} 則，見房間 log）"]
     parts += ["", "這是房間裡發生的事，不是任務；不回應也可以。"]
     return "\n".join(parts)
 
@@ -362,6 +458,8 @@ def _log(event: str, now: datetime, tz: str, **fields: Any) -> None:
 # Tick
 # ---------------------------------------------------------------------------
 
+# In-process only: the daemon is room.json's single writer today. A second
+# writer (the planned ``room`` tool, a CLI) must also take ``state_lock()``.
 _tick_lock: asyncio.Lock | None = None
 
 
@@ -372,6 +470,16 @@ def _get_lock() -> asyncio.Lock:
     return _tick_lock
 
 
+def _touch_seen(state: RoomState, key: str) -> bool:
+    """Record a sighting (LRU). Returns True when the key is new."""
+    if key in state.seen:
+        state.seen.remove(key)
+        state.seen.append(key)
+        return False
+    state.seen.append(key)
+    return True
+
+
 async def room_tick(
     daemon: Any,
     circadian: Any,
@@ -380,31 +488,43 @@ async def room_tick(
     config: RoomConfig | None = None,
     runner: Runner = run_furniture,
 ) -> None:
-    """One pass: peek due furniture, decide, deliver at most one chime."""
+    """One pass: re-decide the queue, peek due furniture, deliver at most
+    one chime, then emit each new signal for subscribers."""
     cfg = config if config is not None else load_room()
     if not cfg.enabled or not cfg.furniture:
         return
     tz = circadian.timezone
+    emits: list[dict[str, Any]] = []
     async with _get_lock():
         state = RoomState.load()
         today = now.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
         if state.date != today:
             state.date, state.wakes_today = today, 0
 
-        # Age out queued entries (logged, never silent).
+        # Age out queued entries (logged, never silent). No readable time ⇒
+        # no way to age it, so it goes now rather than never.
         cutoff = now - timedelta(hours=cfg.queue_ttl_hours)
         kept = []
         for q in state.queue:
             ts = _parse_dt(q.get("at"))
-            if ts is not None and ts < cutoff:
+            if ts is None or ts < cutoff:
                 _log("expired", now, tz, source=q.get("source"), id=q.get("id"), key=q.get("key"))
             else:
                 kept.append(q)
-        state.queue = kept
 
         activity = current_activity(state, now, circadian)
-        seen = set(state.seen)
+
+        # Everything still queued is decided again under today's conditions.
         woken: list[dict[str, Any]] = []
+        state.queue = []
+        for q in kept:
+            if decide(q.get("priority", "ambient"), activity, state, cfg, now) == "wake":
+                woken.append(q)
+            else:
+                state.queue.append(q)
+        if woken:
+            _log("redecide", now, tz, activity=activity, woken=[q.get("id") for q in woken])
+
         for f in cfg.furniture:
             due = _parse_dt(state.next_check.get(f.name))
             if due is not None and now < due:
@@ -416,17 +536,23 @@ async def room_tick(
                 _log("furniture_error", now, tz, source=f.name)
                 continue
             if nxt is not None and nxt > now:
+                nxt = min(nxt, now + NEXT_CHECK_MAX)
                 state.next_check[f.name] = nxt.isoformat()
             else:
                 state.next_check.pop(f.name, None)
+            dropped = len(signals) - MAX_SIGNALS_PER_PEEK
+            signals = signals[:MAX_SIGNALS_PER_PEEK]
+            _log("peek", now, tz, source=f.name, count=len(signals),
+                 dropped=max(0, dropped), next_check=state.next_check.get(f.name))
             for s in signals:
-                if s.dedupe_key in seen:
+                if not _touch_seen(state, s.dedupe_key):
                     continue
-                seen.add(s.dedupe_key)
-                state.seen.append(s.dedupe_key)
                 decision = decide(s.priority, activity, state, cfg, now)
                 _log("signal", now, tz, source=s.source, id=s.id, key=s.key,
                      priority=s.priority, activity=activity, decision=decision)
+                emits.append({"source": s.source, "id": s.id, "key": s.key,
+                              "priority": s.priority, "activity": activity,
+                              "decision": decision})
                 entry = {**asdict(s), "at": now.isoformat()}
                 (woken if decision == "wake" else state.queue).append(entry)
         state.seen = state.seen[-SEEN_CAP:]
@@ -434,7 +560,7 @@ async def room_tick(
         if woken:
             labels = {f.name: f.label for f in cfg.furniture}
             merged = list(state.queue)
-            sources = {s["source"] for s in woken} | {s["source"] for s in merged}
+            sources = {s.get("source") for s in woken} | {s.get("source") for s in merged}
             tools = tuple(dict.fromkeys(
                 t for f in cfg.furniture if f.name in sources for t in f.allowed_tools
             ))
@@ -455,15 +581,27 @@ async def room_tick(
                 logger.exception("[room] chime delivery raised")
                 delivered = False
             _log("wake", now, tz, delivered=delivered,
-                 woken=[s["id"] for s in woken], merged=[s["id"] for s in merged])
+                 woken=[s.get("id") for s in woken], merged=[s.get("id") for s in merged])
             if delivered:
-                state.wakes_today += 1
+                # Urgent wakes don't spend the normal budget, but they do
+                # reset the gap: a normal right after one would be noise.
+                if any(s.get("priority") != "urgent" for s in woken):
+                    state.wakes_today += 1
                 state.last_wake_at = now.isoformat()
                 state.queue = []
             else:
-                state.queue.extend(woken)
+                state.queue = woken + state.queue
 
         state.save()
+
+    # Outside the lock, like lifecycle's _emit: a subscriber's run can't
+    # stall the room.
+    emit = getattr(getattr(daemon, "evaluator", None), "emit", None)
+    for ctx in emits if emit is not None else []:
+        try:
+            await emit(SIGNAL_EVENT, ctx)
+        except Exception:  # noqa: BLE001 — a bad subscriber must not break the room
+            logger.exception("[room] emit %s failed", SIGNAL_EVENT)
 
 
 # ---------------------------------------------------------------------------

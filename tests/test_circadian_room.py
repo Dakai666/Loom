@@ -80,6 +80,11 @@ class FakeDaemon:
     def register_direct_handler(self, name, fn):
         self.handlers[name] = fn
 
+    emitted: list
+
+    async def emit(self, name, ctx):
+        self.__dict__.setdefault("emitted", []).append((name, dict(ctx)))
+
 
 MIJI = Furniture(
     name="miji",
@@ -220,19 +225,58 @@ class TestTick:
         await room_tick(d2, CIRC, at(13), config=cfg(), runner=runner_returning(same))
         assert d2.chimes == []
 
-    async def test_sleeping_signal_queues_then_rides_next_wake(self):
+    async def test_sleeping_signal_queues_then_wakes_once_awake(self):
+        """A queued signal is re-decided every tick — it doesn't need another
+        signal to carry it (review P0: queue must not mean 'demoted')."""
         d = FakeDaemon()
         run = runner_returning(
             {"signals": [sig("thunder", "2026-09-23:late_night", "床底傳來抗議聲。")]},
-            {"signals": [sig("seeking", "2026-09-23:afternoon", "她跟著你走。")]},
         )
         await room_tick(d, CIRC, at(2), config=cfg(), runner=run)
         assert d.chimes == []
-        await room_tick(d, CIRC, at(12), config=cfg(), runner=run)
+        await room_tick(d, CIRC, at(8, 5), config=cfg(), runner=run)
         assert len(d.chimes) == 1
-        intent = d.chimes[0].intent
-        assert "她跟著你走。" in intent and "床底傳來抗議聲。" in intent
+        assert "床底傳來抗議聲。" in d.chimes[0].intent
         assert RoomState.load().queue == []
+
+    async def test_queued_urgent_is_not_lost_while_reemitted(self):
+        """feel_sick re-emitted with the same key through the night must wake
+        as soon as she's awake, not sit until TTL (review P0 repro)."""
+        d = FakeDaemon()
+        same = {"signals": [sig("feel_sick", "2026-09-23:dawn", "走路的樣子不對。")]}
+        run = runner_returning(same, same, same)
+        await room_tick(d, CIRC, at(5), config=cfg(), runner=run)
+        await room_tick(d, CIRC, at(7), config=cfg(), runner=run)
+        assert d.chimes == []
+        await room_tick(d, CIRC, at(8), config=cfg(), runner=run)
+        assert len(d.chimes) == 1
+
+    async def test_undelivered_wake_is_retried(self):
+        d = FakeDaemon(accept=False)
+        run = runner_returning({"signals": [sig("feel_sick", "2026-09-23:morning")]})
+        await room_tick(d, CIRC, at(10), config=cfg(), runner=run)
+        d.accept = True
+        await room_tick(d, CIRC, at(10, 5), config=cfg(), runner=run)
+        assert len(d.chimes) == 2
+        assert RoomState.load().queue == []
+
+    async def test_gap_deferred_normal_wakes_after_gap(self):
+        RoomState(date="2026-09-23", last_wake_at=at(11, 50).isoformat()).save()
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("seeking", "2026-09-23:afternoon")]})
+        await room_tick(d, CIRC, at(12), config=cfg(min_gap_minutes=45), runner=run)
+        assert d.chimes == []
+        await room_tick(d, CIRC, at(12, 40), config=cfg(min_gap_minutes=45), runner=run)
+        assert len(d.chimes) == 1
+
+    async def test_queued_ambient_never_wakes_by_itself(self):
+        amb = Furniture(name="window", label="窗戶", command=("true",),
+                        priorities={}, default_priority="ambient")
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("dusk", "2026-09-23")]})
+        for hh in (18, 19, 20):
+            await room_tick(d, CIRC, at(hh), config=cfg(furniture=(amb,)), runner=run)
+        assert d.chimes == []
 
     async def test_ambient_waits_in_queue(self):
         d = FakeDaemon()
@@ -411,3 +455,195 @@ class TestSetupWiring:
         assert c.enabled
         assert c.furniture[0].priority_for("feel_sick") == "urgent"
         assert c.furniture[0].priority_for("seeking") == "normal"
+
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (subagent + opencode on PR #591)
+# ---------------------------------------------------------------------------
+
+def _circ_state(phases: list[tuple[str, str]], closed: bool = False):
+    from loom.autonomy.circadian.state import CircadianState
+    s = CircadianState(date="2026-09-23", thread_id=1, session_id="s", channel_id=1,
+                       started_at=at(8).isoformat(), timezone=TZ,
+                       closed_at=at(23).isoformat() if closed else None)
+    for phase, outcome in phases:
+        s.append_phase(phase, outcome)
+    s.save_atomic()
+
+
+def _rhythm_with_dawn():
+    p = Path("autonomy/circadian/rhythm.toml")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('[[anchors]]\ntime = "09:00"\nname = "dawn"\nmeaning = "醒來"\n')
+
+
+class TestAwake:
+    async def test_not_awake_before_dawn_phase_delivered(self):
+        """Thread opens at 08:00 but she wakes at the dawn anchor; the room
+        must not speak first."""
+        _rhythm_with_dawn()
+        _circ_state([("dawn", "spawned")])
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("feel_sick", "2026-09-23:morning")]})
+        await room_tick(d, CIRC, at(8, 30), config=cfg(), runner=run)
+        assert d.chimes == []
+        _circ_state([("dawn", "spawned"), ("dawn", "delivered")])
+        await room_tick(d, CIRC, at(9, 5), config=cfg(), runner=run)
+        assert len(d.chimes) == 1
+
+    async def test_closed_session_counts_as_sleeping(self):
+        _circ_state([("dawn", "delivered")], closed=True)
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("feel_sick", "2026-09-23:night")]})
+        await room_tick(d, CIRC, at(23, 30), config=cfg(), runner=run)
+        assert d.chimes == []
+
+
+class TestBudget:
+    async def test_urgent_does_not_spend_normal_budget(self):
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("feel_sick", "2026-09-23:afternoon")]})
+        await room_tick(d, CIRC, at(12), config=cfg(), runner=run)
+        assert len(d.chimes) == 1
+        assert RoomState.load().wakes_today == 0
+
+
+class TestEmit:
+    async def test_every_new_signal_is_emitted(self):
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("seeking", "2026-09-23:afternoon")]})
+        await room_tick(d, CIRC, at(12), config=cfg(), runner=run)
+        assert [n for n, _ in d.emitted] == ["circadian:room_signal"]
+        ctx = d.emitted[0][1]
+        assert ctx["source"] == "miji" and ctx["id"] == "seeking"
+        assert ctx["decision"] == "wake"
+
+
+class TestBounds:
+    async def test_signals_per_peek_are_capped(self):
+        d = FakeDaemon()
+        many = {"signals": [sig(f"s{i}", "k") for i in range(200)]}
+        await room_tick(d, CIRC, at(12), config=cfg(), runner=runner_returning(many))
+        total = len(RoomState.load().queue) + d.chimes[0].intent.count("\n- ")
+        assert total <= room.MAX_SIGNALS_PER_PEEK
+
+    async def test_chime_lines_are_capped(self):
+        RoomState(date="2026-09-23", queue=[
+            {"source": "miji", "id": f"q{i}", "key": "k", "text": f"舊{i}",
+             "priority": "ambient", "at": at(11).isoformat()} for i in range(50)
+        ]).save()
+        d = FakeDaemon()
+        run = runner_returning({"signals": [sig("seeking", "2026-09-23:afternoon")]})
+        await room_tick(d, CIRC, at(12), config=cfg(), runner=run)
+        intent = d.chimes[0].intent
+        assert intent.count("\n- ") <= room.MAX_CHIME_LINES + 1
+        assert "還有" in intent
+
+    async def test_far_future_next_signal_at_is_clamped(self):
+        calls = []
+
+        async def run(furniture, now):
+            calls.append(now)
+            return [], datetime(2999, 1, 1, tzinfo=timezone.utc)
+
+        d = FakeDaemon()
+        await room_tick(d, CIRC, at(12), config=cfg(), runner=run)
+        later = at(12) + room.NEXT_CHECK_MAX + timedelta(minutes=5)
+        await room_tick(d, CIRC, later, config=cfg(), runner=run)
+        assert len(calls) == 2
+
+    async def test_peek_is_logged_even_without_signals(self):
+        async def run(furniture, now):
+            return [], None
+
+        await room_tick(FakeDaemon(), CIRC, at(12), config=cfg(), runner=run)
+        lines = [json.loads(l) for l in next(st._log_dir().glob("room-*.jsonl")).read_text().splitlines()]
+        assert any(l["event"] == "peek" and l["count"] == 0 for l in lines)
+
+    async def test_oversized_output_yields_nothing(self, tmp_path):
+        import sys
+        script = tmp_path / "big.py"
+        script.write_text(
+            "import json; print(json.dumps({'signals': "
+            "[{'id': 's', 'key': 'k', 'text': 'x' * (1024 * 1024)}]}))"
+        )
+        f = Furniture(name="big", label="big", command=(sys.executable, str(script)),
+                      priorities={}, default_priority="normal")
+        assert await room.run_furniture(f, at(12)) == ([], None)
+
+    async def test_unparseable_queue_time_expires(self):
+        RoomState(date="2026-09-23", queue=[
+            {"source": "miji", "id": "x", "key": "k", "text": "壞時間", "priority": "normal", "at": "??"}
+        ]).save()
+        run = runner_returning({"signals": []})
+        await room_tick(FakeDaemon(), CIRC, at(12), config=cfg(), runner=run)
+        assert RoomState.load().queue == []
+
+
+class TestSeen:
+    async def test_reseen_key_is_kept_fresh(self, monkeypatch):
+        monkeypatch.setattr(room, "SEEN_CAP", 3)
+        d = FakeDaemon()
+        amb = Furniture(name="m", label="m", command=("true",), priorities={},
+                        default_priority="ambient")
+        c = cfg(furniture=(amb,), queue_ttl_hours=1000)
+        long_lived = sig("need", "live")
+        batches = [{"signals": [long_lived, sig(f"n{i}", "k")]} for i in range(6)]
+        run = runner_returning(*batches)
+        for i in range(6):
+            await room_tick(d, CIRC, at(12, i * 5), config=c, runner=run)
+        ids = [q["id"] for q in RoomState.load().queue]
+        assert ids.count("need") == 1
+
+
+class TestTolerance:
+    def test_wrong_typed_state_file_falls_back_per_field(self):
+        p = room.room_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"date": "2026-09-23", "queue": "notalist",
+                                 "seen": None, "next_check": [], "wakes_today": "x"}))
+        s = RoomState.load()
+        assert s.date == "2026-09-23"
+        assert s.queue == [] and s.seen == [] and s.next_check == {} and s.wakes_today == 0
+
+    @pytest.mark.parametrize("body", [
+        "room = 5\n",
+        "furniture = 3\n[room]\nenabled = true\n",
+        '[room]\nenabled = "false"\n[[furniture]]\nname = "m"\ncommand = ["x"]\n',
+    ])
+    def test_bad_shapes_disable_instead_of_raising(self, tmp_path, body):
+        p = tmp_path / "room.toml"
+        p.write_text(body)
+        assert load_room(p).enabled is False
+
+    def test_string_allowed_tools_drops_furniture(self, tmp_path):
+        p = tmp_path / "room.toml"
+        p.write_text('[room]\nenabled = true\n[[furniture]]\nname = "m"\n'
+                     'command = ["x"]\nallowed_tools = "run_bash"\n')
+        assert load_room(p).furniture == ()
+
+    def test_duplicate_furniture_name_keeps_first(self, tmp_path):
+        p = tmp_path / "room.toml"
+        p.write_text('[room]\nenabled = true\n'
+                     '[[furniture]]\nname = "m"\ncommand = ["a"]\n'
+                     '[[furniture]]\nname = "m"\ncommand = ["b"]\n')
+        assert [f.command for f in load_room(p).furniture] == [("a",)]
+
+    async def test_setup_survives_broken_room(self, monkeypatch):
+        from loom.autonomy.circadian import lifecycle
+
+        def boom(*a, **k):
+            raise RuntimeError("room exploded")
+
+        called = []
+
+        async def recover(*a, **k):
+            called.append("recover")
+
+        monkeypatch.setattr(room, "register_room", boom)
+        monkeypatch.setattr(lifecycle, "recover_on_startup", recover)
+        monkeypatch.setattr(lifecycle, "is_in_active_hours", lambda *a: False)
+        monkeypatch.setattr(lifecycle, "register_triggers", lambda *a: None)
+        await lifecycle.setup_circadian(FakeDaemon(), object(), CIRC)
+        assert called == ["recover"]

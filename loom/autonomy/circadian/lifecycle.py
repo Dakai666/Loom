@@ -861,9 +861,13 @@ async def setup_circadian(
     anchors = load_rhythm()
     register_rhythm_anchors(daemon, config, anchors)
     # The room (furniture-driven wakes) is optional: no room.toml ⇒ no tick.
-    # Imported here because room.py reads is_in_active_hours from this module.
-    from loom.autonomy.circadian.room import register_room
-    register_room(daemon, config)
+    # Imported here because room.py imports this module at load time. A
+    # broken room must never cost the day its recovery / catch-up spawn.
+    from loom.autonomy.circadian import room
+    try:
+        room.register_room(daemon, config)
+    except Exception:  # noqa: BLE001
+        logger.exception("[circadian] room registration failed; continuing without it")
     await recover_on_startup(platform, config, evaluator=daemon.evaluator)
     if is_in_active_hours(datetime.now(ZoneInfo(config.timezone)), config):
         logger.info("[circadian] startup is within active hours — ensuring today's session")

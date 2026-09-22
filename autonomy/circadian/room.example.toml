@@ -17,9 +17,12 @@
 #
 # Wake matrix (spec §5.1):
 #   urgent  → wakes in every waking activity, ignores budget / gap
+#             (and doesn't spend the budget)
 #   normal  → wakes only when free, within budget and min gap
 #   ambient → never wakes alone; rides along with the next wake
-# Anything that doesn't wake is queued; nothing is dropped silently.
+# Anything that doesn't wake is queued and re-decided every tick, so it goes
+# out as soon as it may (e.g. once she's awake after dawn). Nothing is
+# dropped silently.
 # Every decision is logged to ~/.loom/circadian/log/room-YYYY-MM-DD.jsonl.
 
 [room]
@@ -34,6 +37,9 @@ label = "喵吉"
 command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]
 default_priority = "normal"
 allowed_tools = ["run_bash"]   # so a wake can be answered with pet.py
+# ⚠️ allowed_tools are pre-authorized for the whole chime turn, and signal
+# text reaches that turn verbatim. Fine for local furniture like 喵吉; for
+# furniture that relays outside text (weather, calendar, web) leave it empty.
 
 [furniture.priorities]
 feel_sick = "urgent"
