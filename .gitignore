@@ -123,6 +123,8 @@ loom.toml.bak
 autonomy/schedules.toml
 # Per-agent rhythm table (issue #460) — copy from rhythm.example.toml
 autonomy/circadian/rhythm.toml
+# Per-agent room / furniture (circadian room) — copy from room.example.toml
+autonomy/circadian/room.toml
 # Per-agent daily weave plan (issue #461) — copy from daily_weave.example.md
 autonomy/circadian/daily_weave.md
 # Weave revision proposals (issue #462) — per-day TOML audit artifacts

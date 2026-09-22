@@ -1,0 +1,39 @@
+# Circadian Room — furniture that can wake the agent.
+# Copy to autonomy/circadian/room.toml (gitignored, per-agent).
+#
+# The clock still owns the day's bookends and the rhythm anchors
+# (rhythm.toml). The room adds wakes that come from the world: each
+# [[furniture]] is a command the daemon runs every few minutes (or at the
+# time the furniture last said it would next have something to say).
+#
+# Furniture contract — the command prints one JSON object on stdout:
+#   {"signals": [{"id": "seeking", "key": "2026-09-23:afternoon",
+#                 "text": "她用頭撞你的手，一次不夠，再一次。"}],
+#    "next_signal_at": "2026-09-23T09:00:00+00:00"}   # optional, ISO time
+# - id    what kind of signal (used for priority below)
+# - key   which occurrence; (furniture, id, key) wakes at most once, ever
+# - text  a description of the world, passed to the chime verbatim
+# The command must NOT change the furniture's own state (read-only peek).
+#
+# Wake matrix (spec §5.1):
+#   urgent  → wakes in every waking activity, ignores budget / gap
+#   normal  → wakes only when free, within budget and min gap
+#   ambient → never wakes alone; rides along with the next wake
+# Anything that doesn't wake is queued; nothing is dropped silently.
+# Every decision is logged to ~/.loom/circadian/log/room-YYYY-MM-DD.jsonl.
+
+[room]
+enabled = true
+daily_budget = 6          # normal wakes per day (dawn / closure not counted)
+min_gap_minutes = 45      # between two normal wakes
+queue_ttl_hours = 12      # queued signals older than this expire (logged)
+
+[[furniture]]
+name = "miji"
+label = "喵吉"
+command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]
+default_priority = "normal"
+allowed_tools = ["run_bash"]   # so a wake can be answered with pet.py
+
+[furniture.priorities]
+feel_sick = "urgent"
