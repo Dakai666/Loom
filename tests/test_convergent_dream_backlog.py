@@ -196,7 +196,7 @@ class TestRunDrainsBacklog:
         # Pass 1: cluster proposed, 絲絲 skips it.
         async def fn1(messages):
             if "差異盤點" in messages[0]["content"]:
-                return '{"unique_by_key":{"m1":"","m2":"more"},"mergeable":true,"rationale":"r"}'
+                return '{"unique_by_key":{"m1":"","m2":"more"},"relation":"duplicate","rationale":"r"}'
             # echo whatever cluster_id is in the prompt
             import re
             cid = re.search(r'cluster_id="([^"]+)"', messages[-1]["content"]).group(1)
@@ -212,7 +212,7 @@ class TestRunDrainsBacklog:
 
     async def test_diff_inventory_tool_error_not_suppressed(self, semantic_emb, db_conn):
         # A diff-inventory tool failure (unparseable after retries) is not a
-        # judgment — it must retry, not be buried. (A *clean* mergeable=false
+        # judgment — it must retry, not be buried. (A *clean* distinct/conflict
         # verdict IS a judgment and is suppressed — see
         # test_convergent_dream_gate_status, #587.)
         await self._seed_pair(semantic_emb)
@@ -229,7 +229,7 @@ class TestRunDrainsBacklog:
 
         async def fn(messages):
             if "差異盤點" in messages[0]["content"]:
-                return '{"unique_by_key":{"m1":"","m2":"more"},"mergeable":true,"rationale":"r"}'
+                return '{"unique_by_key":{"m1":"","m2":"more"},"relation":"duplicate","rationale":"r"}'
             import re
             cid = re.search(r'cluster_id="([^"]+)"', messages[-1]["content"]).group(1)
             return '[{"cluster_id":"%s","verdict":"defer","reason":"fermenting"}]' % cid
@@ -245,7 +245,7 @@ class TestRunDrainsBacklog:
 
         async def fn(messages):
             if "差異盤點" in messages[0]["content"]:
-                return '{"unique_by_key":{"m1":"","m2":"more"},"mergeable":true,"rationale":"r"}'
+                return '{"unique_by_key":{"m1":"","m2":"more"},"relation":"duplicate","rationale":"r"}'
             import re
             cid = re.search(r'cluster_id="([^"]+)"', messages[-1]["content"]).group(1)
             return '[{"cluster_id":"%s","verdict":"skip","reason":"unique"}]' % cid

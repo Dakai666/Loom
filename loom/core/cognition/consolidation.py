@@ -70,6 +70,17 @@ VERDICT_DEFER = "defer"
 DIFF_OK = "ok"          # trustworthy verdict (mergeable true OR a real false)
 DIFF_ERROR = "error"    # gate could not produce a verdict (retries exhausted)
 
+# How a merge cluster's members relate (#587). Replaces the old binary
+# "≥2 members carry unique content → not mergeable" rule, which vetoed facets
+# of one claim (union should be kept) and lumped them with members that
+# actually disagree (union would weld a contradiction into one fact).
+REL_DUPLICATE = "duplicate"   # same claim, nothing lost by fusing
+REL_EXTENDS = "extends"       # same claim, members add compatible details → union
+REL_DISTINCT = "distinct"     # different claims that merely look alike → keep apart
+REL_CONFLICT = "conflict"     # members disagree → needs arbitration, not fusion
+_RELATIONS = {REL_DUPLICATE, REL_EXTENDS, REL_DISTINCT, REL_CONFLICT}
+_MERGEABLE_RELATIONS = {REL_DUPLICATE, REL_EXTENDS}
+
 
 # ---------------------------------------------------------------------------
 # Data structures (spec §5.1 ConsolidationPlan)
@@ -80,16 +91,21 @@ class DiffInventory:
     """Result of the LLM "差異盤點" gate for a merge cluster (spec §6.4).
 
     ``unique_by_key`` maps each member key → what that member says that no
-    other member does. ``mergeable`` is False when ≥2 members carry unique
-    content (they are distinct insights that merely look alike).
+    other member does. ``relation`` is the gate's verdict on how the members
+    relate (``REL_*``); ``mergeable`` is derived from it.
 
     ``status`` separates *fault* from *judgment* (#587): ``DIFF_ERROR`` means
-    the gate failed (``mergeable`` is then a fail-safe False, not an answer).
+    the gate failed — no verdict, never mergeable. The default relation is
+    ``distinct`` so an unset inventory fails safe.
     """
     unique_by_key: dict[str, str] = field(default_factory=dict)
-    mergeable: bool = False
+    relation: str = REL_DISTINCT
     rationale: str = ""
     status: str = DIFF_OK
+
+    @property
+    def mergeable(self) -> bool:
+        return self.status == DIFF_OK and self.relation in _MERGEABLE_RELATIONS
 
 
 @dataclass
@@ -267,7 +283,10 @@ def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
 # carries each member's ``updated_at``, so any edit to a member yields a new
 # signature and the cluster is automatically re-admitted for review.
 
-_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips"
+# Versioned (#587): skips recorded under the old binary gate vetoed clusters
+# the four-way gate would merge — bumping the key lets every cluster be judged
+# once more under the current rules instead of staying buried for 90 days.
+_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips.v2"
 _SUPPRESS_RETENTION_DAYS = 90.0   # aligns with the memory half-life
 
 
@@ -549,22 +568,34 @@ You are Loom's memory consolidation reviewer running a "差異盤點" (differenc
 inventory) on a cluster of semantically-similar facts that are candidates for
 merging into one.
 
-Your job is NOT to decide whether they should merge. Your job is to surface,
-for EACH fact, what it says that the OTHERS do not. Two facts may have high
-embedding similarity yet be distinct insights (e.g. "user prefers concise
-replies" is a preference; "user dislikes verbosity" is a complaint — they
-overlap in words but are not the same fact).
+Step 1 — for EACH fact, surface what it says that the OTHERS do not ("" if
+nothing). Two facts may have high embedding similarity yet be distinct
+insights (e.g. "user prefers concise replies" is a preference; "user dislikes
+verbosity" is a complaint — they overlap in words but are not the same fact).
 
-Rule for mergeability:
-  - If TWO OR MORE facts each carry content the others lack → NOT mergeable
-    (they are distinct insights that merely look alike — keep them separate).
-  - If only ONE fact carries unique content (the others are subsumed) →
-    mergeable.
+Step 2 — classify how the facts relate, as exactly one "relation":
+  - "duplicate" : they make the same claim; any unique content is trivial
+                  wording, so fusing loses nothing.
+  - "extends"   : they make the same core claim, and some facts add details
+                  the others lack that are COMPATIBLE with each other (facets,
+                  reasons, examples, scope). Fusing keeps the core claim plus
+                  every detail — having unique details is NOT a reason to
+                  keep them apart.
+  - "distinct"  : they are different claims that merely look alike — different
+                  subjects, different insights, or dated snapshots of a
+                  changing value (different counts / dates / run results are a
+                  history, not facets of one claim).
+  - "conflict"  : they are about the same thing but DISAGREE — inconsistent
+                  values, paths, orderings, or one corrects/overturns another.
+                  Fusing would weld the contradiction into one fact.
+
+When unsure between "extends" and "conflict", choose "conflict". When unsure
+between "extends" and "distinct", choose "distinct".
 
 Return ONLY a JSON object with exactly these keys:
   "unique_by_key" : object mapping each fact's key → a short string describing
                     what that fact uniquely contributes ("" if nothing unique)
-  "mergeable"     : boolean
+  "relation"      : "duplicate" | "extends" | "distinct" | "conflict"
   "rationale"     : one sentence explaining the verdict
 
 Return ONLY the JSON object — no preamble, no markdown fences.
@@ -577,11 +608,11 @@ async def diff_inventory(
     """Run the LLM difference-inventory gate on a merge cluster (spec §6.4).
 
     The gate is a hard fail-safe (#493): untrustworthy output never marks a
-    cluster mergeable. A single retry (``max_attempts=2``) absorbs *transient*
+    cluster mergeable (a tool failure returns ``status=DIFF_ERROR``, #587). A single retry (``max_attempts=2``) absorbs *transient*
     LLM format jitter — an exception, an unparseable body, a malformed
     ``unique_by_key`` shape, or a key set that fails to cover the cluster — so a
     large near-duplicate cluster isn't permanently stuck on one bad response
-    (#554). A clean verdict (mergeable true OR a real "both unique" false) is a
+    (#554). A clean verdict (any recognised ``relation``) is a
     trustworthy answer and is returned on the first attempt — never retried.
     Two bad attempts still fail safe.
     """
@@ -600,7 +631,6 @@ async def diff_inventory(
     suffix = f" (members={len(cluster.members)}, attempts={attempts})"
     return DiffInventory(
         unique_by_key=last.unique_by_key,
-        mergeable=False,
         rationale=last.rationale + suffix,
         status=DIFF_ERROR,
     )
@@ -612,8 +642,8 @@ async def _diff_inventory_attempt(
     """One diff-inventory call. Returns ``(result, retryable)``.
 
     ``retryable`` is True only for untrustworthy output (exception / unparseable
-    / malformed shape / coverage miss) — a clean parsed verdict is never
-    retryable, even when it is mergeable=False.
+    / malformed shape / unknown relation / coverage miss) — a clean parsed
+    verdict is never retryable, whatever its relation.
     """
     facts_block = "\n".join(
         f'- key="{m.key}"  source="{m.source}"  value="{m.value}"'
@@ -628,36 +658,39 @@ async def _diff_inventory_attempt(
     except Exception as exc:
         logger.warning("[convergent-dream] diff_inventory LLM failed: %s", exc)
         # Fail safe: if we cannot inventory differences, do NOT mark mergeable.
-        return DiffInventory(mergeable=False, rationale=f"diff-inventory unavailable: {exc}"), True
+        return DiffInventory(rationale=f"diff-inventory unavailable: {exc}"), True
 
     data = _parse_json_object(raw)
     if data is None:
-        return DiffInventory(mergeable=False, rationale="diff-inventory output unparseable"), True
+        return DiffInventory(rationale="diff-inventory output unparseable"), True
 
     # unique_by_key must be an object; a list/string/None would crash .items()
     # — fail safe rather than raise (Codex re-review #493).
     raw_ubk = data.get("unique_by_key")
     if not isinstance(raw_ubk, dict):
         return DiffInventory(
-            mergeable=False,
             rationale="diff-inventory unique_by_key was not an object — failing safe",
         ), True
     unique_by_key = {str(k): str(v) for k, v in raw_ubk.items()}
-    # Only an explicit JSON boolean true counts. bool("false") is True, so a
-    # stringified verdict must NOT slip through — anything other than real
-    # `true` fails safe to not-mergeable (Codex re-review #493).
-    mergeable = data.get("mergeable") is True
+    # Only a recognised relation string counts — anything else (missing, a
+    # legacy "mergeable" bool, a typo) is untrustworthy output (#587).
+    raw_rel = data.get("relation")
+    relation = raw_rel.strip().lower() if isinstance(raw_rel, str) else ""
     rationale = str(data.get("rationale", ""))
+    if relation not in _RELATIONS:
+        return DiffInventory(
+            unique_by_key=unique_by_key,
+            rationale=f"diff-inventory relation {raw_rel!r} not recognised — failing safe",
+        ), True
 
     # Fail safe when the inventory shape does not match the cluster (Codex
     # review #493): a response that omits a member — or invents a key that
     # isn't in the cluster — cannot be trusted to claim mergeable. The gate
-    # must COVER exactly the cluster members before we honour mergeable=True.
+    # must COVER exactly the cluster members before we honour its relation.
     expected = set(cluster.member_keys)
     if expected and set(unique_by_key) != expected:
         return DiffInventory(
             unique_by_key=unique_by_key,
-            mergeable=False,
             rationale=(
                 f"diff-inventory keys {sorted(unique_by_key)} did not cover "
                 f"cluster members {sorted(expected)} — failing safe"
@@ -665,7 +698,7 @@ async def _diff_inventory_attempt(
         ), True
 
     # Clean, covered verdict — a trustworthy answer, mergeable or not. Done.
-    return DiffInventory(unique_by_key=unique_by_key, mergeable=mergeable, rationale=rationale), False
+    return DiffInventory(unique_by_key=unique_by_key, relation=relation, rationale=rationale), False
 
 
 # ---------------------------------------------------------------------------
@@ -686,9 +719,15 @@ For each proposed cluster, return one of:
 Be conservative — prefer skip/defer — when a cluster:
   - touches a user_explicit fact (the user told this to you directly),
   - would flatten wording that itself carries the insight (not a droppable detail),
-  - involves two facts that each have unique content (per the diff inventory),
+  - looks mislabelled by the diff inventory — e.g. marked "extends" but the
+    details actually disagree, or are really separate claims,
   - or feels like it is still "fermenting" (a recent fact whose deeper
     connections have not surfaced yet).
+
+A cluster with relation=extends will be fused as the core claim PLUS every
+member's unique detail as a separate bullet (tagged with date and source), and
+all originals are preserved verbatim. Members carrying unique details is
+therefore NOT by itself a reason to veto an extends cluster.
 
 Return ONLY a JSON array; one object per cluster, each with:
   "cluster_id" : string (echo the id you were given)
@@ -710,7 +749,7 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
     if cluster.diff is not None:
         lines.append(
             f"  diff_inventory: status={cluster.diff.status} "
-            f"mergeable={cluster.diff.mergeable} — {cluster.diff.rationale}"
+            f"relation={cluster.diff.relation} — {cluster.diff.rationale}"
         )
         for k, v in cluster.diff.unique_by_key.items():
             if v:
@@ -786,7 +825,7 @@ async def self_review(
 ) -> list[ReviewDecision]:
     """絲絲 reviews each cluster offline and returns hard-boundary verdicts.
 
-    Clusters whose diff-inventory already says ``mergeable=False`` are auto-
+    Clusters whose diff-inventory relation is ``distinct`` / ``conflict`` are auto-
     skipped without consulting the LLM (the gate already vetoed them, spec §6.4)
     and do NOT consume the review budget. A gate *tool error* (``DIFF_ERROR``)
     is deferred instead — no verdict was produced, so none is recorded (#587).
@@ -829,7 +868,7 @@ async def self_review(
             decisions.append(ReviewDecision(
                 cluster_id=cluster.cluster_id,
                 verdict=VERDICT_SKIP,
-                reason=f"diff-inventory: not mergeable — {cluster.diff.rationale}",
+                reason=f"diff-inventory: {cluster.diff.relation} — {cluster.diff.rationale}",
             ))
         else:
             review_clusters.append(cluster)
@@ -888,6 +927,12 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
     )
     if tool_errors:
         out.append(f"- ⚠️ {tool_errors} 個簇差異盤點工具故障（非判斷），下輪重試")
+    conflicts = sum(
+        1 for c in plan.clusters
+        if c.diff is not None and c.diff.status == DIFF_OK and c.diff.relation == REL_CONFLICT
+    )
+    if conflicts:
+        out.append(f"- 🔀 {conflicts} 個簇成員互相矛盾，需仲裁（未合併）")
 
     def _section(title: str, kind: str) -> None:
         clusters = [c for c in plan.clusters if c.kind == kind]
@@ -904,7 +949,7 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
             if d and d.reason:
                 out.append(f"  - 理由：{d.reason}")
             if c.diff is not None and c.diff.rationale:
-                out.append(f"  - 差異盤點：{c.diff.rationale}")
+                out.append(f"  - 差異盤點（{c.diff.relation}）：{c.diff.rationale}")
 
     _section("Merge 記錄", KIND_MERGE)
     _section("Reconcile 記錄", KIND_RECONCILE)
@@ -1031,11 +1076,16 @@ Rules:
   - Anchor on the SURVIVOR's wording and stance. Lower-trust facts may only
     ADD detail the survivor lacks — they must not override it.
   - Do not invent anything not present in the cluster.
-  - Keep it one tight fact, not a summary of "these facts say...".
+  - Keep "refined_value" one tight core claim, not a summary of "these facts say...".
+  - If a DETAILS INVENTORY is given, every non-survivor fact listed there has
+    a detail the core does not carry. Return each one as an item in
+    "details" — never drop one, never merge two facts' details into one item.
 
-Return ONLY a JSON object with exactly these keys:
-  "refined_value" : the single fused fact (string)
+Return ONLY a JSON object with these keys:
+  "refined_value" : the single fused core claim (string)
   "rationale"     : one sentence on why they are the same fact (string)
+  "details"       : list of {"from_key": <fact key>, "detail": <that fact's
+                    unique detail, one short clause>} — [] when no inventory
 
 Return ONLY the JSON object — no preamble, no markdown fences.
 """
@@ -1054,6 +1104,12 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
     full originals are preserved regardless of what the LLM returns (spec §5.4
     + 絲絲's no-flatten requirement). The LLM only writes the refined value.
 
+    For an ``extends`` cluster (#587) the fused value is the core claim plus
+    one bullet per non-survivor member's unique detail. The bullets' date and
+    source tier are stamped in code from the member entry, and synthesis is
+    rejected if any member with a unique detail is left without a bullet — a
+    lossy union is never written.
+
     Returns None when the cluster is malformed or the LLM cannot synthesize a
     non-empty refined value (caller skips — never a silent bad merge).
     """
@@ -1071,9 +1127,22 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
         tier, _ = classify_source(e.source)
         marker = " ← SURVIVOR (anchor)" if e.key == survivor.key else ""
         fact_lines.append(f'- key="{e.key}"  trust={tier}{marker}\n  value="{e.value}"')
+    # Members whose unique detail must survive as a bullet (extends only).
+    # The survivor's own unique content is carried by the anchored core.
+    required: dict[str, str] = {}
+    if cluster.diff is not None and cluster.diff.relation == REL_EXTENDS:
+        required = {
+            k: v.strip() for k, v in cluster.diff.unique_by_key.items()
+            if v.strip() and k != survivor.key
+        }
+    user = "Cluster:\n" + "\n".join(fact_lines)
+    if required:
+        user += "\n\nDETAILS INVENTORY (each must appear in \"details\"):\n" + "\n".join(
+            f'- from_key="{k}": {v}' for k, v in required.items()
+        )
     messages = [
         {"role": "system", "content": _SYNTH_SYSTEM},
-        {"role": "user", "content": "Cluster:\n" + "\n".join(fact_lines) + "\n\nReturn the JSON now."},
+        {"role": "user", "content": user + "\n\nReturn the JSON now."},
     ]
 
     try:
@@ -1089,6 +1158,30 @@ async def synthesize_merge(cluster: CandidateCluster, llm_fn: LLMFn) -> MergeSyn
     if not refined:
         return None
     rationale = str(data.get("rationale", "")).strip() or "(no rationale provided)"
+
+    if required:
+        by_key = {e.key: e for e in members}
+        raw_details = data.get("details")
+        if not isinstance(raw_details, list):
+            return None
+        bullets: list[str] = []
+        covered: set[str] = set()
+        for item in raw_details:
+            if not isinstance(item, dict):
+                return None
+            key = str(item.get("from_key", ""))
+            text = str(item.get("detail", "")).strip()
+            if key not in by_key:
+                return None       # phantom key — untrustworthy output
+            if not text:
+                continue
+            src = by_key[key]
+            tier, _ = classify_source(src.source)
+            bullets.append(f"- {text}（{src.created_at.strftime('%Y-%m-%d')} · {tier}）")
+            covered.add(key)
+        if not set(required) <= covered:
+            return None           # a member's detail was dropped — lossy union
+        refined = refined + "\n" + "\n".join(bullets)
 
     return MergeSynthesis(
         refined_value=refined,

@@ -62,9 +62,9 @@ class _Seq:
 
 
 _CLEAN_FALSE = ('{"unique_by_key": {"a": "preference", "b": "complaint"}, '
-                '"mergeable": false, "rationale": "distinct insights"}')
+                '"relation": "distinct", "rationale": "distinct insights"}')
 _CLEAN_TRUE = ('{"unique_by_key": {"a": "", "b": "extra"}, '
-               '"mergeable": true, "rationale": "b subsumes a"}')
+               '"relation": "duplicate", "rationale": "b subsumes a"}')
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +97,14 @@ class TestDiffInventoryStatus:
         assert diff.status == DIFF_ERROR
 
     async def test_exhausted_coverage_miss_is_error(self):
-        bad = '{"unique_by_key": {"a": ""}, "mergeable": true, "rationale": "r"}'
+        bad = '{"unique_by_key": {"a": ""}, "relation": "duplicate", "rationale": "r"}'
         diff = await diff_inventory(_cluster(), _Seq(bad, bad))
         assert diff.status == DIFF_ERROR
         assert diff.mergeable is False
 
     def test_default_status_is_ok(self):
         # Constructing a verdict directly means a real answer.
-        assert DiffInventory(mergeable=False).status == DIFF_OK
+        assert DiffInventory(relation="distinct").status == DIFF_OK
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ class _NoCallLLM:
 class TestSelfReviewRouting:
     async def test_tool_error_defers_not_skips(self):
         plan = ConsolidationPlan(clusters=[_cluster(
-            "m0", diff=DiffInventory(mergeable=False, status=DIFF_ERROR, rationale="unparseable"),
+            "m0", diff=DiffInventory(status=DIFF_ERROR, rationale="unparseable"),
         )])
         decisions = await self_review(plan, _NoCallLLM())
         assert [d.verdict for d in decisions] == [VERDICT_DEFER]
@@ -127,14 +127,14 @@ class TestSelfReviewRouting:
 
     async def test_tool_error_is_not_cap_overflow(self):
         plan = ConsolidationPlan(clusters=[_cluster(
-            "m0", diff=DiffInventory(mergeable=False, status=DIFF_ERROR),
+            "m0", diff=DiffInventory(status=DIFF_ERROR),
         )])
         await self_review(plan, _NoCallLLM())
         assert plan.deferred_to_next_pass == 0
 
     async def test_clean_not_mergeable_skips(self):
         plan = ConsolidationPlan(clusters=[_cluster(
-            "m0", diff=DiffInventory(mergeable=False, rationale="distinct insights"),
+            "m0", diff=DiffInventory(relation="distinct", rationale="distinct insights"),
         )])
         decisions = await self_review(plan, _NoCallLLM())
         assert [d.verdict for d in decisions] == [VERDICT_SKIP]
@@ -179,7 +179,7 @@ def _gate_llm(diff_response: str):
 
 
 _PAIR_FALSE = ('{"unique_by_key":{"m1":"a","m2":"b"},'
-               '"mergeable":false,"rationale":"distinct"}')
+               '"relation":"distinct","rationale":"distinct"}')
 
 
 class TestRunSuppression:
@@ -207,8 +207,8 @@ class TestRunSuppression:
 class TestReport:
     async def test_report_counts_tool_errors(self):
         plan = ConsolidationPlan(clusters=[
-            _cluster("m0", diff=DiffInventory(mergeable=False, status=DIFF_ERROR)),
-            _cluster("m1", "c", "d", diff=DiffInventory(mergeable=False, status=DIFF_ERROR)),
+            _cluster("m0", diff=DiffInventory(status=DIFF_ERROR)),
+            _cluster("m1", "c", "d", diff=DiffInventory(status=DIFF_ERROR)),
         ])
         plan.decisions = await self_review(plan, _NoCallLLM())
         report = render_report(plan)

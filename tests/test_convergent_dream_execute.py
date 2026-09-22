@@ -47,7 +47,7 @@ async def _orchestrated_llm(messages):
     if "差異盤點" in sys:
         keys = re.findall(r'key="([^"]+)"', user)
         ubk = ", ".join(f'"{k}": ""' for k in keys)
-        return '{"unique_by_key": {' + ubk + '}, "mergeable": true, "rationale": "same"}'
+        return '{"unique_by_key": {' + ubk + '}, "relation": "duplicate", "rationale": "same"}'
     if "reviewing how YOUR OWN" in sys:
         ids = re.findall(r'cluster_id="([^"]+)"', user)
         return json.dumps([{"cluster_id": i, "verdict": "approve"} for i in ids])
