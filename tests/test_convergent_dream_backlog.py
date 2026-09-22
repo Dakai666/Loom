@@ -10,7 +10,7 @@ The fix is a *content-addressed* suppression set persisted in ``memory_meta``:
 a cluster 絲絲 reviewed and skipped is filtered out of later passes — until any
 member's content changes (the signature carries each member's ``updated_at``).
 Two judgments are deliberately NOT suppressed: a ``defer`` (ask again later) and
-a diff-inventory tooling auto-skip (should retry, #554).
+a diff-inventory tool failure (should retry, #554 / #587).
 """
 
 from __future__ import annotations
@@ -184,17 +184,6 @@ class TestBuildPlanSuppression:
 # run_convergent_dream — records genuine skips, drains across passes
 # ---------------------------------------------------------------------------
 
-def _combined_llm(self_review_response: str, mergeable: bool = True):
-    """diff-inventory → mergeable; self_review → the given verdict array."""
-    async def fn(messages):
-        sys = messages[0]["content"]
-        if "差異盤點" in sys:
-            return ('{"unique_by_key":{"m1":"","m2":"more"},'
-                    f'"mergeable":{"true" if mergeable else "false"},"rationale":"r"}}')
-        return self_review_response
-    return fn
-
-
 class TestRunDrainsBacklog:
     async def _seed_pair(self, semantic_emb):
         await semantic_emb.upsert(SemanticEntry(key="m1", value="GROUPA x", source="manual"))
@@ -221,11 +210,15 @@ class TestRunDrainsBacklog:
         plan2, _ = await run_convergent_dream(semantic_emb, fn1)
         assert [c for c in plan2.clusters if c.kind == KIND_MERGE] == []
 
-    async def test_diff_inventory_auto_skip_not_suppressed(self, semantic_emb, db_conn):
-        # mergeable=false → self_review auto-skips WITHOUT consulting 絲絲. That
-        # is a tooling verdict, not a judgment — it must retry, not be buried.
+    async def test_diff_inventory_tool_error_not_suppressed(self, semantic_emb, db_conn):
+        # A diff-inventory tool failure (unparseable after retries) is not a
+        # judgment — it must retry, not be buried. (A *clean* mergeable=false
+        # verdict IS a judgment and is suppressed — see
+        # test_convergent_dream_gate_status, #587.)
         await self._seed_pair(semantic_emb)
-        fn = _combined_llm("[]", mergeable=False)
+
+        async def fn(messages):
+            return "garbage" if "差異盤點" in messages[0]["content"] else "[]"
         plan1, _ = await run_convergent_dream(semantic_emb, fn)
         assert await load_suppressed_signatures(db_conn) == set()
         plan2, _ = await run_convergent_dream(semantic_emb, fn)

@@ -65,6 +65,11 @@ VERDICT_APPROVE = "approve"
 VERDICT_SKIP = "skip"
 VERDICT_DEFER = "defer"
 
+# Diff-inventory gate status (#587). A tool failure is not a judgment: it must
+# never be rendered as "not mergeable" nor be suppressed like a stable skip.
+DIFF_OK = "ok"          # trustworthy verdict (mergeable true OR a real false)
+DIFF_ERROR = "error"    # gate could not produce a verdict (retries exhausted)
+
 
 # ---------------------------------------------------------------------------
 # Data structures (spec §5.1 ConsolidationPlan)
@@ -77,10 +82,14 @@ class DiffInventory:
     ``unique_by_key`` maps each member key → what that member says that no
     other member does. ``mergeable`` is False when ≥2 members carry unique
     content (they are distinct insights that merely look alike).
+
+    ``status`` separates *fault* from *judgment* (#587): ``DIFF_ERROR`` means
+    the gate failed (``mergeable`` is then a fail-safe False, not an answer).
     """
     unique_by_key: dict[str, str] = field(default_factory=dict)
     mergeable: bool = False
     rationale: str = ""
+    status: str = DIFF_OK
 
 
 @dataclass
@@ -346,11 +355,13 @@ async def record_suppressed_signatures(
 
 
 def _genuine_skip_signatures(plan: "ConsolidationPlan") -> set[str]:
-    """Signatures of clusters 絲絲 reviewed and skipped — the stable judgments.
+    """Signatures of clusters skipped by a real judgment — the stable ones.
 
-    Excludes (a) non-skip verdicts and (b) diff-inventory tooling auto-skips
-    (``mergeable=False``): the latter is a tool failure, not a judgment, and
-    must be free to retry next pass (#554) rather than be buried by suppression.
+    Includes a clean diff-inventory "not mergeable" verdict: that is a
+    judgment on unchanged content, and re-reviewing it every pass ate the
+    cluster quota and starved the backlog (#587). Excludes non-skip verdicts
+    and any diff-inventory tool failure (``DIFF_ERROR``), which must stay free
+    to retry next pass (#554) rather than be buried by suppression.
     """
     sigs: set[str] = set()
     for cluster in plan.clusters:
@@ -360,7 +371,7 @@ def _genuine_skip_signatures(plan: "ConsolidationPlan") -> set[str]:
         if (
             cluster.kind == KIND_MERGE
             and cluster.diff is not None
-            and not cluster.diff.mergeable
+            and cluster.diff.status == DIFF_ERROR
         ):
             continue
         sigs.add(_cluster_signature(cluster.members))
@@ -591,6 +602,7 @@ async def diff_inventory(
         unique_by_key=last.unique_by_key,
         mergeable=False,
         rationale=last.rationale + suffix,
+        status=DIFF_ERROR,
     )
 
 
@@ -696,7 +708,10 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
             f'    value="{m.value}"'
         )
     if cluster.diff is not None:
-        lines.append(f"  diff_inventory: mergeable={cluster.diff.mergeable} — {cluster.diff.rationale}")
+        lines.append(
+            f"  diff_inventory: status={cluster.diff.status} "
+            f"mergeable={cluster.diff.mergeable} — {cluster.diff.rationale}"
+        )
         for k, v in cluster.diff.unique_by_key.items():
             if v:
                 lines.append(f'    unique to "{k}": {v}')
@@ -773,7 +788,8 @@ async def self_review(
 
     Clusters whose diff-inventory already says ``mergeable=False`` are auto-
     skipped without consulting the LLM (the gate already vetoed them, spec §6.4)
-    and do NOT consume the review budget.
+    and do NOT consume the review budget. A gate *tool error* (``DIFF_ERROR``)
+    is deferred instead — no verdict was produced, so none is recorded (#587).
 
     The remaining clusters are reviewed in batches of ``batch_size`` — one
     context-bounded LLM call each — rather than one mega-prompt. Real-run
@@ -801,7 +817,15 @@ async def self_review(
     review_clusters: list[CandidateCluster] = []
 
     for cluster in plan.clusters:
-        if cluster.kind == KIND_MERGE and cluster.diff is not None and not cluster.diff.mergeable:
+        if cluster.kind == KIND_MERGE and cluster.diff is not None and cluster.diff.status == DIFF_ERROR:
+            # Tool failure, not a judgment (#587): retry next pass. Not cap
+            # overflow, so deferred_to_next_pass is left untouched.
+            decisions.append(ReviewDecision(
+                cluster_id=cluster.cluster_id,
+                verdict=VERDICT_DEFER,
+                reason=f"diff-inventory tool error — retry next pass ({cluster.diff.rationale})",
+            ))
+        elif cluster.kind == KIND_MERGE and cluster.diff is not None and not cluster.diff.mergeable:
             decisions.append(ReviewDecision(
                 cluster_id=cluster.cluster_id,
                 verdict=VERDICT_SKIP,
@@ -859,6 +883,11 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
     ]
     if plan.deferred_to_next_pass:
         out.append(f"- ⏭️ 因批次上限，{plan.deferred_to_next_pass} 個簇順延下輪")
+    tool_errors = sum(
+        1 for c in plan.clusters if c.diff is not None and c.diff.status == DIFF_ERROR
+    )
+    if tool_errors:
+        out.append(f"- ⚠️ {tool_errors} 個簇差異盤點工具故障（非判斷），下輪重試")
 
     def _section(title: str, kind: str) -> None:
         clusters = [c for c in plan.clusters if c.kind == kind]
