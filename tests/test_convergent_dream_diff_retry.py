@@ -4,7 +4,7 @@ Tests for diff-inventory gate robustness (#554).
 The gate must stay a hard fail-safe (spec #493 — never mark a cluster mergeable
 on untrustworthy output), but a *single* retry should absorb transient LLM
 format jitter so a large near-duplicate cluster isn't permanently stuck on one
-malformed response. A clean verdict (even mergeable=false) must NOT trigger a
+malformed response. A clean verdict (any recognised relation) must NOT trigger a
 retry, and two bad responses must still fail safe.
 """
 
@@ -41,7 +41,7 @@ class _SequenceLLM:
 class TestDiffInventoryRetry:
     async def test_retry_recovers_from_transient_unparseable(self):
         good = ('{"unique_by_key": {"a": "", "b": "extra"}, '
-                '"mergeable": true, "rationale": "b subsumes a"}')
+                '"relation": "duplicate", "rationale": "b subsumes a"}')
         llm = _SequenceLLM("garbage not json", good)
         diff = await diff_inventory(_cluster("a", "b"), llm)
         assert diff.mergeable is True
@@ -49,9 +49,9 @@ class TestDiffInventoryRetry:
 
     async def test_retry_recovers_from_transient_coverage_mismatch(self):
         # First response drops a member key; second covers the cluster.
-        bad = '{"unique_by_key": {"a": ""}, "mergeable": true, "rationale": "r"}'
+        bad = '{"unique_by_key": {"a": ""}, "relation": "duplicate", "rationale": "r"}'
         good = ('{"unique_by_key": {"a": "", "b": ""}, '
-                '"mergeable": true, "rationale": "r"}')
+                '"relation": "duplicate", "rationale": "r"}')
         llm = _SequenceLLM(bad, good)
         diff = await diff_inventory(_cluster("a", "b"), llm)
         assert diff.mergeable is True
@@ -68,7 +68,7 @@ class TestDiffInventoryRetry:
         # A parseable, covered "both unique" verdict is a real answer — the gate
         # must accept it on the first call, not waste a retry.
         resp = ('{"unique_by_key": {"a": "preference", "b": "complaint"}, '
-                '"mergeable": false, "rationale": "distinct insights"}')
+                '"relation": "distinct", "rationale": "distinct insights"}')
         llm = _SequenceLLM(resp, resp)
         diff = await diff_inventory(_cluster("a", "b"), llm)
         assert diff.mergeable is False
@@ -76,7 +76,7 @@ class TestDiffInventoryRetry:
 
     async def test_clean_true_verdict_does_not_retry(self):
         resp = ('{"unique_by_key": {"a": "", "b": "extra"}, '
-                '"mergeable": true, "rationale": "r"}')
+                '"relation": "duplicate", "rationale": "r"}')
         llm = _SequenceLLM(resp, resp)
         diff = await diff_inventory(_cluster("a", "b"), llm)
         assert diff.mergeable is True
@@ -84,7 +84,7 @@ class TestDiffInventoryRetry:
 
     async def test_retry_on_transient_exception_then_success(self):
         good = ('{"unique_by_key": {"a": "", "b": "extra"}, '
-                '"mergeable": true, "rationale": "r"}')
+                '"relation": "duplicate", "rationale": "r"}')
         calls = {"n": 0}
 
         async def llm(messages):

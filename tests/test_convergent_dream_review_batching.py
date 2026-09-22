@@ -168,7 +168,7 @@ class TestAutoSkipNotCounted:
                 cluster_id="m0", kind=KIND_MERGE,
                 members=[SemanticEntry(key="a", value="x", source="manual"),
                          SemanticEntry(key="b", value="y", source="manual")],
-                diff=DiffInventory(mergeable=False, rationale="distinct insights"),
+                diff=DiffInventory(relation="distinct", rationale="distinct insights"),
             ),
             *[_cluster(i) for i in range(20)],
         ])

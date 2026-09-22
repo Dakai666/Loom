@@ -252,12 +252,12 @@ class TestDreamingExemption:
 # ---------------------------------------------------------------------------
 
 class TestDiffInventory:
-    async def test_parses_mergeable_true(self):
+    async def test_parses_duplicate_as_mergeable(self):
         cluster = CandidateCluster(
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
         llm = _stub_llm('{"unique_by_key": {"a": "", "b": "extra detail"}, '
-                        '"mergeable": true, "rationale": "b subsumes a"}')
+                        '"relation": "duplicate", "rationale": "b subsumes a"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is True
         assert diff.unique_by_key["b"] == "extra detail"
@@ -267,7 +267,7 @@ class TestDiffInventory:
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
         llm = _stub_llm('{"unique_by_key": {"a": "preference", "b": "complaint"}, '
-                        '"mergeable": false, "rationale": "distinct insights"}')
+                        '"relation": "distinct", "rationale": "distinct insights"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
@@ -288,7 +288,7 @@ class TestDiffInventory:
         cluster = CandidateCluster(
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
-        llm = _stub_llm('{"unique_by_key": {"a": ""}, "mergeable": true, "rationale": "looks same"}')
+        llm = _stub_llm('{"unique_by_key": {"a": ""}, "relation": "duplicate", "rationale": "looks same"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
@@ -298,28 +298,28 @@ class TestDiffInventory:
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
         llm = _stub_llm('{"unique_by_key": {"a": "", "b": "", "zzz": "ghost"}, '
-                        '"mergeable": true, "rationale": "r"}')
+                        '"relation": "duplicate", "rationale": "r"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
-    async def test_string_mergeable_is_not_truthy(self):
-        # Codex re-review #493 — a malformed string "false" must NOT become
-        # True via bool("false"). Only a real JSON boolean true counts.
+    async def test_non_string_relation_fails_safe(self):
+        # Codex re-review #493 lineage — only a recognised relation *string*
+        # counts; a JSON boolean in its place is malformed output (#587).
         cluster = CandidateCluster(
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
         llm = _stub_llm('{"unique_by_key": {"a": "", "b": ""}, '
-                        '"mergeable": "false", "rationale": "r"}')
+                        '"relation": false, "rationale": "r"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
-    async def test_string_true_also_not_mergeable(self):
-        # A stringified "true" is still malformed output → fail safe.
+    async def test_numeric_relation_fails_safe(self):
+        # A number in place of the relation string is malformed → fail safe.
         cluster = CandidateCluster(
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
         llm = _stub_llm('{"unique_by_key": {"a": "", "b": ""}, '
-                        '"mergeable": "true", "rationale": "r"}')
+                        '"relation": 1, "rationale": "r"}')
         diff = await diff_inventory(cluster, llm)
         assert diff.mergeable is False
 
@@ -329,7 +329,7 @@ class TestDiffInventory:
         cluster = CandidateCluster(
             cluster_id="c1", kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
-        llm = _stub_llm('{"unique_by_key": ["a", "b"], "mergeable": true, "rationale": "r"}')
+        llm = _stub_llm('{"unique_by_key": ["a", "b"], "relation": "duplicate", "rationale": "r"}')
         diff = await diff_inventory(cluster, llm)   # must not raise
         assert diff.mergeable is False
 
@@ -343,7 +343,7 @@ class TestSelfReview:
         c = CandidateCluster(
             cluster_id=cid, kind=KIND_MERGE,
             members=[SemanticEntry(key="a", value="x"), SemanticEntry(key="b", value="y")])
-        c.diff = DiffInventory(mergeable=mergeable, rationale="r")
+        c.diff = DiffInventory(relation="duplicate" if mergeable else "distinct", rationale="r")
         return c
 
     async def test_auto_skips_non_mergeable_without_llm(self):
@@ -351,7 +351,7 @@ class TestSelfReview:
         # LLM that would approve — must NOT be consulted for the vetoed cluster.
         decisions = await self_review(plan, _stub_llm('[{"cluster_id":"c1","verdict":"approve"}]'))
         assert decisions[0].verdict == VERDICT_SKIP
-        assert "not mergeable" in decisions[0].reason
+        assert "distinct" in decisions[0].reason
 
     async def test_applies_llm_verdicts(self):
         plan = ConsolidationPlan(clusters=[self._merge_cluster(cid="c1")])
@@ -438,7 +438,7 @@ class TestReadOnlyInvariant:
         async def combined(messages):
             sys = messages[0]["content"]
             if "差異盤點" in sys:
-                return '{"unique_by_key":{"m1":"","m2":"more"},"mergeable":true,"rationale":"r"}'
+                return '{"unique_by_key":{"m1":"","m2":"more"},"relation":"duplicate","rationale":"r"}'
             # self_review — verdict is irrelevant to the read-only invariant
             return '[]'
 
