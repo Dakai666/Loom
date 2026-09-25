@@ -344,6 +344,20 @@ def _resolve_active_model_and_tier(session: Any) -> tuple[str, str]:
     return session.model, ""
 
 
+def _attribute_speaker(content: str, author: Any) -> str:
+    """Prefix a user turn with who sent it.
+
+    Several people can share one agent (e.g. friends in the same thread);
+    unsigned turns leave the agent unable to tell them apart. The username
+    rides along when it differs from the display name, since server
+    nicknames can change but the username is stable.
+    """
+    display = author.display_name
+    name = author.name
+    who = display if display == name else f"{display} (@{name})"
+    return f"[發話者：{who}]\n{content}"
+
+
 class LoomDiscordBot:
     """
     Runs LoomSessions behind a Discord bot, one session per thread.
@@ -593,10 +607,10 @@ class LoomDiscordBot:
                     content = "[系統通知：使用者僅上傳了附件]"
         # Build the user_input value: route through the single shared
         # builder (#507) so the Discord path produces exactly the same
-        # canonical shape as the CLI path. Returns ``content`` unchanged
+        # canonical shape as the CLI path. Returns the text unchanged
         # when there are no images.
         user_input_for_turn: "str | list[dict]" = _vision.build_user_content(
-            content, attachment_images or None
+            _attribute_speaker(content, message.author), attachment_images or None
         )
 
         if is_thread:
@@ -606,7 +620,7 @@ class LoomDiscordBot:
             # Echo a short text preview; full vision content still goes
             # through user_input_for_turn.
             if isinstance(user_input_for_turn, str):
-                preview = user_input_for_turn[:100]
+                preview = content[:100]
             else:
                 preview = "[含圖片附件]"
             fake_msg = await _safe_send(thread, f"> {preview}")  # echo starter
@@ -1809,7 +1823,7 @@ class LoomDiscordBot:
                             elif raw.lower() in ("r", "resume", ""):
                                 session.resume()
                             else:
-                                session.resume_with(raw)
+                                session.resume_with(_attribute_speaker(raw, reply.author))
                                 tool_buf += f"\n*(redirected: {raw[:60]})*"
                         except asyncio.TimeoutError:
                             session.cancel()
