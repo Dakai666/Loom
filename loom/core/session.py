@@ -1470,7 +1470,10 @@ class LoomSession:
 
         # Issue #9: MCP client — import tools from external MCP servers
         try:
-            from loom.extensibility.mcp_client import load_mcp_servers_into_session
+            from loom.extensibility.mcp_client import (
+                load_mcp_servers_into_session,
+                render_mcp_instructions,
+            )
 
             self._mcp_clients = await load_mcp_servers_into_session(
                 _load_loom_config(), self, extra_env=_load_env(),
@@ -1480,6 +1483,13 @@ class LoomSession:
                 console.print(
                     f"[dim]  MCP: {len(self._mcp_clients)} server(s) connected ({names})[/dim]"
                 )
+            # Issue #595: servers' own usage guides, as Claude Code injects them.
+            mcp_ctx = render_mcp_instructions(self._mcp_clients)
+            if mcp_ctx:
+                if self.messages and self.messages[0]["role"] == "system":
+                    self.messages[0]["content"] += f"\n\n{mcp_ctx}"
+                else:
+                    self.messages.insert(0, {"role": "system", "content": mcp_ctx})
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
 

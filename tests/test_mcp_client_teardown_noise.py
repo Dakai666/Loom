@@ -200,6 +200,9 @@ class TestFailedHandshakeCleanup:
             async def __aenter__(self):
                 raise RuntimeError("handshake failed")
 
+            async def __aexit__(self, *_exc):
+                return None
+
         monkeypatch.setattr(mcp_client_mod, "stdio_client", lambda _p: _CM())
         monkeypatch.setattr(mcp_client_mod, "ClientSession", _Session)
 
