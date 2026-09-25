@@ -560,6 +560,11 @@ async def session_plugin_tool(call):
             "## MCP server: minimax\nPrefer minimax__search for web lookups."
             in session.messages[0]["content"]
         )
+        # Issue #597: a personality switch keeps start()-time sections.
+        session.switch_personality("off")
+        system = session.messages[0]["content"]
+        assert "## Workspace" in system
+        assert "## MCP server: minimax" in system
 
         await session.stop()
 
