@@ -695,25 +695,20 @@ class LoomSession:
         # Issue #181: cache the whole config so ``output_max_tokens`` resolves
         # cheaply on every LLM call, and responds live to ``set_model``.
         self._loom_config: dict = config
-        system_prompt = self._stack.load()
+        self._stack.load()
 
-        # Inject workspace context into system prompt
-        workspace_note = (
-            f"\n\n## Workspace\nYour working directory is: `{self.workspace}`\n"
+        # OpenAI-canonical message history.  messages[0] is the system
+        # message, always rendered from PromptStack + these sections — see
+        # _render_system_message() (Issue #597).
+        self.messages: list[dict[str, Any]] = []
+        self._system_sections: dict[str, str] = {}
+        self._set_system_section("workspace", (
+            f"## Workspace\nYour working directory is: `{self.workspace}`\n"
             "ALWAYS save files inside this directory. "
             "Use relative paths (e.g. `report.md`) which resolve to the workspace. "
             "NEVER write to `~`, `/tmp`, or paths outside the workspace unless "
             "explicitly instructed by the user."
-        )
-        if system_prompt:
-            system_prompt = system_prompt + workspace_note
-        else:
-            system_prompt = workspace_note.strip()
-
-        # OpenAI-canonical message history, seeded with composed system prompt
-        self.messages: list[dict[str, Any]] = (
-            [{"role": "system", "content": system_prompt}] if system_prompt else []
-        )
+        ))
 
         # Registry — run_bash + workspace-aware filesystem tools
         # NOTE: tool factories are lazy-imported from loom.platform.cli.tools.
@@ -943,15 +938,42 @@ class LoomSession:
             if not self._stack.switch_personality(name):
                 return False
 
-        new_prompt = self._stack.composed_prompt
-        if self.messages and self.messages[0]["role"] == "system":
-            if new_prompt:
-                self.messages[0]["content"] = new_prompt
-            else:
-                self.messages.pop(0)
-        elif new_prompt:
-            self.messages.insert(0, {"role": "system", "content": new_prompt})
+        self._render_system_message()
         return True
+
+    # ------------------------------------------------------------------
+    # System message (Issue #597)
+    # ------------------------------------------------------------------
+
+    def _set_system_section(self, key: str, text: str | None) -> None:
+        """Add or replace one session section of the system message.
+
+        Sections follow the PromptStack in the order they were first added;
+        replacing one keeps its position, a blank *text* drops it.
+        """
+        if text:
+            self._system_sections[key] = text
+        else:
+            self._system_sections.pop(key, None)
+        self._render_system_message()
+
+    def _render_system_message(self) -> None:
+        """Rebuild messages[0] from the PromptStack and the session sections.
+
+        The only writer of the system message: it is never spliced as a
+        string, so a personality switch or index refresh cannot drop or
+        duplicate another part.
+        """
+        parts = [self._stack.composed_prompt, *self._system_sections.values()]
+        content = "\n\n".join(p for p in parts if p)
+        has_system = bool(self.messages) and self.messages[0]["role"] == "system"
+        if content:
+            if has_system:
+                self.messages[0]["content"] = content
+            else:
+                self.messages.insert(0, {"role": "system", "content": content})
+        elif has_system:
+            self.messages.pop(0)
 
     @property
     def current_personality(self) -> str | None:
@@ -1119,20 +1141,13 @@ class LoomSession:
         )
         self._memory_index = await indexer.build()
         if not self._memory_index.is_empty:
-            index_text = self._memory_index.render()
-            if self.messages and self.messages[0]["role"] == "system":
-                self.messages[0]["content"] += f"\n\n{index_text}"
-            else:
-                self.messages.insert(0, {"role": "system", "content": index_text})
+            self._set_system_section("memory_index", self._memory_index.render())
 
         # Issue #133: inject memory health alert into system context
         # so the agent is aware of prior session failures.
-        health_ctx = self._governor.health.report().render_agent_context()
-        if health_ctx:
-            if self.messages and self.messages[0]["role"] == "system":
-                self.messages[0]["content"] += f"\n\n{health_ctx}"
-            else:
-                self.messages.insert(0, {"role": "system", "content": health_ctx})
+        self._set_system_section(
+            "memory_health", self._governor.health.report().render_agent_context(),
+        )
 
         if not self._resume:
             await self._session_log.create_session(self.session_id, self.model, self._provisional_title)
@@ -1484,12 +1499,7 @@ class LoomSession:
                     f"[dim]  MCP: {len(self._mcp_clients)} server(s) connected ({names})[/dim]"
                 )
             # Issue #595: servers' own usage guides, as Claude Code injects them.
-            mcp_ctx = render_mcp_instructions(self._mcp_clients)
-            if mcp_ctx:
-                if self.messages and self.messages[0]["role"] == "system":
-                    self.messages[0]["content"] += f"\n\n{mcp_ctx}"
-                else:
-                    self.messages.insert(0, {"role": "system", "content": mcp_ctx})
+            self._set_system_section("mcp", render_mcp_instructions(self._mcp_clients))
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
 
@@ -4600,9 +4610,10 @@ class LoomSession:
         (e.g. Discord bots that never restart) see fresh fact/anti-pattern counts
         without waiting for the next session start.
 
-        Finds the existing MemoryIndex block in messages[0] by the sentinel line
-        "Memory Index" and replaces everything from that line to the closing rule
-        line. If no existing block is found, appends the new block as usual.
+        Replaces the ``memory_index`` section wholesale (Issue #597).  The
+        old sentinel-based splice stopped at the hint lines and left the
+        block's tail (self-portrait, skills catalog) behind, so every
+        refresh stacked another copy of it into the prompt.
         """
         if self._memory is None:
             return
@@ -4615,44 +4626,7 @@ class LoomSession:
             if new_index.is_empty:
                 return
             self._memory_index = new_index
-            new_text = new_index.render()
-
-            if not self.messages or self.messages[0]["role"] != "system":
-                return
-
-            current = self.messages[0]["content"]
-            sentinel = "Memory Index\n"
-            pos = current.find(sentinel)
-            if pos != -1:
-                # Replace from "Memory Index\n" to end of the block.
-                # The block ends after the second rule line (─────…).
-                # Find the second occurrence of the rule separator after pos.
-                rule = "─" * 45
-                first_rule = current.find(rule, pos)
-                second_rule = current.find(rule, first_rule + len(rule)) if first_rule != -1 else -1
-                if second_rule != -1:
-                    # Keep everything before the block and after the closing rule line.
-                    end = second_rule + len(rule)
-                    # Also swallow trailing newlines and hint lines until next blank line.
-                    tail = current[end:]
-                    # Drop the hint lines that were part of the old block.
-                    lines = tail.splitlines(keepends=True)
-                    skip = 0
-                    for line in lines:
-                        stripped = line.strip()
-                        if stripped.startswith("Use ") or stripped == "":
-                            skip += len(line)
-                        else:
-                            break
-                    self.messages[0]["content"] = (
-                        current[:pos].rstrip("\n") + "\n\n" + new_text + current[end + skip:]
-                    )
-                else:
-                    # Fallback: just replace from sentinel to end
-                    self.messages[0]["content"] = current[:pos].rstrip("\n") + "\n\n" + new_text
-            else:
-                # No existing block — append
-                self.messages[0]["content"] += f"\n\n{new_text}"
+            self._set_system_section("memory_index", new_index.render())
             # System prompt size changed — keep budget aligned so the
             # footer % doesn't drift away from reality until the next
             # provider response arrives.
