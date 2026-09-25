@@ -1,9 +1,14 @@
 """
 MCP Client — import tools from an external MCP server into Loom (Issue #9).
 
-Connects to an MCP server (over stdio subprocess) and wraps each remote
-tool as a Loom ``ToolDefinition`` so it appears in the session registry
-like any built-in tool.
+Connects to an MCP server and wraps each remote tool as a Loom
+``ToolDefinition`` so it appears in the session registry like any built-in
+tool.
+
+Entries mirror a Claude Code ``.mcp.json`` ``mcpServers`` entry field for
+field (Issue #595) — ``type`` / ``command`` / ``args`` / ``env`` / ``url`` /
+``headers`` — so one server definition can be copied between the two.
+``trust_level`` is the only Loom-specific field.
 
 Usage
 -----
@@ -11,15 +16,19 @@ In ``loom.toml``::
 
     [[mcp.servers]]
     name    = "filesystem"
-    command = "npx"
+    command = "npx"          # no ``type`` + ``command`` → stdio
     args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
     [[mcp.servers]]
-    name    = "github"
-    command = "uvx"
-    args    = ["mcp-server-git"]
-    # env values support ${ENV_VAR} syntax for secrets kept in .env
-    env     = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+    name    = "substrate"
+    type    = "http"         # stdio | http (Streamable HTTP) | sse
+    url     = "http://127.0.0.1:7077/mcp"
+    # Every string field supports ${VAR} and ${VAR:-default}, resolved
+    # against .env first, then the process environment.
+    headers = { Authorization = "${SUBSTRATE_AUTH_HEADER}" }
+
+The ``instructions`` a server returns from ``initialize`` are rendered into
+the system prompt by ``render_mcp_instructions()``, as Claude Code does.
 
 Then in LoomSession.start(), ``_load_mcp_servers()`` is called
 automatically to connect and register tools from each configured server.
@@ -38,7 +47,7 @@ Or manually::
 
 Requirements
 ------------
-    pip install loom[mcp]   # installs mcp>=1.0.0
+    pip install loom[mcp]   # installs mcp>=1.24.0
 """
 
 from __future__ import annotations
@@ -56,7 +65,10 @@ logger = logging.getLogger(__name__)
 
 try:
     from mcp.client.session import ClientSession
+    from mcp.client.sse import sse_client
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
     from mcp.types import CallToolResult
     _MCP_AVAILABLE = True
 except ImportError:
@@ -127,30 +139,56 @@ def _check_mcp() -> None:
 # Config data class (mirrors loom.toml [[mcp.servers]] entries)
 # ---------------------------------------------------------------------------
 
+_TRANSPORTS = frozenset({"stdio", "http", "sse"})
+
+# Per-server cap on rendered ``instructions`` — generous for a usage guide,
+# small enough that one server cannot crowd out the rest of the prompt.
+MCP_INSTRUCTIONS_MAX_CHARS = 4000
+
+
 @dataclass
 class MCPServerConfig:
     """Configuration for one external MCP server."""
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     trust_level: str = "safe"   # safe | guarded — maps to Loom TrustLevel
+    type: str = "stdio"         # stdio | http | sse
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
 
 
-_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+# ${VAR} or ${VAR:-default}
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
 
 
-def _expand_env(value: str, extra_env: dict[str, str] | None = None) -> str:
+def _expand_env(
+    value: str,
+    extra_env: dict[str, str] | None = None,
+    missing: list[str] | None = None,
+) -> str:
     """
-    Expand ${VAR} placeholders in *value*.
+    Expand ``${VAR}`` and ``${VAR:-default}`` placeholders in *value*.
 
     Lookup order: *extra_env* (e.g. values from .env) first, then
-    ``os.environ``.  Unset variables are replaced with the empty string.
+    ``os.environ``.  ``:-default`` applies when the variable is unset or
+    empty, as in the shell.  An unset variable without a default expands to
+    the empty string and, when *missing* is given, its name is appended so
+    the caller can refuse the config instead of sending a blank secret.
     """
     merged = {**os.environ, **(extra_env or {})}
 
     def _replace(m: re.Match) -> str:
-        return merged.get(m.group(1), "")
+        name, default = m.group(1), m.group(2)
+        value = merged.get(name)
+        if default is not None:
+            return value or default
+        if value is None:
+            if missing is not None:
+                missing.append(name)
+            return ""
+        return value
 
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
@@ -162,11 +200,16 @@ def load_mcp_server_configs(
     """
     Parse ``[[mcp.servers]]`` entries from the loaded loom.toml dict.
 
-    Environment-variable placeholders (``${VAR}``) in ``env`` values are
-    expanded using *extra_env* (typically the dict returned by
-    ``_load_env()``) merged over ``os.environ``, so secrets kept in
-    ``.env`` are resolved without needing them injected into the process
-    environment first.
+    Environment-variable placeholders (``${VAR}`` / ``${VAR:-default}``) in
+    ``command``, ``args``, ``env``, ``url`` and ``headers`` are expanded
+    using *extra_env* (typically the dict returned by ``_load_env()``)
+    merged over ``os.environ``, so secrets kept in ``.env`` are resolved
+    without needing them injected into the process environment first.
+
+    Without ``type``, a ``command`` means stdio and a ``url`` means http.
+    An entry that references an unset variable with no default, or lacks
+    what its transport needs, is skipped with a warning — like Claude Code,
+    which refuses such a config rather than connecting with a blank secret.
 
     Returns an empty list if no MCP servers are configured.
     """
@@ -174,19 +217,46 @@ def load_mcp_server_configs(
     result: list[MCPServerConfig] = []
     for item in raw:
         try:
-            raw_env: dict[str, str] = dict(item.get("env", {}))
-            expanded_env: dict[str, str] = {
-                k: _expand_env(v, extra_env) for k, v in raw_env.items()
-            }
-            result.append(MCPServerConfig(
-                name=item.get("name", "unknown"),
-                command=item.get("command", ""),
-                args=list(item.get("args", [])),
-                env=expanded_env,
+            name = item.get("name", "unknown")
+            missing: list[str] = []
+
+            def _x(value: Any) -> str:
+                return _expand_env(str(value), extra_env, missing)
+
+            transport = item.get("type") or (
+                "stdio" if item.get("command") else "http" if item.get("url") else ""
+            )
+            cfg = MCPServerConfig(
+                name=name,
+                type=transport,
+                command=_x(item.get("command", "")),
+                args=[_x(a) for a in item.get("args", [])],
+                env={k: _x(v) for k, v in dict(item.get("env", {})).items()},
+                url=_x(item.get("url", "")),
+                headers={k: _x(v) for k, v in dict(item.get("headers", {})).items()},
                 trust_level=item.get("trust_level", "safe"),
-            ))
+            )
         except Exception as exc:
             logger.warning("mcp_client: invalid server config %r — %s", item, exc)
+            continue
+
+        if missing:
+            logger.warning(
+                "mcp_client: server %r references unset variable(s) %s "
+                "with no default — skipping",
+                name, ", ".join(sorted(set(missing))),
+            )
+        elif transport not in _TRANSPORTS:
+            logger.warning(
+                "mcp_client: server %r has %s — skipping", name,
+                f"unknown type {transport!r}" if transport else "neither command nor url",
+            )
+        elif transport == "stdio" and not cfg.command:
+            logger.warning("mcp_client: stdio server %r has no command — skipping", name)
+        elif transport != "stdio" and not cfg.url:
+            logger.warning("mcp_client: %s server %r has no url — skipping", transport, name)
+        else:
+            result.append(cfg)
     return result
 
 
@@ -200,23 +270,25 @@ class LoomMCPClient:
     ``ToolDefinition`` objects.
 
     Each remote tool becomes an async Loom tool that:
-    1. Spawns (or reuses) a connection to the MCP subprocess
+    1. Opens (or reuses) a connection to the MCP server
     2. Calls the remote tool via MCP ``tools/call``
     3. Returns the text result as a ``ToolResult``
 
-    One client instance corresponds to one external MCP server process.
-    The subprocess is launched lazily on first use and terminated on
-    ``disconnect()``.
+    One client instance corresponds to one external MCP server.  The
+    connection (a subprocess for stdio, an HTTP session for http/sse) is
+    opened lazily on first use and closed on ``disconnect()``.
     """
 
     def __init__(self, cfg: MCPServerConfig) -> None:
         _check_mcp()
         self._cfg = cfg
         self._session: "ClientSession | None" = None
-        self._cm: Any = None   # context manager for stdio_client
+        self._cm: Any = None   # AsyncExitStack owning transport + session
         self._read: Any = None
         self._write: Any = None
         self._lock = asyncio.Lock()
+        # Server usage guide from ``initialize`` (Issue #595); None if absent.
+        self.instructions: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -334,10 +406,10 @@ class LoomMCPClient:
         return tool_defs
 
     async def disconnect(self) -> None:
-        """Close the connection to the MCP server subprocess.
+        """Close the connection to the MCP server (session, then transport).
 
         Suppresses all exceptions during __aexit__ so that:
-        - stdio_client async-generator GC finalizer errors (which can fire
+        - transport async-generator GC finalizer errors (which can fire
           in unrelated async contexts) do not propagate
         - Session shutdown is never derailed by a failing MCP cleanup
         See: "an error occurred during closing of async generator stdio_client"
@@ -365,51 +437,93 @@ class LoomMCPClient:
     # Internal
     # ------------------------------------------------------------------
 
+    async def _open_transport(self, stack: contextlib.AsyncExitStack) -> tuple:
+        """Enter the configured transport on *stack*; return ``(read, write)``."""
+        cfg = self._cfg
+        if cfg.type == "http":
+            http_client = await stack.enter_async_context(
+                create_mcp_http_client(headers=cfg.headers or None)
+            )
+            read, write, _get_session_id = await stack.enter_async_context(
+                streamable_http_client(cfg.url, http_client=http_client)
+            )
+            return read, write
+        if cfg.type == "sse":
+            return await stack.enter_async_context(
+                sse_client(cfg.url, headers=cfg.headers or None)
+            )
+
+        # Merge override env on top of the full parent environment so the
+        # subprocess retains PATH and other inherited vars.  Without this,
+        # passing a non-None env dict to StdioServerParameters replaces the
+        # entire subprocess environment and breaks PATH lookup (e.g. uvx).
+        merged_env = {**os.environ, **cfg.env} if cfg.env else None
+        params = StdioServerParameters(
+            command=cfg.command,
+            args=cfg.args,
+            env=merged_env,
+        )
+        return await stack.enter_async_context(stdio_client(params))
+
     async def _ensure_connected(self) -> None:
         async with self._lock:
             if self._session is not None:
                 return
 
-            # Merge override env on top of the full parent environment so the
-            # subprocess retains PATH and other inherited vars.  Without this,
-            # passing a non-None env dict to StdioServerParameters replaces the
-            # entire subprocess environment and breaks PATH lookup (e.g. uvx).
-            merged_env = {**os.environ, **self._cfg.env} if self._cfg.env else None
-            params = StdioServerParameters(
-                command=self._cfg.command,
-                args=self._cfg.args,
-                env=merged_env,
-            )
-            cm = stdio_client(params)
-            read, write = await cm.__aenter__()
+            stack = contextlib.AsyncExitStack()
             try:
-                session = ClientSession(read, write)
-                await session.__aenter__()
-                await session.initialize()
+                read, write = await self._open_transport(stack)
+                session = await stack.enter_async_context(ClientSession(read, write))
+                init = await session.initialize()
             except BaseException:
-                # Clean up the stdio_client CM immediately so it is not
-                # orphaned.  An un-exited anyio task group inside the CM
-                # would later crash when Python's async-generator GC
-                # finalises it in a different task.
+                # Close the transport immediately so it is not orphaned.  An
+                # un-exited anyio task group inside it would later crash when
+                # Python's async-generator GC finalises it in a different
+                # task.
                 #
-                # A server that printed a stdout banner flushes it here too
-                # (the subprocess dies on this __aexit__), so this path needs
+                # A stdio server that printed a stdout banner flushes it here
+                # too (the subprocess dies on this close), so this path needs
                 # the same quieting as disconnect() — otherwise a failed
                 # handshake buries its real cause under a parse traceback.
                 try:
                     with _quiet_stdio_reader():
-                        await cm.__aexit__(None, None, None)
+                        await stack.aclose()
                 except Exception:
                     pass
                 raise
-            self._cm = cm
+            self._cm = stack
             self._read, self._write = read, write
             self._session = session
+            self.instructions = getattr(init, "instructions", None)
 
     async def _call_tool(self, name: str, arguments: dict) -> "CallToolResult":
         await self._ensure_connected()
         assert self._session is not None
         return await self._session.call_tool(name, arguments)
+
+
+def render_mcp_instructions(
+    clients: list[Any],
+    max_chars: int = MCP_INSTRUCTIONS_MAX_CHARS,
+) -> str:
+    """Render connected servers' ``instructions`` as system-prompt sections.
+
+    One ``## MCP server: <name>`` section per server that sent non-blank
+    instructions, in connection order; each body is capped at *max_chars*.
+    Returns ``""`` when there is nothing to add.
+    """
+    sections: list[str] = []
+    for client in clients:
+        text = (getattr(client, "instructions", None) or "").strip()
+        if not text:
+            continue
+        if len(text) > max_chars:
+            text = (
+                text[:max_chars].rstrip()
+                + f"\n\n[… truncated at {max_chars} chars]"
+            )
+        sections.append(f"## MCP server: {client._cfg.name}\n{text}")
+    return "\n\n".join(sections)
 
 
 def _extract_text(result: "CallToolResult") -> str:
@@ -437,8 +551,8 @@ async def load_mcp_servers_into_session(
     the tools into *session*.
 
     Pass *extra_env* (the dict returned by ``_load_env()``) so that
-    ``${VAR}`` placeholders in loom.toml env values are resolved against
-    the .env file even when those variables are not in ``os.environ``.
+    ``${VAR}`` placeholders in loom.toml are resolved against the .env
+    file even when those variables are not in ``os.environ``.
 
     Returns the list of ``LoomMCPClient`` instances so the session can
     call ``disconnect()`` on shutdown.
@@ -449,9 +563,6 @@ async def load_mcp_servers_into_session(
 
     clients: list[LoomMCPClient] = []
     for cfg in server_configs:
-        if not cfg.command:
-            logger.warning("mcp_client: server %r has no command — skipping", cfg.name)
-            continue
         client = LoomMCPClient(cfg)
         try:
             tools = await client.connect_and_list_tools()
@@ -463,7 +574,7 @@ async def load_mcp_servers_into_session(
                 "mcp_client: failed to connect to %r: %s — skipping",
                 cfg.name, exc
             )
-            # Ensure any partially-opened stdio_client CM is closed so
-            # its anyio task group doesn't leak and crash later.
+            # Ensure any partially-opened transport is closed so its
+            # anyio task group doesn't leak and crash later.
             await client.disconnect()
     return clients

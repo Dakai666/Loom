@@ -889,11 +889,24 @@ enabled = true
 # ─────────────────────────────────────────────
 # Requires: pip install loom[mcp]
 #
-# Each [[mcp.servers]] entry starts an external MCP server subprocess
-# and imports its tools into the Loom session registry at startup.
-# Tools are prefixed with the server name: "filesystem:list_files"
+# Each [[mcp.servers]] entry connects to an external MCP server and imports
+# its tools into the Loom session registry at startup.
+# Tools are prefixed with the server name: "filesystem__list_files"
 #
-# trust_level controls what Loom trust tier the imported tools receive:
+# Fields match a Claude Code .mcp.json "mcpServers" entry, so one definition
+# can be copied between the two (Issue #595):
+#   type     stdio | http (Streamable HTTP) | sse
+#            omitted → stdio if `command` is set, http if `url` is set
+#   command / args / env   — stdio
+#   url / headers          — http, sse
+# Every string field supports ${VAR} and ${VAR:-default}, resolved against
+# .env first, then the process environment. A server that references an
+# unset variable with no default is skipped (logged as a warning).
+#
+# A server's own usage guide (MCP `instructions`) is added to the system
+# prompt as a "## MCP server: <name>" section, capped at 4000 chars.
+#
+# trust_level (Loom-only) controls what trust tier the imported tools get:
 #   safe    → auto-executed (SAFE tier)
 #   guarded → confirmation required (GUARDED tier)
 
@@ -910,3 +923,11 @@ enabled = true
 # command     = "uvx"
 # args        = ["mcp-server-git", "--repository", "."]
 # trust_level = "guarded"
+
+# ── Example: remote / long-running server over Streamable HTTP ───────────────
+# [[mcp.servers]]
+# name        = "memory"
+# type        = "http"
+# url         = "http://127.0.0.1:${MEMORY_MCP_PORT:-7077}/mcp"
+# headers     = { Authorization = "${MEMORY_MCP_AUTH_HEADER}" }   # keep in .env
+# trust_level = "safe"

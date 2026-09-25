@@ -526,7 +526,10 @@ async def session_plugin_tool(call):
         from rich.prompt import Confirm
         monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
 
-        fake_client = SimpleNamespace(_cfg=SimpleNamespace(name="minimax"))
+        fake_client = SimpleNamespace(
+            _cfg=SimpleNamespace(name="minimax"),
+            instructions="Prefer minimax__search for web lookups.",
+        )
 
         async def fake_load_mcp_servers_into_session(config, session, extra_env=None):
             assert config["mcp"]["servers"][0]["name"] == "minimax"
@@ -551,6 +554,12 @@ async def session_plugin_tool(call):
         await session.start()
 
         assert session._mcp_clients == [fake_client]
+        # Issue #595: server instructions reach the system prompt.
+        assert session.messages[0]["role"] == "system"
+        assert (
+            "## MCP server: minimax\nPrefer minimax__search for web lookups."
+            in session.messages[0]["content"]
+        )
 
         await session.stop()
 
