@@ -65,14 +65,22 @@ logger = logging.getLogger(__name__)
 
 try:
     from mcp.client.session import ClientSession
-    from mcp.client.sse import sse_client
     from mcp.client.stdio import StdioServerParameters, stdio_client
-    from mcp.client.streamable_http import streamable_http_client
-    from mcp.shared._httpx_utils import create_mcp_http_client
     from mcp.types import CallToolResult
     _MCP_AVAILABLE = True
 except ImportError:
     _MCP_AVAILABLE = False
+
+# Remote transports live in their own block: an environment installed under
+# the old ``mcp>=1.0.0`` floor may lack them, and that must only disable
+# http/sse servers — never the stdio servers that already worked there.
+try:
+    from mcp.client.sse import sse_client
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+    _MCP_HTTP_AVAILABLE = True
+except ImportError:
+    _MCP_HTTP_AVAILABLE = False
 
 
 # Logger the MCP SDK's stdio transport uses for its stdout reader
@@ -128,10 +136,15 @@ def _quiet_stdio_reader():
         log.removeFilter(_demote_stdio_noise)
 
 
-def _check_mcp() -> None:
+def _check_mcp(transport: str = "stdio") -> None:
     if not _MCP_AVAILABLE:
         raise ImportError(
             "MCP SDK not installed. Run: pip install 'loom[mcp]'"
+        )
+    if transport != "stdio" and not _MCP_HTTP_AVAILABLE:
+        raise ImportError(
+            f"MCP SDK too old for {transport} transport (needs mcp>=1.24.0). "
+            "Run: pip install -U 'loom[mcp]'"
         )
 
 
@@ -280,7 +293,7 @@ class LoomMCPClient:
     """
 
     def __init__(self, cfg: MCPServerConfig) -> None:
-        _check_mcp()
+        _check_mcp(cfg.type)
         self._cfg = cfg
         self._session: "ClientSession | None" = None
         self._cm: Any = None   # AsyncExitStack owning transport + session

@@ -257,6 +257,21 @@ class TestTransportSelection:
         await client.disconnect()
 
 
+class TestOldSdk:
+    """An env installed under the old ``mcp>=1.0.0`` floor may lack the
+    remote transports; that must not take the stdio servers down with it."""
+
+    def test_stdio_still_constructs(self, monkeypatch) -> None:
+        monkeypatch.setattr(mcp_client_mod, "_MCP_HTTP_AVAILABLE", False)
+        LoomMCPClient(MCPServerConfig(name="fs", command="npx"))
+
+    @pytest.mark.parametrize("transport", ["http", "sse"])
+    def test_remote_transport_names_the_upgrade(self, monkeypatch, transport) -> None:
+        monkeypatch.setattr(mcp_client_mod, "_MCP_HTTP_AVAILABLE", False)
+        with pytest.raises(ImportError, match=r"mcp>=1\.24\.0"):
+            LoomMCPClient(MCPServerConfig(name="r", type=transport, url="http://h"))
+
+
 # ---------------------------------------------------------------------------
 # System prompt rendering
 # ---------------------------------------------------------------------------
