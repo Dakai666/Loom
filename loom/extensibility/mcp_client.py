@@ -446,16 +446,21 @@ class LoomMCPClient:
         The close itself runs in the owner task, so it is safe from any task
         and in any order relative to other clients.  If the caller is
         cancelled while waiting, the owner still finishes closing on its own.
+
+        Serialised with ``_ensure_connected`` on ``_lock``: a disconnect that
+        lands mid-handshake waits for that connect to finish, then closes —
+        rather than closing under a caller about to use the session.
         """
-        owner, self._owner = self._owner, None
-        close_requested, self._close_requested = self._close_requested, None
-        if owner is None or close_requested is None:
-            return
-        close_requested.set()
-        # ``wait`` rather than ``await owner``: the owner's own outcome (it
-        # may have been cancelled at loop shutdown) is not the caller's
-        # business; only the caller's own cancellation propagates.
-        await asyncio.wait({owner})
+        async with self._lock:
+            owner, self._owner = self._owner, None
+            close_requested, self._close_requested = self._close_requested, None
+            if owner is None or close_requested is None:
+                return
+            close_requested.set()
+            # ``wait`` rather than ``await owner``: the owner's own outcome
+            # (it may have been cancelled at loop shutdown) is not the
+            # caller's business; only the caller's own cancellation propagates.
+            await asyncio.wait({owner})
 
     # ------------------------------------------------------------------
     # Internal

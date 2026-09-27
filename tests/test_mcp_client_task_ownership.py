@@ -193,3 +193,35 @@ class TestOwnerLifecycle:
             await asyncio.sleep(0)
         assert client._session is None
         assert [t for t in asyncio.all_tasks() - before if not t.done()] == []
+
+
+class TestConnectDisconnectRace:
+    async def test_disconnect_mid_handshake_waits_for_connect(
+        self, scoped_transports, monkeypatch
+    ) -> None:
+        """PR #600 review: a disconnect landing mid-handshake used to close
+        the connection under the connecting caller, which then failed on
+        ``assert self._session is not None``.  Disconnect now waits for the
+        in-flight connect, so the caller gets its connection, then it closes."""
+        handshaking = asyncio.Event()
+
+        class _Slow(_ScopedSession):
+            async def initialize(self):
+                handshaking.set()
+                await asyncio.sleep(0.01)
+                return SimpleNamespace(instructions=None)
+
+            async def list_tools(self):
+                return SimpleNamespace(tools=[])
+
+        monkeypatch.setattr(mcp_client_mod, "ClientSession", _Slow)
+        before = asyncio.all_tasks()
+        client = _client("a")
+
+        connecting = asyncio.create_task(client.connect_and_list_tools())
+        await handshaking.wait()
+        await client.disconnect()
+
+        assert await connecting == []
+        assert client._session is None
+        assert [t for t in asyncio.all_tasks() - before if not t.done()] == []

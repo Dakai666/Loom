@@ -96,6 +96,33 @@ class TestTriggerReactionIsolation:
         with pytest.raises(asyncio.CancelledError):
             await fire
 
+    async def test_shutdown_cancel_reaches_the_reaction(self) -> None:
+        """PR #600 review asked whether the reaction task is orphaned when
+        the fire is cancelled.  It is not: cancelling a task that awaits
+        another task cancels the awaited one too.  Pinned here."""
+        daemon = _daemon()
+        reaction: dict[str, object] = {}
+        entered = asyncio.Event()
+
+        async def slow(_t, _c):
+            reaction["task"] = asyncio.current_task()
+            entered.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                reaction["cancelled"] = True
+                raise
+
+        daemon.register_direct_handler("circadian:nightly_close", slow)
+        fire = asyncio.create_task(daemon._on_trigger_fire(_trigger(), {}))
+        await entered.wait()
+        fire.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await fire
+
+        assert reaction.get("cancelled") is True
+        assert reaction["task"].done()
+
     async def test_reaction_runs_under_callers_context(self) -> None:
         """Correlation scopes are contextvars — the reaction task must see them."""
         import contextvars
@@ -174,6 +201,66 @@ class TestStartSupervision:
         assert cancelled.is_set()
 
 
+class TestRestartBackoff:
+    """PR #600 review: a loop that fails forever must not log every 5 s."""
+
+    def test_delay_doubles_per_consecutive_failure_and_caps(self) -> None:
+        daemon = _daemon()
+        delays = [daemon._next_restart_delay("dream", ran_for=0.1) for _ in range(12)]
+        base, cap = AutonomyDaemon._LOOP_RESTART_DELAY_S, AutonomyDaemon._LOOP_RESTART_MAX_DELAY_S
+        assert delays[:4] == [base, base * 2, base * 4, base * 8]
+        assert max(delays) == cap
+        assert delays[-1] == cap
+
+    def test_long_healthy_run_resets_backoff(self) -> None:
+        daemon = _daemon()
+        for _ in range(6):
+            daemon._next_restart_delay("evaluator", ran_for=0.1)
+        cap = AutonomyDaemon._LOOP_RESTART_MAX_DELAY_S
+        assert daemon._next_restart_delay("evaluator", ran_for=cap + 1) == (
+            AutonomyDaemon._LOOP_RESTART_DELAY_S
+        )
+
+    def test_loops_back_off_independently(self) -> None:
+        daemon = _daemon()
+        for _ in range(5):
+            daemon._next_restart_delay("dream", ran_for=0.1)
+        assert daemon._next_restart_delay("evaluator", ran_for=0.1) == (
+            AutonomyDaemon._LOOP_RESTART_DELAY_S
+        )
+
+
+class TestIndependentRestarts:
+    async def test_long_backoff_does_not_delay_other_loops(self, monkeypatch) -> None:
+        """A dream loop deep in backoff must not hold up an evaluator restart."""
+        daemon = _daemon()
+        evaluator_runs: list[int] = []
+
+        async def failing_dream() -> None:
+            raise RuntimeError("dream broken")
+
+        monkeypatch.setattr(
+            daemon, "_maybe_start_dream_loop",
+            lambda: asyncio.create_task(failing_dream()),
+        )
+        monkeypatch.setattr(
+            daemon, "_next_restart_delay",
+            lambda name, *, ran_for: 3600.0 if name == "dream" else 0.0,
+        )
+
+        async def run_forever(poll_interval: float = 60.0) -> None:
+            evaluator_runs.append(1)
+            if len(evaluator_runs) == 1:
+                await asyncio.sleep(0.05)       # dies after dream has
+                raise RuntimeError("evaluator crashed")
+            daemon.stop()
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(daemon._evaluator, "run_forever", run_forever)
+        await asyncio.wait_for(daemon.start(poll_interval=0.01), timeout=2)
+        assert len(evaluator_runs) == 2
+
+
 class TestPlatformTaskReporting:
     """The Discord platform runs the daemon fire-and-forget; its end must
     leave a trace on the console instead of vanishing."""
@@ -201,5 +288,17 @@ class TestPlatformTaskReporting:
         task = asyncio.create_task(ok(), name="autonomy-daemon")
         await asyncio.wait({task})
         with caplog.at_level(logging.DEBUG, logger="loom.platform.cli.main"):
+            _log_background_task_end(task)
+        assert caplog.records == []
+
+    async def test_cancel_is_debug_only(self, caplog) -> None:
+        """Only shutdown cancels the supervised daemon task now — not news."""
+        from loom.platform.cli.main import _log_background_task_end
+
+        task = asyncio.create_task(asyncio.sleep(3600), name="autonomy-daemon")
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.wait({task})
+        with caplog.at_level(logging.INFO, logger="loom.platform.cli.main"):
             _log_background_task_end(task)
         assert caplog.records == []

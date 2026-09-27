@@ -2772,8 +2772,9 @@ def _log_background_task_end(task: "asyncio.Task") -> None:
     (the daemon after ``stop()``) is not logged.
     """
     if task.cancelled():
-        # Normal at shutdown; recorded so an unexpected cancel is traceable.
-        logger.info("background task %s was cancelled", task.get_name())
+        # Only shutdown cancels these (the daemon supervises its own loops),
+        # so this is not news — kept at DEBUG for tracing.
+        logger.debug("background task %s was cancelled", task.get_name())
         return
     exc = task.exception()
     if exc is not None:
