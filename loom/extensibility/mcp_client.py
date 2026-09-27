@@ -58,7 +58,8 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+import weakref
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -620,6 +621,77 @@ def _extract_text(result: "CallToolResult") -> str:
 # Session-level loader (called from LoomSession.start())
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Process-wide client sharing (Issue #601)
+# ---------------------------------------------------------------------------
+#
+# Every session used to open its own servers, and Discord thread sessions are
+# never evicted — so a long-running bot held one set of server subprocesses
+# per thread it had ever touched.  Sessions now borrow one client per server
+# config; the connection closes when its last borrower releases it, so a
+# single CLI session behaves exactly as before.
+#
+# One pool per event loop: a client's owner task belongs to the loop that
+# started it, and a lock or task must never cross loops.
+
+
+class _ClientPool:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        # config key → (client, borrow count)
+        self._entries: dict[str, tuple[LoomMCPClient, int]] = {}
+
+    @staticmethod
+    def _key(cfg: MCPServerConfig) -> str:
+        # The full config, so an entry edited in loom.toml gets a new client.
+        return json.dumps(asdict(cfg), sort_keys=True)
+
+    async def acquire(self, cfg: MCPServerConfig) -> LoomMCPClient:
+        async with self._lock:
+            key = self._key(cfg)
+            client, count = self._entries.get(key, (None, 0))
+            if client is None:
+                client = LoomMCPClient(cfg)
+            self._entries[key] = (client, count + 1)
+            return client
+
+    async def release(self, client: Any) -> bool:
+        """Return one borrow of *client*; True if it was the last one."""
+        async with self._lock:
+            for key, (pooled, count) in self._entries.items():
+                if pooled is client:
+                    if count > 1:
+                        self._entries[key] = (pooled, count - 1)
+                        return False
+                    del self._entries[key]
+                    return True
+            return False
+
+
+_pools: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _ClientPool]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _pool() -> _ClientPool:
+    loop = asyncio.get_running_loop()
+    pool = _pools.get(loop)
+    if pool is None:
+        pool = _pools[loop] = _ClientPool()
+    return pool
+
+
+async def release_mcp_client(client: Any) -> None:
+    """Give back one borrow of a client from ``load_mcp_servers_into_session``.
+
+    Disconnects when the last borrower releases it.  Releasing more times than
+    acquired, or a client the pool never handed out, is a no-op — teardown
+    must never fail on bookkeeping.
+    """
+    if await _pool().release(client):
+        await client.disconnect()
+
+
 async def load_mcp_servers_into_session(
     config: dict,
     session: Any,
@@ -633,16 +705,19 @@ async def load_mcp_servers_into_session(
     ``${VAR}`` placeholders in loom.toml are resolved against the .env
     file even when those variables are not in ``os.environ``.
 
-    Returns the list of ``LoomMCPClient`` instances so the session can
-    call ``disconnect()`` on shutdown.
+    Clients are shared by every session in the event loop (Issue #601):
+    a server already connected for another session is reused, not spawned
+    again.  Returns the borrowed clients; the session must hand each back
+    with ``release_mcp_client()`` on shutdown.
     """
     server_configs = load_mcp_server_configs(config, extra_env)
     if not server_configs:
         return []
 
+    pool = _pool()
     clients: list[LoomMCPClient] = []
     for cfg in server_configs:
-        client = LoomMCPClient(cfg)
+        client = await pool.acquire(cfg)
         try:
             tools = await client.connect_and_list_tools()
             for tool in tools:
@@ -653,7 +728,7 @@ async def load_mcp_servers_into_session(
                 "mcp_client: failed to connect to %r: %s — skipping",
                 cfg.name, exc
             )
-            # Ensure any partially-opened transport is closed so its
-            # anyio task group doesn't leak and crash later.
-            await client.disconnect()
+            # Hand the borrow back; if nobody else holds this client, that
+            # also closes any partially-opened transport.
+            await release_mcp_client(client)
     return clients
