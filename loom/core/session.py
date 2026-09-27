@@ -1793,9 +1793,13 @@ class LoomSession:
                         len(still_pending),
                     )
 
+            # Clients are shared across sessions (#601): hand our borrow back;
+            # the connection closes only when its last session lets go.
+            from loom.extensibility.mcp_client import release_mcp_client
+
             for client in self._mcp_clients:
                 try:
-                    await client.disconnect()
+                    await release_mcp_client(client)
                 except BaseException as exc:
                     # BaseException: catch GeneratorExit + CancelledError too.
                     # MCP stdio_client cleanup may race with event-loop shutdown;
