@@ -204,14 +204,40 @@ class AutonomyDaemon:
         self._direct_handlers.pop(name, None)
 
     async def _on_trigger_fire(self, trigger, context):
+        """Run one trigger's reaction in its own task and contain its failure.
+
+        The evaluator awaits this inline, so anything escaping here ends
+        ``run_forever`` — every schedule — silently.  A reaction runs in a
+        child task (inheriting this context, so correlation scopes carry
+        over): if the child is cancelled while this task is not, the cancel
+        came from inside the reaction — e.g. an anyio cancel scope leaking
+        out of an MCP teardown during nightly close — and is logged, not
+        propagated.  A cancel aimed at the evaluator (shutdown) still is.
+        """
+        reaction = asyncio.create_task(
+            self._react(trigger, context), name=f"trigger:{trigger.name}"
+        )
+        try:
+            await reaction
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            logger.error(
+                "[autonomy] reaction to trigger=%s was cancelled from inside "
+                "(not a shutdown); evaluator continues",
+                trigger.name,
+            )
+        except Exception:
+            logger.exception(
+                "[autonomy] reaction to trigger=%s raised; evaluator continues",
+                trigger.name,
+            )
+
+    async def _react(self, trigger, context) -> None:
         handler = self._direct_handlers.get(trigger.name)
         if handler is not None:
-            try:
-                await handler(trigger, context)
-            except Exception:
-                logger.exception(
-                    "[autonomy] direct handler for trigger=%s raised", trigger.name
-                )
+            await handler(trigger, context)
             return
         plan = await self._planner.handle(trigger, context)
         await self._execute_plan(plan)
@@ -535,37 +561,81 @@ class AutonomyDaemon:
     # Runtime
     # ------------------------------------------------------------------
 
+    # Pause before restarting a loop that ended without stop(): long enough
+    # that a loop failing instantly cannot spin, short enough that a restarted
+    # evaluator is normally back inside the same cron minute.
+    _LOOP_RESTART_DELAY_S = 5.0
+
     async def start(self, poll_interval: float = 60.0) -> None:
-        """Run the evaluator loop (blocking). Returns when stop() is called."""
-        run_task = asyncio.ensure_future(
-            self._evaluator.run_forever(poll_interval=poll_interval)
-        )
+        """Run the evaluator and memory loops (blocking) until stop() is called.
+
+        Supervised: a loop that ends while the daemon has not been stopped —
+        it raised, or was cancelled from inside — is logged and restarted.
+        Callers (the Discord platform) run this fire-and-forget, so a loop
+        that simply ended used to take every schedule down with no trace.
+        """
+        # Issue #281 P3: memory maintenance sweep, dream and consolidation
+        # loops run alongside the trigger evaluator on the daemon's abort
+        # signal so shutdown is single-source. Each ``_maybe_start_*`` returns
+        # None when its config disables it or no session/db is wired.
+        loop_factories: dict[str, Callable[[], asyncio.Future | None]] = {
+            "evaluator": lambda: asyncio.ensure_future(
+                self._evaluator.run_forever(poll_interval=poll_interval)
+            ),
+            "memory maintenance": self._maybe_start_maintenance,
+            "dream": self._maybe_start_dream_loop,
+            "consolidation": self._maybe_start_consolidation_loop,
+        }
         abort_task = asyncio.ensure_future(wait_aborted(self._abort.signal))
+        running: dict[asyncio.Future, str] = {}
+        for name, start_loop in loop_factories.items():
+            task = start_loop()
+            if task is not None:
+                running[task] = name
 
-        # Issue #281 P3: parallel memory maintenance sweep. Runs alongside
-        # the trigger evaluator on the daemon's abort signal so shutdown
-        # is single-source. Only started when [memory.lifecycle].enabled
-        # is true and a session/db is wired.
-        wait_set = [run_task, abort_task]
-        maint_task = self._maybe_start_maintenance()
-        if maint_task is not None:
-            wait_set.append(maint_task)
-        dream_task = self._maybe_start_dream_loop()
-        if dream_task is not None:
-            wait_set.append(dream_task)
-        consol_task = self._maybe_start_consolidation_loop()
-        if consol_task is not None:
-            wait_set.append(consol_task)
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {abort_task, *running}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if abort_task in done:
+                    return
+                ended = [running.pop(task) for task in done]
+                for task, name in zip(done, ended):
+                    self._log_loop_end(name, task)
+                await asyncio.wait({abort_task}, timeout=self._LOOP_RESTART_DELAY_S)
+                if abort_task.done():
+                    return
+                for name in ended:
+                    task = loop_factories[name]()
+                    if task is not None:
+                        running[task] = name
+        finally:
+            for t in (*running, abort_task):
+                t.cancel()
+            for t in (*running, abort_task):
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
 
-        done, pending = await asyncio.wait(
-            wait_set, return_when=asyncio.FIRST_COMPLETED
-        )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+    def _log_loop_end(self, name: str, task: asyncio.Future) -> None:
+        delay = self._LOOP_RESTART_DELAY_S
+        if task.cancelled():
+            logger.error(
+                "[autonomy] %s loop was cancelled without stop(); restarting in %.0fs",
+                name, delay,
+            )
+        elif task.exception() is not None:
+            logger.error(
+                "[autonomy] %s loop crashed; restarting in %.0fs",
+                name, delay, exc_info=task.exception(),
+            )
+        else:
+            logger.error(
+                "[autonomy] %s loop returned without stop(); restarting in %.0fs",
+                name, delay,
+            )
 
     def _maybe_start_maintenance(self) -> asyncio.Task | None:
         """Read [memory.lifecycle] and launch MaintenanceLoop if enabled.
