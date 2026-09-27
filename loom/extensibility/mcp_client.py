@@ -632,7 +632,9 @@ def _extract_text(result: "CallToolResult") -> str:
 # single CLI session behaves exactly as before.
 #
 # One pool per event loop: a client's owner task belongs to the loop that
-# started it, and a lock or task must never cross loops.
+# started it, and a lock or task must never cross loops.  Sharing is therefore
+# per loop, not per process — in production (one Discord/CLI loop per
+# process) the two coincide.
 
 
 class _ClientPool:
@@ -687,6 +689,12 @@ async def release_mcp_client(client: Any) -> None:
     Disconnects when the last borrower releases it.  Releasing more times than
     acquired, or a client the pool never handed out, is a no-op — teardown
     must never fail on bookkeeping.
+
+    The entry leaves the pool before the disconnect runs, so a session that
+    acquires the same config meanwhile gets a fresh client: for the seconds
+    the old connection takes to close, two may coexist.  Deliberate — before
+    #601 every session held its own connection anyway, and making acquire
+    wait on an in-flight close would add cross-await state for no gain.
     """
     if await _pool().release(client):
         await client.disconnect()
