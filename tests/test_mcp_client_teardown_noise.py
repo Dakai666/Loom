@@ -67,35 +67,56 @@ def _banner_traceback() -> None:
     )
 
 
+async def _connected(monkeypatch, on_close) -> LoomMCPClient:
+    """A client connected through a fake stdio transport whose close runs
+    *on_close* — so ``disconnect()`` is exercised end to end, owner task and
+    all, rather than by poking internal state."""
+    class _CM:
+        async def __aenter__(self):
+            return ("read", "write")
+
+        async def __aexit__(self, *_exc):
+            on_close()
+
+    class _Session:
+        def __init__(self, *_a):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def initialize(self):
+            return None
+
+    monkeypatch.setattr(mcp_client_mod, "stdio_client", lambda _p: _CM())
+    monkeypatch.setattr(mcp_client_mod, "ClientSession", _Session)
+    client = _client()
+    await client._ensure_connected()
+    return client
+
+
 class TestDisconnect:
-    async def test_banner_traceback_stays_off_the_console(self, console) -> None:
-        client = _client()
-
-        class _CM:
-            async def __aexit__(self, *_exc):
-                _banner_traceback()
-
-        client._cm = _CM()
+    async def test_banner_traceback_stays_off_the_console(
+        self, console, monkeypatch
+    ) -> None:
+        client = await _connected(monkeypatch, _banner_traceback)
         await client.disconnect()
 
         assert console.records == [], (
             "stdio parse noise during teardown reached the console"
         )
 
-    async def test_record_is_demoted_not_discarded(self) -> None:
+    async def test_record_is_demoted_not_discarded(self, monkeypatch) -> None:
         """A shared logger must not lose records — only their severity."""
         debug_sink = _Capture(logging.DEBUG)
         log = logging.getLogger(_STDIO_LOGGER_NAME)
         log.addHandler(debug_sink)
         log.setLevel(logging.DEBUG)
         try:
-            client = _client()
-
-            class _CM:
-                async def __aexit__(self, *_exc):
-                    _banner_traceback()
-
-            client._cm = _CM()
+            client = await _connected(monkeypatch, _banner_traceback)
             await client.disconnect()
 
             assert len(debug_sink.records) == 1
@@ -104,46 +125,35 @@ class TestDisconnect:
         finally:
             log.removeHandler(debug_sink)
 
-    async def test_logger_is_live_again_afterwards(self, console) -> None:
+    async def test_logger_is_live_again_afterwards(self, console, monkeypatch) -> None:
         """Quieting is scoped to the cleanup, not installed permanently."""
-        client = _client()
-
-        class _CM:
-            async def __aexit__(self, *_exc):
-                return None
-
-        client._cm = _CM()
+        client = await _connected(monkeypatch, lambda: None)
         await client.disconnect()
 
         logging.getLogger(_STDIO_LOGGER_NAME).error("a genuine error")
         assert len(console.records) == 1
 
-    async def test_scope_lifted_even_when_aexit_raises(self, console) -> None:
-        client = _client()
+    async def test_scope_lifted_even_when_aexit_raises(
+        self, console, monkeypatch
+    ) -> None:
+        def _explode():
+            raise RuntimeError("anyio task group cleanup exploded")
 
-        class _CM:
-            async def __aexit__(self, *_exc):
-                raise RuntimeError("anyio task group cleanup exploded")
-
-        client._cm = _CM()
+        client = await _connected(monkeypatch, _explode)
         await client.disconnect()   # swallows, by contract
 
         logging.getLogger(_STDIO_LOGGER_NAME).error("a genuine error")
         assert len(console.records) == 1
 
-    async def test_other_loggers_are_untouched(self) -> None:
+    async def test_other_loggers_are_untouched(self, monkeypatch) -> None:
         capture = _Capture()
         other = logging.getLogger("loom.test.unrelated")
         other.addHandler(capture)
         other.setLevel(logging.DEBUG)
         try:
-            client = _client()
-
-            class _CM:
-                async def __aexit__(self, *_exc):
-                    other.error("unrelated subsystem still talking")
-
-            client._cm = _CM()
+            client = await _connected(
+                monkeypatch, lambda: other.error("unrelated subsystem still talking")
+            )
             await client.disconnect()
 
             assert len(capture.records) == 1
@@ -151,19 +161,11 @@ class TestDisconnect:
         finally:
             other.removeHandler(capture)
 
-    async def test_teardown_still_clears_state(self) -> None:
+    async def test_teardown_still_clears_state(self, monkeypatch) -> None:
         """Quieting must not change what disconnect() actually does."""
-        client = _client()
         exited: list[bool] = []
-
-        class _CM:
-            async def __aexit__(self, *_exc):
-                exited.append(True)
-
-        client._cm = _CM()
-        client._session = object()
-        client._read = object()
-        client._write = object()
+        client = await _connected(monkeypatch, lambda: exited.append(True))
+        assert client._session is not None
 
         await client.disconnect()
 

@@ -2763,6 +2763,26 @@ async def _setup_circadian_if_enabled(
         console.print(f"[loom.muted]Circadian: setup skipped ({exc})[/loom.muted]")
 
 
+def _log_background_task_end(task: "asyncio.Task") -> None:
+    """Done-callback for fire-and-forget platform tasks.
+
+    Nothing awaits these, so an exception or a cancel from inside would
+    otherwise vanish — the autonomy daemon once died this way overnight with
+    the Discord bot still up and not a line on the console.  A clean return
+    (the daemon after ``stop()``) is not logged.
+    """
+    if task.cancelled():
+        # Only shutdown cancels these (the daemon supervises its own loops),
+        # so this is not news — kept at DEBUG for tracing.
+        logger.debug("background task %s was cancelled", task.get_name())
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "background task %s died: %r", task.get_name(), exc, exc_info=exc
+        )
+
+
 async def _discord_with_autonomy(
     bot: "LoomDiscordBot",
     token: str,
@@ -2850,15 +2870,21 @@ async def _discord_with_autonomy(
         # hours. No-op unless [autonomy.circadian].enabled is true.
         await _setup_circadian_if_enabled(bot, daemon, config_path, notify_channel_id)
         console.print("[loom.muted]Autonomy daemon started.[/loom.muted]")
-        _t = asyncio.ensure_future(daemon.start(poll_interval=float(interval)))
+        _t = asyncio.create_task(
+            daemon.start(poll_interval=float(interval)), name="autonomy-daemon"
+        )
         _background_tasks.add(_t)
         _t.add_done_callback(_background_tasks.discard)
+        _t.add_done_callback(_log_background_task_end)
 
     try:
         async with bot._client:
-            _t = asyncio.ensure_future(_start_daemon_after_ready())
+            _t = asyncio.create_task(
+                _start_daemon_after_ready(), name="autonomy-daemon-bootstrap"
+            )
             _background_tasks.add(_t)
             _t.add_done_callback(_background_tasks.discard)
+            _t.add_done_callback(_log_background_task_end)
             await bot._client.start(token)
     finally:
         for tid in list(bot._sessions):

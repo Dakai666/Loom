@@ -290,6 +290,13 @@ class LoomMCPClient:
     One client instance corresponds to one external MCP server.  The
     connection (a subprocess for stdio, an HTTP session for http/sse) is
     opened lazily on first use and closed on ``disconnect()``.
+
+    The transport stack is entered and exited inside a task the client owns
+    (``_own_connection``).  The SDK transports and ``ClientSession`` hold
+    anyio cancel scopes, which must be exited by the task that entered them,
+    in LIFO order; entering them in the caller's task meant that closing two
+    clients in connection order leaked a cancellation into the caller —
+    which, during circadian nightly close, was the autonomy evaluator.
     """
 
     def __init__(self, cfg: MCPServerConfig) -> None:
@@ -300,6 +307,10 @@ class LoomMCPClient:
         self._read: Any = None
         self._write: Any = None
         self._lock = asyncio.Lock()
+        # The task that entered ``_cm`` and will exit it, and the event that
+        # tells it to.  Both None while disconnected.
+        self._owner: "asyncio.Task[None] | None" = None
+        self._close_requested: asyncio.Event | None = None
         # Server usage guide from ``initialize`` (Issue #595); None if absent.
         self.instructions: str | None = None
 
@@ -431,20 +442,25 @@ class LoomMCPClient:
         ``_quiet_stdio_reader`` — because a server that buffered a stdout
         banner flushes it exactly here, and the resulting parse traceback is
         noise from a session that is already finished with the server.
+
+        The close itself runs in the owner task, so it is safe from any task
+        and in any order relative to other clients.  If the caller is
+        cancelled while waiting, the owner still finishes closing on its own.
+
+        Serialised with ``_ensure_connected`` on ``_lock``: a disconnect that
+        lands mid-handshake waits for that connect to finish, then closes —
+        rather than closing under a caller about to use the session.
         """
-        if self._cm is not None:
-            cm, self._cm = self._cm, None
-            try:
-                with _quiet_stdio_reader():
-                    await cm.__aexit__(None, None, None)
-            except BaseException:
-                # Catch everything: Exception + GeneratorExit + CancelledError.
-                # The anyio task group inside stdio_client may attempt cleanup
-                # in a stale event-loop context; swallow the error silently.
-                pass
-            self._session = None
-            self._read = None
-            self._write = None
+        async with self._lock:
+            owner, self._owner = self._owner, None
+            close_requested, self._close_requested = self._close_requested, None
+            if owner is None or close_requested is None:
+                return
+            close_requested.set()
+            # ``wait`` rather than ``await owner``: the owner's own outcome
+            # (it may have been cancelled at loop shutdown) is not the
+            # caller's business; only the caller's own cancellation propagates.
+            await asyncio.wait({owner})
 
     # ------------------------------------------------------------------
     # Internal
@@ -483,31 +499,81 @@ class LoomMCPClient:
             if self._session is not None:
                 return
 
-            stack = contextlib.AsyncExitStack()
+            ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            close_requested = asyncio.Event()
+            owner = asyncio.create_task(
+                self._own_connection(ready, close_requested),
+                name=f"mcp-owner:{self._cfg.name}",
+            )
+            self._owner, self._close_requested = owner, close_requested
             try:
-                read, write = await self._open_transport(stack)
-                session = await stack.enter_async_context(ClientSession(read, write))
-                init = await session.initialize()
-            except BaseException:
-                # Close the transport immediately so it is not orphaned.  An
-                # un-exited anyio task group inside it would later crash when
-                # Python's async-generator GC finalises it in a different
-                # task.
-                #
-                # A stdio server that printed a stdout banner flushes it here
-                # too (the subprocess dies on this close), so this path needs
-                # the same quieting as disconnect() — otherwise a failed
-                # handshake buries its real cause under a parse traceback.
-                try:
-                    with _quiet_stdio_reader():
-                        await stack.aclose()
-                except Exception:
-                    pass
+                await ready
+            except BaseException as exc:
+                self._owner = self._close_requested = None
+                if isinstance(exc, asyncio.CancelledError):
+                    # Caller gave up mid-handshake: the owner is still
+                    # connecting and must be told to stop and clean up.
+                    owner.cancel()
                 raise
-            self._cm = stack
-            self._read, self._write = read, write
-            self._session = session
-            self.instructions = getattr(init, "instructions", None)
+
+    async def _own_connection(
+        self, ready: "asyncio.Future[None]", close_requested: asyncio.Event
+    ) -> None:
+        """Owner task: enter the transport stack, hold it, exit it — all here.
+
+        Reports the handshake outcome through *ready*, then parks until
+        ``disconnect()`` sets *close_requested* (or the task is cancelled at
+        loop shutdown) and closes the stack in the same task that opened it.
+        """
+        stack = contextlib.AsyncExitStack()
+        try:
+            read, write = await self._open_transport(stack)
+            session = await stack.enter_async_context(ClientSession(read, write))
+            init = await session.initialize()
+        except BaseException as exc:
+            # Close the transport immediately so it is not orphaned.  An
+            # un-exited anyio task group inside it would later crash when
+            # Python's async-generator GC finalises it in a different task.
+            await self._close_quietly(stack)
+            if not ready.done():
+                if isinstance(exc, asyncio.CancelledError):
+                    ready.cancel()
+                else:
+                    ready.set_exception(exc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return
+
+        self._cm = stack
+        self._read, self._write = read, write
+        self._session = session
+        self.instructions = getattr(init, "instructions", None)
+        ready.set_result(None)
+        try:
+            await close_requested.wait()
+        finally:
+            self._cm = None
+            self._session = None
+            self._read = None
+            self._write = None
+            await self._close_quietly(stack)
+
+    @staticmethod
+    async def _close_quietly(stack: contextlib.AsyncExitStack) -> None:
+        """Exit *stack*, swallowing every error — the connection is finished.
+
+        A stdio server that printed a stdout banner flushes it on this close
+        (the subprocess dies here), so the SDK's stdio-reader output is
+        demoted for the window — otherwise a shutdown, or a failed
+        handshake's real cause, is buried under a parse traceback.
+        """
+        try:
+            with _quiet_stdio_reader():
+                await stack.aclose()
+        except BaseException:
+            # Catch everything: Exception + GeneratorExit + CancelledError.
+            # This is the owner's last act; nothing above it needs the error.
+            pass
 
     async def _call_tool(self, name: str, arguments: dict) -> "CallToolResult":
         await self._ensure_connected()
