@@ -785,12 +785,16 @@ class AutonomyDaemon:
         model = session.model
 
         async def _consolidate_once() -> Any:
-            from loom.core.cognition.consolidation import run_convergent_dream
+            from loom.core.cognition.consolidation import (
+                DREAM_LLM_MAX_TOKENS,
+                run_convergent_dream,
+            )
             from loom.autonomy.circadian.journal import append_consolidation_report
 
             async def _llm_fn(messages: list[dict]) -> str:
                 response = await router.chat(
-                    model=model, messages=messages, max_tokens=2048,
+                    model=model, messages=messages,
+                    max_tokens=DREAM_LLM_MAX_TOKENS,
                 )
                 return response.text or ""
 

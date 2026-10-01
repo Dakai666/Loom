@@ -1225,9 +1225,12 @@ class LoomSession:
             make_predict_tool,
         )
 
+        from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
+
         async def _dream_llm_fn(messages: list[dict]) -> str:
             response = await self.router.chat(
-                model=self.model, messages=messages, max_tokens=2048,
+                model=self.model, messages=messages,
+                max_tokens=DREAM_LLM_MAX_TOKENS,
             )
             return response.text or ""
 
