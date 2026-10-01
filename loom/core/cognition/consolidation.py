@@ -70,6 +70,13 @@ VERDICT_DEFER = "defer"
 DIFF_OK = "ok"          # trustworthy verdict (mergeable true OR a real false)
 DIFF_ERROR = "error"    # gate could not produce a verdict (retries exhausted)
 
+# Output budget for the dream ``llm_fn`` (#603). Reasoning models spend part of
+# max_tokens on thinking: at 2048, MiniMax-M2.7 hit stop=max_tokens with an
+# empty / 17-char body on a 42-member diff inventory in 2 of 3 real calls; at
+# 8192 it finished cleanly. Billing follows tokens actually generated, so the
+# headroom only costs when it is needed.
+DREAM_LLM_MAX_TOKENS = 8192
+
 # How a merge cluster's members relate (#587). Replaces the old binary
 # "≥2 members carry unique content → not mergeable" rule, which vetoed facets
 # of one claim (union should be kept) and lumped them with members that
@@ -598,11 +605,16 @@ Step 2 — classify how the facts relate, as exactly one "relation":
 When unsure between "extends" and "conflict", choose "conflict". When unsure
 between "extends" and "distinct", choose "distinct".
 
+Facts are numbered [1]..[N]. Refer to them ONLY by that number — never copy a
+fact's key.
+
 Return ONLY a JSON object with exactly these keys:
-  "unique_by_key" : object mapping each fact's key → a short string describing
-                    what that fact uniquely contributes ("" if nothing unique)
-  "relation"      : "duplicate" | "extends" | "distinct" | "conflict"
-  "rationale"     : one sentence explaining the verdict
+  "unique_by_index" : object mapping EVERY fact number ("1".."N", as strings)
+                      → what that fact uniquely contributes, in at most ~15
+                      words ("" if nothing unique). Keep it terse: large
+                      clusters must still fit in one response.
+  "relation"        : "duplicate" | "extends" | "distinct" | "conflict"
+  "rationale"       : one sentence explaining the verdict
 
 Return ONLY the JSON object — no preamble, no markdown fences.
 """
@@ -651,9 +663,13 @@ async def _diff_inventory_attempt(
     / malformed shape / unknown relation / coverage miss) — a clean parsed
     verdict is never retryable, whatever its relation.
     """
+    # Members are addressed by 1-based index (#603): making the LLM re-type
+    # every long fact key as a JSON key corrupted keys (T→:) and bloated the
+    # output past the dream llm_fn budget on large clusters. Keys stay in the
+    # prompt as context only.
     facts_block = "\n".join(
-        f'- key="{m.key}"  source="{m.source}"  value="{m.value}"'
-        for m in cluster.members
+        f'[{i}] key="{m.key}"  source="{m.source}"  value="{m.value}"'
+        for i, m in enumerate(cluster.members, start=1)
     )
     messages = [
         {"role": "system", "content": _DIFF_SYSTEM},
@@ -668,16 +684,42 @@ async def _diff_inventory_attempt(
 
     data = _parse_json_object(raw)
     if data is None:
-        return DiffInventory(rationale="diff-inventory output unparseable"), True
-
-    # unique_by_key must be an object; a list/string/None would crash .items()
-    # — fail safe rather than raise (Codex re-review #493).
-    raw_ubk = data.get("unique_by_key")
-    if not isinstance(raw_ubk, dict):
+        # Record the output size so a maintainer can tell a budget-truncated
+        # body (large cluster) from format jitter (#603).
+        raw = raw or ""
+        logger.warning(
+            "[convergent-dream] diff_inventory unparseable: members=%d raw_chars=%d tail=%r",
+            len(cluster.members), len(raw), raw[-120:],
+        )
         return DiffInventory(
-            rationale="diff-inventory unique_by_key was not an object — failing safe",
+            rationale=f"diff-inventory output unparseable (raw_chars={len(raw)})",
         ), True
-    unique_by_key = {str(k): str(v) for k, v in raw_ubk.items()}
+
+    # The mapping must be an object; a list/string/None would crash .items()
+    # — fail safe rather than raise (Codex re-review #493). Prefer the index
+    # contract (#603); a legacy key-echo answer is honoured under the same
+    # strict coverage check below.
+    raw_ubi = data.get("unique_by_index")
+    if raw_ubi is not None:
+        if not isinstance(raw_ubi, dict):
+            return DiffInventory(
+                rationale="diff-inventory unique_by_index was not an object — failing safe",
+            ), True
+        unique_by_key = _map_indices_to_keys(raw_ubi, cluster.member_keys)
+        if unique_by_key is None:
+            return DiffInventory(
+                rationale=(
+                    f"diff-inventory indices {sorted(map(str, raw_ubi))} did not "
+                    f"cover members 1..{len(cluster.members)} — failing safe"
+                ),
+            ), True
+    else:
+        raw_ubk = data.get("unique_by_key")
+        if not isinstance(raw_ubk, dict):
+            return DiffInventory(
+                rationale="diff-inventory had no unique_by_index object — failing safe",
+            ), True
+        unique_by_key = {str(k): str(v) for k, v in raw_ubk.items()}
     # Only a recognised relation string counts — anything else (missing, a
     # legacy "mergeable" bool, a typo) is untrustworthy output (#587).
     raw_rel = data.get("relation")
@@ -705,6 +747,32 @@ async def _diff_inventory_attempt(
 
     # Clean, covered verdict — a trustworthy answer, mergeable or not. Done.
     return DiffInventory(unique_by_key=unique_by_key, relation=relation, rationale=rationale), False
+
+
+def _map_indices_to_keys(
+    raw_ubi: dict, member_keys: list[str],
+) -> dict[str, str] | None:
+    """Map a 1-based ``unique_by_index`` answer back to member keys (#603).
+
+    Returns None unless the indices are exactly 1..N — a missing, extra,
+    duplicated or non-numeric index is untrustworthy output, same fail-safe
+    standard as the key-coverage check.
+    """
+    mapped: dict[str, str] = {}
+    for k, v in raw_ubi.items():
+        try:
+            idx = int(str(k).strip())
+        except ValueError:
+            return None
+        if not 1 <= idx <= len(member_keys):
+            return None
+        key = member_keys[idx - 1]
+        if key in mapped:
+            return None
+        mapped[key] = str(v)
+    if len(mapped) != len(member_keys):
+        return None
+    return mapped
 
 
 # ---------------------------------------------------------------------------
