@@ -14,6 +14,7 @@ reinforced (``last_accessed_at`` bumped), which restarts its decay clock.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -145,3 +146,34 @@ class TestReinforcement:
         )
         assert results[0].admitted is False
         assert results[0].reason == "duplicate_semantic"
+
+
+class TestObservability:
+    async def test_audit_event_counts_semantic_rejections_and_reinforcements(self, db):
+        semantic = SemanticMemory(db, embedding_provider=_same_vector_provider())
+        await _seed_old(db, semantic, days=60)
+        gov = await _governor(db, semantic)
+
+        await gov.evaluate_admission(
+            ["the nightly closure phase: say good night, journal the day, pick a program"],
+            source="session:new",
+        )
+        cur = await db.execute(
+            "SELECT details FROM audit_log WHERE tool_name = 'governance:admission'"
+        )
+        details = json.loads((await cur.fetchone())[0])
+        assert details["rejected_semantic"] == 1
+        assert details["reinforced"] == 1
+
+    async def test_all_admitted_batch_is_still_audited(self, db):
+        semantic = SemanticMemory(db)  # no embeddings → lexical only
+        gov = await _governor(db, semantic)
+        await gov.evaluate_admission(
+            ["the weather station API rate limit is sixty calls per hour"],
+            source="session:new",
+        )
+        cur = await db.execute(
+            "SELECT details FROM audit_log WHERE tool_name = 'governance:admission'"
+        )
+        details = json.loads((await cur.fetchone())[0])
+        assert details["admitted"] == 1 and details["reinforced"] == 0

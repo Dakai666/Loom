@@ -367,10 +367,13 @@ class MemoryGovernor:
                 duplicate_of=duplicate_of,
             ))
 
-        # Log admission summary
+        # Log admission summary — every non-empty batch, so the census can
+        # report gate activity (admitted vs re-learned) over a window (#603).
         admitted_count = sum(1 for r in results if r.admitted)
         rejected_count = len(results) - admitted_count
-        if rejected_count > 0:
+        semantic_rejected = sum(1 for r in results if r.reason == "duplicate_semantic")
+        reinforced = sum(1 for r in results if r.duplicate_of is not None)
+        if results:
             await self._log_governance(
                 "governance:admission",
                 f"Admitted {admitted_count}/{len(results)} facts",
@@ -378,6 +381,8 @@ class MemoryGovernor:
                     "total": len(results),
                     "admitted": admitted_count,
                     "rejected": rejected_count,
+                    "rejected_semantic": semantic_rejected,
+                    "reinforced": reinforced,
                     "threshold": self._admission_threshold,
                     "source": source,
                 },

@@ -800,14 +800,25 @@ class AutonomyDaemon:
                 )
                 return response.text or ""
 
+            # #603 step B: never rewrite memory without a fresh snapshot.
+            # A failed backup downgrades this pass to read-only.
+            run_execute = execute
+            if execute:
+                from loom.core.memory.backup import snapshot_before_write
+                if await snapshot_before_write(db, prefix="memory-pre-consolidation") is None:
+                    logger.warning(
+                        "[consolidation] pre-execute backup failed — running read-only this pass",
+                    )
+                    run_execute = False
+
             plan, report = await run_convergent_dream(
                 memory.semantic, _llm_fn,
-                corpus_limit=corpus_limit, execute=execute,
+                corpus_limit=corpus_limit, execute=run_execute,
             )
             append_consolidation_report(report)
             logger.info(
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
-                plan.pass_id, execute, plan.counts(), plan.deferred_to_next_pass,
+                plan.pass_id, run_execute, plan.counts(), plan.deferred_to_next_pass,
             )
 
             return plan

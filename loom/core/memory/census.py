@@ -90,6 +90,9 @@ class CorpusCensus:
     dup: DupDensity | None = None
     dup_unavailable: str | None = None
     notes: list[str] = field(default_factory=list)
+    # Admission-gate activity over the last BASELINE_DAYS (#603):
+    # {"admitted", "rejected_semantic", "reinforced"}; None on old snapshots.
+    gate_7d: dict[str, int] | None = None
 
     # ── persistence ─────────────────────────────────────────────────────
 
@@ -164,6 +167,13 @@ class CorpusCensus:
             f"{delta(self.access['never'], b and b.access['never'])}",
             f"- short values (display width <{SHORT_VALUE_WIDTH}): {self.short_values}",
         ]
+        if self.gate_7d is not None:
+            g = self.gate_7d
+            lines.append(
+                f"- admission gate ≤{BASELINE_DAYS}d: admitted {g['admitted']}, "
+                f"rejected as re-learned {g['rejected_semantic']}, "
+                f"reinforced {g['reinforced']}"
+            )
         if b is None:
             lines.append(f"- trend: no snapshot ≥{BASELINE_DAYS}d old yet")
         lines += [f"- note: {n}" for n in self.notes]
@@ -196,10 +206,38 @@ async def take_census(
         "last_accessed_at, domain, temporal, embedding FROM semantic_entries"
     )
     rows = await cursor.fetchall()
+    gate = await _gate_activity(db, since=now - timedelta(days=BASELINE_DAYS), until=now)
     # Everything after the fetch is CPU work over ~10k rows (JSON parsing, a
     # matmul); keep it off the event loop the Discord / autonomy sessions
     # share (PR #589 review).
-    return await asyncio.to_thread(_census_from_rows, rows, now)
+    census = await asyncio.to_thread(_census_from_rows, rows, now)
+    census.gate_7d = gate
+    return census
+
+
+async def _gate_activity(
+    db: aiosqlite.Connection, *, since: datetime, until: datetime,
+) -> dict[str, int] | None:
+    """Sum ``governance:admission`` audit events in ``[since, until]`` (#603)."""
+    try:
+        cursor = await db.execute(
+            "SELECT details FROM audit_log WHERE tool_name = 'governance:admission' "
+            "AND created_at >= ? AND created_at <= ?",
+            (since.isoformat(), until.isoformat()),
+        )
+        rows = await cursor.fetchall()
+    except Exception as exc:  # audit_log missing/locked — census stays usable
+        logger.warning("census gate activity unavailable (%s)", exc)
+        return None
+    totals = {"admitted": 0, "rejected_semantic": 0, "reinforced": 0}
+    for (raw,) in rows:
+        try:
+            d = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        for k in totals:
+            totals[k] += int(d.get(k, 0) or 0)
+    return totals
 
 
 def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
@@ -247,13 +285,14 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
             access["7d"] += age <= timedelta(days=7)
             access["30d"] += age <= timedelta(days=30)
 
-        # Consolidation's exemptions (build_plan): dreaming output and
-        # redirect stubs are not facts to merge.
+        # Consolidation's exemption (build_plan): redirect stubs are not facts
+        # to merge. Dreaming output is clustered since #603 lifted its merge
+        # exemption — the census must see what consolidation can now act on.
         try:
             stub = bool(json.loads(meta_raw or "{}").get("redirected_to"))
         except (ValueError, AttributeError):
             stub = False
-        if tier == "dreaming" or stub:
+        if stub:
             continue
         if emb:
             to_cluster.append((value, emb))
