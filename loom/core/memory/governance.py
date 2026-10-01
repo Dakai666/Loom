@@ -72,6 +72,7 @@ class AdmissionResult:
     admitted: bool
     score: float        # 0.0–1.0 composite quality score
     reason: str         # "novel" | "duplicate" | "too_short" | "low_info"
+    duplicate_of: str | None = None  # key of the existing fact a semantic dup repeats (#603)
 
 
 @dataclass
@@ -155,6 +156,14 @@ class MemoryGovernor:
         # paths agree on what "near-duplicate" means.
         self._dup_similarity_threshold: float = cfg.get(
             "dup_similarity_threshold", 0.85
+        )
+        # Issue #603: the embedding check is a SQL vector scan, so it looks at
+        # the whole corpus by default (None). With the old 7-day window, 64 of
+        # 81 re-learned session facts in 30 days repeated a fact older than
+        # the window and slipped through. The lexical pass keeps
+        # ``dup_window_days`` — it is O(n) Python over fetched rows.
+        self._semantic_dup_window_days: int | None = cfg.get(
+            "semantic_dup_window_days", None
         )
         # Issue #281 P3: lifecycle throttle. Cross-caller gate so daemon-cron
         # and session.stop() paths skip when the previous run was recent.
@@ -298,8 +307,10 @@ class MemoryGovernor:
         Scoring criteria (each 0.0–1.0, averaged):
         - **Length score**: too short (<15 chars) = low, optimal 30-300 = high
         - **Info density**: ratio of non-stopword tokens
-        - **Novelty**: rejected when either the embedding cosine OR the lexical
-          Jaccard exceeds threshold against any recent fact in the time window.
+        - **Novelty**: rejected when either the embedding cosine (whole corpus
+          by default, #603) OR the lexical Jaccard (recent time window)
+          exceeds threshold. A semantic duplicate reinforces the fact it
+          repeats (``mark_accessed``) and is reported via ``duplicate_of``.
 
         Facts scoring >= ``admission_threshold`` (default 0.5) are admitted.
 
@@ -321,33 +332,48 @@ class MemoryGovernor:
             # Embedding-based semantic dup check — silently skipped when the
             # embedding provider is missing or fails (find_near_duplicates
             # returns [] in either case, so lexical path still runs).
-            semantic_dup = False
+            duplicate_of: str | None = None
             try:
                 near = await self._semantic.find_near_duplicates(
                     fact,
                     min_similarity=self._dup_similarity_threshold,
-                    within_days=self._dup_window_days,
+                    within_days=self._semantic_dup_window_days,
                     limit=1,
                 )
-                semantic_dup = bool(near)
+                if near:
+                    duplicate_of = near[0][0].key
             except Exception:
                 pass
 
             score, reason = self._score_fact(
-                fact, recent_values, semantic_dup=semantic_dup,
+                fact, recent_values, semantic_dup=duplicate_of is not None,
             )
             admitted = score >= self._admission_threshold
+            if reason == "duplicate_semantic" and duplicate_of is not None:
+                # Re-learning an existing fact is a signal that it is still
+                # true and in use: bump it so its decay clock restarts (#603).
+                # Best-effort — a failed touch must not change the verdict.
+                try:
+                    await self._semantic.mark_accessed([duplicate_of])
+                except Exception:
+                    pass
+            else:
+                duplicate_of = None
             results.append(AdmissionResult(
                 fact=fact,
                 admitted=admitted,
                 score=round(score, 3),
                 reason=reason,
+                duplicate_of=duplicate_of,
             ))
 
-        # Log admission summary
+        # Log admission summary — every non-empty batch, so the census can
+        # report gate activity (admitted vs re-learned) over a window (#603).
         admitted_count = sum(1 for r in results if r.admitted)
         rejected_count = len(results) - admitted_count
-        if rejected_count > 0:
+        semantic_rejected = sum(1 for r in results if r.reason == "duplicate_semantic")
+        reinforced = sum(1 for r in results if r.duplicate_of is not None)
+        if results:
             await self._log_governance(
                 "governance:admission",
                 f"Admitted {admitted_count}/{len(results)} facts",
@@ -355,6 +381,8 @@ class MemoryGovernor:
                     "total": len(results),
                     "admitted": admitted_count,
                     "rejected": rejected_count,
+                    "rejected_semantic": semantic_rejected,
+                    "reinforced": reinforced,
                     "threshold": self._admission_threshold,
                     "source": source,
                 },

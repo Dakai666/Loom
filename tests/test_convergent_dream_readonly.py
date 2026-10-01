@@ -224,18 +224,29 @@ class TestBuildPlanMerge:
 
 
 # ---------------------------------------------------------------------------
-# Dreaming exemption (spec §6.5)
+# Dreaming exemption (spec §6.5) — merge arm lifted by #603
 # ---------------------------------------------------------------------------
 
 class TestDreamingExemption:
-    async def test_dreaming_facts_excluded_from_merge(self, semantic_emb):
+    async def test_dreaming_facts_join_merge_clusters(self, semantic_emb):
+        # #603: dreaming output was 23% of the corpus with no merge path, so
+        # near-identical triples piled up forever. The merge exemption is
+        # lifted; diff-inventory + self-review still gate every fusion.
         await semantic_emb.upsert(SemanticEntry(key="m1", value="GROUPA fact", source="manual"))
         await semantic_emb.upsert(SemanticEntry(key="m2", value="GROUPA fact too", source="manual"))
         await semantic_emb.upsert(SemanticEntry(key="d1", value="GROUPA dreamt link", source="dreaming"))
 
         plan = await build_plan(semantic_emb, min_similarity=0.85)
-        all_keys = {k for c in plan.clusters for k in c.member_keys}
-        assert "d1" not in all_keys
+        merge_keys = {k for c in plan.clusters if c.kind == KIND_MERGE for k in c.member_keys}
+        assert "d1" in merge_keys
+
+    async def test_dreaming_only_cluster_is_proposed(self, semantic_emb):
+        await semantic_emb.upsert(SemanticEntry(key="rel:a::p", value="GROUPA link one", source="dreaming"))
+        await semantic_emb.upsert(SemanticEntry(key="rel:a::q", value="GROUPA link two", source="dreaming"))
+
+        plan = await build_plan(semantic_emb, min_similarity=0.85)
+        merge_keys = {k for c in plan.clusters if c.kind == KIND_MERGE for k in c.member_keys}
+        assert merge_keys == {"rel:a::p", "rel:a::q"}
 
     async def test_dreaming_facts_excluded_from_reconcile(self, semantic):
         await semantic.upsert(SemanticEntry(

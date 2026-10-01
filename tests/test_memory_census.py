@@ -110,10 +110,11 @@ class TestDuplicateDensity:
         assert c.dup.largest == 3
         assert "每日節奏 dawn" in c.dup.largest_sample
 
-    async def test_dreaming_stubs_and_unembedded_are_not_clustered(self, db):
-        """Same exemptions consolidation applies: dreaming output and redirect
-        stubs are not facts to merge. Rows without an embedding can't be
-        measured — they are counted, not silently skipped."""
+    async def test_stubs_and_unembedded_are_not_clustered(self, db):
+        """Same exemptions consolidation applies: redirect stubs are not facts
+        to merge. Dreaming output IS clustered since #603 lifted its merge
+        exemption. Rows without an embedding can't be measured — they are
+        counted, not silently skipped."""
         await _row(db, embedding=_vec(0))
         await _row(db, embedding=_vec(1), source="dreaming")
         await _row(db, embedding=_vec(2), metadata={"redirected_to": "k1"})
@@ -121,8 +122,8 @@ class TestDuplicateDensity:
         await _row(db)  # no embedding
 
         c = await take_census(db, now=NOW)
-        assert c.dup.groups == 0
-        assert c.dup.embedded == 2
+        assert c.dup.groups == 1
+        assert c.dup.embedded == 3
         assert c.dup.unembedded == 1
 
 
@@ -221,3 +222,41 @@ class TestMemoryHealthCorpusView:
         call = ToolCall(id="c", tool_name="memory_health", args={},
                         trust_level=tool.trust_level, session_id="s")
         assert (await tool.executor(call)).output == "ops ok"
+
+
+class TestAdmissionGateActivity:
+    """#603: the census shows whether the admission gate is catching
+    re-learned facts, so the dedup fix is observable in the weekly report."""
+
+    async def _audit(self, db, *, days_ago, admitted, rejected_semantic, reinforced):
+        ts = (NOW - timedelta(days=days_ago)).isoformat()
+        details = {"admitted": admitted, "rejected": rejected_semantic,
+                   "rejected_semantic": rejected_semantic, "reinforced": reinforced}
+        await db.execute(
+            "INSERT INTO audit_log (id, session_id, tool_name, trust_level, success, "
+            "duration_ms, error, details, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"a{days_ago}{admitted}", "governance", "governance:admission",
+             "GOVERNANCE", 1, 0, "", json.dumps(details), ts),
+        )
+        await db.commit()
+
+    async def test_sums_last_seven_days_only(self, db):
+        await _row(db)
+        await self._audit(db, days_ago=1, admitted=3, rejected_semantic=2, reinforced=2)
+        await self._audit(db, days_ago=3, admitted=1, rejected_semantic=1, reinforced=1)
+        await self._audit(db, days_ago=20, admitted=9, rejected_semantic=9, reinforced=9)
+        c = await take_census(db, now=NOW)
+        assert c.gate_7d == {"admitted": 4, "rejected_semantic": 3, "reinforced": 3}
+        assert "admission gate ≤7d: admitted 4, rejected as re-learned 3, reinforced 3" in c.render_detail()
+
+    async def test_old_snapshot_without_gate_field_still_loads(self, db):
+        await _row(db)
+        c = await take_census(db, now=NOW - timedelta(days=8))
+        raw = c.to_dict()
+        raw.pop("gate_7d")
+        await db.execute(
+            "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?)",
+            ("census:" + raw["taken_at"][:10], json.dumps(raw), raw["taken_at"]),
+        )
+        await db.commit()
+        assert (await load_baseline(db, now=NOW)) is not None
