@@ -24,10 +24,11 @@ Design decisions
   asserts the corpus is byte-identical before and after.
 * **Pure cognition** — no imports from platform, harness, or autonomy. The
   ``ToolDefinition`` adapter lives in ``loom.core.memory.maintenance``.
-* **dreaming exemption is principled, not tactical** (spec §6.5) — facts whose
-  source classifies as ``dreaming`` are the divergent dream's own output and
-  are never proposed for merge/reconcile; a dreaming fact with no relations is
-  an *allowed orphan* (a connection still waiting for its place), not garbage.
+* **dreaming exemption** (spec §6.5) — facts whose source classifies as
+  ``dreaming`` are never proposed for reconcile, and a dreaming fact with no
+  relations is an *allowed orphan* (a connection still waiting for its place),
+  not garbage. The merge exemption was lifted in #603: near-identical dream
+  triples are clustered like any other fact, behind the same gates.
 * **Strong veto** (spec §6.2) — ``self_review`` verdicts are hard boundaries,
   not advisory scores. ``skip`` / ``defer`` mean the cluster is not executed.
 * **No silent caps** (feedback: no-silent-truncation) — when a batch cap drops
@@ -434,13 +435,17 @@ async def build_plan(
     plan.scanned = len(corpus)
     by_key = {e.key: e for e in corpus}
 
-    # ── Merge candidates: near-duplicate clustering (dreaming-exempt) ──────
+    # ── Merge candidates: near-duplicate clustering ───────────────────────
+    # Dreaming output joins merge clustering (#603 lifted the §6.5 merge
+    # exemption: 23% of the corpus had no consolidation path, so near-identical
+    # triples only ever accumulated). Every fusion still passes diff-inventory
+    # and self-review. Reconcile and orphan handling keep the exemption.
     edges: list[tuple[str, str]] = []
     pair_score: dict[frozenset[str], float] = {}
     if semantic.has_embeddings:
         for entry in corpus:
-            if _is_dreaming(entry) or _is_stub(entry):
-                continue  # §6.5 dreaming exempt; stubs aren't real facts (#490)
+            if _is_stub(entry):
+                continue  # stubs aren't real facts (#490)
             try:
                 neighbours = await semantic.find_near_duplicates(
                     entry.value,
@@ -453,7 +458,7 @@ async def build_plan(
                 plan.notes.append(f"near-dup lookup failed for {entry.key!r}: {exc}")
                 continue
             for neighbour, score in neighbours:
-                if _is_dreaming(neighbour) or _is_stub(neighbour) or neighbour.key not in by_key:
+                if _is_stub(neighbour) or neighbour.key not in by_key:
                     continue
                 edges.append((entry.key, neighbour.key))
                 pair = frozenset((entry.key, neighbour.key))

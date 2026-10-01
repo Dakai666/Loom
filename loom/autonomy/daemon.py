@@ -722,11 +722,13 @@ class AutonomyDaemon:
         model = session.model
 
         async def _dream_once() -> dict:
+            from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
             from loom.core.cognition.dreaming import dream_cycle
 
             async def _llm_fn(messages: list[dict]) -> str:
                 response = await router.chat(
-                    model=model, messages=messages, max_tokens=2048,
+                    model=model, messages=messages,
+                    max_tokens=DREAM_LLM_MAX_TOKENS,
                 )
                 return response.text or ""
 
