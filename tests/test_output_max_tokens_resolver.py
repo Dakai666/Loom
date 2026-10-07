@@ -156,6 +156,19 @@ class TestAnthropicProviderTable:
         assert p.native_max_tokens("deepseek-chat") == 8192
         assert p.native_max_tokens("deepseek-reasoner") == 8192
 
+    def test_current_tier_models_have_entries(self) -> None:
+        """Models routed via loom.toml tiers must not fall through to the
+        8192 fallback — long-form tasks hit stop_reason=max_tokens after
+        tool use, which has no continuation path (#271 is 0-tool only)."""
+        p = object.__new__(AnthropicProvider)
+        for model in (
+            "MiniMax-M3",
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ):
+            assert p.native_max_tokens(model) == 65536, model
+
     def test_unknown_model_returns_none(self) -> None:
         p = object.__new__(AnthropicProvider)
         assert p.native_max_tokens("claude-gibberish-99") is None
