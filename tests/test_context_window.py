@@ -112,12 +112,23 @@ class TestResolveContextWindow:
 
 
 # ---------------------------------------------------------------------------
-# Session: re-sync + compact-before-call
+# Session: re-sync + compact-before-call (real compaction, not a stub)
 # ---------------------------------------------------------------------------
 
+from loom.core.cognition.providers import LLMResponse
+
+BIG, SMALL = "minimax-m3.1-flash-preview", "minimax-m2.7"
+# Scaled-down windows keep the real token estimator fast; the ratio (5×)
+# mirrors a 1M → 204_800 tier switch.
+SCALED = {"cognition": {"context_window_overrides": {BIG: 100_000, SMALL: 20_000}}}
+
+
 class _FakeSession:
+    model = LoomSession.model
     _sync_context_budget = LoomSession._sync_context_budget
     _fit_context_to = LoomSession._fit_context_to
+    _smart_compact = LoomSession._smart_compact
+    _compress_context = LoomSession._compress_context
 
 
 class _Layout:
@@ -128,22 +139,38 @@ class _Layout:
         self.window = n
 
 
-def _session(cfg: dict | None = None) -> _FakeSession:
+def _turns(n: int, tokens_each: int = 1000) -> list[dict]:
+    body = "word " * int(tokens_each * 0.8)
+    msgs: list[dict] = [{"role": "system", "content": "sys"}]
+    for i in range(n):
+        msgs.append({"role": "user", "content": f"q{i} {body}"})
+        msgs.append({"role": "assistant", "content": f"a{i} {body}"})
+    return msgs
+
+
+def _session(cfg: dict | None = None, messages: list[dict] | None = None) -> _FakeSession:
     s = _FakeSession()
-    s._loom_config = cfg or {}
+    s._model = BIG
+    s._loom_config = cfg if cfg is not None else {}
     s.router = _router()
+    s.summary_calls = 0
+
+    async def _summarize(**kwargs: Any) -> LLMResponse:
+        s.summary_calls += 1
+        return LLMResponse(text="short summary", tool_uses=[], stop_reason="end_turn")
+    s.router.get_provider(BIG).chat = _summarize
+
     s.budget = ContextBudget(total_tokens=_DEFAULT_CONTEXT_WINDOW)
-    s.messages = []
+    s.messages = messages if messages is not None else []
+    s.budget.record_messages(s.messages)
     layout = _Layout()
     s._layout = layout
     s._telemetry = SimpleNamespace(get=lambda n: layout if n == "context_layout" else None)
-    s.compactions = 0
-
-    async def _compact() -> None:
-        s.compactions += 1
-        s.budget.used_tokens = 10_000
-    s._smart_compact = _compact
     return s
+
+
+def _under_threshold(s: _FakeSession) -> bool:
+    return s.budget.used_tokens <= s.budget.compression_threshold * s.budget.total_tokens
 
 
 class TestSessionContextBudget:
@@ -159,16 +186,40 @@ class TestSessionContextBudget:
         assert s._sync_context_budget("minimax-m2.7") == 204_800
 
     async def test_large_window_no_compaction_at_old_threshold(self):
-        # 300K used would have compacted under the old hard-coded 204_800.
-        s = _session()
-        s.budget.used_tokens = 300_000
-        await s._fit_context_to("minimax-m3.1-flash-preview", where="initial")
-        assert s.compactions == 0
+        # ~300K tokens would have compacted under the old hard-coded 204_800.
+        s = _session(messages=_turns(150, 2000))
+        await s._fit_context_to(BIG, where="initial")
+        assert s.summary_calls == 0
+        assert len(s.messages) == 301
 
-    async def test_switch_to_smaller_window_compacts_before_call(self):
-        s = _session()
-        s._sync_context_budget("minimax-m3.1-flash-preview")
-        s.budget.used_tokens = 600_000
-        await s._fit_context_to("minimax-m2.7", where="tier switch")
-        assert s.compactions == 1
-        assert s.budget.total_tokens == 204_800
+
+class TestFitReachesInvariant:
+    async def test_tier_switch_onto_smaller_window_ends_under_threshold(self):
+        # ~75K on a 100K window, then switch to 20K: one summary pass keeps the
+        # newer half verbatim (~185%) — the fit must not stop there (#610 B1).
+        s = _session(SCALED, _turns(36))
+        s._sync_context_budget(BIG)
+        assert not s.budget.should_compress()
+        await s._fit_context_to(SMALL, where="tier switch")
+        assert s.budget.total_tokens == 20_000
+        assert _under_threshold(s), s.budget.format_pressure()
+        assert s.messages[0]["role"] == "system"
+        assert s.messages[-1]["content"].startswith("a35 ")  # newest turn kept
+
+    async def test_summary_failure_still_reaches_invariant(self):
+        s = _session(SCALED, _turns(36))
+
+        async def _boom(**kwargs: Any) -> LLMResponse:
+            raise RuntimeError("summary endpoint down")
+        s.router.get_provider(BIG).chat = _boom
+        await s._fit_context_to(SMALL, where="tier switch")
+        assert _under_threshold(s), s.budget.format_pressure()
+
+    async def test_irreducible_single_turn_terminates(self, caplog):
+        # One turn bigger than the whole window can't be fixed by compaction;
+        # the fit must stop (bounded passes) and say so instead of looping.
+        s = _session(SCALED, _turns(1, 30_000))
+        with caplog.at_level("WARNING"):
+            await s._fit_context_to(SMALL, where="tier switch")
+        assert s.summary_calls <= 3
+        assert any("still" in r.getMessage() for r in caplog.records)

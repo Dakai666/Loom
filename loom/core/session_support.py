@@ -24,6 +24,7 @@ Grouped by concern:
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,6 +35,8 @@ from dotenv import dotenv_values
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
     from loom.core.harness.middleware import ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +164,10 @@ def _resolve_output_max_tokens(
     Precedence (Issue #272):
       1. ``[cognition.output_max_tokens_overrides][<model>]`` — explicit
          user override, case-sensitive (intentional: user typed it).
-      2. ``[cognition].output_max_tokens`` — global user-set cap.
+      2. ``[cognition].output_max_tokens`` — global user-set cap. It
+         *replaces* the native value (may raise or lower it) — unlike the
+         sibling ``context_window``, which only ever caps; see
+         ``_resolve_context_window``.
       3. **Provider-declared native limit** — provider class knows what its
          own models support. Lookup is case-insensitive. New models become
          available without loom.toml edits.
@@ -217,11 +223,18 @@ def _resolve_context_window(
     """Return the context-budget window for *model*.
 
     Precedence:
-      1. ``[cognition.context_window_overrides][<model>]`` — explicit.
+      1. ``[cognition.context_window_overrides][<model>]`` — explicit,
+         case-sensitive exact match (intentional, same as
+         ``output_max_tokens_overrides``: the user typed that key).
       2. Provider-declared native window, capped by the optional global
          ``[cognition].context_window`` ceiling. The ceiling only ever
          *lowers* a window — never raises it past what the model holds.
       3. The ceiling alone (unknown model), else ``_DEFAULT_CONTEXT_WINDOW``.
+
+    The sibling ``[cognition].output_max_tokens`` *replaces* the native
+    output cap, whereas ``context_window`` only *caps* — a context ceiling
+    above what the model holds would overflow the wire. Don't "align" this
+    into a replacement.
 
     ``[cognition].max_tokens`` is deliberately not consulted: it was never
     read, and honouring it now would silently cap 1M models at 204_800.
@@ -236,12 +249,17 @@ def _resolve_context_window(
     if router is not None:
         try:
             native = _positive_int(router.get_provider(model).native_context_window(model))
-        except Exception:
+        except Exception as exc:
+            logger.debug("context window: provider lookup for %r failed: %s", model, exc)
             native = None
     if native is not None:
         return min(native, ceiling) if ceiling is not None else native
     if ceiling is not None:
         return ceiling
+    logger.debug(
+        "context window: no native window declared for %r; using %d fallback",
+        model, _DEFAULT_CONTEXT_WINDOW,
+    )
     return _DEFAULT_CONTEXT_WINDOW
 
 
