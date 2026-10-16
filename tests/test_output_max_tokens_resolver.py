@@ -161,14 +161,14 @@ class TestAnthropicProviderTable:
         fallback — long-form tasks hit stop_reason=max_tokens after
         tool use, which has no continuation path (#271 is 0-tool only)."""
         p = object.__new__(AnthropicProvider)
-        for model in ("MiniMax-M3", "MiniMax-M3.1-Flash-Preview"):
-            assert p.native_max_tokens(model) == 131072, model
         for model in (
+            "MiniMax-M3",
+            "MiniMax-M3.1-Flash-Preview",
             "deepseek-flash",
             "deepseek-v4-flash",
             "deepseek-v4-pro",
         ):
-            assert p.native_max_tokens(model) == 65536, model
+            assert p.native_max_tokens(model) == 131072, model
 
     def test_unknown_model_returns_none(self) -> None:
         p = object.__new__(AnthropicProvider)

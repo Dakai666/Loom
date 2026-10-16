@@ -198,6 +198,53 @@ def _resolve_output_max_tokens(
     return _DEFAULT_OUTPUT_MAX_TOKENS
 
 
+# Context window used when neither config nor provider knows the model.
+# Matches the budget that was hard-coded before windows became per-model.
+_DEFAULT_CONTEXT_WINDOW = 204_800
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _resolve_context_window(
+    cfg: dict, model: str, router: "LLMRouter | None" = None,
+) -> int:
+    """Return the context-budget window for *model*.
+
+    Precedence:
+      1. ``[cognition.context_window_overrides][<model>]`` — explicit.
+      2. Provider-declared native window, capped by the optional global
+         ``[cognition].context_window`` ceiling. The ceiling only ever
+         *lowers* a window — never raises it past what the model holds.
+      3. The ceiling alone (unknown model), else ``_DEFAULT_CONTEXT_WINDOW``.
+
+    ``[cognition].max_tokens`` is deliberately not consulted: it was never
+    read, and honouring it now would silently cap 1M models at 204_800.
+    """
+    cog = cfg.get("cognition", {}) or {}
+    overrides = cog.get("context_window_overrides", {}) or {}
+    explicit = _positive_int(overrides.get(model))
+    if explicit is not None:
+        return explicit
+    ceiling = _positive_int(cog.get("context_window"))
+    native: int | None = None
+    if router is not None:
+        try:
+            native = _positive_int(router.get_provider(model).native_context_window(model))
+        except Exception:
+            native = None
+    if native is not None:
+        return min(native, ceiling) if ceiling is not None else native
+    if ceiling is not None:
+        return ceiling
+    return _DEFAULT_CONTEXT_WINDOW
+
+
 # ---------------------------------------------------------------------------
 # Environment / config loading
 # ---------------------------------------------------------------------------

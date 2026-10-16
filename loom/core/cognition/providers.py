@@ -180,6 +180,17 @@ class LLMProvider(ABC):
     # doesn't override. Subclasses populate; default is empty.
     NATIVE_OUTPUT_LIMITS: dict[str, int] = {}
 
+    # Model → native context window (input + output tokens). Drives the
+    # session's ContextBudget so compaction triggers relative to what the
+    # serving model actually holds. Unknown models fall back in the resolver.
+    NATIVE_CONTEXT_WINDOWS: dict[str, int] = {}
+
+    def native_context_window(self, model: str) -> int | None:
+        """Declared context window for *model* (case-insensitive), or ``None``."""
+        if not model:
+            return None
+        return self.NATIVE_CONTEXT_WINDOWS.get(model.lower())
+
     def for_model(self, model: str) -> "LLMProvider":
         """Return a view of this provider that serves *model*.
 
@@ -313,8 +324,8 @@ class AnthropicProvider(LLMProvider):
     #     131072 on 2026-10-16 (M3.1-Flash accepted up to 200000, no 400).
     #     M2.7 is retiring 2026-11-18; Token Plan requests to it have
     #     auto-routed to M3.1-Flash-Preview since 2026-10-19.
-    #   - DeepSeek V4 family: vendors advertise ~384K; 65536 is a
-    #     deliberate middle ground. Live-probed on 2026-10-07 (no 400).
+    #   - DeepSeek V4 family: vendor max output 384K, 1M context. Live-probed
+    #     at 131072 on 2026-10-16 (deepseek-flash, deepseek-v4-pro; no 400).
     #     Unlisted models silently fall back to 8192 and abort long-form
     #     turns with stop_reason=max_tokens once a tool has run.
     NATIVE_OUTPUT_LIMITS: dict[str, int] = {
@@ -328,12 +339,25 @@ class AnthropicProvider(LLMProvider):
         "minimax-m3": 131072,
         "minimax-m3.1-flash-preview": 131072,
         # DeepSeek via Anthropic-compat endpoint
-        "deepseek-flash": 65536,
-        "deepseek-v4-flash": 65536,
-        "deepseek-v4-pro": 65536,
+        "deepseek-flash": 131072,
+        "deepseek-v4-flash": 131072,
+        "deepseek-v4-pro": 131072,
         "deepseek-v3": 8192,
         "deepseek-chat": 8192,
         "deepseek-reasoner": 8192,
+    }
+
+    # Sources (2026-10-16): MiniMax models-intro (M3 / M3.1-Flash 1M);
+    # DeepSeek pricing page (deepseek-flash / v4-pro 1M; deepseek-v4-flash
+    # is a legacy alias served by V4.1 Flash). M2.7 keeps the 204_800 the
+    # session budget was hard-coded to. Claude is left to the fallback.
+    NATIVE_CONTEXT_WINDOWS: dict[str, int] = {
+        "minimax-m2.7": 204_800,
+        "minimax-m3": 1_000_000,
+        "minimax-m3.1-flash-preview": 1_000_000,
+        "deepseek-flash": 1_000_000,
+        "deepseek-v4-flash": 1_000_000,
+        "deepseek-v4-pro": 1_000_000,
     }
 
     # Models that accept ``output_config.effort`` → vendor default applied

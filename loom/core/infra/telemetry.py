@@ -358,6 +358,10 @@ class ContextLayoutDimension(DimensionTracker):
         self._max_window = max_window
         self._last_total_tokens: int = 0
 
+    def set_max_window(self, max_window: int) -> None:
+        """Follow the active model's context window after a model switch."""
+        self._max_window = max_window
+
     def update_total(self, input_tokens: int) -> None:
         """Called after each LLM response — stores the authoritative total."""
         if input_tokens > 0:
