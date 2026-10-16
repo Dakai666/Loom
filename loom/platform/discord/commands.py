@@ -166,7 +166,7 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
         # Surface registered providers as completion hints. Specific model
         # names per provider are too dynamic to enumerate up front.
         hints = []
-        for prefix in ("MiniMax-M2", "claude-sonnet-4-6", "claude-opus-4-7", "deepseek/deepseek-chat"):
+        for prefix in ("MiniMax-M3", "claude-sonnet-4-6", "claude-opus-4-7", "deepseek/deepseek-chat"):
             if current.lower() in prefix.lower():
                 hints.append(app_commands.Choice(name=prefix, value=prefix))
         return hints[:25]
