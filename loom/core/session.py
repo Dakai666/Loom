@@ -59,10 +59,9 @@ from loom.core.ledger import (
 from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
-from loom.core.cognition.providers import (
+from loom.core.cognition.providers import AnthropicProvider, SensitiveContentError
+from loom.core.cognition.responses_policy import (
     ANTHROPIC_EFFORT_LEVELS,
-    AnthropicProvider,
-    SensitiveContentError,
     normalize_anthropic_effort,
 )
 from loom.core.cognition import vision as _vision
@@ -1366,7 +1365,7 @@ class LoomSession:
         if any(
             isinstance(p, AnthropicProvider)
             and any(p.supports_effort(m) for m in _effort_models)
-            for p in self.router._providers.values()
+            for p in self.router.provider_instances()
         ):
             from loom.platform.cli.tools import make_set_reasoning_effort_tool
             self.registry.register(make_set_reasoning_effort_tool(self))
@@ -3699,7 +3698,8 @@ class LoomSession:
         if router is None:
             return
         effort = self._effective_effort()
-        for provider in (getattr(router, "_providers", None) or {}).values():
+        instances = getattr(router, "provider_instances", None)
+        for provider in (instances() if callable(instances) else ()):
             if isinstance(provider, AnthropicProvider):
                 provider.effort = effort
 

@@ -117,6 +117,11 @@ class LLMRouter:
         """Names of all registered providers."""
         return list(self._providers)
 
+    def provider_instances(self) -> list[LLMProvider]:
+        """All registered provider objects (for session-wide settings such as
+        reasoning effort). Per-call routing still goes through ``get_provider``."""
+        return list(self._providers.values())
+
     def registered_models(self) -> list[str]:
         """List known model names from all registered providers."""
         models = []

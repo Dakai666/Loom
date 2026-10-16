@@ -3,8 +3,9 @@ Contract tests for reasoning-effort control on Anthropic-compatible models.
 
 MiniMax-M3.1-Flash-Preview exposes thinking depth via ``output_config.effort``
 (low | medium | high | xhigh | max); omitting it means the vendor default
-``max`` — every turn at the deepest, slowest setting. Thinking cannot be
-disabled (``none`` → 400).
+``max``. Unset is the deliberate default (measured fast enough in practice);
+the feature exists to *lower* depth when wanted — by config, by the agent's
+own judgement, or because DK asked. Thinking cannot be disabled (``none`` → 400).
 
 Invariants:
   - ``output_config`` is sent ONLY for models that declare effort support;
@@ -26,9 +27,9 @@ from typing import Any
 
 import pytest
 
-from loom.core.cognition.providers import (
+from loom.core.cognition.providers import AnthropicProvider
+from loom.core.cognition.responses_policy import (
     ANTHROPIC_EFFORT_LEVELS,
-    AnthropicProvider,
     normalize_anthropic_effort,
 )
 from loom.core.cognition.router import LLMRouter
@@ -342,3 +343,9 @@ class TestEffortThroughRouter:
         r = _router_with(p)
         await r.chat(model="minimax-m2.7", messages=[{"role": "user", "content": "hi"}], max_tokens=64)
         assert "output_config" not in p._client.messages.kwargs
+
+
+def test_router_exposes_provider_instances_publicly():
+    p = _provider(M31)
+    r = _router_with(p)
+    assert r.provider_instances() == [p]

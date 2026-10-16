@@ -4344,7 +4344,7 @@ def make_set_reasoning_effort_tool(session: Any) -> ToolDefinition:
     override is session-scoped and is kept across tier switches — it applies
     whenever a supporting model is active.
     """
-    from loom.core.cognition.providers import (
+    from loom.core.cognition.responses_policy import (
         ANTHROPIC_EFFORT_LEVELS,
         normalize_anthropic_effort,
     )

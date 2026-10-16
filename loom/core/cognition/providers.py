@@ -274,19 +274,6 @@ class LLMProvider(ABC):
 # Anthropic provider
 # ---------------------------------------------------------------------------
 
-# Thinking-depth levels for ``output_config.effort`` on Anthropic-compatible
-# endpoints. ``none`` is deliberately absent: MiniMax-M3.1-Flash-Preview
-# can't disable thinking and answers ``effort: none`` with a 400.
-ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-
-
-def normalize_anthropic_effort(value: Any) -> str | None:
-    """Return a canonical effort level, or ``None`` for unset / invalid."""
-    if not isinstance(value, str):
-        return None
-    candidate = value.strip().lower()
-    return candidate if candidate in ANTHROPIC_EFFORT_LEVELS else None
-
 
 class AnthropicProvider(LLMProvider):
     """
