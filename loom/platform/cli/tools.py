@@ -4328,3 +4328,102 @@ def make_clear_model_tier_tool(session: Any) -> ToolDefinition:
         tags=["cognition", "tier"],
         impact_scope="agent",
     )
+
+
+def make_set_reasoning_effort_tool(session: Any) -> ToolDefinition:
+    """Agent-callable: set the thinking depth of the active model.
+
+    Sibling of ``request_model_tier``: the tier picks *which* engine, effort
+    picks *how hard it thinks*. Maps to ``output_config.effort`` on
+    Anthropic-compatible models that support it (MiniMax-M3.1-Flash-Preview,
+    whose vendor default is ``max``). The agent can call it on its own
+    judgement, or because DK asked in plain words ("今天輕一點").
+
+    ``effort="default"`` clears the session override, falling back to
+    ``[cognition] reasoning_effort`` and then the vendor default. The
+    override is session-scoped and is kept across tier switches — it applies
+    whenever a supporting model is active.
+    """
+    from loom.core.cognition.providers import (
+        ANTHROPIC_EFFORT_LEVELS,
+        normalize_anthropic_effort,
+    )
+
+    async def _executor(call: ToolCall) -> ToolResult:
+        reason = str(call.args.get("reason", "")).strip()
+        if not reason:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error="'reason' is required — describe why the thinking depth should change",
+            )
+        raw = str(call.args.get("effort", "")).strip().lower()
+        if raw == "default":
+            level: str | None = None
+        else:
+            level = normalize_anthropic_effort(raw)
+            if level is None:
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name,
+                    success=False,
+                    error=(
+                        f"Unknown effort {raw!r}. Use one of: "
+                        f"{', '.join(ANTHROPIC_EFFORT_LEVELS)}, or 'default' to clear. "
+                        f"Thinking cannot be turned off."
+                    ),
+                )
+
+        session._set_reasoning_effort(level)
+        model = session._active_model()
+        shown = session._effort_display()
+        effective = session._effective_effort()
+        if shown is not None:
+            msg = f"Reasoning effort: {shown} on {model}."
+        else:
+            msg = (
+                f"Recorded effort={effective or 'default'}, but the active model "
+                f"{model} does not support effort control. It applies whenever "
+                f"a supporting model (e.g. MiniMax-M3.1-Flash-Preview) is active."
+            )
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=True, output=msg,
+            metadata={
+                "effort": effective,
+                "override": session._effort_override,
+                "applies": shown is not None,
+                "model": model,
+            },
+        )
+
+    return ToolDefinition(
+        name="set_reasoning_effort",
+        description=(
+            "Set how deeply the active model thinks before answering "
+            "(low | medium | high | xhigh | max; 'default' clears the override). "
+            "Higher = more thorough but slower and more output tokens. Lower it "
+            "for light chat or routine steps; raise it for hard reasoning. Also "
+            "use it when DK asks you to think more or less. Current effort is "
+            "shown in runtime_identity. Reason is mandatory."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.NONE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "xhigh", "max", "default"],
+                    "description": "Target thinking depth, or 'default' to clear the override.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the change is warranted — one short sentence.",
+                },
+            },
+            "required": ["effort", "reason"],
+        },
+        executor=_executor,
+        tags=["cognition", "effort"],
+        impact_scope="agent",
+    )
