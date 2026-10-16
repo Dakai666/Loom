@@ -20,7 +20,7 @@ Model routing rules
 Usage
 -----
     router = LLMRouter()
-    router.register(MiniMaxProvider(api_key="...", model="MiniMax-M2.7"))
+    router.register(MiniMaxProvider(api_key="...", model="MiniMax-M3.1-Flash-Preview"))
     router.register(AnthropicProvider(api_key="..."))
     router.register(OllamaProvider())   # no key needed
 
@@ -42,11 +42,11 @@ from .providers import LLMProvider, LLMResponse
 def get_default_model() -> str:
     """
     Return the default model from loom.toml [cognition]default_model,
-    falling back to "MiniMax-M2.7".
+    falling back to "MiniMax-M3.1-Flash-Preview".
     """
     config = load_loom_config()
     model = config.get("cognition", {}).get("default_model", "")
-    return model if model else "MiniMax-M2.7"
+    return model if model else "MiniMax-M3.1-Flash-Preview"
 
 
 class LLMRouter:
@@ -132,7 +132,7 @@ class LLMRouter:
         tools: list[dict] | None = None,
         max_tokens: int = 8096,
     ) -> LLMResponse:
-        provider = self.get_provider(model)
+        provider = self.get_provider(model).for_model(model)
         return await provider.chat(messages=messages, tools=tools, max_tokens=max_tokens)
 
     async def stream_chat(
@@ -144,7 +144,7 @@ class LLMRouter:
         *,
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
-        provider = self.get_provider(model)
+        provider = self.get_provider(model).for_model(model)
         async for item in provider.stream_chat(
             messages=messages, tools=tools, max_tokens=max_tokens,
             abort_signal=abort_signal,

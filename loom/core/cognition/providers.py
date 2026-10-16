@@ -29,6 +29,7 @@ Tool:      {"role": "tool", "tool_call_id": "...", "content": "..."}
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -179,13 +180,30 @@ class LLMProvider(ABC):
     # doesn't override. Subclasses populate; default is empty.
     NATIVE_OUTPUT_LIMITS: dict[str, int] = {}
 
+    def for_model(self, model: str) -> "LLMProvider":
+        """Return a view of this provider that serves *model*.
+
+        Providers put ``self.model`` on the wire, so a provider registered at
+        build time would otherwise keep serving its build-time model no matter
+        which tier asked. The router binds every call through here. A shallow
+        copy shares the HTTP clients and auth state but owns its ``model``, so
+        the registered instance is never mutated and concurrent calls with
+        different models (judge / reflection beside the main turn) can't race.
+        Providers keep no per-call state they reassign after ``__init__``.
+        """
+        if not model or model == self.model:
+            return self
+        bound = copy.copy(self)
+        bound.model = model
+        return bound
+
     def native_max_tokens(self, model: str) -> int | None:
         """Return the provider's declared native output cap for *model*.
 
         Returns ``None`` when the model is unknown to this provider — the
         session resolver should then fall back to its conservative default.
         Lookup is case-insensitive so loom.toml entries like
-        ``"MiniMax-M2.7"`` and ``"minimax-m2.7"`` both resolve correctly
+        ``"MiniMax-M3.1-Flash-Preview"`` and ``"minimax-m3.1-flash-preview"`` both resolve correctly
         against the canonical lower-cased table.
         """
         if not model:
@@ -265,7 +283,7 @@ class AnthropicProvider(LLMProvider):
             api_key=minimax_key,
             base_url="https://api.minimax.io/anthropic",
             name="minimax",
-            model="MiniMax-M2.7",
+            model="MiniMax-M3.1-Flash-Preview",
         )
 
     Messages are converted to/from Anthropic format internally.

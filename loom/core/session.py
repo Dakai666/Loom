@@ -391,7 +391,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         or os.environ.get("MINIMAX_API_KEY", "")
     )
     if minimax_key:
-        mm_model = default if default.startswith("MiniMax") else "MiniMax-M2.7"
+        mm_model = default if default.lower().startswith("minimax-") else "MiniMax-M3.1-Flash-Preview"
         router.register(
             AnthropicProvider(
                 api_key=minimax_key,
