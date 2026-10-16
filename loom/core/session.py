@@ -153,12 +153,18 @@ from loom.core.session_support import (  # noqa: F401  (re-export)
     _iter_nonempty_lines,
     _load_env,
     _parse_skill_frontmatter,
+    _resolve_context_window,
     _resolve_output_max_tokens,
     prediction_nudge_body,
 )
 
 console = Console(highlight=False)
 logger = logging.getLogger(__name__)
+
+# Upper bound on summary passes in _fit_context_to before falling back to
+# turn-dropping. Each pass halves the summarised span, so 3 covers an 8×
+# window shrink; beyond that dropping is cheaper than summaries of summaries.
+_MAX_SMART_COMPACT_PASSES = 3
 
 # ---------------------------------------------------------------------------
 # Session compression (episodic → semantic)
@@ -842,8 +848,14 @@ class LoomSession:
             if tool.trust_level == TrustLevel.SAFE:
                 self.perm.authorize(tool.name)
 
-        # Context budget (MiniMax M2.7 has 204 800 token context)
-        self.budget = ContextBudget(total_tokens=204_800, compression_threshold=0.80)
+        # Context budget — sized to the active model's window and re-synced
+        # before every LLM call (tiers can switch to a different window).
+        self.budget = ContextBudget(
+            total_tokens=_resolve_context_window(
+                self._loom_config, self._active_model(), self.router,
+            ),
+            compression_threshold=0.80,
+        )
 
         # Memory
         self._store = SQLiteStore(db_path)
@@ -2092,13 +2104,7 @@ class LoomSession:
             # ``should_compress`` is OR over token + block dimensions —
             # MiniMax's 2013-block wire cap can bite long before the
             # token budget does, especially on parallel-tool sessions.
-            self.budget.update_block_count(self.messages)
-            if self.budget.should_compress():
-                console.print(
-                    f"[yellow]  Context at {self.budget.format_pressure()} — "
-                    f"compressing…[/yellow]"
-                )
-                await self._smart_compact()
+            await self._fit_context_to(self._active_model(), where="")
 
             tools = self.registry.to_openai_schema()
             tool_count = 0
@@ -2182,6 +2188,9 @@ class LoomSession:
                 # When tiers aren't configured, _active_model() falls back to
                 # self.model (legacy behavior preserved).
                 _active_model = self._active_model()
+                # A tier switch (skill / agent / circadian) may have landed on
+                # a smaller window than the history now holds — fit it first.
+                await self._fit_context_to(_active_model, where="before call")
                 yield ModelThinkingStarted(
                     phase="after_tool" if tool_count > 0 else "initial",
                     tool_name=_last_completed_tool_name,
@@ -2724,13 +2733,7 @@ class LoomSession:
                     # ``should_compress`` would still see the previous turn's
                     # block reading and miss a wire-cap overrun until the
                     # next turn boundary.
-                    self.budget.update_block_count(self.messages)
-                    if self.budget.should_compress():
-                        console.print(
-                            f"[yellow]  Context at {self.budget.format_pressure()}"
-                            f" mid-turn — compressing…[/yellow]"
-                        )
-                        await self._smart_compact()
+                    await self._fit_context_to(self._active_model(), where="mid-turn")
 
                     # ── HITL check point ─────────────────────────────────────
                     # Fires after every tool batch, before the next LLM call.
@@ -3718,6 +3721,62 @@ class LoomSession:
             return None
         effort = self._effective_effort()
         return effort or f"{provider.default_effort(model)} (vendor default)"
+
+    # ------------------------------------------------------------------
+    # Context window — budget follows the serving model
+    # ------------------------------------------------------------------
+
+    def _sync_context_budget(self, model: str) -> int:
+        """Resize the budget (and telemetry window) to *model*'s window."""
+        window = _resolve_context_window(self._loom_config, model, self.router)
+        self.budget.total_tokens = window
+        telemetry = getattr(self, "_telemetry", None)
+        layout = telemetry.get("context_layout") if telemetry is not None else None
+        if layout is not None and hasattr(layout, "set_max_window"):
+            layout.set_max_window(window)
+        return window
+
+    async def _fit_context_to(self, model: str, *, where: str) -> None:
+        """Re-sync the budget to *model*, then compact until under threshold.
+
+        ``should_compress`` is OR over token + block dimensions — MiniMax's
+        2013-block wire cap can bite long before the token budget does,
+        especially on parallel-tool sessions — so the block count is
+        refreshed first (``record_response`` only updates token totals).
+
+        One ``_smart_compact`` pass summarises the older half of the turns but
+        keeps the newer half verbatim, so after a large window shrink (a tier
+        switch from 1M onto 204_800) a single pass provably can't reach the
+        threshold. Repeat while each pass makes progress, bounded, then fall
+        back to ``_compress_context`` (drops oldest turns down to 60%). A
+        single turn larger than the window can't be fixed here — warn instead
+        of looping.
+        """
+        self._sync_context_budget(model)
+        self.budget.update_block_count(self.messages)
+        if not self.budget.should_compress():
+            return
+        suffix = f" {where}" if where else ""
+        console.print(
+            f"[yellow]  Context at {self.budget.format_pressure()}"
+            f"{suffix} — compressing…[/yellow]"
+        )
+        for _ in range(_MAX_SMART_COMPACT_PASSES):
+            before = self.budget.pressure
+            await self._smart_compact()
+            self.budget.update_block_count(self.messages)
+            if not self.budget.should_compress():
+                return
+            if self.budget.pressure >= before:
+                break  # no progress — summarising further won't help
+        await self._compress_context()
+        self.budget.update_block_count(self.messages)
+        if self.budget.should_compress():
+            logger.warning(
+                "Context still at %s of %s's %d-token window after compaction; "
+                "the newest turn alone exceeds the threshold.",
+                self.budget.format_pressure(), model, self.budget.total_tokens,
+            )
 
     def _set_reasoning_effort(self, effort: str | None) -> None:
         """Set (or with ``None`` clear) the session override."""
@@ -4775,6 +4834,9 @@ class LoomSession:
         before_tokens = self.budget.used_tokens
 
         try:
+            # Summarised with the session's base model, not the active tier:
+            # the rendered history can be large, and on a tier switch the
+            # active model is the one with the *smaller* window being fitted.
             response = await self.router.chat(
                 model=self.model,
                 messages=[

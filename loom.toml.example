@@ -42,7 +42,17 @@ personality = ""
 
 [cognition]
 default_model = "claude-sonnet-4-6"
-max_tokens    = 8096
+
+# Context budget window. Each model's native window is declared by its
+# provider (MiniMax-M3 / M3.1-Flash and DeepSeek flash / v4-pro: 1M; M2.7:
+# 204_800); unknown models fall back to 204_800. The budget is re-synced to
+# the active model before every LLM call, and compaction fires at 80% of it.
+# ``context_window`` is an optional global *ceiling* — it only lowers a
+# window, never raises it past what the model holds.
+# context_window = 400000
+#
+# [cognition.context_window_overrides]
+# "deepseek-flash" = 600000
 
 # Thinking depth for Anthropic-compatible models that support
 # ``output_config.effort`` (currently MiniMax-M3.1-Flash-Preview; ignored for
