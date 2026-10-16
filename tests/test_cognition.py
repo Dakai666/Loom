@@ -553,6 +553,8 @@ class TestLLMRouter:
         async def async_chat(**kwargs):
             return mock_resp
         p.chat = async_chat
+        # Router binds each call to the requested model via for_model().
+        p.for_model = lambda model: p
 
         router.register(p, default=True)
         result = await router.chat(

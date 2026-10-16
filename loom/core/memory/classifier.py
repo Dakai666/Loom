@@ -78,7 +78,7 @@ def infer_domain(key: str | None) -> str:
 # ---------------------------------------------------------------------------
 # LLM-assisted classifier — used by the P1-C migration script to relabel
 # the legacy default-domain rows in bulk via Loom's existing LLM router
-# (MiniMax-M2.7 by default). Live `governed_upsert` writes still go through
+# (MiniMax-M3.1-Flash-Preview by default). Live `governed_upsert` writes still go through
 # the heuristic ``infer_domain`` above for zero per-write LLM cost.
 # ---------------------------------------------------------------------------
 
@@ -153,14 +153,14 @@ class LLMDomainClassifier:
     Designed for the P1-C one-shot migration — not wired into the live
     write path (the heuristic :func:`infer_domain` covers that with no
     LLM cost). Use the router that's already configured for the running
-    Loom installation; defaults to ``minimax-m2.7`` since that's Loom's
-    standard daily model.
+    Loom installation; defaults to ``minimax-m3.1-flash-preview`` since
+    that's Loom's standard daily model.
     """
 
     def __init__(
         self,
         router,
-        model: str = "minimax-m2.7",
+        model: str = "minimax-m3.1-flash-preview",
         batch_size: int = 30,
         concurrency: int = 5,
     ):
