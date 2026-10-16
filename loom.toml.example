@@ -44,6 +44,17 @@ personality = ""
 default_model = "claude-sonnet-4-6"
 max_tokens    = 8096
 
+# Thinking depth for Anthropic-compatible models that support
+# ``output_config.effort`` (currently MiniMax-M3.1-Flash-Preview; ignored for
+# every other model). low | medium | high | xhigh | max. Thinking cannot be
+# disabled. Recommended: leave unset = vendor default (max for M3.1-Flash);
+# in practice max is fast enough, and the agent can lower it at runtime with
+# the ``set_reasoning_effort`` tool (session-scoped). Set "high" / "medium"
+# here only if every session should start lighter. Avoid "low" for anything
+# that needs judgement (observed a wrong answer on a logic check).
+# (Codex / xAI keep their own ``reasoning_effort`` in their provider sections.)
+# reasoning_effort = "high"
+
 # Output-token cap for the main stream_turn() LLM call.
 #
 # Issue #272: providers now declare native limits in their

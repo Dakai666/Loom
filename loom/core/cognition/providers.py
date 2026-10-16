@@ -274,6 +274,7 @@ class LLMProvider(ABC):
 # Anthropic provider
 # ---------------------------------------------------------------------------
 
+
 class AnthropicProvider(LLMProvider):
     """
     Anthropic Claude via the anthropic SDK.
@@ -335,6 +336,14 @@ class AnthropicProvider(LLMProvider):
         "deepseek-reasoner": 8192,
     }
 
+    # Models that accept ``output_config.effort`` → vendor default applied
+    # when the field is omitted. Only these get the field on the wire; every
+    # other model on this class keeps its payload unchanged. MiniMax documents
+    # effort for M3.1-Flash-Preview only (not M3, not M2.x) as of 2026-10-16.
+    EFFORT_MODELS: dict[str, str] = {
+        "minimax-m3.1-flash-preview": "max",
+    }
+
     def __init__(
         self,
         api_key: str,
@@ -357,6 +366,20 @@ class AnthropicProvider(LLMProvider):
         self.model = model
         self._timeout = timeout
         self._max_retries = max_retries
+        # Session-owned: LoomSession pushes its resolved effort here. ``None``
+        # omits the field so the vendor default applies.
+        self.effort: str | None = None
+
+    def supports_effort(self, model: str | None = None) -> bool:
+        return (model if model is not None else self.model or "").lower() in self.EFFORT_MODELS
+
+    def default_effort(self, model: str | None = None) -> str | None:
+        """Vendor default effort for *model*, or ``None`` if unsupported."""
+        return self.EFFORT_MODELS.get((model if model is not None else self.model or "").lower())
+
+    def _apply_effort(self, kwargs: dict[str, Any]) -> None:
+        if self.effort and self.supports_effort():
+            kwargs["output_config"] = {"effort": self.effort}
 
     async def chat(
         self,
@@ -399,6 +422,7 @@ class AnthropicProvider(LLMProvider):
                  "input_schema": t.get("parameters", t.get("input_schema", {}))}
                 for t in tools
             ]
+        self._apply_effort(kwargs)
 
         forensics = get_forensics()
         forensics.record(
@@ -520,6 +544,7 @@ class AnthropicProvider(LLMProvider):
                 }
                 for t in tools
             ]
+        self._apply_effort(kwargs)
 
         full_text = ""
         tool_uses: list[ToolUse] = []

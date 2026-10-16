@@ -60,6 +60,10 @@ from loom.core.memory.facade import MemoryFacade
 from loom.core.cognition.context import ContextBudget
 from loom.core.cognition.prompt_stack import PromptStack
 from loom.core.cognition.providers import AnthropicProvider, SensitiveContentError
+from loom.core.cognition.responses_policy import (
+    ANTHROPIC_EFFORT_LEVELS,
+    normalize_anthropic_effort,
+)
 from loom.core.cognition import vision as _vision
 from loom.core.cognition.responses_sse import ResponsesProviderError
 from loom.core.cognition.counter_factual import CounterFactualReflector
@@ -737,6 +741,21 @@ class LoomSession:
         # remain available to CLI / Discord through read-only properties below.
         self._tier = TierManager.from_config(config, lambda: self._model)
 
+        # Reasoning effort (``output_config.effort``) for Anthropic-compatible
+        # models that support it (MiniMax-M3.1-Flash-Preview). Precedence:
+        # session override (set_reasoning_effort tool) > [cognition]
+        # reasoning_effort > vendor default (field omitted). Session-scoped:
+        # the override does not survive a restart, same as sticky tiers.
+        _raw_effort = (config.get("cognition") or {}).get("reasoning_effort")
+        self._effort_default: str | None = normalize_anthropic_effort(_raw_effort)
+        if _raw_effort and self._effort_default is None:
+            logger.warning(
+                "Ignoring [cognition] reasoning_effort=%r — expected one of %s",
+                _raw_effort, ", ".join(ANTHROPIC_EFFORT_LEVELS),
+            )
+        self._effort_override: str | None = None
+        self._apply_reasoning_effort()
+
         # Issue #271: when stop_reason='max_tokens' fires after 0 tools, inject
         # a system-reminder telling the agent to spill in-flight reasoning to
         # scratchpad and resume, instead of silently truncating. ``"auto"``
@@ -1339,6 +1358,17 @@ class LoomSession:
             )
             self.registry.register(make_request_model_tier_tool(self))
             self.registry.register(make_clear_model_tier_tool(self))
+
+        # Effort control only when some configured model honours it — no use
+        # offering a knob that maps to nothing on this deployment.
+        _effort_models = {self._model, *self._tier_models.values()}
+        if any(
+            isinstance(p, AnthropicProvider)
+            and any(p.supports_effort(m) for m in _effort_models)
+            for p in self.router.provider_instances()
+        ):
+            from loom.platform.cli.tools import make_set_reasoning_effort_tool
+            self.registry.register(make_set_reasoning_effort_tool(self))
 
         # Issue #64 Phase B: Register unload_skill tool
         from loom.platform.cli.skill_tools import make_unload_skill_tool
@@ -3646,7 +3676,54 @@ class LoomSession:
         _ri = telemetry.get("runtime_identity")
         if _ri is not None:
             _ri.update(model=self._active_model(), tier=self._active_tier(),
-                       tier_models=self._tier_models)
+                       tier_models=self._tier_models,
+                       effort=self._effort_display())
+
+    # ------------------------------------------------------------------
+    # Reasoning effort — session intent, pushed down to providers
+    # ------------------------------------------------------------------
+
+    def _effective_effort(self) -> str | None:
+        """Override > config default > ``None`` (vendor default)."""
+        return getattr(self, "_effort_override", None) or getattr(self, "_effort_default", None)
+
+    def _apply_reasoning_effort(self) -> None:
+        """Push the effective effort onto every Anthropic-compatible provider.
+
+        Lives on the session, not the provider, because ``set_model`` can
+        rebuild the router — fresh provider instances must inherit the intent.
+        Providers only put it on the wire for models that support it.
+        """
+        router = getattr(self, "router", None)
+        if router is None:
+            return
+        effort = self._effective_effort()
+        instances = getattr(router, "provider_instances", None)
+        for provider in (instances() if callable(instances) else ()):
+            if isinstance(provider, AnthropicProvider):
+                provider.effort = effort
+
+    def _effort_display(self) -> str | None:
+        """Effort as the agent should see it, or ``None`` when the active
+        model has no effort control (the runtime_identity line is hidden)."""
+        router = getattr(self, "router", None)
+        if router is None:
+            return None
+        model = self._active_model()
+        try:
+            provider = router.get_provider(model)
+        except (RuntimeError, AttributeError):
+            return None
+        if not isinstance(provider, AnthropicProvider) or not provider.supports_effort(model):
+            return None
+        effort = self._effective_effort()
+        return effort or f"{provider.default_effort(model)} (vendor default)"
+
+    def _set_reasoning_effort(self, effort: str | None) -> None:
+        """Set (or with ``None`` clear) the session override."""
+        self._effort_override = effort
+        self._apply_reasoning_effort()
+        self._refresh_runtime_identity()
 
     def _set_sticky_tier(
         self, new_tier: int | None, *, reason: str, source: str,
@@ -4805,6 +4882,8 @@ class LoomSession:
         if ok:
             self._model = model  # base model — TierManager reads it live
             self._tier.mark_manual_override()
+            # A rebuilt router has fresh providers — re-apply the session's effort.
+            self._apply_reasoning_effort()
             # Keep the identity telemetry (agent_health) in lock-step with the
             # model that will actually serve — set_model previously skipped this.
             self._refresh_runtime_identity()

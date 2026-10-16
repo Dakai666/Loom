@@ -437,38 +437,52 @@ class RuntimeIdentityDimension(DimensionTracker):
 
     name = "runtime_identity"
 
+    _UNSET: Any = object()
+
     def __init__(self) -> None:
         self._model: str = "unknown"
         self._tier: int = 1
         self._tier_models: dict[int, str] = {}
+        # Reasoning effort as shown to the agent; ``None`` = the active model
+        # has no effort control, so the line is hidden entirely.
+        self._effort: str | None = None
 
     def update(self, *, model: str | None = None, tier: int | None = None,
-               tier_models: dict[int, str] | None = None) -> None:
+               tier_models: dict[int, str] | None = None,
+               effort: Any = _UNSET) -> None:
         if model is not None:
             self._model = model
         if tier is not None:
             self._tier = tier
         if tier_models is not None:
             self._tier_models = tier_models
+        if effort is not self._UNSET:
+            self._effort = effort
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "model": self._model,
             "tier": self._tier,
             "tier_models": {str(k): v for k, v in self._tier_models.items()},
+            "effort": self._effort,
         }
 
     def render_summary(self) -> str:
+        if self._effort:
+            return f"model: {self._model} (T{self._tier}, effort {self._effort})"
         return f"model: {self._model} (T{self._tier})"
 
     def render_detail(self) -> str:
         tms = ", ".join(f"T{t}={m}" for t, m in sorted(self._tier_models.items()))
-        return (
+        detail = (
             f"## runtime_identity\n"
             f"- model: {self._model}\n"
             f"- tier: {self._tier}\n"
             f"- tier models: {tms or '(not configured)'}"
         )
+        if self._effort:
+            detail += f"\n- effort: {self._effort}"
+        return detail
 
 
 # ── Dimension: context_budget ─────────────────────────────────────────────
