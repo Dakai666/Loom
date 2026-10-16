@@ -289,10 +289,13 @@ class AnthropicProvider(LLMProvider):
     #     in loom.toml ``output_max_tokens_overrides``.
     #   - DeepSeek: 8K is the documented standard cap for deepseek-chat
     #     and deepseek-coder; deepseek-reasoner is the same.
-    #   - MiniMax-M3 / DeepSeek V4 family: vendors advertise far larger
-    #     caps (128K / ~384K); 65536 is a deliberate middle ground since
-    #     these endpoints may validate input + max_tokens against the
-    #     context window. Live-probed at 65536 on 2026-10-07 (no 400).
+    #   - MiniMax-M3 / M3.1-Flash-Preview: 1M context windows, so the
+    #     input + max_tokens budget leaves plenty of room. Live-probed at
+    #     131072 on 2026-10-16 (M3.1-Flash accepted up to 200000, no 400).
+    #     M2.7 is retiring 2026-11-18; Token Plan requests to it have
+    #     auto-routed to M3.1-Flash-Preview since 2026-10-19.
+    #   - DeepSeek V4 family: vendors advertise ~384K; 65536 is a
+    #     deliberate middle ground. Live-probed on 2026-10-07 (no 400).
     #     Unlisted models silently fall back to 8192 and abort long-form
     #     turns with stop_reason=max_tokens once a tool has run.
     NATIVE_OUTPUT_LIMITS: dict[str, int] = {
@@ -303,7 +306,8 @@ class AnthropicProvider(LLMProvider):
         "claude-haiku-4-5-20251001": 8192,
         # MiniMax via Anthropic-compat endpoint
         "minimax-m2.7": 65536,
-        "minimax-m3": 65536,
+        "minimax-m3": 131072,
+        "minimax-m3.1-flash-preview": 131072,
         # DeepSeek via Anthropic-compat endpoint
         "deepseek-flash": 65536,
         "deepseek-v4-flash": 65536,

@@ -140,7 +140,11 @@ def _find_partial_tag_suffix(text: str, tag: str) -> int:
 # output ceilings (MiniMax-M2.7 ~64K, Claude Sonnet 4.6 ~64K, smaller local
 # models often 4-8K) so a single hardcoded value was either wasteful or
 # clipping long tool-loop turns. Resolved once at session start.
-_DEFAULT_OUTPUT_MAX_TOKENS = 8192
+# 32768 since 2026-10: 8192 silently truncated reasoning models whose
+# thinking alone can eat the budget (#603/#607); current frontier models
+# all accept far more, and providers that can't should declare it in
+# NATIVE_OUTPUT_LIMITS or users can cap via output_max_tokens.
+_DEFAULT_OUTPUT_MAX_TOKENS = 32768
 
 # Issue #271: max consecutive max_tokens-with-zero-tools recoveries within a
 # single stream_turn() before falling through to TurnDropped. Two attempts

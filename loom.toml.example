@@ -57,12 +57,12 @@ max_tokens    = 8096
 #   1. [cognition.output_max_tokens_overrides][<model>]  ← user override
 #   2. [cognition].output_max_tokens                      ← global user-set
 #   3. provider's NATIVE_OUTPUT_LIMITS[<model>]           ← provider truth
-#   4. _DEFAULT_OUTPUT_MAX_TOKENS = 8192                  ← last-resort
+#   4. _DEFAULT_OUTPUT_MAX_TOKENS = 32768                 ← last-resort
 #
 # output_max_tokens = 8192
 #
 # [cognition.output_max_tokens_overrides]
-# "MiniMax-M2.7"       = 32768   # cap a chatty model
+# "MiniMax-M3.1-Flash-Preview" = 32768   # cap a chatty model
 # "claude-opus-4-7"    = 16384
 
 # ─────────────────────────────────────────────
@@ -77,7 +77,8 @@ max_tokens    = 8096
 # different reasoning engines based on task difficulty. Daily chat
 # stays cheap; deep reasoning gets the heavy artillery.
 [cognition.tiers]
-1 = "minimax-m2.7"           # daily — light reasoning, fast & cheap
+1 = "minimax-m3.1-flash-preview"   # daily — fast, adjustable thinking (M Plan / Token Plan only;
+                                   # pay-as-you-go: use "minimax-m3")
 2 = "deepseek-v4-pro"        # deep — multi-constraint puzzles, long CoT
 default_tier = 1
 # After this many consecutive turns at non-default tier, harness emits a

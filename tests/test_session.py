@@ -623,8 +623,8 @@ class TestOutputMaxTokensResolution:
     """Issue #181: per-model output cap resolution."""
 
     def test_falls_back_to_hardcoded_default_on_empty_config(self):
-        from loom.core.session import _resolve_output_max_tokens
-        assert _resolve_output_max_tokens({}, "claude-sonnet-4-6") == 8192
+        from loom.core.session import _resolve_output_max_tokens, _DEFAULT_OUTPUT_MAX_TOKENS
+        assert _resolve_output_max_tokens({}, "claude-sonnet-4-6") == _DEFAULT_OUTPUT_MAX_TOKENS
 
     def test_uses_cognition_default_when_no_override(self):
         from loom.core.session import _resolve_output_max_tokens
@@ -648,7 +648,7 @@ class TestOutputMaxTokensResolution:
         assert _resolve_output_max_tokens(cfg, "gpt-5") == 8192
 
     def test_invalid_values_fall_back_gracefully(self):
-        from loom.core.session import _resolve_output_max_tokens
+        from loom.core.session import _resolve_output_max_tokens, _DEFAULT_OUTPUT_MAX_TOKENS
         cfg = {
             "cognition": {
                 "output_max_tokens": "not-a-number",
@@ -658,7 +658,7 @@ class TestOutputMaxTokensResolution:
             }
         }
         # both invalid → hardcoded default
-        assert _resolve_output_max_tokens(cfg, "claude-sonnet-4-6") == 8192
+        assert _resolve_output_max_tokens(cfg, "claude-sonnet-4-6") == _DEFAULT_OUTPUT_MAX_TOKENS
 
 
 class TestParallelDispatch:

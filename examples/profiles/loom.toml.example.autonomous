@@ -40,7 +40,7 @@ default_model = "claude-sonnet-4-6"
 max_tokens    = 8096
 
 [cognition.tiers]
-1 = "minimax-m2.7"
+1 = "minimax-m3.1-flash-preview"  # M/Token Plan only; pay-as-you-go → "minimax-m3"
 2 = "deepseek-v4-pro"
 default_tier         = 1
 reminder_after_turns = 10
