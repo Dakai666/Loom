@@ -345,6 +345,101 @@ def make_convergent_dream_tool(
     )
 
 
+def make_distill_dream_tool(
+    semantic: "SemanticMemory",
+    llm_fn: LLMFn,
+    *,
+    timezone: str = "Asia/Taipei",
+    dreams_dir=None,
+) -> ToolDefinition:
+    """Build the ``distill_dream`` ToolDefinition (#613 E, P1 — read-only).
+
+    Picks topic neighbourhoods, distils each into one refined fact, gates it
+    for information loss, runs Loom's self-review veto and writes a 記憶蒸餾
+    report to the dated ``dreams/`` file. Never writes to memory in P1; used
+    for the big-dream rehearsal (docs/designs/57 §6).
+    """
+    from loom.core.cognition.distillation import (
+        DEFAULT_MAX_NEIGHBOURHOODS, STATUS_APPROVED, STATUS_DEFERRED,
+        STATUS_FAILED, STATUS_REJECTED, run_distill_dream,
+    )
+    from loom.autonomy.circadian.journal import append_distill_report
+    from loom.core.memory.ontology import (
+        DOMAIN_KNOWLEDGE, DOMAIN_PROJECT, DOMAIN_SELF, DOMAIN_USER,
+    )
+
+    allowed_domains = {DOMAIN_SELF, DOMAIN_USER, DOMAIN_PROJECT, DOMAIN_KNOWLEDGE}
+
+    async def _executor(call) -> ToolResult:
+        domain = call.args.get("domain")
+        if domain is not None and domain not in allowed_domains:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=f"Invalid domain={domain!r}. Allowed: {sorted(allowed_domains)} or omit.",
+            )
+        try:
+            max_nb = int(call.args.get("max_neighbourhoods", DEFAULT_MAX_NEIGHBOURHOODS))
+            corpus_limit = int(call.args.get("corpus_limit", 15000))
+        except (TypeError, ValueError):
+            max_nb = corpus_limit = 0
+        if max_nb < 1 or corpus_limit < 1:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error="max_neighbourhoods and corpus_limit must be positive integers.",
+            )
+
+        plan, report = await run_distill_dream(
+            semantic, llm_fn, domain=domain,
+            max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
+        )
+        path = append_distill_report(report, timezone=timezone, dreams_dir=dreams_dir)
+        c = plan.counts()
+        lines = [
+            "Distill dream complete (read-only / P1)",
+            f"  Scanned        : {plan.scanned} facts",
+            f"  Neighbourhoods : {len(plan.neighbourhoods)}",
+            f"  Results        : approved={c[STATUS_APPROVED]}, rejected={c[STATUS_REJECTED]}, "
+            f"deferred={c[STATUS_DEFERRED]}, failed={c[STATUS_FAILED]}",
+            f"  Report         : {path}",
+        ]
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=True,
+            output="\n".join(lines),
+        )
+
+    return ToolDefinition(
+        name="distill_dream",
+        description=(
+            "Run a read-only distill dream: pick topic neighbourhoods of "
+            "machine-written facts, distil each into one refined fact that "
+            "would replace them, gate it for information loss, self-review "
+            "with veto, and write a 記憶蒸餾 report to the dreams journal. "
+            "Hand-written and milestone facts are context only, never replaced. "
+            "Does NOT modify memory (P1)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "enum": sorted(allowed_domains),
+                    "description": "Only seed neighbourhoods in this domain (omit for all).",
+                },
+                "max_neighbourhoods": {
+                    "type": "integer", "minimum": 1,
+                    "description": f"Neighbourhoods distilled this pass (default {DEFAULT_MAX_NEIGHBOURHOODS}).",
+                },
+                "corpus_limit": {
+                    "type": "integer", "minimum": 1,
+                    "description": "Most-recent facts considered (default 15000).",
+                },
+            },
+        },
+        executor=_executor,
+        trust_level=TrustLevel.SAFE,
+    )
+
+
 def make_predict_tool(db: "aiosqlite.Connection") -> ToolDefinition:
     """Build the ``predict`` ToolDefinition (#537; reshaped by the #528 retirement).
 
