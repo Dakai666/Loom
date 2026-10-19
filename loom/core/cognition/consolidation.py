@@ -883,11 +883,16 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
     return "\n".join(lines)
 
 
+_EMPTY_REVIEW_MAX_SPLITS = 2
+
+
 async def _review_batch(
     clusters: list, llm_fn: LLMFn,
     *,
     system: str = _SELF_REVIEW_SYSTEM,
     render: Callable[[object], str] = _render_cluster_for_review,  # type: ignore[assignment]
+    log_label: str = "convergent-dream",
+    _splits_left: int = _EMPTY_REVIEW_MAX_SPLITS,
 ) -> list[ReviewDecision]:
     """Review one context-bounded batch of clusters in a single LLM call.
 
@@ -896,6 +901,13 @@ async def _review_batch(
     pass. This is the per-batch isolation that batching buys us (#499).
     ``system`` / ``render`` let the distill dream reuse the same fail-safe
     verdict handling with its own prompt; items need a ``cluster_id``.
+
+    An **empty** answer — a reasoning model that spent all of ``max_tokens``
+    thinking — is halved and retried, at most ``_EMPTY_REVIEW_MAX_SPLITS``
+    levels deep (≤ 7 calls for one batch). Only empty text splits: a
+    malformed or cut-off answer may already hold a veto, and a retry could
+    turn it into an approval, so those defer as before. Provider errors are
+    not split either.
     """
     decisions: list[ReviewDecision] = []
     block = "\n\n".join(render(c) for c in clusters)
@@ -906,7 +918,7 @@ async def _review_batch(
     try:
         raw = await llm_fn(messages)
     except Exception as exc:
-        logger.warning("[convergent-dream] self_review batch LLM failed: %s", exc)
+        logger.warning("[%s] self_review batch LLM failed: %s", log_label, exc)
         # Fail safe: defer this batch (never auto-approve), let the pass go on.
         return [
             ReviewDecision(
@@ -915,6 +927,17 @@ async def _review_batch(
             )
             for c in clusters
         ]
+
+    if not (raw or "").strip() and len(clusters) > 1 and _splits_left > 0:
+        logger.warning(
+            "[%s] self-review answered nothing for a batch of %d — splitting",
+            log_label, len(clusters),
+        )
+        mid = len(clusters) // 2
+        kw = dict(system=system, render=render, log_label=log_label,
+                  _splits_left=_splits_left - 1)
+        return (await _review_batch(clusters[:mid], llm_fn, **kw)
+                + await _review_batch(clusters[mid:], llm_fn, **kw))
 
     parsed = _parse_json_array(raw)
     id_counts = Counter(str(d.get("cluster_id")) for d in parsed if isinstance(d, dict))

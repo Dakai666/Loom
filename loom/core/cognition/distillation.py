@@ -93,6 +93,12 @@ OUTCOME_INELIGIBLE = "ineligible"  # a covered fact is no longer replaceable
 OUTCOME_ERROR = "error"            # consolidate raised; nothing written
 
 BACKUP_PREFIX = "memory-pre-distill"
+#: Neighbourhoods per self-review call. Each item carries up to 12 facts plus
+#: the distillation; with 10 per call (the convergent size), and still at
+#: times with 4, a reasoning model spent all 8192 tokens thinking and answered
+#: nothing; 2 per call always answered in 250–1350 tokens (rehearsal
+#: 2026-10-19). _review_batch also halves an empty answer as a backstop.
+DISTILL_REVIEW_BATCH_SIZE = 2
 MODE_READ_ONLY = "read-only"
 MODE_EXECUTE = "execute"
 
@@ -538,7 +544,7 @@ async def run_distill_dream(
     max_neighbourhoods: int = DEFAULT_MAX_NEIGHBOURHOODS,
     corpus_limit: int = 15000,
     min_similarity: float = DISTILL_MIN_SIMILARITY,
-    review_batch_size: int = 10,
+    review_batch_size: int = DISTILL_REVIEW_BATCH_SIZE,
     execute: bool = False,
 ) -> tuple[DistillPlan, str]:
     """One distill pass. Returns ``(plan, report_markdown)``.
@@ -583,6 +589,7 @@ async def run_distill_dream(
         batch = to_review[start:start + review_batch_size]
         decisions: list[ReviewDecision] = await _review_batch(
             batch, llm_fn, system=_DISTILL_REVIEW_SYSTEM, render=_render_for_review,
+            log_label="distill-dream",
         )
         for item, decision in zip(batch, decisions):
             item.result.reason = f"self-review: {decision.reason}"
