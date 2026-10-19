@@ -761,6 +761,7 @@ class AutonomyDaemon:
                 sample_size=sample_size,
                 themed=True,
                 db=db,
+                governor=getattr(session, "_governor", None),
             )
 
         loop = DreamLoop(

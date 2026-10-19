@@ -263,6 +263,7 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
         accessed_at = _parse_ts(accessed)
         eff = effective_confidence(
             conf, updated_at, accessed_at, domain, temporal, now=now,
+            source=source,
         )
         for edge, label in _DECAY_EDGES:
             if eff < edge:

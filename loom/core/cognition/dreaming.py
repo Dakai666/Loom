@@ -47,6 +47,8 @@ from loom.core.memory.ontology import (
 if TYPE_CHECKING:
     import aiosqlite
 
+    from loom.core.memory.governance import MemoryGovernor
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +179,7 @@ async def dream_cycle(
     domain: str | None = None,
     themed: bool = False,
     db: "aiosqlite.Connection | None" = None,
+    governor: "MemoryGovernor | None" = None,
 ) -> dict:
     """
     Execute one dreaming cycle.
@@ -199,6 +202,10 @@ async def dream_cycle(
                   Issue #281 P3-D — themed dreams stay focused, free
                   dreams find cross-domain bridges; both modes coexist.
     db:           Required only when ``themed=True``; ignored otherwise.
+    governor:     When given, triples pass the admission gate (whole-corpus
+                  near-duplicate check) and are written via
+                  ``governed_upsert`` — a repeat reinforces the fact it repeats
+                  instead of adding a row (#613). ``None`` writes through.
 
     Returns
     -------
@@ -206,6 +213,7 @@ async def dream_cycle(
       - ``facts_sampled``   int
       - ``triples_found``   int
       - ``triples_written`` int
+      - ``triples_rejected`` int  (blocked by the admission gate)
       - ``domain``          str | None  (resolved domain, or None for free)
       - ``errors``          list[str]  (non-fatal parse issues)
     """
@@ -271,32 +279,59 @@ async def dream_cycle(
 
     # ── 4. Write to semantic via relational bridge (#451 phase B) ─────
     written = 0
+    rejected = 0
     if not dry_run:
-        from loom.core.memory.relational_bridge import RelationalEntry, upsert_triple
-        for triple in triples:
+        from loom.core.memory.relational_bridge import (
+            RelationalEntry, triple_to_semantic, upsert_triple,
+        )
+        entries = [
+            RelationalEntry(
+                subject=triple["subject"],
+                predicate=triple["predicate"],
+                object=triple["object"],
+                confidence=0.7,          # dreaming-sourced insights start lower
+                source="dreaming",
+                metadata={
+                    "insight": triple.get("insight", ""),
+                    "dream_ts": datetime.now(UTC).isoformat(),
+                    "sampled_facts": sampled_facts_metadata,
+                },
+            )
+            for triple in triples
+        ]
+        admitted = [True] * len(entries)
+        if governor is not None and entries:
+            # Dreams were the largest producer yet bypassed the gate that
+            # #603 put on session compression (#613).
             try:
-                entry = RelationalEntry(
-                    subject=triple["subject"],
-                    predicate=triple["predicate"],
-                    object=triple["object"],
-                    confidence=0.7,          # dreaming-sourced insights start lower
+                verdicts = await governor.evaluate_admission(
+                    [triple_to_semantic(e).value for e in entries],
                     source="dreaming",
-                    metadata={
-                        "insight": triple.get("insight", ""),
-                        "dream_ts": datetime.now(UTC).isoformat(),
-                        "sampled_facts": sampled_facts_metadata,
-                    },
                 )
-                await upsert_triple(semantic, entry)
-                written += 1
+                admitted = [v.admitted for v in verdicts]
+            except Exception as exc:
+                errors.append(f"admission error: {exc}")
+                logger.warning("[dreaming] admission gate failed: %s", exc)
+        for entry, ok in zip(entries, admitted):
+            if not ok:
+                rejected += 1
+                continue
+            try:
+                if governor is not None:
+                    res = await governor.governed_upsert(triple_to_semantic(entry))
+                    written += int(res.written)
+                else:
+                    await upsert_triple(semantic, entry)
+                    written += 1
             except Exception as exc:
                 errors.append(f"upsert error: {exc}")
-                logger.warning("[dreaming] Failed to write triple %s: %s", triple, exc)
+                logger.warning("[dreaming] Failed to write triple %s: %s", entry, exc)
 
     result = {
         "facts_sampled": len(facts),
         "triples_found": len(triples),
         "triples_written": written,
+        "triples_rejected": rejected,
         "domain": domain,
         "errors": errors,
     }

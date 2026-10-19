@@ -83,13 +83,23 @@ _HALF_LIFE_TABLE: dict[tuple[str, str], float] = {
 _FALLBACK_HALF_LIFE = 90.0
 
 
-def half_life_for(domain: str, temporal: str) -> float:
+# Dream output is a hypothesis, not a settled fact (#613): unless a recall
+# keeps resetting its clock, a dreaming-sourced row should flow out through
+# the normal archive → delete path in weeks, not the 90d+ of the table.
+DREAMING_HALF_LIFE_DAYS = 21.0
+
+
+def half_life_for(domain: str, temporal: str, source: str | None = None) -> float:
     """Return the half-life in days for a (domain, temporal) pair.
 
     ``math.inf`` means "never decays" — used by milestone-class facts in
-    every domain except knowledge.
+    every domain except knowledge. ``source="dreaming"`` caps the result at
+    :data:`DREAMING_HALF_LIFE_DAYS` (never lengthens a shorter table value).
     """
-    return _HALF_LIFE_TABLE.get((domain, temporal), _FALLBACK_HALF_LIFE)
+    half = _HALF_LIFE_TABLE.get((domain, temporal), _FALLBACK_HALF_LIFE)
+    if source == "dreaming":
+        return min(half, DREAMING_HALF_LIFE_DAYS)
+    return half
 
 
 def _decay_factor(half_life: float, days: float) -> float:
@@ -108,6 +118,7 @@ def effective_confidence(
     temporal: str,
     *,
     now: datetime | None = None,
+    source: str | None = None,
 ) -> float:
     """Time-decayed confidence using the (domain, temporal) half-life.
 
@@ -117,7 +128,7 @@ def effective_confidence(
     visible to audits. ``now`` defaults to the wall clock; the corpus census
     passes its own so a snapshot is computed at one instant (#587).
     """
-    half = half_life_for(domain, temporal)
+    half = half_life_for(domain, temporal, source)
     if half == math.inf:
         return confidence
     anchor = updated_at
@@ -316,7 +327,7 @@ class MemoryLifecycle:
         Returns (examined, deleted)."""
         cursor = await self._db.execute(
             f"SELECT {key_col}, confidence, updated_at, last_accessed_at, "
-            f"domain, temporal FROM {table} WHERE temporal = ?",
+            f"domain, temporal, source FROM {table} WHERE temporal = ?",
             (TEMPORAL_ARCHIVED,),
         )
         rows = await cursor.fetchall()
@@ -334,6 +345,7 @@ class MemoryLifecycle:
                     ),
                     domain=row[4],
                     temporal=row[5],
+                    source=row[6],
                 )
             except Exception as exc:
                 logger.debug("lifecycle: skip %s row %r (%s)", table, row[0], exc)
@@ -342,6 +354,15 @@ class MemoryLifecycle:
                 to_delete.append(row[0])
 
         if to_delete and not dry_run:
+            # Deletion is irreversible: no fresh snapshot → no delete (the
+            # rows stay archived and are retried next cycle). #613
+            from loom.core.memory import backup
+            if await backup.snapshot_before_write(self._db, prefix="memory-pre-prune") is None:
+                logger.warning(
+                    "lifecycle: pre-delete backup failed — keeping %d archived "
+                    "%s rows this cycle", len(to_delete), table,
+                )
+                return len(rows), 0
             placeholders = ",".join("?" * len(to_delete))
             await self._db.execute(
                 f"DELETE FROM {table} WHERE {key_col} IN ({placeholders})",
@@ -369,7 +390,7 @@ class MemoryLifecycle:
         Returns (examined, demoted)."""
         cursor = await self._db.execute(
             f"SELECT {key_col}, confidence, updated_at, last_accessed_at, "
-            f"domain, temporal FROM {table} "
+            f"domain, temporal, source FROM {table} "
             f"WHERE temporal IN (?, ?)",
             (TEMPORAL_RECENT, TEMPORAL_MILESTONE),
         )
@@ -388,6 +409,7 @@ class MemoryLifecycle:
                     ),
                     domain=row[4],
                     temporal=row[5],
+                    source=row[6],
                 )
             except Exception as exc:
                 logger.debug("lifecycle: skip %s row %r (%s)", table, row[0], exc)

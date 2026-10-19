@@ -25,7 +25,7 @@ DEFAULT_BACKUP_DIR = Path.home() / ".loom" / "backups"
 async def snapshot_before_write(
     db: aiosqlite.Connection,
     *,
-    dest_dir: Path = DEFAULT_BACKUP_DIR,
+    dest_dir: Path | None = None,
     prefix: str,
     keep: int = 3,
 ) -> Path | None:
@@ -38,7 +38,9 @@ async def snapshot_before_write(
     """
     tmp: Path | None = None
     try:
-        dest_dir = Path(dest_dir)
+        # Resolved at call time (not bound as a default) so tests can redirect
+        # the live ~/.loom/backups dir.
+        dest_dir = Path(dest_dir) if dest_dir is not None else DEFAULT_BACKUP_DIR
         dest_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         final = dest_dir / f"{prefix}-{stamp}.db"
