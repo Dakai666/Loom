@@ -138,37 +138,87 @@ def split_oversized(
     return out, notes
 
 
+def stack_normalised(
+    vectors: Iterable[object],
+    *,
+    dim: int | None = None,
+) -> tuple["np.ndarray", list[int]]:
+    """Parse vectors (JSON strings or float lists) into an L2-normalised
+    float32 matrix; return it with the input positions kept.
+
+    Unparseable / empty entries are skipped. Only vectors of ``dim`` are kept
+    (default: the most common dimension) — embeddings from different models
+    can't be compared.
+    """
+    import json
+
+    import numpy as np
+
+    parsed: list[tuple[int, "np.ndarray"]] = []
+    for i, raw in enumerate(vectors):
+        if raw is None:
+            continue
+        try:
+            arr = np.asarray(json.loads(raw) if isinstance(raw, (str, bytes)) else raw,
+                             dtype=np.float32)
+        except (ValueError, TypeError):
+            continue
+        if arr.ndim == 1 and arr.size:
+            parsed.append((i, arr))
+    if dim is None and parsed:
+        counts: dict[int, int] = {}
+        for _, arr in parsed:
+            counts[arr.size] = counts.get(arr.size, 0) + 1
+        dim = max(counts, key=counts.__getitem__)
+    kept = [(i, arr) for i, arr in parsed if arr.size == dim]
+    if not kept:
+        return np.zeros((0, dim or 0), dtype=np.float32), []
+    m = np.stack([arr for _, arr in kept])
+    norms = np.linalg.norm(m, axis=1, keepdims=True)
+    m /= np.where(norms == 0, 1, norms)
+    return m, [i for i, _ in kept]
+
+
 def knn_edges(
-    matrix: "np.ndarray",
+    stored: "np.ndarray",
     *,
     k: int,
     min_similarity: float,
+    queries: "np.ndarray | None" = None,
+    query_self: "np.ndarray | None" = None,
     block: int = 1024,
 ) -> tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
-    """Top-``k`` cosine neighbours per row of an L2-normalised ``matrix``.
+    """Top-``k`` cosine neighbours among L2-normalised ``stored`` rows.
 
-    Returns ``(a, b, score)`` arrays: row ``a`` links to row ``b`` whenever
-    ``b`` is among ``a``'s ``k`` nearest (self excluded) and the cosine is
-    ≥ ``min_similarity`` — the edge rule of ``find_near_duplicates(limit=k)``,
-    computed in one blocked matmul over stored vectors instead of one
-    embed + full-table scan per fact (~1.2 s each on an 11k corpus).
+    Returns ``(q, s, score)``: query row ``q`` links to stored row ``s`` when
+    ``s`` is among its ``k`` nearest and the cosine is ≥ ``min_similarity`` —
+    the edge rule of ``find_near_duplicates(limit=k)``, in one blocked matmul
+    instead of a full-table sqlite-vec scan per fact (~1.2 s each on an 11k
+    corpus). ``queries`` defaults to ``stored`` itself; ``query_self[i]`` is
+    the stored row that query ``i`` *is* (or -1), never its own neighbour.
     """
     import numpy as np
 
-    n = len(matrix)
-    k = min(k, n - 1)
-    if k <= 0:
+    if queries is None:
+        queries = stored
+        query_self = np.arange(len(stored))
+    # Self-matches are masked to -inf and fall below any threshold, so k may
+    # be the full stored size.
+    k = min(k, len(stored))
+    if k <= 0 or len(queries) == 0:
         empty = np.array([], dtype=np.int64)
         return empty, empty, np.array([], dtype=np.float32)
-    out_a, out_b, out_s = [], [], []
-    for start in range(0, n, block):
-        sims = matrix[start:start + block] @ matrix.T
-        local = np.arange(sims.shape[0])
-        sims[local, local + start] = -np.inf  # never your own neighbour
+    out_q, out_s, out_v = [], [], []
+    for start in range(0, len(queries), block):
+        sims = queries[start:start + block] @ stored.T
+        if query_self is not None:
+            own = query_self[start:start + block]
+            rows = np.nonzero(own >= 0)[0]
+            sims[rows, own[rows]] = -np.inf
         idx = np.argpartition(-sims, k - 1, axis=1)[:, :k]
         top = np.take_along_axis(sims, idx, axis=1)
-        rows, cols = np.nonzero(top >= min_similarity)
-        out_a.append(rows + start)
-        out_b.append(idx[rows, cols])
-        out_s.append(top[rows, cols])
-    return np.concatenate(out_a), np.concatenate(out_b), np.concatenate(out_s)
+        r, c = np.nonzero(top >= min_similarity)
+        out_q.append(r + start)
+        out_s.append(idx[r, c])
+        out_v.append(top[r, c])
+    return np.concatenate(out_q), np.concatenate(out_s), np.concatenate(out_v)

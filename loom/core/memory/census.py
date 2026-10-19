@@ -36,6 +36,7 @@ from wcwidth import wcswidth
 
 from loom.core.memory.clustering import (
     MAX_CLUSTER_MEMBERS, NEAR_DUP_NEIGHBOURS, knn_edges, split_component,
+    stack_normalised,
 )
 from loom.core.memory.lifecycle import effective_confidence
 from loom.core.memory.ontology import (
@@ -319,42 +320,29 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
 def _duplicate_density(
     rows: list[tuple[str, str]], unembedded: int, notes: list[str],
 ) -> DupDensity:
-    """Duplicate groups at ``DUP_SIMILARITY`` built the way consolidation's
-    planner builds them — top-k neighbour edges, single-linkage union-find,
-    oversized chains re-split at stricter similarity — over the whole corpus
-    at once (consolidation sees only ``corpus_limit`` rows and further drops
-    suppressed / capped clusters). Blocked matmul keeps memory at
-    ~block × N floats; edges are at most k × N."""
+    """Duplicate groups at ``DUP_SIMILARITY`` built with consolidation's
+    rules — top-k neighbour edges, single-linkage union-find, oversized
+    chains re-split at stricter similarity — over the whole corpus at once.
+
+    A close estimate, not a replay: the census compares stored vectors with
+    each other, while the planner queries with a fresh value-only vector
+    (#620), sees only ``corpus_limit`` rows and drops suppressed / capped
+    clusters. Blocked matmul keeps memory at ~block × N floats; edges are at
+    most k × N."""
     import numpy as np
 
-    # Convert each row to float32 as it is parsed — a list of Python floats
-    # costs ~8× the memory of the array it becomes.
-    vectors: list[Any] = []
-    values: list[str] = []
-    for value, raw in rows:
-        try:
-            vectors.append(np.asarray(json.loads(raw), dtype=np.float32))
-            values.append(value)
-        except (ValueError, TypeError):
-            unembedded += 1
-    if not vectors:
-        return DupDensity(0, 0, 0, "", 0, unembedded)
-
-    # Embeddings from different providers can't be compared; measure the
-    # dominant dimension and say how many were left out.
-    dims: dict[int, int] = {}
-    for v in vectors:
-        dims[len(v)] = dims.get(len(v), 0) + 1
-    dim = max(dims, key=dims.__getitem__)
-    keep = [i for i, v in enumerate(vectors) if len(v) == dim]
-    if len(keep) < len(vectors):
-        notes.append(f"{len(vectors) - len(keep)} embeddings of another dimension not clustered")
-        unembedded += len(vectors) - len(keep)
-    m = np.stack([vectors[i] for i in keep])
-    del vectors
-    values = [values[i] for i in keep]
-    norms = np.linalg.norm(m, axis=1, keepdims=True)
-    m /= np.where(norms == 0, 1, norms)
+    # Parsed straight to float32 (a Python float list costs ~8× the array);
+    # corrupt cells and other-model dimensions are counted, not clustered.
+    m, kept = stack_normalised([raw for _, raw in rows])
+    if not kept:
+        return DupDensity(0, 0, 0, "", 0, unembedded + len(rows))
+    if len(kept) < len(rows):
+        notes.append(
+            f"{len(rows) - len(kept)} embeddings unparseable or of another "
+            "dimension, not clustered"
+        )
+        unembedded += len(rows) - len(kept)
+    values = [rows[i][0] for i in kept]
 
     n = len(m)
     parent = list(range(n))
