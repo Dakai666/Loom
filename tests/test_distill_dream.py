@@ -148,6 +148,31 @@ class TestNeighbourhoods:
         assert plan.neighbourhoods == []
 
 
+    async def test_hand_written_fact_is_context_for_every_neighbourhood(self, db, semantic):
+        """Context facts aren't consumed: two topics around one hand-written
+        fact both see it, so neither can restate it unchecked (#622 review)."""
+        await _row(db, "hand", 30, source="manual")
+        for i, deg in enumerate((0, 6, 12)):
+            await _row(db, f"a{i}", deg)
+        for i, deg in enumerate((60, 66, 72)):   # ≤45° from hand, ≥48° from a
+            await _row(db, f"b{i}", deg)
+        plan = await build_distill_plan(semantic)
+        assert len(plan.neighbourhoods) == 2
+        assert all("hand" in nb.protected_keys for nb in plan.neighbourhoods)
+
+    async def test_needs_two_replaceable_members(self, db, semantic):
+        await _row(db, "seed", 0)
+        await _row(db, "h1", 5, source="manual")
+        await _row(db, "h2", 10, source="manual")
+        plan = await build_distill_plan(semantic)
+        assert plan.neighbourhoods == []
+
+    async def test_unreadable_distilled_at_counts_as_recent(self, db, semantic):
+        await _topic(db, metadata={"produced_by": PRODUCED_BY, "distilled_at": "2026-10-19T08:00:00"})
+        plan = await build_distill_plan(semantic)
+        assert plan.neighbourhoods == []
+
+
 # ── hard boundaries enforced in code, not by the LLM ──────────────────────
 
 class TestHardBoundaries:
@@ -163,6 +188,21 @@ class TestHardBoundaries:
         (r,) = plan.results
         assert r.status == STATUS_REJECTED
         assert "protected" in r.reason
+
+    async def test_recently_distilled_neighbour_is_context_only(self, db, semantic):
+        await _topic(db, n=3)
+        await _row(db, "fresh", 5, metadata={"produced_by": PRODUCED_BY,
+                                             "distilled_at": datetime.now(UTC).isoformat()})
+
+        def distill(user):
+            idx = next(i for i, line in enumerate(_facts(user), 1) if 'key="fresh"' in line)
+            assert "protected=yes" in _facts(user)[idx - 1]
+            return {"distilled": "x", "covers": [1, idx], "dropped": [], "rationale": ""}
+
+        plan, _ = await run_distill_dream(semantic, _llm(distill=distill))
+        (r,) = plan.results
+        assert r.status == STATUS_REJECTED
+        assert "context-only" in r.reason
 
     async def test_no_non_dream_survivor_is_rejected(self, db, semantic):
         await _row(db, "seed", 0)
@@ -215,6 +255,20 @@ class TestGate:
         (r,) = plan.results
         assert r.status == STATUS_REJECTED
         assert "hand-written" in r.reason
+
+    async def test_gate_accepts_the_S_labels_it_was_shown(self, db, semantic):
+        await _topic(db, n=3)
+        gate = lambda u: json.dumps({"sources": {"S1": "covered", "[S2]": "dropped", "s3": "covered"},
+                                     "handwritten_restated": [], "rationale": "ok"})
+        plan, _ = await run_distill_dream(semantic, _llm(gate=gate))
+        assert plan.results[0].status == STATUS_APPROVED
+
+    async def test_restated_ids_not_shown_are_ignored(self, db, semantic):
+        await _topic(db, n=3)                      # no kept facts → no H ids shown
+        gate = lambda u: json.dumps({"sources": {"1": "covered", "2": "covered", "3": "covered"},
+                                     "handwritten_restated": ["none", ""], "rationale": "ok"})
+        plan, _ = await run_distill_dream(semantic, _llm(gate=gate))
+        assert plan.results[0].status == STATUS_APPROVED
 
     async def test_untrustworthy_gate_output_defers_never_approves(self, db, semantic):
         await _topic(db, n=3)
@@ -289,7 +343,8 @@ class TestTool:
         tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
         bad_domain = await tool.executor(_call({"domain": "nope"}))
         bad_cap = await tool.executor(_call({"max_neighbourhoods": 0}))
-        assert not bad_domain.success and not bad_cap.success
+        bad_sim = await tool.executor(_call({"min_similarity": 1.5}))
+        assert not bad_domain.success and not bad_cap.success and not bad_sim.success
 
 
 def _call(args: dict):

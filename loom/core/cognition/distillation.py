@@ -103,18 +103,23 @@ def _recently_distilled(entry: SemanticEntry, now: datetime) -> bool:
     try:
         return now - datetime.fromisoformat(ts) < timedelta(days=RECENT_DISTILL_DAYS)
     except (TypeError, ValueError):
-        return False
+        return True  # can't tell → assume recent; re-distilling too soon is the risk
 
 
-def _seedable(entry: SemanticEntry, domain: str | None, now: datetime) -> bool:
+def _replaceable(entry: SemanticEntry, domain: str | None, now: datetime) -> bool:
+    """May this fact be covered (replaced)? Everything else is context only."""
     return (
         not _is_stub(entry)
-        and not _is_dreaming(entry)
         and not is_protected(entry)
         and entry.temporal != TEMPORAL_ARCHIVED
         and (domain is None or entry.domain == domain)
         and not _recently_distilled(entry, now)
     )
+
+
+def _seedable(entry: SemanticEntry, domain: str | None, now: datetime) -> bool:
+    # Dream triples may be covered but never seed (spec §4.1 / §5).
+    return _replaceable(entry, domain, now) and not _is_dreaming(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +131,10 @@ class Neighbourhood:
     cluster_id: str                      # named for _review_batch reuse
     seed_key: str
     members: list[SemanticEntry]         # seed first, then by similarity
-    protected_keys: set[str] = field(default_factory=set)
+    protected_keys: set[str] = field(default_factory=set)   # hand-written / milestone
+    #: members that may not be covered: protected, plus archived, recently
+    #: distilled or out-of-domain neighbours
+    context_keys: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -204,29 +212,36 @@ async def build_distill_plan(
         sims = matrix[rows_i] @ matrix.T
         sims[np.arange(len(rows_i)), rows_i] = -np.inf
         counts = (sims >= min_similarity).sum(axis=1)
-        top = np.argsort(-sims, axis=1)[:, :k]
+        part = np.argpartition(-sims, k - 1, axis=1)[:, :k]
         for r, row in enumerate(rows_i):
-            nbrs = [int(j) for j in top[r] if sims[r, j] >= min_similarity]
+            top = part[r][np.argsort(-sims[r, part[r]])]
+            nbrs = [int(j) for j in top if sims[r, j] >= min_similarity]
             if len(nbrs) + 1 >= MIN_MEMBERS:
                 candidates.append((int(counts[r]), int(row), nbrs))
     candidates.sort(key=lambda c: (-c[0], c[1]))
 
+    replaceable = [_replaceable(e, domain, now) for e in entries]
+    # Only replaceable facts are consumed by a neighbourhood; context facts
+    # (hand-written above all) stay visible to every neighbourhood on their
+    # topic, so the no-restating check can't miss them (#622 review).
     used: set[int] = set()
     for _, row, nbrs in candidates:
         if len(plan.neighbourhoods) >= max_neighbourhoods:
             break
         if row in used:
             continue
-        members_rows = [row] + [j for j in nbrs if j not in used]
-        if len(members_rows) < MIN_MEMBERS:
+        members_rows = [row] + [j for j in nbrs if not (replaceable[j] and j in used)]
+        n_replaceable = sum(1 for j in members_rows if replaceable[j])
+        if len(members_rows) < MIN_MEMBERS or n_replaceable < 2:
             continue
-        used.update(members_rows)
+        used.update(j for j in members_rows if replaceable[j])
         members = [entries[j] for j in members_rows]
         plan.neighbourhoods.append(Neighbourhood(
             cluster_id=f"nb-{uuid.uuid4().hex[:8]}",
             seed_key=entries[row].key,
             members=members,
             protected_keys={m.key for m in members if is_protected(m)},
+            context_keys={entries[j].key for j in members_rows if not replaceable[j]},
         ))
         for m in members:
             plan.source_versions[m.key] = m.updated_at.isoformat()
@@ -250,10 +265,10 @@ Rules:
 - "covers": the [index] numbers of the facts the distilled fact replaces. Only
   facts marked protected=no may be listed. Leave out facts that are about
   something else — replacing fewer is fine.
-- Facts marked protected=yes are hand-written and authoritative. Never restate
-  their claims in "distilled". If a fact you replace says the same as a
-  protected fact, put that claim in "dropped" with "carried_by" = the protected
-  fact's index.
+- Facts marked protected=yes must stay as they are (hand-written, permanent,
+  or already distilled). Never restate their claims in "distilled". If a fact
+  you replace says the same as a protected fact, put that claim in "dropped"
+  with "carried_by" = the protected fact's index.
 - "dropped": claims from the replaced facts you deliberately do not keep
   (outdated, trivial, or carried by a protected fact), each
   {"text": ..., "reason": ..., "carried_by": index or null}.
@@ -269,7 +284,7 @@ def _render_neighbourhood(nb: Neighbourhood) -> str:
     lines = []
     for i, m in enumerate(nb.members, start=1):
         tier, _ = classify_source(m.source)
-        protected = "yes" if m.key in nb.protected_keys else "no"
+        protected = "yes" if m.key in nb.context_keys else "no"
         lines.append(
             f'[{i}] key="{m.key}"  trust={tier}  protected={protected}  '
             f'value="{m.value}"'
@@ -313,7 +328,7 @@ async def _distill(nb: Neighbourhood, llm_fn: LLMFn) -> Distillation | None:
         except (TypeError, ValueError):
             ci = None
         if ci is not None and 1 <= ci <= len(nb.members) \
-                and nb.members[ci - 1].key in nb.protected_keys:
+                and nb.members[ci - 1].key in nb.context_keys:
             entry["carried_by"] = nb.members[ci - 1].key
         if entry["text"]:
             dropped.append(entry)
@@ -330,6 +345,9 @@ def _boundary_violation(nb: Neighbourhood, d: Distillation) -> tuple[str | None,
     protected = [k for k in d.covers if k in nb.protected_keys]
     if protected:
         return f"covers a protected (hand-written / milestone) fact: {protected}", None
+    context = [k for k in d.covers if k in nb.context_keys]
+    if context:
+        return f"covers a context-only fact (archived / recently distilled / other domain): {context}", None
     if len(d.covers) < 2:
         return "fewer than 2 sources to replace", None
     by_key = {m.key: m for m in nb.members}
@@ -351,8 +369,9 @@ SOURCES are the facts that would be replaced. For each source answer:
   "covered" — everything it says that is still valid appears in DISTILLED,
   "dropped" — what is missing is listed under DROPPED (deliberately not kept),
   "lost"    — it says something that is neither in DISTILLED nor in DROPPED.
-HAND-WRITTEN facts stay as they are. List the [H..] ids of any whose claim
-DISTILLED restates (that would duplicate an authoritative fact).
+KEPT facts stay as they are (hand-written, permanent or already distilled).
+List the [H..] ids of any whose claim DISTILLED restates (that would leave the
+same claim in memory twice).
 
 Return ONLY a JSON object:
 {"sources": {"1": "covered"|"dropped"|"lost", ...},
@@ -373,11 +392,11 @@ class _GateResult:
 async def _gate_attempt(nb: Neighbourhood, d: Distillation, llm_fn: LLMFn) -> _GateResult:
     by_key = {m.key: m for m in nb.members}
     sources = [by_key[k] for k in d.covers]
-    hand = [m for m in nb.members if m.key in nb.protected_keys]
+    hand = [m for m in nb.members if m.key in nb.context_keys]
     lines = ["SOURCES:"]
     lines += [f'[S{i}] value="{s.value}"' for i, s in enumerate(sources, start=1)]
     if hand:
-        lines.append("HAND-WRITTEN:")
+        lines.append("KEPT:")
         lines += [f'[H{i}] value="{h.value}"' for i, h in enumerate(hand, start=1)]
     lines.append(f'DISTILLED: "{d.distilled}"')
     lines.append("DROPPED:")
@@ -393,19 +412,24 @@ async def _gate_attempt(nb: Neighbourhood, d: Distillation, llm_fn: LLMFn) -> _G
     data = _parse_json_object(raw)
     if data is None or not isinstance(data.get("sources"), dict):
         return _GateResult(False, False, "gate output unparseable")
-    verdicts = {str(k).strip(): str(v).strip().lower() for k, v in data["sources"].items()}
+    # Accept "1" and the "S1" label the prompt shows (#622 review).
+    verdicts = {str(k).strip().strip("[]").upper().removeprefix("S"): str(v).strip().lower()
+                for k, v in data["sources"].items()}
     if set(verdicts) != {str(i) for i in range(1, len(sources) + 1)} \
             or not set(verdicts.values()) <= _GATE_VERDICTS:
         return _GateResult(False, False, "gate did not cover every source exactly")
-    restated = data.get("handwritten_restated") or []
-    if not isinstance(restated, list):
+    restated_raw = data.get("handwritten_restated") or []
+    if not isinstance(restated_raw, list):
         return _GateResult(False, False, "gate handwritten_restated malformed")
+    # Only ids actually shown count; "none" / "" / invented ids are noise.
+    shown = {f"H{i}" for i in range(1, len(hand) + 1)}
+    restated = sorted({str(x).strip().strip("[]").upper() for x in restated_raw} & shown)
     rationale = str(data.get("rationale", "")).strip()
     lost = sorted(k for k, v in verdicts.items() if v == "lost")
     if lost:
         return _GateResult(False, True, f"sources {lost} would lose information — {rationale}")
     if restated:
-        return _GateResult(False, True, f"restates hand-written fact(s) {restated} — {rationale}")
+        return _GateResult(False, True, f"restates kept / hand-written fact(s) {restated} — {rationale}")
     return _GateResult(True, True, rationale)
 
 
@@ -422,7 +446,7 @@ async def _gate(nb: Neighbourhood, d: Distillation, llm_fn: LLMFn) -> _GateResul
 # ---------------------------------------------------------------------------
 
 _DISTILL_REVIEW_SYSTEM = """\
-You are Loom (絲絲), reviewing how YOUR OWN memory is about to be distilled
+You are Loom, reviewing how YOUR OWN memory is about to be distilled
 while you sleep. Several machine-written facts on one topic would be replaced
 by a single refined fact; the originals stay recoverable in its metadata.
 

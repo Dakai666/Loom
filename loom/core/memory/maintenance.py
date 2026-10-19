@@ -360,7 +360,7 @@ def make_distill_dream_tool(
     for the big-dream rehearsal (docs/designs/57 §6).
     """
     from loom.core.cognition.distillation import (
-        DEFAULT_MAX_NEIGHBOURHOODS, STATUS_APPROVED, STATUS_DEFERRED,
+        DEFAULT_MAX_NEIGHBOURHOODS, DISTILL_MIN_SIMILARITY, STATUS_APPROVED, STATUS_DEFERRED,
         STATUS_FAILED, STATUS_REJECTED, run_distill_dream,
     )
     from loom.autonomy.circadian.journal import append_distill_report
@@ -380,17 +380,21 @@ def make_distill_dream_tool(
         try:
             max_nb = int(call.args.get("max_neighbourhoods", DEFAULT_MAX_NEIGHBOURHOODS))
             corpus_limit = int(call.args.get("corpus_limit", 15000))
+            min_sim = float(call.args.get("min_similarity", DISTILL_MIN_SIMILARITY))
         except (TypeError, ValueError):
             max_nb = corpus_limit = 0
-        if max_nb < 1 or corpus_limit < 1:
+            min_sim = DISTILL_MIN_SIMILARITY
+        if max_nb < 1 or corpus_limit < 1 or not 0.0 < min_sim < 1.0:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
-                error="max_neighbourhoods and corpus_limit must be positive integers.",
+                error=("max_neighbourhoods and corpus_limit must be positive integers; "
+                       "min_similarity must be in (0, 1)."),
             )
 
         plan, report = await run_distill_dream(
             semantic, llm_fn, domain=domain,
             max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
+            min_similarity=min_sim,
         )
         path = append_distill_report(report, timezone=timezone, dreams_dir=dreams_dir)
         c = plan.counts()
@@ -432,6 +436,13 @@ def make_distill_dream_tool(
                 "corpus_limit": {
                     "type": "integer", "minimum": 1,
                     "description": "Most-recent facts considered (default 15000).",
+                },
+                "min_similarity": {
+                    "type": "number",
+                    "description": (
+                        f"Stored-vector cosine floor for a neighbour (default "
+                        f"{DISTILL_MIN_SIMILARITY}; re-calibrated every 4 weeks, spec §3)."
+                    ),
                 },
             },
         },
