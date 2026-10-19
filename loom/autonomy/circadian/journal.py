@@ -75,6 +75,7 @@ KIND_LABELS: dict[str, str] = {
 # System-generated entry labels — NOT in KIND_LABELS so the agent-facing
 # journal_append tool's life-texture enum stays clean (#488, spec §8).
 CONSOLIDATION_LABEL = "夢境鞏固"
+DISTILL_LABEL = "記憶蒸餾"
 
 
 def journal_path_for(date_str: str, base: Path | None = None) -> Path:
@@ -136,10 +137,31 @@ def append_consolidation_report(
     drowns the day's journal entries when they share a file. ``grep 夢境鞏固
     dreams/`` to review. Returns the path.
     """
+    return _append_dream_report(CONSOLIDATION_LABEL, report_body, timezone, dreams_dir)
+
+
+def append_distill_report(
+    report_body: str,
+    *,
+    timezone: str = "Asia/Taipei",
+    dreams_dir: Path | None = None,
+) -> Path:
+    """Append a distill-dream pass report (``記憶蒸餾``) to today's dream file.
+
+    Same dated ``dreams/`` tree as the convergent dream's 夢境鞏固 reports
+    (#613 E); ``grep 記憶蒸餾 dreams/`` to review. Returns the path.
+    """
+    return _append_dream_report(DISTILL_LABEL, report_body, timezone, dreams_dir)
+
+
+def _append_dream_report(
+    label: str, report_body: str, timezone: str, dreams_dir: Path | None,
+) -> Path:
+    """Shared writer for system dream reports in the dated ``dreams/`` tree."""
     target_dir = dreams_dir or DEFAULT_DREAMS_DIR
     now = datetime.now(ZoneInfo(timezone))
     return _append_dated_entry(
-        target_dir, now, CONSOLIDATION_LABEL, report_body,
+        target_dir, now, label, report_body,
         header_title="Dream Consolidation",
     )
 

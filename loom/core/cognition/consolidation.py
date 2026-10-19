@@ -884,18 +884,23 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
 
 
 async def _review_batch(
-    clusters: list[CandidateCluster], llm_fn: LLMFn,
+    clusters: list, llm_fn: LLMFn,
+    *,
+    system: str = _SELF_REVIEW_SYSTEM,
+    render: Callable[[object], str] = _render_cluster_for_review,  # type: ignore[assignment]
 ) -> list[ReviewDecision]:
     """Review one context-bounded batch of clusters in a single LLM call.
 
     A batch that fails (e.g. the provider rejects an over-long prompt) or
     returns malformed output defers ONLY its own clusters — never the whole
     pass. This is the per-batch isolation that batching buys us (#499).
+    ``system`` / ``render`` let the distill dream reuse the same fail-safe
+    verdict handling with its own prompt; items need a ``cluster_id``.
     """
     decisions: list[ReviewDecision] = []
-    block = "\n\n".join(_render_cluster_for_review(c) for c in clusters)
+    block = "\n\n".join(render(c) for c in clusters)
     messages = [
-        {"role": "system", "content": _SELF_REVIEW_SYSTEM},
+        {"role": "system", "content": system},
         {"role": "user", "content": f"Clusters to review:\n\n{block}\n\nReturn the JSON array now."},
     ]
     try:
