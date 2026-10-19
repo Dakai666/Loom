@@ -94,42 +94,56 @@ class TestScratchpad:
 
     def test_head(self):
         pad = Scratchpad()
-        body = "\n".join(f"line-{i}" for i in range(1, 101))
-        pad.write("log", body)
+        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 101)))
         result = pad.read("log", head=50)
-        assert result.splitlines()[:50] == [f"line-{i}" for i in range(1, 51)]
-        assert "line-51" not in result
+        assert _body(result) == "\n".join(f"line-{i}" for i in range(1, 51))
+        assert "head=50 selected 50 of 100 lines" in _note(result)
 
     def test_tail(self):
         pad = Scratchpad()
-        body = "\n".join(f"line-{i}" for i in range(1, 101))
-        pad.write("log", body)
+        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 101)) + "\n")
         result = pad.read("log", tail=50)
-        assert result.splitlines()[:50] == [f"line-{i}" for i in range(51, 101)]
+        # Trailing newline is not an extra empty line.
+        assert _body(result) == "\n".join(f"line-{i}" for i in range(51, 101))
+        assert "of 100 lines" in _note(result)
 
     def test_lines_range(self):
         pad = Scratchpad()
         pad.write("log", "a\nb\nc\nd\ne")
-        assert pad.read("log", lines="2-4").startswith("b\nc\nd\n")
+        assert _body(pad.read("log", lines="2-4")) == "b\nc\nd"
 
-    def test_grep(self):
+    def test_grep_numbers_hits(self):
         pad = Scratchpad()
         pad.write("log", "apple\nbanana\napricot\ncarrot")
-        assert pad.read("log", grep="ap").startswith("apple\napricot\n")
+        result = pad.read("log", grep="ap")
+        assert _body(result) == "1: apple\n3: apricot"
+        assert "matched 2 of 4 lines" in _note(result)
+
+    def test_unfiltered_read_has_no_note(self):
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        assert pad.read("log", max_bytes=1000) == "a\nb"
 
     def test_lines_zero_lower_bound_clamps_to_one(self):
         """Issue #302 F2: "0-N" reads from the start as the caller intended."""
         pad = Scratchpad()
         pad.write("log", "\n".join(f"line-{i}" for i in range(1, 21)))
         result = pad.read("log", lines="0-5")
-        assert result.splitlines()[:5] == [f"line-{i}" for i in range(1, 6)]
-        assert "line-6" not in result
+        assert _body(result) == "\n".join(f"line-{i}" for i in range(1, 6))
 
     def test_lines_past_end_returns_remaining(self):
         pad = Scratchpad()
         pad.write("log", "\n".join(f"line-{i}" for i in range(1, 11)))
         result = pad.read("log", lines="8-9999")
-        assert result.splitlines()[:3] == [f"line-{i}" for i in range(8, 11)]
+        assert _body(result) == "line-8\nline-9\nline-10"
+
+    def test_line_numbers_count_newlines_only(self):
+        """Form feeds (PDF page breaks) etc. must not shift numbering away
+        from read_file / grep -n — only \\n separates lines."""
+        pad = Scratchpad()
+        pad.write("doc", "p1\x0cstill line 1\nline 2\nline 3")
+        assert _body(pad.read("doc", lines="2-2")) == "line 2"
+        assert _body(pad.read("doc", grep="line 3")) == "3: line 3"
 
     @pytest.mark.parametrize("bad", ["5-2", "abc", "3", "1-x"])
     def test_lines_malformed_raises(self, bad):
@@ -138,6 +152,14 @@ class TestScratchpad:
         pad.write("log", "a\nb")
         with pytest.raises(ValueError):
             pad.read("log", lines=bad)
+
+    @pytest.mark.parametrize("kw", [{"head": 0}, {"tail": -50}, {"grep": ""}])
+    def test_nonpositive_or_empty_filter_raises(self, kw):
+        """Same principle: tail=-50 must not look like a genuine 'matched 0'."""
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        with pytest.raises(ValueError):
+            pad.read("log", **kw)
 
     def test_filters_are_mutually_exclusive(self):
         pad = Scratchpad()
@@ -154,9 +176,7 @@ class TestScratchpad:
         body = "\n".join(f"filler {i}" for i in range(1, 3001))
         body += "\nthe 2024-2025 cohort"
         pad.write("log", body)
-        result = pad.read("log", grep="2024-2025")
-        assert "the 2024-2025 cohort" in result
-        assert "filler 2024" not in result
+        assert _body(pad.read("log", grep="2024-2025")) == "3001: the 2024-2025 cohort"
 
     def test_tail_reaches_real_end_of_large_body(self):
         """T1: tail must return the end of the whole body, even when the
@@ -164,14 +184,14 @@ class TestScratchpad:
         pad = Scratchpad()
         pad.write("log", "\n".join(f"line-{i:05d}" for i in range(1, 3001)))
         result = pad.read("log", tail=50, max_bytes=30_000)
-        assert "line-03000" in result
-        assert "line-00723" not in result
+        assert _body(result) == "\n".join(f"line-{i:05d}" for i in range(2951, 3001))
+        assert "truncated" not in result
 
     def test_grep_searches_beyond_max_bytes(self):
         """T1 corollary: grep sees the full body, not a byte-prefix of it."""
         pad = Scratchpad()
         pad.write("log", "x" * 100_000 + "\nneedle here")
-        assert "needle here" in pad.read("log", grep="needle", max_bytes=1000)
+        assert _body(pad.read("log", grep="needle", max_bytes=1000)) == "2: needle here"
 
     def test_zero_matches_is_reported_not_disguised_as_truncation(self):
         """T3: no match must say so, and must not carry a truncation notice
@@ -179,27 +199,44 @@ class TestScratchpad:
         pad = Scratchpad()
         pad.write("log", "y\n" * 50_000)
         result = pad.read("log", grep="NonexistentTerm", max_bytes=30_000)
-        assert "matched 0" in result
+        assert _body(result) == ""
+        assert "matched 0 of 50000 lines" in result
         assert "truncated" not in result
 
-    def test_match_count_reported(self):
+    def test_truncated_filter_says_where_it_stopped(self):
+        """Truncation keeps whole lines and names the next line to read."""
         pad = Scratchpad()
-        pad.write("log", "apple\nbanana\napricot")
-        assert "matched 2 of 3 lines" in pad.read("log", grep="ap")
+        pad.write("log", "\n".join(f"line-{i:03d}" for i in range(1, 201)))
+        result = pad.read("log", lines="1-200", max_bytes=35)  # 8 bytes + \n each
+        assert _body(result) == "line-001\nline-002\nline-003\nline-004"
+        note = _note(result)
+        assert "selected 200 of 200 lines" in note
+        assert "showing 4 lines through line 4" in note
+        assert "continue from line 5" in note
 
-    def test_truncation_never_splits_utf8_char(self):
+    def test_truncated_grep_names_next_hit_line(self):
+        pad = Scratchpad()
+        pad.write("log", "\n".join(f"hit {i}" if i % 10 == 0 else "-" for i in range(1, 101)))
+        result = pad.read("log", grep="hit", max_bytes=21)
+        assert _body(result) == "10: hit 10\n20: hit 20"
+        assert "continue from line 30" in _note(result)
+
+    def test_unfiltered_truncation_names_line_and_never_splits_utf8(self):
         """T1 second harm: byte-cutting mid-character used to inject U+FFFD."""
         pad = Scratchpad()
-        pad.write("doc", "中文內容" * 10_000)
+        pad.write("doc", ("中文內容" * 10 + "\n") * 1_000)
         result = pad.read("doc", max_bytes=30_001)  # 3-byte chars: odd cut
         assert "\ufffd" not in result
-        assert "truncated" in result
+        note = _note(result)
+        assert "truncated at 30001 of 121000 bytes" in note
+        assert "mid-line 248 of 1000" in note
+        assert "lines='248-1000'" in note
 
     def test_max_bytes_truncates_with_notice(self):
         pad = Scratchpad()
         pad.write("big", "x" * 1000)
         result = pad.read("big", max_bytes=100)
-        assert result.startswith("x" * 100)
+        assert _body(result) == "x" * 100
         assert "truncated at 100 of 1000 bytes" in result
 
     def test_max_bytes_not_applied_when_under(self):
@@ -211,9 +248,16 @@ class TestScratchpad:
         pad = Scratchpad()
         pad.write("log", "aaa\nbbb\nccc\nddd")
         result = pad.read("log", head=3, max_bytes=7)
-        assert result.startswith("aaa\nbbb")
-        assert "ccc" not in result.split("\n\n[")[0]
-        assert "truncated" in result
+        assert _body(result) == "aaa\nbbb"
+        assert "continue from line 3" in _note(result)
+
+
+def _body(result: str) -> str:
+    return result.rsplit("\n\n[scratchpad_read:", 1)[0] if "[scratchpad_read:" in result else result
+
+
+def _note(result: str) -> str:
+    return result.rsplit("[scratchpad_read:", 1)[1]
 
 
 # --- JobStore: submission + completion -------------------------------

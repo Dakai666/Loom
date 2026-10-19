@@ -4106,7 +4106,10 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
                     indent=2,
                 ),
             )
-        if call.args.get("section") is not None:
+        # Models often fill every schema field with a placeholder; treat
+        # None / "" as "not set" so they don't count as filters.
+        args = {k: v for k, v in call.args.items() if v is not None and v != ""}
+        if "section" in args:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=False,
@@ -4119,17 +4122,20 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
             )
         filters: dict[str, Any] = {}
         for name in ("head", "tail"):
-            if call.args.get(name) is not None:
+            if name in args:
+                v = args[name]
+                if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()):
+                    v = None
                 try:
-                    filters[name] = int(call.args[name])
+                    filters[name] = int(v)  # type: ignore[arg-type]
                 except (TypeError, ValueError):
                     return ToolResult(
                         call_id=call.id, tool_name=call.tool_name,
                         success=False, error=f"'{name}' must be an integer line count",
                     )
         for name in ("lines", "grep"):
-            if call.args.get(name) is not None:
-                filters[name] = str(call.args[name])
+            if name in args:
+                filters[name] = str(args[name])
         raw_max = call.args.get("max_bytes")
         if raw_max is None:
             max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
@@ -4159,8 +4165,9 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
             "Read content from the session Scratchpad. Omit 'ref' to list "
             "available refs. Optional line filter (at most one): head=N, "
             "tail=N, lines='N-M' (1-indexed, inclusive), or grep='text' "
-            "(substring match). Filters see the whole body; a trailing note "
-            "reports how many lines matched. Output is capped at "
+            "(substring match, output prefixed with line numbers). Filters "
+            "see the whole body; a trailing note reports how many lines "
+            "matched and where truncation stopped. Output is capped at "
             f"{_SCRATCHPAD_DEFAULT_MAX_BYTES} bytes by default — raise "
             "'max_bytes' or narrow with lines='N-M' for larger payloads."
         ),

@@ -372,7 +372,7 @@ class TestScratchpadTool:
         tool = make_scratchpad_read_tool(pad)
         r = await tool.executor(_call("scratchpad_read", {"ref": "log", "grep": "2024-2025"}))
         assert r.success
-        assert r.output.startswith("the 2024-2025 cohort")
+        assert r.output.startswith("2: the 2024-2025 cohort\n\n[scratchpad_read:")
         assert "matched 1 of 3 lines" in r.output
 
     async def test_tail_and_head_args(self):
@@ -395,6 +395,26 @@ class TestScratchpadTool:
         assert not r.success
         for name in ("head", "tail", "lines", "grep"):
             assert name in r.error
+
+    async def test_placeholder_args_are_ignored(self):
+        """Weaker models fill every field: "" / None must not count as filters."""
+        pad = Scratchpad()
+        pad.write("log", "a\nb\nc")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {
+            "ref": "log", "lines": "2-3", "grep": "", "head": None, "section": "",
+        }))
+        assert r.success, r.error
+        assert r.output.startswith("b\nc\n\n[scratchpad_read:")
+
+    @pytest.mark.parametrize("bad", [True, 5.9, "five"])
+    async def test_head_rejects_non_integer(self, bad):
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": bad}))
+        assert not r.success
+        assert "integer" in r.error
 
     async def test_conflicting_filters_error(self):
         pad = Scratchpad()
