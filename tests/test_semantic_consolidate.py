@@ -2,7 +2,7 @@
 Tests for SemanticMemory.consolidate() + resolve_redirect() (#489, P2).
 
 The merge primitive: fuse N near-duplicate facts into one refined survivor,
-preserving every sacrificed fact's FULL original text (絲絲's hard
+preserving every sacrificed fact's FULL original text (Loom Agent's hard
 requirement — merge must not flatten the wording that carries the insight),
 and leave a redirect stub at each sacrificed key so recall still resolves.
 """
@@ -265,3 +265,67 @@ class TestRedirectRecall:
         assert resolved is not None
         assert resolved.key == "user:tea"
         assert resolved.value == "user drinks tea every morning"
+
+
+class TestProvenanceAcrossPasses:
+    """A survivor merged again, or a past survivor sacrificed, must not lose
+    the originals an earlier pass preserved (live DB lost 10 this way)."""
+
+    async def _merge(self, semantic, keys, survivor, refined, **kw):
+        entries = [await semantic.get(k) for k in keys]
+        return await semantic.consolidate(
+            entries, refined_value=refined, survivor_key=survivor,
+            sacrificed_content="x", merge_rationale=f"merge into {survivor}", **kw)
+
+    async def test_survivor_original_value_is_kept(self, semantic):
+        a, _ = await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "refined")
+        ci = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        assert ci["survivor_original"]["value"] == a.value
+        assert ci["survivor_original"]["source"] == a.source
+
+    async def test_merging_a_survivor_again_keeps_the_earlier_record(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "pass one")
+        first = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        await semantic.upsert(SemanticEntry(key="user:tea3", value="tea at dawn", source="session:y:fact:1"))
+        await self._merge(semantic, ["user:tea", "user:tea3"], "user:tea", "pass two")
+        meta = (await semantic.get("user:tea")).metadata
+        assert meta["consolidation_history"] == [first]
+        assert meta["consolidated_into"]["sacrificed_entries"][0]["key"] == "user:tea3"
+
+    async def test_history_accumulates_over_three_passes(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "one")
+        for i in (3, 4):
+            await semantic.upsert(SemanticEntry(key=f"user:tea{i}", value=f"tea {i}", source="session:y:fact:1"))
+            await self._merge(semantic, ["user:tea", f"user:tea{i}"], "user:tea", f"pass {i}")
+        hist = (await semantic.get("user:tea")).metadata["consolidation_history"]
+        assert [h["rationale"] for h in hist] == ["merge into user:tea"] * 2
+        assert [h["sacrificed_entries"][0]["key"] for h in hist] == ["user:tea_dup", "user:tea3"]
+
+    async def test_sacrificing_a_past_survivor_carries_its_record(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "one")
+        earlier = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        await semantic.upsert(SemanticEntry(key="user:drinks", value="tea and coffee",
+                                            source="manual", confidence=1.0))
+        await self._merge(semantic, ["user:drinks", "user:tea"], "user:drinks", "drinks")
+        sac = (await semantic.get("user:drinks")).metadata["consolidated_into"]["sacrificed_entries"]
+        rec = next(s for s in sac if s["key"] == "user:tea")
+        assert rec["consolidated_into"] == earlier
+        assert rec["value"] == "one"
+
+    async def test_extra_metadata_lands_on_survivor(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "r",
+                          extra_metadata={"produced_by": "distill_dream"})
+        assert (await semantic.get("user:tea")).metadata["produced_by"] == "distill_dream"
+
+    @pytest.mark.parametrize("key", ["consolidated_into", "consolidation_history", "redirected_to"])
+    async def test_extra_metadata_cannot_overwrite_provenance(self, semantic, key):
+        await _seed_pair(semantic)
+        with pytest.raises(ValueError):
+            await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "r",
+                              extra_metadata={key: "x"})
+        assert (await semantic.get("user:tea_dup")).metadata.get("redirected_to") is None

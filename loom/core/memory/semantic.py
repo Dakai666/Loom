@@ -165,6 +165,19 @@ class ConsolidationResult:
     refined_value: str
 
 
+_PROVENANCE_KEYS = frozenset({"consolidated_into", "consolidation_history", "redirected_to"})
+
+
+def _sacrificed_record(e: "SemanticEntry") -> dict:
+    """What a sacrificed fact leaves on the survivor: its full text, plus the
+    record of anything it had absorbed itself (its stub keeps none)."""
+    rec = {"key": e.key, "value": e.value, "source": e.source, "confidence": e.confidence}
+    for k in ("consolidated_into", "consolidation_history"):
+        if e.metadata.get(k):
+            rec[k] = e.metadata[k]
+    return rec
+
+
 class SemanticMemory:
     """Read/write access to the semantic_entries table."""
 
@@ -645,17 +658,25 @@ class SemanticMemory:
         survivor_key: str,
         sacrificed_content: str,
         merge_rationale: str,
+        extra_metadata: dict | None = None,
     ) -> ConsolidationResult:
         """Fuse ≥2 near-duplicate facts into one refined survivor (#489, P2).
 
         The survivor's value becomes ``refined_value``; every sacrificed
         entry's **full original text is preserved verbatim** in the survivor's
-        ``metadata["consolidated_into"]`` (絲絲's hard requirement — merge must
-        not flatten the wording that carries the insight), and each sacrificed
+        ``metadata["consolidated_into"]`` (Loom Agent's hard requirement — merge
+        must not flatten the wording that carries the insight), and each sacrificed
         key is turned into a redirect stub so ``resolve_redirect`` still finds
         the survivor. Confidence takes the max across members (independent
         corroboration → at least as confident as the strongest). The stub's
         embedding is nulled so it never surfaces in semantic search.
+
+        Provenance survives repeated passes: the survivor's own pre-merge value
+        is kept as ``survivor_original``, an earlier ``consolidated_into`` moves
+        to ``consolidation_history``, and a sacrificed past survivor carries its
+        record inside its ``sacrificed_entries`` item (its stub keeps none).
+        ``extra_metadata`` is merged onto the survivor but may not touch these
+        provenance keys.
 
         This is a write primitive — it trusts its inputs. The caller
         (``execute_plan``) is responsible for self-review approval and stale
@@ -672,6 +693,9 @@ class SemanticMemory:
             raise ValueError("sacrificed_content must be non-empty (preserve the originals)")
         if not merge_rationale.strip():
             raise ValueError("merge_rationale must be non-empty")
+        reserved = set(extra_metadata or {}) & _PROVENANCE_KEYS
+        if reserved:
+            raise ValueError(f"extra_metadata may not set provenance keys {sorted(reserved)}")
 
         survivor = await self.get(survivor_key)
         if survivor is None:
@@ -685,13 +709,15 @@ class SemanticMemory:
         new_conf = max(e.confidence for e in entries)
 
         meta = dict(survivor.metadata)
+        if meta.get("consolidated_into"):
+            meta["consolidation_history"] = [
+                *meta.get("consolidation_history", []), meta["consolidated_into"]]
+        meta.update(extra_metadata or {})
         meta["consolidated_into"] = {
             "sacrificed_content": sacrificed_content,
-            "sacrificed_entries": [
-                {"key": e.key, "value": e.value, "source": e.source,
-                 "confidence": e.confidence}
-                for e in sacrificed
-            ],
+            "sacrificed_entries": [_sacrificed_record(e) for e in sacrificed],
+            "survivor_original": {"value": survivor.value, "source": survivor.source,
+                                  "confidence": survivor.confidence},
             "rationale": merge_rationale,
             "ts": now,
         }
