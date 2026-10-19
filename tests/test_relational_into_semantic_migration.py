@@ -342,6 +342,33 @@ async def test_ensure_embeddings_for_prefix_fills_missing_rows(tmp_db):
         assert await sem.ensure_embeddings_for_prefix("rel:") == 0
 
 
+async def test_ensure_embeddings_skips_redirect_stubs(tmp_db):
+    """``consolidate`` nulls a stub's embedding so it never surfaces in
+    semantic search. The backfill (run at every session start for ``rel:``)
+    used to re-embed those stubs, undoing that (2026-10-19)."""
+    store = SQLiteStore(tmp_db)
+    await store.initialize()
+    async with store.connect() as db:
+        sem = SemanticMemory(db)
+        await upsert_triple(sem, RelationalEntry(
+            subject="user", predicate="likes", object="tea",
+        ))
+        await sem.upsert(SemanticEntry(
+            key="rel:user::enjoys", value="[consolidated → rel:user::likes]",
+            metadata={"redirected_to": "rel:user::likes"},
+        ))
+
+    async with store.connect() as db:
+        mock_provider = AsyncMock()
+        mock_provider.embed.side_effect = lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
+        sem = SemanticMemory(db, embedding_provider=mock_provider)
+        assert await sem.ensure_embeddings_for_prefix("rel:") == 1
+        row = await (await db.execute(
+            "SELECT embedding FROM semantic_entries WHERE key = 'rel:user::enjoys'"
+        )).fetchone()
+        assert row[0] is None
+
+
 async def test_ensure_embeddings_no_op_without_provider(tmp_db):
     store = SQLiteStore(tmp_db)
     await store.initialize()
