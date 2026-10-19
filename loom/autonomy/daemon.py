@@ -783,6 +783,11 @@ class AutonomyDaemon:
         # max_clusters / max_review_clusters regardless; only local embedding
         # work scales with this number (#524 review).
         corpus_limit = int(cfg.get("corpus_limit", 2000))
+        # LLM cost knobs: each merge cluster costs one diff-inventory call plus
+        # its share of self-review / synthesis; overflow defers to the next
+        # pass. Previously hard-coded, so the backlog drained at 20/week (#612).
+        max_clusters = int(cfg.get("max_clusters", 20))
+        max_review_clusters = int(cfg.get("max_review_clusters", 40))
         router = session.router
         model = session.model
 
@@ -813,7 +818,8 @@ class AutonomyDaemon:
 
             plan, report = await run_convergent_dream(
                 memory.semantic, _llm_fn,
-                corpus_limit=corpus_limit, execute=run_execute,
+                corpus_limit=corpus_limit, max_clusters=max_clusters,
+                max_review_clusters=max_review_clusters, execute=run_execute,
             )
             append_consolidation_report(report)
             logger.info(
@@ -831,8 +837,10 @@ class AutonomyDaemon:
         )
         logger.info(
             "[autonomy] convergent dream loop started "
-            "(interval=%.1fd, corpus_limit=%d, execute=%s)",
-            loop._interval_seconds / 86400.0, corpus_limit, execute,
+            "(interval=%.1fd, corpus_limit=%d, max_clusters=%d, "
+            "max_review_clusters=%d, execute=%s)",
+            loop._interval_seconds / 86400.0, corpus_limit, max_clusters,
+            max_review_clusters, execute,
         )
         return asyncio.ensure_future(loop.run_forever())
 

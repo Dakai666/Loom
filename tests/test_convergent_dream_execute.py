@@ -266,3 +266,6 @@ class TestRunConvergentDreamExecute:
         stub = await semantic_emb.get("k:b")
         assert stub.metadata.get("redirected_to") == "k:a"
         assert "執行結果" in report  # execution section present when execute=True
+        # Header used to hard-code "(read-only / P1)" even on executed passes
+        # (#612): an executed report must not claim read-only anywhere.
+        assert "read-only" not in report.lower()

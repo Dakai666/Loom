@@ -348,9 +348,15 @@ interval_days = 7       # cadence in days (first check ~5min after daemon start)
 execute       = false   # P4a read-only; set true for autonomous writes (P4b)
 # Coverage cap. list_recent is newest-first, so this scans the N most-recent
 # facts — older ones are never looked at. Set it >= your total semantic entry
-# count for full coverage. LLM cost is bounded by max_clusters regardless; only
+# count for full coverage. LLM cost is bounded by the caps below regardless; only
 # local embedding work scales with this number. Raise it as your corpus grows.
 corpus_limit  = 5000
+# LLM cost caps. Each merge cluster costs one diff-inventory call plus its share
+# of self-review (batches of 10) and synthesis; clusters over either cap defer
+# to the next pass. If the report keeps saying "capped at N … deferred", the
+# backlog drains at max_clusters per week — raise both together.
+max_clusters        = 20
+max_review_clusters = 40
 # Explicit `predict` tool (#537): Loom writes a falsifiable assertion before an
 # uncertain tool call; it settles in-session against that tool's next run and the
 # verdict (HIT / MISS) is appended to the tool's result. (The implicit heartbeat,

@@ -1062,7 +1062,8 @@ def render_report(plan: ConsolidationPlan, execute_result: "ExecuteResult | None
     """
     counts = plan.counts()
     out: list[str] = [
-        f"pass_id: `{plan.pass_id}` · status: {plan.execution_status} (read-only / P1)",
+        f"pass_id: `{plan.pass_id}` · status: {plan.execution_status} "
+        f"({'read-only' if execute_result is None else 'execute'})",
         "",
         "### 本輪 pass 摘要",
         f"- 掃描範圍：{plan.scanned} 筆 semantic facts",
