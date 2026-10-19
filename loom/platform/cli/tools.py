@@ -4106,7 +4106,30 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
                     indent=2,
                 ),
             )
-        section = call.args.get("section")
+        if call.args.get("section") is not None:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name,
+                success=False,
+                error=(
+                    "'section' was removed: it guessed between head/tail/range/"
+                    "keyword from one string (e.g. '2024-2025' became a line "
+                    "range). Use exactly one of head=N, tail=N, lines='N-M', "
+                    "or grep='text'."
+                ),
+            )
+        filters: dict[str, Any] = {}
+        for name in ("head", "tail"):
+            if call.args.get(name) is not None:
+                try:
+                    filters[name] = int(call.args[name])
+                except (TypeError, ValueError):
+                    return ToolResult(
+                        call_id=call.id, tool_name=call.tool_name,
+                        success=False, error=f"'{name}' must be an integer line count",
+                    )
+        for name in ("lines", "grep"):
+            if call.args.get(name) is not None:
+                filters[name] = str(call.args[name])
         raw_max = call.args.get("max_bytes")
         if raw_max is None:
             max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
@@ -4121,8 +4144,8 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
                     success=False, error="'max_bytes' must be a positive integer",
                 )
         try:
-            content = scratchpad.read(ref, section=section, max_bytes=max_bytes)
-        except KeyError as exc:
+            content = scratchpad.read(ref, max_bytes=max_bytes, **filters)
+        except (KeyError, ValueError) as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
         return ToolResult(
@@ -4134,10 +4157,12 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         name="scratchpad_read",
         description=(
             "Read content from the session Scratchpad. Omit 'ref' to list "
-            "available refs. Supports section filter: 'head', 'tail', 'N-M' "
-            f"for line range, or any string to grep matching lines. Output is "
-            f"capped at {_SCRATCHPAD_DEFAULT_MAX_BYTES} bytes by default — "
-            "raise 'max_bytes' for larger payloads."
+            "available refs. Optional line filter (at most one): head=N, "
+            "tail=N, lines='N-M' (1-indexed, inclusive), or grep='text' "
+            "(substring match). Filters see the whole body; a trailing note "
+            "reports how many lines matched. Output is capped at "
+            f"{_SCRATCHPAD_DEFAULT_MAX_BYTES} bytes by default — raise "
+            "'max_bytes' or narrow with lines='N-M' for larger payloads."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
@@ -4145,8 +4170,11 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
             "type": "object",
             "properties": {
                 "ref": {"type": "string", "description": "Scratchpad ref (with or without scratchpad:// prefix). Omit to list all refs."},
-                "section": {"type": "string", "description": "Optional filter: head/tail/N-M/keyword."},
-                "max_bytes": {"type": "integer", "description": f"Byte cap on raw payload before section filter (default {_SCRATCHPAD_DEFAULT_MAX_BYTES})."},
+                "head": {"type": "integer", "description": "First N lines."},
+                "tail": {"type": "integer", "description": "Last N lines of the whole body."},
+                "lines": {"type": "string", "description": "Line range 'N-M', 1-indexed, inclusive."},
+                "grep": {"type": "string", "description": "Lines containing this substring (hyphens are literal)."},
+                "max_bytes": {"type": "integer", "description": f"Byte cap on output after filtering (default {_SCRATCHPAD_DEFAULT_MAX_BYTES})."},
             },
         },
         executor=_scratchpad_read,

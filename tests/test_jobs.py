@@ -92,77 +92,128 @@ class TestScratchpad:
         assert "scratchpad://x" in pad
         assert "nope" not in pad
 
-    def test_section_head(self):
+    def test_head(self):
         pad = Scratchpad()
         body = "\n".join(f"line-{i}" for i in range(1, 101))
         pad.write("log", body)
-        result = pad.read("log", section="head")
-        assert result.splitlines() == [f"line-{i}" for i in range(1, 51)]
+        result = pad.read("log", head=50)
+        assert result.splitlines()[:50] == [f"line-{i}" for i in range(1, 51)]
+        assert "line-51" not in result
 
-    def test_section_tail(self):
+    def test_tail(self):
         pad = Scratchpad()
         body = "\n".join(f"line-{i}" for i in range(1, 101))
         pad.write("log", body)
-        result = pad.read("log", section="tail")
-        assert result.splitlines() == [f"line-{i}" for i in range(51, 101)]
+        result = pad.read("log", tail=50)
+        assert result.splitlines()[:50] == [f"line-{i}" for i in range(51, 101)]
 
-    def test_section_range(self):
+    def test_lines_range(self):
         pad = Scratchpad()
         pad.write("log", "a\nb\nc\nd\ne")
-        assert pad.read("log", section="2-4") == "b\nc\nd"
+        assert pad.read("log", lines="2-4").startswith("b\nc\nd\n")
 
-    def test_section_keyword(self):
+    def test_grep(self):
         pad = Scratchpad()
         pad.write("log", "apple\nbanana\napricot\ncarrot")
-        assert pad.read("log", section="ap") == "apple\napricot"
+        assert pad.read("log", grep="ap").startswith("apple\napricot\n")
 
-    def test_section_range_zero_lower_bound_clamps_to_one(self):
-        """Issue #302 F2: section="0-N" used to fall through to keyword
-        search (matching nothing → empty result) on huge files. Now it
-        clamps to 1 and reads from the start as the caller obviously
-        intended."""
+    def test_lines_zero_lower_bound_clamps_to_one(self):
+        """Issue #302 F2: "0-N" reads from the start as the caller intended."""
         pad = Scratchpad()
-        body = "\n".join(f"line-{i}" for i in range(1, 21))  # 20 lines
+        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 21)))
+        result = pad.read("log", lines="0-5")
+        assert result.splitlines()[:5] == [f"line-{i}" for i in range(1, 6)]
+        assert "line-6" not in result
+
+    def test_lines_past_end_returns_remaining(self):
+        pad = Scratchpad()
+        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 11)))
+        result = pad.read("log", lines="8-9999")
+        assert result.splitlines()[:3] == [f"line-{i}" for i in range(8, 11)]
+
+    @pytest.mark.parametrize("bad", ["5-2", "abc", "3", "1-x"])
+    def test_lines_malformed_raises(self, bad):
+        """Malformed / inverted ranges are caller errors, not silent empties."""
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        with pytest.raises(ValueError):
+            pad.read("log", lines=bad)
+
+    def test_filters_are_mutually_exclusive(self):
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        with pytest.raises(ValueError):
+            pad.read("log", head=1, grep="a")
+
+    # --- 2026-10-19 section-filter diagnosis (T1 / T3 / T4) ----------
+
+    def test_hyphenated_grep_is_keyword_not_range(self):
+        """T4: a hyphenated keyword like "2024-2025" must match lines that
+        contain it — never be reinterpreted as a line range."""
+        pad = Scratchpad()
+        body = "\n".join(f"filler {i}" for i in range(1, 3001))
+        body += "\nthe 2024-2025 cohort"
         pad.write("log", body)
-        result = pad.read("log", section="0-5")
-        assert result.splitlines() == [f"line-{i}" for i in range(1, 6)]
+        result = pad.read("log", grep="2024-2025")
+        assert "the 2024-2025 cohort" in result
+        assert "filler 2024" not in result
 
-    def test_section_range_past_end_returns_remaining(self):
-        """Asking for lines past EOF returns what exists — Python slice
-        semantics. No empty-result surprise on big files."""
+    def test_tail_reaches_real_end_of_large_body(self):
+        """T1: tail must return the end of the whole body, even when the
+        body exceeds max_bytes. max_bytes caps the output, not the input."""
         pad = Scratchpad()
-        body = "\n".join(f"line-{i}" for i in range(1, 11))  # 10 lines
-        pad.write("log", body)
-        result = pad.read("log", section="8-9999")
-        assert result.splitlines() == [f"line-{i}" for i in range(8, 11)]
+        pad.write("log", "\n".join(f"line-{i:05d}" for i in range(1, 3001)))
+        result = pad.read("log", tail=50, max_bytes=30_000)
+        assert "line-03000" in result
+        assert "line-00723" not in result
 
-    def test_section_range_inverted_returns_empty_not_keyword(self):
-        """Inverted range like '5-2' is a typo, not a keyword. Don't
-        silently search for the literal '5-2'."""
+    def test_grep_searches_beyond_max_bytes(self):
+        """T1 corollary: grep sees the full body, not a byte-prefix of it."""
         pad = Scratchpad()
-        pad.write("log", "alpha\n5-2 is here\nbeta")
-        # Bug-era behavior would have matched the line containing "5-2".
-        assert pad.read("log", section="5-2") == ""
+        pad.write("log", "x" * 100_000 + "\nneedle here")
+        assert "needle here" in pad.read("log", grep="needle", max_bytes=1000)
+
+    def test_zero_matches_is_reported_not_disguised_as_truncation(self):
+        """T3: no match must say so, and must not carry a truncation notice
+        that invites a futile max_bytes retry."""
+        pad = Scratchpad()
+        pad.write("log", "y\n" * 50_000)
+        result = pad.read("log", grep="NonexistentTerm", max_bytes=30_000)
+        assert "matched 0" in result
+        assert "truncated" not in result
+
+    def test_match_count_reported(self):
+        pad = Scratchpad()
+        pad.write("log", "apple\nbanana\napricot")
+        assert "matched 2 of 3 lines" in pad.read("log", grep="ap")
+
+    def test_truncation_never_splits_utf8_char(self):
+        """T1 second harm: byte-cutting mid-character used to inject U+FFFD."""
+        pad = Scratchpad()
+        pad.write("doc", "中文內容" * 10_000)
+        result = pad.read("doc", max_bytes=30_001)  # 3-byte chars: odd cut
+        assert "\ufffd" not in result
+        assert "truncated" in result
 
     def test_max_bytes_truncates_with_notice(self):
         pad = Scratchpad()
         pad.write("big", "x" * 1000)
         result = pad.read("big", max_bytes=100)
         assert result.startswith("x" * 100)
-        assert "truncated at 100 bytes" in result
+        assert "truncated at 100 of 1000 bytes" in result
 
     def test_max_bytes_not_applied_when_under(self):
         pad = Scratchpad()
         pad.write("small", "tiny")
         assert pad.read("small", max_bytes=1000) == "tiny"
 
-    def test_max_bytes_with_section(self):
-        """max_bytes trims raw bytes first, section filter runs on the trim."""
+    def test_max_bytes_applies_after_filter(self):
         pad = Scratchpad()
         pad.write("log", "aaa\nbbb\nccc\nddd")
-        result = pad.read("log", section="head", max_bytes=7)
-        assert "aaa\nbbb" in result
-        assert "truncated at 7 bytes" in result
+        result = pad.read("log", head=3, max_bytes=7)
+        assert result.startswith("aaa\nbbb")
+        assert "ccc" not in result.split("\n\n[")[0]
+        assert "truncated" in result
 
 
 # --- JobStore: submission + completion -------------------------------

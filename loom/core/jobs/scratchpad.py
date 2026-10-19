@@ -34,28 +34,63 @@ class Scratchpad:
     def read(
         self,
         ref: str,
-        section: str | None = None,
+        *,
+        head: int | None = None,
+        tail: int | None = None,
+        lines: str | None = None,
+        grep: str | None = None,
         max_bytes: int | None = None,
     ) -> str:
         """Read a scratchpad entry as text.
 
-        ``max_bytes`` caps the decoded payload before section filtering — a
-        safety net for tools that may return multi-megabyte bodies. When the
-        cap trims content, a truncation notice is appended.
+        At most one line filter applies, each with a single meaning:
+        ``head``/``tail`` = first/last N lines, ``lines`` = ``"N-M"``
+        (1-indexed, inclusive), ``grep`` = lines containing the substring.
+        Filters always see the full body (2026-10-19 diagnosis: filtering a
+        byte-prefix made ``tail`` land mid-file and ``grep`` miss).
+
+        ``max_bytes`` caps the *output* after filtering — a safety net for
+        multi-megabyte bodies. The cut lands on a character boundary.
+
+        Whenever a filter or the cap is involved, a trailing
+        ``[scratchpad_read: ...]`` note says what was selected, how many
+        lines matched, and whether output was truncated — so "matched 0"
+        is never mistaken for "truncated, retry with more bytes".
+
+        Raises ``ValueError`` for conflicting filters or a malformed range.
         """
         ref = self._strip_uri(ref)
         if ref not in self._data:
             raise KeyError(f"Scratchpad ref not found: {ref}")
         raw = self._data[ref]
-        truncated = False
-        if max_bytes is not None and len(raw) > max_bytes:
-            raw = raw[:max_bytes]
-            truncated = True
         text = raw.decode("utf-8", errors="replace")
-        if section is not None:
-            text = _apply_section(text, section)
-        if truncated:
-            text = text + f"\n\n[scratchpad_read: output truncated at {max_bytes} bytes]"
+
+        notes: list[str] = []
+        chosen = [n for n, v in (("head", head), ("tail", tail),
+                                 ("lines", lines), ("grep", grep)) if v is not None]
+        if len(chosen) > 1:
+            raise ValueError(
+                f"Use at most one of head/tail/lines/grep (got {', '.join(chosen)})"
+            )
+        if chosen:
+            all_lines = text.splitlines()
+            selected, desc = _apply_filter(all_lines, head, tail, lines, grep)
+            text = "\n".join(selected)
+            notes.append(
+                f"{desc} matched {len(selected)} of {len(all_lines)} lines "
+                f"(full body, {len(raw)} bytes)"
+            )
+
+        encoded = text.encode("utf-8")
+        if max_bytes is not None and len(encoded) > max_bytes:
+            text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+            notes.append(
+                f"output truncated at {max_bytes} of {len(encoded)} bytes; "
+                "narrow with lines='N-M' or raise max_bytes"
+            )
+
+        if notes:
+            text = text + f"\n\n[scratchpad_read: {'; '.join(notes)}]"
         return text
 
     def size(self, ref: str) -> int:
@@ -86,41 +121,38 @@ class Scratchpad:
         return ref
 
 
-def _apply_section(text: str, section: str) -> str:
-    """Apply a section filter on text content.
+def _apply_filter(
+    lines: list[str],
+    head: int | None,
+    tail: int | None,
+    line_range: str | None,
+    grep: str | None,
+) -> tuple[list[str], str]:
+    """Select lines by exactly one filter; return (selected, description).
 
-    Supported:
-      - "head"     → first 50 lines
-      - "tail"     → last 50 lines
-      - "N-M"      → lines N..M inclusive (1-indexed). N is clamped to 1
-                     if a caller passes 0 (Issue #302 F2 — previously this
-                     silently fell through to keyword search and returned
-                     an empty string for huge files).
-      - any other  → treat as keyword; return lines containing it
+    Replaces the old single ``section`` string that guessed between
+    head/tail/range/keyword from its content — "2024-2025" was silently
+    read as a line range (2026-10-19 diagnosis, T4).
     """
-    lines = text.splitlines()
-    if section == "head":
-        return "\n".join(lines[:50])
-    if section == "tail":
-        return "\n".join(lines[-50:])
-    if "-" in section:
-        lo_s, hi_s = section.split("-", 1)
+    if head is not None:
+        return lines[:max(head, 0)], f"head={head}"
+    if tail is not None:
+        return (lines[-tail:] if tail > 0 else []), f"tail={tail}"
+    if line_range is not None:
+        lo_s, sep, hi_s = line_range.partition("-")
         try:
+            if not sep:
+                raise ValueError
             i, j = int(lo_s), int(hi_s)
         except ValueError:
-            # Not a numeric range — fall through to keyword search.
-            i = j = None  # type: ignore[assignment]
-        if i is not None and j is not None:
-            # Both halves parsed as ints → treat as a line range. Clamp
-            # i to 1 (caller-friendly: "0-500" reads as "from start"),
-            # require j >= i. Out-of-range j is harmless thanks to
-            # Python slice semantics.
-            if i < 1:
-                i = 1
-            if j >= i:
-                return "\n".join(lines[i - 1:j])
-            # Inverted range (j < i) is almost certainly a typo, not a
-            # keyword — return empty rather than misleading keyword hits.
-            return ""
-    matches = [line for line in lines if section in line]
-    return "\n".join(matches)
+            raise ValueError(
+                f"lines must be 'N-M' (1-indexed, inclusive), got {line_range!r}"
+            ) from None
+        # Clamp i to 1 so "0-500" reads from the start (#302 F2). Out-of-range
+        # j is harmless thanks to slice semantics.
+        i = max(i, 1)
+        if j < i:
+            raise ValueError(f"lines range is inverted: {line_range!r}")
+        return lines[i - 1:j], f"lines={line_range}"
+    assert grep is not None
+    return [line for line in lines if grep in line], f"grep={grep!r}"
