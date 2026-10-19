@@ -227,16 +227,17 @@ def make_convergent_dream_tool(
     ``dreams_dir``) so tests can redirect the report IO.
     """
     from loom.core.cognition.consolidation import (
+        DEFAULT_MAX_CLUSTERS, DEFAULT_MAX_REVIEW_CLUSTERS,
         KIND_CLEAN, KIND_MERGE, KIND_RECONCILE, run_convergent_dream,
     )
     from loom.autonomy.circadian.journal import append_consolidation_report
 
     async def _executor(call) -> ToolResult:
         corpus_limit = int(call.args.get("corpus_limit", 2000))
-        max_clusters = int(call.args.get("max_clusters", 20))
+        max_clusters = int(call.args.get("max_clusters", DEFAULT_MAX_CLUSTERS))
         min_similarity = float(call.args.get("min_similarity", 0.85))
         review_batch_size = int(call.args.get("review_batch_size", 10))
-        max_review_clusters = int(call.args.get("max_review_clusters", 40))
+        max_review_clusters = int(call.args.get("max_review_clusters", DEFAULT_MAX_REVIEW_CLUSTERS))
 
         # The batch/cap knobs feed range() steps and slice bounds; a
         # non-positive value would crash the pass or silently leave every

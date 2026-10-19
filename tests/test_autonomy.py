@@ -1061,6 +1061,108 @@ class TestDreamLoopWiring:
         assert captured["semantic"] is fake_memory.semantic
 
 
+class TestConsolidationLoopWiring:
+    """#612: max_clusters / max_review_clusters were hard-coded (20 / 40) —
+    the daemon never read them from [memory.consolidation_dream]."""
+
+    async def _run_pass(self, monkeypatch, cfg: dict) -> dict:
+        import types
+        from loom.autonomy.daemon import AutonomyDaemon
+        from loom.notify.router import NotificationRouter
+        from loom.notify.confirm import ConfirmFlow
+        import loom.autonomy.daemon as daemon_mod
+        import loom.autonomy.circadian.journal as journal_mod
+        import loom.core.config as config_mod
+        import loom.core.cognition.consolidation as consolidation_mod
+
+        fake_session = types.SimpleNamespace(
+            _db=object(), _memory=types.SimpleNamespace(semantic=object()),
+            router=object(), model="m",
+        )
+        captured: dict = {}
+
+        async def fake_run(semantic, llm_fn, **kwargs):
+            captured.update(kwargs)
+            plan = types.SimpleNamespace(
+                pass_id="p", counts=lambda: {}, deferred_to_next_pass=0,
+            )
+            return plan, "report"
+
+        monkeypatch.setattr(consolidation_mod, "run_convergent_dream", fake_run)
+        monkeypatch.setattr(
+            journal_mod, "append_consolidation_report",
+            lambda r: captured.__setitem__("report", r),
+        )
+        monkeypatch.setattr(
+            config_mod, "load_loom_config",
+            lambda: {"memory": {"consolidation_dream": {"enabled": True, **cfg}}},
+        )
+        holder: dict = {}
+
+        class FakeLoop:
+            def __init__(self, *, dream_fn, **_):
+                holder["fn"] = dream_fn
+                self._interval_seconds = 86400.0
+
+            def run_forever(self):
+                async def _noop():
+                    return None
+                return _noop()
+
+        monkeypatch.setattr(daemon_mod, "ConvergentDreamLoop", FakeLoop)
+        daemon = AutonomyDaemon(
+            notify_router=NotificationRouter(),
+            confirm_flow=ConfirmFlow(send_fn=lambda n: None),
+            loom_session=fake_session,
+        )
+        assert daemon._maybe_start_consolidation_loop() is not None
+        await holder["fn"]()
+        return captured
+
+    async def test_caps_read_from_config(self, monkeypatch):
+        captured = await self._run_pass(monkeypatch, {
+            "corpus_limit": 15000, "max_clusters": 40, "max_review_clusters": 50,
+        })
+        assert captured["corpus_limit"] == 15000
+        assert captured["max_clusters"] == 40
+        assert captured["max_review_clusters"] == 50
+
+    async def test_caps_default_when_absent(self, monkeypatch):
+        from loom.core.cognition.consolidation import (
+            DEFAULT_MAX_CLUSTERS, DEFAULT_MAX_REVIEW_CLUSTERS,
+        )
+        captured = await self._run_pass(monkeypatch, {})
+        assert captured["max_clusters"] == DEFAULT_MAX_CLUSTERS
+        assert captured["max_review_clusters"] == DEFAULT_MAX_REVIEW_CLUSTERS
+
+    @pytest.mark.parametrize("bad", [0, -5, "forty", True, 2.5])
+    async def test_invalid_caps_fall_back_without_crashing(self, monkeypatch, caplog, bad):
+        """Loop start isn't guarded by run(): a typo must not take down every
+        daemon loop, and a non-positive cap must not reach the planner."""
+        from loom.core.cognition.consolidation import DEFAULT_MAX_REVIEW_CLUSTERS
+        captured = await self._run_pass(monkeypatch, {
+            "max_review_clusters": bad, "corpus_limit": bad,
+        })
+        assert captured["max_review_clusters"] == DEFAULT_MAX_REVIEW_CLUSTERS
+        assert captured["corpus_limit"] == 2000
+        assert "not a positive integer" in caplog.text
+
+    async def test_warns_when_clusters_exceed_review_cap(self, monkeypatch, caplog):
+        await self._run_pass(monkeypatch, {"max_clusters": 60, "max_review_clusters": 40})
+        assert "max_clusters=60 > max_review_clusters=40" in caplog.text
+
+    async def test_backup_failure_downgrade_is_stated_in_report(self, monkeypatch):
+        import loom.core.memory.backup as backup_mod
+
+        async def failed_snapshot(db, *, prefix):
+            return None
+
+        monkeypatch.setattr(backup_mod, "snapshot_before_write", failed_snapshot)
+        captured = await self._run_pass(monkeypatch, {"execute": True})
+        assert captured["execute"] is False
+        assert "備份失敗" in captured["report"]
+
+
 class TestRunAgentAttachments:
     @pytest.mark.asyncio
     async def test_run_agent_attaches_files_produced_during_turn(self, tmp_path):

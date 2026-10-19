@@ -253,6 +253,8 @@ class TestRunConvergentDreamExecute:
             "SELECT key, value FROM semantic_entries ORDER BY key")).fetchall())
         assert before == after
         assert plan.execution_status == "planned"
+        assert "status: planned (read-only)" in report
+        assert "(execute)" not in report
 
     async def test_execute_true_consolidates(self, semantic_emb):
         await semantic_emb.upsert(SemanticEntry(key="k:a", value="GROUPA user likes tea", source="manual"))
@@ -266,3 +268,7 @@ class TestRunConvergentDreamExecute:
         stub = await semantic_emb.get("k:b")
         assert stub.metadata.get("redirected_to") == "k:a"
         assert "執行結果" in report  # execution section present when execute=True
+        # Header used to hard-code "(read-only / P1)" even on executed passes
+        # (#612): an executed report must not claim read-only anywhere.
+        assert "read-only" not in report.lower()
+        assert "status: executed (execute)" in report

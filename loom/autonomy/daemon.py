@@ -144,6 +144,29 @@ def _check_config_integrity(sched_cfg: dict) -> bool:
         return True  # fail-open
 
 
+def _positive_int_cfg(cfg: dict, key: str, default: int) -> int:
+    """Read a positive int from a config section; warn and fall back otherwise.
+
+    Runs on the loop-start path, which ``run()`` doesn't guard — a typo must
+    not take down every daemon loop, and a non-positive cap would either crash
+    self_review after paid diff-inventory calls or silently disable merges.
+    """
+    raw = cfg.get(key, default)
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        value = int(raw)
+        if value < 1 or value != raw:
+            raise ValueError
+    except (TypeError, ValueError):
+        logger.warning(
+            "[autonomy] %s=%r is not a positive integer — using default %d",
+            key, raw, default,
+        )
+        return default
+    return value
+
+
 class AutonomyDaemon:
     """
     Manages the full autonomy lifecycle:
@@ -782,7 +805,26 @@ class AutonomyDaemon:
         # semantic entry count for full coverage. LLM cost stays bounded by
         # max_clusters / max_review_clusters regardless; only local embedding
         # work scales with this number (#524 review).
-        corpus_limit = int(cfg.get("corpus_limit", 2000))
+        from loom.core.cognition.consolidation import (
+            DEFAULT_MAX_CLUSTERS, DEFAULT_MAX_REVIEW_CLUSTERS,
+        )
+        corpus_limit = _positive_int_cfg(cfg, "corpus_limit", 2000)
+        # LLM cost knobs: each merge cluster costs one diff-inventory call plus
+        # its share of self-review / synthesis; overflow defers to the next
+        # pass. Previously hard-coded, so the backlog drained at 20/week (#612).
+        max_clusters = _positive_int_cfg(cfg, "max_clusters", DEFAULT_MAX_CLUSTERS)
+        max_review_clusters = _positive_int_cfg(
+            cfg, "max_review_clusters", DEFAULT_MAX_REVIEW_CLUSTERS,
+        )
+        if max_clusters > max_review_clusters:
+            # Clusters past the review cap pay for diff-inventory, then defer
+            # and get re-planned (and re-paid) next pass.
+            logger.warning(
+                "[consolidation] max_clusters=%d > max_review_clusters=%d — "
+                "the excess pays for diff-inventory every pass but is never "
+                "reviewed; raise max_review_clusters to match",
+                max_clusters, max_review_clusters,
+            )
         router = session.router
         model = session.model
 
@@ -813,8 +855,16 @@ class AutonomyDaemon:
 
             plan, report = await run_convergent_dream(
                 memory.semantic, _llm_fn,
-                corpus_limit=corpus_limit, execute=run_execute,
+                corpus_limit=corpus_limit, max_clusters=max_clusters,
+                max_review_clusters=max_review_clusters, execute=run_execute,
             )
+            if execute and not run_execute:
+                # Say why in the report itself, not only in the daemon log —
+                # otherwise this reads as a deliberately read-only pass.
+                report += (
+                    "\n\n> ⚠️ 設定為 execute=true，但執行前備份失敗，"
+                    "本輪降級為 read-only（未改寫任何記憶）。"
+                )
             append_consolidation_report(report)
             logger.info(
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
@@ -831,8 +881,10 @@ class AutonomyDaemon:
         )
         logger.info(
             "[autonomy] convergent dream loop started "
-            "(interval=%.1fd, corpus_limit=%d, execute=%s)",
-            loop._interval_seconds / 86400.0, corpus_limit, execute,
+            "(interval=%.1fd, corpus_limit=%d, max_clusters=%d, "
+            "max_review_clusters=%d, execute=%s)",
+            loop._interval_seconds / 86400.0, corpus_limit, max_clusters,
+            max_review_clusters, execute,
         )
         return asyncio.ensure_future(loop.run_forever())
 
