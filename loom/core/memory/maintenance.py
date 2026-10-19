@@ -228,7 +228,7 @@ def make_convergent_dream_tool(
 
     The convergent counterpart to ``dream_cycle``: scans the semantic store,
     proposes merge / reconcile / clean clusters, runs the diff-inventory gate
-    and 絲絲's self-review, then writes a 夢境鞏固 report to its own dated
+    and Loom's self-review, then writes a 夢境鞏固 report to its own dated
     ``dreams/`` file. **Read-only** — this phase never writes to the DB;
     execution of the approved clusters lands in P2 (#489).
 
@@ -352,15 +352,17 @@ def make_distill_dream_tool(
     timezone: str = "Asia/Taipei",
     dreams_dir=None,
 ) -> ToolDefinition:
-    """Build the ``distill_dream`` ToolDefinition (#613 E, P1 — read-only).
+    """Build the ``distill_dream`` ToolDefinition (#613 E).
 
     Picks topic neighbourhoods, distils each into one refined fact, gates it
     for information loss, runs Loom's self-review veto and writes a 記憶蒸餾
-    report to the dated ``dreams/`` file. Never writes to memory in P1; used
-    for the big-dream rehearsal (docs/designs/57 §6).
+    report to the dated ``dreams/`` file. Read-only by default (the big-dream
+    rehearsal, docs/designs/57 §6); ``execute=true`` writes the approved
+    distillations after a fresh backup (P2).
     """
     from loom.core.cognition.distillation import (
-        DEFAULT_MAX_NEIGHBOURHOODS, DISTILL_MIN_SIMILARITY, STATUS_APPROVED, STATUS_DEFERRED,
+        DEFAULT_MAX_NEIGHBOURHOODS, DISTILL_MIN_SIMILARITY, MODE_EXECUTE, OUTCOME_ERROR,
+        OUTCOME_EXECUTED, OUTCOME_INELIGIBLE, OUTCOME_STALE, STATUS_APPROVED, STATUS_DEFERRED,
         STATUS_FAILED, STATUS_REJECTED, run_distill_dream,
     )
     from loom.autonomy.circadian.journal import append_distill_report
@@ -376,6 +378,13 @@ def make_distill_dream_tool(
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
                 error=f"Invalid domain={domain!r}. Allowed: {sorted(allowed_domains)} or omit.",
+            )
+        execute = call.args.get("execute", False)
+        if not isinstance(execute, bool):
+            # A memory-rewriting switch: "false"/"0" must never read as true.
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=f"execute must be a boolean true/false, got {execute!r}.",
             )
         try:
             max_nb = int(call.args.get("max_neighbourhoods", DEFAULT_MAX_NEIGHBOURHOODS))
@@ -394,18 +403,25 @@ def make_distill_dream_tool(
         plan, report = await run_distill_dream(
             semantic, llm_fn, domain=domain,
             max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
-            min_similarity=min_sim,
+            min_similarity=min_sim, execute=execute,
         )
         path = append_distill_report(report, timezone=timezone, dreams_dir=dreams_dir)
         c = plan.counts()
         lines = [
-            "Distill dream complete (read-only / P1)",
+            f"Distill dream complete ({plan.mode})",
             f"  Scanned        : {plan.scanned} facts",
             f"  Neighbourhoods : {len(plan.neighbourhoods)}",
             f"  Results        : approved={c[STATUS_APPROVED]}, rejected={c[STATUS_REJECTED]}, "
             f"deferred={c[STATUS_DEFERRED]}, failed={c[STATUS_FAILED]}",
             f"  Report         : {path}",
         ]
+        if plan.mode == MODE_EXECUTE:
+            o = plan.outcome_counts()
+            lines.insert(-1, (
+                f"  Executed       : executed={o[OUTCOME_EXECUTED]}, stale={o[OUTCOME_STALE]}, "
+                f"ineligible={o[OUTCOME_INELIGIBLE]}, error={o[OUTCOME_ERROR]}"))
+        elif execute:
+            lines.insert(-1, "  Executed       : none — pre-execute backup failed, stayed read-only")
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name, success=True,
             output="\n".join(lines),
@@ -414,12 +430,13 @@ def make_distill_dream_tool(
     return ToolDefinition(
         name="distill_dream",
         description=(
-            "Run a read-only distill dream: pick topic neighbourhoods of "
-            "machine-written facts, distil each into one refined fact that "
-            "would replace them, gate it for information loss, self-review "
-            "with veto, and write a 記憶蒸餾 report to the dreams journal. "
-            "Hand-written and milestone facts are context only, never replaced. "
-            "Does NOT modify memory (P1)."
+            "Run a distill dream: pick topic neighbourhoods of machine-written "
+            "facts, distil each into one refined fact that replaces them, gate "
+            "it for information loss, self-review with veto, and write a 記憶蒸餾 "
+            "report to the dreams journal. Hand-written and milestone facts are "
+            "context only, never replaced. Read-only unless execute=true; then "
+            "approved distillations are written after a fresh backup, with "
+            "every original kept on the survivor and redirect stubs left behind."
         ),
         input_schema={
             "type": "object",
@@ -442,6 +459,13 @@ def make_distill_dream_tool(
                     "description": (
                         f"Stored-vector cosine floor for a neighbour (default "
                         f"{DISTILL_MIN_SIMILARITY}; re-calibrated every 4 weeks, spec §3)."
+                    ),
+                },
+                "execute": {
+                    "type": "boolean",
+                    "description": (
+                        "Write the approved distillations to memory (default false = "
+                        "report only). Run read-only first and check the report."
                     ),
                 },
             },

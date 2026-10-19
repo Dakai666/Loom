@@ -1279,7 +1279,7 @@ class LoomSession:
         self.registry.register(
             make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
         )
-        # #613 E (P1): distill_dream — read-only topic distillation pass.
+        # #613 E: distill_dream — topic distillation (read-only unless execute=true).
         self.registry.register(
             make_distill_dream_tool(self._memory.semantic, _dream_llm_fn)
         )

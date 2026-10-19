@@ -1,5 +1,5 @@
 """
-Distill dream — refine a topic neighbourhood into one fact (#613 E, P1).
+Distill dream — refine a topic neighbourhood into one fact (#613 E).
 
 Spec: ``docs/designs/57-記憶蒸餾夢-規格.md``. The convergent dream merges
 near-duplicates (cos ≥ 0.85); the distill dream handles the band below it —
@@ -24,8 +24,14 @@ One pass:
    retried once, then deferred (never approved);
 6. **self-review** — Loom's veto, via consolidation's batched reviewer.
 
-P1 is read-only: it plans and reports. Execution (``consolidate`` + stale
-check + backup) is P2.
+With ``execute=True`` (P2) the approved distillations are then written:
+7. **backup** — a fresh snapshot first; no snapshot → the pass stays read-only;
+8. **re-check** — any member changed since planning → stale, skipped; covered
+   facts are re-validated as replaceable (lifecycle archives without touching
+   ``updated_at``, so the snapshot alone can't see it);
+9. **write** — ``semantic.consolidate``: the survivor takes the distilled
+   value plus ``produced_by`` / ``distilled_at``, every original stays in its
+   metadata, the other covered keys become redirect stubs.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from loom.core.cognition.consolidation import (
 )
 from loom.core.memory.clustering import stack_normalised
 from loom.core.memory.ontology import TEMPORAL_ARCHIVED, TEMPORAL_MILESTONE
+from loom.core.memory.relational_bridge import REL_KEY_PREFIX
 from loom.core.memory.semantic import SemanticEntry, classify_source
 
 if TYPE_CHECKING:
@@ -78,6 +85,16 @@ STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"   # a boundary, the gate or the veto said no
 STATUS_DEFERRED = "deferred"   # no trustworthy verdict — retry another pass
 STATUS_FAILED = "failed"       # the distill call itself failed
+
+#: Execute outcomes of an approved result (P2).
+OUTCOME_EXECUTED = "executed"
+OUTCOME_STALE = "stale"            # a member changed or vanished since planning
+OUTCOME_INELIGIBLE = "ineligible"  # a covered fact is no longer replaceable
+OUTCOME_ERROR = "error"            # consolidate raised; nothing written
+
+BACKUP_PREFIX = "memory-pre-distill"
+MODE_READ_ONLY = "read-only"
+MODE_EXECUTE = "execute"
 
 
 def planned_survivor_metadata(*, now: datetime | None = None) -> dict[str, str]:
@@ -153,6 +170,7 @@ class DistillResult:
     distillation: Distillation | None = None
     survivor_key: str | None = None
     gate_rationale: str = ""
+    outcome: str = ""                    # execute only; "error: …" carries the cause
 
 
 @dataclass
@@ -166,6 +184,15 @@ class DistillPlan:
     #: key → updated_at, for P2's stale check
     source_versions: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    mode: str = MODE_READ_ONLY
+
+    def outcome_counts(self) -> dict[str, int]:
+        c = {OUTCOME_EXECUTED: 0, OUTCOME_STALE: 0, OUTCOME_INELIGIBLE: 0, OUTCOME_ERROR: 0}
+        for r in self.results:
+            if r.outcome:
+                key = r.outcome.split(":", 1)[0]
+                c[key] = c.get(key, 0) + 1
+        return c
 
     def counts(self) -> dict[str, int]:
         c = {STATUS_APPROVED: 0, STATUS_REJECTED: 0, STATUS_DEFERRED: 0, STATUS_FAILED: 0}
@@ -354,7 +381,11 @@ def _boundary_violation(nb: Neighbourhood, d: Distillation) -> tuple[str | None,
     candidates = [by_key[k] for k in d.covers if not _is_dreaming(by_key[k])]
     if not candidates:
         return "no non-dream survivor among the covered facts", None
-    survivor = max(candidates, key=lambda e: (_trust_of(e), -e.created_at.timestamp()))
+    # Trust first (the distilled fact inherits the survivor's source), then a
+    # key nothing will rewrite: rel:{S}::{P} is derived from the triple, so a
+    # later triple with the same subject and predicate lands on it.
+    survivor = max(candidates, key=lambda e: (
+        _trust_of(e), not e.key.startswith(REL_KEY_PREFIX), -e.created_at.timestamp()))
     return None, survivor.key
 
 
@@ -507,8 +538,13 @@ async def run_distill_dream(
     corpus_limit: int = 15000,
     min_similarity: float = DISTILL_MIN_SIMILARITY,
     review_batch_size: int = 10,
+    execute: bool = False,
 ) -> tuple[DistillPlan, str]:
-    """One read-only distill pass (P1). Returns ``(plan, report_markdown)``."""
+    """One distill pass. Returns ``(plan, report_markdown)``.
+
+    Read-only unless ``execute``; then approved results are written after a
+    fresh backup, and a failed backup keeps the pass read-only (noted).
+    """
     plan = await build_distill_plan(
         semantic, domain=domain, max_neighbourhoods=max_neighbourhoods,
         corpus_limit=corpus_limit, min_similarity=min_similarity,
@@ -556,8 +592,74 @@ async def run_distill_dream(
             else:
                 item.result.status = STATUS_REJECTED
 
+    if execute and plan.counts()[STATUS_APPROVED]:
+        # Resolved at call time so tests can stand in for the snapshot.
+        from loom.core.memory import backup
+        if await backup.snapshot_before_write(semantic._db, prefix=BACKUP_PREFIX) is None:
+            logger.warning("[distill-dream] pre-execute backup failed — read-only this pass")
+            plan.notes.append("設定為 execute，但執行前備份失敗，本輪降級為 read-only（未改寫任何記憶）。")
+        else:
+            await execute_distill_plan(semantic, plan)
+
     return plan, render_distill_report(plan)
 
+
+async def execute_distill_plan(
+    semantic: "SemanticMemory", plan: DistillPlan, *, now: datetime | None = None,
+) -> None:
+    """Write the approved results of *plan*; sets each one's ``outcome``.
+
+    Trusts that a backup exists — ``run_distill_dream`` takes it first.
+    """
+    plan.mode = MODE_EXECUTE
+    now = now or datetime.now(UTC)
+    nbs = {nb.cluster_id: nb for nb in plan.neighbourhoods}
+    for r in plan.results:
+        if r.status != STATUS_APPROVED:
+            continue
+        nb, d = nbs[r.neighbourhood_id], r.distillation
+        # Context members count too: an edited hand-written fact changes what
+        # "already carried" meant when the gate judged the distillation.
+        current = {m.key: await semantic.get(m.key) for m in nb.members}
+        if any(e is None or e.updated_at.isoformat() != plan.source_versions.get(k)
+               for k, e in current.items()):
+            r.outcome = OUTCOME_STALE
+            continue
+        covered = [current[k] for k in d.covers]
+        if not all(_replaceable(e, plan.domain, now) for e in covered) \
+                or _is_dreaming(current[r.survivor_key]):
+            r.outcome = OUTCOME_INELIGIBLE
+            continue
+        try:
+            await semantic.consolidate(
+                covered,
+                refined_value=d.distilled,
+                survivor_key=r.survivor_key,
+                sacrificed_content="\n\n".join(
+                    f"[{e.key}] {e.value}" for e in covered if e.key != r.survivor_key),
+                merge_rationale=_merge_rationale(plan, d),
+                extra_metadata=planned_survivor_metadata(now=now),
+            )
+        except Exception as exc:
+            logger.warning("[distill-dream] consolidate failed for %s: %s", nb.cluster_id, exc)
+            r.outcome = f"{OUTCOME_ERROR}: {exc}"
+            continue
+        r.outcome = OUTCOME_EXECUTED
+
+
+def _merge_rationale(plan: DistillPlan, d: Distillation) -> str:
+    lines = [f"distill_dream {plan.pass_id}: {d.rationale or 'distilled'}"]
+    for x in d.dropped:
+        carried = f"; carried by {x['carried_by']}" if x.get("carried_by") else ""
+        lines.append(f"dropped: {x['text']} ({x['reason']}{carried})")
+    return "\n".join(lines)
+
+
+_OUTCOME_TEXT = {
+    OUTCOME_EXECUTED: "已寫入",
+    OUTCOME_STALE: "stale — 規劃後有來源變動，跳過",
+    OUTCOME_INELIGIBLE: "ineligible — 有被取代的記憶已不可取代（例如已 archived），跳過",
+}
 
 _STATUS_ICON = {STATUS_APPROVED: "✅", STATUS_REJECTED: "⚠️",
                 STATUS_DEFERRED: "💤", STATUS_FAILED: "❌"}
@@ -568,7 +670,7 @@ def render_distill_report(plan: DistillPlan) -> str:
     c = plan.counts()
     nbs = {nb.cluster_id: nb for nb in plan.neighbourhoods}
     out = [
-        f"pass_id: `{plan.pass_id}` · mode: read-only (P1)",
+        f"pass_id: `{plan.pass_id}` · mode: {plan.mode}",
         "",
         "### 本輪摘要",
         f"- 掃描範圍：{plan.scanned} 筆 semantic facts"
@@ -577,6 +679,10 @@ def render_distill_report(plan: DistillPlan) -> str:
         f"- 結果：approved {c[STATUS_APPROVED]} · rejected {c[STATUS_REJECTED]} · "
         f"deferred {c[STATUS_DEFERRED]} · failed {c[STATUS_FAILED]}",
     ]
+    if plan.mode == MODE_EXECUTE:
+        o = plan.outcome_counts()
+        out.append(f"- 執行：executed {o[OUTCOME_EXECUTED]} · stale {o[OUTCOME_STALE]} · "
+                   f"ineligible {o[OUTCOME_INELIGIBLE]} · error {o[OUTCOME_ERROR]}")
     if plan.results:
         out += ["", "### 蒸餾記錄"]
     for r in plan.results:
@@ -594,7 +700,13 @@ def render_distill_report(plan: DistillPlan) -> str:
                 out.append(f"  - 不保留：{x['text']}（{x['reason']}{carried}）")
         if r.reason:
             out.append(f"  - 理由：{r.reason}")
+        if r.outcome:
+            out.append(f"  - 執行：{_OUTCOME_TEXT.get(r.outcome, r.outcome)}")
     if plan.notes:
         out += ["", "### 備註"] + [f"- {n}" for n in plan.notes]
-    out += ["", "_read-only：本輪僅規劃與自審，未改寫任何記憶。_"]
+    if plan.mode == MODE_EXECUTE:
+        out += ["", "_execute：已寫入的蒸餾，原文都保存在 survivor 的 metadata.consolidated_into，"
+                    "被取代的 key 留有重導向 stub。_"]
+    else:
+        out += ["", "_read-only：本輪僅規劃與自審，未改寫任何記憶。_"]
     return "\n".join(out)
