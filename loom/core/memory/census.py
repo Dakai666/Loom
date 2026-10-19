@@ -34,7 +34,9 @@ from typing import TYPE_CHECKING, Any
 
 from wcwidth import wcswidth
 
-from loom.core.memory.clustering import MAX_CLUSTER_MEMBERS, split_component
+from loom.core.memory.clustering import (
+    MAX_CLUSTER_MEMBERS, NEAR_DUP_NEIGHBOURS, knn_edges, split_component,
+)
 from loom.core.memory.lifecycle import effective_confidence
 from loom.core.memory.ontology import (
     TEMPORAL_ARCHIVED,
@@ -52,8 +54,6 @@ logger = logging.getLogger(__name__)
 DUP_SIMILARITY = 0.85
 #: A group of this many coexisting versions is a consolidation miss, not a pair.
 DUP_GROUP_MIN = 3
-#: Neighbours linked per fact — ``build_plan``'s ``find_near_duplicates(limit=5)``.
-_NEIGHBOURS = 5
 #: Lifecycle's default demote/delete threshold (``MemoryLifecycle``).
 PRUNE_THRESHOLD = 0.1
 #: Display width, so a CJK character counts 2: '在本地' is short,
@@ -367,25 +367,9 @@ def _duplicate_density(
 
     # Same edge rule as build_plan: each fact links to its top-k neighbours
     # at ≥ DUP_SIMILARITY (find_near_duplicates(limit=5)), not to every pair.
-    k = min(_NEIGHBOURS, n - 1)
-    edge_a: list[Any] = []
-    edge_b: list[Any] = []
-    edge_s: list[Any] = []
-    block = 1024
-    for start in range(0, n, block) if k > 0 else ():
-        sims = m[start:start + block] @ m.T
-        local = np.arange(sims.shape[0])
-        sims[local, local + start] = -np.inf  # never your own neighbour
-        idx = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-        top = np.take_along_axis(sims, idx, axis=1)
-        keep_r, keep_c = np.nonzero(top >= DUP_SIMILARITY)
-        a = keep_r + start
-        b = idx[keep_r, keep_c]
-        edge_a.append(a)
-        edge_b.append(b)
-        edge_s.append(top[keep_r, keep_c])
-        for x, y in zip(a.tolist(), b.tolist()):
-            parent[find(x)] = find(y)
+    a_all, b_all, s_all = knn_edges(m, k=NEAR_DUP_NEIGHBOURS, min_similarity=DUP_SIMILARITY)
+    for x, y in zip(a_all.tolist(), b_all.tolist()):
+        parent[find(x)] = find(y)
 
     roots = np.array([find(i) for i in range(n)])
     uniq, counts = np.unique(roots, return_counts=True)
@@ -396,9 +380,6 @@ def _duplicate_density(
     # similarity. A dense flood that can't split still counts — whole.
     oversized = [r for r, c in sizes.items() if c > MAX_CLUSTER_MEMBERS]
     if oversized:
-        a_all = np.concatenate(edge_a)
-        b_all = np.concatenate(edge_b)
-        s_all = np.concatenate(edge_s)
         edge_root = roots[a_all]
         for root in oversized:
             sel = edge_root == root

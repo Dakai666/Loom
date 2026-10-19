@@ -209,6 +209,45 @@ class TestBuildPlanMerge:
         assert set(merge[0].member_keys) == {"m1", "m2"}
         assert "u1" not in merge[0].member_keys
 
+    async def test_stored_vectors_are_reused_not_recomputed(self, semantic_emb, monkeypatch):
+        """Each per-fact find_near_duplicates re-embedded the value and made
+        sqlite-vec re-parse every stored vector: ~1.2 s/fact, ~5 h for a
+        15k corpus (2026-10-19). Facts with a stored vector must cost no
+        embed call and no per-fact scan; clusters stay the same."""
+        await semantic_emb.upsert(SemanticEntry(key="m1", value="GROUPA the user likes tea", source="manual"))
+        await semantic_emb.upsert(SemanticEntry(key="m2", value="GROUPA tea is the user's favourite", source="manual"))
+        await semantic_emb.upsert(SemanticEntry(key="u1", value="GROUPB unrelated fact", source="manual"))
+
+        calls = {"embed": 0, "scan": 0}
+        real_embed = semantic_emb._embeddings.embed
+
+        async def counting_embed(texts):
+            calls["embed"] += 1
+            return await real_embed(texts)
+
+        async def no_scan(*a, **k):
+            calls["scan"] += 1
+            return []
+
+        monkeypatch.setattr(semantic_emb._embeddings, "embed", counting_embed)
+        monkeypatch.setattr(semantic_emb, "find_near_duplicates", no_scan)
+
+        plan = await build_plan(semantic_emb, min_similarity=0.85)
+        assert calls == {"embed": 0, "scan": 0}
+        merge = [c for c in plan.clusters if c.kind == KIND_MERGE]
+        assert [set(c.member_keys) for c in merge] == [{"m1", "m2"}]
+
+    async def test_fact_without_stored_vector_falls_back_to_lookup(
+        self, semantic_emb, db_conn,
+    ):
+        await semantic_emb.upsert(SemanticEntry(key="m1", value="GROUPA the user likes tea", source="manual"))
+        await semantic_emb.upsert(SemanticEntry(key="m2", value="GROUPA tea again", source="manual"))
+        await db_conn.execute("UPDATE semantic_entries SET embedding = NULL WHERE key = 'm2'")
+        await db_conn.commit()
+        plan = await build_plan(semantic_emb, min_similarity=0.85)
+        merge = [c for c in plan.clusters if c.kind == KIND_MERGE]
+        assert [set(c.member_keys) for c in merge] == [{"m1", "m2"}]
+
     async def test_no_merge_without_embeddings(self, semantic):
         await semantic.upsert(SemanticEntry(key="m1", value="same text", source="manual"))
         await semantic.upsert(SemanticEntry(key="m2", value="same text", source="manual"))

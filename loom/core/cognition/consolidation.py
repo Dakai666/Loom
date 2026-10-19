@@ -51,6 +51,7 @@ from typing import Awaitable, Callable, TYPE_CHECKING
 # what this planner proposes (#613-D); private aliases kept for callers.
 from loom.core.memory.clustering import (
     MAX_CLUSTER_MEMBERS,
+    NEAR_DUP_NEIGHBOURS,
     split_oversized as _split_oversized,
     union_find_clusters as _union_find_clusters,
 )
@@ -421,7 +422,8 @@ async def build_plan(
     """
     plan = ConsolidationPlan()
 
-    corpus = await semantic.list_recent(limit=corpus_limit)
+    corpus_pairs = await semantic.list_with_embeddings(limit=corpus_limit)
+    corpus = [e for e, _ in corpus_pairs]
     plan.scanned = len(corpus)
     by_key = {e.key: e for e in corpus}
 
@@ -432,16 +434,42 @@ async def build_plan(
     # and self-review. Reconcile and orphan handling keep the exemption.
     edges: list[tuple[str, str]] = []
     pair_score: dict[frozenset[str], float] = {}
+
+    def _add_edge(a: str, b: str, score: float) -> None:
+        edges.append((a, b))
+        pair = frozenset((a, b))
+        pair_score[pair] = max(pair_score.get(pair, 0.0), score)
+
     if semantic.has_embeddings:
-        for entry in corpus:
-            if _is_stub(entry):
-                continue  # stubs aren't real facts (#490)
+        # Stored vectors → one blocked matmul. The old per-fact lookup
+        # re-embedded each value and made sqlite-vec re-parse every stored
+        # vector: ~1.2 s/fact, ~5 h at corpus_limit=15000 (2026-10-19).
+        live = [(e, v) for e, v in corpus_pairs if not _is_stub(e)]  # stubs aren't facts (#490)
+        dims: dict[int, int] = {}
+        for _, v in live:
+            if v is not None:
+                dims[len(v)] = dims.get(len(v), 0) + 1
+        dim = max(dims, key=dims.__getitem__) if dims else None
+        stored = [(e, v) for e, v in live if v is not None and len(v) == dim]
+        lookup = [e for e, v in live if v is None or len(v) != dim]
+        if len(stored) > 1:
+            import numpy as np
+            from loom.core.memory.clustering import knn_edges
+
+            m = np.asarray([v for _, v in stored], dtype=np.float32)
+            norms = np.linalg.norm(m, axis=1, keepdims=True)
+            m /= np.where(norms == 0, 1, norms)
+            a, b, sc = knn_edges(m, k=NEAR_DUP_NEIGHBOURS, min_similarity=min_similarity)
+            for x, y, score in zip(a.tolist(), b.tolist(), sc.tolist()):
+                _add_edge(stored[x][0].key, stored[y][0].key, score)
+        # Facts without a usable stored vector keep the embed-and-search path.
+        for entry in lookup:
             try:
                 neighbours = await semantic.find_near_duplicates(
                     entry.value,
                     min_similarity=min_similarity,
                     within_days=None,           # whole corpus, not the write-time 7-day window
-                    limit=5,
+                    limit=NEAR_DUP_NEIGHBOURS,
                     exclude_key=entry.key,
                 )
             except Exception as exc:  # embedding outage must not abort the pass
@@ -450,9 +478,7 @@ async def build_plan(
             for neighbour, score in neighbours:
                 if _is_stub(neighbour) or neighbour.key not in by_key:
                     continue
-                edges.append((entry.key, neighbour.key))
-                pair = frozenset((entry.key, neighbour.key))
-                pair_score[pair] = max(pair_score.get(pair, 0.0), score)
+                _add_edge(entry.key, neighbour.key, score)
     else:
         plan.notes.append("no embedding provider — merge candidates skipped this pass")
 

@@ -10,7 +10,10 @@ the clusters consolidation would actually propose (#613-D: a raw 845-member
 
 from __future__ import annotations
 
-from typing import Hashable, Iterable, TypeVar
+from typing import TYPE_CHECKING, Hashable, Iterable, TypeVar
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 K = TypeVar("K", bound=Hashable)
@@ -46,6 +49,10 @@ def union_find_clusters(pairs: Iterable[tuple[K, K]]) -> list[set[K]]:
 MAX_CLUSTER_MEMBERS = 40
 
 SPLIT_STEP = 0.03
+
+# Near-duplicate neighbours linked per fact — shared by consolidation's
+# planner and the corpus census so both build the same graph.
+NEAR_DUP_NEIGHBOURS = 5
 
 
 # Scores are float32 cosines: an identical pair can read 0.99999994, so the
@@ -129,3 +136,39 @@ def split_oversized(
             note += f"; {dropped} facts in still-oversized pieces not proposed"
         notes.append(note)
     return out, notes
+
+
+def knn_edges(
+    matrix: "np.ndarray",
+    *,
+    k: int,
+    min_similarity: float,
+    block: int = 1024,
+) -> tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+    """Top-``k`` cosine neighbours per row of an L2-normalised ``matrix``.
+
+    Returns ``(a, b, score)`` arrays: row ``a`` links to row ``b`` whenever
+    ``b`` is among ``a``'s ``k`` nearest (self excluded) and the cosine is
+    ≥ ``min_similarity`` — the edge rule of ``find_near_duplicates(limit=k)``,
+    computed in one blocked matmul over stored vectors instead of one
+    embed + full-table scan per fact (~1.2 s each on an 11k corpus).
+    """
+    import numpy as np
+
+    n = len(matrix)
+    k = min(k, n - 1)
+    if k <= 0:
+        empty = np.array([], dtype=np.int64)
+        return empty, empty, np.array([], dtype=np.float32)
+    out_a, out_b, out_s = [], [], []
+    for start in range(0, n, block):
+        sims = matrix[start:start + block] @ matrix.T
+        local = np.arange(sims.shape[0])
+        sims[local, local + start] = -np.inf  # never your own neighbour
+        idx = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+        top = np.take_along_axis(sims, idx, axis=1)
+        rows, cols = np.nonzero(top >= min_similarity)
+        out_a.append(rows + start)
+        out_b.append(idx[rows, cols])
+        out_s.append(top[rows, cols])
+    return np.concatenate(out_a), np.concatenate(out_b), np.concatenate(out_s)
