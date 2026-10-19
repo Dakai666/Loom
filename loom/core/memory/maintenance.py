@@ -24,6 +24,8 @@ from loom.core.harness.registry import ToolDefinition
 
 if TYPE_CHECKING:
     import aiosqlite
+
+    from loom.core.memory.governance import MemoryGovernor
     from loom.core.memory.semantic import SemanticMemory
 
 
@@ -34,6 +36,7 @@ def make_dream_cycle_tool(
     semantic: "SemanticMemory",
     llm_fn: LLMFn,
     db: "aiosqlite.Connection | None" = None,
+    governor: "MemoryGovernor | None" = None,
 ) -> ToolDefinition:
     """Build the ``dream_cycle`` ToolDefinition.
 
@@ -83,6 +86,7 @@ def make_dream_cycle_tool(
             domain=domain,
             themed=themed,
             db=db,
+            governor=governor,
         )
 
         lines = [
@@ -92,6 +96,11 @@ def make_dream_cycle_tool(
             f"  Facts sampled: {result['facts_sampled']}",
             f"  Triples found: {result['triples_found']}",
             f"  Triples written: {result['triples_written']}",
+            f"  Triples rejected: {result.get('triples_rejected', 0)}"
+            + (
+                " (" + ", ".join(f"{k}={v}" for k, v in sorted(result["rejected_reasons"].items())) + ")"
+                if result.get("rejected_reasons") else ""
+            ),
         ]
         if result["errors"]:
             lines.append(f"  Warnings: {'; '.join(result['errors'])}")

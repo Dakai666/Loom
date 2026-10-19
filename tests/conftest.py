@@ -46,3 +46,13 @@ def _isolate_circadian_dirs(request, tmp_path, monkeypatch):
     monkeypatch.setattr(
         _journal_module, "DEFAULT_JOURNAL_DIR", tmp_path / "autonomy/circadian/journal",
     )
+
+
+import loom.core.memory.backup as _backup_module
+
+
+@pytest.fixture(autouse=True)
+def _isolate_backup_dir(tmp_path, monkeypatch):
+    """Memory snapshots (consolidation execute, lifecycle prune) default to
+    ``~/.loom/backups`` — the live runtime dir. Keep the suite out of it."""
+    monkeypatch.setattr(_backup_module, "DEFAULT_BACKUP_DIR", tmp_path / "backups")

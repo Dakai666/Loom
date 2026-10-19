@@ -94,6 +94,7 @@ class RelationalEntry:
             last_accessed_at=self.last_accessed_at,
             domain=self.domain,
             temporal=self.temporal,
+            source=self.source,
         )
 
 
