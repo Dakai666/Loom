@@ -72,7 +72,7 @@ async def ensure_recent_snapshot(
     *,
     prefix: str,
     max_age_hours: float = 24.0,
-    keep: int = 7,
+    keep: int = 3,
     dest_dir: Path | None = None,
 ) -> Path | None:
     """Return a ``prefix`` snapshot no older than ``max_age_hours``, taking one

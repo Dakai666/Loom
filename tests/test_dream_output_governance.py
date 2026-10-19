@@ -288,6 +288,21 @@ class TestPruneBackup:
         assert result.semantic_deleted == 1
         assert len(list(backup_mod.DEFAULT_BACKUP_DIR.glob("memory-pre-prune-*.db"))) == 1
 
+    async def test_prune_snapshots_rotate_at_three(self, db_conn, semantic):
+        """~360 MB each on the live DB: keep three days of restore points."""
+        import os
+        import time
+        backup_mod.DEFAULT_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        old = time.time() - 3 * 86400
+        for i in range(4):  # four stale snapshots, each older than 24 h
+            p = backup_mod.DEFAULT_BACKUP_DIR / f"memory-pre-prune-2026010{i}T000000.db"
+            p.write_bytes(b"x")
+            os.utime(p, (old - i, old - i))
+        await _insert(db_conn, "doomed", source="test", age_days=1000,
+                      temporal=TEMPORAL_ARCHIVED)
+        await MemoryLifecycle(db_conn).run()
+        assert len(list(backup_mod.DEFAULT_BACKUP_DIR.glob("memory-pre-prune-*.db"))) == 3
+
     async def test_no_snapshot_when_nothing_to_delete(self, db_conn, semantic):
         await _insert(db_conn, "fresh", source="test", age_days=1)
         await MemoryLifecycle(db_conn).run()
