@@ -166,6 +166,10 @@ class ConsolidationResult:
 
 
 _PROVENANCE_KEYS = frozenset({"consolidated_into", "consolidation_history", "redirected_to"})
+# upsert over an existing key: the originals a survivor holds are never
+# dropped; the distill marks describe the value, so they go when it changes.
+_CARRIED_ON_OVERWRITE = ("consolidated_into", "consolidation_history")
+_CARRIED_IF_UNCHANGED = ("produced_by", "distilled_at")
 
 
 def _sacrificed_record(e: "SemanticEntry") -> dict:
@@ -201,7 +205,10 @@ class SemanticMemory:
         was overwritten (conflict), False for a clean insert.
 
         On conflict the previous value is appended to metadata["history"]
-        (capped at 3 entries) so overwrites are traceable.
+        (capped at 3 entries) so overwrites are traceable. A consolidation
+        survivor keeps the originals it holds (``consolidated_into`` /
+        ``consolidation_history``) whatever the new value; its
+        ``produced_by`` / ``distilled_at`` marks survive only an unchanged value.
 
         If an embedding provider is configured, computes and persists the
         vector for this entry after the upsert.  Embedding failures are
@@ -225,6 +232,13 @@ class SemanticMemory:
                 "updated_at": existing.updated_at.isoformat() if existing.updated_at else "",
             })
             merged_metadata["history"] = history[-3:]
+        if existing is not None:
+            carried = _CARRIED_ON_OVERWRITE
+            if existing.value == entry.value:
+                carried = carried + _CARRIED_IF_UNCHANGED
+            for k in carried:
+                if k in existing.metadata and k not in merged_metadata:
+                    merged_metadata[k] = existing.metadata[k]
 
         await self._db.execute(
             """

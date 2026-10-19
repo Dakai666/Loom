@@ -329,3 +329,70 @@ class TestProvenanceAcrossPasses:
             await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "r",
                               extra_metadata={key: "x"})
         assert (await semantic.get("user:tea_dup")).metadata.get("redirected_to") is None
+
+
+class TestProvenanceSurvivesOverwrite:
+    """A later write to a survivor's key (same-key triple, SUPERSEDE) replaces
+    its value but must not drop the originals it holds."""
+
+    async def _survivor(self, semantic, key="user:tea"):
+        await _seed_pair(semantic)
+        entries = [await semantic.get("user:tea"), await semantic.get("user:tea_dup")]
+        await semantic.consolidate(
+            entries, refined_value="refined", survivor_key=key,
+            sacrificed_content="x", merge_rationale="r",
+            extra_metadata={"produced_by": "distill_dream", "distilled_at": "2026-10-19"})
+        return (await semantic.get(key)).metadata
+
+    async def test_overwrite_keeps_consolidated_into(self, semantic):
+        before = await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="user now drinks coffee",
+                                            source="session:z:fact:0"))
+        after = await semantic.get("user:tea")
+        assert after.value == "user now drinks coffee"
+        assert after.metadata["consolidated_into"] == before["consolidated_into"]
+
+    async def test_overwrite_keeps_consolidation_history(self, semantic):
+        await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea3", value="tea at dawn", source="session:y:fact:1"))
+        await semantic.consolidate(
+            [await semantic.get("user:tea"), await semantic.get("user:tea3")],
+            refined_value="second", survivor_key="user:tea",
+            sacrificed_content="x", merge_rationale="r2")
+        hist = (await semantic.get("user:tea")).metadata["consolidation_history"]
+        await semantic.upsert(SemanticEntry(key="user:tea", value="v3", source="session:z:fact:0"))
+        assert (await semantic.get("user:tea")).metadata["consolidation_history"] == hist
+
+    async def test_overwritten_value_is_no_longer_a_distill_product(self, semantic):
+        await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="other", source="session:z:fact:0"))
+        meta = (await semantic.get("user:tea")).metadata
+        assert "produced_by" not in meta and "distilled_at" not in meta
+
+    async def test_same_value_rewrite_keeps_everything(self, semantic):
+        before = await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="refined", source="session:s:fact:0"))
+        meta = (await semantic.get("user:tea")).metadata
+        assert meta["consolidated_into"] == before["consolidated_into"]
+        assert meta["produced_by"] == "distill_dream"
+
+    async def test_governed_supersede_keeps_originals(self, semantic, db_conn):
+        from loom.core.memory.episodic import EpisodicMemory
+        from loom.core.memory.governance import MemoryGovernor
+
+        # session-sourced survivor + same-tier newcomer → SUPERSEDE writes through
+        before = await self._survivor(semantic, key="user:tea_dup")
+        gov = MemoryGovernor(semantic, ProceduralMemory(db_conn), EpisodicMemory(db_conn), db_conn)
+        res = await gov.governed_upsert(SemanticEntry(
+            key="user:tea_dup", value="user switched to coffee", source="session:z:fact:0"))
+        assert res.written, res
+        after = await semantic.get("user:tea_dup")
+        assert after.value == "user switched to coffee"
+        assert after.metadata["consolidated_into"] == before["consolidated_into"]
+
+    async def test_plain_overwrite_metadata_unchanged(self, semantic):
+        await semantic.upsert(SemanticEntry(key="k", value="a", source="manual", metadata={"x": 1}))
+        await semantic.upsert(SemanticEntry(key="k", value="b", source="manual", metadata={"y": 2}))
+        meta = (await semantic.get("k")).metadata
+        assert "x" not in meta and meta["y"] == 2
+        assert "consolidated_into" not in meta
