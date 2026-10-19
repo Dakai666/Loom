@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from wcwidth import wcswidth
 
-from loom.core.memory.clustering import MAX_CLUSTER_MEMBERS, split_oversized
+from loom.core.memory.clustering import MAX_CLUSTER_MEMBERS, split_component
 from loom.core.memory.lifecycle import effective_confidence
 from loom.core.memory.ontology import (
     TEMPORAL_ARCHIVED,
@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 DUP_SIMILARITY = 0.85
 #: A group of this many coexisting versions is a consolidation miss, not a pair.
 DUP_GROUP_MIN = 3
+#: Neighbours linked per fact — ``build_plan``'s ``find_near_duplicates(limit=5)``.
+_NEIGHBOURS = 5
 #: Lifecycle's default demote/delete threshold (``MemoryLifecycle``).
 PRUNE_THRESHOLD = 0.1
 #: Display width, so a CJK character counts 2: '在本地' is short,
@@ -317,10 +319,12 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
 def _duplicate_density(
     rows: list[tuple[str, str]], unembedded: int, notes: list[str],
 ) -> DupDensity:
-    """Duplicate groups at ``DUP_SIMILARITY`` exactly as consolidation forms
-    them — single-linkage union-find, then oversized chains re-split at
-    stricter similarity — but over the whole corpus at once. Blocked matmul
-    keeps memory at ~block × N floats."""
+    """Duplicate groups at ``DUP_SIMILARITY`` built the way consolidation's
+    planner builds them — top-k neighbour edges, single-linkage union-find,
+    oversized chains re-split at stricter similarity — over the whole corpus
+    at once (consolidation sees only ``corpus_limit`` rows and further drops
+    suppressed / capped clusters). Blocked matmul keeps memory at
+    ~block × N floats; edges are at most k × N."""
     import numpy as np
 
     # Convert each row to float32 as it is parsed — a list of Python floats
@@ -352,7 +356,8 @@ def _duplicate_density(
     norms = np.linalg.norm(m, axis=1, keepdims=True)
     m /= np.where(norms == 0, 1, norms)
 
-    parent = list(range(len(m)))
+    n = len(m)
+    parent = list(range(n))
 
     def find(x: int) -> int:
         while parent[x] != x:
@@ -360,50 +365,64 @@ def _duplicate_density(
             x = parent[x]
         return x
 
-    block = 1024
+    # Same edge rule as build_plan: each fact links to its top-k neighbours
+    # at ≥ DUP_SIMILARITY (find_near_duplicates(limit=5)), not to every pair.
+    k = min(_NEIGHBOURS, n - 1)
     edge_a: list[Any] = []
     edge_b: list[Any] = []
     edge_s: list[Any] = []
-    for start in range(0, len(m), block):
+    block = 1024
+    for start in range(0, n, block) if k > 0 else ():
         sims = m[start:start + block] @ m.T
-        rows_i, cols = np.nonzero(sims >= DUP_SIMILARITY)
-        upper = (rows_i + start) < cols
-        rows_i, cols = rows_i[upper], cols[upper]
-        edge_a.append(rows_i + start)
-        edge_b.append(cols)
-        edge_s.append(sims[rows_i, cols])
-        for a, c in zip((rows_i + start).tolist(), cols.tolist()):
-            parent[find(a)] = find(c)
+        local = np.arange(sims.shape[0])
+        sims[local, local + start] = -np.inf  # never your own neighbour
+        idx = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+        top = np.take_along_axis(sims, idx, axis=1)
+        keep_r, keep_c = np.nonzero(top >= DUP_SIMILARITY)
+        a = keep_r + start
+        b = idx[keep_r, keep_c]
+        edge_a.append(a)
+        edge_b.append(b)
+        edge_s.append(top[keep_r, keep_c])
+        for x, y in zip(a.tolist(), b.tolist()):
+            parent[find(x)] = find(y)
 
-    sizes: dict[int, int] = {}
-    members: dict[int, set[int]] = {}
-    for i in range(len(m)):
-        root = find(i)
-        sizes[root] = sizes.get(root, 0) + 1
-        members.setdefault(root, set()).add(i)
+    roots = np.array([find(i) for i in range(n)])
+    uniq, counts = np.unique(roots, return_counts=True)
+    sizes: dict[int, int] = {int(r): int(c) for r, c in zip(uniq, counts)}
 
-    # Report what consolidation proposes, not the raw single-linkage chain:
-    # oversized components are re-split at stricter similarity (#613-D).
-    oversized = [r for r, n in sizes.items() if n > MAX_CLUSTER_MEMBERS]
+    # Report the groups consolidation would form, not raw single-linkage
+    # chains (#613-D): oversized components are re-split at stricter
+    # similarity. A dense flood that can't split still counts — whole.
+    oversized = [r for r, c in sizes.items() if c > MAX_CLUSTER_MEMBERS]
     if oversized:
-        a_all = np.concatenate(edge_a) if edge_a else np.array([], dtype=int)
-        b_all = np.concatenate(edge_b) if edge_b else np.array([], dtype=int)
-        s_all = np.concatenate(edge_s) if edge_s else np.array([], dtype=np.float32)
-        roots = np.array([find(int(x)) for x in a_all]) if len(a_all) else np.array([])
+        a_all = np.concatenate(edge_a)
+        b_all = np.concatenate(edge_b)
+        s_all = np.concatenate(edge_s)
+        edge_root = roots[a_all]
         for root in oversized:
-            sel = roots == root
-            pair_score = {
-                frozenset((int(a), int(b))): float(sc)
-                for a, b, sc in zip(a_all[sel], b_all[sel], s_all[sel])
-            }
-            pieces, split_notes = split_oversized(
-                [members[root]], pair_score, base=DUP_SIMILARITY,  # type: ignore[list-item]
+            sel = edge_root == root
+            pair_score: dict[frozenset[int], float] = {}
+            for x, y, sc in zip(a_all[sel].tolist(), b_all[sel].tolist(), s_all[sel].tolist()):
+                pair = frozenset((x, y))
+                pair_score[pair] = max(pair_score.get(pair, 0.0), sc)
+            group = set(np.nonzero(roots == root)[0].tolist())
+            pieces, unsplittable = split_component(
+                group, pair_score, base=DUP_SIMILARITY,
             )
-            notes.extend(split_notes)
+            note = (
+                f"census: {len(group)}-fact chained component re-split into "
+                f"{len(pieces)} group(s) as consolidation would"
+            )
+            if unsplittable:
+                note += (
+                    f"; {sum(map(len, unsplittable))} facts in "
+                    f"{len(unsplittable)} dense group(s) too tight to split, counted whole"
+                )
+            notes.append(note)
             del sizes[root]
-            for piece in pieces:
-                rep = min(piece)
-                sizes[rep] = len(piece)
+            for piece in pieces + unsplittable:
+                sizes[min(piece)] = len(piece)
     groups = {r: n for r, n in sizes.items() if n >= DUP_GROUP_MIN}
     if not groups:
         return DupDensity(0, 0, 0, "", len(m), unembedded)
