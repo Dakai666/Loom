@@ -219,6 +219,25 @@ class TestHardBoundaries:
         assert r.status == STATUS_REJECTED
         assert "survivor" in r.reason
 
+    async def test_survivor_prefers_a_key_nothing_will_rewrite(self, db, semantic):
+        # rel:{S}::{P} keys are derived from the triple, so a later triple with
+        # the same subject/predicate lands on the same key; a session fact key
+        # is unique. Same trust → the non-rel key survives, even if younger.
+        await _row(db, "rel:user::has_skill", 0, days_old=30)
+        await _row(db, "rel:x::pass_rate", 10, days_old=20)
+        await _row(db, "session:s1:20261001T000000:fact:3", 25, days_old=5)
+        plan, _ = await run_distill_dream(semantic, _llm())
+        (r,) = plan.results
+        assert r.survivor_key == "session:s1:20261001T000000:fact:3"
+
+    async def test_higher_trust_still_beats_key_shape(self, db, semantic):
+        await _row(db, "rel:user::has_skill", 0)                 # session_compress 0.8
+        await _row(db, "rel:x::pass_rate", 10, days_old=5)
+        await _row(db, "skill:image", 25, source="skill_eval:r1")  # agent_inferred 0.7
+        plan, _ = await run_distill_dream(semantic, _llm())
+        (r,) = plan.results
+        assert r.survivor_key == "rel:user::has_skill"
+
     async def test_single_source_cover_is_rejected(self, db, semantic):
         await _topic(db)
         plan, _ = await run_distill_dream(semantic, _llm(

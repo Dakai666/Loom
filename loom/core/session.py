@@ -1250,6 +1250,7 @@ class LoomSession:
         # tools (formerly DreamingPlugin). Wired with dependency injection
         # so the factories stay session-agnostic.
         from loom.core.memory.maintenance import (
+            distill_execute_enabled,
             make_convergent_dream_tool,
             make_distill_dream_tool,
             make_dream_cycle_tool,
@@ -1279,9 +1280,13 @@ class LoomSession:
         self.registry.register(
             make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
         )
-        # #613 E (P1): distill_dream — read-only topic distillation pass.
+        # #613 E: distill_dream — topic distillation; writes only with
+        # execute=true AND [memory.distill_dream] execute = true.
         self.registry.register(
-            make_distill_dream_tool(self._memory.semantic, _dream_llm_fn)
+            make_distill_dream_tool(
+                self._memory.semantic, _dream_llm_fn,
+                allow_execute=distill_execute_enabled(self._loom_config),
+            )
         )
         # #528: give rotting bets an exit — expire open bets older than the TTL
         # (target tool never ran). Runs regardless of predict_tool_enabled.

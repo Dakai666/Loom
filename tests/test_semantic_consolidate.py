@@ -2,7 +2,7 @@
 Tests for SemanticMemory.consolidate() + resolve_redirect() (#489, P2).
 
 The merge primitive: fuse N near-duplicate facts into one refined survivor,
-preserving every sacrificed fact's FULL original text (絲絲's hard
+preserving every sacrificed fact's FULL original text (Loom Agent's hard
 requirement — merge must not flatten the wording that carries the insight),
 and leave a redirect stub at each sacrificed key so recall still resolves.
 """
@@ -265,3 +265,184 @@ class TestRedirectRecall:
         assert resolved is not None
         assert resolved.key == "user:tea"
         assert resolved.value == "user drinks tea every morning"
+
+
+class TestProvenanceAcrossPasses:
+    """A survivor merged again, or a past survivor sacrificed, must not lose
+    the originals an earlier pass preserved (live DB lost 10 this way)."""
+
+    async def _merge(self, semantic, keys, survivor, refined, **kw):
+        entries = [await semantic.get(k) for k in keys]
+        return await semantic.consolidate(
+            entries, refined_value=refined, survivor_key=survivor,
+            sacrificed_content="x", merge_rationale=f"merge into {survivor}", **kw)
+
+    async def test_survivor_original_value_is_kept(self, semantic):
+        a, _ = await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "refined")
+        ci = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        assert ci["survivor_original"]["value"] == a.value
+        assert ci["survivor_original"]["source"] == a.source
+
+    async def test_merging_a_survivor_again_keeps_the_earlier_record(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "pass one")
+        first = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        await semantic.upsert(SemanticEntry(key="user:tea3", value="tea at dawn", source="session:y:fact:1"))
+        await self._merge(semantic, ["user:tea", "user:tea3"], "user:tea", "pass two")
+        meta = (await semantic.get("user:tea")).metadata
+        assert meta["consolidation_history"] == [first]
+        assert meta["consolidated_into"]["sacrificed_entries"][0]["key"] == "user:tea3"
+
+    async def test_history_accumulates_over_three_passes(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "one")
+        for i in (3, 4):
+            await semantic.upsert(SemanticEntry(key=f"user:tea{i}", value=f"tea {i}", source="session:y:fact:1"))
+            await self._merge(semantic, ["user:tea", f"user:tea{i}"], "user:tea", f"pass {i}")
+        hist = (await semantic.get("user:tea")).metadata["consolidation_history"]
+        assert [h["rationale"] for h in hist] == ["merge into user:tea"] * 2
+        assert [h["sacrificed_entries"][0]["key"] for h in hist] == ["user:tea_dup", "user:tea3"]
+
+    async def test_sacrificing_a_past_survivor_carries_its_record(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "one")
+        earlier = (await semantic.get("user:tea")).metadata["consolidated_into"]
+        await semantic.upsert(SemanticEntry(key="user:drinks", value="tea and coffee",
+                                            source="manual", confidence=1.0))
+        await self._merge(semantic, ["user:drinks", "user:tea"], "user:drinks", "drinks")
+        sac = (await semantic.get("user:drinks")).metadata["consolidated_into"]["sacrificed_entries"]
+        rec = next(s for s in sac if s["key"] == "user:tea")
+        assert rec["consolidated_into"] == earlier
+        assert rec["value"] == "one"
+
+    async def test_extra_metadata_lands_on_survivor(self, semantic):
+        await _seed_pair(semantic)
+        await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "r",
+                          extra_metadata={"produced_by": "distill_dream"})
+        assert (await semantic.get("user:tea")).metadata["produced_by"] == "distill_dream"
+
+    @pytest.mark.parametrize("key", ["consolidated_into", "consolidation_history", "redirected_to"])
+    async def test_extra_metadata_cannot_overwrite_provenance(self, semantic, key):
+        await _seed_pair(semantic)
+        with pytest.raises(ValueError):
+            await self._merge(semantic, ["user:tea", "user:tea_dup"], "user:tea", "r",
+                              extra_metadata={key: "x"})
+        assert (await semantic.get("user:tea_dup")).metadata.get("redirected_to") is None
+
+
+class TestProvenanceSurvivesOverwrite:
+    """A later write to a survivor's key (same-key triple, SUPERSEDE) replaces
+    its value but must not drop the originals it holds."""
+
+    async def _survivor(self, semantic, key="user:tea"):
+        await _seed_pair(semantic)
+        entries = [await semantic.get("user:tea"), await semantic.get("user:tea_dup")]
+        await semantic.consolidate(
+            entries, refined_value="refined", survivor_key=key,
+            sacrificed_content="x", merge_rationale="r",
+            extra_metadata={"produced_by": "distill_dream", "distilled_at": "2026-10-19"})
+        return (await semantic.get(key)).metadata
+
+    async def test_overwrite_retires_the_record_to_history(self, semantic):
+        before = await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="user now drinks coffee",
+                                            source="session:z:fact:0"))
+        after = await semantic.get("user:tea")
+        assert after.value == "user now drinks coffee"
+        # the new value is not a merge product, but the originals stay
+        assert "consolidated_into" not in after.metadata
+        (rec,) = after.metadata["consolidation_history"]
+        assert rec == {**before["consolidated_into"], "superseded_value": "refined"}
+
+    async def test_overwrite_keeps_consolidation_history(self, semantic):
+        await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea3", value="tea at dawn", source="session:y:fact:1"))
+        await semantic.consolidate(
+            [await semantic.get("user:tea"), await semantic.get("user:tea3")],
+            refined_value="second", survivor_key="user:tea",
+            sacrificed_content="x", merge_rationale="r2")
+        meta = (await semantic.get("user:tea")).metadata
+        hist, current = meta["consolidation_history"], meta["consolidated_into"]
+        await semantic.upsert(SemanticEntry(key="user:tea", value="v3", source="session:z:fact:0"))
+        assert (await semantic.get("user:tea")).metadata["consolidation_history"] == [
+            *hist, {**current, "superseded_value": "second"}]
+
+    async def test_overwritten_value_is_no_longer_a_distill_product(self, semantic):
+        await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="other", source="session:z:fact:0"))
+        meta = (await semantic.get("user:tea")).metadata
+        assert "produced_by" not in meta and "distilled_at" not in meta
+
+    async def test_same_value_rewrite_keeps_everything(self, semantic):
+        before = await self._survivor(semantic)
+        await semantic.upsert(SemanticEntry(key="user:tea", value="refined", source="session:s:fact:0"))
+        meta = (await semantic.get("user:tea")).metadata
+        assert meta["consolidated_into"] == before["consolidated_into"]
+        assert meta["produced_by"] == "distill_dream"
+
+    async def test_governed_supersede_keeps_originals(self, semantic, db_conn):
+        from loom.core.memory.episodic import EpisodicMemory
+        from loom.core.memory.governance import MemoryGovernor
+
+        # session-sourced survivor + same-tier newcomer → SUPERSEDE writes through
+        before = await self._survivor(semantic, key="user:tea_dup")
+        gov = MemoryGovernor(semantic, ProceduralMemory(db_conn), EpisodicMemory(db_conn), db_conn)
+        res = await gov.governed_upsert(SemanticEntry(
+            key="user:tea_dup", value="user switched to coffee", source="session:z:fact:0"))
+        assert res.written, res
+        after = await semantic.get("user:tea_dup")
+        assert after.value == "user switched to coffee"
+        (rec,) = after.metadata["consolidation_history"]
+        assert rec["sacrificed_entries"] == before["consolidated_into"]["sacrificed_entries"]
+        assert rec["superseded_value"] == "refined"
+
+    async def test_plain_overwrite_metadata_unchanged(self, semantic):
+        await semantic.upsert(SemanticEntry(key="k", value="a", source="manual", metadata={"x": 1}))
+        await semantic.upsert(SemanticEntry(key="k", value="b", source="manual", metadata={"y": 2}))
+        meta = (await semantic.get("k")).metadata
+        assert "x" not in meta and meta["y"] == 2
+        assert "consolidated_into" not in meta and "consolidation_history" not in meta
+
+
+class TestConsolidateWriteChecks:
+    async def test_merging_a_distilled_survivor_drops_its_marks(self, semantic):
+        await _seed_pair(semantic)
+        await semantic.consolidate(
+            [await semantic.get("user:tea"), await semantic.get("user:tea_dup")],
+            refined_value="distilled", survivor_key="user:tea", sacrificed_content="x",
+            merge_rationale="r", extra_metadata={"produced_by": "distill_dream",
+                                                 "distilled_at": "2026-10-19"})
+        await semantic.upsert(SemanticEntry(key="user:tea3", value="tea 3", source="session:y:fact:1"))
+        await semantic.consolidate(   # a later convergent merge, no extra_metadata
+            [await semantic.get("user:tea"), await semantic.get("user:tea3")],
+            refined_value="merged", survivor_key="user:tea", sacrificed_content="x",
+            merge_rationale="r2")
+        meta = (await semantic.get("user:tea")).metadata
+        assert "produced_by" not in meta and "distilled_at" not in meta
+
+    async def test_expected_versions_refuse_a_changed_fact(self, semantic, db_conn):
+        from loom.core.memory.semantic import StaleWriteError
+
+        a, b = await _seed_pair(semantic)
+        versions = {e.key: e.updated_at.isoformat() for e in (a, b)}
+        await db_conn.execute("UPDATE semantic_entries SET value='newer', "
+                              "updated_at='2099-01-01T00:00:00+00:00' WHERE key='user:tea_dup'")
+        await db_conn.commit()
+        with pytest.raises(StaleWriteError):
+            await semantic.consolidate(
+                [a, b], refined_value="r", survivor_key="user:tea", sacrificed_content="x",
+                merge_rationale="r", expected_versions=versions)
+        assert (await semantic.get("user:tea_dup")).value == "newer"
+        assert (await semantic.get("user:tea")).value == a.value
+
+    async def test_expected_versions_preserve_what_the_store_holds(self, semantic):
+        a, b = await _seed_pair(semantic)
+        versions = {e.key: e.updated_at.isoformat() for e in (a, b)}
+        stale_copy = SemanticEntry(key=b.key, value="caller's outdated copy", source=b.source,
+                                   updated_at=b.updated_at)
+        await semantic.consolidate(
+            [a, stale_copy], refined_value="r", survivor_key="user:tea", sacrificed_content="x",
+            merge_rationale="r", expected_versions=versions)
+        (rec,) = (await semantic.get("user:tea")).metadata["consolidated_into"]["sacrificed_entries"]
+        assert rec["value"] == b.value
