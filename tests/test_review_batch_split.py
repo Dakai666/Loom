@@ -1,10 +1,11 @@
-"""Self-review batches that yield no verdict at all are split and retried.
+"""Self-review batches that come back empty are split and retried.
 
 A reasoning model can spend the whole ``max_tokens`` budget thinking about a
 large batch and return empty text (seen live: 10 distill neighbourhoods, 19k
 prompt chars → stop_reason=max_tokens, 0 chars; the convergent dream lost a
 whole batch the same way on 2026-09-28). Halving the batch keeps every item
 reviewable; a single item that still yields nothing is deferred as before.
+Only *empty* text splits — a cut-off or malformed answer may hold a veto.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ async def test_empty_answer_splits_until_every_item_is_reviewed():
     decisions = await _review(items, _llm(max_items=3, calls=calls))
     assert [d.cluster_id for d in decisions] == [i.cluster_id for i in items]
     assert all(d.verdict == VERDICT_APPROVE for d in decisions)
-    assert calls[0] == 10 and sum(c for c in calls if c <= 3) == 10
+    assert calls == [10, 5, 2, 3, 5, 2, 3]
 
 
 async def test_a_single_item_with_no_answer_is_deferred_not_retried_forever():
@@ -87,7 +88,7 @@ async def test_a_veto_inside_a_split_batch_still_holds():
         ids = [line.split('"')[1] for line in messages[-1]["content"].splitlines()
                if line.startswith('neighbourhood_id="')]
         if len(ids) > 1:
-            return "not json"
+            return ""
         verdict = "skip" if ids[0] == "c1" else "approve"
         return json.dumps([{"cluster_id": ids[0], "verdict": verdict, "reason": "r"}])
     decisions = await _review([_Item("c0"), _Item("c1"), _Item("c2")], fn)
@@ -97,6 +98,37 @@ async def test_a_veto_inside_a_split_batch_still_holds():
 def test_distill_reviews_in_small_batches():
     import inspect
 
-    from loom.core.cognition.distillation import run_distill_dream
+    from loom.core.cognition.distillation import DISTILL_REVIEW_BATCH_SIZE, run_distill_dream
     default = inspect.signature(run_distill_dream).parameters["review_batch_size"].default
-    assert default <= 5
+    assert default == DISTILL_REVIEW_BATCH_SIZE == 2
+
+
+async def test_a_cut_off_answer_is_not_retried():
+    # it may already hold a veto; a fresh review could approve the same item
+    calls: list = []
+
+    async def fn(messages):
+        calls.append(1)
+        return '[{"cluster_id": "c0", "verdict": "skip", "reason": "no"}, {"cluster_id": "c1", "verd'
+    decisions = await _review([_Item("c0"), _Item("c1")], fn)
+    assert all(d.verdict == VERDICT_DEFER for d in decisions)
+    assert calls == [1]
+
+
+async def test_prose_or_empty_array_is_not_retried():
+    for answer in ("I cannot review these.", "[]"):
+        calls: list = []
+
+        async def fn(messages, answer=answer):
+            calls.append(1)
+            return answer
+        decisions = await _review([_Item("c0"), _Item("c1")], fn)
+        assert all(d.verdict == VERDICT_DEFER for d in decisions)
+        assert calls == [1]
+
+
+async def test_splitting_is_bounded():
+    calls: list = []
+    decisions = await _review([_Item(f"c{i}") for i in range(10)], _llm(max_items=0, calls=calls))
+    assert len(calls) == 7                      # 1 + 2 + 4, then defer
+    assert all(d.verdict == VERDICT_DEFER for d in decisions)

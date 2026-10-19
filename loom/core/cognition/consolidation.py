@@ -883,11 +883,16 @@ def _render_cluster_for_review(cluster: CandidateCluster) -> str:
     return "\n".join(lines)
 
 
+_EMPTY_REVIEW_MAX_SPLITS = 2
+
+
 async def _review_batch(
     clusters: list, llm_fn: LLMFn,
     *,
     system: str = _SELF_REVIEW_SYSTEM,
     render: Callable[[object], str] = _render_cluster_for_review,  # type: ignore[assignment]
+    log_label: str = "convergent-dream",
+    _splits_left: int = _EMPTY_REVIEW_MAX_SPLITS,
 ) -> list[ReviewDecision]:
     """Review one context-bounded batch of clusters in a single LLM call.
 
@@ -897,10 +902,12 @@ async def _review_batch(
     ``system`` / ``render`` let the distill dream reuse the same fail-safe
     verdict handling with its own prompt; items need a ``cluster_id``.
 
-    A batch that answered but yielded no valid verdict at all — typically a
-    reasoning model spending all of ``max_tokens`` thinking and returning
-    empty text — is halved and retried, down to single items (which are
-    then deferred as before). Provider errors are not split.
+    An **empty** answer — a reasoning model that spent all of ``max_tokens``
+    thinking — is halved and retried, at most ``_EMPTY_REVIEW_MAX_SPLITS``
+    levels deep (≤ 7 calls for one batch). Only empty text splits: a
+    malformed or cut-off answer may already hold a veto, and a retry could
+    turn it into an approval, so those defer as before. Provider errors are
+    not split either.
     """
     decisions: list[ReviewDecision] = []
     block = "\n\n".join(render(c) for c in clusters)
@@ -911,7 +918,7 @@ async def _review_batch(
     try:
         raw = await llm_fn(messages)
     except Exception as exc:
-        logger.warning("[convergent-dream] self_review batch LLM failed: %s", exc)
+        logger.warning("[%s] self_review batch LLM failed: %s", log_label, exc)
         # Fail safe: defer this batch (never auto-approve), let the pass go on.
         return [
             ReviewDecision(
@@ -921,20 +928,18 @@ async def _review_batch(
             for c in clusters
         ]
 
-    parsed = _parse_json_array(raw)
-    if len(clusters) > 1 and not any(
-        isinstance(d, dict) and str(d.get("verdict", "")).lower()
-        in (VERDICT_APPROVE, VERDICT_SKIP, VERDICT_DEFER)
-        and str(d.get("cluster_id")) in {c.cluster_id for c in clusters}
-        for d in parsed
-    ):
+    if not (raw or "").strip() and len(clusters) > 1 and _splits_left > 0:
         logger.warning(
-            "[self-review] no verdict for a batch of %d (output %d chars) — splitting",
-            len(clusters), len(raw or ""),
+            "[%s] self-review answered nothing for a batch of %d — splitting",
+            log_label, len(clusters),
         )
         mid = len(clusters) // 2
-        return (await _review_batch(clusters[:mid], llm_fn, system=system, render=render)
-                + await _review_batch(clusters[mid:], llm_fn, system=system, render=render))
+        kw = dict(system=system, render=render, log_label=log_label,
+                  _splits_left=_splits_left - 1)
+        return (await _review_batch(clusters[:mid], llm_fn, **kw)
+                + await _review_batch(clusters[mid:], llm_fn, **kw))
+
+    parsed = _parse_json_array(raw)
     id_counts = Counter(str(d.get("cluster_id")) for d in parsed if isinstance(d, dict))
     by_id = {str(d.get("cluster_id")): d for d in parsed if isinstance(d, dict)}
     for c in clusters:
