@@ -46,6 +46,9 @@ import numpy as np
 
 from loom.core.cognition.consolidation import (
     LLMFn,
+    _cluster_signature,
+    load_suppressed_signatures,
+    record_suppressed_signatures,
     VERDICT_APPROVE,
     VERDICT_DEFER,
     ReviewDecision,
@@ -93,6 +96,10 @@ OUTCOME_INELIGIBLE = "ineligible"  # a covered fact is no longer replaceable
 OUTCOME_ERROR = "error"            # consolidate raised; nothing written
 
 BACKUP_PREFIX = "memory-pre-distill"
+#: Rejected neighbourhoods (by member key@updated_at) aren't re-planned while
+#: unchanged, so repeated passes move on instead of re-reviewing them.
+SUPPRESS_META_KEY = "distill_dream.suppressed_rejections.v1"
+SUPPRESS_RETENTION_DAYS = 30.0
 #: Neighbourhoods per self-review call. Each item carries up to 12 facts plus
 #: the distillation; with 10 per call (the convergent size), and still at
 #: times with 4, a reasoning model spent all 8192 tokens thinking and answered
@@ -221,6 +228,7 @@ async def build_distill_plan(
     min_similarity: float = DISTILL_MIN_SIMILARITY,
     max_members: int = DEFAULT_MAX_MEMBERS,
     now: datetime | None = None,
+    suppress: set[str] | None = None,
 ) -> DistillPlan:
     """Pick disjoint topic neighbourhoods, densest seeds first. Read-only."""
     now = now or datetime.now(UTC)
@@ -259,6 +267,7 @@ async def build_distill_plan(
     # (hand-written above all) stay visible to every neighbourhood on their
     # topic, so the no-restating check can't miss them (#622 review).
     used: set[int] = set()
+    suppressed = 0
     for _, row, nbrs in candidates:
         if len(plan.neighbourhoods) >= max_neighbourhoods:
             break
@@ -268,8 +277,15 @@ async def build_distill_plan(
         n_replaceable = sum(1 for j in members_rows if replaceable[j])
         if len(members_rows) < MIN_MEMBERS or n_replaceable < 2:
             continue
-        used.update(j for j in members_rows if replaceable[j])
         members = [entries[j] for j in members_rows]
+        # Rejected neighbourhoods and the facts in them are both off the
+        # table: a neighbouring seed would otherwise rebuild nearly the same
+        # set under a new signature and get re-reviewed.
+        is_suppressed = bool(suppress) and _cluster_signature(members) in suppress
+        used.update(j for j in members_rows if replaceable[j])
+        if is_suppressed:
+            suppressed += 1
+            continue
         plan.neighbourhoods.append(Neighbourhood(
             cluster_id=f"nb-{uuid.uuid4().hex[:8]}",
             seed_key=entries[row].key,
@@ -279,6 +295,8 @@ async def build_distill_plan(
         ))
         for m in members:
             plan.source_versions[m.key] = m.updated_at.isoformat()
+    if suppressed:
+        plan.notes.append(f"{suppressed} neighbourhood(s) suppressed: rejected earlier, unchanged since")
     return plan
 
 
@@ -546,15 +564,22 @@ async def run_distill_dream(
     min_similarity: float = DISTILL_MIN_SIMILARITY,
     review_batch_size: int = DISTILL_REVIEW_BATCH_SIZE,
     execute: bool = False,
+    skip_signatures: set[str] | None = None,
 ) -> tuple[DistillPlan, str]:
     """One distill pass. Returns ``(plan, report_markdown)``.
 
     Read-only unless ``execute``; then approved results are written after a
     fresh backup, and a failed backup keeps the pass read-only (noted).
+    An executing caller holds ``consolidation.memory_rewrite_lock()`` around
+    the whole pass (not re-entrant, so this function doesn't take it).
+    ``skip_signatures`` adds neighbourhoods to leave alone this pass (the big
+    dream passes the ones it already tried).
     """
     plan = await build_distill_plan(
         semantic, domain=domain, max_neighbourhoods=max_neighbourhoods,
         corpus_limit=corpus_limit, min_similarity=min_similarity,
+        suppress=(await load_suppressed_signatures(semantic._db, meta_key=SUPPRESS_META_KEY)
+                  | (skip_signatures or set())),
     )
     to_review: list[_ReviewItem] = []
     for nb in plan.neighbourhoods:
@@ -599,6 +624,18 @@ async def run_distill_dream(
                 item.result.status = STATUS_DEFERRED
             else:
                 item.result.status = STATUS_REJECTED
+
+    # A rejection is a judgment on unchanged content; deferred / failed are
+    # not and stay free to retry. Only executing passes remember it: a
+    # read-only pass (rehearsal, the gate-off daemon loop) writes nothing,
+    # so it can never change what a later real pass does.
+    nbs = {nb.cluster_id: nb for nb in plan.neighbourhoods}
+    rejected = {_cluster_signature(nbs[r.neighbourhood_id].members)
+                for r in plan.results if r.status == STATUS_REJECTED}
+    if rejected and execute:
+        await record_suppressed_signatures(
+            semantic._db, rejected, meta_key=SUPPRESS_META_KEY,
+            retention_days=SUPPRESS_RETENTION_DAYS)
 
     if execute and plan.counts()[STATUS_APPROVED]:
         # Resolved at call time so tests can stand in for the snapshot.

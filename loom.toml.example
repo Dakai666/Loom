@@ -320,6 +320,9 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 #     metadata and the replaced keys become redirect stubs.
 # The cadence is restart-safe (distill_dream.last_run in memory_meta).
 # The 03:00 free dream (dream_cycle themed=false) is a separate schedule.
+# First time, or after months without it: run one whole-corpus pass with
+# ``loom memory big-dream`` (read-only rehearsal first; see
+# skills/memory_big_dream/SKILL.md). It honours the same execute gates.
 [memory.distill_dream]
 enabled            = true
 interval_hours     = 12      # cadence; restart-safe

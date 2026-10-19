@@ -17,6 +17,7 @@ _tz_module._USER_ZONE = zoneinfo.ZoneInfo("UTC")
 
 
 import pytest
+from pathlib import Path
 
 import loom.autonomy.circadian.journal as _journal_module
 
@@ -49,6 +50,28 @@ def _isolate_circadian_dirs(request, tmp_path, monkeypatch):
 
 
 import loom.core.memory.backup as _backup_module
+import loom.core.memory.store as _store_module
+
+_LIVE_LOOM_DIR = (Path.home() / ".loom").resolve()
+
+
+@pytest.fixture(autouse=True)
+def _forbid_live_memory_db(monkeypatch):
+    """No test may open a DB under the live ``~/.loom`` dir.
+
+    2026-10-19: a mutation check made a CLI test fall back to the default
+    ``~/.loom/memory.db`` with --execute, and a fake LLM rewrote the main
+    agent's memory. Whatever a test or a mutation does, this refuses first.
+    """
+    real_init = _store_module.SQLiteStore.__init__
+
+    def guarded(self, db_path: str = "~/.loom/memory.db") -> None:
+        resolved = Path(db_path).expanduser().resolve()
+        if resolved == _LIVE_LOOM_DIR or _LIVE_LOOM_DIR in resolved.parents:
+            raise RuntimeError(f"test tried to open the live memory DB: {resolved}")
+        real_init(self, db_path)
+
+    monkeypatch.setattr(_store_module.SQLiteStore, "__init__", guarded)
 
 
 @pytest.fixture(autouse=True)

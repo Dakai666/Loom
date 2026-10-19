@@ -215,10 +215,6 @@ class AutonomyDaemon:
         self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
         # Loop name → consecutive unexpected ends, for restart backoff.
         self._loop_failures: dict[str, int] = {}
-        # The convergent and distill dreams both rewrite memory on the shared
-        # session connection; a commit from one inside the other's
-        # multi-statement write would land half of it. One pass at a time.
-        self._dream_write_lock = asyncio.Lock()
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -743,7 +739,10 @@ class AutonomyDaemon:
 
     def _one_dream_at_a_time(self, fn: Callable[[], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
         async def serialised() -> Any:
-            async with self._dream_write_lock:
+            # Shared with the session's distill_dream tool: both rewrite
+            # memory on one connection. One pass at a time.
+            from loom.core.cognition.consolidation import memory_rewrite_lock
+            async with memory_rewrite_lock():
                 return await fn()
         return serialised
 
@@ -903,7 +902,7 @@ class AutonomyDaemon:
         async def _consolidate_once() -> Any:
             from loom.core.cognition.consolidation import (
                 DREAM_LLM_MAX_TOKENS,
-                run_convergent_dream,
+                run_convergent_pass,
             )
             from loom.autonomy.circadian.journal import append_consolidation_report
 
@@ -914,29 +913,14 @@ class AutonomyDaemon:
                 )
                 return response.text or ""
 
-            # #603 step B: never rewrite memory without a fresh snapshot.
-            # A failed backup downgrades this pass to read-only.
-            run_execute = execute
-            if execute:
-                from loom.core.memory.backup import snapshot_before_write
-                if await snapshot_before_write(db, prefix="memory-pre-consolidation") is None:
-                    logger.warning(
-                        "[consolidation] pre-execute backup failed — running read-only this pass",
-                    )
-                    run_execute = False
-
-            plan, report = await run_convergent_dream(
-                memory.semantic, _llm_fn,
+            # #603 step B: never rewrite memory without a fresh snapshot —
+            # run_convergent_pass downgrades to read-only (and says so in the
+            # report) when the backup fails.
+            plan, report, run_execute = await run_convergent_pass(
+                memory.semantic, _llm_fn, db=db, execute=execute,
                 corpus_limit=corpus_limit, max_clusters=max_clusters,
-                max_review_clusters=max_review_clusters, execute=run_execute,
+                max_review_clusters=max_review_clusters,
             )
-            if execute and not run_execute:
-                # Say why in the report itself, not only in the daemon log —
-                # otherwise this reads as a deliberately read-only pass.
-                report += (
-                    "\n\n> ⚠️ 設定為 execute=true，但執行前備份失敗，"
-                    "本輪降級為 read-only（未改寫任何記憶）。"
-                )
             append_consolidation_report(report)
             logger.info(
                 "[consolidation] pass=%s execute=%s clusters=%s deferred=%d",
