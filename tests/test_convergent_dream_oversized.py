@@ -65,3 +65,21 @@ class TestBuildPlanCap:
         plan = await build_plan(semantic_emb, min_similarity=0.85, max_cluster_members=3)
         assert all(len(c.members) <= 3 for c in plan.clusters if c.kind == KIND_MERGE)
         assert any("not proposed" in n or "split" in n for n in plan.notes)
+
+
+def test_identical_float32_scores_survive_the_final_step():
+    """float32 cosines of identical vectors read 0.99999994; the last split
+    step (1.0) must keep those edges instead of shattering the group (#618)."""
+    from loom.core.memory.clustering import split_component
+
+    keys = [f"k{i}" for i in range(4)]
+    scores = {frozenset((a, b)): 0.99999994 for a in keys for b in keys if a < b}
+    scores[frozenset(("k0", "k1"))] = 0.90  # weakest link breaks first
+    pieces, unsplittable = split_component(
+        set(keys), scores, base=0.85, max_members=3,
+    )
+    # Splitting at ≥0.88 keeps every 0.99999994 edge: still 4 > 3 members,
+    # stepping on to 1.0 must still see the edges, so the group is reported
+    # as one unsplittable dense group rather than lost as singletons.
+    assert pieces == []
+    assert unsplittable == [set(keys)]

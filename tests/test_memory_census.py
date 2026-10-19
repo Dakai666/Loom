@@ -110,6 +110,35 @@ class TestDuplicateDensity:
         assert c.dup.largest == 3
         assert "每日節奏 dawn" in c.dup.largest_sample
 
+    async def test_chained_component_is_split_like_consolidation(self, db):
+        """Single-linkage chains unrelated facts (A~B~C…): on 2026-10-19 the
+        census reported an 845-member "dense group" whose mean pairwise cos was
+        0.52. Report what consolidation actually proposes — oversized chains
+        split at stepwise stricter similarity — not the raw chain."""
+        # 11 tight groups of 4 (0.5° apart), 22° between groups (cos ≈ 0.927).
+        # With top-5 neighbour edges each fact reaches into the next group, so
+        # it is one 44-fact chain at 0.85 — eleven groups once bridges break.
+        for g in range(11):
+            for i in range(4):
+                await _row(db, embedding=_vec(g * 23.5 + i * 0.5), value=f"群{g} 事實 {i}")
+        c = await take_census(db, now=NOW)
+        assert c.dup.groups == 11
+        assert c.dup.largest == 4
+        assert c.dup.facts_in_groups == 44
+        assert any("44-fact chained component" in n for n in c.notes)
+
+    async def test_dense_flood_that_cannot_split_still_counts(self, db):
+        """60 identical versions can't be split at any threshold. They are the
+        worst duplication in the corpus and must not vanish from the figures
+        (#618 review)."""
+        for i in range(60):
+            await _row(db, embedding=_vec(0), value=f"心跳 {i}")
+        c = await take_census(db, now=NOW)
+        assert c.dup.groups == 1
+        assert c.dup.largest == 60
+        assert c.dup.facts_in_groups == 60
+        assert any("too tight to split" in n for n in c.notes)
+
     async def test_stubs_and_unembedded_are_not_clustered(self, db):
         """Same exemptions consolidation applies: redirect stubs are not facts
         to merge. Dreaming output IS clustered since #603 lifted its merge
