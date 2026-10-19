@@ -283,6 +283,11 @@ def _union_find_clusters(pairs: list[tuple[str, str]]) -> list[set[str]]:
 # real 42-member cluster; beyond that a single response is unreliable and a
 # chained union-find component is rarely one duplicate claim anyway.
 MAX_CLUSTER_MEMBERS = 40
+
+# Per-pass LLM cost caps (spec §7 batch cap). Shared by every caller — the
+# daemon reads overrides from [memory.consolidation_dream] (#612).
+DEFAULT_MAX_CLUSTERS = 20
+DEFAULT_MAX_REVIEW_CLUSTERS = 40
 _SPLIT_STEP = 0.03
 
 
@@ -484,7 +489,7 @@ async def build_plan(
     *,
     corpus_limit: int = 2000,
     min_similarity: float = 0.85,
-    max_clusters: int = 20,
+    max_clusters: int = DEFAULT_MAX_CLUSTERS,
     suppress_signatures: set[str] | None = None,
     max_cluster_members: int = MAX_CLUSTER_MEMBERS,
 ) -> ConsolidationPlan:
@@ -969,7 +974,7 @@ async def self_review(
     llm_fn: LLMFn,
     *,
     batch_size: int = 10,
-    max_review_clusters: int | None = 40,
+    max_review_clusters: int | None = DEFAULT_MAX_REVIEW_CLUSTERS,
 ) -> list[ReviewDecision]:
     """絲絲 reviews each cluster offline and returns hard-boundary verdicts.
 
@@ -1141,9 +1146,9 @@ async def run_convergent_dream(
     *,
     corpus_limit: int = 2000,
     min_similarity: float = 0.85,
-    max_clusters: int = 20,
+    max_clusters: int = DEFAULT_MAX_CLUSTERS,
     review_batch_size: int = 10,
-    max_review_clusters: int | None = 40,
+    max_review_clusters: int | None = DEFAULT_MAX_REVIEW_CLUSTERS,
     execute: bool = False,
 ) -> tuple[ConsolidationPlan, str]:
     """Run one convergent-dream pass.

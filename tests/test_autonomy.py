@@ -1089,7 +1089,10 @@ class TestConsolidationLoopWiring:
             return plan, "report"
 
         monkeypatch.setattr(consolidation_mod, "run_convergent_dream", fake_run)
-        monkeypatch.setattr(journal_mod, "append_consolidation_report", lambda r: None)
+        monkeypatch.setattr(
+            journal_mod, "append_consolidation_report",
+            lambda r: captured.__setitem__("report", r),
+        )
         monkeypatch.setattr(
             config_mod, "load_loom_config",
             lambda: {"memory": {"consolidation_dream": {"enabled": True, **cfg}}},
@@ -1125,9 +1128,39 @@ class TestConsolidationLoopWiring:
         assert captured["max_review_clusters"] == 50
 
     async def test_caps_default_when_absent(self, monkeypatch):
+        from loom.core.cognition.consolidation import (
+            DEFAULT_MAX_CLUSTERS, DEFAULT_MAX_REVIEW_CLUSTERS,
+        )
         captured = await self._run_pass(monkeypatch, {})
-        assert captured["max_clusters"] == 20
-        assert captured["max_review_clusters"] == 40
+        assert captured["max_clusters"] == DEFAULT_MAX_CLUSTERS
+        assert captured["max_review_clusters"] == DEFAULT_MAX_REVIEW_CLUSTERS
+
+    @pytest.mark.parametrize("bad", [0, -5, "forty", True, 2.5])
+    async def test_invalid_caps_fall_back_without_crashing(self, monkeypatch, caplog, bad):
+        """Loop start isn't guarded by run(): a typo must not take down every
+        daemon loop, and a non-positive cap must not reach the planner."""
+        from loom.core.cognition.consolidation import DEFAULT_MAX_REVIEW_CLUSTERS
+        captured = await self._run_pass(monkeypatch, {
+            "max_review_clusters": bad, "corpus_limit": bad,
+        })
+        assert captured["max_review_clusters"] == DEFAULT_MAX_REVIEW_CLUSTERS
+        assert captured["corpus_limit"] == 2000
+        assert "not a positive integer" in caplog.text
+
+    async def test_warns_when_clusters_exceed_review_cap(self, monkeypatch, caplog):
+        await self._run_pass(monkeypatch, {"max_clusters": 60, "max_review_clusters": 40})
+        assert "max_clusters=60 > max_review_clusters=40" in caplog.text
+
+    async def test_backup_failure_downgrade_is_stated_in_report(self, monkeypatch):
+        import loom.core.memory.backup as backup_mod
+
+        async def failed_snapshot(db, *, prefix):
+            return None
+
+        monkeypatch.setattr(backup_mod, "snapshot_before_write", failed_snapshot)
+        captured = await self._run_pass(monkeypatch, {"execute": True})
+        assert captured["execute"] is False
+        assert "備份失敗" in captured["report"]
 
 
 class TestRunAgentAttachments:

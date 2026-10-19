@@ -353,8 +353,10 @@ execute       = false   # P4a read-only; set true for autonomous writes (P4b)
 corpus_limit  = 5000
 # LLM cost caps. Each merge cluster costs one diff-inventory call plus its share
 # of self-review (batches of 10) and synthesis; clusters over either cap defer
-# to the next pass. If the report keeps saying "capped at N … deferred", the
-# backlog drains at max_clusters per week — raise both together.
+# to the next pass. Merge AND reconcile/clean clusters share max_review_clusters,
+# so keep it >= max_clusters (the daemon warns otherwise). If the report keeps
+# saying "capped at N … deferred", the backlog drains at most max_clusters per
+# pass (one pass every interval_days) — raise both together.
 max_clusters        = 20
 max_review_clusters = 40
 # Explicit `predict` tool (#537): Loom writes a falsifiable assertion before an
