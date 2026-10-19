@@ -87,8 +87,9 @@ Session 範圍的 `ref → bytes` 儲存。job 的輸出寫這裡，agent 用 `s
 class Scratchpad:
     def write(self, ref: str, content: str | bytes) -> str:
         """回傳 scratchpad://<ref>。ref 必須不含 /、不以 . 起頭、非空。"""
-    def read(self, ref: str,
-             section: str | None = None,
+    def read(self, ref: str, *,
+             head: int | None = None, tail: int | None = None,
+             lines: str | None = None, grep: str | None = None,
              max_bytes: int | None = None) -> str: ...
     def size(self, ref: str) -> int: ...
     def list_refs(self) -> list[str]: ...   # sorted
@@ -96,9 +97,11 @@ class Scratchpad:
     def __contains__(self, ref: str) -> bool: ...
 ```
 
-`section` 支援 `"head"` / `"tail"` / `"N-M"` / 關鍵字（grep 語義），避免 agent 每次都讀完整 blob。
+最多一個行篩選，每個參數只有一種語意：`head=N` / `tail=N`（前/後 N 行）、`lines="N-M"`（1-indexed、含頭尾）、`grep="text"`（子字串，命中行加 `N: ` 行號前綴，方便接著用 `lines` 讀上下文）。行號只以 `\n` 切分，和 `read_file` / `grep -n` 一致。篩選永遠作用在完整內容上；衝突的篩選、反向或格式錯誤的範圍、非正數的 head/tail、空的 grep 都直接報錯，不會靜默回空。
 
-`max_bytes` 在 section filter 之**前**截斷原始 bytes，超過時附加 `[scratchpad_read: output truncated at N bytes]`。預設 200_000 bytes。
+`max_bytes` 在篩選**之後**限制輸出（預設 200_000 bytes）。有篩選時只保留完整的行，切點不會切壞 UTF-8 字元。只要用到篩選或發生截斷，結尾就會附一行 `[scratchpad_read: …]`，寫明命中/選取幾行（共幾行）、截斷停在哪一行、下一步從哪一行接著讀。沒篩選且沒超過上限時，原文照樣回傳。
+
+> 2026-10-19 前用的是單一 `section` 字串，靠內容猜是 head/tail/範圍/關鍵字（`"2024-2025"` 會被當成行號範圍），而且是在已截斷的 bytes 上篩選（`tail` 會落在檔案中段）。舊參數現在會回錯誤，並列出四個新參數。
 
 **為什麼 Scratchpad 獨立於記憶系統？** — Scratchpad 存的是**過程產物**（抓到的 HTML、build log），只對當前 session 有意義。真正要進長期記憶的應該是 agent 讀完後**自己決定的結論**，透過 `memorize` 寫入 semantic store。session stop 時 Scratchpad 會 `clear()`，任何沒被主動撈出來的內容就丟了。
 
@@ -132,7 +135,7 @@ run_bash(command=..., async_mode=True)
 | `jobs_status(job_id)` | 單個 job 的完整狀態（含 elapsed、args、error） |
 | `jobs_await(job_ids, timeout)` | 等到全部 terminal 或 timeout。**不 raise**——回傳 `{timeout_hit, finished, still_running}` 讓 agent 自己決定 cancel 或再等 |
 | `jobs_cancel(job_id, reason)` | `reason` 必填——schema 層就擋掉沒帶理由的呼叫 |
-| `scratchpad_read(ref?, section?, max_bytes?)` | 省略 `ref` 時列出可用 refs；`section` 支援 `head`/`tail`/`N-M`/keyword |
+| `scratchpad_read(ref?, head?/tail?/lines?/grep?, max_bytes?)` | 省略 `ref` 時列出可用 refs；最多一個行篩選，結尾附命中數與截斷位置 |
 
 所有這 5 個工具 trust level 都是 `SAFE`——純讀操作，不需要確認。
 

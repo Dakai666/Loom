@@ -33,7 +33,7 @@ at turn boundaries — you never need to poll blindly.
 | `jobs_status(job_id)` | Full state for one job |
 | `jobs_await(job_ids, timeout)` | Block until all complete or timeout. Does not raise on timeout — check `timeout_hit` in the result and decide (cancel vs. keep waiting) |
 | `jobs_cancel(job_id, reason)` | Cancel in-flight job — `reason` is mandatory |
-| `scratchpad_read(ref, section?)` | Read the body; omit `ref` to list available refs |
+| `scratchpad_read(ref, head?/tail?/lines?/grep?)` | Read the body (at most one line filter: `head=N`, `tail=N`, `lines="N-M"`, `grep="text"`); omit `ref` to list available refs |
 
 ## Typical flow (parallel fetch)
 
