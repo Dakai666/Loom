@@ -345,12 +345,19 @@ def make_convergent_dream_tool(
     )
 
 
+def distill_execute_enabled(loom_config: dict) -> bool:
+    """``[memory.distill_dream] execute`` — only a literal ``true`` enables writes."""
+    cfg = (loom_config.get("memory") or {}).get("distill_dream") or {}
+    return cfg.get("execute") is True
+
+
 def make_distill_dream_tool(
     semantic: "SemanticMemory",
     llm_fn: LLMFn,
     *,
     timezone: str = "Asia/Taipei",
     dreams_dir=None,
+    allow_execute: bool = False,
 ) -> ToolDefinition:
     """Build the ``distill_dream`` ToolDefinition (#613 E).
 
@@ -358,7 +365,9 @@ def make_distill_dream_tool(
     for information loss, runs Loom's self-review veto and writes a 記憶蒸餾
     report to the dated ``dreams/`` file. Read-only by default (the big-dream
     rehearsal, docs/designs/57 §6); ``execute=true`` writes the approved
-    distillations after a fresh backup (P2).
+    distillations after a fresh backup (P2), and only when ``allow_execute``
+    (``[memory.distill_dream] execute = true`` in loom.toml, like the
+    convergent dream's gate) — the model alone can't turn writes on.
     """
     from loom.core.cognition.distillation import (
         DEFAULT_MAX_NEIGHBOURHOODS, DISTILL_MIN_SIMILARITY, MODE_EXECUTE, OUTCOME_ERROR,
@@ -385,6 +394,12 @@ def make_distill_dream_tool(
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
                 error=f"execute must be a boolean true/false, got {execute!r}.",
+            )
+        if execute and not allow_execute:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=("execute is disabled: set [memory.distill_dream] execute = true "
+                       "in loom.toml to allow writes. Run without execute for a report."),
             )
         try:
             max_nb = int(call.args.get("max_neighbourhoods", DEFAULT_MAX_NEIGHBOURHOODS))
@@ -420,8 +435,10 @@ def make_distill_dream_tool(
             lines.insert(-1, (
                 f"  Executed       : executed={o[OUTCOME_EXECUTED]}, stale={o[OUTCOME_STALE]}, "
                 f"ineligible={o[OUTCOME_INELIGIBLE]}, error={o[OUTCOME_ERROR]}"))
-        elif execute:
+        elif plan.backup_failed:
             lines.insert(-1, "  Executed       : none — pre-execute backup failed, stayed read-only")
+        elif execute:
+            lines.insert(-1, "  Executed       : none — nothing was approved this pass")
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name, success=True,
             output="\n".join(lines),
@@ -465,7 +482,8 @@ def make_distill_dream_tool(
                     "type": "boolean",
                     "description": (
                         "Write the approved distillations to memory (default false = "
-                        "report only). Run read-only first and check the report."
+                        "report only; needs [memory.distill_dream] execute = true in "
+                        "loom.toml). Run read-only first and check the report."
                     ),
                 },
             },

@@ -58,7 +58,7 @@ from loom.core.cognition.consolidation import (
 from loom.core.memory.clustering import stack_normalised
 from loom.core.memory.ontology import TEMPORAL_ARCHIVED, TEMPORAL_MILESTONE
 from loom.core.memory.relational_bridge import REL_KEY_PREFIX
-from loom.core.memory.semantic import SemanticEntry, classify_source
+from loom.core.memory.semantic import SemanticEntry, StaleWriteError, classify_source
 
 if TYPE_CHECKING:
     from loom.core.memory.semantic import SemanticMemory
@@ -185,6 +185,7 @@ class DistillPlan:
     source_versions: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     mode: str = MODE_READ_ONLY
+    backup_failed: bool = False          # execute asked, snapshot failed → read-only
 
     def outcome_counts(self) -> dict[str, int]:
         c = {OUTCOME_EXECUTED: 0, OUTCOME_STALE: 0, OUTCOME_INELIGIBLE: 0, OUTCOME_ERROR: 0}
@@ -597,6 +598,7 @@ async def run_distill_dream(
         from loom.core.memory import backup
         if await backup.snapshot_before_write(semantic._db, prefix=BACKUP_PREFIX) is None:
             logger.warning("[distill-dream] pre-execute backup failed — read-only this pass")
+            plan.backup_failed = True
             plan.notes.append("設定為 execute，但執行前備份失敗，本輪降級為 read-only（未改寫任何記憶）。")
         else:
             await execute_distill_plan(semantic, plan)
@@ -626,8 +628,7 @@ async def execute_distill_plan(
             r.outcome = OUTCOME_STALE
             continue
         covered = [current[k] for k in d.covers]
-        if not all(_replaceable(e, plan.domain, now) for e in covered) \
-                or _is_dreaming(current[r.survivor_key]):
+        if not all(_replaceable(e, plan.domain, now) for e in covered):
             r.outcome = OUTCOME_INELIGIBLE
             continue
         try:
@@ -639,7 +640,13 @@ async def execute_distill_plan(
                     f"[{e.key}] {e.value}" for e in covered if e.key != r.survivor_key),
                 merge_rationale=_merge_rationale(plan, d),
                 extra_metadata=planned_survivor_metadata(now=now),
+                # re-checked inside the write: a concurrent memorize between
+                # the reads above and the UPDATE must not be overwritten.
+                expected_versions={k: plan.source_versions[k] for k in d.covers},
             )
+        except StaleWriteError:
+            r.outcome = OUTCOME_STALE
+            continue
         except Exception as exc:
             logger.warning("[distill-dream] consolidate failed for %s: %s", nb.cluster_id, exc)
             r.outcome = f"{OUTCOME_ERROR}: {exc}"
@@ -704,9 +711,11 @@ def render_distill_report(plan: DistillPlan) -> str:
             out.append(f"  - 執行：{_OUTCOME_TEXT.get(r.outcome, r.outcome)}")
     if plan.notes:
         out += ["", "### 備註"] + [f"- {n}" for n in plan.notes]
-    if plan.mode == MODE_EXECUTE:
+    if plan.mode == MODE_EXECUTE and plan.outcome_counts()[OUTCOME_EXECUTED]:
         out += ["", "_execute：已寫入的蒸餾，原文都保存在 survivor 的 metadata.consolidated_into，"
                     "被取代的 key 留有重導向 stub。_"]
+    elif plan.mode == MODE_EXECUTE:
+        out += ["", "_execute：本輪沒有任何蒸餾寫入（全部跳過或失敗），記憶未改寫。_"]
     else:
         out += ["", "_read-only：本輪僅規劃與自審，未改寫任何記憶。_"]
     return "\n".join(out)

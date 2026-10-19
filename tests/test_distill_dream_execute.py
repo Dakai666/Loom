@@ -268,7 +268,7 @@ class TestToolExecute:
         from loom.core.memory.maintenance import make_distill_dream_tool
 
         await _topic(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
+        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
         res = await tool.executor(_call({"execute": True}))
         assert res.success, res.error
         assert "executed=1" in res.output
@@ -281,7 +281,83 @@ class TestToolExecute:
 
         await _topic(db)
         before = await _snapshot(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
+        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
         res = await tool.executor(_call({"execute": value}))
         assert not res.success
         assert await _snapshot(db) == before
+
+
+
+class TestReviewFixes:
+    async def test_write_racing_the_check_is_not_overwritten(self, db, semantic, monkeypatch):
+        # a memorize lands after execute's reads but before consolidate's UPDATE
+        await _topic(db)
+        real = semantic.consolidate
+
+        async def racing(entries, **kw):
+            await db.execute("UPDATE semantic_entries SET value='just memorized', "
+                             "updated_at='2099-01-01T00:00:00+00:00' WHERE key=?",
+                             (entries[-1].key,))
+            await db.commit()
+            return await real(entries, **kw)
+        monkeypatch.setattr(semantic, "consolidate", racing)
+        plan, _ = await _execute(semantic)
+        r = _approved(plan)
+        assert r.outcome == "stale"
+        assert (await semantic.get(r.distillation.covers[-1])).value == "just memorized"
+
+    async def test_footer_does_not_claim_writes_when_none_landed(self, db, semantic):
+        await _topic(db)
+
+        async def edit():
+            await db.execute("UPDATE semantic_entries SET updated_at='2099-01-01T00:00:00+00:00' "
+                             "WHERE key='t1'")
+            await db.commit()
+        _, report = await _execute(semantic, _llm_mutating(db, edit))
+        assert "已寫入的蒸餾" not in report
+        assert "沒有任何蒸餾寫入" in report
+
+
+class TestExecuteGate:
+    async def test_tool_refuses_execute_unless_config_allows(self, db, semantic, tmp_path):
+        from loom.core.memory.maintenance import make_distill_dream_tool
+
+        await _topic(db)
+        before = await _snapshot(db)
+        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
+        res = await tool.executor(_call({"execute": True}))
+        assert not res.success and "[memory.distill_dream]" in res.error
+        assert await _snapshot(db) == before
+        assert (await tool.executor(_call({}))).success   # read-only still fine
+
+    @pytest.mark.parametrize("cfg, expected", [
+        ({}, False),
+        ({"memory": {"distill_dream": {"execute": False}}}, False),
+        ({"memory": {"distill_dream": {"execute": "true"}}}, False),
+        ({"memory": {"distill_dream": {"execute": 1}}}, False),
+        ({"memory": {"distill_dream": {"execute": True}}}, True),
+    ])
+    def test_config_gate_needs_a_literal_true(self, cfg, expected):
+        from loom.core.memory.maintenance import distill_execute_enabled
+        assert distill_execute_enabled(cfg) is expected
+
+    async def test_nothing_approved_is_not_reported_as_backup_failure(self, db, semantic, tmp_path):
+        from loom.core.memory.maintenance import make_distill_dream_tool
+
+        await _topic(db)
+        tool = make_distill_dream_tool(semantic, _llm(review="skip"), dreams_dir=tmp_path,
+                                       allow_execute=True)
+        res = await tool.executor(_call({"execute": True}))
+        assert "backup failed" not in res.output
+        assert "nothing was approved" in res.output
+
+    async def test_failed_backup_is_reported_as_such(self, db, semantic, tmp_path, monkeypatch):
+        from loom.core.memory.maintenance import make_distill_dream_tool
+
+        async def broken(conn, **kw):
+            return None
+        monkeypatch.setattr(backup, "snapshot_before_write", broken)
+        await _topic(db)
+        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
+        res = await tool.executor(_call({"execute": True}))
+        assert "backup failed" in res.output

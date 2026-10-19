@@ -157,6 +157,10 @@ def _row_to_entry(row: tuple) -> SemanticEntry:
     )
 
 
+class StaleWriteError(ValueError):
+    """A fact changed between the caller's check and the write; nothing written."""
+
+
 @dataclass
 class ConsolidationResult:
     """Outcome of a ``consolidate()`` merge (#489, P2)."""
@@ -166,8 +170,8 @@ class ConsolidationResult:
 
 
 _PROVENANCE_KEYS = frozenset({"consolidated_into", "consolidation_history", "redirected_to"})
-# upsert over an existing key: the originals a survivor holds are never
-# dropped; the distill marks describe the value, so they go when it changes.
+# Over an existing key the originals a survivor holds are never dropped; the
+# distill marks describe the value, so they go when it changes.
 _CARRIED_ON_OVERWRITE = ("consolidated_into", "consolidation_history")
 _CARRIED_IF_UNCHANGED = ("produced_by", "distilled_at")
 
@@ -206,9 +210,10 @@ class SemanticMemory:
 
         On conflict the previous value is appended to metadata["history"]
         (capped at 3 entries) so overwrites are traceable. A consolidation
-        survivor keeps the originals it holds (``consolidated_into`` /
-        ``consolidation_history``) whatever the new value; its
-        ``produced_by`` / ``distilled_at`` marks survive only an unchanged value.
+        survivor never loses the originals it holds: an unchanged value keeps
+        its metadata as is; a new value retires ``consolidated_into`` (plus the
+        full value it replaces) into ``consolidation_history`` and drops the
+        ``produced_by`` / ``distilled_at`` marks.
 
         If an embedding provider is configured, computes and persists the
         vector for this entry after the upsert.  Embedding failures are
@@ -233,12 +238,20 @@ class SemanticMemory:
             })
             merged_metadata["history"] = history[-3:]
         if existing is not None:
-            carried = _CARRIED_ON_OVERWRITE
+            old = existing.metadata
             if existing.value == entry.value:
-                carried = carried + _CARRIED_IF_UNCHANGED
-            for k in carried:
-                if k in existing.metadata and k not in merged_metadata:
-                    merged_metadata[k] = existing.metadata[k]
+                for k in _CARRIED_ON_OVERWRITE + _CARRIED_IF_UNCHANGED:
+                    if k in old and k not in merged_metadata:
+                        merged_metadata[k] = old[k]
+            elif "consolidated_into" not in merged_metadata and \
+                    "consolidation_history" not in merged_metadata:
+                # The new value is not the merge product: retire the record to
+                # history, keeping the refined value it replaces in full.
+                hist = list(old.get("consolidation_history", []))
+                if old.get("consolidated_into"):
+                    hist.append({**old["consolidated_into"], "superseded_value": existing.value})
+                if hist:
+                    merged_metadata["consolidation_history"] = hist
 
         await self._db.execute(
             """
@@ -673,6 +686,7 @@ class SemanticMemory:
         sacrificed_content: str,
         merge_rationale: str,
         extra_metadata: dict | None = None,
+        expected_versions: dict[str, str] | None = None,
     ) -> ConsolidationResult:
         """Fuse ≥2 near-duplicate facts into one refined survivor (#489, P2).
 
@@ -690,7 +704,13 @@ class SemanticMemory:
         to ``consolidation_history``, and a sacrificed past survivor carries its
         record inside its ``sacrificed_entries`` item (its stub keeps none).
         ``extra_metadata`` is merged onto the survivor but may not touch these
-        provenance keys.
+        provenance keys; the old value's ``produced_by`` / ``distilled_at``
+        marks are dropped (the refined value is not that product).
+
+        ``expected_versions`` (key → ``updated_at`` isoformat): every entry is
+        re-read right before the write and must still match, else
+        :class:`StaleWriteError` and nothing is written. The records then use
+        the re-read rows, so what is preserved is what the store held.
 
         This is a write primitive — it trusts its inputs. The caller
         (``execute_plan``) is responsible for self-review approval and stale
@@ -711,6 +731,14 @@ class SemanticMemory:
         if reserved:
             raise ValueError(f"extra_metadata may not set provenance keys {sorted(reserved)}")
 
+        if expected_versions is not None:
+            fresh = []
+            for e in entries:
+                cur = await self.get(e.key)
+                if cur is None or cur.updated_at.isoformat() != expected_versions.get(e.key):
+                    raise StaleWriteError(f"{e.key!r} changed since it was checked")
+                fresh.append(cur)
+            entries = fresh
         survivor = await self.get(survivor_key)
         if survivor is None:
             raise ValueError(f"survivor_key {survivor_key!r} not found in store")
@@ -726,6 +754,8 @@ class SemanticMemory:
         if meta.get("consolidated_into"):
             meta["consolidation_history"] = [
                 *meta.get("consolidation_history", []), meta["consolidated_into"]]
+        for k in _CARRIED_IF_UNCHANGED:
+            meta.pop(k, None)
         meta.update(extra_metadata or {})
         meta["consolidated_into"] = {
             "sacrificed_content": sacrificed_content,

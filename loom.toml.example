@@ -367,6 +367,17 @@ max_review_clusters = 40
 predict_tool_enabled = false  # opt-in: expose the explicit `predict` tool
 
 # ─────────────────────────────────────────────
+# Distill dream (#613 E, docs/designs/57) — topic distillation
+# ─────────────────────────────────────────────
+# ``distill_dream`` folds several machine-written facts on one topic into one
+# refined fact (originals kept in the survivor's metadata, redirect stubs left).
+# The tool is read-only by default; a call with execute=true writes only when
+# this gate is on, so the model alone can't start rewriting memory. Turn it on
+# after a read-only rehearsal report looks right.
+[memory.distill_dream]
+execute = false   # true = allow distill_dream(execute=true) to write
+
+# ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
 # ─────────────────────────────────────────────
 # When a skill is activated via ``load_skill`` and the turn completes,
