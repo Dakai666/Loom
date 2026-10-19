@@ -295,23 +295,58 @@ _LEGACY_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips"
 _SUPPRESS_RETENTION_DAYS = 90.0   # aligns with the memory half-life
 
 
-_REWRITE_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+class _RewriteLock:
+    """``asyncio.Lock`` that refuses re-entry instead of deadlocking.
+
+    The lock is shared across subsystems (daemon loops, the distill tool,
+    the big dream); a task that already holds it and asks again — a nested
+    path nobody meant to write — raises rather than waiting on itself.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if task is not None and task is self._owner:
+            raise RuntimeError("memory_rewrite_lock is not re-entrant: this task already holds it")
+        await self._lock.acquire()
+        self._owner = task
+
+    def release(self) -> None:
+        self._owner = None
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def __aenter__(self) -> "_RewriteLock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.release()
+
+
+_REWRITE_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _RewriteLock]" = (
     weakref.WeakKeyDictionary())
 
 
-def memory_rewrite_lock() -> asyncio.Lock:
+def memory_rewrite_lock() -> _RewriteLock:
     """The lock every memory-rewriting dream pass holds (#624 follow-up).
 
     The daemon's convergent / distill loops and a session's ``distill_dream``
     tool share one DB connection; a commit from one inside the other's
     multi-statement write would land half of it. One lock per event loop
-    (an ``asyncio.Lock`` binds to the loop it is first contended on).
-    Separate processes need no lock: SQLite isolates their connections.
+    (an ``asyncio.Lock`` binds to the loop it is first contended on); not
+    re-entrant — a nested acquire raises. Separate processes need no lock:
+    SQLite isolates their connections.
     """
     loop = asyncio.get_running_loop()
     lock = _REWRITE_LOCKS.get(loop)
     if lock is None:
-        lock = _REWRITE_LOCKS[loop] = asyncio.Lock()
+        lock = _REWRITE_LOCKS[loop] = _RewriteLock()
     return lock
 
 
@@ -1218,6 +1253,37 @@ async def run_convergent_dream(
     report = render_report(plan, execute_result=execute_result)
     return plan, report
 
+
+
+BACKUP_PREFIX = "memory-pre-consolidation"
+BACKUP_FAILED_NOTE = ("\n\n> ⚠️ 設定為 execute=true，但執行前備份失敗，"
+                      "本輪降級為 read-only（未改寫任何記憶）。")
+
+
+async def run_convergent_pass(
+    semantic: "SemanticMemory",
+    llm_fn: LLMFn,
+    *,
+    db,
+    execute: bool,
+    **caps,
+) -> tuple[ConsolidationPlan, str, bool]:
+    """``run_convergent_dream`` behind the #603 backup gate.
+
+    Never rewrites memory without a fresh snapshot: a failed backup runs the
+    pass read-only and says so in the report itself, so the journal can't
+    read as a deliberate read-only pass. Returns ``(plan, report, executed)``.
+    Shared by the daemon loop and the big dream.
+    """
+    from loom.core.memory import backup
+    run_execute = execute
+    if execute and await backup.snapshot_before_write(db, prefix=BACKUP_PREFIX) is None:
+        logger.warning("[convergent-dream] pre-execute backup failed — running read-only this pass")
+        run_execute = False
+    plan, report = await run_convergent_dream(semantic, llm_fn, execute=run_execute, **caps)
+    if execute and not run_execute:
+        report += BACKUP_FAILED_NOTE
+    return plan, report, run_execute
 
 # ---------------------------------------------------------------------------
 # Step 4 — synthesize + execute (P2 #489)

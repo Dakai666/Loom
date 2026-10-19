@@ -88,6 +88,29 @@ class TestExecute:
         assert s.distill_passes == 1
         assert "no progress" in s.stop_reason
 
+    async def test_an_unwritable_neighbourhood_is_tried_once(self, db, semantic, tmp_path, monkeypatch):
+        await _topic(db, "a", 0)
+        for i, base in enumerate((90, 180, 270)):
+            await _topic(db, f"r{i}", base, n=3)
+        real = semantic.consolidate
+
+        async def broken_for_a(entries, **kw):
+            if kw["survivor_key"].startswith("a"):
+                raise RuntimeError("disk full")
+            return await real(entries, **kw)
+        monkeypatch.setattr(semantic, "consolidate", broken_for_a)
+        reviewed = []
+        base_llm = _dream_llm()
+
+        async def llm(messages):
+            import loom.core.cognition.distillation as dd
+            if messages[0]["content"] is dd._DISTILL_SYSTEM:
+                reviewed.append('key="a' in messages[-1]["content"])
+            return await base_llm(messages)
+        s = await _big(db, semantic, tmp_path, llm, execute_distill=True, distill_batch=1)
+        assert reviewed.count(True) == 1               # not once per pass
+        assert s.distill_executed == 3
+
     async def test_max_passes_is_respected(self, db, semantic, tmp_path):
         for i, base in enumerate((0, 90, 180, 270)):
             await _topic(db, f"t{i}", base, n=3)

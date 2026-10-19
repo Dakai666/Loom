@@ -278,10 +278,14 @@ async def build_distill_plan(
         if len(members_rows) < MIN_MEMBERS or n_replaceable < 2:
             continue
         members = [entries[j] for j in members_rows]
-        if suppress and _cluster_signature(members) in suppress:
+        # Rejected neighbourhoods and the facts in them are both off the
+        # table: a neighbouring seed would otherwise rebuild nearly the same
+        # set under a new signature and get re-reviewed.
+        is_suppressed = bool(suppress) and _cluster_signature(members) in suppress
+        used.update(j for j in members_rows if replaceable[j])
+        if is_suppressed:
             suppressed += 1
             continue
-        used.update(j for j in members_rows if replaceable[j])
         plan.neighbourhoods.append(Neighbourhood(
             cluster_id=f"nb-{uuid.uuid4().hex[:8]}",
             seed_key=entries[row].key,
@@ -560,6 +564,7 @@ async def run_distill_dream(
     min_similarity: float = DISTILL_MIN_SIMILARITY,
     review_batch_size: int = DISTILL_REVIEW_BATCH_SIZE,
     execute: bool = False,
+    skip_signatures: set[str] | None = None,
 ) -> tuple[DistillPlan, str]:
     """One distill pass. Returns ``(plan, report_markdown)``.
 
@@ -567,11 +572,14 @@ async def run_distill_dream(
     fresh backup, and a failed backup keeps the pass read-only (noted).
     An executing caller holds ``consolidation.memory_rewrite_lock()`` around
     the whole pass (not re-entrant, so this function doesn't take it).
+    ``skip_signatures`` adds neighbourhoods to leave alone this pass (the big
+    dream passes the ones it already tried).
     """
     plan = await build_distill_plan(
         semantic, domain=domain, max_neighbourhoods=max_neighbourhoods,
         corpus_limit=corpus_limit, min_similarity=min_similarity,
-        suppress=await load_suppressed_signatures(semantic._db, meta_key=SUPPRESS_META_KEY),
+        suppress=(await load_suppressed_signatures(semantic._db, meta_key=SUPPRESS_META_KEY)
+                  | (skip_signatures or set())),
     )
     to_review: list[_ReviewItem] = []
     for nb in plan.neighbourhoods:
@@ -618,11 +626,13 @@ async def run_distill_dream(
                 item.result.status = STATUS_REJECTED
 
     # A rejection is a judgment on unchanged content; deferred / failed are
-    # not and stay free to retry.
+    # not and stay free to retry. Only executing passes remember it: a
+    # read-only pass (rehearsal, the gate-off daemon loop) writes nothing,
+    # so it can never change what a later real pass does.
     nbs = {nb.cluster_id: nb for nb in plan.neighbourhoods}
     rejected = {_cluster_signature(nbs[r.neighbourhood_id].members)
                 for r in plan.results if r.status == STATUS_REJECTED}
-    if rejected:
+    if rejected and execute:
         await record_suppressed_signatures(
             semantic._db, rejected, meta_key=SUPPRESS_META_KEY,
             retention_days=SUPPRESS_RETENTION_DAYS)

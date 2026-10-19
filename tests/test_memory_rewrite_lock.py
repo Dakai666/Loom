@@ -69,3 +69,18 @@ async def test_distill_tool_execute_waits_for_a_running_dream(tmp_path):
         lock.release()
         res = await asyncio.wait_for(task, timeout=5)
         assert res.success, res.error
+
+
+async def test_nested_acquire_raises_instead_of_deadlocking():
+    import pytest
+
+    lock = memory_rewrite_lock()
+
+    async def nested():
+        async with lock:
+            async with memory_rewrite_lock():
+                pass
+    with pytest.raises(RuntimeError, match="re-entrant"):
+        await asyncio.wait_for(nested(), timeout=2)   # a deadlock fails, not hangs
+    async with lock:            # released cleanly after the refusal
+        pass

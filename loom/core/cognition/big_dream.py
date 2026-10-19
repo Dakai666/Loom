@@ -8,10 +8,11 @@ months without them needs one pass over everything first:
 2. **converge** — ``run_convergent_dream`` over the whole corpus with no
    cluster caps (near-duplicates, cos ≥ 0.85), after its own backup;
 3. **distill** — ``run_distill_dream`` passes of ``distill_batch``
-   neighbourhoods each, until no eligible neighbourhood is left, a pass makes
-   no progress (nothing written or rejected — only deferred / failed), or
-   ``max_passes``. Rejections are suppressed across passes, so each pass
-   moves on; every executing pass takes its own backup;
+   neighbourhoods each, until no eligible neighbourhood is left, a pass gets
+   no verdict at all (only deferred / failed — e.g. an LLM outage), or
+   ``max_passes``. Each neighbourhood is tried once per run (rejections
+   also across runs), so each pass moves on; every executing pass takes
+   its own backup;
 4. **census** again, and a before / after summary.
 
 Each stage writes only when its ``execute_*`` flag is set (the CLI passes the
@@ -110,12 +111,11 @@ async def run_big_dream(
     from loom.autonomy.circadian.journal import (
         append_consolidation_report, append_distill_report,
     )
-    from loom.core.cognition.consolidation import run_convergent_dream
+    from loom.core.cognition.consolidation import _cluster_signature, run_convergent_pass
     from loom.core.cognition.distillation import (
-        DISTILL_MIN_SIMILARITY, OUTCOME_EXECUTED, STATUS_DEFERRED, STATUS_FAILED,
-        STATUS_REJECTED, run_distill_dream,
+        DISTILL_MIN_SIMILARITY, OUTCOME_EXECUTED, STATUS_APPROVED, STATUS_DEFERRED,
+        STATUS_FAILED, STATUS_REJECTED, run_distill_dream,
     )
-    from loom.core.memory import backup
     from loom.core.memory.census import take_census
 
     if distill_batch < 1 or max_passes < 1:
@@ -131,23 +131,23 @@ async def run_big_dream(
     if skip_consolidation:
         s.consolidation_mode = "skipped"
     else:
-        run_execute = execute_consolidation
+        log(f"convergent dream over {corpus} rows "
+            f"({'execute' if execute_consolidation else 'read-only'})…")
         async with memory_rewrite_lock():
-            if run_execute and await backup.snapshot_before_write(
-                    db, prefix="memory-pre-consolidation") is None:
-                run_execute = False
-                s.notes.append("convergent dream: pre-execute backup failed — ran read-only")
-            log(f"convergent dream over {corpus} rows ({'execute' if run_execute else 'read-only'})…")
-            plan, report = await run_convergent_dream(
-                semantic, llm_fn, corpus_limit=max(corpus, 1),
-                max_clusters=_UNCAPPED, max_review_clusters=_UNCAPPED, execute=run_execute,
+            plan, report, run_execute = await run_convergent_pass(
+                semantic, llm_fn, db=db, execute=execute_consolidation,
+                corpus_limit=max(corpus, 1),
+                max_clusters=_UNCAPPED, max_review_clusters=_UNCAPPED,
             )
+        if execute_consolidation and not run_execute:
+            s.notes.append("convergent dream: pre-execute backup failed — ran read-only")
         append_consolidation_report(report, **journal)
         s.consolidation_mode = "execute" if run_execute else "read-only"
         s.consolidation_counts = dict(plan.counts())
         log(f"  clusters: {s.consolidation_counts}")
 
     distill_backup_failed = False
+    seen: set[str] = set()      # neighbourhoods already tried this run
     for _ in range(max_passes if execute_distill else 1):
         s.distill_passes += 1
         log(f"distill pass {s.distill_passes} ({'execute' if execute_distill else 'read-only'}, "
@@ -156,6 +156,7 @@ async def run_big_dream(
             plan, report = await run_distill_dream(
                 semantic, llm_fn, max_neighbourhoods=distill_batch, corpus_limit=max(corpus, 1),
                 min_similarity=min_similarity or DISTILL_MIN_SIMILARITY, execute=execute_distill,
+                skip_signatures=seen,
             )
         append_distill_report(report, **journal)
         c, o = plan.counts(), plan.outcome_counts()
@@ -175,7 +176,13 @@ async def run_big_dream(
         if not execute_distill:
             s.stop_reason = "read-only: one pass (nothing is consumed, so more would repeat it)"
             break
-        if not (o[OUTCOME_EXECUTED] or c[STATUS_REJECTED]):
+        # Each neighbourhood is tried once per run: deferred / failed ones, or
+        # approved ones that couldn't be written, would otherwise come back
+        # every pass. A later run retries them.
+        seen |= {_cluster_signature(nb.members) for nb in plan.neighbourhoods}
+        # Stop when nothing got a verdict (an LLM outage, say): the next
+        # pass would only burn through untried neighbourhoods the same way.
+        if not (c[STATUS_APPROVED] or c[STATUS_REJECTED]):
             s.stop_reason = "no progress (only deferred / failed) — re-run later"
             break
     else:

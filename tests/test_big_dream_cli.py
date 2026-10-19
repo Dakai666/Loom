@@ -41,14 +41,16 @@ def run(tmp_path, monkeypatch):
             return types.SimpleNamespace(text=await llm(messages))
 
     monkeypatch.chdir(tmp_path)                        # journal + cwd loom.toml land here
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # a default path can't reach ~/.loom
     monkeypatch.setattr(cli_main, "build_router", lambda model: Router())
     monkeypatch.setattr("loom.core.memory.embeddings.build_embedding_provider",
                         lambda env, cfg: None)
     monkeypatch.setattr("loom.core.cognition.router.get_default_model", lambda: "m")
 
-    def invoke(args, cfg):
+    def invoke(args, cfg, *, pass_db=True):
         monkeypatch.setattr(cli_main, "_load_loom_config", lambda: cfg)
-        return CliRunner().invoke(cli_main.cli, ["memory", "big-dream", "--db", db, *args])
+        db_args = ["--db", db] if pass_db else []
+        return CliRunner().invoke(cli_main.cli, ["memory", "big-dream", *db_args, *args])
     return invoke, db
 
 
@@ -85,3 +87,21 @@ def test_execute_asks_first_without_yes(run):
     res = invoke(["--execute"], GATES_ON)     # CliRunner feeds no input → declined
     assert "Aborted" in res.output
     assert _stubs(db) == 0
+
+
+def test_db_defaults_to_the_configs_db_path(run, tmp_path):
+    # run from a second agent's directory without --db: its own DB, not ~/.loom
+    invoke, db = run
+    cfg = {"memory": {"db_path": "m.db", **GATES_ON["memory"]}}
+    res = invoke(["--execute", "--yes"], cfg, pass_db=False)
+    assert res.exit_code == 0, res.output
+    assert _stubs(db) == 2
+
+
+def test_the_live_db_is_unreachable_from_tests():
+    # conftest's guard: the 2026-10-19 accident can't repeat
+    from pathlib import Path
+
+    from loom.core.memory.store import SQLiteStore
+    with pytest.raises(RuntimeError, match="live memory DB"):
+        SQLiteStore(str(Path(__file__).home() / ".loom" / "memory.db"))

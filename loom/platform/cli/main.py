@@ -2167,7 +2167,9 @@ async def _gather_memory_health(conn) -> dict:
 
 
 @memory.command("big-dream")
-@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--db", default=None,
+              help="Memory DB. Default: [memory] db_path of the cwd's loom.toml "
+                   "(relative to the cwd), else ~/.loom/memory.db.")
 @click.option("--execute", is_flag=True,
               help="Write. Each stage still needs its loom.toml gate: "
                    "[memory.consolidation_dream] execute and [memory.distill_dream] execute.")
@@ -2175,7 +2177,7 @@ async def _gather_memory_health(conn) -> dict:
 @click.option("--max-passes", default=50, show_default=True, help="Upper bound on distill passes.")
 @click.option("--skip-consolidation", is_flag=True, help="Distill only (no convergent dream).")
 @click.option("--yes", is_flag=True, help="Don't ask for confirmation (for agents / scripts).")
-def memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
+def memory_big_dream(db: str | None, execute: bool, batch: int, max_passes: int,
                      skip_consolidation: bool, yes: bool) -> None:
     """One-off whole-corpus tidy-up: convergent dream + distill passes.
 
@@ -2186,7 +2188,7 @@ def memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
     asyncio.run(_memory_big_dream(db, execute, batch, max_passes, skip_consolidation, yes))
 
 
-async def _memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
+async def _memory_big_dream(db: str | None, execute: bool, batch: int, max_passes: int,
                             skip_consolidation: bool, yes: bool) -> None:
     from rich.markup import escape
 
@@ -2202,7 +2204,9 @@ async def _memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
     gate_distill = distill_execute_enabled(cfg)
     exec_consolidation = execute and gate_consolidation and not skip_consolidation
     exec_distill = execute and gate_distill
-    db_path = str(Path(db).expanduser())
+    # The DB must belong to the config whose gates authorise the writes: a
+    # second agent's directory with no --db must not rewrite the main DB.
+    db_path = str(Path(db or mem_cfg.get("db_path") or "~/.loom/memory.db").expanduser().resolve())
     model = get_default_model()
 
     console.print(Rule("[loom.accent]Big dream[/loom.accent]"))

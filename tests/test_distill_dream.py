@@ -377,11 +377,12 @@ def _call(args: dict):
 
 class TestSuppression:
     """A rejected neighbourhood isn't re-planned while it is unchanged, so
-    repeated passes (the big dream, the 12 h loop) move on to the next one."""
+    repeated executing passes (the big dream, the 12 h loop) move on to the
+    next one. Read-only passes remember nothing."""
 
     async def test_rejected_neighbourhood_is_not_planned_again(self, db, semantic):
         await _topic(db, "a", 0)
-        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1, execute=True)
         (r,) = plan1.results
         assert r.status == STATUS_REJECTED
         plan2, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
@@ -391,14 +392,14 @@ class TestSuppression:
     async def test_the_next_neighbourhood_gets_its_turn(self, db, semantic):
         await _topic(db, "a", 0)
         await _topic(db, "b", 180, n=3)       # smaller → planned second
-        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1, execute=True)
         seed1 = plan1.neighbourhoods[0].seed_key
         plan2, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
         assert plan2.neighbourhoods[0].seed_key[0] != seed1[0]
 
     async def test_an_edited_member_lifts_the_suppression(self, db, semantic):
         await _topic(db, "a", 0)
-        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1, execute=True)
         await db.execute("UPDATE semantic_entries SET value='changed', "
                          "updated_at='2099-01-01T00:00:00+00:00' WHERE key='a2'")
         await db.commit()
@@ -408,18 +409,39 @@ class TestSuppression:
     @pytest.mark.parametrize("review", ["defer"])
     async def test_deferred_is_not_suppressed(self, db, semantic, review):
         await _topic(db, "a", 0)
-        await run_distill_dream(semantic, _llm(review=review), max_neighbourhoods=1)
+        await run_distill_dream(semantic, _llm(review=review), max_neighbourhoods=1, execute=True)
         plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
         assert len(plan.neighbourhoods) == 1
 
     async def test_failed_distill_is_not_suppressed(self, db, semantic):
         await _topic(db, "a", 0)
-        await run_distill_dream(semantic, _llm(fail_distill_for='key="a'), max_neighbourhoods=1)
+        await run_distill_dream(semantic, _llm(fail_distill_for='key="a'), max_neighbourhoods=1, execute=True)
         plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
         assert len(plan.neighbourhoods) == 1
 
     async def test_convergent_suppression_is_separate(self, db, semantic):
         from loom.core.cognition.consolidation import load_suppressed_signatures
         await _topic(db, "a", 0)
-        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1, execute=True)
         assert await load_suppressed_signatures(db) == set()
+
+    async def test_read_only_pass_remembers_nothing(self, db, semantic):
+        await _topic(db, "a", 0)
+        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert len(plan.neighbourhoods) == 1
+        cur = await db.execute("SELECT count(*) FROM memory_meta WHERE key LIKE 'distill_dream.%'")
+        assert (await cur.fetchone())[0] == 0
+
+    async def test_neighbours_of_a_rejected_set_are_not_regrouped(self, db, semantic):
+        # one dense topic: after its densest set is rejected, a neighbouring
+        # seed must not rebuild nearly the same set and get re-reviewed
+        for i in range(16):                      # denser than one 12-member set
+            await _row(db, f"d{i:02d}", i * 1.5)
+        first, _ = await run_distill_dream(semantic, _llm(review="skip"),
+                                           max_neighbourhoods=1, execute=True)
+        rejected = {m.key for m in first.neighbourhoods[0].members}
+        assert len(rejected) == 12
+        plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=5)
+        for nb in plan.neighbourhoods:
+            assert not rejected & {m.key for m in nb.members}

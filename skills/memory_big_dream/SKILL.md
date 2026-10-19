@@ -26,7 +26,7 @@ tags: [memory, maintenance, distill, consolidation]
 
 1. **普查**：整理前的快照。
 2. **收斂**：近重複（cos ≥ 0.85）的收斂夢，跑全庫、不設簇數上限。
-3. **蒸餾**：同主題不同面向（cos 0.70–0.85）分批精煉，每輪 `--batch` 個鄰域。一直跑到沒有可蒸餾的鄰域、某一輪毫無進展（只有 deferred / failed），或達到 `--max-passes` 為止。被否決的鄰域在內容改變之前不會重審，所以每一輪都會往下走。
+3. **蒸餾**：同主題不同面向（cos 0.70–0.85）分批精煉，每輪 `--batch` 個鄰域。一直跑到沒有可蒸餾的鄰域、某一輪完全沒有拿到判定（只有 deferred / failed，例如 LLM 暫時出問題），或達到 `--max-passes` 為止。同一次執行中每個鄰域只試一次；被否決的鄰域在內容改變前，之後的執行也不會重審，所以每一輪都會往下走。
 4. **普查**：整理後的快照，並印出前後對照。
 
 安全網全部內建，不需要手動處理：
@@ -39,7 +39,7 @@ tags: [memory, maintenance, distill, consolidation]
 
 ## 步驟
 
-在**該 agent 的目錄**執行，因為 `loom.toml`、`autonomy/` 和報告都以 cwd 為準。DB 用 `--db` 指定，例如主 agent 是 `~/.loom/memory.db`，另一個 agent 是 `data/memory.db`。
+在**該 agent 的目錄**執行，因為 `loom.toml`、`autonomy/` 和報告都以 cwd 為準。沒有指定 `--db` 時，會用該 `loom.toml` 的 `[memory] db_path`（相對路徑以 cwd 為準），都沒有才用 `~/.loom/memory.db`。指令一開始會印出實際使用的 DB，請先確認它是這個 agent 的 DB。
 
 ### 1. 先彩排（唯讀，不需要任何開關）
 
@@ -47,7 +47,7 @@ tags: [memory, maintenance, distill, consolidation]
 loom memory big-dream --db <DB 路徑> --batch 20
 ```
 
-唯讀模式只跑一輪蒸餾，因為沒有任何記憶被取代，跑第二輪只會重複同樣的結果。唯讀不會改動任何記憶內容，只會在 `memory_meta` 記下被否決的鄰域，之後正式跑時就不會重審它們。打開當天的 `autonomy/circadian/dreams/<日期>.md` 看 記憶蒸餾 報告，逐條檢查：
+唯讀模式只跑一輪蒸餾，因為沒有任何記憶被取代，跑第二輪只會重複同樣的結果。唯讀完全不寫 DB，所以彩排結果不會影響之後正式跑的內容。打開當天的 `autonomy/circadian/dreams/<日期>.md` 看 記憶蒸餾 報告，逐條檢查：
 
 - 「精煉」有沒有保留來源的關鍵細節？
 - 「不保留」的理由站得住嗎？例如已作廢的規則、已由手寫記憶承載。
