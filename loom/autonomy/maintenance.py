@@ -97,12 +97,13 @@ class MaintenanceLoop:
 # How often to re-check due-ness. The cadence is enforced by the persisted
 # last_run, so the check interval only bounds how soon after a due moment (or
 # a restart) the run actually fires.
-_CHECK_INTERVAL_DEFAULT = 6 * 3600.0
+DEFAULT_CHECK_INTERVAL_SECONDS = 6 * 3600.0
 _META_KEY_LAST_RUN_DEFAULT = "consolidation_dream.last_run"
 
 
 class ConvergentDreamLoop:
-    """Drives ``run_convergent_dream`` on a *weekly*, restart-safe cadence (#495).
+    """Restart-safe cadence for the memory-rewriting dreams: the weekly
+    convergent dream (#495) and the 12 h distill dream (#613 E).
 
     The convergent (consolidation) dream rewrites memory, so its cadence must
     survive restarts: a daemon bounce must neither reset the week nor
@@ -133,7 +134,7 @@ class ConvergentDreamLoop:
         interval_days: float = 7.0,
         *,
         meta_key: str = _META_KEY_LAST_RUN_DEFAULT,
-        check_interval_seconds: float = _CHECK_INTERVAL_DEFAULT,
+        check_interval_seconds: float = DEFAULT_CHECK_INTERVAL_SECONDS,
         label: str = "consolidation",
     ) -> None:
         self._dream_fn = dream_fn

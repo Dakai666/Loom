@@ -91,6 +91,9 @@ async def _wire(monkeypatch, db, cfg: dict):
 
     async def fake_run(semantic, llm_fn, **kw):
         captured.update(kw)
+        captured.setdefault("domains", []).append(kw.get("domain"))
+        if captured.pop("fail_next", False):
+            raise RuntimeError("provider down")
         plan = types.SimpleNamespace(
             pass_id="distill-x", domain=kw.get("domain"), mode="read-only",
             counts=lambda: {"approved": 0}, outcome_counts=lambda: {}, backup_failed=False,
@@ -102,8 +105,11 @@ async def _wire(monkeypatch, db, cfg: dict):
 
     monkeypatch.setattr(distill_mod, "run_distill_dream", fake_run)
     monkeypatch.setattr(dreaming_mod, "dream_cycle", no_dream_cycle)
-    monkeypatch.setattr(journal_mod, "append_distill_report",
-                        lambda report, **_: reports.append(report))
+    def fake_append(report, **_):
+        if captured.get("journal_broken"):
+            raise OSError("disk full")
+        reports.append(report)
+    monkeypatch.setattr(journal_mod, "append_distill_report", fake_append)
     monkeypatch.setattr(config_mod, "load_loom_config", lambda: {"memory": cfg})
     holder: dict = {}
 
@@ -118,7 +124,9 @@ async def _wire(monkeypatch, db, cfg: dict):
             return _noop()
 
     monkeypatch.setattr(daemon_mod, "ConvergentDreamLoop", FakeLoop)
-    task = _daemon(_session(db))._maybe_start_dream_loop()
+    daemon = _daemon(_session(db))
+    task = daemon._maybe_start_dream_loop()
+    holder["daemon"] = daemon
     return task, holder, captured, reports
 
 
@@ -194,3 +202,148 @@ class TestWiring:
     def test_no_session_or_db_starts_nothing(self):
         assert _daemon(None)._maybe_start_dream_loop() is None
         assert _daemon(_session(None))._maybe_start_dream_loop() is None
+
+
+class TestReviewFixes:
+    async def test_old_opt_out_is_honoured(self, monkeypatch, db):
+        # someone who switched the themed dream off didn't opt into a new one
+        task, *_ = await _wire(monkeypatch, db, {"dream": {"enabled": False}})
+        assert task is None
+
+    async def test_new_section_wins_over_old_opt_out(self, monkeypatch, db):
+        task, *_ = await _wire(monkeypatch, db, {
+            "dream": {"enabled": False}, "distill_dream": {"enabled": True}})
+        assert task is not None
+
+    async def test_journal_failure_does_not_rerun_the_pass(self, monkeypatch, db, caplog):
+        _, loop_kw, captured, _ = await _wire(monkeypatch, db, {})
+        captured["journal_broken"] = True
+        with caplog.at_level(logging.ERROR):
+            await loop_kw["dream_fn"]()             # must not raise → last_run gets marked
+        assert "distill report" in caplog.text      # the report survives in the log
+
+    async def test_failed_pass_keeps_its_domain(self, monkeypatch, db):
+        _, loop_kw, captured, _ = await _wire(monkeypatch, db, {})
+        captured["fail_next"] = True
+        with pytest.raises(RuntimeError):
+            await loop_kw["dream_fn"]()
+        await loop_kw["dream_fn"]()
+        assert captured["domains"] == ["self", "self"]
+
+    async def test_rotation_is_independent_of_the_dream_cycle_tool(self, monkeypatch, db):
+        from loom.core.cognition.dreaming import next_themed_domain
+        _, loop_kw, captured, _ = await _wire(monkeypatch, db, {})
+        await loop_kw["dream_fn"]()
+        await next_themed_domain(db)                # dream_cycle(themed=True) via the tool
+        await next_themed_domain(db)
+        await loop_kw["dream_fn"]()
+        assert captured["domains"] == ["self", "user"]
+
+    async def test_fractional_interval_is_accepted(self, monkeypatch, db):
+        _, loop_kw, *_ = await _wire(monkeypatch, db, {"distill_dream": {"interval_hours": 6.5}})
+        assert loop_kw["interval_days"] == pytest.approx(6.5 / 24)
+
+    @pytest.mark.parametrize("bad", [0, -1, "x", True])
+    async def test_bad_interval_falls_back(self, monkeypatch, db, bad):
+        _, loop_kw, *_ = await _wire(monkeypatch, db, {"distill_dream": {"interval_hours": bad}})
+        assert loop_kw["interval_days"] == pytest.approx(0.5)
+
+    async def test_distill_and_consolidation_passes_never_overlap(self, monkeypatch, db):
+        import asyncio
+
+        import loom.autonomy.circadian.journal as journal_mod
+        import loom.core.cognition.consolidation as consolidation_mod
+        import loom.core.cognition.distillation as distill_mod
+        import loom.autonomy.daemon as daemon_mod
+        import loom.core.config as config_mod
+
+        events = []
+
+        def plan():
+            return types.SimpleNamespace(
+                pass_id="p", domain=None, mode="read-only", counts=lambda: {},
+                outcome_counts=lambda: {}, backup_failed=False, deferred_to_next_pass=0)
+
+        async def slow(tag):
+            events.append(f"{tag}+")
+            await asyncio.sleep(0.05)
+            events.append(f"{tag}-")
+            return plan(), "r"
+
+        async def run_distill(*a, **k):
+            return await slow("d")
+
+        async def run_convergent(*a, **k):
+            return await slow("c")
+        monkeypatch.setattr(distill_mod, "run_distill_dream", run_distill)
+        monkeypatch.setattr(consolidation_mod, "run_convergent_dream", run_convergent)
+        monkeypatch.setattr(journal_mod, "append_distill_report", lambda r, **_: None)
+        monkeypatch.setattr(journal_mod, "append_consolidation_report", lambda r, **_: None)
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {"memory": {
+            "consolidation_dream": {"enabled": True}}})
+        fns = []
+
+        class FakeLoop:
+            def __init__(self, **kw):
+                fns.append(kw["dream_fn"])
+                self._interval_seconds = 1.0
+
+            def run_forever(self):
+                async def _noop():
+                    return None
+                return _noop()
+        monkeypatch.setattr(daemon_mod, "ConvergentDreamLoop", FakeLoop)
+        daemon = _daemon(_session(db))
+        daemon._maybe_start_dream_loop()
+        daemon._maybe_start_consolidation_loop()
+        await asyncio.gather(*(fn() for fn in fns))
+        assert events in (["d+", "d-", "c+", "c-"], ["c+", "c-", "d+", "d-"])
+
+
+class TestRealClosure:
+    """The real daemon closure against a real store — only the LLM is faked
+    (the stubbed tests above would accept any kwargs; #451's crash hid there)."""
+
+    async def test_execute_pass_writes_and_journals(self, monkeypatch, db, tmp_path):
+        import loom.autonomy.circadian.journal as journal_mod
+        import loom.autonomy.daemon as daemon_mod
+        import loom.core.config as config_mod
+        from loom.core.memory.semantic import SemanticMemory
+        from tests.test_distill_dream import _llm, _topic
+
+        await _topic(db)
+        fake_llm = _llm()
+
+        class Router:
+            async def chat(self, *, model, messages, max_tokens):
+                return types.SimpleNamespace(text=await fake_llm(messages))
+
+        real_append = journal_mod.append_distill_report
+        monkeypatch.setattr(journal_mod, "append_distill_report",
+                            lambda r, **kw: real_append(r, dreams_dir=tmp_path / "dreams"))
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {"memory": {
+            "distill_dream": {"execute": True}}})
+        holder = {}
+
+        class FakeLoop:
+            def __init__(self, **kw):
+                holder.update(kw)
+                self._interval_seconds = 1.0
+
+            def run_forever(self):
+                async def _noop():
+                    return None
+                return _noop()
+        monkeypatch.setattr(daemon_mod, "ConvergentDreamLoop", FakeLoop)
+        session = types.SimpleNamespace(
+            _db=db, _memory=types.SimpleNamespace(semantic=SemanticMemory(db)),
+            router=Router(), model="m")
+        from loom.core.cognition.dreaming import mark_themed_domain
+        # the fixture topic lives in "knowledge" — the domain after "project"
+        await mark_themed_domain(db, "distill_dream.last_theme", "project")
+        assert _daemon(session)._maybe_start_dream_loop() is not None
+        plan = await holder["dream_fn"]()
+        assert plan.domain == "knowledge"
+        assert plan.outcome_counts()["executed"] == 1
+        (report,) = list((tmp_path / "dreams").glob("*.md"))
+        assert "記憶蒸餾" in report.read_text()
