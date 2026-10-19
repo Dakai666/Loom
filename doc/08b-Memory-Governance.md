@@ -224,6 +224,8 @@ dream_cycle(sample_size=15)
 
 **排程（2026-10-19 起，#613 E）**：daemon 不再每 12h 跑 themed `dream_cycle`。那條路徑只會增加記憶，現在改跑蒸餾夢（`distill_dream`，`[memory.distill_dream]`）：沿用同一個 domain 輪替挑種子，把同主題的機器記憶精煉成一條並取代原本那幾條。`dream_cycle` 仍可透過工具呼叫，03:00 自由夢（themed=false）照常排程。設計與邊界見 `docs/designs/57-記憶蒸餾夢-規格.md`。
 
+**大夢（一次性全庫整理）**：`loom memory big-dream` 依序跑普查 → 全庫收斂夢（不設上限）→ 蒸餾分批直到沒有可蒸餾的鄰域 → 普查並印出前後對照。預設唯讀；寫入要同時有 `--execute` 和 loom.toml 的 `[memory.consolidation_dream]` / `[memory.distill_dream]` `execute = true`。每個寫入階段都會先備份，被否決的鄰域在內容改變前不會重審（`distill_dream.suppressed_rejections.v1`）。它跟 daemon 是不同 process，不用停 daemon；同一個 process 裡會寫入的夢，則共用 `consolidation.memory_rewrite_lock()`。操作步驟見 `skills/memory_big_dream/SKILL.md`。
+
 ---
 
 ## 矛盾偵測策略（ContradictionDetector）

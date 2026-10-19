@@ -2166,6 +2166,89 @@ async def _gather_memory_health(conn) -> dict:
     }
 
 
+@memory.command("big-dream")
+@click.option("--db", default="~/.loom/memory.db", show_default=True)
+@click.option("--execute", is_flag=True,
+              help="Write. Each stage still needs its loom.toml gate: "
+                   "[memory.consolidation_dream] execute and [memory.distill_dream] execute.")
+@click.option("--batch", default=20, show_default=True, help="Neighbourhoods per distill pass.")
+@click.option("--max-passes", default=50, show_default=True, help="Upper bound on distill passes.")
+@click.option("--skip-consolidation", is_flag=True, help="Distill only (no convergent dream).")
+@click.option("--yes", is_flag=True, help="Don't ask for confirmation (for agents / scripts).")
+def memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
+                     skip_consolidation: bool, yes: bool) -> None:
+    """One-off whole-corpus tidy-up: convergent dream + distill passes.
+
+    Read-only unless --execute. Every writing stage backs up first and every
+    report lands in the dreams journal. Run it from the agent's directory (its
+    loom.toml is read from the cwd). See skills/memory_big_dream/SKILL.md.
+    """
+    asyncio.run(_memory_big_dream(db, execute, batch, max_passes, skip_consolidation, yes))
+
+
+async def _memory_big_dream(db: str, execute: bool, batch: int, max_passes: int,
+                            skip_consolidation: bool, yes: bool) -> None:
+    from rich.markup import escape
+
+    from loom.core.cognition.big_dream import run_big_dream
+    from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
+    from loom.core.cognition.router import get_default_model
+    from loom.core.memory.embeddings import build_embedding_provider
+    from loom.core.memory.maintenance import distill_execute_enabled
+
+    cfg = _load_loom_config()
+    mem_cfg = cfg.get("memory", {})
+    gate_consolidation = (mem_cfg.get("consolidation_dream") or {}).get("execute") is True
+    gate_distill = distill_execute_enabled(cfg)
+    exec_consolidation = execute and gate_consolidation and not skip_consolidation
+    exec_distill = execute and gate_distill
+    db_path = str(Path(db).expanduser())
+    model = get_default_model()
+
+    console.print(Rule("[loom.accent]Big dream[/loom.accent]"))
+    console.print(f"  db       : {escape(db_path)}")
+    cfg_path = next((p for p in (Path.cwd() / "loom.toml",
+                                 Path(__file__).parents[3] / "loom.toml") if p.exists()), None)
+    console.print(f"  config   : {cfg_path or '(none — defaults)'}")
+    console.print(f"  journal  : {Path.cwd() / 'autonomy/circadian/dreams'}")
+    console.print(f"  model    : {model}")
+    console.print("  converge : " + ("skipped" if skip_consolidation else
+                  "execute" if exec_consolidation else "read-only"))
+    console.print(f"  distill  : {'execute' if exec_distill else 'read-only'} "
+                  f"(batch {batch}, ≤ {max_passes} passes)")
+    if execute and not (exec_consolidation or skip_consolidation) and not gate_consolidation:
+        console.print("  [yellow]--execute, but \\[memory.consolidation_dream] execute is not true "
+                      "— convergent stage stays read-only[/yellow]")
+    if execute and not gate_distill:
+        console.print("  [yellow]--execute, but \\[memory.distill_dream] execute is not true "
+                      "— distill stage stays read-only[/yellow]")
+    if (exec_consolidation or exec_distill) and not yes:
+        if not click.confirm("Rewrite memory now? (backups are taken first)", default=False):
+            console.print("[loom.muted]Aborted.[/loom.muted]")
+            return
+
+    async def llm_fn(messages: list[dict]) -> str:
+        response = await router.chat(model=model, messages=messages,
+                                     max_tokens=DREAM_LLM_MAX_TOKENS)
+        return response.text or ""
+
+    router = build_router(model)
+    store = SQLiteStore(db_path)
+    await store.initialize()
+    async with store.connect() as conn:
+        semantic = SemanticMemory(
+            conn, embedding_provider=build_embedding_provider(_load_env(), cfg))
+        summary = await run_big_dream(
+            conn, semantic, llm_fn,
+            execute_consolidation=exec_consolidation, execute_distill=exec_distill,
+            distill_batch=batch, max_passes=max_passes,
+            skip_consolidation=skip_consolidation,
+            log=lambda line: console.print(f"[loom.muted]{escape(line)}[/loom.muted]"),
+        )
+    console.print(Rule())
+    console.print(Text(summary.render()))
+
+
 @memory.command("health")
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 def memory_health(db: str) -> None:

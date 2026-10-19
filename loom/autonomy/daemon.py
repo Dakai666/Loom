@@ -215,10 +215,6 @@ class AutonomyDaemon:
         self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
         # Loop name → consecutive unexpected ends, for restart backoff.
         self._loop_failures: dict[str, int] = {}
-        # The convergent and distill dreams both rewrite memory on the shared
-        # session connection; a commit from one inside the other's
-        # multi-statement write would land half of it. One pass at a time.
-        self._dream_write_lock = asyncio.Lock()
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -743,7 +739,10 @@ class AutonomyDaemon:
 
     def _one_dream_at_a_time(self, fn: Callable[[], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
         async def serialised() -> Any:
-            async with self._dream_write_lock:
+            # Shared with the session's distill_dream tool: both rewrite
+            # memory on one connection. One pass at a time.
+            from loom.core.cognition.consolidation import memory_rewrite_lock
+            async with memory_rewrite_lock():
                 return await fn()
         return serialised
 

@@ -37,11 +37,13 @@ Design decisions
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
 import uuid
+import weakref
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
@@ -293,6 +295,26 @@ _LEGACY_META_KEY_SUPPRESSED = "consolidation_dream.suppressed_skips"
 _SUPPRESS_RETENTION_DAYS = 90.0   # aligns with the memory half-life
 
 
+_REWRITE_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary())
+
+
+def memory_rewrite_lock() -> asyncio.Lock:
+    """The lock every memory-rewriting dream pass holds (#624 follow-up).
+
+    The daemon's convergent / distill loops and a session's ``distill_dream``
+    tool share one DB connection; a commit from one inside the other's
+    multi-statement write would land half of it. One lock per event loop
+    (an ``asyncio.Lock`` binds to the loop it is first contended on).
+    Separate processes need no lock: SQLite isolates their connections.
+    """
+    loop = asyncio.get_running_loop()
+    lock = _REWRITE_LOCKS.get(loop)
+    if lock is None:
+        lock = _REWRITE_LOCKS[loop] = asyncio.Lock()
+    return lock
+
+
 def _cluster_signature(members) -> str:
     """Stable, order-independent signature of a cluster's members.
 
@@ -303,14 +325,14 @@ def _cluster_signature(members) -> str:
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
 
 
-async def load_suppressed_signatures(db) -> set[str]:
+async def load_suppressed_signatures(db, *, meta_key: str = _META_KEY_SUPPRESSED) -> set[str]:
     """Read the persisted skip-suppression set from ``memory_meta`` (#553).
 
     Tolerant by contract: a missing or corrupt row reads as the empty set, so a
     bad value can never wedge the dream into suppressing nothing-or-everything.
     """
     cursor = await db.execute(
-        "SELECT value FROM memory_meta WHERE key = ?", (_META_KEY_SUPPRESSED,)
+        "SELECT value FROM memory_meta WHERE key = ?", (meta_key,)
     )
     row = await cursor.fetchone()
     if not row or not row[0]:
@@ -330,6 +352,7 @@ async def record_suppressed_signatures(
     *,
     now: datetime | None = None,
     retention_days: float = _SUPPRESS_RETENTION_DAYS,
+    meta_key: str = _META_KEY_SUPPRESSED,
 ) -> None:
     """Merge ``signatures`` into the persisted set, pruning stale entries (#553).
 
@@ -341,7 +364,7 @@ async def record_suppressed_signatures(
     stamp = now.isoformat()
 
     cursor = await db.execute(
-        "SELECT value FROM memory_meta WHERE key = ?", (_META_KEY_SUPPRESSED,)
+        "SELECT value FROM memory_meta WHERE key = ?", (meta_key,)
     )
     row = await cursor.fetchone()
     stored: dict[str, str] = {}
@@ -371,13 +394,14 @@ async def record_suppressed_signatures(
         "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
         "updated_at = excluded.updated_at",
-        (_META_KEY_SUPPRESSED, payload, stamp),
+        (meta_key, payload, stamp),
     )
-    # Drop pre-v2 sets on the write path (load stays read-only) so they don't
-    # sit orphaned in memory_meta forever.
-    await db.execute(
-        "DELETE FROM memory_meta WHERE key = ?", (_LEGACY_META_KEY_SUPPRESSED,)
-    )
+    if meta_key == _META_KEY_SUPPRESSED:
+        # Drop pre-v2 sets on the write path (load stays read-only) so they
+        # don't sit orphaned in memory_meta forever.
+        await db.execute(
+            "DELETE FROM memory_meta WHERE key = ?", (_LEGACY_META_KEY_SUPPRESSED,)
+        )
     await db.commit()
 
 

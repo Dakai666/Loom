@@ -415,11 +415,19 @@ def make_distill_dream_tool(
                        "min_similarity must be in (0, 1)."),
             )
 
-        plan, report = await run_distill_dream(
-            semantic, llm_fn, domain=domain,
-            max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
-            min_similarity=min_sim, execute=execute,
-        )
+        async def _pass():
+            return await run_distill_dream(
+                semantic, llm_fn, domain=domain,
+                max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
+                min_similarity=min_sim, execute=execute,
+            )
+        if execute:
+            # The daemon's dream loops write on this session's connection too.
+            from loom.core.cognition.consolidation import memory_rewrite_lock
+            async with memory_rewrite_lock():
+                plan, report = await _pass()
+        else:
+            plan, report = await _pass()
         path = append_distill_report(report, timezone=timezone, dreams_dir=dreams_dir)
         c = plan.counts()
         lines = [

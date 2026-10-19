@@ -371,3 +371,55 @@ def _call(args: dict):
     from loom.core.harness.permissions import TrustLevel
     return ToolCall(tool_name="distill_dream", args=args,
                     trust_level=TrustLevel.SAFE, session_id="t")
+
+
+# ── cross-pass suppression of rejected neighbourhoods ─────────────────────
+
+class TestSuppression:
+    """A rejected neighbourhood isn't re-planned while it is unchanged, so
+    repeated passes (the big dream, the 12 h loop) move on to the next one."""
+
+    async def test_rejected_neighbourhood_is_not_planned_again(self, db, semantic):
+        await _topic(db, "a", 0)
+        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        (r,) = plan1.results
+        assert r.status == STATUS_REJECTED
+        plan2, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert plan2.neighbourhoods == []
+        assert any("suppressed" in n for n in plan2.notes)
+
+    async def test_the_next_neighbourhood_gets_its_turn(self, db, semantic):
+        await _topic(db, "a", 0)
+        await _topic(db, "b", 180, n=3)       # smaller → planned second
+        plan1, _ = await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        seed1 = plan1.neighbourhoods[0].seed_key
+        plan2, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert plan2.neighbourhoods[0].seed_key[0] != seed1[0]
+
+    async def test_an_edited_member_lifts_the_suppression(self, db, semantic):
+        await _topic(db, "a", 0)
+        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        await db.execute("UPDATE semantic_entries SET value='changed', "
+                         "updated_at='2099-01-01T00:00:00+00:00' WHERE key='a2'")
+        await db.commit()
+        plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert len(plan.neighbourhoods) == 1
+
+    @pytest.mark.parametrize("review", ["defer"])
+    async def test_deferred_is_not_suppressed(self, db, semantic, review):
+        await _topic(db, "a", 0)
+        await run_distill_dream(semantic, _llm(review=review), max_neighbourhoods=1)
+        plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert len(plan.neighbourhoods) == 1
+
+    async def test_failed_distill_is_not_suppressed(self, db, semantic):
+        await _topic(db, "a", 0)
+        await run_distill_dream(semantic, _llm(fail_distill_for='key="a'), max_neighbourhoods=1)
+        plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=1)
+        assert len(plan.neighbourhoods) == 1
+
+    async def test_convergent_suppression_is_separate(self, db, semantic):
+        from loom.core.cognition.consolidation import load_suppressed_signatures
+        await _topic(db, "a", 0)
+        await run_distill_dream(semantic, _llm(review="skip"), max_neighbourhoods=1)
+        assert await load_suppressed_signatures(db) == set()
