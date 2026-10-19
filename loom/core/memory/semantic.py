@@ -483,8 +483,11 @@ class SemanticMemory:
             return 0
 
         cursor = await self._db.execute(
+            # Redirect stubs keep a NULL embedding on purpose (consolidate):
+            # re-embedding "[consolidated → …]" would surface them in search.
             "SELECT key, value FROM semantic_entries "
-            "WHERE key LIKE ? AND embedding IS NULL",
+            "WHERE key LIKE ? AND embedding IS NULL "
+            "AND json_extract(metadata, '$.redirected_to') IS NULL",
             (f"{prefix}%",),
         )
         rows = await cursor.fetchall()
