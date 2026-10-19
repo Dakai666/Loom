@@ -97,8 +97,10 @@ def half_life_for(domain: str, temporal: str, source: str | None = None) -> floa
     :data:`DREAMING_HALF_LIFE_DAYS` (never lengthens a shorter table value).
     """
     half = _HALF_LIFE_TABLE.get((domain, temporal), _FALLBACK_HALF_LIFE)
-    if source == "dreaming":
-        return min(half, DREAMING_HALF_LIFE_DAYS)
+    if source:
+        from loom.core.memory.semantic import classify_source  # lazy: semantic imports us
+        if classify_source(source)[0] == "dreaming":
+            return min(half, DREAMING_HALF_LIFE_DAYS)
     return half
 
 
@@ -357,7 +359,7 @@ class MemoryLifecycle:
             # Deletion is irreversible: no fresh snapshot → no delete (the
             # rows stay archived and are retried next cycle). #613
             from loom.core.memory import backup
-            if await backup.snapshot_before_write(self._db, prefix="memory-pre-prune") is None:
+            if await backup.ensure_recent_snapshot(self._db, prefix="memory-pre-prune") is None:
                 logger.warning(
                     "lifecycle: pre-delete backup failed — keeping %d archived "
                     "%s rows this cycle", len(to_delete), table,

@@ -214,6 +214,7 @@ async def dream_cycle(
       - ``triples_found``   int
       - ``triples_written`` int
       - ``triples_rejected`` int  (blocked by the admission gate)
+      - ``rejected_reasons`` dict[str, int]  (admission reason → count)
       - ``domain``          str | None  (resolved domain, or None for free)
       - ``errors``          list[str]  (non-fatal parse issues)
     """
@@ -279,7 +280,7 @@ async def dream_cycle(
 
     # ── 4. Write to semantic via relational bridge (#451 phase B) ─────
     written = 0
-    rejected = 0
+    rejected: dict[str, int] = {}  # admission reason → count
     if not dry_run:
         from loom.core.memory.relational_bridge import (
             RelationalEntry, triple_to_semantic, upsert_triple,
@@ -299,39 +300,38 @@ async def dream_cycle(
             )
             for triple in triples
         ]
-        admitted = [True] * len(entries)
-        if governor is not None and entries:
-            # Dreams were the largest producer yet bypassed the gate that
-            # #603 put on session compression (#613).
-            try:
-                verdicts = await governor.evaluate_admission(
-                    [triple_to_semantic(e).value for e in entries],
-                    source="dreaming",
-                )
-                admitted = [v.admitted for v in verdicts]
-            except Exception as exc:
-                errors.append(f"admission error: {exc}")
-                logger.warning("[dreaming] admission gate failed: %s", exc)
-        for entry, ok in zip(entries, admitted):
-            if not ok:
-                rejected += 1
-                continue
+        for entry in entries:
             try:
                 if governor is not None:
-                    res = await governor.governed_upsert(triple_to_semantic(entry))
+                    # Dreams were the largest producer yet bypassed the gate
+                    # #603 put on session compression (#613). One triple at a
+                    # time so a later one is checked against an earlier one
+                    # from the same dream. reinforce/notify off: a dream
+                    # paraphrasing what it sampled is not use, and its
+                    # contradictions are not the live session's business.
+                    sem = triple_to_semantic(entry)
+                    verdict = (await governor.evaluate_admission(
+                        [sem.value], source="dreaming", reinforce=False,
+                    ))[0]
+                    if not verdict.admitted:
+                        rejected[verdict.reason] = rejected.get(verdict.reason, 0) + 1
+                        continue
+                    res = await governor.governed_upsert(sem, notify=False)
                     written += int(res.written)
                 else:
                     await upsert_triple(semantic, entry)
                     written += 1
             except Exception as exc:
-                errors.append(f"upsert error: {exc}")
-                logger.warning("[dreaming] Failed to write triple %s: %s", entry, exc)
+                # Fail closed: an erroring gate must not wave triples through.
+                errors.append(f"write error: {exc}")
+                logger.warning("[dreaming] Failed to gate/write triple %s: %s", entry, exc)
 
     result = {
         "facts_sampled": len(facts),
         "triples_found": len(triples),
         "triples_written": written,
-        "triples_rejected": rejected,
+        "triples_rejected": sum(rejected.values()),
+        "rejected_reasons": rejected,
         "domain": domain,
         "errors": errors,
     }

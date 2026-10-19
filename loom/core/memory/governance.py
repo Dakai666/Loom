@@ -191,7 +191,9 @@ class MemoryGovernor:
     # 1. Governed upsert
     # ------------------------------------------------------------------
 
-    async def governed_upsert(self, entry: SemanticEntry) -> GovernedWriteResult:
+    async def governed_upsert(
+        self, entry: SemanticEntry, *, notify: bool = True,
+    ) -> GovernedWriteResult:
         """Write a semantic entry through the governance pipeline.
 
         Steps:
@@ -241,7 +243,10 @@ class MemoryGovernor:
             # Issue #281 P3 Hook A — fire once per (key × session) regardless
             # of resolution: even when the existing fact wins (KEEP), the
             # agent benefits from knowing a contradicting attempt happened.
-            if self._pulse is not None:
+            # ``notify=False``: background producers (dreams) must not inject a
+            # contradiction pulse about a hypothesis nobody in the live session
+            # wrote (#616 review).
+            if notify and self._pulse is not None:
                 await self._pulse.contradiction_inject(main)
 
             if result.resolution == Resolution.KEEP:
@@ -301,6 +306,8 @@ class MemoryGovernor:
         self,
         candidate_facts: list[str],
         source: str,
+        *,
+        reinforce: bool = True,
     ) -> list[AdmissionResult]:
         """Score candidate facts before promotion to semantic memory.
 
@@ -353,10 +360,13 @@ class MemoryGovernor:
                 # Re-learning an existing fact is a signal that it is still
                 # true and in use: bump it so its decay clock restarts (#603).
                 # Best-effort — a failed touch must not change the verdict.
-                try:
-                    await self._semantic.mark_accessed([duplicate_of])
-                except Exception:
-                    pass
+                # ``reinforce=False`` for producers whose repeats are not use:
+                # a dream paraphrases the facts it sampled (#616 review).
+                if reinforce:
+                    try:
+                        await self._semantic.mark_accessed([duplicate_of])
+                    except Exception:
+                        pass
             else:
                 duplicate_of = None
             results.append(AdmissionResult(

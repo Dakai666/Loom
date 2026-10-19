@@ -128,10 +128,77 @@ class TestDreamAdmission:
         assert result["triples_found"] == 2
         assert result["triples_written"] == 1
         assert result["triples_rejected"] == 1
+        assert result["rejected_reasons"] == {"duplicate_semantic": 1}
         assert await semantic.get("rel:GROUPA memory search::parallels") is None
         assert await semantic.get("rel:GROUPB circadian rhythm::enables") is not None
-        # The repeated fact was re-learned, so its decay clock restarts.
-        assert (await semantic.get("fact:a")).last_accessed_at is not None
+
+    async def test_dream_repeat_does_not_reinforce(self, semantic, governor):
+        """A dream paraphrasing what it sampled is not use: the repeated fact's
+        decay clock must not restart, or the sampler becomes a recall."""
+        await semantic.upsert(SemanticEntry(
+            key="fact:a", value="GROUPA memory search mixes bm25 and vectors",
+            source="manual",
+        ))
+        triples = [{"subject": "GROUPA memory search", "predicate": "parallels",
+                    "object": "hybrid retrieval design", "insight": ""}]
+        await dream_cycle(semantic=semantic, llm_fn=_llm_returning(triples),
+                          governor=governor)
+        assert (await semantic.get("fact:a")).last_accessed_at is None
+
+    async def test_same_dream_duplicates_checked_against_each_other(
+        self, semantic, governor,
+    ):
+        await semantic.upsert(SemanticEntry(
+            key="fact:seed", value="unrelated seed fact for sampling", source="manual",
+        ))
+        triples = [
+            {"subject": "GROUPB x", "predicate": "uses", "object": "y tool chain", "insight": ""},
+            {"subject": "GROUPB x", "predicate": "utilizes", "object": "y tool chain", "insight": ""},
+        ]
+        result = await dream_cycle(semantic=semantic, llm_fn=_llm_returning(triples),
+                                   governor=governor)
+        assert result["triples_written"] == 1
+        assert result["triples_rejected"] == 1
+
+    async def test_gate_error_fails_closed(self, semantic, governor, monkeypatch):
+        await semantic.upsert(SemanticEntry(
+            key="fact:seed", value="unrelated seed fact for sampling", source="manual",
+        ))
+
+        async def boom(*a, **k):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(governor, "evaluate_admission", boom)
+        triples = [{"subject": "GROUPB x", "predicate": "enables",
+                    "object": "y things happen", "insight": ""}]
+        result = await dream_cycle(semantic=semantic, llm_fn=_llm_returning(triples),
+                                   governor=governor)
+        assert result["triples_written"] == 0
+        assert await semantic.get("rel:GROUPB x::enables") is None
+        assert result["errors"]
+
+    async def test_dream_contradiction_does_not_pulse_live_session(
+        self, semantic, governor,
+    ):
+        injected = []
+
+        class _Pulse:
+            async def contradiction_inject(self, c):
+                injected.append(c)
+
+        governor._pulse = _Pulse()
+        # Same rel key, dissimilar text → admitted, then a key-match
+        # contradiction inside governed_upsert.
+        await semantic.upsert(SemanticEntry(
+            key="rel:topic::enables", value="topic enables GROUPA old object",
+            source="dreaming",
+        ))
+        triples = [{"subject": "topic", "predicate": "enables",
+                    "object": "GROUPB a different new object", "insight": ""}]
+        result = await dream_cycle(semantic=semantic, llm_fn=_llm_returning(triples),
+                                   governor=governor)
+        assert result["triples_rejected"] == 0  # reached governed_upsert
+        assert injected == []
 
     async def test_without_governor_still_writes(self, semantic):
         """Callers that don't wire a governor keep the old write-through."""
@@ -156,6 +223,11 @@ class TestDreamingHalfLife:
         # The cap never lengthens a shorter table value.
         assert half_life_for(DOMAIN_KNOWLEDGE, TEMPORAL_ARCHIVED, source="dreaming") \
             == min(14.0, DREAMING_HALF_LIFE_DAYS)
+
+    def test_source_matched_via_trust_classifier(self):
+        """Same classification as the trust tiers (case-insensitive)."""
+        assert half_life_for(DOMAIN_KNOWLEDGE, TEMPORAL_RECENT, source="Dreaming") \
+            == DREAMING_HALF_LIFE_DAYS
 
     def test_other_sources_unchanged(self):
         assert half_life_for(DOMAIN_KNOWLEDGE, TEMPORAL_RECENT, source="session:x") == 90.0
@@ -205,6 +277,17 @@ class TestPruneBackup:
         snaps = list(backup_mod.DEFAULT_BACKUP_DIR.glob("memory-pre-prune-*.db"))
         assert len(snaps) == 1
 
+    async def test_recent_snapshot_is_reused(self, db_conn, semantic):
+        """Daily / session-stop prunes must not copy the whole DB every time."""
+        await _insert(db_conn, "doomed1", source="test", age_days=1000,
+                      temporal=TEMPORAL_ARCHIVED)
+        await MemoryLifecycle(db_conn).run()
+        await _insert(db_conn, "doomed2", source="test", age_days=1000,
+                      temporal=TEMPORAL_ARCHIVED)
+        result = await MemoryLifecycle(db_conn).run()
+        assert result.semantic_deleted == 1
+        assert len(list(backup_mod.DEFAULT_BACKUP_DIR.glob("memory-pre-prune-*.db"))) == 1
+
     async def test_no_snapshot_when_nothing_to_delete(self, db_conn, semantic):
         await _insert(db_conn, "fresh", source="test", age_days=1)
         await MemoryLifecycle(db_conn).run()
@@ -214,7 +297,7 @@ class TestPruneBackup:
         async def failed(db, **_):
             return None
 
-        monkeypatch.setattr(backup_mod, "snapshot_before_write", failed)
+        monkeypatch.setattr(backup_mod, "ensure_recent_snapshot", failed)
         await _insert(db_conn, "doomed", source="test", age_days=1000,
                       temporal=TEMPORAL_ARCHIVED)
         result = await MemoryLifecycle(db_conn).run()

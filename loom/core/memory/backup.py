@@ -65,3 +65,28 @@ async def snapshot_before_write(
             logger.warning("[memory-backup] could not prune %s: %s", old, exc)
     logger.info("[memory-backup] snapshot written: %s", final)
     return final
+
+
+async def ensure_recent_snapshot(
+    db: aiosqlite.Connection,
+    *,
+    prefix: str,
+    max_age_hours: float = 24.0,
+    keep: int = 7,
+    dest_dir: Path | None = None,
+) -> Path | None:
+    """Return a ``prefix`` snapshot no older than ``max_age_hours``, taking one
+    only when none exists.
+
+    For frequent small destructive passes (the lifecycle prune runs daily and
+    at every session stop): a fresh full copy each time would stall shutdown
+    and rotate restore points out within hours. Rows such a pass removes are
+    weeks old, so a same-day snapshot still holds them. Returns ``None`` when
+    no recent snapshot exists and taking one fails.
+    """
+    dest = Path(dest_dir) if dest_dir is not None else DEFAULT_BACKUP_DIR
+    cutoff = datetime.now(UTC).timestamp() - max_age_hours * 3600
+    recent = [p for p in dest.glob(f"{prefix}-*.db") if p.stat().st_mtime >= cutoff]
+    if recent:
+        return max(recent, key=lambda p: p.stat().st_mtime)
+    return await snapshot_before_write(db, prefix=prefix, keep=keep, dest_dir=dest)

@@ -96,7 +96,11 @@ def make_dream_cycle_tool(
             f"  Facts sampled: {result['facts_sampled']}",
             f"  Triples found: {result['triples_found']}",
             f"  Triples written: {result['triples_written']}",
-            f"  Triples rejected (duplicate): {result.get('triples_rejected', 0)}",
+            f"  Triples rejected: {result.get('triples_rejected', 0)}"
+            + (
+                " (" + ", ".join(f"{k}={v}" for k, v in sorted(result["rejected_reasons"].items())) + ")"
+                if result.get("rejected_reasons") else ""
+            ),
         ]
         if result["errors"]:
             lines.append(f"  Warnings: {'; '.join(result['errors'])}")
