@@ -110,6 +110,22 @@ class TestDuplicateDensity:
         assert c.dup.largest == 3
         assert "每日節奏 dawn" in c.dup.largest_sample
 
+    async def test_chained_component_is_split_like_consolidation(self, db):
+        """Single-linkage chains unrelated facts (A~B~C…): on 2026-10-19 the
+        census reported an 845-member "dense group" whose mean pairwise cos was
+        0.52. Report what consolidation actually proposes — oversized chains
+        split at stepwise stricter similarity — not the raw chain."""
+        # 5 tight groups of 10 (0.5° apart), 22° between groups (cos ≈ 0.927):
+        # one 50-member chain at 0.85, five groups once the bridges break.
+        for g in range(5):
+            for i in range(10):
+                await _row(db, embedding=_vec(g * 26.5 + i * 0.5), value=f"群{g} 事實 {i}")
+        c = await take_census(db, now=NOW)
+        assert c.dup.groups == 5
+        assert c.dup.largest == 10
+        assert c.dup.facts_in_groups == 50
+        assert any("chained" in n for n in c.notes)
+
     async def test_stubs_and_unembedded_are_not_clustered(self, db):
         """Same exemptions consolidation applies: redirect stubs are not facts
         to merge. Dreaming output IS clustered since #603 lifted its merge

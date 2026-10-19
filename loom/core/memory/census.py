@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from wcwidth import wcswidth
 
+from loom.core.memory.clustering import MAX_CLUSTER_MEMBERS, split_oversized
 from loom.core.memory.lifecycle import effective_confidence
 from loom.core.memory.ontology import (
     TEMPORAL_ARCHIVED,
@@ -316,9 +317,10 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
 def _duplicate_density(
     rows: list[tuple[str, str]], unembedded: int, notes: list[str],
 ) -> DupDensity:
-    """Single-linkage groups at ``DUP_SIMILARITY`` — the same union-find over
-    near-duplicate edges that consolidation builds, but over the whole corpus
-    at once. Blocked matmul keeps memory at ~block × N floats."""
+    """Duplicate groups at ``DUP_SIMILARITY`` exactly as consolidation forms
+    them — single-linkage union-find, then oversized chains re-split at
+    stricter similarity — but over the whole corpus at once. Blocked matmul
+    keeps memory at ~block × N floats."""
     import numpy as np
 
     # Convert each row to float32 as it is parsed — a list of Python floats
@@ -359,18 +361,49 @@ def _duplicate_density(
         return x
 
     block = 1024
+    edge_a: list[Any] = []
+    edge_b: list[Any] = []
+    edge_s: list[Any] = []
     for start in range(0, len(m), block):
         sims = m[start:start + block] @ m.T
         rows_i, cols = np.nonzero(sims >= DUP_SIMILARITY)
-        for r, c in zip(rows_i.tolist(), cols.tolist()):
-            a = start + r
-            if a < c:
-                parent[find(a)] = find(c)
+        upper = (rows_i + start) < cols
+        rows_i, cols = rows_i[upper], cols[upper]
+        edge_a.append(rows_i + start)
+        edge_b.append(cols)
+        edge_s.append(sims[rows_i, cols])
+        for a, c in zip((rows_i + start).tolist(), cols.tolist()):
+            parent[find(a)] = find(c)
 
     sizes: dict[int, int] = {}
+    members: dict[int, set[int]] = {}
     for i in range(len(m)):
         root = find(i)
         sizes[root] = sizes.get(root, 0) + 1
+        members.setdefault(root, set()).add(i)
+
+    # Report what consolidation proposes, not the raw single-linkage chain:
+    # oversized components are re-split at stricter similarity (#613-D).
+    oversized = [r for r, n in sizes.items() if n > MAX_CLUSTER_MEMBERS]
+    if oversized:
+        a_all = np.concatenate(edge_a) if edge_a else np.array([], dtype=int)
+        b_all = np.concatenate(edge_b) if edge_b else np.array([], dtype=int)
+        s_all = np.concatenate(edge_s) if edge_s else np.array([], dtype=np.float32)
+        roots = np.array([find(int(x)) for x in a_all]) if len(a_all) else np.array([])
+        for root in oversized:
+            sel = roots == root
+            pair_score = {
+                frozenset((int(a), int(b))): float(sc)
+                for a, b, sc in zip(a_all[sel], b_all[sel], s_all[sel])
+            }
+            pieces, split_notes = split_oversized(
+                [members[root]], pair_score, base=DUP_SIMILARITY,  # type: ignore[list-item]
+            )
+            notes.extend(split_notes)
+            del sizes[root]
+            for piece in pieces:
+                rep = min(piece)
+                sizes[rep] = len(piece)
     groups = {r: n for r, n in sizes.items() if n >= DUP_GROUP_MIN}
     if not groups:
         return DupDensity(0, 0, 0, "", len(m), unembedded)
