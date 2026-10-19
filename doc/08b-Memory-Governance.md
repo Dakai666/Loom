@@ -222,6 +222,8 @@ dream_cycle(sample_size=15)
 
 這讓 relational triples 更能捕捉 cross-domain 的關係，而非只是同一個 topic 內部的瑣碎連結。
 
+**排程（2026-10-19 起，#613 E）**：daemon 不再每 12h 跑 themed `dream_cycle`。那條路徑只會增加記憶，現在改跑蒸餾夢（`distill_dream`，`[memory.distill_dream]`）：沿用同一個 domain 輪替挑種子，把同主題的機器記憶精煉成一條並取代原本那幾條。`dream_cycle` 仍可透過工具呼叫，03:00 自由夢（themed=false）照常排程。設計與邊界見 `docs/designs/57-記憶蒸餾夢-規格.md`。
+
 ---
 
 ## 矛盾偵測策略（ContradictionDetector）

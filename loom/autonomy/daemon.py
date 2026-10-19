@@ -20,14 +20,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.permission_fields import parse_permission_fields
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.maintenance import (
-    ConvergentDreamLoop, DreamLoop, MaintenanceLoop,
+    DEFAULT_CHECK_INTERVAL_SECONDS, ConvergentDreamLoop, MaintenanceLoop,
 )
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
@@ -167,6 +167,26 @@ def _positive_int_cfg(cfg: dict, key: str, default: int) -> int:
     return value
 
 
+_DISTILL_THEME_KEY = "distill_dream.last_theme"
+
+
+def _positive_float_cfg(
+    cfg: dict, key: str, default: float, *, below: float | None = None,
+) -> float:
+    """Like :func:`_positive_int_cfg` for a float in (0, ``below``)."""
+    raw = cfg.get(key, default)
+    ok = (not isinstance(raw, bool) and isinstance(raw, (int, float))
+          and raw > 0 and (below is None or raw < below))
+    if not ok:
+        bound = f"(0, {below})" if below is not None else "> 0"
+        logger.warning(
+            "[autonomy] %s=%r is not a number in %s — using default %s",
+            key, raw, bound, default,
+        )
+        return default
+    return float(raw)
+
+
 class AutonomyDaemon:
     """
     Manages the full autonomy lifecycle:
@@ -195,6 +215,10 @@ class AutonomyDaemon:
         self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
         # Loop name → consecutive unexpected ends, for restart backoff.
         self._loop_failures: dict[str, int] = {}
+        # The convergent and distill dreams both rewrite memory on the shared
+        # session connection; a commit from one inside the other's
+        # multi-statement write would land half of it. One pass at a time.
+        self._dream_write_lock = asyncio.Lock()
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -717,12 +741,21 @@ class AutonomyDaemon:
         )
         return asyncio.ensure_future(loop.run_forever())
 
-    def _maybe_start_dream_loop(self) -> asyncio.Task | None:
-        """Read [memory.dream] and launch DreamLoop if enabled.
+    def _one_dream_at_a_time(self, fn: Callable[[], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
+        async def serialised() -> Any:
+            async with self._dream_write_lock:
+                return await fn()
+        return serialised
 
-        Issue #376: ``dream_cycle`` only ran when the agent remembered to
-        call its tool form. This loop gives it a deterministic cadence so
-        themed rotation actually fires every day.
+    def _maybe_start_dream_loop(self) -> asyncio.Task | None:
+        """Read [memory.distill_dream] and launch the distill-dream loop (#613 E).
+
+        Replaces the 12 h themed dream (#376), which only added memory: each
+        pass now folds one topic neighbourhood per seed into a refined fact
+        (docs/designs/57). Seeds follow the themed domain rotation; cadence
+        is restart-safe (``distill_dream.last_run`` in ``memory_meta``). It
+        writes only with ``execute = true`` — the same gate as the tool —
+        after a fresh backup. The 03:00 free dream is a separate schedule.
         """
         session = self._session
         db = getattr(session, "_db", None) if session else None
@@ -733,20 +766,42 @@ class AutonomyDaemon:
             return None
         try:
             from loom.core.config import load_loom_config  # local import: lazy
-            cfg = load_loom_config().get("memory", {}).get("dream", {})
+            mem_cfg = load_loom_config().get("memory", {})
         except Exception as exc:
-            logger.debug("[autonomy] dream config load failed: %s", exc)
+            logger.debug("[autonomy] distill dream config load failed: %s", exc)
             return None
+        from loom.core.cognition.distillation import (
+            DEFAULT_MAX_NEIGHBOURHOODS, DISTILL_MIN_SIMILARITY,
+        )
+        from loom.core.memory.maintenance import distill_execute_enabled
+
+        legacy = mem_cfg.get("dream")
+        if legacy is not None:
+            logger.warning(
+                "[autonomy] [memory.dream] is retired — the themed dream was replaced "
+                "by the distill dream; configure [memory.distill_dream] instead",
+            )
+        if "distill_dream" not in mem_cfg and isinstance(legacy, dict) \
+                and legacy.get("enabled") is False:
+            # Whoever switched the old dream off didn't opt into its successor.
+            logger.warning("[autonomy] distill dream off: honouring [memory.dream] enabled = false")
+            return None
+        cfg = mem_cfg.get("distill_dream", {}) or {}
         if not cfg.get("enabled", True):
             return None
-
-        sample_size = int(cfg.get("sample_size", 15))
+        execute = distill_execute_enabled({"memory": mem_cfg})
+        interval_hours = _positive_float_cfg(cfg, "interval_hours", 12.0)
+        max_nb = _positive_int_cfg(cfg, "max_neighbourhoods", DEFAULT_MAX_NEIGHBOURHOODS)
+        corpus_limit = _positive_int_cfg(cfg, "corpus_limit", 15000)
+        min_sim = _positive_float_cfg(cfg, "min_similarity", DISTILL_MIN_SIMILARITY, below=1.0)
         router = session.router
         model = session.model
 
-        async def _dream_once() -> dict:
+        async def _distill_once() -> Any:
+            from loom.autonomy.circadian.journal import append_distill_report
             from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
-            from loom.core.cognition.dreaming import dream_cycle
+            from loom.core.cognition.distillation import run_distill_dream
+            from loom.core.cognition.dreaming import mark_themed_domain, peek_themed_domain
 
             async def _llm_fn(messages: list[dict]) -> str:
                 response = await router.chat(
@@ -755,31 +810,47 @@ class AutonomyDaemon:
                 )
                 return response.text or ""
 
-            return await dream_cycle(
-                semantic=memory.semantic,
-                llm_fn=_llm_fn,
-                sample_size=sample_size,
-                themed=True,
-                db=db,
-                governor=getattr(session, "_governor", None),
+            # Own rotation key (the dream_cycle tool advances dream.last_theme),
+            # advanced only once the pass succeeded so a failure retries it.
+            domain = await peek_themed_domain(db, _DISTILL_THEME_KEY)
+            plan, report = await run_distill_dream(
+                memory.semantic, _llm_fn, domain=domain,
+                max_neighbourhoods=max_nb, corpus_limit=corpus_limit,
+                min_similarity=min_sim, execute=execute,
             )
+            await mark_themed_domain(db, _DISTILL_THEME_KEY, domain)
+            try:
+                append_distill_report(report)
+            except Exception:
+                # The pass may already have written memory: don't raise (the
+                # loop would re-run it), and keep the report in the log.
+                logger.exception("[distill-dream] journal append failed; report:\n%s", report)
+            logger.info(
+                "[distill-dream] pass=%s domain=%s mode=%s results=%s outcomes=%s",
+                plan.pass_id, domain, plan.mode, plan.counts(), plan.outcome_counts(),
+            )
+            return plan
 
-        loop = DreamLoop(
-            dream_fn=_dream_once,
+        loop = ConvergentDreamLoop(
+            dream_fn=self._one_dream_at_a_time(_distill_once),
+            db=db,
             abort=self._abort,
-            interval_hours=float(cfg.get("interval_hours", 12.0)),
+            interval_days=interval_hours / 24.0,
+            meta_key="distill_dream.last_run",
+            check_interval_seconds=min(DEFAULT_CHECK_INTERVAL_SECONDS, interval_hours * 3600.0 / 4),
+            label="distill-dream",
         )
         logger.info(
-            "[autonomy] dream loop started (interval=%.1fh, sample=%d)",
-            loop._interval_seconds / 3600.0, sample_size,
+            "[autonomy] distill dream loop started (interval=%.1fh, max_neighbourhoods=%d, "
+            "min_similarity=%.2f, execute=%s)",
+            interval_hours, max_nb, min_sim, execute,
         )
         return asyncio.ensure_future(loop.run_forever())
 
     def _maybe_start_consolidation_loop(self) -> asyncio.Task | None:
         """Read [memory.consolidation_dream] and launch ConvergentDreamLoop (#495).
 
-        The weekly convergent (consolidation) dream — counterpart to the
-        divergent DreamLoop. P4a ships read-only by default (``execute=false``):
+        The weekly convergent (consolidation) dream. P4a ships read-only by default (``execute=false``):
         the schedule produces 夢境鞏固 reports without touching the DB so the
         autonomous report quality can be observed before ``execute=true`` (P4b)
         is ever set.
@@ -875,7 +946,7 @@ class AutonomyDaemon:
             return plan
 
         loop = ConvergentDreamLoop(
-            dream_fn=_consolidate_once,
+            dream_fn=self._one_dream_at_a_time(_consolidate_once),
             db=db,
             abort=self._abort,
             interval_days=float(cfg.get("interval_days", 7.0)),

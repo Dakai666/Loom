@@ -2,8 +2,7 @@
 Tests for ConvergentDreamLoop — the weekly read-only convergent-dream schedule
 (#495, P4a).
 
-Unlike DreamLoop (a simple in-process interval), the convergent dream runs
-weekly and must be **restart-safe**: the due-ness is decided against a
+The convergent dream runs weekly and must be **restart-safe**: the due-ness is decided against a
 persisted ``consolidation_dream.last_run`` in ``memory_meta``, not an in-memory
 timer, so a daemon restart neither resets the week nor double-runs. A failed
 pass must NOT mark last_run — it retries next check rather than silently

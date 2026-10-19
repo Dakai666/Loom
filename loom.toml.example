@@ -303,26 +303,30 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 # "knowledge.milestone" = 365
 
 # ─────────────────────────────────────────────
-# Dream loop (Issue #376) — Themed background synthesis
+# Distill dream (#613 E, docs/designs/57) — twice-daily topic distillation
 # ─────────────────────────────────────────────
-# Runs ``dream_cycle(themed=True)`` on a fixed cadence inside the autonomy
-# daemon, parallel to ``[memory.lifecycle]``. Theme rotation state
-# (self → user → project → knowledge) lives in ``memory_meta`` so it
-# survives restarts. The free-form / single-domain modes remain available
-# via the ``dream_cycle`` tool — this loop only owns the themed schedule.
+# Replaces the 12 h themed dream (#376, retired: it only ever added memory;
+# a leftover [memory.dream] section is ignored with a warning). Each pass picks
+# the densest topic neighbourhoods of machine-written facts in the next domain
+# of the rotation (self → user → project → knowledge, kept in memory_meta),
+# folds each into one refined fact, gates it for information loss and lets
+# Loom veto it, then writes a 記憶蒸餾 report to the dreams journal.
+# Hand-written and milestone facts are context only, never replaced.
 #
-# Recommended pairing (the "B plan"):
-#   • Keep ``[memory.dream]`` on — themed rotation runs cheaply (no LLM
-#     intent layer, just direct python call).
-#   • Add an ``[[autonomy.schedules]]`` block for *free* dreams only
-#     (themed=false, cross-domain) — see the dreaming example near the
-#     bottom of this file.
-#   • Do NOT add a second schedule for themed dreams — it would double-fire.
-
-[memory.dream]
-enabled        = true   # set false to disable scheduled dreams entirely
-interval_hours = 12     # cadence (first dream ~5min after daemon start)
-sample_size    = 15     # facts sampled per cycle (matches tool default)
+# The same ``execute`` gate covers the daemon loop and the distill_dream tool:
+#   • execute = false — read-only: reports only, memory untouched.
+#   • execute = true  — approved distillations are written after a fresh
+#     backup (memory-pre-distill-*); every original stays on the survivor's
+#     metadata and the replaced keys become redirect stubs.
+# The cadence is restart-safe (distill_dream.last_run in memory_meta).
+# The 03:00 free dream (dream_cycle themed=false) is a separate schedule.
+[memory.distill_dream]
+enabled            = true
+interval_hours     = 12      # cadence; restart-safe
+execute            = false   # true = allow writes (daemon loop and tool)
+max_neighbourhoods = 5       # neighbourhoods distilled per pass (LLM cost bound)
+min_similarity     = 0.70    # stored-vector cosine floor; re-calibrate every 4 weeks (spec §3)
+corpus_limit       = 15000   # most-recent facts scanned; >= corpus size for full coverage
 
 # ─────────────────────────────────────────────
 # Convergent dream (#495 P4) — Weekly memory consolidation
@@ -365,17 +369,6 @@ max_review_clusters = 40
 # weekly reconcile, calibration residue and affect layers were retired 2026-09-17,
 # #528 — their keys are no longer read.)
 predict_tool_enabled = false  # opt-in: expose the explicit `predict` tool
-
-# ─────────────────────────────────────────────
-# Distill dream (#613 E, docs/designs/57) — topic distillation
-# ─────────────────────────────────────────────
-# ``distill_dream`` folds several machine-written facts on one topic into one
-# refined fact (originals kept in the survivor's metadata, redirect stubs left).
-# The tool is read-only by default; a call with execute=true writes only when
-# this gate is on, so the model alone can't start rewriting memory. Turn it on
-# after a read-only rehearsal report looks right.
-[memory.distill_dream]
-execute = false   # true = allow distill_dream(execute=true) to write
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
@@ -781,17 +774,11 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 # notify        = false
 # notify_thread = 0
 
-# ── Example: free-dream supplement (pair with [memory.dream]) ──────────────────
-# Themed rotation is owned by ``[memory.dream]`` (daemon-level, no LLM
-# intent). This schedule is the recommended complement: a single daily
-# *free* dream (themed=false) that samples cross-domain instead of
-# pinning one ontology bucket. Together they give you ~2 themed +
-# 1 free dream per day.
-#
-# Do NOT add a second schedule that calls ``dream_cycle`` with themed=true
-# — that would double-fire against ``[memory.dream]``. If you prefer
-# full LLM-routed control (e.g. dynamic sample_size from intent), set
-# ``[memory.dream].enabled = false`` and use schedules exclusively.
+# ── Example: daily free dream (pair with [memory.distill_dream]) ─────────────────
+# The daemon's distill dream (twice a day) only reduces memory. This schedule
+# is the recommended complement: one daily *free* dream (themed=false) that
+# samples cross-domain and proposes new relational triples (admission-gated,
+# 21-day half-life). Together: ~2 distill passes + 1 free dream per day.
 #
 # [[autonomy.schedules]]
 # name          = "offline_dreaming_free"

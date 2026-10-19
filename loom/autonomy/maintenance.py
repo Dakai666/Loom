@@ -94,74 +94,22 @@ class MaintenanceLoop:
                 logger.warning("[maintenance] cycle failed: %s", exc)
 
 
-class DreamLoop:
-    """Drives ``dream_cycle(themed=True)`` on a fixed interval until aborted.
-
-    Issue #376: ``dream_cycle`` shipped as a first-class tool in #149 but had
-    no deterministic trigger — it only ran when the agent remembered to call
-    it, leaving empty days. This loop owns the cadence; theme rotation state
-    lives in ``memory_meta`` (``dream.last_theme``) and survives restarts.
-    """
-
-    # Same rationale as MaintenanceLoop._FIRST_SWEEP_DELAY_SECONDS — defer
-    # the first dream so startup doesn't compete with session bring-up.
-    _FIRST_SWEEP_DELAY_SECONDS = 300.0
-
-    def __init__(
-        self,
-        dream_fn: Callable[[], Awaitable[dict[str, Any]]],
-        abort: AbortController,
-        interval_hours: float = 12.0,
-    ) -> None:
-        self._dream_fn = dream_fn
-        self._abort = abort
-        self._interval_seconds = max(60.0, interval_hours * 3600.0)
-
-    async def run_forever(self) -> None:
-        """Run a dream cycle ``_FIRST_SWEEP_DELAY_SECONDS`` after start, then
-        every ``interval_hours``. Returns when the abort signal fires."""
-        first_iter = True
-        while not self._abort.signal.is_set():
-            timeout = (
-                self._FIRST_SWEEP_DELAY_SECONDS if first_iter
-                else self._interval_seconds
-            )
-            first_iter = False
-            try:
-                await asyncio.wait_for(
-                    wait_aborted(self._abort.signal),
-                    timeout=timeout,
-                )
-                return  # abort signalled
-            except asyncio.TimeoutError:
-                pass  # interval elapsed, run a cycle
-
-            try:
-                result = await self._dream_fn()
-                logger.info(
-                    "[dream] cycle domain=%s sampled=%d found=%d written=%d",
-                    result.get("domain") or "free",
-                    result.get("facts_sampled", 0),
-                    result.get("triples_found", 0),
-                    result.get("triples_written", 0),
-                )
-                errors = result.get("errors") or []
-                if errors:
-                    logger.warning("[dream] warnings: %s", "; ".join(errors))
-            except Exception as exc:  # never let dreaming crash the daemon
-                logger.warning("[dream] cycle failed: %s", exc)
+# How often to re-check due-ness. The cadence is enforced by the persisted
+# last_run, so the check interval only bounds how soon after a due moment (or
+# a restart) the run actually fires.
+DEFAULT_CHECK_INTERVAL_SECONDS = 6 * 3600.0
+_META_KEY_LAST_RUN_DEFAULT = "consolidation_dream.last_run"
 
 
 class ConvergentDreamLoop:
-    """Drives ``run_convergent_dream`` on a *weekly*, restart-safe cadence (#495).
+    """Restart-safe cadence for the memory-rewriting dreams: the weekly
+    convergent dream (#495) and the 12 h distill dream (#613 E).
 
-    The convergent (consolidation) dream is the counterpart to ``DreamLoop``'s
-    divergent dream, but its cadence is weekly rather than every few hours and
-    must survive restarts: a daemon bounce must neither reset the week nor
+    The convergent (consolidation) dream rewrites memory, so its cadence must
+    survive restarts: a daemon bounce must neither reset the week nor
     double-run. So due-ness is decided against a persisted
-    ``consolidation_dream.last_run`` in ``memory_meta`` — not an in-memory timer
-    like ``DreamLoop`` — mirroring ``dreaming.next_themed_domain``'s
-    restart-safe rotation.
+    ``consolidation_dream.last_run`` in ``memory_meta`` — not an in-memory
+    timer — mirroring ``dreaming.next_themed_domain``'s restart-safe rotation.
 
     The loop wakes on a short *check* interval and runs the dream only when
     ``interval_days`` have elapsed since ``last_run``. ``last_run`` is marked
@@ -170,15 +118,13 @@ class ConvergentDreamLoop:
 
     ``dream_fn`` is supplied by the daemon and decides read-only (P4a) vs
     ``execute=True`` (P4b) — this loop only owns *when*, never *what*.
+
+    The distill dream (#613 E) runs on the same loop with its own
+    ``meta_key`` and a 12 h interval, so the two cadences never share state.
     """
 
     # Defer the first due-check so daemon startup isn't competing for the DB.
     _FIRST_CHECK_DELAY_SECONDS = 300.0
-    # How often to re-check due-ness. The weekly cadence is enforced by the
-    # persisted last_run, so the check interval only bounds how soon after a
-    # due moment (or a restart) the run actually fires.
-    _CHECK_INTERVAL_SECONDS = 6 * 3600.0
-    _META_KEY_LAST_RUN = "consolidation_dream.last_run"
 
     def __init__(
         self,
@@ -186,16 +132,23 @@ class ConvergentDreamLoop:
         db: "aiosqlite.Connection",
         abort: AbortController,
         interval_days: float = 7.0,
+        *,
+        meta_key: str = _META_KEY_LAST_RUN_DEFAULT,
+        check_interval_seconds: float = DEFAULT_CHECK_INTERVAL_SECONDS,
+        label: str = "consolidation",
     ) -> None:
         self._dream_fn = dream_fn
         self._db = db
         self._abort = abort
         self._interval_seconds = max(60.0, interval_days * 86400.0)
+        self._meta_key = meta_key
+        self._check_interval_seconds = check_interval_seconds
+        self._label = label
 
     async def _last_run(self) -> datetime | None:
         cursor = await self._db.execute(
             "SELECT value FROM memory_meta WHERE key = ?",
-            (self._META_KEY_LAST_RUN,),
+            (self._meta_key,),
         )
         row = await cursor.fetchone()
         if not row or not row[0]:
@@ -211,7 +164,7 @@ class ConvergentDreamLoop:
             "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
             "updated_at = excluded.updated_at",
-            (self._META_KEY_LAST_RUN, stamp, stamp),
+            (self._meta_key, stamp, stamp),
         )
         await self._db.commit()
 
@@ -231,12 +184,12 @@ class ConvergentDreamLoop:
 
     async def run_forever(self) -> None:
         """Check due-ness ``_FIRST_CHECK_DELAY_SECONDS`` after start, then every
-        ``_CHECK_INTERVAL_SECONDS``. Returns when the abort signal fires."""
+        ``check_interval_seconds``. Returns when the abort signal fires."""
         first_iter = True
         while not self._abort.signal.is_set():
             timeout = (
                 self._FIRST_CHECK_DELAY_SECONDS if first_iter
-                else self._CHECK_INTERVAL_SECONDS
+                else self._check_interval_seconds
             )
             first_iter = False
             try:
@@ -251,8 +204,8 @@ class ConvergentDreamLoop:
             try:
                 if await self.maybe_run_once(datetime.now(UTC)):
                     logger.info(
-                        "[consolidation] convergent dream ran (interval=%.1fd)",
-                        self._interval_seconds / 86400.0,
+                        "[%s] dream ran (interval=%.2fd)",
+                        self._label, self._interval_seconds / 86400.0,
                     )
-            except Exception as exc:  # never let consolidation crash the daemon
-                logger.warning("[consolidation] cycle failed: %s", exc)
+            except Exception as exc:  # never let a dream crash the daemon
+                logger.warning("[%s] cycle failed: %s", self._label, exc)

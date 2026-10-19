@@ -77,32 +77,39 @@ async def next_themed_domain(db: "aiosqlite.Connection") -> str:
     the new theme back, and returns it. First call ever returns the first
     domain in the cycle.
     """
-    cursor = await db.execute(
-        "SELECT value FROM memory_meta WHERE key = ?",
-        (_META_KEY_LAST_THEME,),
-    )
+    next_theme = await peek_themed_domain(db, _META_KEY_LAST_THEME)
+    # Same boundary effect note as pulse._mark_notified (#307 B1):
+    # this commits whatever else is pending on the connection. Caller
+    # (dream_cycle) holds no other un-committed writes at this point —
+    # do not introduce any before next_themed_domain() returns.
+    await mark_themed_domain(db, _META_KEY_LAST_THEME, next_theme)
+    return next_theme
+
+
+async def peek_themed_domain(db: "aiosqlite.Connection", meta_key: str) -> str:
+    """The domain after the one stored under *meta_key*, without advancing.
+
+    Lets a caller with its own rotation (the distill dream, #613 E) advance
+    only after its pass succeeded, via :func:`mark_themed_domain`.
+    """
+    cursor = await db.execute("SELECT value FROM memory_meta WHERE key = ?", (meta_key,))
     row = await cursor.fetchone()
     last = row[0] if row else None
-
     if last in _THEME_ROTATION:
-        idx = (_THEME_ROTATION.index(last) + 1) % len(_THEME_ROTATION)
-    else:
-        idx = 0  # first call, or stored value drifted out of the enum
-    next_theme = _THEME_ROTATION[idx]
+        return _THEME_ROTATION[(_THEME_ROTATION.index(last) + 1) % len(_THEME_ROTATION)]
+    return _THEME_ROTATION[0]  # first call, or stored value drifted out of the enum
 
+
+async def mark_themed_domain(db: "aiosqlite.Connection", meta_key: str, theme: str) -> None:
+    """Persist *theme* as the last one dreamed under *meta_key* (commits)."""
     now = datetime.now(UTC).isoformat()
     await db.execute(
         "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
         "updated_at = excluded.updated_at",
-        (_META_KEY_LAST_THEME, next_theme, now),
+        (meta_key, theme, now),
     )
-    # Same boundary effect note as pulse._mark_notified (#307 B1):
-    # this commits whatever else is pending on the connection. Caller
-    # (dream_cycle) holds no other un-committed writes at this point —
-    # do not introduce any before next_themed_domain() returns.
     await db.commit()
-    return next_theme
 
 
 # ---------------------------------------------------------------------------
