@@ -896,6 +896,11 @@ async def _review_batch(
     pass. This is the per-batch isolation that batching buys us (#499).
     ``system`` / ``render`` let the distill dream reuse the same fail-safe
     verdict handling with its own prompt; items need a ``cluster_id``.
+
+    A batch that answered but yielded no valid verdict at all — typically a
+    reasoning model spending all of ``max_tokens`` thinking and returning
+    empty text — is halved and retried, down to single items (which are
+    then deferred as before). Provider errors are not split.
     """
     decisions: list[ReviewDecision] = []
     block = "\n\n".join(render(c) for c in clusters)
@@ -917,6 +922,19 @@ async def _review_batch(
         ]
 
     parsed = _parse_json_array(raw)
+    if len(clusters) > 1 and not any(
+        isinstance(d, dict) and str(d.get("verdict", "")).lower()
+        in (VERDICT_APPROVE, VERDICT_SKIP, VERDICT_DEFER)
+        and str(d.get("cluster_id")) in {c.cluster_id for c in clusters}
+        for d in parsed
+    ):
+        logger.warning(
+            "[self-review] no verdict for a batch of %d (output %d chars) — splitting",
+            len(clusters), len(raw or ""),
+        )
+        mid = len(clusters) // 2
+        return (await _review_batch(clusters[:mid], llm_fn, system=system, render=render)
+                + await _review_batch(clusters[mid:], llm_fn, system=system, render=render))
     id_counts = Counter(str(d.get("cluster_id")) for d in parsed if isinstance(d, dict))
     by_id = {str(d.get("cluster_id")): d for d in parsed if isinstance(d, dict)}
     for c in clusters:
