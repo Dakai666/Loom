@@ -34,7 +34,10 @@ from typing import TYPE_CHECKING, Any
 
 from wcwidth import wcswidth
 
-from loom.core.memory.clustering import MAX_CLUSTER_MEMBERS, split_component
+from loom.core.memory.clustering import (
+    MAX_CLUSTER_MEMBERS, NEAR_DUP_NEIGHBOURS, knn_edges, split_component,
+    stack_normalised,
+)
 from loom.core.memory.lifecycle import effective_confidence
 from loom.core.memory.ontology import (
     TEMPORAL_ARCHIVED,
@@ -52,8 +55,6 @@ logger = logging.getLogger(__name__)
 DUP_SIMILARITY = 0.85
 #: A group of this many coexisting versions is a consolidation miss, not a pair.
 DUP_GROUP_MIN = 3
-#: Neighbours linked per fact — ``build_plan``'s ``find_near_duplicates(limit=5)``.
-_NEIGHBOURS = 5
 #: Lifecycle's default demote/delete threshold (``MemoryLifecycle``).
 PRUNE_THRESHOLD = 0.1
 #: Display width, so a CJK character counts 2: '在本地' is short,
@@ -319,42 +320,29 @@ def _census_from_rows(rows: list[Any], now: datetime) -> CorpusCensus:
 def _duplicate_density(
     rows: list[tuple[str, str]], unembedded: int, notes: list[str],
 ) -> DupDensity:
-    """Duplicate groups at ``DUP_SIMILARITY`` built the way consolidation's
-    planner builds them — top-k neighbour edges, single-linkage union-find,
-    oversized chains re-split at stricter similarity — over the whole corpus
-    at once (consolidation sees only ``corpus_limit`` rows and further drops
-    suppressed / capped clusters). Blocked matmul keeps memory at
-    ~block × N floats; edges are at most k × N."""
+    """Duplicate groups at ``DUP_SIMILARITY`` built with consolidation's
+    rules — top-k neighbour edges, single-linkage union-find, oversized
+    chains re-split at stricter similarity — over the whole corpus at once.
+
+    A close estimate, not a replay: the census compares stored vectors with
+    each other, while the planner queries with a fresh value-only vector
+    (#620), sees only ``corpus_limit`` rows and drops suppressed / capped
+    clusters. Blocked matmul keeps memory at ~block × N floats; edges are at
+    most k × N."""
     import numpy as np
 
-    # Convert each row to float32 as it is parsed — a list of Python floats
-    # costs ~8× the memory of the array it becomes.
-    vectors: list[Any] = []
-    values: list[str] = []
-    for value, raw in rows:
-        try:
-            vectors.append(np.asarray(json.loads(raw), dtype=np.float32))
-            values.append(value)
-        except (ValueError, TypeError):
-            unembedded += 1
-    if not vectors:
-        return DupDensity(0, 0, 0, "", 0, unembedded)
-
-    # Embeddings from different providers can't be compared; measure the
-    # dominant dimension and say how many were left out.
-    dims: dict[int, int] = {}
-    for v in vectors:
-        dims[len(v)] = dims.get(len(v), 0) + 1
-    dim = max(dims, key=dims.__getitem__)
-    keep = [i for i, v in enumerate(vectors) if len(v) == dim]
-    if len(keep) < len(vectors):
-        notes.append(f"{len(vectors) - len(keep)} embeddings of another dimension not clustered")
-        unembedded += len(vectors) - len(keep)
-    m = np.stack([vectors[i] for i in keep])
-    del vectors
-    values = [values[i] for i in keep]
-    norms = np.linalg.norm(m, axis=1, keepdims=True)
-    m /= np.where(norms == 0, 1, norms)
+    # Parsed straight to float32 (a Python float list costs ~8× the array);
+    # corrupt cells and other-model dimensions are counted, not clustered.
+    m, kept = stack_normalised([raw for _, raw in rows])
+    if not kept:
+        return DupDensity(0, 0, 0, "", 0, unembedded + len(rows))
+    if len(kept) < len(rows):
+        notes.append(
+            f"{len(rows) - len(kept)} embeddings unparseable or of another "
+            "dimension, not clustered"
+        )
+        unembedded += len(rows) - len(kept)
+    values = [rows[i][0] for i in kept]
 
     n = len(m)
     parent = list(range(n))
@@ -367,25 +355,9 @@ def _duplicate_density(
 
     # Same edge rule as build_plan: each fact links to its top-k neighbours
     # at ≥ DUP_SIMILARITY (find_near_duplicates(limit=5)), not to every pair.
-    k = min(_NEIGHBOURS, n - 1)
-    edge_a: list[Any] = []
-    edge_b: list[Any] = []
-    edge_s: list[Any] = []
-    block = 1024
-    for start in range(0, n, block) if k > 0 else ():
-        sims = m[start:start + block] @ m.T
-        local = np.arange(sims.shape[0])
-        sims[local, local + start] = -np.inf  # never your own neighbour
-        idx = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-        top = np.take_along_axis(sims, idx, axis=1)
-        keep_r, keep_c = np.nonzero(top >= DUP_SIMILARITY)
-        a = keep_r + start
-        b = idx[keep_r, keep_c]
-        edge_a.append(a)
-        edge_b.append(b)
-        edge_s.append(top[keep_r, keep_c])
-        for x, y in zip(a.tolist(), b.tolist()):
-            parent[find(x)] = find(y)
+    a_all, b_all, s_all = knn_edges(m, k=NEAR_DUP_NEIGHBOURS, min_similarity=DUP_SIMILARITY)
+    for x, y in zip(a_all.tolist(), b_all.tolist()):
+        parent[find(x)] = find(y)
 
     roots = np.array([find(i) for i in range(n)])
     uniq, counts = np.unique(roots, return_counts=True)
@@ -396,9 +368,6 @@ def _duplicate_density(
     # similarity. A dense flood that can't split still counts — whole.
     oversized = [r for r, c in sizes.items() if c > MAX_CLUSTER_MEMBERS]
     if oversized:
-        a_all = np.concatenate(edge_a)
-        b_all = np.concatenate(edge_b)
-        s_all = np.concatenate(edge_s)
         edge_root = roots[a_all]
         for root in oversized:
             sel = edge_root == root

@@ -47,10 +47,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Awaitable, Callable, TYPE_CHECKING
 
+import numpy as np
+
 # Clustering lives in the memory layer so the corpus census measures exactly
 # what this planner proposes (#613-D); private aliases kept for callers.
 from loom.core.memory.clustering import (
     MAX_CLUSTER_MEMBERS,
+    NEAR_DUP_NEIGHBOURS,
+    knn_edges,
+    stack_normalised,
     split_oversized as _split_oversized,
     union_find_clusters as _union_find_clusters,
 )
@@ -404,6 +409,65 @@ def _genuine_skip_signatures(plan: "ConsolidationPlan") -> set[str]:
 # Step 2 — plan (read-only candidate discovery)
 # ---------------------------------------------------------------------------
 
+_EMBED_BATCH = 64
+
+
+async def _near_duplicate_edges(
+    semantic: "SemanticMemory",
+    corpus_raw: list[tuple[SemanticEntry, str | None]],
+    edges: list[tuple[str, str]],
+    pair_score: dict[frozenset[str], float],
+    plan: "ConsolidationPlan",
+    min_similarity: float,
+) -> None:
+    """Fill ``edges`` / ``pair_score`` with each fact's near-duplicates.
+
+    Same semantics as the old per-fact ``find_near_duplicates(value, limit=5)``
+    — a fresh *value-only* query vector against the stored ``key value``
+    vectors, which is what 0.85 was calibrated on (stored-vs-stored lets
+    shared key prefixes inflate cosine, #620 review). The cost is what
+    changed: queries are embedded in batches and matched with one matmul
+    instead of a full-table sqlite-vec scan per fact (~1.2 s each, ~5 h at
+    corpus_limit=15000, 2026-10-19).
+    """
+    live = [(e, raw) for e, raw in corpus_raw if not _is_stub(e)]  # stubs aren't facts (#490)
+    if not live:
+        return
+    query_vecs: list[list[float]] = []
+    queried: list[SemanticEntry] = []
+    for i in range(0, len(live), _EMBED_BATCH):
+        chunk = [e for e, _ in live[i:i + _EMBED_BATCH]]
+        try:
+            vectors = await semantic.embed_texts([e.value for e in chunk])
+        except Exception as exc:  # embedding outage must not abort the pass
+            plan.notes.append(f"near-dup embed failed for {len(chunk)} facts: {exc}")
+            continue
+        for e, v in zip(chunk, vectors):
+            if v:
+                query_vecs.append(v)
+                queried.append(e)
+    queries, q_kept = stack_normalised(query_vecs)
+    if not q_kept:
+        return
+    # Only stored vectors in the current provider's space are comparable.
+    stored, s_kept = stack_normalised([raw for _, raw in live], dim=queries.shape[1])
+    if not s_kept:
+        return
+    stored_entries = [live[i][0] for i in s_kept]
+    row_of = {e.key: j for j, e in enumerate(stored_entries)}
+    query_entries = [queried[i] for i in q_kept]
+    query_self = np.asarray([row_of.get(e.key, -1) for e in query_entries])
+    q, st, score = knn_edges(
+        stored, queries=queries, query_self=query_self,
+        k=NEAR_DUP_NEIGHBOURS, min_similarity=min_similarity,
+    )
+    for x, y, sc in zip(q.tolist(), st.tolist(), score.tolist()):
+        a, b = query_entries[x].key, stored_entries[y].key
+        edges.append((a, b))
+        pair = frozenset((a, b))
+        pair_score[pair] = max(pair_score.get(pair, 0.0), sc)
+
+
 async def build_plan(
     semantic: "SemanticMemory",
     *,
@@ -421,7 +485,12 @@ async def build_plan(
     """
     plan = ConsolidationPlan()
 
-    corpus = await semantic.list_recent(limit=corpus_limit)
+    if semantic.has_embeddings:
+        corpus_raw = await semantic.list_recent_raw_embeddings(corpus_limit)
+        corpus = [e for e, _ in corpus_raw]
+    else:
+        corpus_raw = []
+        corpus = await semantic.list_recent(limit=corpus_limit)
     plan.scanned = len(corpus)
     by_key = {e.key: e for e in corpus}
 
@@ -433,26 +502,9 @@ async def build_plan(
     edges: list[tuple[str, str]] = []
     pair_score: dict[frozenset[str], float] = {}
     if semantic.has_embeddings:
-        for entry in corpus:
-            if _is_stub(entry):
-                continue  # stubs aren't real facts (#490)
-            try:
-                neighbours = await semantic.find_near_duplicates(
-                    entry.value,
-                    min_similarity=min_similarity,
-                    within_days=None,           # whole corpus, not the write-time 7-day window
-                    limit=5,
-                    exclude_key=entry.key,
-                )
-            except Exception as exc:  # embedding outage must not abort the pass
-                plan.notes.append(f"near-dup lookup failed for {entry.key!r}: {exc}")
-                continue
-            for neighbour, score in neighbours:
-                if _is_stub(neighbour) or neighbour.key not in by_key:
-                    continue
-                edges.append((entry.key, neighbour.key))
-                pair = frozenset((entry.key, neighbour.key))
-                pair_score[pair] = max(pair_score.get(pair, 0.0), score)
+        await _near_duplicate_edges(
+            semantic, corpus_raw, edges, pair_score, plan, min_similarity,
+        )
     else:
         plan.notes.append("no embedding provider — merge candidates skipped this pass")
 

@@ -376,6 +376,28 @@ class SemanticMemory:
             result.append((entry, vector))
         return result
 
+    async def list_recent_raw_embeddings(
+        self, limit: int,
+    ) -> list[tuple[SemanticEntry, str | None]]:
+        """``list_recent`` plus each row's stored embedding, unparsed.
+
+        Bulk callers parse straight into float32 (and skip corrupt cells)
+        instead of materialising Python float lists per row.
+        """
+        cursor = await self._db.execute(
+            f"SELECT {_SELECT_COLS}, embedding FROM semantic_entries "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [(_row_to_entry(r[:11]), r[11]) for r in rows]
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Batch-embed ``texts`` with the configured provider (raises without one)."""
+        if self._embeddings is None:
+            raise RuntimeError("no embedding provider configured")
+        return await self._embeddings.embed(texts)
+
     async def search(self, query: str, limit: int = 10) -> list[SemanticEntry]:
         """Simple substring search — full-text search can be added later."""
         cursor = await self._db.execute(
