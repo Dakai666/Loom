@@ -401,7 +401,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         or os.environ.get("MINIMAX_API_KEY", "")
     )
     if minimax_key:
-        mm_model = default if default.lower().startswith("minimax-") else "MiniMax-M3.1-Flash-Preview"
+        mm_model = default if default.lower().startswith("minimax-") else "MiniMax-M3.1-Flash"
         router.register(
             AnthropicProvider(
                 api_key=minimax_key,
@@ -748,7 +748,7 @@ class LoomSession:
         self._tier = TierManager.from_config(config, lambda: self._model)
 
         # Reasoning effort (``output_config.effort``) for Anthropic-compatible
-        # models that support it (MiniMax-M3.1-Flash-Preview). Precedence:
+        # models that support it (MiniMax-M3.1-Flash). Precedence:
         # session override (set_reasoning_effort tool) > [cognition]
         # reasoning_effort > vendor default (field omitted). Session-scoped:
         # the override does not survive a restart, same as sticky tiers.

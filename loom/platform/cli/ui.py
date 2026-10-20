@@ -86,7 +86,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/model",                      "show current model + registered providers"),
     ("/model claude-sonnet-4-6",    "switch to Anthropic Claude Sonnet 4.6"),
     ("/model claude-opus-4-7",      "switch to Anthropic Claude Opus 4.7"),
-    ("/model MiniMax-M3.1-Flash-Preview", "switch to MiniMax-M3.1-Flash-Preview (default)"),
+    ("/model MiniMax-M3.1-Flash", "switch to MiniMax-M3.1-Flash (default)"),
     ("/name",                       "rename the current session"),
     ("/new",                        "start a fresh session"),
     ("/pause",                      "toggle HITL pause after each tool batch"),
@@ -461,7 +461,7 @@ def render_welcome_signature(
         ||  |     // ____  \  // ____  \ \   \  //   |      12 skills · 14k facts
         |:  |    /  /    ) :)/  /    ) :)/\\  \/.    |      3 mcp · 47 episodes
          \  |___(: (____/ //(: (____/ //|: \.        |      ─────────────
-        ( \_|:  \\        /  \        / |.  \    /:  |      minimax-m3.1-flash-preview
+        ( \_|:  \\        /  \        / |.  \    /:  |      minimax-m3.1-flash
          \_______)\"_____/    \"_____/  |___|\__/|___|      persona: tarot
 
     Stats fields with zero counts are silently skipped.

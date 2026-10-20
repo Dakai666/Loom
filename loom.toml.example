@@ -55,7 +55,7 @@ default_model = "claude-sonnet-4-6"
 # "deepseek-flash" = 600000
 
 # Thinking depth for Anthropic-compatible models that support
-# ``output_config.effort`` (currently MiniMax-M3.1-Flash-Preview; ignored for
+# ``output_config.effort`` (currently MiniMax-M3.1-Flash; ignored for
 # every other model). low | medium | high | xhigh | max. Thinking cannot be
 # disabled. Recommended: leave unset = vendor default (max for M3.1-Flash);
 # in practice max is fast enough, and the agent can lower it at runtime with
@@ -83,7 +83,7 @@ default_model = "claude-sonnet-4-6"
 # output_max_tokens = 8192
 #
 # [cognition.output_max_tokens_overrides]
-# "MiniMax-M3.1-Flash-Preview" = 32768   # cap a chatty model
+# "MiniMax-M3.1-Flash" = 32768   # cap a chatty model
 # "claude-opus-4-7"    = 16384
 
 # ─────────────────────────────────────────────
@@ -98,7 +98,7 @@ default_model = "claude-sonnet-4-6"
 # different reasoning engines based on task difficulty. Daily chat
 # stays cheap; deep reasoning gets the heavy artillery.
 [cognition.tiers]
-1 = "minimax-m3.1-flash-preview"   # daily — fast, adjustable thinking (M Plan / Token Plan only;
+1 = "minimax-m3.1-flash"   # daily — fast, adjustable thinking (M Plan / Token Plan only;
                                    # pay-as-you-go: use "minimax-m3")
 2 = "deepseek-v4-pro"        # deep — multi-constraint puzzles, long CoT
 default_tier = 1

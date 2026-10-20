@@ -7,7 +7,7 @@ output that are specific to the terminal interface.
 
 Usage
 -----
-    loom chat                         # MiniMax-M3.1-Flash-Preview (default)
+    loom chat                         # MiniMax-M3.1-Flash (default)
     loom chat --model MiniMax-M3
     loom chat --model claude-sonnet-4-6
     loom memory list
@@ -1132,7 +1132,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/name[/loom.warning] [loom.muted]<title>[/loom.muted]             Rename the current session\n"
                 "  [loom.warning]/model[/loom.warning]                     Show current model + registered providers\n"
                 "  [loom.warning]/model[/loom.warning] [loom.muted]<name>[/loom.muted]              Switch model at runtime\n"
-                "    [loom.muted]MiniMax-M3.1-Flash-Preview → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
+                "    [loom.muted]MiniMax-M3.1-Flash → MiniMax via Anthropic SDK (MINIMAX_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]claude-sonnet-4-6       → Anthropic (ANTHROPIC_API_KEY)[/loom.muted]\n"
                 "    [loom.muted]gpt-5.5 / gpt-5.5-pro   → OpenAI (OPENAI_API_KEY; run `loom auth openai`)[/loom.muted]\n"
                 "    [loom.muted]codex/gpt-5.5           → Codex OAuth backend (run `codex login`)[/loom.muted]\n"

@@ -4370,7 +4370,7 @@ def make_set_reasoning_effort_tool(session: Any) -> ToolDefinition:
 
     Sibling of ``request_model_tier``: the tier picks *which* engine, effort
     picks *how hard it thinks*. Maps to ``output_config.effort`` on
-    Anthropic-compatible models that support it (MiniMax-M3.1-Flash-Preview,
+    Anthropic-compatible models that support it (MiniMax-M3.1-Flash,
     whose vendor default is ``max``). The agent can call it on its own
     judgement, or because DK asked in plain words ("今天輕一點").
 
@@ -4418,7 +4418,7 @@ def make_set_reasoning_effort_tool(session: Any) -> ToolDefinition:
             msg = (
                 f"Recorded effort={effective or 'default'}, but the active model "
                 f"{model} does not support effort control. It applies whenever "
-                f"a supporting model (e.g. MiniMax-M3.1-Flash-Preview) is active."
+                f"a supporting model (e.g. MiniMax-M3.1-Flash) is active."
             )
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,

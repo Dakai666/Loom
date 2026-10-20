@@ -20,7 +20,7 @@ Model routing rules
 Usage
 -----
     router = LLMRouter()
-    router.register(MiniMaxProvider(api_key="...", model="MiniMax-M3.1-Flash-Preview"))
+    router.register(MiniMaxProvider(api_key="...", model="MiniMax-M3.1-Flash"))
     router.register(AnthropicProvider(api_key="..."))
     router.register(OllamaProvider())   # no key needed
 
@@ -42,11 +42,11 @@ from .providers import LLMProvider, LLMResponse
 def get_default_model() -> str:
     """
     Return the default model from loom.toml [cognition]default_model,
-    falling back to "MiniMax-M3.1-Flash-Preview".
+    falling back to "MiniMax-M3.1-Flash".
     """
     config = load_loom_config()
     model = config.get("cognition", {}).get("default_model", "")
-    return model if model else "MiniMax-M3.1-Flash-Preview"
+    return model if model else "MiniMax-M3.1-Flash"
 
 
 class LLMRouter:

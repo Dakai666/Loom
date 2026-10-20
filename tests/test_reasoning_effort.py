@@ -1,7 +1,7 @@
 """
 Contract tests for reasoning-effort control on Anthropic-compatible models.
 
-MiniMax-M3.1-Flash-Preview exposes thinking depth via ``output_config.effort``
+MiniMax-M3.1-Flash exposes thinking depth via ``output_config.effort``
 (low | medium | high | xhigh | max); omitting it means the vendor default
 ``max``. Unset is the deliberate default (measured fast enough in practice);
 the feature exists to *lower* depth when wanted — by config, by the agent's
@@ -39,7 +39,7 @@ from loom.core.tier_manager import TierManager
 from loom.platform.cli.tools import make_set_reasoning_effort_tool
 
 
-M31 = "MiniMax-M3.1-Flash-Preview"
+M31 = "MiniMax-M3.1-Flash"
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ class TestEffortWireFormat:
         assert kw["output_config"] == {"effort": "low"}
 
     def test_lowercase_model_name_is_supported(self):
-        kw = _sync_kwargs(_provider("minimax-m3.1-flash-preview", "medium"))
+        kw = _sync_kwargs(_provider("minimax-m3.1-flash", "medium"))
         assert kw["output_config"] == {"effort": "medium"}
 
     @pytest.mark.parametrize(
@@ -148,7 +148,8 @@ class TestEffortCapabilityTable:
     def test_supports_effort(self):
         p = _provider(M31)
         assert p.supports_effort(M31)
-        assert p.supports_effort("minimax-m3.1-flash-preview")
+        assert p.supports_effort("minimax-m3.1-flash")
+        assert p.supports_effort("MiniMax-M3.1-Flash-Preview")   # pre-GA id still works
         assert not p.supports_effort("minimax-m2.7")
         assert not p.supports_effort("")
 
@@ -332,7 +333,7 @@ class TestEffortThroughRouter:
         p = _provider("MiniMax-M2.7", "low")
         r = _router_with(p)
         async for _ in r.stream_chat(
-            model="minimax-m3.1-flash-preview",
+            model="minimax-m3.1-flash",
             messages=[{"role": "user", "content": "hi"}], max_tokens=64,
         ):
             pass
