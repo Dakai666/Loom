@@ -34,7 +34,7 @@ from loom.core.session_support import (
 )
 
 
-def _anthropic(name: str = "minimax", model: str = "MiniMax-M3.1-Flash-Preview") -> AnthropicProvider:
+def _anthropic(name: str = "minimax", model: str = "MiniMax-M3.1-Flash") -> AnthropicProvider:
     return AnthropicProvider(
         api_key="test", model=model,
         base_url="https://example.invalid/anthropic", name=name,
@@ -50,7 +50,7 @@ def _router() -> LLMRouter:
 
 class TestNativeContextWindows:
     @pytest.mark.parametrize("model", [
-        "MiniMax-M3.1-Flash-Preview", "minimax-m3.1-flash-preview", "MiniMax-M3",
+        "MiniMax-M3.1-Flash", "minimax-m3.1-flash", "MiniMax-M3.1-Flash-Preview", "MiniMax-M3",
         "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro",
     ])
     def test_1m_models(self, model):
@@ -70,14 +70,14 @@ class TestNativeContextWindows:
 
 class TestResolveContextWindow:
     def test_native_when_unconfigured(self):
-        assert _resolve_context_window({}, "minimax-m3.1-flash-preview", _router()) == 1_000_000
+        assert _resolve_context_window({}, "minimax-m3.1-flash", _router()) == 1_000_000
 
     def test_fallback_for_unknown_model(self):
         assert _resolve_context_window({}, "claude-gibberish", _router()) == _DEFAULT_CONTEXT_WINDOW
         assert _DEFAULT_CONTEXT_WINDOW == 204_800
 
     def test_fallback_without_router(self):
-        assert _resolve_context_window({}, "minimax-m3.1-flash-preview") == _DEFAULT_CONTEXT_WINDOW
+        assert _resolve_context_window({}, "minimax-m3.1-flash") == _DEFAULT_CONTEXT_WINDOW
 
     def test_global_ceiling_caps_native(self):
         cfg = {"cognition": {"context_window": 400_000}}
@@ -117,7 +117,7 @@ class TestResolveContextWindow:
 
 from loom.core.cognition.providers import LLMResponse
 
-BIG, SMALL = "minimax-m3.1-flash-preview", "minimax-m2.7"
+BIG, SMALL = "minimax-m3.1-flash", "minimax-m2.7"
 # Scaled-down windows keep the real token estimator fast; the ratio (5×)
 # mirrors a 1M → 204_800 tier switch.
 SCALED = {"cognition": {"context_window_overrides": {BIG: 100_000, SMALL: 20_000}}}

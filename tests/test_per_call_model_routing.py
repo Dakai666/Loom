@@ -4,7 +4,7 @@ Contract: the model the router is asked for is the model on the wire.
 Before this fix the router used the model name only to *pick* a provider;
 the request then went out with ``provider.model``, frozen at build time.
 Tier switches never touched it, so with loom.toml saying T1 =
-``minimax-m3.1-flash-preview`` / T2 = ``deepseek-flash`` the wire carried
+``minimax-m3.1-flash`` / T2 = ``deepseek-flash`` the wire carried
 ``MiniMax-M2.7`` / ``deepseek-v4-pro`` — and every display surface showed
 the configured name (the drift #471 was meant to rule out).
 
@@ -102,13 +102,13 @@ async def _drain(router: LLMRouter, model: str) -> None:
 class TestRequestedModelReachesWire:
     async def test_chat_sends_requested_model(self):
         mm = _anthropic("minimax", "MiniMax-M2.7")
-        await _router(mm).chat(model="minimax-m3.1-flash-preview", messages=MSGS, max_tokens=64)
-        assert mm._client.messages.models == ["minimax-m3.1-flash-preview"]
+        await _router(mm).chat(model="minimax-m3.1-flash", messages=MSGS, max_tokens=64)
+        assert mm._client.messages.models == ["minimax-m3.1-flash"]
 
     async def test_stream_sends_requested_model(self):
         mm = _anthropic("minimax", "MiniMax-M2.7")
-        await _drain(_router(mm), "minimax-m3.1-flash-preview")
-        assert mm._async_client.messages.models == ["minimax-m3.1-flash-preview"]
+        await _drain(_router(mm), "minimax-m3.1-flash")
+        assert mm._async_client.messages.models == ["minimax-m3.1-flash"]
 
     async def test_same_provider_tier_switch(self):
         ds = _anthropic("deepseek", "deepseek-v4-pro")
@@ -119,17 +119,17 @@ class TestRequestedModelReachesWire:
 
     async def test_registered_provider_not_mutated(self):
         mm = _anthropic("minimax", "MiniMax-M2.7")
-        await _drain(_router(mm), "minimax-m3.1-flash-preview")
+        await _drain(_router(mm), "minimax-m3.1-flash")
         assert mm.model == "MiniMax-M2.7"
 
     async def test_concurrent_calls_keep_their_own_model(self):
         mm = _anthropic("minimax", "MiniMax-M2.7")
         r = _router(mm)
         await asyncio.gather(
-            _drain(r, "minimax-m3.1-flash-preview"),
+            _drain(r, "minimax-m3.1-flash"),
             r.chat(model="MiniMax-M3", messages=MSGS, max_tokens=64),
         )
-        assert mm._async_client.messages.models == ["minimax-m3.1-flash-preview"]
+        assert mm._async_client.messages.models == ["minimax-m3.1-flash"]
         assert mm._client.messages.models == ["MiniMax-M3"]
 
     def test_prefixed_provider_strips_prefix(self):
@@ -150,7 +150,7 @@ class TestBuildRouterDefault:
         monkeypatch.setattr(session_mod, "_load_loom_config", lambda: {})
         monkeypatch.setattr(
             "loom.core.cognition.router.get_default_model",
-            lambda: "minimax-m3.1-flash-preview",
+            lambda: "minimax-m3.1-flash",
         )
         r = session_mod.build_router()
-        assert r._providers["minimax"].model == "minimax-m3.1-flash-preview"
+        assert r._providers["minimax"].model == "minimax-m3.1-flash"

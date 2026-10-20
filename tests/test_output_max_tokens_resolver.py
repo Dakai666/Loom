@@ -163,7 +163,7 @@ class TestAnthropicProviderTable:
         p = object.__new__(AnthropicProvider)
         for model in (
             "MiniMax-M3",
-            "MiniMax-M3.1-Flash-Preview",
+            "MiniMax-M3.1-Flash",
             "deepseek-flash",
             "deepseek-v4-flash",
             "deepseek-v4-pro",

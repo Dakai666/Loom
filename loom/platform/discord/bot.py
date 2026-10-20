@@ -363,7 +363,7 @@ class LoomDiscordBot:
     Runs LoomSessions behind a Discord bot, one session per thread.
 
     Args:
-        model:             LLM model name (e.g. "MiniMax-M3.1-Flash-Preview").
+        model:             LLM model name (e.g. "MiniMax-M3.1-Flash").
         db_path:           Path to the SQLite memory database.
         channel_ids:       If given, only operate in these channel IDs
                            (and threads that belong to them).

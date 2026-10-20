@@ -214,7 +214,7 @@ class LLMProvider(ABC):
         Returns ``None`` when the model is unknown to this provider — the
         session resolver should then fall back to its conservative default.
         Lookup is case-insensitive so loom.toml entries like
-        ``"MiniMax-M3.1-Flash-Preview"`` and ``"minimax-m3.1-flash-preview"`` both resolve correctly
+        ``"MiniMax-M3.1-Flash"`` and ``"minimax-m3.1-flash"`` both resolve correctly
         against the canonical lower-cased table.
         """
         if not model:
@@ -295,7 +295,7 @@ class AnthropicProvider(LLMProvider):
             api_key=minimax_key,
             base_url="https://api.minimax.io/anthropic",
             name="minimax",
-            model="MiniMax-M3.1-Flash-Preview",
+            model="MiniMax-M3.1-Flash",
         )
 
     Messages are converted to/from Anthropic format internally.
@@ -319,11 +319,11 @@ class AnthropicProvider(LLMProvider):
     #     in loom.toml ``output_max_tokens_overrides``.
     #   - DeepSeek: 8K is the documented standard cap for deepseek-chat
     #     and deepseek-coder; deepseek-reasoner is the same.
-    #   - MiniMax-M3 / M3.1-Flash-Preview: 1M context windows, so the
+    #   - MiniMax-M3 / M3.1-Flash: 1M context windows, so the
     #     input + max_tokens budget leaves plenty of room. Live-probed at
     #     131072 on 2026-10-16 (M3.1-Flash accepted up to 200000, no 400).
     #     M2.7 is retiring 2026-11-18; Token Plan requests to it have
-    #     auto-routed to M3.1-Flash-Preview since 2026-10-19.
+    #     auto-routed to M3.1-Flash since 2026-10-19.
     #   - DeepSeek V4 family: vendor max output 384K, 1M context. Live-probed
     #     at 131072 on 2026-10-16 (deepseek-flash, deepseek-v4-pro; no 400).
     #     Unlisted models silently fall back to 8192 and abort long-form
@@ -337,7 +337,8 @@ class AnthropicProvider(LLMProvider):
         # MiniMax via Anthropic-compat endpoint
         "minimax-m2.7": 65536,
         "minimax-m3": 131072,
-        "minimax-m3.1-flash-preview": 131072,
+        "minimax-m3.1-flash": 131072,
+        "minimax-m3.1-flash-preview": 131072,   # pre-GA id (until 2026-10-21)
         # DeepSeek via Anthropic-compat endpoint
         "deepseek-flash": 131072,
         "deepseek-v4-flash": 131072,
@@ -354,6 +355,7 @@ class AnthropicProvider(LLMProvider):
     NATIVE_CONTEXT_WINDOWS: dict[str, int] = {
         "minimax-m2.7": 204_800,
         "minimax-m3": 1_000_000,
+        "minimax-m3.1-flash": 1_000_000,
         "minimax-m3.1-flash-preview": 1_000_000,
         "deepseek-flash": 1_000_000,
         "deepseek-v4-flash": 1_000_000,
@@ -363,8 +365,9 @@ class AnthropicProvider(LLMProvider):
     # Models that accept ``output_config.effort`` → vendor default applied
     # when the field is omitted. Only these get the field on the wire; every
     # other model on this class keeps its payload unchanged. MiniMax documents
-    # effort for M3.1-Flash-Preview only (not M3, not M2.x) as of 2026-10-16.
+    # effort for M3.1-Flash only (not M3, not M2.x) as of 2026-10-16.
     EFFORT_MODELS: dict[str, str] = {
+        "minimax-m3.1-flash": "max",
         "minimax-m3.1-flash-preview": "max",
     }
 
