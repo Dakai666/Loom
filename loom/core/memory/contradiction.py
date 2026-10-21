@@ -250,7 +250,11 @@ def is_namespace_sibling(key_a: str, key_b: str) -> bool:
 
     Bias is intentionally conservative toward *excluding* from reconcile: the
     reconcile arm is the destructive path, so over-skipping is the safe error,
-    under-skipping is the noise we are removing.
+    under-skipping is the noise we are removing. On the governed-write path
+    (#628) the protective side is KEEP instead: an excluded pair can let a
+    lower-trust fact land next to a higher-trust one, never replace it
+    (SUPERSEDE writes only the new key). 0 KEEPs in the live audit_log when
+    this moved here, against 5,501 sibling false positives.
     """
     if key_a == key_b:
         return False
