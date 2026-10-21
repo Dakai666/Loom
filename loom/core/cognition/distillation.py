@@ -36,10 +36,12 @@ With ``execute=True`` (P2) the approved distillations are then written:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -88,6 +90,14 @@ STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"   # a boundary, the gate or the veto said no
 STATUS_DEFERRED = "deferred"   # no trustworthy verdict — retry another pass
 STATUS_FAILED = "failed"       # the distill call itself failed
+
+#: Prefixes of a failed result's reason, so the report can tell an LLM that
+#: answered garbage from one that never answered (#629).
+REASON_UNPARSEABLE = "distill output unparseable"
+REASON_CALL_FAILED = "distill call failed"
+#: Unparseable distill replies are kept here — the only way to tell a
+#: truncated answer from format drift (#629).
+DEFAULT_DEBUG_DIR = Path.home() / ".loom" / "debug"
 
 #: Execute outcomes of an approved result (P2).
 OUTCOME_EXECUTED = "executed"
@@ -344,27 +354,23 @@ def _render_neighbourhood(nb: Neighbourhood) -> str:
     return "\n".join(lines)
 
 
-async def _distill(nb: Neighbourhood, llm_fn: LLMFn) -> Distillation | None:
-    messages = [
-        {"role": "system", "content": _DISTILL_SYSTEM},
-        {"role": "user", "content": f"Neighbourhood:\n{_render_neighbourhood(nb)}\n\nReturn the JSON now."},
-    ]
-    raw = await llm_fn(messages)  # exceptions → caller marks the result failed
+def _parse_distillation(nb: Neighbourhood, raw: str) -> tuple[Distillation | None, str]:
+    """``(distillation, "")`` or ``(None, why it is unusable)``."""
     data = _parse_json_object(raw)
     if data is None:
-        return None
+        return None, "no JSON object" if raw.strip() else "empty reply"
     distilled = str(data.get("distilled", "")).strip()
     covers_raw = data.get("covers")
     if not isinstance(covers_raw, list):
-        return None
+        return None, "covers is not a list"
     keys: list[str] = []
     for idx in covers_raw:
         try:
             i = int(idx)
         except (TypeError, ValueError):
-            return None
+            return None, f"covers index {idx!r} is not an integer"
         if not 1 <= i <= len(nb.members):
-            return None                      # phantom index — untrustworthy
+            return None, f"covers index {i} out of range"   # phantom — untrustworthy
         key = nb.members[i - 1].key
         if key not in keys:
             keys.append(key)
@@ -387,7 +393,49 @@ async def _distill(nb: Neighbourhood, llm_fn: LLMFn) -> Distillation | None:
     return Distillation(
         distilled=distilled, covers=keys, dropped=dropped,
         rationale=str(data.get("rationale", "")).strip(),
-    )
+    ), ""
+
+
+async def _distill(nb: Neighbourhood, llm_fn: LLMFn) -> tuple[Distillation | None, list[dict]]:
+    """One retry for unparseable output (mirrors ``_gate`` / diff_inventory, #629).
+
+    Returns the distillation (or None) and every unusable attempt as
+    ``{"raw", "why"}``. An empty ``covers`` parses fine — "nothing to merge"
+    is an answer, not a fault, so it is never retried.
+    """
+    messages = [
+        {"role": "system", "content": _DISTILL_SYSTEM},
+        {"role": "user", "content": f"Neighbourhood:\n{_render_neighbourhood(nb)}\n\nReturn the JSON now."},
+    ]
+    bad: list[dict] = []
+    for _ in range(2):
+        raw = await llm_fn(messages)  # exceptions → caller marks the result failed
+        d, why = _parse_distillation(nb, raw)
+        if d is not None:
+            return d, bad
+        bad.append({"raw": raw, "why": why})
+    return None, bad
+
+
+def _dump_unparseable(nb: Neighbourhood, bad: list[dict]) -> Path | None:
+    """Keep the raw replies; the report only has room for one line."""
+    try:
+        DEFAULT_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+        path = DEFAULT_DEBUG_DIR / f"distill_unparseable_{ts}_{nb.cluster_id}.json"
+        payload = {
+            "ts": datetime.now().isoformat(),
+            "neighbourhood_id": nb.cluster_id,
+            "seed_key": nb.seed_key,
+            "members": [{"key": m.key, "value": m.value} for m in nb.members],
+            "attempts": [{"raw": b["raw"], "raw_chars": len(b["raw"]), "why": b["why"]}
+                         for b in bad],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        return path
+    except Exception as exc:
+        logger.warning("[distill-dream] could not keep unparseable output: %s", exc)
+        return None
 
 
 def _boundary_violation(nb: Neighbourhood, d: Distillation) -> tuple[str | None, str | None]:
@@ -584,13 +632,18 @@ async def run_distill_dream(
     to_review: list[_ReviewItem] = []
     for nb in plan.neighbourhoods:
         try:
-            d = await _distill(nb, llm_fn)
+            d, bad = await _distill(nb, llm_fn)
         except Exception as exc:
             logger.warning("[distill-dream] distill failed for %s: %s", nb.cluster_id, exc)
-            plan.results.append(DistillResult(nb.cluster_id, STATUS_FAILED, f"distill call failed: {exc}"))
+            plan.results.append(DistillResult(nb.cluster_id, STATUS_FAILED, f"{REASON_CALL_FAILED}: {exc}"))
             continue
         if d is None:
-            plan.results.append(DistillResult(nb.cluster_id, STATUS_FAILED, "distill output unparseable"))
+            path = _dump_unparseable(nb, bad)
+            logger.warning("[distill-dream] unparseable distill output for %s (%s) — raw kept at %s",
+                           nb.cluster_id, bad[-1]["why"], path)
+            plan.results.append(DistillResult(
+                nb.cluster_id, STATUS_FAILED,
+                f"{REASON_UNPARSEABLE} ({bad[-1]['why']}, attempts={len(bad)})"))
             continue
         if not d.covers:
             plan.results.append(DistillResult(nb.cluster_id, STATUS_REJECTED,
@@ -716,6 +769,16 @@ _STATUS_ICON = {STATUS_APPROVED: "✅", STATUS_REJECTED: "⚠️",
                 STATUS_DEFERRED: "💤", STATUS_FAILED: "❌"}
 
 
+def _failure_split(plan: DistillPlan) -> str:
+    """``（unparseable n · exception m）`` — an LLM answering garbage and an
+    LLM not answering need different fixes (#629)."""
+    failed = [r.reason for r in plan.results if r.status == STATUS_FAILED]
+    if not failed:
+        return ""
+    unparseable = sum(r.startswith(REASON_UNPARSEABLE) for r in failed)
+    return f"（unparseable {unparseable} · exception {len(failed) - unparseable}）"
+
+
 def render_distill_report(plan: DistillPlan) -> str:
     """Body of a ``記憶蒸餾`` entry in the dated dreams file."""
     c = plan.counts()
@@ -728,7 +791,8 @@ def render_distill_report(plan: DistillPlan) -> str:
         + (f"（種子限 domain={plan.domain}）" if plan.domain else ""),
         f"- 鄰域：{len(plan.neighbourhoods)} 個",
         f"- 結果：approved {c[STATUS_APPROVED]} · rejected {c[STATUS_REJECTED]} · "
-        f"deferred {c[STATUS_DEFERRED]} · failed {c[STATUS_FAILED]}",
+        f"deferred {c[STATUS_DEFERRED]} · failed {c[STATUS_FAILED]}"
+        + _failure_split(plan),
     ]
     if plan.mode == MODE_EXECUTE:
         o = plan.outcome_counts()

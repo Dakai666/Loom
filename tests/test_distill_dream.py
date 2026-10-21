@@ -445,3 +445,75 @@ class TestSuppression:
         plan, _ = await run_distill_dream(semantic, _llm(), max_neighbourhoods=5)
         for nb in plan.neighbourhoods:
             assert not rejected & {m.key for m in nb.members}
+
+
+# ── unparseable distill output: retry + diagnostics (#629) ────────────────
+
+def _flaky_distill(bad_first: int, bad: str = "sorry, here is my thinking…"):
+    """``_llm()`` whose first ``bad_first`` distill replies are unusable."""
+    inner, calls = _llm(), {"distill": 0}
+
+    async def fn(messages):
+        if messages[0]["content"] is dd._DISTILL_SYSTEM:
+            calls["distill"] += 1
+            if calls["distill"] <= bad_first:
+                return bad
+        return await inner(messages)
+    return fn, calls
+
+
+class TestUnparseableDistill:
+    async def test_unparseable_reply_is_retried_once(self, db, semantic):
+        await _topic(db)
+        fn, calls = _flaky_distill(bad_first=1)
+        plan, _ = await run_distill_dream(semantic, fn)
+        assert calls["distill"] == 2
+        assert plan.results[0].status == STATUS_APPROVED
+
+    async def test_two_unparseable_replies_fail_with_attempts(self, db, semantic):
+        await _topic(db)
+        fn, calls = _flaky_distill(bad_first=2)
+        plan, _ = await run_distill_dream(semantic, fn)
+        assert calls["distill"] == 2
+        r = plan.results[0]
+        assert r.status == STATUS_FAILED
+        assert r.reason.startswith(dd.REASON_UNPARSEABLE)
+        assert "attempts=2" in r.reason
+
+    async def test_nothing_to_merge_is_an_answer_not_retried(self, db, semantic):
+        await _topic(db)
+        inner, calls = _llm(distill=lambda u: {"distilled": "", "covers": [], "dropped": [],
+                                                "rationale": "distinct"}), {"distill": 0}
+
+        async def fn(messages):
+            if messages[0]["content"] is dd._DISTILL_SYSTEM:
+                calls["distill"] += 1
+            return await inner(messages)
+        plan, _ = await run_distill_dream(semantic, fn)
+        assert calls["distill"] == 1
+        assert plan.results[0].status == STATUS_REJECTED
+
+    async def test_raw_replies_are_kept_for_diagnosis(self, db, semantic, tmp_path):
+        await _topic(db)
+        fn, _ = _flaky_distill(bad_first=2, bad="")
+        plan, _ = await run_distill_dream(semantic, fn)
+        dumps = list(dd.DEFAULT_DEBUG_DIR.glob("distill_unparseable_*.json"))
+        assert len(dumps) == 1
+        payload = json.loads(dumps[0].read_text())
+        assert payload["neighbourhood_id"] == plan.results[0].neighbourhood_id
+        assert [a["raw"] for a in payload["attempts"]] == ["", ""]
+        assert all(a["why"] for a in payload["attempts"])
+        assert payload["members"]                # enough to replay the prompt
+
+    async def test_report_splits_failures_by_type(self, db, semantic):
+        await _topic(db, "a", 0)
+        await _topic(db, "b", 180)
+        bad, _ = _flaky_distill(bad_first=99)
+        down = _llm(fail_distill_for='key="a')
+
+        async def fn(messages):
+            if 'key="a' in messages[-1]["content"]:
+                return await down(messages)
+            return await bad(messages)
+        _, report = await run_distill_dream(semantic, fn)
+        assert "failed 2（unparseable 1 · exception 1）" in report
