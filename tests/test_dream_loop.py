@@ -316,7 +316,7 @@ class TestRealClosure:
 
         class Router:
             async def chat(self, *, model, messages, max_tokens):
-                return types.SimpleNamespace(text=await fake_llm(messages))
+                return types.SimpleNamespace(text=await fake_llm(messages), stop_reason="end_turn")
 
         real_append = journal_mod.append_distill_report
         monkeypatch.setattr(journal_mod, "append_distill_report",

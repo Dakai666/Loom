@@ -49,6 +49,7 @@ def _isolate_circadian_dirs(request, tmp_path, monkeypatch):
     )
 
 
+import loom.core.cognition.distillation as _distillation_module
 import loom.core.memory.backup as _backup_module
 import loom.core.memory.store as _store_module
 
@@ -79,3 +80,9 @@ def _isolate_backup_dir(tmp_path, monkeypatch):
     """Memory snapshots (consolidation execute, lifecycle prune) default to
     ``~/.loom/backups`` — the live runtime dir. Keep the suite out of it."""
     monkeypatch.setattr(_backup_module, "DEFAULT_BACKUP_DIR", tmp_path / "backups")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_distill_debug_dir(tmp_path, monkeypatch):
+    """Unparseable distill replies are dumped to ``~/.loom/debug`` (#629)."""
+    monkeypatch.setattr(_distillation_module, "DEFAULT_DEBUG_DIR", tmp_path / "debug")
