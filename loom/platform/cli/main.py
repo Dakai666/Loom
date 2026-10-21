@@ -2193,7 +2193,7 @@ async def _memory_big_dream(db: str | None, execute: bool, batch: int, max_passe
     from rich.markup import escape
 
     from loom.core.cognition.big_dream import run_big_dream
-    from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
+    from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
     from loom.core.cognition.router import get_default_model
     from loom.core.memory.embeddings import build_embedding_provider
     from loom.core.memory.maintenance import distill_execute_enabled
@@ -2234,7 +2234,7 @@ async def _memory_big_dream(db: str | None, execute: bool, batch: int, max_passe
     async def llm_fn(messages: list[dict]) -> str:
         response = await router.chat(model=model, messages=messages,
                                      max_tokens=DREAM_LLM_MAX_TOKENS)
-        return response.text or ""
+        return dream_reply_text(response)
 
     router = build_router(model)
     store = SQLiteStore(db_path)

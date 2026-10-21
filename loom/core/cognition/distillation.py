@@ -409,7 +409,12 @@ async def _distill(nb: Neighbourhood, llm_fn: LLMFn) -> tuple[Distillation | Non
     ]
     bad: list[dict] = []
     for _ in range(2):
-        raw = await llm_fn(messages)  # exceptions → caller marks the result failed
+        try:
+            raw = await llm_fn(messages)  # exceptions → caller marks the result failed
+        except Exception:
+            if bad:                       # keep the unusable first reply all the same
+                _dump_unparseable(nb, bad)
+            raise
         d, why = _parse_distillation(nb, raw)
         if d is not None:
             return d, bad

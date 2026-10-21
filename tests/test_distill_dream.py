@@ -517,3 +517,33 @@ class TestUnparseableDistill:
             return await bad(messages)
         _, report = await run_distill_dream(semantic, fn)
         assert "failed 2（unparseable 1 · exception 1）" in report
+
+    async def test_first_reply_kept_when_the_retry_raises(self, db, semantic):
+        await _topic(db)
+        bad, _ = _flaky_distill(bad_first=1, bad="half a JSON {")
+        calls = {"n": 0}
+
+        async def fn(messages):
+            if messages[0]["content"] is dd._DISTILL_SYSTEM:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise RuntimeError("provider down")
+            return await bad(messages)
+        plan, _ = await run_distill_dream(semantic, fn)
+        assert plan.results[0].reason.startswith(dd.REASON_CALL_FAILED)
+        dumps = list(dd.DEFAULT_DEBUG_DIR.glob("distill_unparseable_*.json"))
+        assert [a["raw"] for a in json.loads(dumps[0].read_text())["attempts"]] == ["half a JSON {"]
+
+
+class TestDreamReplyText:
+    def test_warns_when_the_reply_hit_the_budget(self, caplog):
+        import types
+        from loom.core.cognition.consolidation import dream_reply_text
+
+        cut = types.SimpleNamespace(text=None, stop_reason="max_tokens")
+        done = types.SimpleNamespace(text='{"ok": 1}', stop_reason="end_turn")
+        with caplog.at_level("WARNING"):
+            assert dream_reply_text(cut) == ""
+            assert dream_reply_text(done) == '{"ok": 1}'
+        assert [r.getMessage() for r in caplog.records if "max_tokens" in r.getMessage()] \
+            == ["[dream] reply hit max_tokens=8192 (0 chars of text)"]

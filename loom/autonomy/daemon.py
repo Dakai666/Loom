@@ -798,7 +798,7 @@ class AutonomyDaemon:
 
         async def _distill_once() -> Any:
             from loom.autonomy.circadian.journal import append_distill_report
-            from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
+            from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
             from loom.core.cognition.distillation import run_distill_dream
             from loom.core.cognition.dreaming import mark_themed_domain, peek_themed_domain
 
@@ -807,11 +807,7 @@ class AutonomyDaemon:
                     model=model, messages=messages,
                     max_tokens=DREAM_LLM_MAX_TOKENS,
                 )
-                # The distill dump keeps the text, not the stop reason (#629).
-                if response.stop_reason == "max_tokens":
-                    logger.warning("[distill-dream] reply hit max_tokens=%d (%d chars of text)",
-                                   DREAM_LLM_MAX_TOKENS, len(response.text or ""))
-                return response.text or ""
+                return dream_reply_text(response)
 
             # Own rotation key (the dream_cycle tool advances dream.last_theme),
             # advanced only once the pass succeeded so a failure retries it.
@@ -906,6 +902,7 @@ class AutonomyDaemon:
         async def _consolidate_once() -> Any:
             from loom.core.cognition.consolidation import (
                 DREAM_LLM_MAX_TOKENS,
+                dream_reply_text,
                 run_convergent_pass,
             )
             from loom.autonomy.circadian.journal import append_consolidation_report
@@ -915,7 +912,7 @@ class AutonomyDaemon:
                     model=model, messages=messages,
                     max_tokens=DREAM_LLM_MAX_TOKENS,
                 )
-                return response.text or ""
+                return dream_reply_text(response)
 
             # #603 step B: never rewrite memory without a fresh snapshot —
             # run_convergent_pass downgrades to read-only (and says so in the

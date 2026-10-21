@@ -1258,14 +1258,14 @@ class LoomSession:
             make_predict_tool,
         )
 
-        from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS
+        from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
 
         async def _dream_llm_fn(messages: list[dict]) -> str:
             response = await self.router.chat(
                 model=self.model, messages=messages,
                 max_tokens=DREAM_LLM_MAX_TOKENS,
             )
-            return response.text or ""
+            return dream_reply_text(response)
 
         self.registry.register(
             make_dream_cycle_tool(

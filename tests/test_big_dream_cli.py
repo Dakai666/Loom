@@ -38,7 +38,7 @@ def run(tmp_path, monkeypatch):
 
     class Router:
         async def chat(self, *, model, messages, max_tokens):
-            return types.SimpleNamespace(text=await llm(messages))
+            return types.SimpleNamespace(text=await llm(messages), stop_reason="end_turn")
 
     monkeypatch.chdir(tmp_path)                        # journal + cwd loom.toml land here
     monkeypatch.setenv("HOME", str(tmp_path / "home"))  # a default path can't reach ~/.loom

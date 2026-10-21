@@ -92,6 +92,17 @@ DIFF_ERROR = "error"    # gate could not produce a verdict (retries exhausted)
 # headroom only costs when it is needed.
 DREAM_LLM_MAX_TOKENS = 8192
 
+
+def dream_reply_text(response) -> str:
+    """What every dream ``llm_fn`` returns. Warns when the reply was cut at
+    the budget — callers see only the text, which can't tell a truncated
+    reply from a malformed one (#629)."""
+    text = response.text or ""
+    if response.stop_reason == "max_tokens":
+        logger.warning("[dream] reply hit max_tokens=%d (%d chars of text)",
+                       DREAM_LLM_MAX_TOKENS, len(text))
+    return text
+
 # How a merge cluster's members relate (#587). Replaces the old binary
 # "≥2 members carry unique content → not mergeable" rule, which vetoed facets
 # of one claim (union should be kept) and lumped them with members that
