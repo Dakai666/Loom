@@ -239,7 +239,7 @@ def _session_fact_key(session_id: str, ts: str, fact: str) -> str:
     previous slot's new value, the "off-by-one chain".
 
     The first three segments (``session:<id>:<ts>``) are unchanged, so
-    ``consolidation._is_session_sibling`` grouping still holds.
+    ``contradiction.is_session_sibling`` grouping still holds.
     """
     digest = hashlib.sha1(fact.encode("utf-8")).hexdigest()[:12]
     return f"session:{session_id}:{ts}:fact:{digest}"

@@ -205,70 +205,6 @@ def _is_stub(entry: SemanticEntry) -> bool:
     return bool(entry.metadata.get("redirected_to"))
 
 
-def _is_session_sibling(key_a: str, key_b: str) -> bool:
-    """True if two keys are sibling facts from the same session compression.
-
-    Session facts use ``session:<id>:<ts>:fact:<n>`` — siblings share the first
-    three segments. That prefix is a *provenance namespace*, not a semantic
-    subtopic, so they must NOT be treated as contradictions (#497, real-run
-    finding: 98% of reconcile candidates were this noise). They are the natural
-    segmentation of one compression, not competing claims.
-    """
-    if not (key_a.startswith("session:") and key_b.startswith("session:")):
-        return False
-    return key_a.split(":")[:3] == key_b.split(":")[:3]
-
-
-_DATE_SEGMENT = re.compile(r"\d{4}-\d{2}-\d{2}")
-# Key segments that mark an append-only log namespace (per-round / per-session
-# evaluation or diagnostic records) rather than a single-valued attribute.
-_LOG_MARKER_SEGMENTS = {"eval", "diagnostic", "diagnosis"}
-
-
-def _is_namespace_sibling(key_a: str, key_b: str) -> bool:
-    """True if two DISTINCT keys are sibling facts under a structured provenance
-    namespace — different leaves of one grouping, not competing claims (#501).
-
-    Generalises ``_is_session_sibling`` (2a). Real-run round 2 (#56 §12.1)
-    showed the same false-positive pattern across more namespaces: the tier-2
-    prefix detector flags two keys that merely share a provenance prefix as a
-    "contradiction" when they are actually distinct facts of a collection. The
-    families, all confirmed on the real corpus:
-
-      - session compression siblings (``session:<id>:<ts>:fact:<n>``);
-      - relational triples (``rel:<S>::<P>``) — distinct predicates are
-        distinct relations about the subject, never a conflict;
-      - time-bucketed log records — either key carries a ``YYYY-MM-DD`` date
-        segment (diary / self_check / integration / *:updated / diagnostic
-        logs); facts stamped at different times are a history, not a conflict;
-      - evaluation / diagnostic log namespaces (an ``eval`` / ``diagnostic`` /
-        ``diagnosis`` segment) — distinct rounds / cases / facets.
-
-    Deliberately does NOT exclude:
-      - identical keys — a same-key value change is a genuine tier-1
-        contradiction and must still surface;
-      - same-prefix keys outside a provenance namespace whose leaves are
-        opposing values of one attribute (e.g. ``user:pref:tone:formal`` vs
-        ``user:pref:tone:casual``) — those stay reconcile candidates.
-
-    Bias is intentionally conservative toward *excluding* from reconcile: the
-    reconcile arm is the destructive path, so over-skipping is the safe error,
-    under-skipping is the noise we are removing.
-    """
-    if key_a == key_b:
-        return False
-    if _is_session_sibling(key_a, key_b):
-        return True
-    if key_a.startswith("rel:") and key_b.startswith("rel:"):
-        return True
-    if _DATE_SEGMENT.search(key_a) or _DATE_SEGMENT.search(key_b):
-        return True
-    segments = set(key_a.split(":")) | set(key_b.split(":"))
-    if segments & _LOG_MARKER_SEGMENTS:
-        return True
-    return False
-
-
 # Per-pass LLM cost caps (spec §7 batch cap). Shared by every caller — the
 # daemon reads overrides from [memory.consolidation_dream] (#612).
 DEFAULT_MAX_CLUSTERS = 20
@@ -630,8 +566,6 @@ async def build_plan(
         for c in contradictions:
             if _is_dreaming(c.existing) or _is_stub(c.existing):
                 continue
-            if _is_namespace_sibling(entry.key, c.existing.key):
-                continue  # structured-namespace siblings, not contradictions (#497/#501)
             pair = frozenset((entry.key, c.existing.key))
             if entry.key == c.existing.key or pair in seen_pairs:
                 continue
