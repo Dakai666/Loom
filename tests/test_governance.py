@@ -269,6 +269,72 @@ class TestContradictionDetector:
         # Different 3rd segment → no conflict
         assert not any(c.conflict_type == ConflictType.KEY_PREFIX for c in results)
 
+    @pytest.mark.asyncio
+    async def test_session_compression_siblings_not_prefix_conflict(self, semantic):
+        """#628: facts from one compression share ``session:<id>:<ts>`` — a
+        provenance namespace, not a subtopic — so tier-2 must not flag them.
+        Real case: 6 complementary facts → 30/30 pairs flagged → supersede ring.
+        """
+        from loom.core.session import _session_fact_key
+
+        ts = "20261020T163907"
+        facts = [
+            "蒸餾大夢功能於 2026-10-19 與 DK、CC 共同完成",
+            "完整整理週期可能接近兩天，延遲甦醒屬正常",
+            "約 85% 的事實從未被召回",
+        ]
+        for v in facts[:-1]:
+            await semantic.upsert(SemanticEntry(
+                key=_session_fact_key("4a082709", ts, v), value=v,
+                source="session:4a082709",
+            ))
+        proposed = SemanticEntry(
+            key=_session_fact_key("4a082709", ts, facts[-1]), value=facts[-1],
+            source="session:4a082709",
+        )
+
+        results = await ContradictionDetector(semantic).detect(proposed)
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_dated_and_relational_siblings_not_prefix_conflict(self, semantic):
+        """#628: the detector shares consolidation's namespace-sibling rule, so
+        the governed-write and dream paths agree on the same pair (#501)."""
+        await semantic.upsert(SemanticEntry(
+            key="loom:2026-10-21:distill-dream-32pct", value="大夢後活記憶減少 32%",
+            source="memorize",
+        ))
+        await semantic.upsert(SemanticEntry(
+            key="rel:self::role", value="Loom Agent", source="memorize",
+        ))
+        detector = ContradictionDetector(semantic)
+
+        dated = await detector.detect(SemanticEntry(
+            key="loom:2026-10-21:zero-rows-is-not-absence", value="查無資料不等於不存在",
+            source="memorize",
+        ))
+        rel = await detector.detect(SemanticEntry(
+            key="rel:self::complements", value="Claude Code", source="memorize",
+        ))
+        assert dated == []
+        assert rel == []
+
+    @pytest.mark.asyncio
+    async def test_same_attribute_opposing_values_still_prefix_conflict(self, semantic):
+        """#628 must not over-exclude: opposing leaves of one attribute outside
+        a provenance namespace stay a genuine tier-2 contradiction."""
+        await semantic.upsert(SemanticEntry(
+            key="user:pref:tone:formal", value="always write in a formal register",
+            source="manual",
+        ))
+        proposed = SemanticEntry(
+            key="user:pref:tone:casual", value="reply with short blunt fragments",
+            source="session:abc",
+        )
+
+        results = await ContradictionDetector(semantic).detect(proposed)
+        assert any(c.conflict_type == ConflictType.KEY_PREFIX for c in results)
+
     def test_resolve_trust_wins(self):
         """Higher trust tier wins."""
         c = Contradiction(
@@ -379,6 +445,27 @@ class TestGovernedUpsert:
 
         assert result.written is True
         assert result.adjusted_confidence >= 0.85
+
+    @pytest.mark.asyncio
+    async def test_compression_siblings_write_without_contradiction(self, governor, semantic):
+        """#628 end-to-end: governed writes of one compression's facts report
+        no contradiction (so no supersede, no contradiction pulse)."""
+        from loom.core.session import _session_fact_key
+
+        ts = "20261021T003900"
+        facts = ["重複記憶以 redirect stub 保留追溯關係",
+                 "蒸餾後人格與連續性仍保留",
+                 "embedding 層減少約 30%"]
+        results = [
+            await governor.governed_upsert(SemanticEntry(
+                key=_session_fact_key("4a082709", ts, v), value=v,
+                source="session:4a082709",
+            ))
+            for v in facts
+        ]
+
+        assert all(r.written for r in results)
+        assert [r.contradictions_found for r in results] == [0, 0, 0]
 
     @pytest.mark.asyncio
     async def test_upsert_with_contradiction_replace(self, governor, semantic):
@@ -877,17 +964,17 @@ class TestSessionFactKeyContentAddressed:
         assert k_a != k_b
 
     def test_key_preserves_session_sibling_prefix(self):
-        """consolidation._is_session_sibling groups by the first three
+        """contradiction.is_session_sibling groups by the first three
         segments (``session:<id>:<ts>``). The content hash lives in the
         leaf, so sibling grouping must be unaffected."""
         from loom.core.session import _session_fact_key
-        from loom.core.cognition.consolidation import _is_session_sibling
+        from loom.core.memory.contradiction import is_session_sibling
 
         ts = "20260613T020407"
         k_a = _session_fact_key("sess", ts, "fact A")
         k_b = _session_fact_key("sess", ts, "fact B")
         assert k_a.startswith(f"session:sess:{ts}:fact:")
-        assert _is_session_sibling(k_a, k_b)
+        assert is_session_sibling(k_a, k_b)
 
     @pytest.mark.asyncio
     async def test_recompression_same_second_no_false_supersede(
