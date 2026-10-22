@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     import aiosqlite
     from loom.core.ledger import LedgerEmitter, LedgerStore
+    from loom.core.memory.attention import AttentionList
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.memory.facade import MemoryFacade
     from loom.core.memory.procedural import ProceduralMemory, SkillGenome
@@ -1513,6 +1514,109 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
         },
         executor=_recall_period,
         tags=["memory", "search", "recall", "period"],
+        impact_scope="memory",
+    )
+
+
+def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
+    """SAFE ``memory_attend`` — the agent's own attention list (#635).
+
+    One tool, edit-style: no arguments shows the list; ``items`` replaces it
+    whole; ``keep`` / ``let_go`` promote to or release from the milestone
+    tier. Every write is validated in full before anything changes. The
+    tool's own trace is kept out of session compression (see
+    ``records_episodic_trace``) so curating doesn't breed facts about
+    curating.
+    """
+    from loom.core.memory.attention import MAX_ITEMS, AttentionError
+
+    async def _render() -> str:
+        items = await attention.read()
+        if not items:
+            return "Attention list is empty."
+        lines = [f"Attention list ({len(items)}/{MAX_ITEMS}):"]
+        for item in items:
+            state, _ = await attention.status(item)
+            lines.append(
+                f"  [{item.stance}] {item.key} — {item.reason} "
+                f"(until {item.expires_at[:10]}, source {state})"
+            )
+        return "\n".join(lines)
+
+    async def _attend(call: ToolCall) -> ToolResult:
+        items = call.args.get("items")
+        keep = call.args.get("keep") or []
+        let_go = call.args.get("let_go") or []
+        if items is None and not keep and not let_go:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=True, output=await _render())
+        try:
+            change = await attention.write(items=items, keep=keep, let_go=let_go)
+        except AttentionError as exc:
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False,
+                error=f"{exc} — nothing was changed.",
+            )
+        lines = [f"+ {k}" for k in change.added]
+        lines += [f"- {k}" for k in change.removed]
+        lines += [f"~ {k} (stance changed)" for k in change.restanced]
+        if change.kept:
+            lines.append("kept: " + ", ".join(change.kept))
+        if change.let_go:
+            lines.append("let go: " + ", ".join(change.let_go))
+        if change.unchanged_keep:
+            lines.append("already milestone (left as is): " + ", ".join(change.unchanged_keep))
+        if change.unchanged_let_go:
+            lines.append("not kept by you (left as is): " + ", ".join(change.unchanged_let_go))
+        summary = "\n".join(lines) or "No change."
+        return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True,
+                          output=summary + "\n\n" + await _render())
+
+    item_schema = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "Exact fact key (from recall)."},
+            "stance": {
+                "type": "string", "enum": ["prepared", "shelved"],
+                "description": (
+                    "prepared = bring it to me at my next session start; "
+                    "shelved = I looked and set it aside for now."
+                ),
+            },
+            "reason": {"type": "string", "description": "Why — in your own words."},
+            "expires_days": {
+                "type": "integer",
+                "description": "How long the item stands before it lapses (1-30, default 7).",
+            },
+        },
+        "required": ["key", "stance", "reason"],
+    }
+    return ToolDefinition(
+        name="memory_attend",
+        description=(
+            "Your own say over your memory. Call with no arguments to see your "
+            f"attention list. 'items' replaces the whole list (max {MAX_ITEMS}; "
+            "[] clears it): prepared items come back to you at the start of your "
+            "next session; shelved ones are set aside but stay recallable. "
+            "'keep' promotes facts to milestone so they stop fading; 'let_go' "
+            "releases facts you kept so they fade normally. Nothing here edits "
+            "a fact's content or confidence. A fact rewritten or merged since "
+            "you listed it drops out until you look at it again."
+        ),
+        trust_level=TrustLevel.SAFE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": item_schema,
+                          "description": "The full new list. Omit to leave it unchanged."},
+                "keep": {"type": "array", "items": {"type": "string"},
+                         "description": "Fact keys to keep long-term (→ milestone)."},
+                "let_go": {"type": "array", "items": {"type": "string"},
+                           "description": "Fact keys you kept earlier and now release."},
+            },
+        },
+        executor=_attend,
+        tags=["memory", "attention"],
         impact_scope="memory",
     )
 
