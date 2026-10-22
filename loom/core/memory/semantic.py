@@ -352,9 +352,10 @@ class SemanticMemory:
         A session scope matches the stored source exactly. Facts without a
         known session source (including manually memorized facts) are not
         included; historical origins of consolidated facts are not inferred.
-        This listing does not mark entries accessed.
+        Redirect stubs are excluded before LIMIT so they cannot crowd out
+        live facts. This listing does not mark entries accessed.
         """
-        where = ["updated_at >= ?"]
+        where = ["updated_at >= ?", "json_extract(metadata, '$.redirected_to') IS NULL"]
         params: list[Any] = [since.isoformat()]
         if until is not None:
             where.append("updated_at < ?")

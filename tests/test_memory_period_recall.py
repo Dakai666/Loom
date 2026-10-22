@@ -10,6 +10,7 @@ from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import TrustLevel
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
 from loom.core.memory.facade import MemoryFacade
+from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -168,3 +169,81 @@ async def test_period_tool_retrieves_session_issues_and_marks_them(period_memory
     assert "message s1" in result.output
     assert "unknown" not in result.output
     assert (await period_memory.semantic.get("s1:later")).last_accessed_at > OLD_ACCESS
+
+
+@pytest_asyncio.fixture
+async def consolidated_memory(period_memory):
+    """Real consolidation stubs are newer than two remaining live facts."""
+    semantic = period_memory.semantic
+    await semantic._db.execute("DELETE FROM semantic_entries")
+    entries = [SemanticEntry(
+        key=key, value=f"Original memory about {key}", source="session:merged",
+    ) for key in ("survivor", "stub:a", "stub:b")]
+    for entry in entries:
+        await semantic.upsert(entry)
+    await semantic.consolidate(
+        entries, survivor_key="survivor",
+        refined_value="Loom uses SQLite for memory storage with FTS5 indexing",
+        sacrificed_content="\n".join(entry.value for entry in entries),
+        merge_rationale="Combine related memory-storage facts",
+    )
+    await semantic.upsert(SemanticEntry(
+        key="live", value="The agent keeps unrelated research notes separately",
+        source="session:merged",
+    ))
+    now = datetime.now(UTC)
+    for minutes, key in enumerate(("stub:a", "stub:b", "live", "survivor"), start=1):
+        await semantic._db.execute(
+            "UPDATE semantic_entries SET updated_at = ? WHERE key = ?",
+            ((now - timedelta(minutes=minutes)).isoformat(), key),
+        )
+    await semantic._db.commit()
+    yield period_memory
+
+
+@pytest.mark.parametrize("session_id", [None, "merged"])
+async def test_period_stubs_do_not_consume_limit_or_get_accessed(
+    consolidated_memory, session_id,
+):
+    memory = consolidated_memory
+    since = datetime.now(UTC) - timedelta(days=1)
+    listed = await memory.semantic.list_between(since, limit=2, session_id=session_id)
+    assert [entry.key for entry in listed] == ["live", "survivor"]
+    assert all(entry.last_accessed_at is None for entry in listed)
+
+    started = datetime.now(UTC)
+    result = await memory.recall_period(
+        since=since, session_id=session_id, limit=2, include_episodic=False,
+    )
+    assert [entry.key for entry in result["semantic"]] == ["live", "survivor"]
+    for key in ("stub:a", "stub:b"):
+        stub = await memory.semantic.get(key)
+        assert stub.metadata["redirected_to"] == "survivor"
+        assert stub.last_accessed_at is None
+        assert (await memory.semantic.resolve_redirect(key)).key == "survivor"
+    for key in ("live", "survivor"):
+        assert (await memory.semantic.get(key)).last_accessed_at >= started
+
+
+async def test_period_search_fallback_fills_limit_past_stubs(consolidated_memory):
+    results = await consolidated_memory.search(
+        "zzzzunmatchedquery", kind="semantic", limit=2,
+        since=datetime.now(UTC) - timedelta(days=1),
+    )
+    assert [entry.key for entry in results] == ["live", "survivor"]
+    assert all(entry.metadata["fallback"] for entry in results)
+
+
+async def test_admission_lexical_lookback_uses_facts_instead_of_stubs(consolidated_memory):
+    memory = consolidated_memory
+    governor = MemoryGovernor(
+        semantic=memory.semantic, procedural=memory.procedural,
+        episodic=memory.episodic, db=memory.semantic._db,
+        config={"dup_lookback_limit": 2},
+    )
+    survivor = await memory.semantic.get("survivor")
+    results = await governor.evaluate_admission([survivor.value], source="session:new")
+    assert results[0].admitted is False
+    assert results[0].reason == "duplicate"
+    for key in ("stub:a", "stub:b", "live", "survivor"):
+        assert (await memory.semantic.get(key)).last_accessed_at is None
