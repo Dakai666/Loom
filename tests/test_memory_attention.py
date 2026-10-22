@@ -282,3 +282,87 @@ async def test_tool_writes_and_shows_list_with_diff(mem):
 def test_attend_trace_is_not_compression_input():
     assert records_episodic_trace("memory_attend") is False
     assert records_episodic_trace("recall") is True
+
+
+# ── serialization with dream rewrites (Codex review on #637) ───────────────
+
+
+async def test_write_waits_for_running_dream_rewrite_then_sees_the_merge(mem):
+    """A dream holding the rewrite lock merges the fact first; the queued
+    keep then validates against the stub and refuses — nothing changes."""
+    import asyncio
+
+    from loom.core.cognition.consolidation import memory_rewrite_lock
+
+    db, semantic, att = mem
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def dream():
+        async with memory_rewrite_lock():
+            holding.set()
+            await release.wait()
+            await semantic.consolidate(
+                [await semantic.get("cdc"), await semantic.get("taste")],
+                survivor_key="cdc", refined_value="merged", sacrificed_content="x",
+                merge_rationale="dream",
+            )
+
+    dream_task = asyncio.create_task(dream())
+    await holding.wait()
+    attend_task = asyncio.create_task(att.write(keep=["taste"]))
+    await asyncio.sleep(0.01)
+    assert not attend_task.done()                    # blocked behind the dream
+    release.set()
+    await dream_task
+    with pytest.raises(AttentionError):
+        await attend_task
+    taste = await semantic.get("taste")
+    assert taste.temporal == "recent" and "kept_by" not in taste.metadata
+    assert (await semantic.get("cdc")).temporal == "recent"
+
+
+async def test_keep_rejects_whole_write_if_fact_merged_after_validation(mem, monkeypatch):
+    """Belt and braces for a writer outside the lock: a real merge landing
+    between validation and the UPDATE must not promote the stub."""
+    db, semantic, att = mem
+    await att.write(items=[_item("cdc")])
+    original = att._live_fact
+
+    async def validate_then_merge(key, what):
+        entry = await original(key, what)
+        if key == "taste":
+            await semantic.consolidate(
+                [await semantic.get("other"), await semantic.get("taste")],
+                survivor_key="other", refined_value="merged",
+                sacrificed_content="x", merge_rationale="race",
+            )
+        return entry
+
+    monkeypatch.setattr(att, "_live_fact", validate_then_merge)
+    with pytest.raises(AttentionError):
+        # taste is validated once (keep), after the list — the merge lands
+        # between that last check and the UPDATE.
+        await att.write(items=[_item("cdc", stance="shelved")], keep=["taste"])
+    stub = await semantic.get("taste")
+    assert stub.metadata.get("redirected_to") == "other"
+    assert stub.temporal == "recent" and "kept_by" not in stub.metadata
+    assert [(i.key, i.stance) for i in await att.read()] == [("cdc", "prepared")]  # list untouched too
+
+
+async def test_let_go_rejects_if_ownership_changed_after_validation(mem, monkeypatch):
+    db, semantic, att = mem
+    await att.write(keep=["taste"])
+    original = att._live_fact
+
+    async def validate_then_take_over(key, what):
+        entry = await original(key, what)
+        await db.execute(
+            "UPDATE semantic_entries SET metadata = json_remove(metadata, '$.kept_by') "
+            "WHERE key = ?", (key,),
+        )
+        return entry
+
+    monkeypatch.setattr(att, "_live_fact", validate_then_take_over)
+    with pytest.raises(AttentionError):
+        await att.write(let_go=["taste"])
+    assert (await semantic.get("taste")).temporal == "milestone"

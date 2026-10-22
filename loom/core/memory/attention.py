@@ -138,7 +138,27 @@ class AttentionList:
         """Validate everything first, then apply in one transaction.
 
         ``items=None`` leaves the list as is; ``items=[]`` clears it.
+
+        The whole read → validate → write → commit runs under the shared
+        memory rewrite lock: the daemon's dream passes rewrite facts on this
+        same connection, so a merge landing between validation and the
+        UPDATE would otherwise let ``keep`` promote a redirect stub (and a
+        dream's commit could land half of this write). The UPDATEs are also
+        conditional on what validation saw; a miss rejects the whole write.
         """
+        # Lazy: the lock lives with the dream passes (cognition layer), as in
+        # maintenance.py's distill path.
+        from loom.core.cognition.consolidation import memory_rewrite_lock
+        async with memory_rewrite_lock():
+            return await self._write_locked(items=items, keep=keep, let_go=let_go)
+
+    async def _write_locked(
+        self,
+        *,
+        items: list[dict[str, Any]] | None,
+        keep: list[str] | None,
+        let_go: list[str] | None,
+    ) -> AttentionChange:
         keep = _dedupe(keep or [])
         let_go = _dedupe(let_go or [])
         if set(keep) & set(let_go):
@@ -174,18 +194,25 @@ class AttentionList:
                      now),
                 )
             for key in kept:
-                await self._db.execute(
+                cur = await self._db.execute(
                     "UPDATE semantic_entries SET temporal = ?, metadata = json_set("
                     "COALESCE(metadata, '{}'), '$.kept_by', ?, '$.kept_at', ?) "
-                    "WHERE key = ?",
-                    (TEMPORAL_MILESTONE, _KEPT_BY, now, key),
+                    "WHERE key = ? AND temporal != ? "
+                    "AND json_extract(metadata, '$.redirected_to') IS NULL",
+                    (TEMPORAL_MILESTONE, _KEPT_BY, now, key, TEMPORAL_MILESTONE),
                 )
+                if cur.rowcount != 1:
+                    raise AttentionError(f"keep: {key!r} changed while writing — look again")
             for key in released:
-                await self._db.execute(
+                cur = await self._db.execute(
                     "UPDATE semantic_entries SET temporal = ?, metadata = json_remove("
-                    "metadata, '$.kept_by', '$.kept_at') WHERE key = ?",
-                    (TEMPORAL_RECENT, key),
+                    "metadata, '$.kept_by', '$.kept_at') WHERE key = ? AND temporal = ? "
+                    "AND json_extract(metadata, '$.kept_by') = ? "
+                    "AND json_extract(metadata, '$.redirected_to') IS NULL",
+                    (TEMPORAL_RECENT, key, TEMPORAL_MILESTONE, _KEPT_BY),
                 )
+                if cur.rowcount != 1:
+                    raise AttentionError(f"let_go: {key!r} changed while writing — look again")
             await self._db.commit()
         except Exception:
             await self._db.rollback()
