@@ -42,6 +42,8 @@ MAX_ITEMS = 5
 STANCES = ("prepared", "shelved")
 DEFAULT_EXPIRES_DAYS = 7
 MAX_EXPIRES_DAYS = 30
+UNVISITED_MIN_DAYS = 30
+UNVISITED_SAMPLE_N = 5
 
 _META_KEY = "attention.list"
 _KEPT_BY = "attention"
@@ -125,6 +127,38 @@ class AttentionList:
             if state == "live" and entry is not None:
                 out.append((item, entry))
         return out
+
+    async def unvisited_sample(
+        self, n: int = UNVISITED_SAMPLE_N, *, min_days: int = UNVISITED_MIN_DAYS,
+    ) -> list["SemanticEntry"]:
+        """A random handful of facts nobody has read in ``min_days``.
+
+        recall and recall_period both need a cue; a memory the agent has no
+        cue for never comes back on its own. This is its way in — chance,
+        then the agent's judgement (keep, prepare, or ignore). Redirect
+        stubs, dreaming hypotheses and items already on the list are left
+        out. Showing a fact here is not a read: nothing is marked accessed.
+        """
+        from loom.core.memory.semantic import _SELECT_COLS, _row_to_entry
+
+        cutoff = (self._clock() - timedelta(days=min_days)).isoformat()
+        listed = [i.key for i in await self.read()]
+        where = [
+            "json_extract(metadata, '$.redirected_to') IS NULL",
+            "COALESCE(source, '') != 'dreaming'",
+            "COALESCE(last_accessed_at, created_at) < ?",
+        ]
+        params: list[Any] = [cutoff]
+        if listed:
+            where.append(f"key NOT IN ({','.join('?' * len(listed))})")
+            params.extend(listed)
+        params.append(max(int(n), 0))
+        cur = await self._db.execute(
+            f"SELECT {_SELECT_COLS} FROM semantic_entries "
+            f"WHERE {' AND '.join(where)} ORDER BY RANDOM() LIMIT ?",
+            tuple(params),
+        )
+        return [_row_to_entry(r) for r in await cur.fetchall()]
 
     # ── write ───────────────────────────────────────────────────────────
 

@@ -1530,17 +1530,30 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
     """
     from loom.core.memory.attention import MAX_ITEMS, AttentionError
 
-    async def _render() -> str:
+    async def _render(*, with_unvisited: bool = False) -> str:
         items = await attention.read()
-        if not items:
-            return "Attention list is empty."
-        lines = [f"Attention list ({len(items)}/{MAX_ITEMS}):"]
+        if items:
+            lines = [f"Attention list ({len(items)}/{MAX_ITEMS}):"]
+        else:
+            lines = ["Attention list is empty."]
         for item in items:
             state, _ = await attention.status(item)
             lines.append(
                 f"  [{item.stance}] {item.key} — {item.reason} "
                 f"(until {item.expires_at[:10]}, source {state})"
             )
+        sample = await attention.unvisited_sample() if with_unvisited else []
+        if sample:
+            lines.append(
+                "\nNot looked at in a long while (random, not counted as read) — "
+                "keep, prepare, or leave them be:"
+            )
+            for entry in sample:
+                value = entry.value.strip().replace("\n", " ")
+                if len(value) > 160:
+                    value = value[:159] + "…"
+                origin = (entry.source or "unknown").split(":", 1)[0]
+                lines.append(f"  {entry.key} ({origin}): {value}")
         return "\n".join(lines)
 
     async def _attend(call: ToolCall) -> ToolResult:
@@ -1549,7 +1562,7 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
         let_go = call.args.get("let_go") or []
         if items is None and not keep and not let_go:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output=await _render())
+                              success=True, output=await _render(with_unvisited=True))
         try:
             change = await attention.write(items=items, keep=keep, let_go=let_go)
         except AttentionError as exc:
@@ -1595,7 +1608,8 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
         name="memory_attend",
         description=(
             "Your own say over your memory. Call with no arguments to see your "
-            f"attention list. 'items' replaces the whole list (max {MAX_ITEMS}; "
+            "attention list plus a few facts you haven't looked at in a long "
+            f"while. 'items' replaces the whole list (max {MAX_ITEMS}; "
             "[] clears it): prepared items come back to you at the start of your "
             "next session; shelved ones are set aside but stay recallable. "
             "'keep' promotes facts to milestone so they stop fading; 'let_go' "
