@@ -366,3 +366,77 @@ async def test_let_go_rejects_if_ownership_changed_after_validation(mem, monkeyp
     with pytest.raises(AttentionError):
         await att.write(let_go=["taste"])
     assert (await semantic.get("taste")).temporal == "milestone"
+
+
+# ── long-unvisited sample (the way in for memories with no cue) ────────────
+
+
+@pytest_asyncio.fixture
+async def aged(mem):
+    """Back-date the fixture facts and add a few that must never be sampled."""
+    db, semantic, att = mem
+    for key, value, source in (
+        ("dream_triple", "A dreaming hypothesis", "dreaming"),
+        ("fresh", "Written yesterday, never read", "memorize"),
+        ("read_lately", "Old but read last week", "memorize"),
+    ):
+        await semantic.upsert(SemanticEntry(key=key, value=value, source=source))
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    await db.execute(
+        "UPDATE semantic_entries SET created_at = ?, last_accessed_at = NULL "
+        "WHERE key != 'fresh'", (old,),
+    )
+    await db.execute(
+        "UPDATE semantic_entries SET last_accessed_at = ? WHERE key = 'read_lately'",
+        ((datetime.now(UTC) - timedelta(days=7)).isoformat(),),
+    )
+    await db.commit()
+    await semantic.consolidate(                       # "other" becomes a stub
+        [await semantic.get("cdc"), await semantic.get("other")],
+        survivor_key="cdc", refined_value="merged cdc", sacrificed_content="x",
+        merge_rationale="test",
+    )
+    await db.execute("UPDATE semantic_entries SET created_at = ?", (old,))
+    await db.execute(
+        "UPDATE semantic_entries SET created_at = ? WHERE key = 'fresh'",
+        ((datetime.now(UTC) - timedelta(days=1)).isoformat(),),
+    )
+    await db.commit()
+    return db, semantic, att
+
+
+async def test_unvisited_sample_only_long_unseen_live_non_dream(aged):
+    _, _, att = aged
+    seen = set()
+    for _ in range(20):
+        seen |= {e.key for e in await att.unvisited_sample(n=10)}
+    assert seen == {"taste", "cdc", "old_anchor"}
+
+
+async def test_unvisited_sample_skips_listed_and_caps_n(aged):
+    _, _, att = aged
+    await att.write(items=[_item("taste")])
+    for _ in range(10):
+        sample = await att.unvisited_sample(n=1)
+        assert len(sample) == 1 and sample[0].key != "taste"
+
+
+async def test_unvisited_sample_does_not_mark_accessed(aged):
+    db, semantic, att = aged
+    await att.unvisited_sample(n=10)
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM semantic_entries WHERE last_accessed_at IS NOT NULL",
+    )
+    assert (await cur.fetchone())[0] == 1             # only read_lately
+
+
+async def test_tool_view_shows_unvisited_sample(aged):
+    _, _, att = aged
+    tool = make_memory_attend_tool(att)
+    shown = await tool.executor(ToolCall(
+        id="v", tool_name="memory_attend", trust_level=TrustLevel.SAFE,
+        session_id="s", args={},
+    ))
+    assert "Not looked at in a long while" in shown.output
+    assert "(session)" in shown.output               # origin shown: hand vs machine
+    assert "dream_triple" not in shown.output and "fresh" not in shown.output
