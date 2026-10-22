@@ -44,6 +44,18 @@ DEFAULT_EXPIRES_DAYS = 7
 MAX_EXPIRES_DAYS = 30
 UNVISITED_MIN_DAYS = 30
 UNVISITED_SAMPLE_N = 5
+UNVISITED_HAND_N = 3
+# Sources a person or the agent wrote on purpose (vs. extraction / dreams).
+HAND_SOURCES = ("memorize", "agent", "user", "manual")
+
+# What a list item's state means, in words the agent reads in the tool view.
+STATE_LABELS = {
+    "live": "fact unchanged",
+    "changed": "fact rewritten since you listed it — look again before relying on it",
+    "merged": "fact merged into another key — list that key instead",
+    "gone": "fact no longer exists",
+    "expired": "expired — re-list it with expires_days to renew",
+}
 
 _META_KEY = "attention.list"
 _KEPT_BY = "attention"
@@ -138,21 +150,45 @@ class AttentionList:
         then the agent's judgement (keep, prepare, or ignore). Redirect
         stubs, dreaming hypotheses and items already on the list are left
         out. Showing a fact here is not a read: nothing is marked accessed.
+
+        Stratified: up to :data:`UNVISITED_HAND_N` of the ``n`` come from
+        hand-written sources, the rest from everything else. Machine facts
+        are ~70% of the corpus, so a flat sample almost never surfaces the
+        agent's own old judgements — while the machine share still shows
+        what the corpus is really made of. A short stratum is filled from
+        the other.
         """
+        n = max(int(n), 0)
+        hand = await self._sample(n=min(UNVISITED_HAND_N, n), hand=True, min_days=min_days)
+        rest = await self._sample(n=n - len(hand), hand=False, min_days=min_days)
+        if len(hand) + len(rest) < n:
+            hand += await self._sample(
+                n=n - len(hand) - len(rest), hand=True, min_days=min_days,
+                exclude=[e.key for e in hand],
+            )
+        return hand + rest
+
+    async def _sample(
+        self, *, n: int, hand: bool, min_days: int, exclude: list[str] = (),
+    ) -> list["SemanticEntry"]:
         from loom.core.memory.semantic import _SELECT_COLS, _row_to_entry
 
+        if n <= 0:
+            return []
         cutoff = (self._clock() - timedelta(days=min_days)).isoformat()
-        listed = [i.key for i in await self.read()]
+        skip = [i.key for i in await self.read()] + list(exclude)
+        marks = ",".join("?" * len(HAND_SOURCES))
         where = [
             "json_extract(metadata, '$.redirected_to') IS NULL",
             "COALESCE(source, '') != 'dreaming'",
             "COALESCE(last_accessed_at, created_at) < ?",
+            f"COALESCE(source, '') {'IN' if hand else 'NOT IN'} ({marks})",
         ]
-        params: list[Any] = [cutoff]
-        if listed:
-            where.append(f"key NOT IN ({','.join('?' * len(listed))})")
-            params.extend(listed)
-        params.append(max(int(n), 0))
+        params: list[Any] = [cutoff, *HAND_SOURCES]
+        if skip:
+            where.append(f"key NOT IN ({','.join('?' * len(skip))})")
+            params.extend(skip)
+        params.append(n)
         cur = await self._db.execute(
             f"SELECT {_SELECT_COLS} FROM semantic_entries "
             f"WHERE {' AND '.join(where)} ORDER BY RANDOM() LIMIT ?",
@@ -199,7 +235,7 @@ class AttentionList:
             raise AttentionError("a key cannot be both kept and let go in one write")
 
         old = await self.read()
-        new_items = old if items is None else await self._validate_items(items)
+        new_items = old if items is None else await self._validate_items(items, old)
         keep_entries = [await self._live_fact(k, "keep") for k in keep]
         let_go_entries = [await self._live_fact(k, "let_go") for k in let_go]
 
@@ -264,7 +300,14 @@ class AttentionList:
             items=new_items,
         )
 
-    async def _validate_items(self, raw_items: list[dict[str, Any]]) -> list[AttentionItem]:
+    async def _validate_items(
+        self, raw_items: list[dict[str, Any]], old: list[AttentionItem],
+    ) -> list[AttentionItem]:
+        """An item already on the list keeps its value hash, set time and
+        expiry unless ``expires_days`` is given: rewriting the list must not
+        quietly re-approve a fact that changed since it was listed, nor
+        silently extend it. Giving ``expires_days`` is the explicit renewal —
+        the fact is re-checked and re-hashed as it is now."""
         if not isinstance(raw_items, list):
             raise AttentionError("items must be a list")
         if len(raw_items) > MAX_ITEMS:
@@ -272,6 +315,7 @@ class AttentionList:
         now = self._clock()
         seen: set[str] = set()
         out: list[AttentionItem] = []
+        old_by_key = {i.key: i for i in old}
         for raw in raw_items:
             if not isinstance(raw, dict):
                 raise AttentionError("each item must be an object")
@@ -285,6 +329,14 @@ class AttentionList:
                 raise AttentionError(f"{key!r}: stance must be one of {STANCES}")
             if not reason:
                 raise AttentionError(f"{key!r}: reason is required")
+            prior = old_by_key.get(key)
+            if prior is not None and "expires_days" not in raw:
+                out.append(AttentionItem(
+                    key=key, stance=stance, reason=reason,
+                    value_hash=prior.value_hash, expires_at=prior.expires_at,
+                    set_at=prior.set_at,
+                ))
+                continue
             try:
                 days = int(raw.get("expires_days", DEFAULT_EXPIRES_DAYS))
             except (TypeError, ValueError):

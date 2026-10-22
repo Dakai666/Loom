@@ -440,3 +440,103 @@ async def test_tool_view_shows_unvisited_sample(aged):
     assert "Not looked at in a long while" in shown.output
     assert "(session)" in shown.output               # origin shown: hand vs machine
     assert "dream_triple" not in shown.output and "fresh" not in shown.output
+
+
+# ── Loom Agent's first-use feedback (2026-10-22) ───────────────────────────
+
+
+@pytest_asyncio.fixture
+async def mixed_pool(mem):
+    """Many old machine facts, a few old hand-written ones."""
+    db, semantic, att = mem
+    for i in range(40):
+        await semantic.upsert(SemanticEntry(
+            key=f"machine:{i}", value=f"extracted {i}", source=f"session:x{i}",
+        ))
+    for i in range(4):
+        await semantic.upsert(SemanticEntry(
+            key=f"hand:{i}", value=f"my own judgement {i}", source="memorize",
+        ))
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    await db.execute(
+        "UPDATE semantic_entries SET created_at = ?, last_accessed_at = NULL", (old,),
+    )
+    await db.commit()
+    return db, semantic, att
+
+
+async def test_unvisited_sample_always_includes_hand_written_when_available(mixed_pool):
+    _, _, att = mixed_pool
+    for _ in range(10):
+        sample = await att.unvisited_sample(n=5)
+        hand = [e for e in sample if e.key.startswith("hand:")]
+        assert len(sample) == 5
+        assert len(hand) == 3                         # 3 hand + 2 other
+
+
+async def test_unvisited_sample_fills_from_machine_when_hand_runs_short(aged):
+    _, _, att = aged                                  # no hand-written in pool
+    sample = await att.unvisited_sample(n=5)
+    assert len(sample) == 3                           # whole eligible pool
+
+
+async def test_relisting_keeps_hash_and_expiry_so_a_rewrite_stays_visible(mem):
+    _, semantic, att = mem
+    await att.write(items=[_item("taste", expires_days=3)])
+    first = (await att.read())[0]
+    await semantic.upsert(SemanticEntry(
+        key="taste", value="Taste rewritten by someone", source="session:s0",
+    ))
+    # Rewriting the list (new reason, another item) must not launder it.
+    await att.write(items=[_item("taste", reason="still mine"), _item("cdc")])
+    carried = [i for i in await att.read() if i.key == "taste"][0]
+    assert carried.reason == "still mine"
+    assert (carried.value_hash, carried.expires_at, carried.set_at) == (
+        first.value_hash, first.expires_at, first.set_at,
+    )
+    assert (await att.status(carried))[0] == "changed"
+
+
+async def test_explicit_expires_days_renews_and_rehashes(mem):
+    _, semantic, att = mem
+    later = AttentionList(
+        att._db, semantic, clock=lambda: datetime.now(UTC) + timedelta(days=10),
+    )
+    await att.write(items=[_item("taste", expires_days=1)])
+    assert (await later.status((await later.read())[0]))[0] == "expired"
+    await later.write(items=[_item("taste", expires_days=7)])
+    assert (await later.status((await later.read())[0]))[0] == "live"
+
+
+async def test_tool_view_explains_item_state_in_plain_words(mem):
+    _, semantic, att = mem
+    tool = make_memory_attend_tool(att)
+
+    async def view():
+        return (await tool.executor(ToolCall(
+            id="v", tool_name="memory_attend", trust_level=TrustLevel.SAFE,
+            session_id="s", args={},
+        ))).output
+
+    await att.write(items=[_item("taste")])
+    assert "fact unchanged" in await view()
+    assert "source live" not in await view()
+    await semantic.upsert(SemanticEntry(key="taste", value="rewritten", source="x"))
+    assert "fact rewritten since you listed it" in await view()
+
+
+async def test_stale_carried_item_does_not_block_rewriting_the_list(mem):
+    """A listed fact merged away later must not make every rewrite fail;
+    it rides along as 'merged' until the agent drops or replaces it."""
+    _, semantic, att = mem
+    await att.write(items=[_item("taste")])
+    await semantic.consolidate(
+        [await semantic.get("cdc"), await semantic.get("taste")],
+        survivor_key="cdc", refined_value="merged", sacrificed_content="x",
+        merge_rationale="test",
+    )
+    await att.write(items=[_item("taste"), _item("old_anchor")])
+    items = {i.key: i for i in await att.read()}
+    assert (await att.status(items["taste"]))[0] == "merged"
+    with pytest.raises(AttentionError):               # renewing a stub is refused
+        await att.write(items=[_item("taste", expires_days=7)])
