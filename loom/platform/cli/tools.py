@@ -1528,7 +1528,7 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
     ``records_episodic_trace``) so curating doesn't breed facts about
     curating.
     """
-    from loom.core.memory.attention import MAX_ITEMS, AttentionError
+    from loom.core.memory.attention import MAX_ITEMS, STATE_LABELS, AttentionError
 
     async def _render(*, with_unvisited: bool = False) -> str:
         items = await attention.read()
@@ -1540,7 +1540,7 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
             state, _ = await attention.status(item)
             lines.append(
                 f"  [{item.stance}] {item.key} — {item.reason} "
-                f"(until {item.expires_at[:10]}, source {state})"
+                f"(until {item.expires_at[:10]}; {STATE_LABELS[state]})"
             )
         sample = await attention.unvisited_sample() if with_unvisited else []
         if sample:
@@ -1599,7 +1599,12 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
             "reason": {"type": "string", "description": "Why — in your own words."},
             "expires_days": {
                 "type": "integer",
-                "description": "How long the item stands before it lapses (1-30, default 7).",
+                "description": (
+                    "Days the item stands (1-30, default 7 for a new item). An "
+                    "item already on the list keeps its date unless you give "
+                    "this — giving it renews the item against the fact as it "
+                    "is now."
+                ),
             },
         },
         "required": ["key", "stance", "reason"],
