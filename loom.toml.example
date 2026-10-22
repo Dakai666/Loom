@@ -303,6 +303,18 @@ threshold       = 0.1    # overrides [memory.governance].semantic_decay_threshol
 # "knowledge.milestone" = 365
 
 # ─────────────────────────────────────────────
+# Attention list (#635, docs/designs/58) — the agent's own say over its memory
+# ─────────────────────────────────────────────
+# Adds the memory_attend tool: a whole-replace list of at most 5 facts the
+# agent prepares for itself (or shelves), plus keep / let_go to move facts in
+# and out of the milestone tier. Facts' content and confidence are never
+# touched. When enabled, Hook G (session-start brief) shows only the agent's
+# prepared items — silent when there are none — instead of the previous
+# session's project×milestone top-3. false = the original Hook G.
+[memory.attention]
+enabled = false
+
+# ─────────────────────────────────────────────
 # Distill dream (#613 E, docs/designs/57) — twice-daily topic distillation
 # ─────────────────────────────────────────────
 # Replaces the 12 h themed dream (#376, retired: it only ever added memory;

@@ -7,10 +7,15 @@ alongside judge verdicts (#196 Phase 2 pattern). Pulses surface as
 ``<system-reminder>`` blocks on the agent's first LLM call of the next turn.
 
 Hook G — Session preheat
-    Once per ``start()``, query the previous active session's
-    ``domain=project AND temporal=milestone`` facts, top-3 by confidence.
-    Continuity across session boundaries without polluting context: ``None``
-    when nothing relevant exists.
+    Once per ``start()``. With the attention list enabled (#635) the brief
+    is the agent's own prepared items (:class:`~loom.core.memory.attention.
+    AttentionList`) — only those whose source fact is unchanged and not
+    expired, silent when there are none. With it disabled, the original
+    source: the previous active session's ``domain=project AND
+    temporal=milestone`` facts, top-3 by confidence. The two modes are
+    exclusive — an empty list never falls back to the top-3. Being
+    start-only, a list written mid-session lands in the next session, and
+    there is at most one brief per session by construction.
 
 Hook A — Contradiction notice
     Each ``governed_upsert`` that detects a contradiction emits a short
@@ -38,6 +43,7 @@ from loom.core.memory.ontology import (
 
 if TYPE_CHECKING:
     import aiosqlite
+    from loom.core.memory.attention import AttentionList
     from loom.core.memory.contradiction import Contradiction
     from loom.core.memory.semantic import SemanticMemory
 
@@ -54,6 +60,7 @@ PULSE_TYPE_CONTRADICTION = "contradiction"
 
 # Pulse source for Hook G — Hook A uses the contradicting fact key.
 _SOURCE_HOOK_G = "hook_G"
+_SOURCE_ATTENTION = "attention"
 
 # Issue #378 — fold-display constraints. Folded form caps bullets so a
 # pathological compression batch (50+ contradictions) doesn't blow up the
@@ -144,12 +151,14 @@ class MemoryPulse:
         session_id: str,
         session_started_at: datetime,
         pending_buffer: list[PulseRecord],
+        attention: "AttentionList | None" = None,
     ) -> None:
         self._db = db
         self._semantic = semantic
         self._session_id = session_id
         self._session_started_at = session_started_at
         self._buffer = pending_buffer
+        self._attention = attention
 
     # ------------------------------------------------------------------
     # Hook G — Session preheat
@@ -161,7 +170,12 @@ class MemoryPulse:
           - no prior session exists
           - no project/milestone fact has been touched since the prior
             session started (i.e. nothing the agent recently anchored on)
+
+        With an attention list wired, the list replaces this source entirely.
         """
+        if self._attention is not None:
+            await self._attention_brief()
+            return
         try:
             prev = await self._previous_active_session()
             if prev is None:
@@ -195,6 +209,29 @@ class MemoryPulse:
             ))
         except Exception as exc:
             logger.debug("pulse: session_brief failed: %s", exc)
+
+    async def _attention_brief(self) -> None:
+        try:
+            prepared = await self._attention.prepared_brief_items()
+            if not prepared:
+                return
+            lines = [
+                f"- {entry.key}: {_truncate(entry.value)}\n  (why: {_truncate(item.reason, 120)})"
+                for item, entry in prepared
+            ]
+            brief = (
+                "Prepared by you (memory_attend) for yourself — use what is "
+                "relevant to what you're doing. If one fits the conversation "
+                "you may bring it up naturally at the end of a reply; leaving "
+                "them unsaid is fine.\n" + "\n".join(lines)
+            )
+            self._buffer.append(PulseRecord(
+                text=brief,
+                pulse_type=PULSE_TYPE_SESSION_BRIEF,
+                pulse_source=_SOURCE_ATTENTION,
+            ))
+        except Exception as exc:
+            logger.debug("pulse: attention brief failed: %s", exc)
 
     async def _previous_active_session(self) -> tuple[str, datetime] | None:
         cursor = await self._db.execute(

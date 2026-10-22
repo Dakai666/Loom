@@ -245,6 +245,18 @@ def _session_fact_key(session_id: str, ts: str, fact: str) -> str:
     return f"session:{session_id}:{ts}:fact:{digest}"
 
 
+# Tools whose trace never enters the episodic log, so session compression
+# can't turn them into new semantic facts. ``memory_attend`` is the agent
+# curating its own memory — the list is already the durable record, and a
+# fact like "I prepared X" would be the operational trace COMPRESS_PROMPT
+# tier 1 forbids, re-entering the corpus as raw material (#635 §4.1).
+_EPISODIC_EXCLUDED_TOOLS = frozenset({"memory_attend"})
+
+
+def records_episodic_trace(tool_name: str) -> bool:
+    return tool_name not in _EPISODIC_EXCLUDED_TOOLS
+
+
 async def compress_session(
     session_id: str,
     episodic: EpisodicMemory,
@@ -1233,6 +1245,14 @@ class LoomSession:
         # #451 phase B: ``query_relations`` tool retired — relational
         # triples surface through ``recall`` (single agent verb).
         self.registry.register(make_memory_health_tool(self._governor, self._db))
+        # #635: the agent's own attention list. Opt-in; when on, Hook G reads
+        # it instead of the milestone top-3 (exclusive — see pulse.py).
+        self._attention = None
+        if _memory_cfg.get("attention", {}).get("enabled", False):
+            from loom.core.memory.attention import AttentionList
+            from loom.platform.cli.tools import make_memory_attend_tool
+            self._attention = AttentionList(self._db, self._memory.semantic)
+            self.registry.register(make_memory_attend_tool(self._attention))
 
         # Issue #147 Phase C.1: facade-aware cognition wiring.
         # ReflectionAPI / CounterFactualReflector previously took
@@ -1637,6 +1657,7 @@ class LoomSession:
             session_id=self.session_id,
             session_started_at=datetime.now(UTC),
             pending_buffer=self._pending_pulses,
+            attention=self._attention,
         )
         self._governor.set_pulse(self._pulse)
         await self._pulse.session_brief()
@@ -4225,14 +4246,15 @@ class LoomSession:
         }
         if result.failure_type:
             meta["failure_type"] = result.failure_type
-        await self._memory.episodic.write(
-            EpisodicEntry(
-                session_id=self.session_id,
-                event_type="tool_result",
-                content=summary,
-                metadata=meta,
+        if records_episodic_trace(call.tool_name):
+            await self._memory.episodic.write(
+                EpisodicEntry(
+                    session_id=self.session_id,
+                    event_type="tool_result",
+                    content=summary,
+                    metadata=meta,
+                )
             )
-        )
 
         # Track tool usage for SkillOutcomeTracker
         if self._skill_outcome_tracker is not None:
