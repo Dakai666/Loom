@@ -1303,7 +1303,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         description=(
             "Search long-term memory for relevant facts or skills using ranked retrieval. "
             "Call this before starting a task to surface related context. "
-            "Results are ranked by relevance to the query."
+            "Results are ranked by relevance to the query. For events in a "
+            "time window or a known session, use recall_period instead."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1460,8 +1461,11 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
         name="recall_period",
         description=(
             "Retrieve time-window memory evidence. Use for questions like "
-            "'what did we discuss yesterday?' Start with semantic facts and "
-            "include episodic/session evidence when deeper recall is needed."
+            "'what did we discuss yesterday?' or 'what issues did I open last night?' "
+            "Use session_id to narrow all layers to a known session. Semantic "
+            "facts use their update time and stored source session; manually "
+            "memorized facts may have no session scope. Include episodic/session "
+            "evidence to inspect the original events and messages."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1497,7 +1501,12 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Optional session scope for episodic events.",
+                    "description": (
+                        "Optional exact session scope for all layers. Only "
+                        "semantic facts with that stored source session are "
+                        "included; unknown or historical merged origins are "
+                        "not inferred."
+                    ),
                 },
             },
             "required": ["since"],

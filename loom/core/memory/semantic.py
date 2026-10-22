@@ -345,13 +345,24 @@ class SemanticMemory:
         until: datetime | None = None,
         *,
         limit: int = 20,
+        session_id: str | None = None,
     ) -> list[SemanticEntry]:
-        """Return entries updated in ``[since, until)`` newest first."""
-        where = ["updated_at >= ?"]
+        """Return entries updated in ``[since, until)`` newest first.
+
+        A session scope matches the stored source exactly. Facts without a
+        known session source (including manually memorized facts) are not
+        included; historical origins of consolidated facts are not inferred.
+        Redirect stubs are excluded before LIMIT so they cannot crowd out
+        live facts. This listing does not mark entries accessed.
+        """
+        where = ["updated_at >= ?", "json_extract(metadata, '$.redirected_to') IS NULL"]
         params: list[Any] = [since.isoformat()]
         if until is not None:
             where.append("updated_at < ?")
             params.append(until.isoformat())
+        if session_id is not None:
+            where.append("source = ?")
+            params.append(f"session:{session_id}")
         params.append(limit)
         cursor = await self._db.execute(
             f"SELECT {_SELECT_COLS} FROM semantic_entries "
