@@ -153,11 +153,13 @@ class MemoryFacade:
 
         Semantic facts are always included. Episodic events and session
         metadata are optional so callers can start with distilled facts and
-        deepen only when needed.
+        deepen only when needed. A session scope applies to every layer;
+        semantic facts require an exact stored session source. Only returned
+        facts are marked accessed; the time window still uses updated_at.
         """
         capped = min(max(int(limit), 1), 20)
         semantic = await self.semantic.list_between(
-            since, until, limit=capped,
+            since, until, limit=capped, session_id=session_id,
         )
         episodic = (
             await self.episodic.list_between(
@@ -167,7 +169,7 @@ class MemoryFacade:
         )
         sessions = (
             await self.session_log.list_sessions_between(
-                since, until, limit=capped,
+                since, until, limit=capped, session_id=session_id,
             )
             if include_sessions and self.session_log is not None else []
         )
@@ -177,6 +179,8 @@ class MemoryFacade:
             )
             if include_sessions and self.session_log is not None else []
         )
+        if semantic:
+            await self.semantic.mark_accessed([entry.key for entry in semantic])
         await self._emit_memory_op(
             operation="read",
             type_summary="period_recall",

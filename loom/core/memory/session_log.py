@@ -387,6 +387,8 @@ class SessionLog:
         since: datetime,
         until: datetime | None = None,
         limit: int = 20,
+        *,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return sessions whose ``last_active`` falls in ``[since, until)``."""
         where = ["last_active >= ?"]
@@ -394,6 +396,9 @@ class SessionLog:
         if until is not None:
             where.append("last_active < ?")
             params.append(until.isoformat())
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
         params.append(limit)
         cursor = await self._db.execute(
             "SELECT session_id, model, title, started_at, last_active, turn_count "
