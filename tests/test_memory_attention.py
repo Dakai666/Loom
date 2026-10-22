@@ -540,3 +540,17 @@ async def test_stale_carried_item_does_not_block_rewriting_the_list(mem):
     assert (await att.status(items["taste"]))[0] == "merged"
     with pytest.raises(AttentionError):               # renewing a stub is refused
         await att.write(items=[_item("taste", expires_days=7)])
+
+
+async def test_subagent_and_case_variant_sources_count_as_hand_written(mem):
+    db, semantic, att = mem
+    await db.execute("DELETE FROM semantic_entries")
+    for key, source in (("sub", "agent:abc123"), ("caps", "Memorize"),
+                        ("m1", "session:a"), ("m2", "session:b")):
+        await semantic.upsert(SemanticEntry(key=key, value=key, source=source))
+    old = (datetime.now(UTC) - timedelta(days=90)).isoformat()
+    await db.execute("UPDATE semantic_entries SET created_at = ?", (old,))
+    await db.commit()
+    for _ in range(10):
+        sample = await att.unvisited_sample(n=3)
+        assert {"sub", "caps"} <= {e.key for e in sample}

@@ -178,11 +178,14 @@ class AttentionList:
         cutoff = (self._clock() - timedelta(days=min_days)).isoformat()
         skip = [i.key for i in await self.read()] + list(exclude)
         marks = ",".join("?" * len(HAND_SOURCES))
+        # Case-folded; subagent memorize is re-tagged "agent:<id>" (subagent.py).
+        is_hand = (f"(LOWER(COALESCE(source, '')) IN ({marks}) "
+                   "OR LOWER(COALESCE(source, '')) LIKE 'agent:%')")
         where = [
             "json_extract(metadata, '$.redirected_to') IS NULL",
             "COALESCE(source, '') != 'dreaming'",
             "COALESCE(last_accessed_at, created_at) < ?",
-            f"COALESCE(source, '') {'IN' if hand else 'NOT IN'} ({marks})",
+            is_hand if hand else f"NOT {is_hand}",
         ]
         params: list[Any] = [cutoff, *HAND_SOURCES]
         if skip:
