@@ -762,3 +762,67 @@ class TestVisionResumeReplay:
             for b in blocks
         ), "image did not survive persist->replay->wire"
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live-history dead file refs — the wire must never raise
+# ---------------------------------------------------------------------------
+
+
+class TestLiveHistoryDeadFileRef:
+    """A file-backed image block in live history is re-read at wire time on
+    every turn. If the file is moved/deleted after it was seen (2026-10-26:
+    the agent ran ``see_image`` and then ``mv``'d the file), the converter
+    used to raise ``VisionInputError`` and every later turn of that session
+    died the same way. #510 only covered the resume path. Invariant: a dead
+    file ref degrades to a text note naming the path; the wire never raises.
+    """
+
+    def _seen_then_moved(self, png_path: Path) -> tuple[dict, str]:
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        png_path.rename(png_path.with_name("moved.png"))
+        return block, str(png_path)
+
+    def test_anthropic_user_turn(self, png_path: Path) -> None:
+        block, ref = self._seen_then_moved(png_path)
+        _, anth = _to_anthropic_messages([
+            {"role": "user", "content": [{"type": "text", "text": "看下這張"}, block]},
+        ])
+        blocks = anth[0]["content"]
+        assert all(b["type"] == "text" for b in blocks)
+        assert blocks[0]["text"] == "看下這張"
+        assert ref in blocks[1]["text"]
+
+    def test_anthropic_tool_result(self, png_path: Path) -> None:
+        # The exact 2026-10-26 shape: see_image result carrying the block.
+        block, ref = self._seen_then_moved(png_path)
+        _, anth = _to_anthropic_messages([
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "see_image", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": [{"type": "text", "text": "已載入圖片"}, block]},
+        ])
+        tr = anth[2]["content"][0]
+        assert tr["type"] == "tool_result"
+        assert all(b["type"] == "text" for b in tr["content"])
+        assert ref in tr["content"][1]["text"]
+
+    @pytest.mark.parametrize("module", [
+        "loom.core.cognition.codex_responses_provider",
+        "loom.core.cognition.xai_responses_provider",
+    ])
+    def test_responses_providers(self, png_path: Path, module: str) -> None:
+        import importlib
+        build = importlib.import_module(module)._build_responses_content
+        block, ref = self._seen_then_moved(png_path)
+        blocks = build([{"type": "text", "text": "看下這張"}, block], "user")
+        assert [b["type"] for b in blocks] == ["input_text", "input_text"]
+        assert ref in blocks[1]["text"]
+
+    def test_live_image_still_sent(self, png_path: Path) -> None:
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        _, anth = _to_anthropic_messages([{"role": "user", "content": [block]}])
+        assert anth[0]["content"][0]["type"] == "image"

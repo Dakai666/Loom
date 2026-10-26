@@ -69,9 +69,15 @@ def _build_responses_content(
                     size_bytes=len(raw_bytes) if raw_bytes else 0,
                     digest=src.get("digest", ""),
                 )
-            else:
+                blocks.append(_vision.to_responses_image_block(vi))
+                continue
+            try:
                 vi = _vision.load_vision_input(src.get("ref"))
-            blocks.append(_vision.to_responses_image_block(vi))
+                blocks.append(_vision.to_responses_image_block(vi))
+            except _vision.VisionInputError as exc:
+                blocks.append({
+                    "type": text_type, "text": _vision.unavailable_image_note(exc),
+                })
             continue
         blocks.append(block)
     return blocks

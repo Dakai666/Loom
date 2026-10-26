@@ -52,6 +52,8 @@ in isolation):
                       ::TestMakeImageBlock
   4. Provider wire    _to_anthropic_messages / _build_responses_content
                       ::TestAnthropicMessages, ::TestResponsesContent
+                      dead file ref → unavailable_image_note, never raises
+                      ::TestLiveHistoryDeadFileRef
   5. Persist (write)  session_log.log_message → _strip_vision_blocks + raw_json
                       ::TestSessionLogVisionPersistence
   6. Replay (read)    session_log.load_messages → _drop_unreadable_image_refs
@@ -453,6 +455,22 @@ def to_responses_image_block(v: VisionInput) -> dict[str, Any]:
     return {"type": "input_image", "image_url": block["image_url"]["url"]}
 
 
+def unavailable_image_note(exc: VisionInputError) -> str:
+    """Text that stands in for a file-backed image that can't be re-read.
+
+    File refs are re-read at wire time on every turn, so a file moved or
+    deleted after it was seen would otherwise raise inside the provider
+    converter and kill every later turn of the session (#510 covered only
+    the resume path). Converters emit this note instead; it names the
+    error (which carries the path) so the agent can re-view the image
+    from its new location if it still needs it.
+    """
+    return (
+        f"[image no longer available: {exc} — view it again from its "
+        f"current location if still needed]"
+    )
+
+
 def make_image_block(v: VisionInput) -> dict[str, Any]:
     """The single canonical image-block builder (#507).
 
@@ -518,6 +536,7 @@ __all__ = [
     "extract_image_paths",
     "load_vision_input",
     "make_image_block",
+    "unavailable_image_note",
     "to_anthropic_image_block",
     "to_openai_image_block",
     "to_responses_image_block",

@@ -1092,10 +1092,17 @@ def _canonical_blocks_to_anthropic(content: list) -> list[dict]:
                     size_bytes=len(raw_bytes) if raw_bytes else 0,
                     digest=src.get("digest", ""),
                 )
-            else:
-                # file: use the ref path; we re-read at wire time.
+                anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
+                continue
+            # file: use the ref path; we re-read at wire time. A file gone
+            # since it was seen degrades to a note instead of raising.
+            try:
                 vision_input = _vision.load_vision_input(src.get("ref"))
-            anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
+                anth_blocks.append(_vision.to_anthropic_image_block(vision_input))
+            except _vision.VisionInputError as exc:
+                anth_blocks.append({
+                    "type": "text", "text": _vision.unavailable_image_note(exc),
+                })
         else:
             # Unknown block type — keep verbatim so we don't silently drop
             # provider-specific extensions.
