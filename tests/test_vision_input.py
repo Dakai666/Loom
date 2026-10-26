@@ -762,3 +762,109 @@ class TestVisionResumeReplay:
             for b in blocks
         ), "image did not survive persist->replay->wire"
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live-history dead file refs — the wire must never raise
+# ---------------------------------------------------------------------------
+
+
+class TestLiveHistoryDeadFileRef:
+    """A file-backed image block in live history is re-read at wire time on
+    every turn. If the file is moved/deleted after it was seen (2026-10-26:
+    the agent ran ``see_image`` and then ``mv``'d the file), the converter
+    used to raise ``VisionInputError`` and every later turn of that session
+    died the same way. #510 only covered the resume path. Invariant: a dead
+    file ref degrades to a text note naming the path; the wire never raises.
+    """
+
+    def _seen_then_moved(self, png_path: Path) -> tuple[dict, str]:
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        png_path.rename(png_path.with_name("moved.png"))
+        return block, str(png_path)
+
+    def test_anthropic_user_turn(self, png_path: Path) -> None:
+        block, ref = self._seen_then_moved(png_path)
+        _, anth = _to_anthropic_messages([
+            {"role": "user", "content": [{"type": "text", "text": "看下這張"}, block]},
+        ])
+        blocks = anth[0]["content"]
+        assert all(b["type"] == "text" for b in blocks)
+        assert blocks[0]["text"] == "看下這張"
+        assert ref in blocks[1]["text"]
+
+    def test_anthropic_tool_result(self, png_path: Path) -> None:
+        # The exact 2026-10-26 shape: see_image result carrying the block.
+        block, ref = self._seen_then_moved(png_path)
+        _, anth = _to_anthropic_messages([
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "see_image", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": [{"type": "text", "text": "已載入圖片"}, block]},
+        ])
+        tr = anth[2]["content"][0]
+        assert tr["type"] == "tool_result"
+        assert all(b["type"] == "text" for b in tr["content"])
+        assert ref in tr["content"][1]["text"]
+
+    @pytest.mark.parametrize("module", [
+        "loom.core.cognition.codex_responses_provider",
+        "loom.core.cognition.xai_responses_provider",
+    ])
+    def test_responses_providers(self, png_path: Path, module: str) -> None:
+        import importlib
+        build = importlib.import_module(module)._build_responses_content
+        block, ref = self._seen_then_moved(png_path)
+        blocks = build([{"type": "text", "text": "看下這張"}, block], "user")
+        assert [b["type"] for b in blocks] == ["input_text", "input_text"]
+        assert ref in blocks[1]["text"]
+
+    @pytest.mark.parametrize("converter", ["anthropic", "codex", "xai"])
+    def test_unreadable_file_degrades(
+        self, png_path: Path, converter: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Codex review on #642: read_bytes() raises OSError (PermissionError
+        # after chmod 000, FileNotFoundError when the file vanishes between
+        # is_file() and the read). Every converter must degrade, not raise.
+        import importlib
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        ref = str(png_path)
+        real = Path.read_bytes
+
+        def deny(self: Path) -> bytes:
+            if str(self) == ref:
+                raise PermissionError(13, "Permission denied", ref)
+            return real(self)
+
+        monkeypatch.setattr(Path, "read_bytes", deny)
+        content = [{"type": "text", "text": "看下這張"}, block]
+        if converter == "anthropic":
+            _, anth = _to_anthropic_messages([{"role": "user", "content": content}])
+            texts = [b["text"] for b in anth[0]["content"]]
+            assert [b["type"] for b in anth[0]["content"]] == ["text", "text"]
+        else:
+            mod = f"loom.core.cognition.{converter}_responses_provider"
+            blocks = importlib.import_module(mod)._build_responses_content(content, "user")
+            texts = [b["text"] for b in blocks]
+            assert [b["type"] for b in blocks] == ["input_text", "input_text"]
+        assert ref in texts[1]
+
+    def test_read_race_raises_vision_error(
+        self, png_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # File removed after is_file() passed: surfaces as VisionInputError
+        # (which every entry point already catches), not a bare OSError.
+        def gone(self: Path) -> bytes:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+
+        monkeypatch.setattr(Path, "read_bytes", gone)
+        with pytest.raises(vision.VisionInputError, match=str(png_path)):
+            vision.load_vision_input(png_path)
+
+    def test_live_image_still_sent(self, png_path: Path) -> None:
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        _, anth = _to_anthropic_messages([{"role": "user", "content": [block]}])
+        assert anth[0]["content"][0]["type"] == "image"
