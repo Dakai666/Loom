@@ -219,7 +219,15 @@ def _read_source(source: VisionSource) -> bytes:
         path = Path(source.ref)
         if not path.is_file():
             raise VisionInputError(f"file not found: {path}")
-        return path.read_bytes()
+        # is_file() doesn't make the read safe: the file can vanish in
+        # between, or be unreadable (permissions). Callers only catch
+        # VisionInputError, so a bare OSError would escape the wire guard.
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise VisionInputError(
+                f"cannot read file: {path} ({exc.strerror or exc})"
+            ) from exc
 
     if source.kind == "url":
         if not isinstance(source.ref, str):

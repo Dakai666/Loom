@@ -822,6 +822,48 @@ class TestLiveHistoryDeadFileRef:
         assert [b["type"] for b in blocks] == ["input_text", "input_text"]
         assert ref in blocks[1]["text"]
 
+    @pytest.mark.parametrize("converter", ["anthropic", "codex", "xai"])
+    def test_unreadable_file_degrades(
+        self, png_path: Path, converter: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Codex review on #642: read_bytes() raises OSError (PermissionError
+        # after chmod 000, FileNotFoundError when the file vanishes between
+        # is_file() and the read). Every converter must degrade, not raise.
+        import importlib
+        block = vision.make_image_block(vision.load_vision_input(png_path))
+        ref = str(png_path)
+        real = Path.read_bytes
+
+        def deny(self: Path) -> bytes:
+            if str(self) == ref:
+                raise PermissionError(13, "Permission denied", ref)
+            return real(self)
+
+        monkeypatch.setattr(Path, "read_bytes", deny)
+        content = [{"type": "text", "text": "看下這張"}, block]
+        if converter == "anthropic":
+            _, anth = _to_anthropic_messages([{"role": "user", "content": content}])
+            texts = [b["text"] for b in anth[0]["content"]]
+            assert [b["type"] for b in anth[0]["content"]] == ["text", "text"]
+        else:
+            mod = f"loom.core.cognition.{converter}_responses_provider"
+            blocks = importlib.import_module(mod)._build_responses_content(content, "user")
+            texts = [b["text"] for b in blocks]
+            assert [b["type"] for b in blocks] == ["input_text", "input_text"]
+        assert ref in texts[1]
+
+    def test_read_race_raises_vision_error(
+        self, png_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # File removed after is_file() passed: surfaces as VisionInputError
+        # (which every entry point already catches), not a bare OSError.
+        def gone(self: Path) -> bytes:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+
+        monkeypatch.setattr(Path, "read_bytes", gone)
+        with pytest.raises(vision.VisionInputError, match=str(png_path)):
+            vision.load_vision_input(png_path)
+
     def test_live_image_still_sent(self, png_path: Path) -> None:
         block = vision.make_image_block(vision.load_vision_input(png_path))
         _, anth = _to_anthropic_messages([{"role": "user", "content": [block]}])
