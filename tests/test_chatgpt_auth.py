@@ -282,3 +282,109 @@ def test_logout_never_sends_refresh_token_to_untrusted_discovery_url(tmp_path):
     assert not auth.logout()
     assert len(seen) == 1
     assert not auth.accounts()[0]["signed_in"]
+
+
+@pytest.mark.parametrize("optional", [
+    {"scope": mod.SCOPES}, {"refresh_token": "rotated"}, {},
+])
+def test_refresh_preserves_only_omitted_optional_fields(tmp_path, optional):
+    auth = ChatGPTAuth(tmp_path / "auth.json", transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"access_token": "fresh", "expires_in": 3600, **optional})))
+    save_account(auth, expired=True)
+    assert auth.access_token() == "fresh"
+    assert auth.access_token() == "fresh"
+    record = auth._read()["accounts"]["oaiapp_test"]
+    assert record["refresh_token"] == optional.get("refresh_token", "refresh-1")
+    assert record["scopes"] == optional.get("scope", PLAN_SCOPE).split()
+
+
+@pytest.mark.parametrize("scope", ["", "openid"])
+def test_refresh_explicit_scope_removal_is_persisted_and_blocks_inference(tmp_path, scope):
+    calls = []
+    def transport(request):
+        calls.append(request)
+        return httpx.Response(200, json={"access_token": "fresh", "expires_in": 3600, "scope": scope})
+    auth = ChatGPTAuth(tmp_path / "auth.json", transport=httpx.MockTransport(transport))
+    save_account(auth, expired=True)
+    with pytest.raises(ChatGPTAuthError, match="no longer granted"):
+        auth.access_token()
+    with pytest.raises(ChatGPTAuthError, match="not authorized"):
+        auth.access_token()
+    assert len(calls) == 1
+    record = auth._read()["accounts"]["oaiapp_test"]
+    assert record["scopes"] == scope.split()
+    assert record["refresh_token"] == "refresh-1"
+
+
+@pytest.mark.parametrize("body", [
+    b"not-json", b"[]", b'{"access_token":"fresh","expires_in":3600,"refresh_token":null}',
+    b'{"access_token":"fresh","expires_in":3600,"refresh_token":""}',
+    b'{"access_token":"fresh","expires_in":3600,"scope":null}',
+])
+def test_invalid_successful_refresh_is_typed_and_preserves_credentials(tmp_path, body):
+    auth = ChatGPTAuth(tmp_path / "auth.json", transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=body)))
+    save_account(auth, expired=True)
+    before = auth.path.read_bytes()
+    with pytest.raises(ChatGPTAuthError, match="preserved"):
+        auth.access_token()
+    assert auth.path.read_bytes() == before
+
+
+def test_initial_exchange_still_requires_refresh_token(tmp_path):
+    auth = ChatGPTAuth(tmp_path / "auth.json")
+    with pytest.raises(ChatGPTAuthError, match="incomplete token set"):
+        auth._token_fields({"access_token": "fresh", "expires_in": 3600, "scope": PLAN_SCOPE})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cross_process", [False, True])
+async def test_cached_context_does_not_block_event_loop_during_refresh(tmp_path, cross_process):
+    import asyncio
+    import queue
+    import threading
+    from loom.core.cognition.chatgpt_provider import ChatGPTResponsesProvider
+
+    if cross_process and os.name == "nt":
+        pytest.skip("fork-based process contention test")
+    path = tmp_path / "auth.json"
+    auth = ChatGPTAuth(path)
+    save_account(auth, expired=True)
+    with auth._locked():
+        store = auth._read()
+        store["accounts"]["oaiapp_test"]["models"] = [{"slug": "test", "context_window": 128000}]
+        auth._write(store)
+    ctx = multiprocessing.get_context("fork") if cross_process else threading
+    entered, release = ctx.Event(), ctx.Event()
+    results = ctx.Queue() if cross_process else queue.Queue()
+    def worker():
+        def transport(request):
+            entered.set()  # access_token owns both transaction locks here.
+            if not release.wait(5):
+                raise RuntimeError("refresh gate timed out")
+            return httpx.Response(200, json={"access_token": "fresh", "expires_in": 3600})
+        try:
+            results.put(ChatGPTAuth(path, transport=httpx.MockTransport(transport)).access_token())
+        except Exception as exc:
+            results.put(type(exc).__name__)
+    child = ctx.Process(target=worker) if cross_process else threading.Thread(target=worker)
+    child.start()
+    watchdog = threading.Timer(2, release.set)  # Old locking code fails without hanging pytest.
+    watchdog.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        async def heartbeat():
+            await asyncio.sleep(.01)
+            return not release.is_set()
+        beat = asyncio.create_task(heartbeat())
+        provider = ChatGPTResponsesProvider(auth=auth)
+        for _ in range(10):
+            assert provider.native_context_window("chatgpt/test") == 128000
+        assert await beat, "catalog lookup waited for the OAuth HTTP request"
+        assert not release.is_set()
+    finally:
+        release.set()
+        watchdog.cancel()
+        await asyncio.to_thread(child.join, 3)
+    assert not child.is_alive()
+    assert results.get(timeout=1) == "fresh"

@@ -69,7 +69,10 @@ Reauthorization retains the issued client ID; different accounts get separate
 registrations. A failed new login does not replace the active account.
 
 Refresh is automatic near access-token expiry. Transient network/server errors
-preserve credentials; terminal refresh failures require another login. Sign-out
+preserve credentials; terminal refresh failures require another login. A renewal
+response that omits an unchanged refresh token or scope retains the saved value;
+explicit scope removal still blocks inference. Malformed success responses leave
+the credential file unchanged and raise a sanitized authentication error. Sign-out
 attempts remote revocation and clears local tokens, retaining the host/client
 mapping. If remote revocation cannot be confirmed, the command says so.
 
@@ -91,8 +94,16 @@ timeout = 600
 
 The provider uses a server-reported `context_window` from the account's cached
 catalog when available; otherwise it starts with a conservative 32,768-token
-budget. A known model's explicit context override can be set through Loom's
+budget and logs a warning once per model with recovery instructions. Cached
+catalog reads do not acquire the credential transaction lock, so a concurrent
+HTTP token renewal cannot block the event loop's context lookup. A known model's explicit context override can be set through Loom's
 existing `[cognition.context_window_overrides]` configuration.
+
+Reasoning effort is sent explicitly: the selected model's catalog default is
+used when advertised, otherwise `high` when supported (or the first supported
+level). If metadata is missing, Loom sends its existing `high` default. Only an
+explicitly empty supported-level list causes omission. A configured effort is
+preserved, including `max`/`ultra`, and rejected if known to be unsupported.
 
 The public endpoint is fixed to `https://api.openai.com/v1/responses`. Payloads
 use `store: false`, `stream: true`, complete local history and namespaced tools.
@@ -130,17 +141,30 @@ the remaining two failures are retained above. No repeated-until-success
 claim is made. The audio limitations remain route-level restrictions and were
 not probed against another endpoint or billing path.
 
-The focused suite completed **315 passing tests**, covering the new provider
+The focused suite completed **337 passing tests**, covering the new provider
 and existing Codex/xAI providers, CLI, routing, vision, tier selection, context
 budgets, and session model updates. Token rotation was verified with a real
 cross-process test using a mocked OAuth server; no one-hour expiry wait was
-used for the live account.
+used for the live account. The review regressions additionally cover optional
+renewal fields, explicit permission removal, malformed responses, per-model
+reasoning selection and warning recovery. Event-loop heartbeat tests exercise
+both real thread and process contention during a gated mock HTTP renewal.
 
 A separate live integration check also passed through `build_router` and
 Loom's existing local-file vision builder: `chatgpt/gpt-6.1-sol` read a
 synthetic blue/green PNG correctly and resolved its 500,000-token context
 window from the account catalog. No session memories or project files were
 included in these requests.
+
+After review, a live long-context check passed for `gpt-6.1-sol` (explicit
+`low` effort) and `gpt-6-sol` (explicit `medium` effort). Each model received
+63,961–64,160 input tokens across five requests: three sequential namespaced
+tool calls, a reply checking all three tool-result nonces, and a second user
+turn recalling those results. All ten requests completed in 2.7–5.9 seconds
+each without a stall. Inputs were synthetic SHA-256 rows and inert tool results.
+This exercises the real router/provider history replay, not a full LoomSession
+or compaction run. The sanitized [long-context report](validation/chatgpt-long-context-2026-10-27.json)
+records token counts, effort, timings and tool rounds.
 
 The sanitized [live verification report](validation/chatgpt-plan-2026-10-27.json)
 contains the synthetic observations and check times, without account identity

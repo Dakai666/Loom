@@ -45,7 +45,8 @@ async def test_public_endpoint_oauth_model_binding_image_and_usage():
     assert body["stream"] is True and body["store"] is False
     assert body["instructions"] == "system"
     assert body["input"][0]["content"][1]["type"] == "input_image"
-    assert not set(body) & {"max_output_tokens", "temperature", "previous_response_id", "reasoning"}
+    assert not set(body) & {"max_output_tokens", "temperature", "previous_response_id"}
+    assert body["reasoning"] == {"effort": "high"}
     assert result.text == "hello" and result.cache_read_input_tokens == 80
     assert provider.model == "chatgpt/gpt-6.1-sol"
     assert provider.native_context_window("chatgpt/model-a") == 128000
@@ -239,3 +240,52 @@ def test_cli_verify_requires_explicit_model_selection(monkeypatch):
     result = CliRunner().invoke(cli, ["auth", "chatgpt", "verify"])
     assert result.exit_code != 0
     assert "Choose --model" in result.output
+
+
+@pytest.mark.parametrize("entry,expected", [
+    ({}, "high"),
+    ({"default_reasoning_level": "low", "supported_reasoning_levels": [
+        {"effort": "low"}, {"effort": "high"}]}, "low"),
+    ({"supported_reasoning_levels": ["low", "high"]}, "high"),
+    ({"supported_reasoning_levels": ["low", "medium"]}, "low"),
+    ({"supported_reasoning_levels": []}, None),
+])
+def test_effort_uses_selected_models_catalog_with_explicit_fallback(entry, expected):
+    fake_auth = auth()
+    fake_auth.catalog = lambda account=None: [{"slug": "model-a", **entry}]
+    provider = ChatGPTResponsesProvider(model="chatgpt/model-a", auth=fake_auth)
+    payload = provider._build_payload([], None, 128)
+    if expected is None:
+        assert "reasoning" not in payload
+    else:
+        assert payload["reasoning"] == {"effort": expected}
+    assert "max_output_tokens" not in payload
+    assert provider.SUPPORTS_MAX_OUTPUT_TOKENS is False
+
+
+def test_effort_follows_per_call_model_and_rejects_known_unsupported_setting():
+    fake_auth = auth()
+    fake_auth.catalog = lambda account=None: [
+        {"slug": "low-only", "supported_reasoning_levels": [{"effort": "low"}]},
+        {"slug": "ultra", "supported_reasoning_levels": [{"effort": "ultra"}]}]
+    provider = ChatGPTResponsesProvider(model="chatgpt/low-only", auth=fake_auth)
+    assert provider._build_payload([], None, 128)["reasoning"] == {"effort": "low"}
+    provider.model = "chatgpt/ultra"
+    assert provider._build_payload([], None, 128)["reasoning"] == {"effort": "ultra"}
+    provider = ChatGPTResponsesProvider(model="chatgpt/low-only", auth=fake_auth, reasoning_effort="high")
+    with pytest.raises(ValueError, match="does not support"):
+        provider._build_payload([], None, 128)
+
+
+@pytest.mark.parametrize("entry", [None, {"context_window": False}, {"context_window": 0}])
+def test_missing_context_window_warns_once_and_recovers_after_discovery(caplog, entry):
+    fake_auth = auth()
+    models = [] if entry is None else [{"slug": "test", **entry}]
+    fake_auth.catalog = lambda account=None: models
+    provider = ChatGPTResponsesProvider(auth=fake_auth)
+    for _ in range(2):
+        assert provider.native_context_window("chatgpt/test") == 32768
+    assert len(caplog.records) == 1
+    assert "loom auth chatgpt models" in caplog.text
+    models[:] = [{"slug": "test", "context_window": 500000}]
+    assert provider.native_context_window("chatgpt/test") == 500000

@@ -34,7 +34,8 @@ TOKEN_URL = f"{ISSUER}/api/accounts/oauth/token"
 JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
 PLAN_SCOPE = "chatgpt.tokens.use.direct"
 SCOPES = f"openid profile email offline_access resource.invoke {PLAN_SCOPE}"
-_THREAD_LOCK = threading.RLock()
+# Credential transactions are non-reentrant: nested flock on a new fd can deadlock.
+_THREAD_LOCK = threading.Lock()
 _TERMINAL_REFRESH_ERRORS = {
     "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",
     "refresh_token_invalid", "refresh_token_invalidated", "refresh_token_reused",
@@ -145,10 +146,11 @@ class ChatGPTAuth:
             return self._account(self._read())[0]
 
     def catalog(self, account: str | None = None, *, refresh: bool = False) -> list[dict[str, Any]]:
-        with self._locked():
-            key, record = self._account(self._read(), account)
-            if not refresh:
-                return list(record.get("models", []))
+        # Writers atomically replace the file. A cached snapshot needs no lock,
+        # especially on the event loop while another process/thread refreshes.
+        key, record = self._account(self._read(), account)
+        if not refresh:
+            return list(record.get("models", []))
         token = self.access_token(key)
         try:
             with self._client() as client:
@@ -185,17 +187,28 @@ class ChatGPTAuth:
         except (jwt.PyJWTError, ValueError, StopIteration, httpx.HTTPError) as exc:
             raise ChatGPTAuthError("OpenAI identity verification failed; credentials were not activated.") from exc
 
-    def _token_fields(self, data: dict[str, Any]) -> dict[str, Any]:
-        if not all(isinstance(data.get(k), str) and data[k] for k in ("access_token", "refresh_token")):
-            raise ChatGPTAuthError("OpenAI returned an incomplete token set; sign in again.")
+    def _token_fields(self, data: dict[str, Any], *, prior: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ChatGPTAuthError("OpenAI returned an invalid token response; credentials were preserved.")
+        # RFC 6749 sections 5.1/6 permit unchanged scope and refresh_token to be
+        # omitted on renewal. Explicit empty/invalid values must not inherit.
+        refresh_token = data.get("refresh_token", (prior or {}).get("refresh_token"))
+        if not all(isinstance(value, str) and value for value in (data.get("access_token"), refresh_token)):
+            raise ChatGPTAuthError("OpenAI returned an incomplete token set; credentials were preserved.")
+        if "scope" in data:
+            if not isinstance(data["scope"], str):
+                raise ChatGPTAuthError("OpenAI returned an invalid token scope; credentials were preserved.")
+            scopes = data["scope"].split()
+        else:
+            scopes = list((prior or {}).get("scopes", []))
         try:
             ttl = float(data["expires_in"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ChatGPTAuthError("OpenAI did not return a valid token expiry.") from exc
         if not 0 < ttl < float("inf"):
             raise ChatGPTAuthError("OpenAI returned an invalid token expiry.")
-        return {"access_token": data["access_token"], "refresh_token": data["refresh_token"],
-                "expires_at": time.time() + ttl, "scopes": str(data.get("scope", "")).split()}
+        return {"access_token": data["access_token"], "refresh_token": refresh_token,
+                "expires_at": time.time() + ttl, "scopes": scopes}
 
     def login(self, *, account: str | None = None, new_account: bool = False,
               label: str | None = None, open_browser: bool = True, timeout: float = 180,
@@ -326,7 +339,11 @@ class ChatGPTAuth:
                         record.pop(field, None)
                     self._write(store)
                 raise ChatGPTAuthError(f"ChatGPT token refresh failed ({code}); retry or sign in again.")
-            fields = self._token_fields(response.json())
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise ChatGPTAuthError("OpenAI returned invalid token JSON; credentials were preserved.") from exc
+            fields = self._token_fields(data, prior=record)
             record.update(fields)
             self._write(store)
             if PLAN_SCOPE not in fields["scopes"]:

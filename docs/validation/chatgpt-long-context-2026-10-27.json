@@ -1,0 +1,113 @@
+{
+  "checked_at": "2026-10-27T12:31:10.437821+00:00",
+  "synthetic_rows": 1500,
+  "synthetic_characters": 115499,
+  "transport": "Loom LLMRouter -> ChatGPTResponsesProvider -> public Responses HTTP/SSE",
+  "scope": "Provider/router history replay and tool loop; not a full LoomSession/compaction test",
+  "models": [
+    {
+      "model": "gpt-6.1-sol",
+      "reasoning": {
+        "effort": "low"
+      },
+      "context_window": 500000,
+      "requests": [
+        {
+          "round": 1,
+          "elapsed_seconds": 4.352,
+          "first_yield_seconds": 4.352,
+          "input_tokens": 63961,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 2,
+          "elapsed_seconds": 5.838,
+          "first_yield_seconds": 5.838,
+          "input_tokens": 64010,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 3,
+          "elapsed_seconds": 4.215,
+          "first_yield_seconds": 4.215,
+          "input_tokens": 64057,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 4,
+          "elapsed_seconds": 3.878,
+          "first_yield_seconds": 3.188,
+          "input_tokens": 64108,
+          "output_tokens": 27,
+          "tool_calls": 0
+        },
+        {
+          "round": 5,
+          "elapsed_seconds": 4.451,
+          "first_yield_seconds": 3.581,
+          "input_tokens": 64154,
+          "output_tokens": 28,
+          "tool_calls": 0
+        }
+      ],
+      "tool_rounds": 3,
+      "user_turns": 2,
+      "status": "verified"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoning": {
+        "effort": "medium"
+      },
+      "context_window": 272000,
+      "requests": [
+        {
+          "round": 1,
+          "elapsed_seconds": 3.021,
+          "first_yield_seconds": 3.021,
+          "input_tokens": 63961,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 2,
+          "elapsed_seconds": 3.416,
+          "first_yield_seconds": 3.416,
+          "input_tokens": 64012,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 3,
+          "elapsed_seconds": 2.71,
+          "first_yield_seconds": 2.71,
+          "input_tokens": 64062,
+          "output_tokens": 19,
+          "tool_calls": 1
+        },
+        {
+          "round": 4,
+          "elapsed_seconds": 3.121,
+          "first_yield_seconds": 2.395,
+          "input_tokens": 64110,
+          "output_tokens": 31,
+          "tool_calls": 0
+        },
+        {
+          "round": 5,
+          "elapsed_seconds": 3.758,
+          "first_yield_seconds": 2.958,
+          "input_tokens": 64160,
+          "output_tokens": 32,
+          "tool_calls": 0
+        }
+      ],
+      "tool_rounds": 3,
+      "user_turns": 2,
+      "status": "verified"
+    }
+  ]
+}

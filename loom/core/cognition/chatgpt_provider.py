@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,7 +16,11 @@ import httpx
 from .chatgpt_auth import ChatGPTAuth, ChatGPTAuthError, RESOURCE
 from .codex_responses_provider import CodexResponsesProvider, _build_responses_content
 from .providers import LLMResponse, ToolUse, _reduce_tool_result_to_text
+from .responses_policy import RESPONSES_REASONING_DEFAULT_EFFORT
 from .responses_sse import ResponsesProviderError, ResponsesStreamState, iter_sse_events
+
+
+logger = logging.getLogger(__name__)
 
 
 def _content(content: Any, role: str) -> list[dict[str, Any]]:
@@ -38,6 +43,8 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
     DEFAULT_MODEL = "gpt-6.1-sol"
     DEFAULT_BASE_URL = f"{RESOURCE}/responses"
     TOOL_NAMESPACE = "loom"
+    # Explicit route contract, independent of the legacy Codex backend.
+    SUPPORTS_MAX_OUTPUT_TOKENS = False
 
     def __init__(self, model: str = "", *, auth: ChatGPTAuth | None = None,
                  account: str | None = None, reasoning_effort: str | None = None,
@@ -52,27 +59,52 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
         self.auth = auth or ChatGPTAuth()
         self.account = account
         self.transport = transport
-        # An unset effort follows the selected model's default, not Codex's
-        # hardcoded 'high' (not every account model supports that setting).
+        self._warned_context_models: set[str] = set()
         self._explicit_effort = reasoning_effort
         if reasoning_effort is not None:
             if reasoning_effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
                 raise ValueError("Invalid ChatGPT reasoning_effort.")
             self._reasoning_effort = reasoning_effort
 
-    def native_context_window(self, model: str) -> int | None:
+    def _catalog_entry(self, model: str) -> dict[str, Any]:
         try:
             models = self.auth.catalog(self.account)
         except ChatGPTAuthError:
             models = []
         slug = model.removeprefix(self.ROUTING_PREFIX)
-        for entry in models:
-            value = entry.get("context_window")
-            if entry.get("slug") == slug and isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                return value
-        # Conservative budget until discovery supplies model-specific metadata;
-        # never inherit Loom's 204,800-token assumption for an unknown model.
+        return next((entry for entry in models if entry.get("slug") == slug), {})
+
+    def native_context_window(self, model: str) -> int | None:
+        value = self._catalog_entry(model).get("context_window")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        if model not in self._warned_context_models:
+            logger.warning(
+                "ChatGPT model %s has no cached context_window; using 32768 tokens. "
+                "Refresh with `loom auth chatgpt models` or configure a context window override.", model)
+            self._warned_context_models.add(model)
         return 32768
+
+    def _model_reasoning_effort(self) -> str | None:
+        entry = self._catalog_entry(self._api_model())
+        levels = entry.get("supported_reasoning_levels")
+        supported = [level.get("effort") if isinstance(level, dict) else level
+                     for level in levels] if isinstance(levels, list) else None
+        if self._explicit_effort is not None:
+            if supported is not None and self._explicit_effort not in supported:
+                raise ValueError(f"ChatGPT model {self._api_model()} does not support reasoning_effort="
+                                 f"{self._explicit_effort}.")
+            return self._explicit_effort
+        if supported == []:
+            return None  # Only omit when the catalog explicitly reports no levels.
+        default = entry.get("default_reasoning_level")
+        if isinstance(default, str) and default and (supported is None or default in supported):
+            return default
+        if supported:
+            return (RESPONSES_REASONING_DEFAULT_EFFORT if RESPONSES_REASONING_DEFAULT_EFFORT in supported
+                    else supported[0])
+        # Missing metadata must not silently delegate effort to the backend.
+        return RESPONSES_REASONING_DEFAULT_EFFORT
 
     def format_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         functions = super().format_tools(tools)
@@ -101,8 +133,9 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
                                       "arguments": function["arguments"]})
         payload = {"model": self._api_model(), "instructions": "\n\n".join(instructions),
                    "input": items, "store": False, "stream": True}
-        if self._explicit_effort:
-            payload["reasoning"] = {"effort": self._reasoning_effort}
+        effort = self._model_reasoning_effort()
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
         if tools:
             payload["tools"] = self.format_tools(tools)
         return payload
