@@ -1986,6 +1986,11 @@ def auth() -> None:
     """Configure provider authentication."""
 
 
+from loom.platform.cli.chatgpt_cli import chatgpt as _chatgpt_auth_command
+
+auth.add_command(_chatgpt_auth_command)
+
+
 @auth.command("openai")
 @click.option("--api-key", default=None, help="OpenAI API key to write to .env.")
 @click.option("--skip-codex-login", is_flag=True, default=False,

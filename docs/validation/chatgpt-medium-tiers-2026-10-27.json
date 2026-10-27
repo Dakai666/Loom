@@ -1,0 +1,38 @@
+{
+  "checked_at": "2026-10-27T12:58:08.085941+00:00",
+  "token_near_expiry_before": false,
+  "refresh_observations": [],
+  "reasoning_effort": "medium",
+  "tiers": [
+    {
+      "tier": 1,
+      "model": "chatgpt/gpt-6-luna",
+      "reasoning": {
+        "effort": "medium"
+      },
+      "text_and_tool_replay": "verified",
+      "elapsed_seconds": 6.156
+    },
+    {
+      "tier": 2,
+      "model": "chatgpt/gpt-6.1-sol",
+      "reasoning": {
+        "effort": "medium"
+      },
+      "text_and_tool_replay": "verified",
+      "elapsed_seconds": 7.3
+    }
+  ],
+  "live_renewal": {
+    "checked_at": "2026-10-27T12:57:02.694969+00:00",
+    "token_near_expiry_before": true,
+    "refresh_observations": [
+      {
+        "status": 200,
+        "returned_scope": true,
+        "returned_refresh_token": true
+      }
+    ],
+    "source": "Preliminary live medium-effort probe before the Luna/Sol tier selection."
+  }
+}

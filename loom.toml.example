@@ -128,6 +128,20 @@ reminder_after_turns = 10
 # base_url      = "https://api.openai.com/v1"
 # default_model = "gpt-5.5"
 
+# The official ChatGPT plan integration uses separate Loom credentials:
+#   loom auth chatgpt login
+#   loom auth chatgpt models
+#   loom chat --model chatgpt/<slug-from-models>
+# [providers.chatgpt]
+# enabled = true
+# default_model = "gpt-6.1-sol"  # select an actually listed account model
+# account = "personal"         # optional saved account ID or local label
+# timeout = 600
+# reasoning_effort = "medium"  # recommended baseline; unset explicitly sends the catalog default
+# first_event_timeout = 90
+# idle_event_timeout = 300
+# Legacy codex/ remains available as an explicitly selected backup.
+
 # [providers.codex]
 # enabled          = true              # optional; explicit --model codex/... also registers it
 # base_url         = "https://chatgpt.com/backend-api/codex/responses"

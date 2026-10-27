@@ -19,6 +19,7 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "wcwidth>=0.2.0",
     "httpx>=0.27.0",
+    "PyJWT[crypto]>=2.10.1",  # official ChatGPT OIDC identity verification
     "jsonschema>=4.0.0",
     "pyyaml>=6.0",
 ]

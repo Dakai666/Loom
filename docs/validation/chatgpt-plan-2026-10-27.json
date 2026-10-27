@@ -1,0 +1,146 @@
+{
+  "checked_at": "2026-10-27T11:53:20.524287+00:00",
+  "models": [
+    {
+      "model": "gpt-6.1-sol",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "green",
+          "red"
+        ],
+        "observation": "green, red"
+      },
+      "image_rechecked_at": "2026-10-27T11:56:38.027859+00:00",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-6-astra",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "yellow",
+          "red"
+        ],
+        "observation": "yellow, red"
+      },
+      "image_rechecked_at": "2026-10-27T11:58:08.044114+00:00",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-6-sol",
+      "text": "verified",
+      "image_input": "inconclusive",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "red",
+          "yellow"
+        ],
+        "observation": "yellow, red"
+      },
+      "image_rechecked_at": "2026-10-27T11:58:11.131380+00:00",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-6-luna",
+      "text": "verified",
+      "image_input": "inconclusive",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "green",
+          "red"
+        ],
+        "observation": "green, green"
+      },
+      "image_rechecked_at": "2026-10-27T11:58:16.049755+00:00",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "green",
+          "yellow"
+        ],
+        "observation": "green, yellow"
+      },
+      "image_rechecked_at": "2026-10-27T11:58:19.752082+00:00",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_transport": "accepted"
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "text": "verified",
+      "image_input": "verified",
+      "tools": "verified",
+      "audio_input": "unsupported_by_route",
+      "audio_output": "unsupported_by_route",
+      "limitations": "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+      "image_check": {
+        "expected": [
+          "green",
+          "yellow"
+        ],
+        "observation": "green,yellow"
+      },
+      "image_rechecked_at": "2026-10-27T11:58:21.953387+00:00",
+      "image_transport": "accepted"
+    }
+  ],
+  "scope": "Account-specific live snapshot; synthetic probes, no model-quality benchmark.",
+  "router_integration": {
+    "model": "chatgpt/gpt-6.1-sol",
+    "provider": "chatgpt",
+    "context_window": 500000,
+    "image_source": "Loom local-file vision builder",
+    "expected": [
+      "blue",
+      "green"
+    ],
+    "observation": "Blue, green",
+    "result": "verified"
+  }
+}
