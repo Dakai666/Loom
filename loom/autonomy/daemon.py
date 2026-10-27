@@ -204,6 +204,7 @@ class AutonomyDaemon:
         chime_delivery: ChimeDelivery | None = None,
     ) -> None:
         self._notify = notify_router
+        self._failover_notices: set[asyncio.Task] = set()
         self._confirm = confirm_flow
         self._session = loom_session
         self._abort = AbortController()
@@ -623,6 +624,11 @@ class AutonomyDaemon:
         fire-and-forget, so a loop that simply ended used to take every
         schedule down with no trace.
         """
+        # Quota fallback: tell the operator once per incident — the fallback
+        # model is pay-per-use, and an overnight run would otherwise switch
+        # silently.
+        from loom.core.cognition.router import add_failover_listener
+        add_failover_listener(self._on_quota_failover)
         # Issue #281 P3: memory maintenance sweep, dream and consolidation
         # loops run alongside the trigger evaluator on the daemon's abort
         # signal so shutdown is single-source. Each ``_maybe_start_*`` returns
@@ -947,7 +953,29 @@ class AutonomyDaemon:
 
     def stop(self) -> None:
         """Signal the daemon to stop — aborts any in-flight stream_turn() and exits the loop."""
+        from loom.core.cognition.router import remove_failover_listener
+        remove_failover_listener(self._on_quota_failover)
         self._abort.abort()
+
+    def _on_quota_failover(self, event: Any) -> None:
+        if event.kind == "failover":
+            minutes = max(1, round(event.cooldown_seconds / 60))
+            title = "Quota exhausted — switched to fallback model"
+            body = (f"{event.primary_model} hit its plan limit; serving {event.fallback_model} "
+                    f"(pay-per-use) for ~{minutes} min, then retrying the primary.\n{event.detail}")
+        else:
+            title = "Primary model restored"
+            body = f"{event.primary_model} is serving again; fallback {event.fallback_model} no longer used."
+        try:
+            task = asyncio.get_running_loop().create_task(self._notify.send(Notification(
+                type=NotificationType.ALERT if event.kind == "failover" else NotificationType.INFO,
+                title=title, body=body, trigger_name="quota_fallback",
+            )))
+        except RuntimeError:
+            logger.warning("quota fallback notification skipped (no running loop): %s", title)
+            return
+        self._failover_notices.add(task)
+        task.add_done_callback(self._failover_notices.discard)
 
     @property
     def evaluator(self) -> TriggerEvaluator:

@@ -648,6 +648,21 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             "run `loom auth xai` for xAI OAuth, or enable a local provider in loom.toml "
             "([providers.ollama] / [providers.lmstudio])."
         )
+
+    # Quota fallback — opt-in. When the serving provider reports its plan
+    # quota is exhausted, the router serves this model instead (pay-per-use).
+    fallback_model = str(cfg.get("cognition", {}).get("fallback_model") or "").strip()
+    if fallback_model:
+        try:
+            router.get_provider(fallback_model)
+        except RuntimeError as exc:
+            logger.warning("[cognition] fallback_model=%r is unavailable; quota fallback disabled: %s",
+                           fallback_model, exc)
+        else:
+            router.set_quota_fallback(
+                fallback_model,
+                max_tokens_resolver=lambda m: _resolve_output_max_tokens(cfg, m, router=router),
+            )
     return router
 
 
@@ -1187,6 +1202,10 @@ class LoomSession:
             # Issue #471: identity is derived from _active_model() via a single
             # helper so start / tier-switch / set_model can never drift apart.
             self._refresh_runtime_identity()
+            # Quota fallback switches are process-wide router events; keep the
+            # agent's view of "which model am I" current when one happens.
+            from loom.core.cognition.router import add_failover_listener
+            add_failover_listener(self._on_quota_failover)
             _cb = self._telemetry.get("context_budget")
             if _cb is not None:
                 _cb.set_budget(self.budget)
@@ -1722,6 +1741,8 @@ class LoomSession:
         self._resume_event.set()
 
     async def stop(self) -> None:
+        from loom.core.cognition.router import remove_failover_listener
+        remove_failover_listener(self._on_quota_failover)
         if self._db is None:
             return
         # Issue #154: cancel any in-flight background jobs with trace.
@@ -2158,7 +2179,7 @@ class LoomSession:
             # ``should_compress`` is OR over token + block dimensions —
             # MiniMax's 2013-block wire cap can bite long before the
             # token budget does, especially on parallel-tool sessions.
-            await self._fit_context_to(self._active_model(), where="")
+            await self._fit_context_to(self.current_model(), where="")
 
             tools = self.registry.to_openai_schema()
             tool_count = 0
@@ -2242,9 +2263,12 @@ class LoomSession:
                 # When tiers aren't configured, _active_model() falls back to
                 # self.model (legacy behavior preserved).
                 _active_model = self._active_model()
+                # Quota fallback: the router may serve a different model; size
+                # the context and output budget for the one that will answer.
+                _serving_model = self._serving_model(_active_model)
                 # A tier switch (skill / agent / circadian) may have landed on
                 # a smaller window than the history now holds — fit it first.
-                await self._fit_context_to(_active_model, where="before call")
+                await self._fit_context_to(_serving_model, where="before call")
                 yield ModelThinkingStarted(
                     phase="after_tool" if tool_count > 0 else "initial",
                     tool_name=_last_completed_tool_name,
@@ -2256,7 +2280,7 @@ class LoomSession:
                         messages=self.messages,
                         tools=tools,
                         max_tokens=_resolve_output_max_tokens(
-                            self._loom_config, _active_model, router=self.router,
+                            self._loom_config, _serving_model, router=self.router,
                         ),
                         abort_signal=abort_signal,
                     ):
@@ -2787,7 +2811,7 @@ class LoomSession:
                     # ``should_compress`` would still see the previous turn's
                     # block reading and miss a wire-cap overrun until the
                     # next turn boundary.
-                    await self._fit_context_to(self._active_model(), where="mid-turn")
+                    await self._fit_context_to(self.current_model(), where="mid-turn")
 
                     # ── HITL check point ─────────────────────────────────────
                     # Fires after every tool batch, before the next LLM call.
@@ -3713,9 +3737,25 @@ class LoomSession:
         Issue #471: every surface that displays "which model is active"
         (footer, agent_health/runtime_identity, diagnostics) should read this
         rather than caching their own copy, so the displayed name can never
-        diverge from what actually serves. Mirrors ``_active_model()``.
+        diverge from what actually serves. The tier's model, unless the
+        router is serving the quota fallback for it.
         """
-        return self._active_model()
+        return self._serving_model(self._active_model())
+
+    def _serving_model(self, model: str) -> str:
+        """Model the router will actually call for *model* (quota fallback aware)."""
+        effective = getattr(getattr(self, "router", None), "effective_model", None)
+        if not callable(effective):
+            return model
+        try:
+            served = effective(model)
+        except Exception:
+            return model
+        return served if isinstance(served, str) and served else model
+
+    def _on_quota_failover(self, event: Any) -> None:
+        """Router failover/restored → refresh what the agent sees as its model."""
+        self._refresh_runtime_identity()
 
     def _refresh_runtime_identity(self) -> None:
         """Push the resolved model/tier into the runtime_identity telemetry.
@@ -3732,7 +3772,7 @@ class LoomSession:
             return
         _ri = telemetry.get("runtime_identity")
         if _ri is not None:
-            _ri.update(model=self._active_model(), tier=self._active_tier(),
+            _ri.update(model=self.current_model(), tier=self._active_tier(),
                        tier_models=self._tier_models,
                        effort=self._effort_display())
 
