@@ -93,7 +93,7 @@ class CodexResponsesProvider(LLMProvider):
 
     name = "codex"
     ROUTING_PREFIX = "codex/"
-    DEFAULT_MODEL = "gpt-5.5"
+    DEFAULT_MODEL = "gpt-6.1-sol"
     DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex/responses"
     DEFAULT_TIMEOUT = 600.0
     # #470: codex reasoning legitimately runs ~5 min; a true hang (observed

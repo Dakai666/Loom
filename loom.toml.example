@@ -34,7 +34,7 @@ personality = ""
 #   claude-*                → Anthropic provider                         (ANTHROPIC_API_KEY in .env)
 #   gpt-*                   → OpenAI official API (gpt-5.5, gpt-5.5-pro)  (OPENAI_API_KEY in .env)
 #   openai/<model>          → OpenAI official API with explicit prefix    (OPENAI_API_KEY in .env)
-#   codex/<model>           → Codex OAuth backend (e.g. codex/gpt-5.5)     (`codex login`)
+#   codex/<model>           → Codex OAuth backend (e.g. codex/gpt-6.1-sol)     (`codex login`)
 #   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
 #   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
 #   ollama/<name>           → local Ollama server  (enable [providers.ollama] below)
@@ -145,9 +145,9 @@ reminder_after_turns = 10
 # [providers.codex]
 # enabled          = true              # optional; explicit --model codex/... also registers it
 # base_url         = "https://chatgpt.com/backend-api/codex/responses"
-# default_model    = "gpt-5.5"         # bare model name — no "codex/" prefix here
-# reasoning_effort = "high"            # none | low | medium | high | xhigh (gpt-5.5 supported).
-#                                      # Default "high" — tier-2 selection implies depth.
+# default_model    = "gpt-6.1-sol"     # bare model name — no "codex/" prefix here
+# reasoning_effort = "medium"          # Use an effort supported by the selected model.
+#                                      # Default "high"; "medium" is a lighter backup baseline.
 #                                      # Must be set: omitting the field lets gpt-5.5's
 #                                      # reasoning run unbounded on big multi-turn payloads,
 #                                      # which stalls for 3+ minutes (the pre-PR #449 implicit
