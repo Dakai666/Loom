@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -17,10 +19,29 @@ from .chatgpt_auth import ChatGPTAuth, ChatGPTAuthError, RESOURCE
 from .codex_responses_provider import CodexResponsesProvider, _build_responses_content
 from .providers import LLMResponse, ToolUse, _reduce_tool_result_to_text
 from .responses_policy import RESPONSES_REASONING_DEFAULT_EFFORT
-from .responses_sse import ResponsesProviderError, ResponsesStreamState, iter_sse_events
+from .responses_sse import (
+    QUOTA_FAILURE_TYPE, ResponsesProviderError, ResponsesStreamState, is_quota_text, iter_sse_events,
+)
 
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse an HTTP Retry-After header (delta-seconds or HTTP-date)."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    return seconds if 0 < seconds < float("inf") else None
 
 
 def _content(content: Any, role: str) -> list[dict[str, Any]]:
@@ -168,9 +189,16 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
                         body = (await response.aread()).decode(errors="replace").replace(token, "[redacted]")
                         # Keep admission's actual response shape, status, and request ID.
                         request_id = response.headers.get("x-request-id", "unknown")
+                        # Plan limits are the one failure the router may route
+                        # around (opt-in [cognition] fallback_model); keep them
+                        # distinct from transient 5xx and auth rejections.
+                        quota = response.status_code == 429 or (
+                            400 <= response.status_code < 500 and is_quota_text(body))
                         raise ResponsesProviderError.from_state(
-                            state, failure_type="http_error",
-                            detail=f"HTTP {response.status_code}; request_id={request_id}; {body[:4000]}")
+                            state, failure_type=QUOTA_FAILURE_TYPE if quota else "http_error",
+                            detail=f"HTTP {response.status_code}; request_id={request_id}; {body[:4000]}",
+                            retry_after_seconds=(_retry_after_seconds(response.headers.get("retry-after"))
+                                                 if quota else None))
                     async for event, data in iter_sse_events(
                         response.aiter_lines(), state=state,
                         first_event_timeout=self._first_event_timeout,

@@ -53,6 +53,7 @@ class ResponsesProviderError(RuntimeError):
         detail: str,
         last_event_type: str = "",
         elapsed_seconds: float = 0.0,
+        retry_after_seconds: float | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -61,6 +62,9 @@ class ResponsesProviderError(RuntimeError):
         self.detail = detail
         self.last_event_type = last_event_type
         self.elapsed_seconds = elapsed_seconds
+        # Server-advised wait (HTTP Retry-After) — the router's quota fallback
+        # uses it as the cooldown instead of its default.
+        self.retry_after_seconds = retry_after_seconds
         parts = [
             f"provider={provider}",
             f"model={model}",
@@ -81,6 +85,7 @@ class ResponsesProviderError(RuntimeError):
         *,
         failure_type: str,
         detail: str,
+        retry_after_seconds: float | None = None,
     ) -> "ResponsesProviderError":
         return cls(
             provider=state.provider,
@@ -90,7 +95,22 @@ class ResponsesProviderError(RuntimeError):
             detail=detail,
             last_event_type=state.last_event_type,
             elapsed_seconds=state.elapsed_seconds(),
+            retry_after_seconds=retry_after_seconds,
         )
+
+
+# Quota / plan-limit failures: the only failure_type the router's quota
+# fallback acts on. Transient (5xx, timeouts) and auth failures stay distinct.
+QUOTA_FAILURE_TYPE = "entitlement_or_quota"
+_QUOTA_MARKERS = (
+    "quota", "entitlement", "subscription", "rate limit", "rate_limit",
+    "usage limit", "usage_limit", "billing",
+)
+
+
+def is_quota_text(text: str) -> bool:
+    haystack = text.lower()
+    return any(marker in haystack for marker in _QUOTA_MARKERS)
 
 
 class _ReasoningStreamWrapper:
@@ -210,17 +230,13 @@ def classify_responses_sse_error(
         detail += f": {extra}"
     return ResponsesProviderError.from_state(
         state,
-        failure_type="stream_error_event",
+        failure_type=QUOTA_FAILURE_TYPE if is_quota_text(extra or "") else "stream_error_event",
         detail=detail,
     )
 
 
 def classify_xai_http_failure(body: str) -> str:
-    haystack = body.lower()
-    markers = ("quota", "entitlement", "subscription", "rate limit", "billing")
-    if any(marker in haystack for marker in markers):
-        return "entitlement_or_quota"
-    return "http_error"
+    return QUOTA_FAILURE_TYPE if is_quota_text(body) else "http_error"
 
 
 async def _next_line_with_timeout(

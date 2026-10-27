@@ -43,6 +43,15 @@ personality = ""
 [cognition]
 default_model = "claude-sonnet-4-6"
 
+# Quota fallback (opt-in). When the serving provider reports its plan quota
+# or usage limit is exhausted (HTTP 429 / quota error, before any output),
+# Loom serves this model instead and skips the exhausted provider for the
+# server's Retry-After, or 30 minutes. Transient 5xx, timeouts and login
+# failures never trigger it. The fallback's provider must be registered
+# (e.g. DEEPSEEK_API_KEY in .env); it is usually pay-per-use. The autonomy
+# daemon notifies once per switch and once when the primary is restored.
+# fallback_model = "deepseek-flash"
+
 # Context budget window. Each model's native window is declared by its
 # provider (MiniMax-M3 / M3.1-Flash and DeepSeek flash / v4-pro: 1M; M2.7:
 # 204_800); unknown models fall back to 204_800. The budget is re-synced to

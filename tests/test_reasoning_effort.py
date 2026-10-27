@@ -181,6 +181,8 @@ class _FakeSession:
     _sticky_tier = property(lambda self: self._tier.sticky_tier)
     _active_tier = LoomSession._active_tier
     _active_model = LoomSession._active_model
+    current_model = LoomSession.current_model
+    _serving_model = LoomSession._serving_model
     _refresh_runtime_identity = LoomSession._refresh_runtime_identity
     _effective_effort = LoomSession._effective_effort
     _effort_display = LoomSession._effort_display
