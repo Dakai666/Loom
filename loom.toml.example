@@ -137,7 +137,7 @@ reminder_after_turns = 10
 # default_model = "gpt-6.1-sol"  # select an actually listed account model
 # account = "personal"         # optional saved account ID or local label
 # timeout = 600
-# reasoning_effort = "high"    # optional; unset follows the model's default
+# reasoning_effort = "medium"  # recommended baseline; unset explicitly sends the catalog default
 # first_event_timeout = 90
 # idle_event_timeout = 300
 # Legacy codex/ remains available as an explicitly selected backup.

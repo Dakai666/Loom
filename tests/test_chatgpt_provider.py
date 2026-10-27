@@ -289,3 +289,38 @@ def test_missing_context_window_warns_once_and_recovers_after_discovery(caplog, 
     assert "loom auth chatgpt models" in caplog.text
     models[:] = [{"slug": "test", "context_window": 500000}]
     assert provider.native_context_window("chatgpt/test") == 500000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("supported", [[], ["low"], [{"effort": "low"}]])
+async def test_tier_model_effort_mismatch_is_structured_and_never_sends_request(streaming, supported):
+    fake_auth = auth()
+    fake_auth.catalog = lambda account=None: [
+        {"slug": "daily", "supported_reasoning_levels": ["medium"]},
+        {"slug": "deep", "supported_reasoning_levels": supported}]
+    sent = []
+    def transport(request):
+        sent.append(request)
+        return httpx.Response(500)
+    provider = ChatGPTResponsesProvider(model="chatgpt/daily", auth=fake_auth, reasoning_effort="medium",
+                                       transport=httpx.MockTransport(transport))
+    router = LLMRouter().register(provider)
+    # Exercise the same for_model binding used when the session changes tiers.
+    with pytest.raises(ResponsesProviderError) as caught:
+        if streaming:
+            async for _ in router.stream_chat("chatgpt/deep", [{"role": "user", "content": "test"}]):
+                pass
+        else:
+            await router.chat("chatgpt/deep", [{"role": "user", "content": "test"}])
+    error = caught.value
+    assert error.provider == "ChatGPT"
+    assert error.model == "deep"
+    assert error.failure_type == "configuration_error"
+    assert error.phase == "request_built"
+    assert "reasoning_effort=medium" in error.detail
+    assert "supported levels" in error.detail
+    assert ("low" in error.detail) == bool(supported)
+    assert "loom-oauth" not in str(error)
+    assert provider.model == "chatgpt/daily"
+    assert sent == []

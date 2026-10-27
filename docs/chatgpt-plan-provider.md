@@ -89,8 +89,34 @@ default_model = "chatgpt/<slug-from-models>"
 enabled = true
 account = "personal"  # optional ID or label; otherwise the active saved account
 timeout = 600
-# reasoning_effort = "high"  # only for models that support it
+reasoning_effort = "medium"  # baseline for models that support it
 ```
+
+For a conversational agent with memory and local tools, start with this
+lighter tier profile, using only slugs listed for the connected account:
+
+```toml
+[cognition]
+default_model = "chatgpt/gpt-6-luna"
+
+[cognition.tiers]
+1 = "chatgpt/gpt-6-luna"
+2 = "chatgpt/gpt-6.1-sol"
+default_tier = 1
+reminder_after_turns = 10
+
+[providers.chatgpt]
+enabled = true
+reasoning_effort = "medium"
+```
+
+T1 handles daily conversation and routine tool work; T2 supplies more capacity
+for difficult reasoning. This is a starting configuration, not a comparative
+Loom quality benchmark. The base `default_model` matches T1 because a configured
+tier takes precedence over the base; `/model` is a manual override. Both tiers
+share the provider's explicit medium effort and the same account allowance.
+The earlier Luna image probe was inconclusive, so use T2 when image accuracy
+needs closer verification. Selecting tiers does not automatically route images.
 
 The provider uses a server-reported `context_window` from the account's cached
 catalog when available; otherwise it starts with a conservative 32,768-token
@@ -104,6 +130,8 @@ used when advertised, otherwise `high` when supported (or the first supported
 level). If metadata is missing, Loom sends its existing `high` default. Only an
 explicitly empty supported-level list causes omission. A configured effort is
 preserved, including `max`/`ultra`, and rejected if known to be unsupported.
+At inference time this is a structured `configuration_error` naming the bound
+model, requested effort and supported levels, including after a tier switch.
 
 The public endpoint is fixed to `https://api.openai.com/v1/responses`. Payloads
 use `store: false`, `stream: true`, complete local history and namespaced tools.
@@ -141,11 +169,13 @@ the remaining two failures are retained above. No repeated-until-success
 claim is made. The audio limitations remain route-level restrictions and were
 not probed against another endpoint or billing path.
 
-The focused suite completed **337 passing tests**, covering the new provider
+The focused suite completed **343 passing tests**, covering the new provider
 and existing Codex/xAI providers, CLI, routing, vision, tier selection, context
 budgets, and session model updates. Token rotation was verified with a real
-cross-process test using a mocked OAuth server; no one-hour expiry wait was
-used for the live account. The review regressions additionally cover optional
+cross-process test using a mocked OAuth server. Later, the live account naturally
+reached near-expiry and successfully refreshed against OpenAI (HTTP 200); the
+renewed credential then completed real inference. That response returned both
+scope and a refresh token, so omission variants remain mocked regressions. The review regressions additionally cover optional
 renewal fields, explicit permission removal, malformed responses, per-model
 reasoning selection and warning recovery. Event-loop heartbeat tests exercise
 both real thread and process contention during a gated mock HTTP renewal.
@@ -165,6 +195,12 @@ each without a stall. Inputs were synthetic SHA-256 rows and inert tool results.
 This exercises the real router/provider history replay, not a full LoomSession
 or compaction run. The sanitized [long-context report](validation/chatgpt-long-context-2026-10-27.json)
 records token counts, effort, timings and tool rounds.
+
+A separate live check uses `TierManager` and `LLMRouter` to switch from T1
+`gpt-6-luna` to T2 `gpt-6.1-sol`, with explicit `medium` effort on both. Each
+model completed a synthetic tool call and exact tool-result replay. The
+[medium tier report](validation/chatgpt-medium-tiers-2026-10-27.json) also records
+the earlier real renewal observation, without credentials or account identity.
 
 The sanitized [live verification report](validation/chatgpt-plan-2026-10-27.json)
 contains the synthetic observations and check times, without account identity

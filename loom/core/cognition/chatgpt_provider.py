@@ -93,7 +93,7 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
         if self._explicit_effort is not None:
             if supported is not None and self._explicit_effort not in supported:
                 raise ValueError(f"ChatGPT model {self._api_model()} does not support reasoning_effort="
-                                 f"{self._explicit_effort}.")
+                                 f"{self._explicit_effort}; supported levels: {supported}.")
             return self._explicit_effort
         if supported == []:
             return None  # Only omit when the catalog explicitly reports no levels.
@@ -149,7 +149,11 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
         except ChatGPTAuthError as exc:
             raise ResponsesProviderError.from_state(
                 state, failure_type="credential_missing", detail=str(exc)) from exc
-        payload = self._build_payload(messages, tools, max_tokens)
+        try:
+            payload = self._build_payload(messages, tools, max_tokens)
+        except ValueError as exc:
+            raise ResponsesProviderError.from_state(
+                state, failure_type="configuration_error", detail=str(exc)) from exc
         text, calls, usage = "", {}, {}
         completed = False
         async with httpx.AsyncClient(timeout=self._timeout, transport=self.transport,
