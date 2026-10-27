@@ -459,6 +459,28 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             default=default_is_openai,
         )
 
+    # Official ChatGPT plan usage — separate credentials and explicit routing.
+    chatgpt_cfg = cfg.get("providers", {}).get("chatgpt", {})
+    chatgpt_requested = requested_model.startswith("chatgpt/")
+    chatgpt_default = default.startswith("chatgpt/")
+    if chatgpt_requested or chatgpt_default or chatgpt_cfg.get("enabled", False):
+        from loom.core.cognition.chatgpt_provider import ChatGPTResponsesProvider
+
+        chatgpt_model = requested_model if chatgpt_requested else (
+            default if chatgpt_default else "chatgpt/" + chatgpt_cfg.get(
+                "default_model", ChatGPTResponsesProvider.DEFAULT_MODEL))
+        router.register(
+            ChatGPTResponsesProvider(
+                model=chatgpt_model, account=chatgpt_cfg.get("account") or None,
+                reasoning_effort=chatgpt_cfg.get("reasoning_effort") or None,
+                timeout=float(chatgpt_cfg.get("timeout") or 600),
+                first_event_timeout=chatgpt_cfg.get("first_event_timeout"),
+                idle_event_timeout=chatgpt_cfg.get("idle_event_timeout"),
+            ),
+            default=chatgpt_default or chatgpt_requested,
+            fallback=chatgpt_default or chatgpt_requested,
+        )
+
     # Codex OAuth — explicit opt-in via codex/<model>. This avoids silently
     # burning OPENAI_API_KEY quota when users expect ChatGPT/Codex billing.
     codex_cfg = cfg.get("providers", {}).get("codex", {})
