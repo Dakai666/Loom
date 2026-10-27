@@ -78,6 +78,7 @@ max_tokens    = 8096
 |------|------|--------|------|
 | `default_model` | string | `"MiniMax-M2.7"` | `loom autonomy start` / `loom discord start` 使用的模型；CLI 優先用 `--model` flag |
 | `max_tokens` | integer | `8096` | LLM 每次呼叫的最大輸出 token |
+| `fallback_model` | string | （未設定） | 額度備援（opt-in）：主模型回報方案額度／用量上限耗盡時改由此模型服務，冷卻期照 `Retry-After`（上限 6h）或 30 分鐘；一般 rate limit、5xx、逾時、登入失效不觸發。詳見 `loom.toml.example` |
 
 **模型前綴路由：**
 

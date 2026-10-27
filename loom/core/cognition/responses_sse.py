@@ -100,12 +100,16 @@ class ResponsesProviderError(RuntimeError):
 
 
 # Quota / plan-limit failures: the only failure_type the router's quota
-# fallback acts on. Transient (5xx, timeouts) and auth failures stay distinct.
+# fallback acts on. Transient (5xx, timeouts, plain rate limits) and auth
+# failures stay distinct — a short rate limit must not switch to a
+# pay-per-use fallback for half an hour.
 QUOTA_FAILURE_TYPE = "entitlement_or_quota"
 _QUOTA_MARKERS = (
-    "quota", "entitlement", "subscription", "rate limit", "rate_limit",
-    "usage limit", "usage_limit", "billing",
+    "quota", "entitlement", "subscription", "usage limit", "usage_limit", "billing",
 )
+# xAI's admission classifier predates the quota fallback and also counts
+# rate limits; kept as-is so its failure_type values don't shift.
+_XAI_QUOTA_MARKERS = ("quota", "entitlement", "subscription", "rate limit", "billing")
 
 
 def is_quota_text(text: str) -> bool:
@@ -236,7 +240,10 @@ def classify_responses_sse_error(
 
 
 def classify_xai_http_failure(body: str) -> str:
-    return QUOTA_FAILURE_TYPE if is_quota_text(body) else "http_error"
+    haystack = body.lower()
+    if any(marker in haystack for marker in _XAI_QUOTA_MARKERS):
+        return QUOTA_FAILURE_TYPE
+    return "http_error"
 
 
 async def _next_line_with_timeout(

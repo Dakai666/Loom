@@ -8,9 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -191,9 +191,9 @@ class ChatGPTResponsesProvider(CodexResponsesProvider):
                         request_id = response.headers.get("x-request-id", "unknown")
                         # Plan limits are the one failure the router may route
                         # around (opt-in [cognition] fallback_model); keep them
-                        # distinct from transient 5xx and auth rejections.
-                        quota = response.status_code == 429 or (
-                            400 <= response.status_code < 500 and is_quota_text(body))
+                        # distinct from transient 5xx, plain rate limits (429
+                        # without a quota marker) and auth rejections.
+                        quota = 400 <= response.status_code < 500 and is_quota_text(body)
                         raise ResponsesProviderError.from_state(
                             state, failure_type=QUOTA_FAILURE_TYPE if quota else "http_error",
                             detail=f"HTTP {response.status_code}; request_id={request_id}; {body[:4000]}",

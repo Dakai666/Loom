@@ -330,8 +330,10 @@ async def test_tier_model_effort_mismatch_is_structured_and_never_sends_request(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status,body,headers,expected,retry_after", [
-    (429, {"error": {"code": "rate_limit_exceeded"}}, {"retry-after": "120"}, "entitlement_or_quota", 120.0),
-    (429, {"error": {"code": "usage_limit_reached"}}, {}, "entitlement_or_quota", None),
+    (429, {"error": {"code": "usage_limit_reached"}}, {"retry-after": "120"}, "entitlement_or_quota", 120.0),
+    (429, {"error": {"code": "insufficient_quota"}}, {}, "entitlement_or_quota", None),
+    # A plain rate limit is transient — not a quota incident, no failover.
+    (429, {"error": {"code": "rate_limit_exceeded"}}, {"retry-after": "2"}, "http_error", None),
     (403, {"error": {"code": "subscription_sharing_usage_limit_exceeded"}}, {}, "entitlement_or_quota", None),
     (403, {"detail": "scope rejected"}, {}, "http_error", None),
     (500, {"error": {"code": "server_error"}}, {"retry-after": "5"}, "http_error", None),
@@ -353,3 +355,21 @@ async def test_sse_quota_error_event_is_classified_as_quota():
     with pytest.raises(ResponsesProviderError) as caught:
         await provider.chat([{"role": "user", "content": "test"}])
     assert caught.value.failure_type == "entitlement_or_quota"
+
+
+def test_xai_http_classification_keeps_its_original_markers():
+    from loom.core.cognition.responses_sse import classify_xai_http_failure
+    assert classify_xai_http_failure("Rate limit reached") == "entitlement_or_quota"
+    assert classify_xai_http_failure("monthly quota used") == "entitlement_or_quota"
+    assert classify_xai_http_failure("usage_limit_reached") == "http_error"  # unchanged by #646
+    assert classify_xai_http_failure("internal error") == "http_error"
+
+
+@pytest.mark.asyncio
+async def test_sse_rate_limit_error_event_is_not_a_quota_incident():
+    provider = ChatGPTResponsesProvider(auth=auth(), transport=httpx.MockTransport(lambda r: httpx.Response(
+        200, text=event("response.failed", response={"status": "failed", "error": {
+            "code": "rate_limit_exceeded", "message": "slow down"}}))))
+    with pytest.raises(ResponsesProviderError) as caught:
+        await provider.chat([{"role": "user", "content": "test"}])
+    assert caught.value.failure_type == "stream_error_event"

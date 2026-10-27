@@ -88,9 +88,9 @@ class Clock:
 def clock(monkeypatch):
     c = Clock()
     monkeypatch.setattr(router_mod, "_clock", c)
-    router_mod.reset_failover_state()
+    router_mod._reset_failover_state_for_tests()
     yield c
-    router_mod.reset_failover_state()
+    router_mod._reset_failover_state_for_tests()
 
 
 def _router(primary: FakeProvider, fallback: FakeProvider | None, *,
@@ -142,9 +142,20 @@ async def test_fallback_call_uses_max_tokens_resolved_for_fallback_model():
         return 131072
 
     r = _router(primary, fallback, max_tokens_resolver=resolver)
-    await _drain(r, max_tokens=8192)
+    await _drain(r, max_tokens=200_000)
     assert seen == ["deepseek-flash"]
-    assert fallback.calls[0]["max_tokens"] == 131072
+    assert fallback.calls[0]["max_tokens"] == 131072  # capped by the fallback's limit
+
+
+async def test_fallback_keeps_a_tight_caller_budget():
+    # judge / reflection / counter-factual ask for a few hundred tokens on
+    # purpose; a pay-per-use fallback must not widen that.
+    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra", fail=[_quota_error()])
+    fallback = FakeProvider("deepseek", "deepseek-flash")
+    r = _router(primary, fallback, max_tokens_resolver=lambda m: 131072)
+    resp = await r.chat(model="chatgpt/gpt-6.1-terra", messages=[], max_tokens=120)
+    assert resp.text == "deepseek-reply"
+    assert fallback.calls[0]["max_tokens"] == 120
 
 
 @pytest.mark.parametrize("failure_type", [
@@ -265,8 +276,10 @@ def _build(monkeypatch, cognition: dict, env: dict):
 async def test_build_router_wires_fallback_model_with_its_own_output_budget(monkeypatch):
     r = _build(monkeypatch, {"fallback_model": "deepseek-flash"}, {"DEEPSEEK_API_KEY": "k"})
     assert r._quota_fallback == "deepseek-flash"
-    # Fallback calls get the fallback model's native cap, not the primary's.
-    assert r._fallback_max_tokens("deepseek-flash", 8192) == 131072
+    # Fallback calls are capped by the fallback model's own limit and never
+    # exceed the caller's budget.
+    assert r._fallback_max_tokens("deepseek-flash", 1_000_000) == 131072
+    assert r._fallback_max_tokens("deepseek-flash", 400) == 400
 
 
 def test_build_router_disables_fallback_when_its_provider_is_unavailable(monkeypatch, caplog):
@@ -280,16 +293,16 @@ def test_build_router_without_fallback_model_keeps_current_behaviour(monkeypatch
     assert r._quota_fallback is None
 
 
-def test_session_reports_the_serving_model_during_failover(clock):
+async def test_session_reports_the_serving_model_during_failover(clock):
     from loom.core.session import LoomSession
 
-    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra")
+    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra", fail=[_quota_error(retry_after=600)])
     r = _router(primary, FakeProvider("deepseek", "deepseek-flash"))
     sess = LoomSession.__new__(LoomSession)
     sess.router = r
     sess._active_model = lambda: "chatgpt/gpt-6.1-terra"
     assert sess.current_model() == "chatgpt/gpt-6.1-terra"
-    router_mod._cooldown_until["chatgpt"] = clock.now + 600
+    await _drain(r)
     assert sess.current_model() == "deepseek-flash"
     clock.now += 601
     assert sess.current_model() == "chatgpt/gpt-6.1-terra"
@@ -330,3 +343,76 @@ async def test_daemon_notifies_operator_once_per_failover_and_on_restore(clock):
 
     assert [n.type for n in sent] == [NotificationType.ALERT, NotificationType.INFO]
     assert "deepseek-flash" in sent[0].body and "10 min" in sent[0].body
+
+
+# ── Review follow-ups (#646) ─────────────────────────────────────────────────
+
+async def test_concurrent_requests_hitting_quota_emit_one_failover():
+    import asyncio
+
+    events: list[str] = []
+    router_mod.add_failover_listener(lambda e: events.append(e.kind))
+    gate = asyncio.Event()
+
+    class Gated(FakeProvider):
+        async def stream_chat(self, messages, tools=None, max_tokens=8096, *, abort_signal=None):
+            self.calls.append({"kind": "stream", "max_tokens": max_tokens})
+            await gate.wait()  # all requests are in flight before any fails
+            raise _quota_error()
+            yield  # pragma: no cover
+
+    primary = Gated("chatgpt", "chatgpt/gpt-6.1-terra")
+    fallback = FakeProvider("deepseek", "deepseek-flash")
+    r = _router(primary, fallback)
+    tasks = [asyncio.create_task(_drain(r)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(*tasks)
+    assert [text for text, _ in results] == ["hi", "hi", "hi"]
+    assert events == ["failover"]
+
+
+async def test_empty_chunk_before_quota_error_still_fails_over():
+    class EmptyFirst(FakeProvider):
+        async def stream_chat(self, messages, tools=None, max_tokens=8096, *, abort_signal=None):
+            yield "", None
+            raise _quota_error()
+
+    fallback = FakeProvider("deepseek", "deepseek-flash", chunks=("fb",))
+    r = _router(EmptyFirst("chatgpt", "chatgpt/gpt-6.1-terra"), fallback)
+    text, _ = await _drain(r)
+    assert text == "fb"
+
+
+async def test_inflight_primary_success_during_cooldown_is_not_a_restore(clock):
+    events: list[str] = []
+    router_mod.add_failover_listener(lambda e: events.append(e.kind))
+    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra", fail=[_quota_error()])
+    r = _router(primary, FakeProvider("deepseek", "deepseek-flash"))
+    await _drain(r)
+    # A router without a fallback (or a stream started before the incident)
+    # completing on the primary mid-cooldown must not end the cooldown.
+    plain = _router(FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra"), None, fallback_model=None)
+    await _drain(plain)
+    assert r.effective_model("chatgpt/gpt-6.1-terra") == "deepseek-flash"
+    assert events == ["failover"]
+
+
+async def test_restored_event_names_the_fallback_even_from_a_plain_router(clock):
+    events = []
+    router_mod.add_failover_listener(events.append)
+    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra", fail=[_quota_error(retry_after=60)])
+    await _drain(_router(primary, FakeProvider("deepseek", "deepseek-flash")))
+    clock.now += 61
+    plain = _router(FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra"), None, fallback_model=None)
+    await _drain(plain)
+    assert [(e.kind, e.fallback_model) for e in events] == [
+        ("failover", "deepseek-flash"), ("restored", "deepseek-flash")]
+
+
+async def test_retry_after_is_capped(clock):
+    primary = FakeProvider("chatgpt", "chatgpt/gpt-6.1-terra", fail=[_quota_error(retry_after=31_536_000)])
+    r = _router(primary, FakeProvider("deepseek", "deepseek-flash"))
+    await _drain(r)
+    clock.now += router_mod.MAX_QUOTA_COOLDOWN_SECONDS + 1
+    assert r.effective_model("chatgpt/gpt-6.1-terra") == "chatgpt/gpt-6.1-terra"

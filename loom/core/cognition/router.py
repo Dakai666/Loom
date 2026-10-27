@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 _clock: Callable[[], float] = time.monotonic
 DEFAULT_QUOTA_COOLDOWN_SECONDS = 1800.0
+# Upper bound on a server-advised Retry-After: past it the primary is probed
+# again (one failed probe is cheap; a year-long silent switch is not).
+MAX_QUOTA_COOLDOWN_SECONDS = 6 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,14 @@ class FailoverEvent:
     cooldown_seconds: float = 0.0
 
 
-_cooldown_until: dict[str, float] = {}
+@dataclass
+class _Cooldown:
+    until: float
+    primary_model: str
+    fallback_model: str
+
+
+_cooldowns: dict[str, _Cooldown] = {}
 _listeners: list[Callable[[FailoverEvent], None]] = []
 
 
@@ -84,9 +94,10 @@ def remove_failover_listener(listener: Callable[[FailoverEvent], None]) -> None:
         _listeners.remove(listener)
 
 
-def reset_failover_state() -> None:
-    """Clear cooldowns and listeners (tests)."""
-    _cooldown_until.clear()
+def _reset_failover_state_for_tests() -> None:
+    """Clear cooldowns and listeners. Tests only — production code must use
+    ``remove_failover_listener`` so other subscribers keep their hooks."""
+    _cooldowns.clear()
     _listeners.clear()
 
 
@@ -149,7 +160,9 @@ class LLMRouter:
 
         Opt-in (``[cognition] fallback_model``). Only ``entitlement_or_quota``
         failures raised before any output trigger it; the exhausted provider
-        is then skipped for ``Retry-After`` seconds (or *cooldown_seconds*).
+        is then skipped for ``Retry-After`` seconds (or *cooldown_seconds*),
+        capped at ``MAX_QUOTA_COOLDOWN_SECONDS``. Fallback calls keep the
+        caller's ``max_tokens``, capped by *max_tokens_resolver(fallback)*.
         """
         self._quota_fallback = model or None
         self._quota_cooldown = cooldown_seconds
@@ -168,12 +181,9 @@ class LLMRouter:
 
     def _cooling(self, model: str) -> str | None:
         """Fallback to use right now because *model*'s provider is cooling down."""
-        provider = self._provider_name_for_model(model)
-        until = _cooldown_until.get(provider or "")
-        if until is None:
-            return None
-        if _clock() >= until:
-            return None  # expired — next call probes the primary again
+        cooldown = _cooldowns.get(self._provider_name_for_model(model) or "")
+        if cooldown is None or _clock() >= cooldown.until:
+            return None  # none, or expired — next call probes the primary
         return self._fallback_for(model)
 
     def effective_model(self, model: str) -> str:
@@ -187,8 +197,14 @@ class LLMRouter:
         if fallback is None:
             return None
         provider = self._provider_name_for_model(model) or ""
-        cooldown = exc.retry_after_seconds or self._quota_cooldown
-        _cooldown_until[provider] = _clock() + cooldown
+        now = _clock()
+        current = _cooldowns.get(provider)
+        if current is not None and now < current.until:
+            # Concurrent requests that were already in flight: serve them on
+            # the fallback, but it is the same incident — no second event.
+            return fallback
+        cooldown = min(exc.retry_after_seconds or self._quota_cooldown, MAX_QUOTA_COOLDOWN_SECONDS)
+        _cooldowns[provider] = _Cooldown(now + cooldown, model, fallback)
         logger.warning(
             "quota exhausted on %s (%s); serving %s for %.0fs",
             model, exc.failure_type, fallback, cooldown,
@@ -198,17 +214,23 @@ class LLMRouter:
 
     def _note_primary_served(self, model: str) -> None:
         provider = self._provider_name_for_model(model) or ""
-        if provider in _cooldown_until:
-            del _cooldown_until[provider]
-            _emit(FailoverEvent("restored", provider, model, self._quota_fallback or ""))
+        cooldown = _cooldowns.get(provider)
+        # Only a probe after expiry restores. A stream that started before the
+        # incident (or a router without a fallback) finishing mid-cooldown
+        # says nothing about whether the quota is back.
+        if cooldown is None or _clock() < cooldown.until:
+            return
+        del _cooldowns[provider]
+        _emit(FailoverEvent("restored", provider, model, cooldown.fallback_model))
 
     def _fallback_max_tokens(self, fallback: str, max_tokens: int) -> int:
+        """Keep the caller's budget, capped by what the fallback model allows."""
         if self._max_tokens_resolver is None:
             return max_tokens
         try:
-            return int(self._max_tokens_resolver(fallback))
+            return min(max_tokens, int(self._max_tokens_resolver(fallback)))
         except Exception:
-            logger.exception("fallback max_tokens resolution failed; reusing primary budget")
+            logger.exception("fallback max_tokens resolution failed; reusing caller budget")
             return max_tokens
 
     def register(
@@ -312,7 +334,8 @@ class LLMRouter:
         yielded = False
         try:
             async for item in self._stream_on(model, messages, tools, max_tokens, abort_signal):
-                yielded = True
+                chunk, final = item
+                yielded = yielded or bool(chunk) or final is not None
                 yield item
         except ResponsesProviderError as exc:
             # Never replay on the fallback once output reached the caller —
