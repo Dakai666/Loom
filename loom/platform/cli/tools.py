@@ -2776,7 +2776,8 @@ def _extract_image_b64(data: Any) -> str:
         if isinstance(value, dict):
             for key, child in value.items():
                 if (
-                    key in {"partial_image_b64", "image_b64", "b64_json"}
+                    (key in {"partial_image_b64", "image_b64", "b64_json"}
+                     or (key == "result" and value.get("type") == "image_generation_call"))
                     and isinstance(child, str)
                     and child
                 ):
@@ -2868,8 +2869,14 @@ def make_openai_image_generation_tool(
 ) -> ToolDefinition:
     """Build the canonical image_generate tool backed by OpenAI GPT Image."""
 
-    from loom.core.session import _load_env
+    from loom.core.session import _load_env, _load_loom_config
+    from loom.core.cognition.codex_responses_provider import CodexResponsesProvider
     from loom.core.cognition.openai_auth import resolve_openai_credential
+    from loom.core.cognition.responses_sse import ResponsesStreamState, iter_sse_events
+
+    codex_config = _load_loom_config().get("providers", {}).get("codex", {})
+    codex_model = str(codex_config.get("default_model") or CodexResponsesProvider.DEFAULT_MODEL).strip()
+    codex_model = codex_model.removeprefix("codex/") or CodexResponsesProvider.DEFAULT_MODEL
 
     async def _openai_image(call: ToolCall) -> ToolResult:
         prompt = str(call.args.get("prompt", "")).strip()
@@ -2970,7 +2977,7 @@ def make_openai_image_generation_tool(
                     tool_spec[key] = value.strip()
 
             payload = {
-                "model": str(call.args.get("codex_model", "gpt-5.5")).strip() or "gpt-5.5",
+                "model": str(call.args.get("codex_model", codex_model)).strip().removeprefix("codex/") or codex_model,
                 "instructions": (
                     "Use image generation to create the requested image. "
                     "Return no extra text unless needed."
@@ -2987,6 +2994,8 @@ def make_openai_image_generation_tool(
                 "store": False,
             }
             latest_b64 = ""
+            completed = False
+            state = ResponsesStreamState(provider="Codex image", model=payload["model"])
             async with client.stream(
                 "POST",
                 "https://chatgpt.com/backend-api/codex/responses",
@@ -2997,27 +3006,23 @@ def make_openai_image_generation_tool(
                 },
                 json=payload,
             ) as resp:
+                if resp.status_code >= 400:
+                    # Read while the stream context is still open.
+                    await resp.aread()
                 resp.raise_for_status()
-                event: str | None = None
-                data_lines: list[str] = []
-                async for line in resp.aiter_lines():
-                    if line.startswith("event: "):
-                        event = line[7:]
-                    elif line.startswith("data: "):
-                        data_lines.append(line[6:])
-                    elif line == "" and event:
-                        raw = "\n".join(data_lines)
-                        try:
-                            data = json.loads(raw)
-                        except json.JSONDecodeError:
-                            data = {}
-                        found = _extract_image_b64(data)
-                        if found:
-                            latest_b64 = found
-                        if event in {"response.completed", "response.failed"}:
-                            break
-                        event = None
-                        data_lines = []
+                async for event, data in iter_sse_events(resp.aiter_lines(), state=state):
+                    found = _extract_image_b64(data)
+                    if found:
+                        latest_b64 = found
+                    if event == "response.incomplete":
+                        raise RuntimeError("Codex image response was incomplete.")
+                    if event == "response.completed":
+                        if data.get("response", {}).get("status") not in (None, "completed"):
+                            raise RuntimeError("Codex image response did not complete successfully.")
+                        completed = True
+                        break
+            if not completed:
+                raise RuntimeError("Codex image stream ended without response.completed.")
             if not latest_b64:
                 raise RuntimeError("Codex Responses backend did not return an image payload.")
             return latest_b64
@@ -3062,7 +3067,9 @@ def make_openai_image_generation_tool(
                     image_bytes = await _decode_openai_image_response(client, data)
                     credential_source = credential.source
         except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:500] if exc.response is not None else ""
+            # Streaming error bodies must be read before accessing .text.
+            await exc.response.aread()
+            body = exc.response.text[:500].replace(credential.token, "[redacted]")
             return ToolResult(
                 call_id=call.id,
                 tool_name=call.tool_name,
@@ -3115,6 +3122,11 @@ def make_openai_image_generation_tool(
                     "type": "string",
                     "description": "OpenAI image model.",
                     "default": default_model,
+                },
+                "codex_model": {
+                    "type": "string",
+                    "description": "Reasoning model for Codex OAuth; defaults to providers.codex.default_model.",
+                    "default": codex_model,
                 },
                 "size": {
                     "type": "string",

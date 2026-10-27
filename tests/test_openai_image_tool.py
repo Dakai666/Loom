@@ -166,7 +166,7 @@ async def test_openai_image_tool_uses_codex_responses_backend(tmp_path, monkeypa
     assert output["credential_source"] == "codex_oauth"
     request = _CodexStreamAsyncClient.requests[0]
     assert request["url"] == "https://chatgpt.com/backend-api/codex/responses"
-    assert request["json"]["model"] == "gpt-5.5"
+    assert request["json"]["model"] == "gpt-6.1-sol"
     assert request["json"]["tools"][0]["model"] == "gpt-image-2"
 
 
@@ -384,3 +384,105 @@ async def test_openai_image_tool_requires_codex_when_requested(tmp_path, monkeyp
 
     assert not result.success
     assert "Codex OAuth token" in result.error
+
+
+@pytest.fixture
+def codex_image_probe(tmp_path, monkeypatch):
+    from loom.core import session as session_module
+    codex_home = tmp_path / 'codex'
+    codex_home.mkdir()
+    (codex_home / 'auth.json').write_text(json.dumps({'tokens': {'access_token': 'codex-test-token'}}))
+    monkeypatch.setenv('CODEX_HOME', str(codex_home))
+    monkeypatch.setattr(session_module, '_load_env', lambda: {'OPENAI_API_KEY': 'must-not-fallback'})
+    monkeypatch.setattr(session_module, '_load_loom_config', lambda: {})
+    actual_client = httpx.AsyncClient
+    requests = []
+
+    async def run(body, *, status=200, args=None):
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield body.encode()
+        def transport(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(status, stream=Body())
+        monkeypatch.setattr(cli_tools.httpx, 'AsyncClient', lambda **kw: actual_client(
+            transport=httpx.MockTransport(transport), **kw))
+        tool = make_openai_image_generation_tool(tmp_path)
+        call = ToolCall(tool_name=tool.name, args={'prompt': 'synthetic probe', 'auth_mode': 'codex',
+                        'output_path': 'result.png', **(args or {})}, trust_level=TrustLevel.GUARDED, session_id='test')
+        return await tool.executor(call), tool
+    return run, requests
+
+
+def _image_event(kind, **data):
+    return f'event: {kind}\ndata: {json.dumps({"type": kind, **data})}\n\n'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('final_in_completed', [False, True])
+async def test_codex_image_reads_official_final_result_without_partial_images(tmp_path, codex_image_probe, final_in_completed):
+    run, requests = codex_image_probe
+    item = {'type': 'image_generation_call', 'status': 'completed',
+            'result': base64.b64encode(b'final-image-bytes').decode()}
+    body = '' if final_in_completed else _image_event('response.output_item.done', item=item)
+    body += _image_event('response.completed', response={'status': 'completed',
+                          'output': [item] if final_in_completed else []})
+    result, _ = await run(body)
+    assert result.success
+    assert (tmp_path / 'result.png').read_bytes() == b'final-image-bytes'
+    assert json.loads(result.output)['credential_source'] == 'codex_oauth'
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ending,expected', [
+    ('', 'without response.completed'),
+    (_image_event('response.failed', response={'error': {'code': 'image_limit', 'message': 'image quota reached'}}), 'image quota reached'),
+    (_image_event('response.incomplete', response={'status': 'incomplete'}), 'incomplete'),
+    (_image_event('response.completed', response={'status': 'failed'}), 'status=failed'),
+])
+async def test_codex_image_never_saves_partial_on_failed_or_unfinished_stream(tmp_path, codex_image_probe, ending, expected):
+    run, requests = codex_image_probe
+    body = _image_event('response.image_generation_call.partial_image',
+                        partial_image_b64=base64.b64encode(b'partial').decode()) + ending
+    result, _ = await run(body)
+    assert not result.success
+    assert expected in result.error
+    assert not (tmp_path / 'result.png').exists()
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('configured,override,expected', [
+    ('codex/configured-model', None, 'configured-model'),
+    ('configured-model', 'codex/override-model', 'override-model'),
+    ('configured-model', '  ', 'configured-model'),
+])
+async def test_codex_image_model_follows_provider_config_and_valid_schema_override(monkeypatch, codex_image_probe, configured, override, expected):
+    from loom.core import session as session_module
+    from jsonschema import validate
+    monkeypatch.setattr(session_module, '_load_loom_config', lambda: {'providers': {'codex': {'default_model': configured}}})
+    run, requests = codex_image_probe
+    item = {'type': 'image_generation_call', 'result': base64.b64encode(b'image').decode()}
+    args = {'codex_model': override} if override is not None else {}
+    result, tool = await run(_image_event('response.completed', response={'status': 'completed', 'output': [item]}), args=args)
+    assert result.success
+    assert requests[0]['model'] == expected
+    validate({'prompt': 'draw', **args}, tool.input_schema)
+    assert tool.input_schema['properties']['codex_model']['default'] == configured.removeprefix('codex/')
+
+
+@pytest.mark.asyncio
+async def test_codex_image_stream_http_error_preserves_real_body_without_api_fallback(tmp_path, codex_image_probe):
+    run, requests = codex_image_probe
+    result, _ = await run('{"error":"model_not_found codex-test-token"}', status=400)
+    assert not result.success
+    assert 'HTTP 400' in result.error and 'model_not_found' in result.error
+    assert 'codex-test-token' not in result.error
+    assert 'ResponseNotRead' not in result.error
+    assert len(requests) == 1
+    assert not (tmp_path / 'result.png').exists()
+
+
+def test_image_decoder_ignores_unrelated_result_text():
+    assert cli_tools._extract_image_b64({'type': 'function_call_output', 'result': 'not-an-image'}) == ''
