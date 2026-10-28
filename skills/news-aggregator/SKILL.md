@@ -74,6 +74,25 @@ python fetch_news.py --source tech --limit 8 --no-save
 python fetch_news.py --source hackernews --no-save
 ```
 
+> ⚠️ **`--limit` 是「整軌」的上限，不是「每個來源」的上限**（2026-10-27 實測）。
+> `--all-tracks --limit 8` 時，`international` 陣列回傳 8 則**全部來自 Al Jazeera**，
+> BBC 的 8 則被截掉；`astronomy` 陣列 8 則**全部來自 ESA**，NASA 的 8 則被截掉。
+> 這會讓「多來源聚合軌」實際變成單一來源軌，卻不會報錯。
+>
+> **因此聚合後必須補抓每個 ok 來源的獨立清單**，否則 briefing 會漏掉整個媒體的視角：
+> ```bash
+> python fetch_news.py --source bbc_world --limit 8 --no-save
+> python fetch_news.py --source nasa_news --limit 8 --no-save
+> ```
+> 判斷方式：看 JSON 陣列裡出現了幾個不同的 `source` 值，與 `_source_health` 裡 `status=ok` 的來源數比對。
+> 少了哪個來源就補抓哪個。
+
+> ⚠️ **`checks.scripts_only_bash` 守門的實際放行條件**（2026-10-27 實測）：
+> 指令必須以 `cd skills/news-aggregator/scripts` **或** `cd skills/news-aggregator` 開頭才會放行。
+> 直接在 workspace 根目錄跑 `python3 fetch_news.py` 會被 deny，
+> `ls ../../../news/...` 也會被 deny（`ls`、`wc`、`stat` 都不放行）。
+> 驗檔請用 `list_dir` + `see_image`，不要用 shell 指令。
+
 ### 步驟 2.5：讀取來源健康狀態（不要靠猜）
 
 `--all-tracks` 的 JSON 裡有一個 `_source_health` 鍵，是**腳本產生的證據**：
@@ -133,6 +152,31 @@ minimax__text_to_image(
 > **不要另開 `outputs/news/`，也不要自取檔名（`quote.jpg` 之類）。**
 > 2026-10-26 08:00 實測：圖被抓到 `outputs/news/2026-10-26/quote.jpg`，dawn 只好事後搬回正確位置。
 > 下載回來的資料其實是 JPEG，就算 URL 結尾是 `.jpeg`／`.png`，也直接存成 `cover.jpg`，不要事後再改名。
+
+### 步驟 4.5：投遞前驗檔（2026-10-26 新增 — DK 認可）
+
+autonomy 跑的時候沒有人類在旁邊看，**所以投遞前自己驗一次**，不要靠「應該抓回來了」。
+
+> ⚠️ **用 `list_dir` 驗，不要用 `ls`／`wc`／`stat`。**
+> 這個技能的 `run_bash` 守門（`checks.scripts_only_bash`）只放行兩件事：
+> `mkdir news/YYYY-MM-DD` 與 `curl ... -o news/YYYY-MM-DD/cover.jpg "<url>"`。
+> **2026-10-26 實測：`ls -l`、`wc -c` 都被 deny。** 而 `list_dir`／`see_image` 不受這個守門限制
+> （守門只掛在 `run_bash` 上）。
+
+**驗檔兩段式：**
+
+1. **存在性** — `list_dir` 看 `news/YYYY-MM-DD/`，`cover.jpg` 在名單裡才算過。
+   `list_dir` **不顯示檔案大小**，所以它看不出空檔。
+2. **可讀性（可選）** — 對 `news/YYYY-MM-DD/cover.jpg` 呼叫 `see_image`：
+   **讀得到＝檔案非空且可解碼**（正常是 100 KB 級的 JPEG）；讀不到＝空檔或壞檔，**重抓一次**。
+
+> ⚠️ 用 `see_image` 驗完之後**不要再移動或刪除那個檔案**——框架的檔案型圖片 ref 會在後續 turn 重送檔案本體，
+> 檔案不見會讓 session 整個壞掉（2026-10-26 實例，框架同日已改為降級，但仍以不動為妙）。
+
+驗過再呼叫 `create_discord_forum_post(..., files=["news/YYYY-MM-DD/cover.jpg"])`。
+
+> ⚠️ **驗不過就不要卡住整份晨報**：圖抓失敗時**照常投遞五份 briefing，只是不帶 `files`**。
+> 配圖是加分項，主體優先——這跟上面「產圖失敗不影響晨報主體」是同一條規律。
 
 **規則**
 - **一天最多一張**，不要為了「多一張比較好」重複呼叫（付費工具）。
@@ -220,7 +264,7 @@ minimax__text_to_image(
 
 | 來源 | 長期狀況 |
 |------|---------|
-| Reuters World | 在部分網路環境 DNS 解析失敗，以 BBC／NHK 為主 |
+| Reuters World | 在部分網路環境 DNS 解析失敗，以 BBC／NHK 為主（2026-10-27 實測：Reuters **完全沒有出現在 `_source_health`**，連狀態列都沒有，無法從腳本輸出判定是「抓取前被跳過」還是「靜默失敗」） |
 | NASA APOD | URL 格式為 `apod.nasa.gov/apod/apYYMMDD.html`，需主動拼接當天日期 |
 | NEJM Alerts | feed 偶有數日不更新 |
 | NHK World | 某些時段回傳舊聞（2026-10-24 實測：最新一則為 76 天前） |
