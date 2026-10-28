@@ -257,8 +257,8 @@ class MemorySearch:
                   (memory, skills and conversation).
         limit:    Maximum number of results.
         domain / temporal:
-                  Memory-Ontology filters.  They exist only on memory, so
-                  conversation is excluded when either is set.
+                  Memory-Ontology filters.  They narrow memory only;
+                  conversation has no such axes and is still searched.
         since / until:
                   Hard limits: memory record time, conversation event time.
                   Skills carry no event time and are excluded when set.
@@ -295,6 +295,8 @@ class MemorySearch:
                     memory_note += " (embedding failed)"
             if windowed:
                 memory_note += ", by record time"
+            if domain or temporal:
+                memory_note += " (domain/temporal filter applies to memory only)"
             notes.append(memory_note)
 
         if type in ("skill", "all"):
@@ -305,12 +307,11 @@ class MemorySearch:
                 notes.append("skills: lexical")
 
         if type == "all":
-            if domain or temporal:
-                notes.append("conversation: excluded (domain/temporal apply to memory only)")
-            else:
-                found, note = await self._search_conversation(terms, since=since, until=until)
-                routes.append(found)
-                notes.append(note)
+            # domain/temporal narrow memory only; they never switch the
+            # conversation route off (models fill optional fields by habit).
+            found, note = await self._search_conversation(terms, since=since, until=until)
+            routes.append(found)
+            notes.append(note)
         else:
             notes.append(f"conversation: excluded (type={type})")
 

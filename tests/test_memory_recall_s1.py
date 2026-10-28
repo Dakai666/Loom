@@ -292,14 +292,20 @@ async def test_rows_written_outside_the_session_log_api_are_indexed(tmp_path):
         assert [_ref(r) for r in await search.recall("苔蘚")] == ["log:s1:1"]
 
 
-async def test_axis_filters_exclude_conversation_and_say_so(tmp_path):
+async def test_axis_filters_narrow_memory_but_never_switch_off_conversation(tmp_path):
+    # Models habitually fill optional enum fields; a memory-only filter must
+    # not silently drop the conversation route (live run 2026-10-29).
     store = await _store(tmp_path)
     async with store.connect() as db:
+        semantic = SemanticMemory(db)
+        await semantic.upsert(SemanticEntry(key="k:user", value="saffron archive note",
+                                            domain="user"))
         await _log(db, "s1", 1, "assistant", "saffron archive talk")
-        found = await MemorySearch(SemanticMemory(db), ProceduralMemory(db)).recall(
-            "saffron archive", domain="self")
-    assert list(found) == []
-    assert "conversation" in found.coverage
+        found = await MemorySearch(semantic, ProceduralMemory(db)).recall(
+            "saffron archive", domain="self", temporal="recent")
+    assert [_ref(r) for r in found] == ["log:s1:1"]
+    assert "conversation: lexical" in found.coverage
+    assert "domain/temporal" in found.coverage
 
 
 # ---------------------------------------------------------------------------
