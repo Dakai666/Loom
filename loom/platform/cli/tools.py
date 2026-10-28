@@ -4251,8 +4251,11 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
                 ),
             )
         # Models often fill every schema field with a placeholder; treat
-        # None / "" as "not set" so they don't count as filters.
-        args = {k: v for k, v in call.args.items() if v is not None and v != ""}
+        # None / "" as "not set" so they don't count as filters. head/tail
+        # must be >= 1, so 0 can only be a placeholder too (#647).
+        args = {k: v for k, v in call.args.items()
+                if v is not None and v != ""
+                and not (k in ("head", "tail") and v == 0 and not isinstance(v, bool))}
         if "section" in args:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
