@@ -1,0 +1,474 @@
+{
+  "baseline_commit": "6644d56cf93836a53c171715a2bc59665daf7a6d",
+  "date": "2026-10-28",
+  "scope": "aggregate-only measurements on disposable copies; synthetic quality separately frozen",
+  "reference_run": {
+    "python_sqlite": "3.49.1",
+    "python": "3.12.11",
+    "semantic_rows": {
+      "total": 9938,
+      "non_redirect": 6209,
+      "redirect_stubs": 3729,
+      "supersede_metadata_fields": [],
+      "sources_total": [
+        [
+          "agent",
+          221
+        ],
+        [
+          "dreaming",
+          1481
+        ],
+        [
+          "memorize",
+          1119
+        ],
+        [
+          "other",
+          9
+        ],
+        [
+          "session",
+          7047
+        ],
+        [
+          "task_reflector",
+          51
+        ],
+        [
+          "user",
+          10
+        ]
+      ],
+      "sources_non_redirect": [
+        [
+          "agent",
+          131
+        ],
+        [
+          "dreaming",
+          888
+        ],
+        [
+          "memorize",
+          1087
+        ],
+        [
+          "other",
+          5
+        ],
+        [
+          "session",
+          4039
+        ],
+        [
+          "task_reflector",
+          49
+        ],
+        [
+          "user",
+          10
+        ]
+      ]
+    },
+    "session_log": {
+      "roles": [
+        [
+          "assistant",
+          37743,
+          7123116,
+          11582615
+        ],
+        [
+          "system",
+          1106,
+          412572,
+          578069
+        ],
+        [
+          "tool",
+          39513,
+          11249567,
+          14033002
+        ],
+        [
+          "user",
+          7349,
+          2588253,
+          4202680
+        ]
+      ],
+      "tool_chars": {
+        "n": 39513,
+        "p50": 323,
+        "p95": 500,
+        "p99": 500,
+        "max": 502
+      }
+    },
+    "indexes": {
+      "1024": {
+        "build_ms": 8357.988874893636,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      },
+      "4096": {
+        "build_ms": 8565.23058284074,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      },
+      "16384": {
+        "build_ms": 8627.794041763991,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      }
+    },
+    "semantic_trigram": {
+      "build_ms": 481.93541588261724,
+      "bytes": 8613888,
+      "existing_unicode61_bytes": 1896448
+    },
+    "two_char_like": {
+      "放下": {
+        "ms": {
+          "n": 31,
+          "p50": 24.2932909168303,
+          "p95": 24.698167107999325,
+          "p99": 24.76287493482232,
+          "max": 24.76287493482232
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "記憶": {
+        "ms": {
+          "n": 31,
+          "p50": 0.6439168937504292,
+          "p95": 0.6869579665362835,
+          "p99": 0.8724173530936241,
+          "max": 0.8724173530936241
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "測試": {
+        "ms": {
+          "n": 31,
+          "p50": 2.107167150825262,
+          "p95": 2.214332576841116,
+          "p99": 2.2224579006433487,
+          "max": 2.2224579006433487
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "霧鉛": {
+        "ms": {
+          "n": 31,
+          "p50": 90.69258393719792,
+          "p95": 91.70304192230105,
+          "p99": 91.88500000163913,
+          "max": 91.88500000163913
+        },
+        "result_count": 0,
+        "plan": [
+          "SCAN session_log"
+        ]
+      }
+    },
+    "current_recall": {
+      "profile": "ollama_end_to_end",
+      "warm": true,
+      "queries": 4,
+      "limit": 5,
+      "latency_ms": {
+        "n": 28,
+        "p50": 368.143874919042,
+        "p95": 432.14641604572535,
+        "p99": 455.8105827309191,
+        "max": 455.8105827309191
+      },
+      "output_chars": {
+        "n": 28,
+        "p50": 1080.0,
+        "p95": 1102,
+        "p99": 1102,
+        "max": 1102
+      },
+      "scope": "MemorySearch.recall plus result formatting; no agent turn/ledger emit"
+    }
+  },
+  "repeat_run": {
+    "python_sqlite": "3.49.1",
+    "python": "3.12.11",
+    "semantic_rows": {
+      "total": 9938,
+      "non_redirect": 6209,
+      "redirect_stubs": 3729,
+      "supersede_metadata_fields": [],
+      "sources_total": [
+        [
+          "agent",
+          221
+        ],
+        [
+          "dreaming",
+          1481
+        ],
+        [
+          "memorize",
+          1119
+        ],
+        [
+          "other",
+          9
+        ],
+        [
+          "session",
+          7047
+        ],
+        [
+          "task_reflector",
+          51
+        ],
+        [
+          "user",
+          10
+        ]
+      ],
+      "sources_non_redirect": [
+        [
+          "agent",
+          131
+        ],
+        [
+          "dreaming",
+          888
+        ],
+        [
+          "memorize",
+          1087
+        ],
+        [
+          "other",
+          5
+        ],
+        [
+          "session",
+          4039
+        ],
+        [
+          "task_reflector",
+          49
+        ],
+        [
+          "user",
+          10
+        ]
+      ],
+      "history_rows": 41
+    },
+    "session_log": {
+      "roles": [
+        [
+          "assistant",
+          37743,
+          7123116,
+          11582615
+        ],
+        [
+          "system",
+          1106,
+          412572,
+          578069
+        ],
+        [
+          "tool",
+          39513,
+          11249567,
+          14033002
+        ],
+        [
+          "user",
+          7349,
+          2588253,
+          4202680
+        ]
+      ],
+      "tool_chars": {
+        "n": 39513,
+        "p50": 323,
+        "p95": 500,
+        "p99": 500,
+        "max": 502
+      },
+      "tool_raw_json_rows": 0,
+      "tool_action_join": [
+        39513,
+        37777
+      ],
+      "rows_per_turn": {
+        "n": 6847,
+        "p50": 7,
+        "p95": 44,
+        "p99": 91,
+        "max": 346
+      },
+      "recall_calls": [
+        [
+          "ledger_recall",
+          80,
+          80
+        ],
+        [
+          "recall",
+          1092,
+          1091
+        ],
+        [
+          "recall_period",
+          197,
+          197
+        ]
+      ]
+    },
+    "indexes": {
+      "512": {
+        "build_ms": 8341.956709045917,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      },
+      "4096": {
+        "build_ms": 8487.35833261162,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      },
+      "16384": {
+        "build_ms": 8576.86970802024,
+        "bytes": 77623296,
+        "tool_chars_retained_fraction": 1.0,
+        "tools_with_full_content_fraction": 1.0
+      }
+    },
+    "action_capture_proxy": {
+      "output_chars": {
+        "n": 5773,
+        "p50": 344,
+        "p95": 7420,
+        "p99": 15690,
+        "max": 1132470
+      },
+      "full_row_fraction_at_prefix": {
+        "512": 0.5589814654425775,
+        "1024": 0.6701888099774814,
+        "4096": 0.9029967088169063,
+        "8192": 0.962930885155032,
+        "16384": 0.992724753161268
+      },
+      "note": "recent action output_len subset only; not full persisted session tool content"
+    },
+    "semantic_trigram": {
+      "build_ms": 473.4824998304248,
+      "bytes": 8613888,
+      "existing_unicode61_bytes": 1896448
+    },
+    "two_char_like": {
+      "放下": {
+        "ms": {
+          "n": 31,
+          "p50": 23.89916591346264,
+          "p95": 24.56462476402521,
+          "p99": 24.65212531387806,
+          "max": 24.65212531387806
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "記憶": {
+        "ms": {
+          "n": 31,
+          "p50": 0.590125098824501,
+          "p95": 0.6674169562757015,
+          "p99": 0.8769161067903042,
+          "max": 0.8769161067903042
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "測試": {
+        "ms": {
+          "n": 31,
+          "p50": 2.0901248790323734,
+          "p95": 2.1820422261953354,
+          "p99": 2.319000195711851,
+          "max": 2.319000195711851
+        },
+        "result_count": 40,
+        "plan": [
+          "SCAN session_log"
+        ]
+      },
+      "霧鉛": {
+        "ms": {
+          "n": 31,
+          "p50": 88.18695787340403,
+          "p95": 89.76012514904141,
+          "p99": 90.56054102256894,
+          "max": 90.56054102256894
+        },
+        "result_count": 0,
+        "plan": [
+          "SCAN session_log"
+        ]
+      }
+    },
+    "current_recall": {
+      "profile": "ollama_end_to_end",
+      "warm": true,
+      "queries": 4,
+      "limit": 5,
+      "latency_ms": {
+        "n": 28,
+        "p50": 350.1490836497396,
+        "p95": 360.2125411853194,
+        "p99": 367.3997912555933,
+        "max": 367.3997912555933
+      },
+      "output_chars": {
+        "n": 28,
+        "p50": 1080.0,
+        "p95": 1102,
+        "p99": 1102,
+        "max": 1102
+      },
+      "scope": "MemorySearch.recall plus result formatting; no agent turn/ledger emit"
+    }
+  },
+  "lexical_synthetic_summary": {
+    "positive_cases": 28,
+    "negative_cases": 8,
+    "hit_at_5": 0.2857142857142857,
+    "all_sources_located_rate": 0.2857142857142857,
+    "false_positive_rate": 0.875
+  },
+  "literal_log_probe": {
+    "cases": 12,
+    "hit_at_5": 6,
+    "scope": "development S1 cases; literal log MATCH/LIKE only, no semantic or skill routes, no query rewrite"
+  }
+}
