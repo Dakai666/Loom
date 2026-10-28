@@ -371,6 +371,9 @@ def make_load_skill_tool(
         executor=_load_skill,
         tags=["skill", "memory", "activation"],
         impact_scope="memory",
+        # Skill instructions are read immediately; spilling them only adds a
+        # scratchpad_read round trip (#647: pet-cat was 30 chars over 8000).
+        inline_only=True,
     )
 
 

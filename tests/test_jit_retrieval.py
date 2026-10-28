@@ -335,3 +335,20 @@ class TestJITRefUniqueness:
 
         assert len(refs) == 10
         assert len(scratchpad.list_refs()) == 10
+
+
+class TestInstructionToolsStayInline:
+    """#647: instructions the model must read right away never spill."""
+
+    async def test_load_skill_output_is_never_spilled(self) -> None:
+        from unittest.mock import MagicMock
+        from loom.platform.cli.skill_tools import make_load_skill_tool
+
+        load_skill = make_load_skill_tool(MagicMock())
+        pad = Scratchpad()
+        jit = JITRetrievalMiddleware(pad, _make_registry(load_skill))
+        # pet-cat's SKILL.md was 8030 chars — 30 over the default threshold.
+        body = "x" * 8030
+        result = await _run(jit, _call("load_skill"), body)
+        assert result.output == body
+        assert pad.list_refs() == []

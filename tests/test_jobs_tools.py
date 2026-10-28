@@ -407,6 +407,51 @@ class TestScratchpadTool:
         assert r.success, r.error
         assert r.output.startswith("b\nc\n\n[scratchpad_read:")
 
+    async def test_issue_647_zero_placeholders_are_ignored(self):
+        """#647: the exact call the model sent after the 2026-10-27 switch —
+        head plus zero/empty placeholders for every other filter."""
+        pad = Scratchpad()
+        pad.write("log", "\n".join(str(i) for i in range(1, 11)))
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {
+            "ref": "log", "head": 100, "tail": 0, "lines": "", "grep": "",
+        }))
+        assert r.success, r.error
+        assert r.output.startswith("1\n2\n")
+        assert "head=100" in r.output
+
+    @pytest.mark.parametrize("args", [
+        {"head": 0}, {"tail": 0}, {"head": 0, "tail": 0},
+        {"head": 0, "tail": 0, "lines": "", "grep": "", "max_bytes": 0},
+    ])
+    async def test_all_zero_placeholders_read_whole_body(self, args):
+        """head/tail must be >= 1, so 0 can only mean "not set"."""
+        pad = Scratchpad()
+        pad.write("log", "a\nb\nc")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "log", **args}))
+        assert r.success, r.error
+        assert r.output == "a\nb\nc"
+
+    async def test_zero_placeholder_does_not_hide_real_conflict(self):
+        """Two real filters still conflict — never silently pick one."""
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {
+            "ref": "log", "head": 1, "tail": 0, "grep": "a",
+        }))
+        assert not r.success
+        assert "head, grep" in r.error
+
+    async def test_negative_head_still_rejected(self):
+        pad = Scratchpad()
+        pad.write("log", "a\nb")
+        tool = make_scratchpad_read_tool(pad)
+        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": -3}))
+        assert not r.success
+        assert "positive" in r.error
+
     @pytest.mark.parametrize("bad", [True, 5.9, "five"])
     async def test_head_rejects_non_integer(self, bad):
         pad = Scratchpad()
