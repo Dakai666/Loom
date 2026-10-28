@@ -1,8 +1,8 @@
-# 整合記憶系統：寫入與召回 — Epic 規格 r1
+# 整合記憶系統：寫入與召回 — Epic 規格 r2
 
 > - 日期：2026-10-28（Asia/Taipei）
-> - 狀態：r1。Loom agent end-user review 與 Claude Code 實作 review 已收斂；§1.1 三項裁決由 DK 確認。S0／S1 可動工。
-> - 版本：r0 由 Codex 依 DK 初步方向起草；r1 依 [#650 Loom agent review](https://github.com/Dakai666/Loom/issues/650) 與 [Claude Code review](https://github.com/Dakai666/Loom/issues/650#issuecomment-6470563466) 收斂（變更摘要見 §15）。
+> - 狀態：r2。S0 已交付並合併（[#651](https://github.com/Dakai666/Loom/pull/651)），盤點修正、S1 預算與 §1.2 裁決由 DK 確認。S1 可動工。
+> - 版本：r0 由 Codex 依 DK 初步方向起草；r1 依 [#650 Loom agent review](https://github.com/Dakai666/Loom/issues/650) 與 [Claude Code review](https://github.com/Dakai666/Loom/issues/650#issuecomment-6470563466) 收斂；r2 依 S0 報告與 [S0 review](https://github.com/Dakai666/Loom/pull/651#issuecomment-6472177779) 更新（變更摘要見 §15）。
 > - Epic：[#650](https://github.com/Dakai666/Loom/issues/650)，Claude Code 與 Loom agent 的共同 review／補充入口。
 > - 程式核對基準：`51bb2a611a2d5b12c128084f6b46d720f8a34597`。
 > - 關聯：[#643](https://github.com/Dakai666/Loom/issues/643)、#634、#635、#633；既有規格 53／56／57／58。
@@ -22,13 +22,27 @@ DK 對下一階段的核心方向：**模型能力越強，框架得越整合、
 
 ### 1.1 r1 收斂主軸與 DK 裁決
 
-**原始經歷早已保存，缺的是可搜尋性，不是新儲存。** `session_log` 自 2026-04-03 起完整保存對話與工具回覆（≈8.6 萬列、無 TTL），但 `recall` 讀不到它；於是系統用 `compress_session` 把經歷例行轉寫成 fact 來補位——目前 semantic 約 71% 來自此路徑，agent 主動 `memorize` 約 11%。因此本 Epic 的主軸是：**讓 `session_log` 成為可搜尋的原始經歷，然後停掉為了「原文找不到」才存在的自動提煉。**
+**原始經歷早已保存，缺的是可搜尋性，不是新儲存。** `session_log` 自 2026-04-03 起保存完整對話文字與工具回覆摘要（≈8.6 萬列、無 TTL；工具回覆只存前 500 字，較完整的工具輸出在 `action_records.output_prefix`，見 §1.2），但 `recall` 讀不到它；於是系統用 `compress_session` 把經歷例行轉寫成 fact 來補位——目前 semantic 約 71%（排除 stub 後約 65%）來自此路徑，agent 主動 `memorize` 約 11%。因此本 Epic 的主軸是：**讓 `session_log` 成為可搜尋的原始經歷，然後停掉為了「原文找不到」才存在的自動提煉。**
 
 DK 已裁決（2026-10-28）：
 
 1. **`compress_session` 在 S1 預設關閉**，不等到 S3。關閉條件：S1 固定案例全部通過。保留函式與設定開關一個版本作回復。
 2. **`session_log` 明定為原始經歷的權威來源，不設 TTL。** 任何未來的清理都必須同時處理索引失效與 `log:` ref 的「來源已刪除」回報。
 3. **既有 `session:` 自動壓縮 facts 不清理、不遷移。** 照常可讀，結果中標示「自動壓縮產物、來源僅到 session 粒度」；是否清理於 S4 實戰後另議。
+
+### 1.2 r2：S0 後的 DK 裁決（2026-10-28）
+
+S0 報告：[`61a-整合記憶系統-S0基準與盤點.md`](61a-整合記憶系統-S0基準與盤點.md)（量測數據 `61a-memory-s0-metrics.json`）。以下裁決以該報告為依據。
+
+1. **工具原文不新增保存點。** `session_log` 的工具列只是 500 字摘要（`session.py` 的 `tool_output[:500]`），不是完整回覆。較完整的工具輸出已由 #569 保存在 `action_records.output_prefix`（上限 16,384 字，附 `output_digest`／`output_len`），可用 `session_id＋tool_call_id` 關聯（S0 實測 37,777／39,513）。S1 索引摘要並標「摘要」；`recall(ref=log:...)` 展開時從 `action_records` 補較完整原文並標截斷，無關聯者明示「僅摘要」。是否索引 `output_prefix` 待固定案例證明需要時再議。recall 對 `action_records` 唯讀，不改 prediction observation 邊界。關閉 compress 後，舊工具原文的上限即「摘要＋prefix」，不宣稱可還原全文。
+2. **改述／跨語言分兩層驗收。** 單次呼叫層（S1 硬門檻）：literal 中文、兩字詞、identifier、無答案、範圍限制、去重案例一次 `recall` 必過。agent 迴圈層（另計）：改述／跨語言允許主模型以同一使用者問題自主改寫搜尋詞，最多 3 次 `recall`，記錄次數與延遲；此層結果不得宣稱為單次改善。不加 hidden LLM；迴圈層不足再附數據評估 `session_log` embedding。
+3. **child 經歷先接來源再退 episodic。** subagent trace 只寫 `episodic`、不在 `session_log`。S3 停 episodic 寫入／TTL 前，先把 child trace 接到可保存、可找回的來源，並測「child 工具失敗 → 原始經歷可讀」。
+4. **索引容量：新索引淨增上限 128 MiB**（`memory.db` 當時約 356 MiB）。
+5. **兩字詞須有上限且隨成長有效。** 不採固定 row 數的線性掃描（以每月約 1.2 萬列的成長，100,000 rows 上限一到兩個月內即觸頂）。改用 **CJK bigram 影子索引**：user／assistant 文字的 CJK 段展開成 bigram、其餘文字原樣保留，`unicode61`、`content=''`、`detail=none`、`contentless_delete=1`；只回答「哪些回合含此詞」，片段與排序仍讀 `session_log`。副本實測（45,092 列）：4.3 MiB、建索引 1.0 秒、查詢 <1 ms，成長約每月 1 MiB，含在 128 MiB 內。單一 CJK 字查詢走限時、由新到舊的線性掃描，超限明示「已查到哪個時間點，可用 `until=` 續查」，不回報不存在。
+
+**S1 預算（依 S0 §7，DK 確認）**：每路候選 ≤40 個獨立 ref／回合、最終預設 5 筆；`ref` 展開 ≤3 回合／128 rows／8,000 字並標截斷；初次輸出每筆 ≤512 字、整次 ≤4,000 字（含來源與覆蓋行）；工具摘要索引 512 字；暖機 recall p95 ≤700 ms（同 profile 比較，主模型追查另計）；migration 單機 rebuild ≤30 秒；額外必跑 LLM 0。字元數不冒充 token 數。
+
+**修改前基準（S0 合成集）**：S1 Hit@5 8/24、無答案假命中 7/8（現行 lexical／fallback 與 embedding 回放兩個 profile 相同）。S1 須在相同案例與 profile 下比較。
 
 ## 2. 已核對的現況與問題
 
@@ -49,7 +63,7 @@ DK 已裁決（2026-10-28）：
 | `since`／`until` 過濾 semantic `updated_at` | `memory/search.py` | 記錄／修訂時間冒充事件時間 |
 | `episodic_entries` 是同一回合的第三份副本（TTL 30 天），主要讀者為 `compress_session` | `session.py`、`memory/episodic.py`、`cognition/reflection.py`、`self_reflection.py` | 原文已在 `session_log`，此表只服務提煉路徑 |
 
-**本機資料量級（2026-10-28 唯讀查詢，含 stub／已 supersede 列，僅供量級參考）**：`session_log` 85,711 列（user＋assistant 文字 ≈9.7 MB、tool 回覆 ≈11 MB）；semantic 來源分布 `session:` 7,047／dreaming 1,481／`memorize` 1,119／其他 <300；`episodic_entries` 4,274 列。
+**本機資料量級（2026-10-28 唯讀查詢）**：`session_log` 85,711 列（user＋assistant 文字 ≈9.7 MB；tool 列 39,513 列為 ≤500 字摘要，`raw_json` 皆為空）；semantic 9,938 列（非 redirect 6,209、stub 3,729），`session:` 來源 7,047／4,039（全部／排除 stub）；`episodic_entries` 4,274 列。精確口徑以 S0 報告 §6 為準。
 
 **既有 join 鍵**：`session_log` tool 列的 `metadata.tool_call_id` ＝ `action_records.call_id` ＝ ledger `payload.tool_call_id`，三者 `session_id` 相同——工具回合可驗證關聯，不需以時間戳猜配對。缺口：ledger `turn_id`（`turn_<uuid12>`）未寫入 `session_log`，純文字回合無法對到 ledger。
 
@@ -153,7 +167,7 @@ flowchart TD
 - TaskReflector／CounterFactualReflector／行為反思／session-end evolution 的啟動與產物要列出合併及退役清單。不能在原有全部背景呼叫之外再加一位統一 curator。
 - 減少自動提煉不等於不保存原始經歷；退役的只有提煉產物，原文仍由 `session_log` 保存並可找回。
 
-### 5.2.1 Writer 盤點與處置（r1）
+### 5.2.1 Writer 盤點與處置（r1 初稿；r2 修正見下）
 
 | Producer | 位置 | 經過 governor？ | 處置 |
 |---|---|---|---|
@@ -166,6 +180,14 @@ flowchart TD
 | `memorize`／`relate` | `platform/cli/tools.py`、`facade.memorize` | 是 | 主要主動入口；S1 起回覆帶 `mem:` ref 與索引狀態 |
 | subagent memorize、API server | `agent/subagent.py`、`platform/api/server.py` | 否 | S3 改走 `facade.memorize` |
 | skill auto-import | `session.py` | — | 檔案同步，非理解，不動 |
+
+**r2 修正（S0 獨立盤點，完整修正版以 S0 報告 §2–4 為準）**：
+
+- `relate` **不經 governor**：`facade.relate → upsert_triple → semantic.upsert` 為直接寫入，S3 一併收斂。
+- subagent memorize 不是整段繞過：先走繼承的 executor，再以直接 upsert 重標 source；要收斂的是第二次 retag／embed。
+- subagent trace 只寫 `episodic`，沒有 `session_log` 副本 → episodic 退役的前置條件見 §1.2 第 3 項。
+- 補列 `run_self_reflection` 的 triples，以及 skill check／plugin approval 的控制狀態寫入；後者是控制狀態，不得當成可合併或衰減的反思。
+- `success_rate` 的讀者分為直接使用、transport、檔案同步三類；`tool_success_rate(session_id)` 是實際計數指標，不因同名而刪除。
 
 ### 5.3 整理與修訂
 
@@ -206,8 +228,8 @@ recall(ref="前次回傳的引用", limit?)
 
 **r1 定案的搜尋細節：**
 
-- **中文斷詞**：`session_log_fts` 與 `semantic_fts` 皆用 FTS5 `trigram` tokenizer（本機 SQLite 3.52 支援）。trigram 對 <3 字查詞無法用索引（如「放下」），該類詞走有界 `LIKE` 掃描；p95 由 S0 量測。
-- **索引範圍**：user／assistant `content` 全文；tool 列只索引前段，長度上限由 S0 量測定。
+- **中文斷詞**：`session_log_fts` 與 `semantic_fts` 皆用 FTS5 `trigram` tokenizer（專案 Python 的 SQLite 3.49.1 已實測支援）。trigram 對 <3 字查詞無法用索引：兩字 CJK 詞走 bigram 影子索引，單字走限時線性掃描（§1.2 第 5 項）。
+- **索引範圍**：user／assistant `content` 全文；tool 列索引 512 字摘要並標「摘要」，展開時從 `action_records` 補原文（§1.2 第 1 項）。external-content FTS 只索引截斷內容時，`rebuild`／insert／update／delete 必須使用同一內容投影（S0 測試已示範）。
 - **合併**：semantic（BM25／embedding）、skills、`session_log` 三路各取 top-k，以 RRF 合併；移除 Tier 1 短路，query 無命中時不回最近資料。
 - **去重單位是回合**：同一回合的多個命中合併為一筆；同 session 的不同回合各自保留——早期判斷與後來修正不能因同屬一 session 被壓掉。
 - **不做 latest-wins**：結果依時間排列並標內容性質；後來的解讀不被呈現為對早期解讀的客觀更正，來源未明講的因果不補。
@@ -288,17 +310,17 @@ S1／S2 可以讓新能力早日可用，但不構成整個 Epic 完成。完成
 | S3 | `episodic_entries` 寫入與 TTL 路徑、`CounterFactualReflector`、`SkillEvolutionHook`、四個繞過 governor 的直接 upsert、模型自評 `success_rate` 路徑、`compress_session` 程式碼 |
 | S4 | `recall_period`、`ledger_recall` 移出主 agent 預設清單（`ledger_recall` 保留為管理／除錯入口）；prompt／工具描述中「選哪種回憶工具」的教學刪除 |
 
-### 9.1 S1 具體範圍（r1）
+### 9.1 S1 具體範圍（r1；r2 補充）
 
 只做對話經歷閉環；不碰文件、不碰 ledger 寫入路徑、不碰 prediction。
 
-1. `memory.db` migration：新增 `session_log_fts`（external content、`trigram`、trigger 同步、首次 `rebuild` 回填）；`semantic_fts` 改 trigram 並 rebuild。migration 前以既有 `memory/backup.py` 備份。
+1. `memory.db` migration：新增 `session_log_fts`（external content、`trigram`、trigger 同步、首次 `rebuild` 回填，tool 列 512 字投影）與 CJK bigram 影子索引；`semantic_fts` 改 trigram 並 rebuild。migration 前以既有 `memory/backup.py` 備份。淨增 ≤128 MiB、rebuild ≤30 秒。
 2. `MemorySearch.recall`：三路候選＋RRF，先排除 stub／失效再 LIMIT；回合級去重；無命中回空並附覆蓋行（含 #643 修正）。
-3. `recall` 工具：加 `ref` 互斥參數，identity 讀取 `log:`／`mem:`／`skill:`；`since`／`until` 對 `session_log` 用 `created_at`。
+3. `recall` 工具：加 `ref` 互斥參數，identity 讀取 `log:`／`mem:`／`skill:`；`log:` 展開以 `tool_call_id` join `action_records` 補工具原文與行動狀態；`since`／`until` 對 `session_log` 用 `created_at`。
 4. `_log_message` metadata 加 `ledger_turn_id`。
 5. `compress_session` 預設關閉（設定可開回），以固定案例通過為前提。
 
-**契約測試先行（red → green）**：無 semantic fact 的合成對話以改述問法找回並 `ref` 展開；2 字中文、≥3 字中文、英文 identifier 各一；semantic 高分命中時 `session_log` 命中仍出現（禁止短路不變式）；無答案回空；`since`／`until` 不回範圍外列；同回合多命中只佔一格、同 session 不同回合各自保留；刪除 session 後 FTS 不再命中且舊 `log:` ref 回「來源已刪除」；寫入與 recall 並行、重放不產生重複候選。
+**契約測試先行（red → green）**：無 semantic fact 的合成對話以改述問法找回並 `ref` 展開；2 字中文、≥3 字中文、英文 identifier 各一；semantic 高分命中時 `session_log` 命中仍出現（禁止短路不變式）；無答案回空；`since`／`until` 不回範圍外列；同回合多命中只佔一格、同 session 不同回合各自保留；刪除 session 後 FTS 與 bigram 影子索引都不再命中，且舊 `log:` ref 回「來源已刪除」；寫入與 recall 並行、重放不產生重複候選；單字掃描超限時覆蓋行標出時間點且不回「不存在」；工具摘要結果標「摘要」、展開時截斷可辨認。驗收以 S0 固定案例（`tests/fixtures/memory_s0_cases.json`）分單次呼叫層與 agent 迴圈層報告（§1.2 第 2 項）。
 
 Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：閱讀篇章（A）、未升格的經歷（C）、放下清單（D）為 S1 必過；改變的判斷（B）、文件修訂（E）依賴修訂鏈與文件，列 S2。
 
@@ -327,7 +349,7 @@ S0 建立至少 24 個有答案、8 個無答案／來源不足的案例；包�
 
 ### 10.2 成本與框架厚度
 
-S0 記錄相同環境下的 p50／p95 延遲、輸出 token、索引空間與重建時間、額外模型呼叫。S1 動工前在該切片定案具體上限，不能等實作完才選有利標準。
+S0 記錄相同環境下的 p50／p95 延遲、輸出 token、索引空間與重建時間、額外模型呼叫。S1 動工前在該切片定案具體上限，不能等實作完才選有利標準。**r2：S1 上限已定案於 §1.2。**
 
 - 預設 recall 不新增必跑的 LLM planning／reranking／self-review 呼叫；模型按需追問的工具次數另計，需保留可觀測成本。
 - 候選、展開數量與輸出有固定上限；被截斷要能辨認。數值依 S0 基準定案，不把任意數字寫成永久規則。
@@ -354,7 +376,7 @@ T0 是主 agent 真正接通新路徑且完成第一次寫入→召回，不是 
 
 **r1 認領狀態**：Claude Code 認領 S0 writer／reader 盤點（§5.2.1 為初稿）、ref mapping、S1 實作與契約測試、各切片刪除清單與 GitNexus impact 報告。Loom agent 認領 end-user 案例私下核對、自然問法與預期脈絡、T0 後第一次寫入／召回／修訂實戰，以及前三個適用機會的失敗回報（不自動增設日常排程）。產品取捨與 issue 收束由 DK 決定。
 
-**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**仍待定**：文件集合與移動／修訂語意（S2）、舊 confidence／half-life 遷移（S3）、相容入口退出預設清單的時點（S4，以等價驗收為條件）、tool 列索引長度與 <3 字掃描上限（S0 量測）。
+**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**r2 已解**：工具原文來源、改述驗收層級、兩字詞方案、S1 預算（§1.2）。**仍待定**：文件集合與移動／修訂語意（S2）、舊 confidence／half-life 遷移（S3）、相容入口退出預設清單的時點（S4，以等價驗收為條件）。
 
 以下為 r0 的原始 review 請求，保留作脈絡。
 
@@ -400,3 +422,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 
 - **r0**（2026-10-28）：Codex 依 DK 初步方向起草。
 - **r1**（2026-10-28）：收斂 Loom agent end-user review 與 Claude Code 實作 review。主要變更：§1.1 收斂主軸與 DK 三項裁決（compress_session 於 S1 關閉、`session_log` 為無 TTL 權威來源、既有 `session:` facts 不清理）；§2 補實測數字、join 鍵與 #643 根因；§4.2 定案 ref 格式；§4.4 對話投影改用同 DB FTS5 trigger、不需 checkpoint，ledger 不建索引；§5.2.1 writer 盤點；§6.2 trigram 斷詞、RRF、回合級去重、不做 latest-wins；§6.3 覆蓋狀態每查詢一行；§9 每切片刪除清單與 S1 範圍；#643 修正併入 S1 首個 PR。
+- **r2**（2026-10-28）：納入 S0（#651）。主要變更：§1.2 S0 後 DK 裁決（工具原文改由 `action_records.output_prefix` 補、改述／跨語言兩層驗收、child 經歷先接來源再退 episodic、索引淨增 ≤128 MiB、兩字詞改 CJK bigram 影子索引）與 S1 預算、修改前基準；§1.1／§2 更正 r1 錯誤（工具回覆只存 500 字摘要、SQLite 版本為 3.49.1、stub 口徑）；§5.2.1 盤點修正（relate 不經 governor、subagent 細節、補列 writer、`success_rate` 讀者）；§6.2／§9.1 對應更新。
