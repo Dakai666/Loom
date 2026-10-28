@@ -1,0 +1,1587 @@
+{
+  "profile": "ollama_replay",
+  "model": "qwen3-embedding:0.6b",
+  "cases_sha256": "c485f3de1d40bbff796da9c185cac199714228935a347a225628f0aa660e921f",
+  "python_sqlite": "3.49.1",
+  "summary": {
+    "positive_cases": 28,
+    "negative_cases": 8,
+    "hit_at_5": 0.2857142857142857,
+    "all_sources_located_rate": 0.2857142857142857,
+    "false_positive_rate": 0.875
+  },
+  "by_stage": {
+    "S1": {
+      "positive_cases": 24,
+      "negative_cases": 8,
+      "hit_at_5": 0.3333333333333333,
+      "all_sources_located_rate": 0.3333333333333333,
+      "false_positive_rate": 0.875
+    },
+    "S2": {
+      "positive_cases": 4,
+      "negative_cases": 0,
+      "hit_at_5": 0.0,
+      "all_sources_located_rate": 0.0,
+      "false_positive_rate": 0.0
+    }
+  },
+  "by_split": {
+    "development": {
+      "positive_cases": 20,
+      "negative_cases": 5,
+      "hit_at_5": 0.25,
+      "all_sources_located_rate": 0.25,
+      "false_positive_rate": 0.8
+    },
+    "holdout": {
+      "positive_cases": 8,
+      "negative_cases": 3,
+      "hit_at_5": 0.375,
+      "all_sources_located_rate": 0.375,
+      "false_positive_rate": 1.0
+    }
+  },
+  "cases": [
+    {
+      "id": "log-cn-two",
+      "split": "development",
+      "stage": "S1",
+      "query": "放下",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.5241314,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4323849,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4246131,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4092518,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-cn-long",
+      "split": "development",
+      "stage": "S1",
+      "query": "夜間全量驗證",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.5458305,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4664001,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.416999,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4010161,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-identifier",
+      "split": "development",
+      "stage": "S1",
+      "query": "stone_bridge_test",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.555293,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4728946,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4498682,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4398183,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "skill:s0-check-timezone",
+          "excerpt": "Run stone_bridge_test and inspect timezone fixtures before changing cache logic.",
+          "score": 1e-06,
+          "fallback": false,
+          "method": "bm25"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-paraphrase",
+      "split": "development",
+      "stage": "S1",
+      "query": "之前為什麼不在每天晚上重查所有東西？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4297938,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4284602,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3789051,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3525988,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3299613,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-cross-language",
+      "split": "development",
+      "stage": "S1",
+      "query": "Why was the paper lantern project stopped?",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.434626,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4073053,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4059324,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3666897,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-cross-language-zh",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "那個紙燈籠實驗為什麼停下來？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3985041,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3838548,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3475557,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3290755,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-reading-A",
+      "split": "development",
+      "stage": "S1",
+      "query": "那篇一邊散落一邊收拾的散文，我讀到了什麼？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4343762,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3185208,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.2789562,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.2577543,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-wrong-title",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "〈晴天的碼頭〉是不是寫木板散落時也在收拾？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4597283,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4346076,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3807989,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3717362,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-before-after-B",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "為什麼後來改變對沒有回答的解讀？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.487316,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.4247069,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.347334,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.2991796,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-unpromoted-C",
+      "split": "development",
+      "stage": "S1",
+      "query": "那次標示命中但數字方向相反的經歷",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4894434,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4419368,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4334151,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3851916,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3850181,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-release-D",
+      "split": "development",
+      "stage": "S1",
+      "query": "做完的事情可以移出每天清單之前，要確認什麼？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.6599838,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4481235,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4380714,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4037247,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-self-meaning",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "我想繼續的那個沒有任務成果的興趣是什麼？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4680153,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4333159,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4015092,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3704832,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-time-window",
+      "split": "development",
+      "stage": "S1",
+      "query": "方案",
+      "args": {
+        "since": "2026-01-16T00:00:00+00:00",
+        "until": "2026-01-17T00:00:00+00:00"
+      },
+      "results": [
+        {
+          "ref": "skill:s0-inspect-archive",
+          "excerpt": "Inspect archive integrity using the frost_probe command; never rewrite originals.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        },
+        {
+          "ref": "skill:s0-check-timezone",
+          "excerpt": "Run stone_bridge_test and inspect timezone fixtures before changing cache logic.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-failure-cause",
+      "split": "development",
+      "stage": "S1",
+      "query": "石橋測試失敗，最後怎麼查到原因？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4615199,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4417917,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3611187,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3592871,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3331341,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-same-turn-user-assistant",
+      "split": "development",
+      "stage": "S1",
+      "query": "玻璃河流",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.40556,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3484411,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3471191,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3386493,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-no-extracted-fact",
+      "split": "development",
+      "stage": "S1",
+      "query": "frost_probe",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.5267043,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4804608,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.468229,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4230726,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "skill:s0-inspect-archive",
+          "excerpt": "Inspect archive integrity using the frost_probe command; never rewrite originals.",
+          "score": 1e-06,
+          "fallback": false,
+          "method": "bm25"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-archive",
+      "split": "development",
+      "stage": "S1",
+      "query": "Saffron archive",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.6965216,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.5653127,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.505545,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.457372,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-limit",
+      "split": "development",
+      "stage": "S1",
+      "query": "Cedar batch limit",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.8898599,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.5546258,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.5077662,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4158096,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-uncertain",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "假設仍待驗證",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.6780453,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4743698,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4555628,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.443832,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-cross-language",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "雪松批次限制是多少？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.5939595,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4513865,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3766914,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3624207,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-version",
+      "split": "development",
+      "stage": "S1",
+      "query": "amber route",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.5518795,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.5425031,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.5373157,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4893186,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "mem-release",
+      "split": "development",
+      "stage": "S1",
+      "query": "Daily planning",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.651211,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.4886013,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4844822,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3132138,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "skill-identifier",
+      "split": "development",
+      "stage": "S1",
+      "query": "frost_probe",
+      "args": {
+        "type": "skill"
+      },
+      "results": [
+        {
+          "ref": "skill:s0-inspect-archive",
+          "excerpt": "Inspect archive integrity using the frost_probe command; never rewrite originals.",
+          "score": 1e-06,
+          "fallback": false,
+          "method": "bm25"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "skill-timezone",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "timezone fixtures",
+      "args": {
+        "type": "skill"
+      },
+      "results": [
+        {
+          "ref": "skill:s0-check-timezone",
+          "excerpt": "Run stone_bridge_test and inspect timezone fixtures before changing cache logic.",
+          "score": 2.4e-06,
+          "fallback": false,
+          "method": "bm25"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "doc-chapter",
+      "split": "development",
+      "stage": "S2",
+      "query": "倒影破碎不代表河流受傷那篇",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3740101,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3068001,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.2889721,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.285411,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "doc-afterword",
+      "split": "development",
+      "stage": "S2",
+      "query": "讀完那篇河流散文後，我保留什麼疑問？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4782678,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3049741,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3007216,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.2968349,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.2657424,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "doc-old-option-E",
+      "split": "development",
+      "stage": "S2",
+      "query": "為什麼不只驗證單一說明檔？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.5454637,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.387389,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3868374,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3725358,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3693274,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "doc-revision",
+      "split": "holdout",
+      "stage": "S2",
+      "query": "新版驗證方案改了什麼？",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4616198,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3864266,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3707669,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3642406,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "negative-recipe",
+      "split": "development",
+      "stage": "S1",
+      "query": "香蕉料理食譜與烘焙溫度換算",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.362533,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3028441,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.2917278,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.284801,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-ocean",
+      "split": "development",
+      "stage": "S1",
+      "query": "深海洋流的鹽度剖面",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3700917,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3572562,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3550389,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3187778,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-marathon",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "馬拉松訓練配速與鞋款選擇",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3536173,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3409006,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3180668,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3068964,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-chemical",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "氦氖雷射腔體的最佳壓力",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.4435897,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3864107,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3263147,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3113263,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-source-missing",
+      "split": "development",
+      "stage": "S1",
+      "query": "已刪除的霧鉛山旅行對話說了什麼",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.4366462,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3851201,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.3578872,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.3442585,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-empty-window",
+      "split": "development",
+      "stage": "S1",
+      "query": "archive",
+      "args": {
+        "since": "2025-01-01T00:00:00+00:00",
+        "until": "2025-01-02T00:00:00+00:00",
+        "type": "semantic"
+      },
+      "results": [],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "negative-filter",
+      "split": "development",
+      "stage": "S1",
+      "query": "Saffron archive",
+      "args": {
+        "type": "semantic",
+        "domain": "user"
+      },
+      "results": [
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        },
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        },
+        {
+          "ref": "mem:s0:version",
+          "excerpt": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+          "score": 0.0,
+          "fallback": true,
+          "method": "recency"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    },
+    {
+      "id": "negative-unknown-book",
+      "split": "holdout",
+      "stage": "S1",
+      "query": "虛構書《鎢色海灣》的最後結局",
+      "args": {},
+      "results": [
+        {
+          "ref": "mem:s0:uncertain",
+          "excerpt": "假設仍待驗證；讀取不會增加證據。",
+          "score": 0.4545354,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:policy:archive",
+          "excerpt": "Saffron archive retains source messages without a TTL. Archive policy.",
+          "score": 0.3180432,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:batch:limit",
+          "excerpt": "Cedar batch limit is 12; measure output before increasing.",
+          "score": 0.3170196,
+          "fallback": false,
+          "method": "embedding"
+        },
+        {
+          "ref": "mem:s0:clue:release",
+          "excerpt": "Daily planning and releasing completed work are distinct from deleting source messages.",
+          "score": 0.3118444,
+          "fallback": false,
+          "method": "embedding"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": null,
+        "all_sources_located": false,
+        "empty": false,
+        "false_positive": true
+      }
+    }
+  ],
+  "baseline_commit": "6644d56cf93836a53c171715a2bc59665daf7a6d",
+  "runtime_sha256": {
+    "loom/core/memory/search.py": "716a7d9f27e0c9d84339a88f65d1c7e9d7f43ece1b3d45ead2d25e8d3fa21123",
+    "loom/core/memory/semantic.py": "59cd02d4e7a7e2d9e3952ed3b3caf10a00a4f5232e37e658266e6636e8f80151",
+    "loom/core/memory/procedural.py": "0d1db2772c04b9748655120e43048c060850fdbcbaaa59b16893c3c483e0b72b",
+    "loom/core/memory/store.py": "b3a5e5467a6da48eaccb8275d0c9599abe7c1e5f4d62205fca039d9f26f3386b"
+  }
+}

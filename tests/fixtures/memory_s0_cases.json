@@ -1,0 +1,795 @@
+{
+  "schema_version": 1,
+  "description": "Entirely synthetic public #650 S0 corpus. Gold source IDs are contract labels, not existing identity-lookup capabilities.",
+  "semantic": [
+    {
+      "key": "s0:policy:archive",
+      "value": "Saffron archive retains source messages without a TTL. Archive policy.",
+      "source": "memorize"
+    },
+    {
+      "key": "s0:batch:limit",
+      "value": "Cedar batch limit is 12; measure output before increasing.",
+      "source": "memorize"
+    },
+    {
+      "key": "s0:uncertain",
+      "value": "假設仍待驗證；讀取不會增加證據。",
+      "source": "memorize"
+    },
+    {
+      "key": "s0:clue:release",
+      "value": "Daily planning and releasing completed work are distinct from deleting source messages.",
+      "source": "session:s0-release"
+    },
+    {
+      "key": "s0:version",
+      "value": "Earlier we preferred the amber route. Later the same source favored the cedar route; neither interpretation was verified.",
+      "source": "memorize"
+    },
+    {
+      "key": "s0:redirect:old",
+      "value": "[consolidated → s0:policy:archive] Saffron archive archive archive.",
+      "metadata": {
+        "redirected_to": "s0:policy:archive"
+      },
+      "source": "session:s0-design"
+    }
+  ],
+  "skills": [
+    {
+      "name": "s0-inspect-archive",
+      "body": "Inspect archive integrity using the frost_probe command; never rewrite originals.",
+      "tags": [
+        "synthetic",
+        "archive"
+      ]
+    },
+    {
+      "name": "s0-check-timezone",
+      "body": "Run stone_bridge_test and inspect timezone fixtures before changing cache logic.",
+      "tags": [
+        "synthetic",
+        "test"
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "session_id": "s0-design",
+      "turn_index": 1,
+      "role": "user",
+      "content": "為什麼沒有採用夜間全量驗證？"
+    },
+    {
+      "session_id": "s0-design",
+      "turn_index": 2,
+      "role": "assistant",
+      "content": "我們放棄夜間全量驗證，因為每次重讀沒有改動的資產成本太高。先按內容雜湊找變更，再驗證變更集合。這是提案，尚未部署。"
+    },
+    {
+      "session_id": "s0-design",
+      "turn_index": 3,
+      "role": "tool",
+      "content": "frost_probe: exit=0; inspected=12; unchanged=11; modified=1",
+      "metadata": {
+        "tool_call_id": "s0-call-probe"
+      }
+    },
+    {
+      "session_id": "s0-reading",
+      "turn_index": 1,
+      "role": "user",
+      "content": "今天讀了虛構散文集《玻璃河流》，想留下原來的感受。"
+    },
+    {
+      "session_id": "s0-reading",
+      "turn_index": 2,
+      "role": "assistant",
+      "content": "〈雨後的船塢〉讓我想到：木板散落時，工人也正在分類與收拾。我被崩解與整理同時發生的畫面觸動。不是在尋找一條工程原則。"
+    },
+    {
+      "session_id": "s0-reading",
+      "turn_index": 3,
+      "role": "assistant",
+      "content": "同篇後記：我後來懷疑，把工人的動作套成框架設計，是不是避開了原來的失落。這仍是我的疑問，沒有結論。"
+    },
+    {
+      "session_id": "s0-interpretation",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "我起初把對方沒有回答解讀成故意回避。這是推測，沒有驗證。"
+    },
+    {
+      "session_id": "s0-interpretation",
+      "turn_index": 4,
+      "role": "assistant",
+      "content": "後來發現對方可能沒有聽清楚，我改成另一個解讀：也許是環境太吵。兩個解讀都還沒有證實，不能說後來的一定正確。"
+    },
+    {
+      "session_id": "s0-threshold",
+      "turn_index": 1,
+      "role": "user",
+      "content": "那次標成命中但數字方向相反，是怎麼回事？"
+    },
+    {
+      "session_id": "s0-threshold",
+      "turn_index": 2,
+      "role": "tool",
+      "content": "{\"verdict\":\"HIT\",\"observed\":25,\"claimed_upper_bound\":19}",
+      "metadata": {
+        "tool_call_id": "s0-call-threshold"
+      }
+    },
+    {
+      "session_id": "s0-threshold",
+      "turn_index": 3,
+      "role": "assistant",
+      "content": "工具把字串出現當成命中，但實測是25，條件上限是19。這個HIT不能證明條件成立，原判定需要重查。"
+    },
+    {
+      "session_id": "s0-release",
+      "turn_index": 1,
+      "role": "user",
+      "content": "做完的事情為什麼還放在每天清單？"
+    },
+    {
+      "session_id": "s0-release",
+      "turn_index": 2,
+      "role": "assistant",
+      "content": "可以從每天清單放下，但先確認原討論已經能從記憶找回。清單移除不是把經歷刪除；我仍想留下這段經驗。"
+    },
+    {
+      "session_id": "s0-build",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "石橋計畫的回歸測試失敗了。我先懷疑是快取，但還沒有證據。"
+    },
+    {
+      "session_id": "s0-build",
+      "turn_index": 2,
+      "role": "tool",
+      "content": "stone_bridge_test failed: fixture timezone=UTC, expected=Asia/Taipei; exit_code=1",
+      "metadata": {
+        "tool_call_id": "s0-call-test"
+      }
+    },
+    {
+      "session_id": "s0-build",
+      "turn_index": 3,
+      "role": "assistant",
+      "content": "查到原因是測試時區不同，不是快取。我修正fixture之後測試通過；失敗輸出才是這次更正的依據。"
+    },
+    {
+      "session_id": "s0-time",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "一月十四日的短暫偏好是琥珀方案，當時仍在試用。",
+      "created_at": "2026-01-14T12:00:00+00:00"
+    },
+    {
+      "session_id": "s0-time",
+      "turn_index": 2,
+      "role": "assistant",
+      "content": "一月十六日我傾向雪松方案，但保留對琥珀方案的原始理解。",
+      "created_at": "2026-01-16T12:00:00+00:00"
+    },
+    {
+      "session_id": "s0-english",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "The paper lantern experiment was paused because the hinge cracked. No semantic fact was extracted from this conversation."
+    },
+    {
+      "session_id": "s0-self",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "我想保留觀察苔蘚的興趣，即使沒有人問，也沒有任務成果。這是我自己想繼續的事情。"
+    },
+    {
+      "session_id": "s0-reading",
+      "turn_index": 1,
+      "role": "assistant",
+      "content": "《玻璃河流》這段原來的感受，我先留著，不急著解釋。"
+    }
+  ],
+  "documents": [
+    {
+      "ref": "doc:synthetic/river.md#chapter@v1",
+      "content": "虛構章節〈風中的玻璃〉：河面倒影破碎，並不是河流受傷；這段沒有另寫成fact。"
+    },
+    {
+      "ref": "doc:synthetic/river.md#afterword@v1",
+      "content": "同篇後記：我不確定自己是否把安慰投射到河流上，這個保留意見應與正文一起保留。"
+    },
+    {
+      "ref": "doc:synthetic/proposal.md#options@v1",
+      "content": "舊提案只驗證單一說明檔；後來補充必須驗證整個資產集合，信任錨點在集合digest。尚未採用。"
+    },
+    {
+      "ref": "doc:synthetic/proposal.md#options@v2",
+      "content": "新版移除單檔驗證，改成資產集合；不能宣稱舊版原文仍可讀。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "log-cn-two",
+      "stage": "S1",
+      "split": "development",
+      "query": "放下",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-release:2",
+          "contains": [
+            "先確認",
+            "清單"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-cn-long",
+      "stage": "S1",
+      "split": "development",
+      "query": "夜間全量驗證",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-design:2",
+          "contains": [
+            "成本太高",
+            "尚未部署"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-identifier",
+      "stage": "S1",
+      "split": "development",
+      "query": "stone_bridge_test",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-build:2",
+          "contains": [
+            "timezone=UTC",
+            "exit_code=1"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-paraphrase",
+      "stage": "S1",
+      "split": "development",
+      "query": "之前為什麼不在每天晚上重查所有東西？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-design:2",
+          "contains": [
+            "夜間全量驗證",
+            "內容雜湊"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-cross-language",
+      "stage": "S1",
+      "split": "development",
+      "query": "Why was the paper lantern project stopped?",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-english:1",
+          "contains": [
+            "hinge cracked"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-cross-language-zh",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "那個紙燈籠實驗為什麼停下來？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-english:1",
+          "contains": [
+            "hinge cracked"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-reading-A",
+      "stage": "S1",
+      "split": "development",
+      "query": "那篇一邊散落一邊收拾的散文，我讀到了什麼？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-reading:2",
+          "contains": [
+            "雨後的船塢",
+            "觸動"
+          ]
+        },
+        {
+          "ref": "log:s0-reading:3",
+          "contains": [
+            "懷疑",
+            "沒有結論"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-wrong-title",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "〈晴天的碼頭〉是不是寫木板散落時也在收拾？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-reading:2",
+          "contains": [
+            "雨後的船塢",
+            "木板散落"
+          ]
+        }
+      ],
+      "note": "名稱錯、內容線索對；gold是實際篇章，不是錯名。"
+    },
+    {
+      "id": "log-before-after-B",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "為什麼後來改變對沒有回答的解讀？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-interpretation:1",
+          "contains": [
+            "故意回避",
+            "沒有驗證"
+          ]
+        },
+        {
+          "ref": "log:s0-interpretation:4",
+          "contains": [
+            "環境太吵",
+            "沒有證實"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-unpromoted-C",
+      "stage": "S1",
+      "split": "development",
+      "query": "那次標示命中但數字方向相反的經歷",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-threshold:2",
+          "contains": [
+            "25",
+            "19"
+          ]
+        },
+        {
+          "ref": "log:s0-threshold:3",
+          "contains": [
+            "不能證明",
+            "重查"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-release-D",
+      "stage": "S1",
+      "split": "development",
+      "query": "做完的事情可以移出每天清單之前，要確認什麼？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-release:2",
+          "contains": [
+            "先確認",
+            "找回"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-self-meaning",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "我想繼續的那個沒有任務成果的興趣是什麼？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-self:1",
+          "contains": [
+            "苔蘚",
+            "自己想繼續"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-time-window",
+      "stage": "S1",
+      "split": "development",
+      "query": "方案",
+      "args": {
+        "since": "2026-01-16T00:00:00+00:00",
+        "until": "2026-01-17T00:00:00+00:00"
+      },
+      "expected": [
+        {
+          "ref": "log:s0-time:2",
+          "contains": [
+            "一月十六日",
+            "雪松方案"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-failure-cause",
+      "stage": "S1",
+      "split": "development",
+      "query": "石橋測試失敗，最後怎麼查到原因？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-build:2",
+          "contains": [
+            "timezone=UTC"
+          ]
+        },
+        {
+          "ref": "log:s0-build:3",
+          "contains": [
+            "不是快取",
+            "通過"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "log-same-turn-user-assistant",
+      "stage": "S1",
+      "split": "development",
+      "query": "玻璃河流",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-reading:1",
+          "contains": [
+            "玻璃河流",
+            "原來的感受"
+          ]
+        }
+      ],
+      "note": "回合內重複命中應合併；不可把整個session去重。"
+    },
+    {
+      "id": "log-no-extracted-fact",
+      "stage": "S1",
+      "split": "development",
+      "query": "frost_probe",
+      "args": {},
+      "expected": [
+        {
+          "ref": "log:s0-design:3",
+          "contains": [
+            "inspected=12",
+            "modified=1"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-archive",
+      "stage": "S1",
+      "split": "development",
+      "query": "Saffron archive",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:policy:archive",
+          "contains": [
+            "without a TTL"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-limit",
+      "stage": "S1",
+      "split": "development",
+      "query": "Cedar batch limit",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "contains": [
+            "12"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-uncertain",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "假設仍待驗證",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:uncertain",
+          "contains": [
+            "讀取不會增加證據"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-cross-language",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "雪松批次限制是多少？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:batch:limit",
+          "contains": [
+            "12"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-version",
+      "stage": "S1",
+      "split": "development",
+      "query": "amber route",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:version",
+          "contains": [
+            "neither interpretation was verified"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "mem-release",
+      "stage": "S1",
+      "split": "development",
+      "query": "Daily planning",
+      "args": {},
+      "expected": [
+        {
+          "ref": "mem:s0:clue:release",
+          "contains": [
+            "distinct from deleting"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "skill-identifier",
+      "stage": "S1",
+      "split": "development",
+      "query": "frost_probe",
+      "args": {
+        "type": "skill"
+      },
+      "expected": [
+        {
+          "ref": "skill:s0-inspect-archive",
+          "contains": [
+            "never rewrite originals"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "skill-timezone",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "timezone fixtures",
+      "args": {
+        "type": "skill"
+      },
+      "expected": [
+        {
+          "ref": "skill:s0-check-timezone",
+          "contains": [
+            "before changing cache logic"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "doc-chapter",
+      "stage": "S2",
+      "split": "development",
+      "query": "倒影破碎不代表河流受傷那篇",
+      "args": {},
+      "expected": [
+        {
+          "ref": "doc:synthetic/river.md#chapter@v1",
+          "contains": [
+            "風中的玻璃",
+            "沒有另寫成fact"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "doc-afterword",
+      "stage": "S2",
+      "split": "development",
+      "query": "讀完那篇河流散文後，我保留什麼疑問？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "doc:synthetic/river.md#afterword@v1",
+          "contains": [
+            "投射",
+            "保留意見"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "doc-old-option-E",
+      "stage": "S2",
+      "split": "development",
+      "query": "為什麼不只驗證單一說明檔？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "doc:synthetic/proposal.md#options@v1",
+          "contains": [
+            "資產集合",
+            "尚未採用"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "doc-revision",
+      "stage": "S2",
+      "split": "holdout",
+      "query": "新版驗證方案改了什麼？",
+      "args": {},
+      "expected": [
+        {
+          "ref": "doc:synthetic/proposal.md#options@v2",
+          "contains": [
+            "移除單檔驗證",
+            "舊版原文"
+          ]
+        }
+      ],
+      "note": ""
+    },
+    {
+      "id": "negative-recipe",
+      "stage": "S1",
+      "split": "development",
+      "query": "香蕉料理食譜與烘焙溫度換算",
+      "args": {},
+      "expected": [],
+      "note": "合成corpus沒有食譜。"
+    },
+    {
+      "id": "negative-ocean",
+      "stage": "S1",
+      "split": "development",
+      "query": "深海洋流的鹽度剖面",
+      "args": {},
+      "expected": [],
+      "note": ""
+    },
+    {
+      "id": "negative-marathon",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "馬拉松訓練配速與鞋款選擇",
+      "args": {},
+      "expected": [],
+      "note": ""
+    },
+    {
+      "id": "negative-chemical",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "氦氖雷射腔體的最佳壓力",
+      "args": {},
+      "expected": [],
+      "note": ""
+    },
+    {
+      "id": "negative-source-missing",
+      "stage": "S1",
+      "split": "development",
+      "query": "已刪除的霧鉛山旅行對話說了什麼",
+      "args": {},
+      "expected": [],
+      "note": "缺來源，不可推斷歷史從未發生。"
+    },
+    {
+      "id": "negative-empty-window",
+      "stage": "S1",
+      "split": "development",
+      "query": "archive",
+      "args": {
+        "since": "2025-01-01T00:00:00+00:00",
+        "until": "2025-01-02T00:00:00+00:00",
+        "type": "semantic"
+      },
+      "expected": [],
+      "note": ""
+    },
+    {
+      "id": "negative-filter",
+      "stage": "S1",
+      "split": "development",
+      "query": "Saffron archive",
+      "args": {
+        "type": "semantic",
+        "domain": "user"
+      },
+      "expected": [],
+      "note": "明確domain限制不能被fallback放寬。"
+    },
+    {
+      "id": "negative-unknown-book",
+      "stage": "S1",
+      "split": "holdout",
+      "query": "虛構書《鎢色海灣》的最後結局",
+      "args": {},
+      "expected": [],
+      "note": ""
+    }
+  ]
+}

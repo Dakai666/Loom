@@ -1,0 +1,183 @@
+{
+  "scope": "development S1 cases; literal log MATCH/LIKE only, no semantic or skill routes, no query rewrite",
+  "cases": [
+    {
+      "id": "log-cn-two",
+      "query": "放下",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-release:2",
+          "excerpt": "可以從每天清單放下，但先確認原討論已經能從記憶找回。清單移除不是把經歷刪除；我仍想留下這段經驗。"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-cn-long",
+      "query": "夜間全量驗證",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-design:1",
+          "excerpt": "為什麼沒有採用夜間全量驗證？"
+        },
+        {
+          "ref": "log:s0-design:2",
+          "excerpt": "我們放棄夜間全量驗證，因為每次重讀沒有改動的資產成本太高。先按內容雜湊找變更，再驗證變更集合。這是提案，尚未部署。"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-identifier",
+      "query": "stone_bridge_test",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-build:2",
+          "excerpt": "stone_bridge_test failed: fixture timezone=UTC, expected=Asia/Taipei; exit_code=1"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-paraphrase",
+      "query": "之前為什麼不在每天晚上重查所有東西？",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-cross-language",
+      "query": "Why was the paper lantern project stopped?",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-reading-A",
+      "query": "那篇一邊散落一邊收拾的散文，我讀到了什麼？",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-unpromoted-C",
+      "query": "那次標示命中但數字方向相反的經歷",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-release-D",
+      "query": "做完的事情可以移出每天清單之前，要確認什麼？",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-time-window",
+      "query": "方案",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-time:2",
+          "excerpt": "一月十六日我傾向雪松方案，但保留對琥珀方案的原始理解。"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-failure-cause",
+      "query": "石橋測試失敗，最後怎麼查到原因？",
+      "has_log_gold": true,
+      "results": [],
+      "evaluation": {
+        "hit_at_5": false,
+        "all_sources_located": false,
+        "empty": true,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-same-turn-user-assistant",
+      "query": "玻璃河流",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-reading:1",
+          "excerpt": "今天讀了虛構散文集《玻璃河流》，想留下原來的感受。"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    },
+    {
+      "id": "log-no-extracted-fact",
+      "query": "frost_probe",
+      "has_log_gold": true,
+      "results": [
+        {
+          "ref": "log:s0-design:3",
+          "excerpt": "frost_probe: exit=0; inspected=12; unchanged=11; modified=1"
+        }
+      ],
+      "evaluation": {
+        "hit_at_5": true,
+        "all_sources_located": true,
+        "empty": false,
+        "false_positive": false
+      }
+    }
+  ]
+}
