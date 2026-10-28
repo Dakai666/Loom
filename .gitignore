@@ -91,7 +91,6 @@ tmp/
 .discord_downloads/
 skills/pdf/
 skills/comfyui_image_skill/
-skills/news-aggregator/
 skills/systematic_code_analyst/
 skills/security_assessment/
 doc/silky_draw_reference.md
@@ -109,7 +108,6 @@ skills/remotion
 skills/suno_music_creator
 silu-video-creator
 skills/audio_transcriber
-skills/news-aggregator
 backups/
 _archive/
 skills/silky_chatgpt_draw
@@ -146,3 +144,8 @@ autonomy/circadian/journal/
 
 # uv lockfile — project installs via pip install -e
 uv.lock
+
+# news-aggregator is a tracked demo skill: keep its scripts despite the
+# global scripts/ rule, but not the raw fetch archives
+!skills/news-aggregator/scripts/
+skills/news-aggregator/scripts/archive-*/
