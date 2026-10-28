@@ -1284,28 +1284,37 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             since=since, until=until,
         )
 
+        coverage = getattr(results, "coverage", "")
         if not results:
+            # #650 S1: a miss is reported as a miss — never padded with the
+            # most recent entries, and never claimed as "it never happened".
+            output = (
+                "No match. This does not mean it never happened — try fewer or "
+                "different keywords (terms are ANDed; a long sentence is "
+                "matched as one literal phrase)."
+            )
+            if coverage:
+                output += "\n" + coverage
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output="No memories stored yet.")
-
-        # If all results are recency-fallback (BM25/embedding had no matches),
-        # prepend a header so the agent knows they are unranked.
-        if all(r.metadata.get("fallback") for r in results):
-            header = f"[No keyword match — showing {len(results)} most recent entries]\n\n"
-        else:
-            header = ""
+                              success=True, output=output)
 
         lines = [r.format() for r in results]
+        if coverage:
+            lines.append(coverage)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=header + "\n\n".join(lines))
+                          success=True, output="\n\n".join(lines))
 
     return ToolDefinition(
         name="recall",
         description=(
-            "Search long-term memory for relevant facts or skills using ranked retrieval. "
-            "Call this before starting a task to surface related context. "
-            "Results are ranked by relevance to the query. For events in a "
-            "time window or a known session, use recall_period instead."
+            "Search your memory, skills and past conversation turns in one call. "
+            "Use short keywords separated by spaces — all terms must match, and a "
+            "long sentence is matched as one literal phrase, so for a vague "
+            "question pick the distinctive words (a name, a phrase you remember) "
+            "and retry with other words if nothing comes back. Each result has a "
+            "ref (mem:/skill:/log:); conversation results are one turn each, "
+            "dated by when it happened. The last line reports which sources were "
+            "searched and where the search was limited."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1313,12 +1322,15 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural-language search query",
+                    "description": "Search keywords separated by spaces (all must match)",
                 },
                 "type": {
                     "type": "string",
                     "enum": ["semantic", "skill", "all"],
-                    "description": "Memory type to search (default: 'all')",
+                    "description": (
+                        "'all' (default) searches memory, skills and conversation; "
+                        "'semantic' memory only; 'skill' skills only"
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -1329,7 +1341,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     "enum": ["self", "user", "project", "knowledge"],
                     "description": (
                         "Optional Memory-Ontology axis filter — return only "
-                        "facts in this domain. Skills are unaffected."
+                        "facts in this domain. Skills are unaffected; "
+                        "conversation is excluded (it has no domain)."
                     ),
                 },
                 "temporal": {
@@ -1343,7 +1356,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 "since": {
                     "type": "string",
                     "description": (
-                        "Optional lower bound for semantic updated_at "
+                        "Optional hard lower bound — conversation event time, "
+                        "memory record time; excludes skills "
                         "(YYYY-MM-DD or ISO datetime). Naked values are "
                         "interpreted in your configured timezone."
                     ),
@@ -1351,7 +1365,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 "until": {
                     "type": "string",
                     "description": (
-                        "Optional exclusive upper bound for semantic updated_at "
+                        "Optional exclusive hard upper bound — conversation event "
+                        "time, memory record time; excludes skills "
                         "(YYYY-MM-DD or ISO datetime). Naked values are "
                         "interpreted in your configured timezone."
                     ),

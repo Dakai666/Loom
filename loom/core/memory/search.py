@@ -1,19 +1,29 @@
 """
-Memory Search — BM25-based retrieval across all memory types.
+Memory Search — one recall entry over memory, skills and raw conversation.
 
-Phase 4B: replaces the existing substring-only SemanticMemory.search()
-with a proper ranked retrieval system. No external dependencies.
+#650 S1 (spec docs/designs/61 r2): every route gets its chance and none
+short-circuits another.  Routes:
 
-BM25 Formula
-------------
-    score(D, Q) = Σ IDF(q) × f(q,D)(k1+1) / (f(q,D) + k1(1-b + b·|D|/avgdl))
+- memory, lexical   — ``semantic_fts`` (trigram) for terms of 3+ chars,
+                      substring match for shorter terms;
+- memory, embedding — cosine over stored vectors, only above
+                      :data:`EMBEDDING_MIN_SCORE`;
+- skills, lexical   — ``skill_fts``;
+- conversation      — ``session_log_fts`` (trigram) / ``session_log_terms``
+                      (CJK bigrams) over ``session_log``, one result per turn.
 
-where IDF(q) = log((N - n(q) + 0.5) / (n(q) + 0.5) + 1)
+Query terms are whitespace-separated and ANDed; a long sentence is one
+literal phrase.  Rewriting a natural question into search terms is the
+model's job, not a hidden step here.  Ranks are merged with reciprocal-rank
+fusion — raw scores are never compared across engines.  A query with no
+match returns an empty list (never the most recent entries); the list's
+``coverage`` line says which routes took part and where they were limited.
 
 Usage
 -----
     search = MemorySearch(semantic, procedural)
-    results = await search.recall("loom configuration", type="semantic", limit=5)
+    results = await search.recall("夜間全量 驗證", limit=5)
+    results.coverage   # one line, agent-facing
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -31,6 +42,8 @@ from loom.core.timezone import user_zone
 logger = logging.getLogger(__name__)
 
 from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory import recall_index
+from loom.core.memory.session_log import _redact_secrets
 from loom.core.memory.semantic import (
     SemanticMemory,
     _SELECT_COLS as _SEMANTIC_SELECT_COLS,
@@ -101,16 +114,40 @@ def _time_filter_sql(
 
 MemoryType = Literal["semantic", "skill", "all"]
 
+# Per-route candidate budget and output bounds (spec 61 r2 §1.2).
+ROUTE_CANDIDATES = 40
+EXCERPT_CHARS = 512
+# Below this cosine an embedding neighbour is noise, not an answer: #643
+# measured unrelated queries topping out at 0.45–0.52 against the live corpus
+# while true hits sat at 0.68–0.75.  Lexical routes are unaffected.
+EMBEDDING_MIN_SCORE = 0.55
+_RRF_K = 60
+# Single CJK characters have no index; scan newest-first within this budget.
+_SCAN_SECONDS = 0.15
+_SCAN_CHUNK_ROWS = 20_000
+# Unindexed short-term rows a recall call will catch up before reading.
+_TERMS_SYNC_BUDGET = 5_000
+
 
 @dataclass
 class MemorySearchResult:
     """A single ranked result from memory search."""
-    type: str               # "semantic" | "skill"
-    key: str                # fact key or skill name
-    value: str              # fact value or skill body
-    score: float            # BM25 relevance score
+    type: str               # "semantic" | "relational" | "skill" | "conversation"
+    key: str                # fact key, skill name, or conversation ref
+    value: str              # fact value, skill body, or conversation excerpt
+    score: float            # fused rank score — not a probability
     metadata: dict = field(default_factory=dict)
-    updated_at: str = ""    # ISO timestamp of last update (empty if unknown)
+    updated_at: str = ""    # memory: record time; conversation: event time
+    ref: str = ""           # stable reference: mem:/skill:/log:
+
+    def __post_init__(self) -> None:
+        if not self.ref:
+            if self.type == "skill":
+                self.ref = f"skill:{self.key}"
+            elif self.type == "conversation":
+                self.ref = self.key
+            else:
+                self.ref = f"mem:{self.key}"
 
     def format(self, max_value_len: int = 300) -> str:
         """Human-readable one-entry summary with timestamp and effective confidence.
@@ -133,9 +170,39 @@ class MemorySearchResult:
                 date_hint = f" [{local_date}]"
             except ValueError:
                 date_hint = f" [{self.updated_at[:10]}]"
+        if self.type == "conversation":
+            return f"[conversation]{date_hint} {self.ref}\n  {self.value[:EXCERPT_CHARS]}"
         conf = self.metadata.get("effective_confidence") or self.metadata.get("confidence")
         conf_hint = f" conf={conf:.2f}" if conf is not None else ""
-        return f"[{self.type}]{date_hint}{conf_hint} {self.key}\n  {truncated}"
+        return f"[{self.type}]{date_hint}{conf_hint} {self.ref}\n  {truncated}"
+
+
+class RecallResults(list):
+    """``list[MemorySearchResult]`` plus a one-line ``coverage`` report."""
+
+    def __init__(self, items=(), coverage: str = "") -> None:
+        super().__init__(items)
+        self.coverage = coverage
+
+
+def _split_terms(query: str) -> list[str]:
+    return [t for t in query.replace('"', " ").split() if t]
+
+
+def _fts_phrase(terms: list[str]) -> str:
+    return " ".join(f'"{t}"' for t in terms)
+
+
+def _excerpt(text: str, terms: list[str], budget: int) -> str:
+    """Window of *text* around the first matching term, at most *budget* chars."""
+    if len(text) <= budget:
+        return text
+    lowered = text.lower()
+    hits = [lowered.find(t.lower()) for t in terms]
+    hits = [h for h in hits if h >= 0]
+    start = max(0, min(hits) - budget // 4) if hits else 0
+    window = text[start:start + budget]
+    return ("…" if start else "") + window + ("…" if start + budget < len(text) else "")
 
 
 # ---------------------------------------------------------------------------
@@ -169,78 +236,76 @@ class MemorySearch:
         temporal: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-    ) -> list[MemorySearchResult]:
+    ) -> RecallResults:
         """
-        Return the top-*limit* memory entries most relevant to *query*.
-
-        BM25 is lexical (keyword-based).  When no terms overlap between the
-        query and stored facts — e.g. cross-language queries or very generic
-        phrases — the ranked search returns no results.  In that case we fall
-        back to recency ordering so the caller always gets something useful.
+        Return up to *limit* results for *query* across every applicable route.
 
         Parameters
         ----------
-        query:    Natural-language search query.
-        type:     Which memory store(s) to search: "semantic", "skill", or "all".
-        limit:    Maximum number of results to return (across all types).
-        domain:   Optional Memory-Ontology axis filter (issue #281). When set,
-                  only semantic entries with this domain are returned. Skills
-                  are unaffected — domain/temporal apply to facts, not skills.
-        temporal: Optional temporal axis filter (same semantics as ``domain``).
-        since:    Optional lower bound on semantic ``updated_at``.
-        until:    Optional exclusive upper bound on semantic ``updated_at``.
+        query:    Search terms, whitespace-separated and ANDed.  A long
+                  sentence is matched as one literal phrase.
+        type:     ``"semantic"`` (memory only), ``"skill"``, or ``"all"``
+                  (memory, skills and conversation).
+        limit:    Maximum number of results.
+        domain / temporal:
+                  Memory-Ontology filters.  They exist only on memory, so
+                  conversation is excluded when either is set.
+        since / until:
+                  Hard limits: memory record time, conversation event time.
+                  Skills carry no event time and are excluded when set.
         """
-        if not query.strip():
-            return []
+        terms = _split_terms(query)
+        if not terms:
+            return RecallResults()
 
-        # ── Tier 1: embedding cosine similarity (language-agnostic) ──────────
-        # Only runs when the SemanticMemory instance has an EmbeddingProvider
-        # configured.  Any exception (network, API error) falls through to BM25.
-        if self._semantic.has_embeddings and type in ("semantic", "all"):
-            try:
-                emb_results = await self._search_semantic_embedding(
-                    query, limit, domain=domain, temporal=temporal,
-                    since=since, until=until,
-                )
-                if emb_results:
-                    # Skills are not embedding-indexed; mix in BM25 skill results
-                    if type == "all":
-                        skill_results = await self._search_skills(query, limit)
-                        combined = emb_results + skill_results
-                        combined.sort(key=lambda r: r.score, reverse=True)
-                        ranked = combined[:limit]
-                    else:
-                        ranked = emb_results
-                    await self._mark_accessed(ranked)
-                    return ranked
-            except Exception as exc:
-                logger.warning(
-                    "Embedding search failed, degrading to BM25: %s", exc,
-                )
-                if self._health:
-                    self._health.record_failure("embedding_search", str(exc))
+        notes: list[str] = []
+        routes: list[list[MemorySearchResult]] = []
+        windowed = since is not None or until is not None
 
-        # ── Tier 2: BM25 keyword search ───────────────────────────────────────
-        results: list[MemorySearchResult] = []
         if type in ("semantic", "all"):
-            results.extend(
-                await self._search_semantic(
-                    query, limit, domain=domain, temporal=temporal,
-                    since=since, until=until,
-                )
-            )
+            routes.append(await self._search_semantic(
+                terms, ROUTE_CANDIDATES, domain=domain, temporal=temporal,
+                since=since, until=until,
+            ))
+            memory_note = "memory: lexical"
+            if self._semantic.has_embeddings:
+                try:
+                    routes.append(await self._search_semantic_embedding(
+                        query, ROUTE_CANDIDATES, domain=domain, temporal=temporal,
+                        since=since, until=until,
+                    ))
+                    memory_note += "+embedding"
+                except Exception as exc:
+                    logger.warning("Embedding search failed: %s", exc)
+                    if self._health:
+                        self._health.record_failure("embedding_search", str(exc))
+                    memory_note += " (embedding failed)"
+            if windowed:
+                memory_note += ", by record time"
+            notes.append(memory_note)
+
         if type in ("skill", "all"):
-            results.extend(await self._search_skills(query, limit))
+            if windowed:
+                notes.append("skills: excluded (no event time)")
+            else:
+                routes.append(await self._search_skills(" ".join(terms), ROUTE_CANDIDATES))
+                notes.append("skills: lexical")
 
-        results.sort(key=lambda r: r.score, reverse=True)
-        ranked = results[:limit]
+        if type == "all":
+            if domain or temporal:
+                notes.append("conversation: excluded (domain/temporal apply to memory only)")
+            else:
+                found, note = await self._search_conversation(terms, since=since, until=until)
+                routes.append(found)
+                notes.append(note)
+        else:
+            notes.append(f"conversation: excluded (type={type})")
 
-        # ── Tier 3: recency fallback ──────────────────────────────────────────
-        if not ranked:
-            ranked = await self._recent_fallback(type, limit, since=since, until=until)
-
+        fused = _fuse(routes)
+        ranked = fused[:limit]
         await self._mark_accessed(ranked)
-        return ranked
+        notes.append(f"{len(fused)} candidates, showing {len(ranked)}")
+        return RecallResults(ranked, coverage="Coverage — " + "; ".join(notes) + ".")
 
     async def _mark_accessed(self, results: list[MemorySearchResult]) -> None:
         """Bump last_accessed_at for semantic + relational hits (Memory Ontology v0.1).
@@ -261,7 +326,11 @@ class MemorySearch:
         since: datetime | None = None,
         until: datetime | None = None,
     ) -> list[MemorySearchResult]:
-        """Rank semantic entries by cosine similarity using sqlite-vec."""
+        """Rank semantic entries by cosine similarity using sqlite-vec.
+
+        Only neighbours at or above :data:`EMBEDDING_MIN_SCORE` count; stubs
+        are excluded in SQL so they never take a LIMIT slot.
+        """
         provider = self._semantic._embeddings
         if provider is None:
             return []
@@ -278,7 +347,8 @@ class MemorySearch:
             SELECT {_SEMANTIC_SELECT_COLS},
                    1.0 - vec_distance_cosine(embedding, ?) AS score
             FROM semantic_entries
-            WHERE embedding IS NOT NULL{axis_where}{time_where}
+            WHERE embedding IS NOT NULL
+              AND json_extract(metadata, '$.redirected_to') IS NULL{axis_where}{time_where}
             ORDER BY vec_distance_cosine(embedding, ?) ASC
             LIMIT ?
             """,
@@ -295,123 +365,10 @@ class MemorySearch:
         results: list[MemorySearchResult] = []
         for r in rows:
             # _SELECT_COLS produces 11 columns; index 11 holds the score.
-            entry = _semantic_row_to_entry(r[:11])
-            if entry.metadata.get("redirected_to"):
-                continue  # consolidation stub — suppress (#494 review)
             score = r[11]
-            if score > 0.0:
-                results.append(
-                    MemorySearchResult(
-                        type=_semantic_result_type(entry.key),
-                        key=entry.key,
-                        value=entry.value,
-                        score=score,
-                        metadata={
-                            "confidence": entry.confidence,
-                            "effective_confidence": entry.effective_confidence(),
-                            "method": "embedding",
-                        },
-                        updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
-                    )
-                )
-        return results
-
-    async def _recent_fallback(
-        self,
-        type: MemoryType,
-        limit: int,
-        *,
-        since: datetime | None = None,
-        until: datetime | None = None,
-    ) -> list[MemorySearchResult]:
-        """Return the most recently updated entries with score=0 (recency order)."""
-        results: list[MemorySearchResult] = []
-
-        if type in ("semantic", "all"):
-            if since is not None or until is not None:
-                floor = since or datetime.min
-                entries = await self._semantic.list_between(floor, until, limit=limit)
-            else:
-                entries = await self._semantic.list_recent(limit)
-            results.extend(
-                MemorySearchResult(
-                    type=_semantic_result_type(e.key),
-                    key=e.key,
-                    value=e.value,
-                    score=0.0,
-                    metadata={
-                        "confidence": e.confidence,
-                        "effective_confidence": e.effective_confidence(),
-                        "fallback": True,
-                    },
-                    updated_at=e.updated_at.isoformat() if e.updated_at else "",
-                )
-                for e in entries
-                if not e.metadata.get("redirected_to")  # suppress stubs (#494)
-            )
-
-        if type in ("skill", "all"):
-            skills = await self._procedural.list_active()
-            results.extend(
-                MemorySearchResult(
-                    type="skill",
-                    key=s.name,
-                    value=s.body,
-                    score=0.0,
-                    metadata={"confidence": s.confidence, "tags": s.tags, "fallback": True},
-                    updated_at=s.updated_at.isoformat() if s.updated_at else "",
-                )
-                for s in skills[:limit]
-            )
-
-        return results[:limit]
-
-    # ------------------------------------------------------------------
-
-    async def _search_semantic(
-        self, query: str, limit: int,
-        domain: str | None = None,
-        temporal: str | None = None,
-        since: datetime | None = None,
-        until: datetime | None = None,
-    ) -> list[MemorySearchResult]:
-        if not query.strip():
-            return []
-
-        safe_query = _sanitize_fts(query)
-        if not safe_query:
-            return []
-
-        axis_where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
-        time_where, time_params = _time_filter_sql(since, until, prefix="e.")
-        # SELECT mirrors _SEMANTIC_SELECT_COLS aliased onto the joined table
-        # so _semantic_row_to_entry can parse rows uniformly with the
-        # embedding path.
-        select_cols = ", ".join(f"e.{c.strip()}" for c in _SEMANTIC_SELECT_COLS.split(","))
-        # FTS5 returns negative scores for bm25 by default, smaller = better.
-        # We order by rank and return absolute values for positive compatibility.
-        cursor = await self._semantic._db.execute(
-            f"""
-            SELECT
-                {select_cols},
-                bm25(semantic_fts) AS fts_score
-            FROM semantic_fts
-            JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
-            WHERE semantic_fts MATCH ?{axis_where}{time_where}
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (safe_query, *axis_params, *time_params, limit)
-        )
-        rows = await cursor.fetchall()
-
-        results: list[MemorySearchResult] = []
-        for r in rows:
+            if score is None or score < EMBEDDING_MIN_SCORE:
+                continue
             entry = _semantic_row_to_entry(r[:11])
-            if entry.metadata.get("redirected_to"):
-                continue  # consolidation stub — suppress (#494 review)
-            # Convert negative rank to positive score
-            score = abs(r[11]) if r[11] else 0.0
             results.append(
                 MemorySearchResult(
                     type=_semantic_result_type(entry.key),
@@ -421,11 +378,173 @@ class MemorySearch:
                     metadata={
                         "confidence": entry.confidence,
                         "effective_confidence": entry.effective_confidence(),
+                        "method": "embedding",
                     },
                     updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
                 )
             )
         return results
+
+    # ------------------------------------------------------------------
+
+    async def _search_semantic(
+        self, terms: list[str] | str, limit: int,
+        domain: str | None = None,
+        temporal: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MemorySearchResult]:
+        """Lexical memory route: trigram MATCH for long terms, substring for short.
+
+        Every term must match (AND).  Stubs are excluded in SQL, before LIMIT.
+        """
+        if isinstance(terms, str):
+            terms = _split_terms(terms)
+        if not terms:
+            return []
+        long_terms = [t for t in terms if len(t) >= 3]
+        short_terms = [t for t in terms if len(t) < 3]
+
+        axis_where, axis_params = _axis_filter_sql(domain, temporal, prefix="e.")
+        time_where, time_params = _time_filter_sql(since, until, prefix="e.")
+        short_where = "".join(
+            " AND (e.key LIKE ? ESCAPE '\\' OR e.value LIKE ? ESCAPE '\\')" for _ in short_terms
+        )
+        short_params = tuple(p for t in short_terms for p in (_like(t), _like(t)))
+        select_cols = ", ".join(f"e.{c.strip()}" for c in _SEMANTIC_SELECT_COLS.split(","))
+        live = " AND json_extract(e.metadata, '$.redirected_to') IS NULL"
+
+        if long_terms:
+            sql = f"""
+                SELECT {select_cols}, bm25(semantic_fts) AS fts_score
+                FROM semantic_fts
+                JOIN semantic_entries e ON semantic_fts.rowid = e.rowid
+                WHERE semantic_fts MATCH ?{live}{short_where}{axis_where}{time_where}
+                ORDER BY rank
+                LIMIT ?
+            """
+            params = (_fts_phrase(long_terms), *short_params, *axis_params, *time_params, limit)
+        else:
+            sql = f"""
+                SELECT {select_cols}, 0.0 AS fts_score
+                FROM semantic_entries e
+                WHERE 1 = 1{live}{short_where}{axis_where}{time_where}
+                ORDER BY e.updated_at DESC
+                LIMIT ?
+            """
+            params = (*short_params, *axis_params, *time_params, limit)
+        cursor = await self._semantic._db.execute(sql, params)
+        rows = await cursor.fetchall()
+
+        results: list[MemorySearchResult] = []
+        for r in rows:
+            entry = _semantic_row_to_entry(r[:11])
+            results.append(
+                MemorySearchResult(
+                    type=_semantic_result_type(entry.key),
+                    key=entry.key,
+                    value=entry.value,
+                    score=abs(r[11]) if r[11] else 0.0,
+                    metadata={
+                        "confidence": entry.confidence,
+                        "effective_confidence": entry.effective_confidence(),
+                        "method": "lexical",
+                    },
+                    updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
+                )
+            )
+        return results
+
+    async def _search_conversation(
+        self,
+        terms: list[str],
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> tuple[list[MemorySearchResult], str]:
+        """Conversation route over ``session_log``: one result per turn.
+
+        Returns ``(results, coverage note)``.
+        """
+        db = self._semantic._db
+        if not await recall_index.indexes_ready(db):
+            return [], "conversation: unavailable (index not built)"
+        note_parts = ["conversation: lexical"]
+        pending = await recall_index.sync_terms(db, budget=_TERMS_SYNC_BUDGET)
+        if pending:
+            note_parts.append(f"{pending} newest rows not yet in the short-term index")
+
+        long_terms = [t for t in terms if len(t) >= 3]
+        single_cjk = [t for t in terms if recall_index.is_cjk_char(t)]
+        short_terms = [t for t in terms if len(t) < 3 and t not in single_cjk]
+
+        where = [f"l.role IN {recall_index.SEARCHABLE_ROLES!r}"]
+        params: list[Any] = []
+        if short_terms:
+            where.append(
+                "l.id IN (SELECT rowid FROM session_log_terms WHERE session_log_terms MATCH ?)"
+            )
+            params.append(_fts_phrase(short_terms))
+        for t in single_cjk:
+            where.append("l.content LIKE ? ESCAPE '\\'")
+            params.append(_like(t))
+        if since is not None:
+            where.append("l.created_at >= ?")
+            params.append(since.isoformat())
+        if until is not None:
+            where.append("l.created_at < ?")
+            params.append(until.isoformat())
+        row_cap = ROUTE_CANDIDATES * 5
+        cols = "l.id, l.session_id, l.turn_index, l.role, l.content, l.metadata, l.created_at"
+
+        if long_terms:
+            cursor = await db.execute(
+                f"SELECT {cols} FROM session_log_fts f JOIN session_log l ON l.id = f.rowid "
+                f"WHERE f.session_log_fts MATCH ? AND {' AND '.join(where)} "
+                "ORDER BY f.rank LIMIT ?",
+                (_fts_phrase(long_terms), *params, row_cap),
+            )
+            rows = await cursor.fetchall()
+        elif short_terms:
+            cursor = await db.execute(
+                f"SELECT {cols} FROM session_log l WHERE {' AND '.join(where)} "
+                "ORDER BY l.id DESC LIMIT ?",
+                (*params, row_cap),
+            )
+            rows = await cursor.fetchall()
+        else:
+            rows, frontier = await self._scan_conversation(db, cols, where, params, row_cap)
+            if frontier:
+                note_parts.append(
+                    f"single-character scan stopped at {frontier}; "
+                    f"older turns not searched (continue with until={frontier})"
+                )
+
+        return _conversation_results(rows, terms), ", ".join(note_parts)
+
+    @staticmethod
+    async def _scan_conversation(db, cols, where, params, row_cap):
+        """Newest-first bounded scan for single-character CJK terms."""
+        cursor = await db.execute("SELECT COALESCE(MAX(id), 0) FROM session_log")
+        hi = (await cursor.fetchone())[0]
+        deadline = time.monotonic() + _SCAN_SECONDS
+        rows: list = []
+        while hi > 0 and len(rows) < row_cap:
+            lo = max(0, hi - _SCAN_CHUNK_ROWS)
+            cursor = await db.execute(
+                f"SELECT {cols} FROM session_log l WHERE l.id > ? AND l.id <= ? "
+                f"AND {' AND '.join(where)} ORDER BY l.id DESC LIMIT ?",
+                (lo, hi, *params, row_cap - len(rows)),
+            )
+            rows.extend(await cursor.fetchall())
+            hi = lo
+            if time.monotonic() > deadline:
+                break
+        if hi <= 0:
+            return rows, None
+        cursor = await db.execute("SELECT created_at FROM session_log WHERE id > ? ORDER BY id LIMIT 1", (hi,))
+        row = await cursor.fetchone()
+        return rows, (row[0] if row else None)
 
     async def _search_skills(self, query: str, limit: int) -> list[MemorySearchResult]:
         if not query.strip():
@@ -478,3 +597,80 @@ class MemorySearch:
             )
 
         return results[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Fusion and conversation shaping
+# ---------------------------------------------------------------------------
+
+def _like(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _fuse(routes: list[list[MemorySearchResult]]) -> list[MemorySearchResult]:
+    """Reciprocal-rank fusion: rank positions merge, raw scores never do."""
+    best: dict[str, MemorySearchResult] = {}
+    fused: dict[str, float] = {}
+    methods: dict[str, list[str]] = {}
+    for route in routes:
+        for rank, result in enumerate(route):
+            ref = result.ref
+            fused[ref] = fused.get(ref, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            best.setdefault(ref, result)
+            method = result.metadata.get("method")
+            if method and method not in methods.setdefault(ref, []):
+                methods[ref].append(method)
+    out = []
+    for ref, result in best.items():
+        result.score = fused[ref]
+        if methods.get(ref):
+            result.metadata["method"] = "+".join(methods[ref])
+        out.append(result)
+    out.sort(key=lambda r: r.score, reverse=True)
+    return out
+
+
+def _conversation_results(rows, terms: list[str]) -> list[MemorySearchResult]:
+    """Group matched rows into one result per (session, turn), in rank order."""
+    turns: dict[str, list] = {}
+    for row in rows:
+        ref = f"log:{row[1]}:{row[2]}"
+        if ref not in turns and len(turns) >= ROUTE_CANDIDATES:
+            continue
+        turns.setdefault(ref, []).append(row)
+    results: list[MemorySearchResult] = []
+    seen_excerpts: set[str] = set()
+    for ref, matched in turns.items():
+        matched.sort(key=lambda r: r[0])
+        parts: list[str] = []
+        budget = EXCERPT_CHARS
+        for _id, _sid, _turn, role, content, metadata, _at in matched:
+            text = _redact_secrets(content) or ""
+            label = role
+            if role == "tool":
+                try:
+                    tool_name = json.loads(metadata or "{}").get("tool_name", "tool")
+                except Exception:
+                    tool_name = "tool"
+                label = f"tool {tool_name} (stored preview)"
+            piece = f"{label}: {_excerpt(text, terms, max(80, budget - len(label) - 2))}"
+            parts.append(piece)
+            budget -= len(piece) + 3
+            if budget <= 80:
+                break
+        excerpt = " / ".join(parts)[:EXCERPT_CHARS]
+        # Forked sessions copy rows verbatim: one source, one slot.
+        if excerpt in seen_excerpts:
+            continue
+        seen_excerpts.add(excerpt)
+        results.append(MemorySearchResult(
+            type="conversation",
+            key=ref,
+            value=excerpt,
+            score=0.0,
+            metadata={"method": "conversation", "rows": len(matched)},
+            updated_at=matched[0][6] or "",
+            ref=ref,
+        ))
+    return results

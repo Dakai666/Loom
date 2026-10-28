@@ -225,13 +225,14 @@ async def test_period_stubs_do_not_consume_limit_or_get_accessed(
         assert (await memory.semantic.get(key)).last_accessed_at >= started
 
 
-async def test_period_search_fallback_fills_limit_past_stubs(consolidated_memory):
+async def test_period_search_without_match_does_not_fill_from_recent(consolidated_memory):
+    # #650 S1: an unmatched query inside a window is an honest miss, not the
+    # window's most recent entries (recall_period remains the time-listing API).
     results = await consolidated_memory.search(
         "zzzzunmatchedquery", kind="semantic", limit=2,
         since=datetime.now(UTC) - timedelta(days=1),
     )
-    assert [entry.key for entry in results] == ["live", "survivor"]
-    assert all(entry.metadata["fallback"] for entry in results)
+    assert list(results) == []
 
 
 async def test_admission_lexical_lookback_uses_facts_instead_of_stubs(consolidated_memory):

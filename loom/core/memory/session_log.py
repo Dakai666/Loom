@@ -307,6 +307,8 @@ class SessionLog:
 
     async def delete_session(self, session_id: str) -> None:
         """Delete session metadata and all message rows."""
+        from loom.core.memory.recall_index import forget_terms_for_session
+        await forget_terms_for_session(self._db, session_id)
         await self._db.execute(
             "DELETE FROM session_log WHERE session_id = ?", (session_id,)
         )
