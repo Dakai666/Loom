@@ -15,7 +15,7 @@ table dropped). After phase B the surface is:
 * Embedding-tier coverage for backfilled rows is filled lazily by
   ``SemanticMemory.ensure_embeddings_for_prefix("rel:")`` from
   ``LoomSession.start()``.
-* ``MemorySearch._mark_accessed`` refreshes ``last_accessed_at`` on the
+* ``MemorySearch.mark_accessed`` refreshes ``last_accessed_at`` on the
   semantic row for ``"relational"`` hits.
 """
 
@@ -415,7 +415,7 @@ async def test_embedding_recall_finds_rel_rows_after_ensure(tmp_db):
 # ---------------------------------------------------------------------------
 
 async def test_recall_refreshes_last_accessed_for_relational_hits(tmp_db):
-    """``_mark_accessed`` must treat ``"relational"`` results as markable
+    """``mark_accessed`` must treat ``"relational"`` results as markable
     (same backing table). The phase-A relational_entries mirror was
     retired with the table in phase B, so verifying the semantic row's
     timestamp is sufficient."""

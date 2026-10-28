@@ -1282,6 +1282,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             query, kind=mem_type, limit=limit,
             domain=domain, temporal=temporal,
             since=since, until=until,
+            # Access is recorded below, for what the output actually carries.
+            mark_accessed=False,
         )
 
         coverage = getattr(results, "coverage", "")
@@ -1316,6 +1318,9 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 blocks.append(block[:room - sep - 1] + "…")
                 trimmed = 1
             break
+        # A trimmed result still showed its ref and part of the text; an
+        # omitted one never reached the model and is not an access.
+        await memory.mark_accessed(list(results)[:len(blocks)])
         lines = list(blocks)
         omitted = len(results) - len(blocks)
         if trimmed or omitted:

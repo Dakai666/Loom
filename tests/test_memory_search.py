@@ -387,6 +387,7 @@ class TestRecallTool:
                 score=1.0,
             )
         ])
+        facade.mark_accessed = AsyncMock()
         tool = make_recall_tool(facade)
         call = _make_call("recall", {
             "query": "loom",
@@ -401,6 +402,9 @@ class TestRecallTool:
         kwargs = facade.search.await_args.kwargs
         assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
         assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
+        # Access is recorded by the tool for what it showed, not by search.
+        assert kwargs["mark_accessed"] is False
+        assert [r.key for r in facade.mark_accessed.await_args.args[0]] == ["k"]
 
     async def test_until_without_since_returns_error(self):
         facade = MagicMock()

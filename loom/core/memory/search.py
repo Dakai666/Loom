@@ -129,6 +129,10 @@ _SCAN_SECONDS = 0.15
 _SCAN_CHUNK_ROWS = 20_000
 # Matched rows read per turn to build its excerpt.
 _TURN_ROWS = 8
+# Turns read per batch, and the most a query examines while merging fork
+# copies into distinct sources.
+_TURN_BATCH = ROUTE_CANDIDATES + 1
+_TURNS_EXAMINED_CAP = ROUTE_CANDIDATES * 4
 # Unindexed short-term rows a recall call will catch up before reading.
 _TERMS_SYNC_BUDGET = 5_000
 
@@ -240,6 +244,7 @@ class MemorySearch:
         temporal: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        mark_accessed: bool = True,
     ) -> RecallResults:
         """
         Return up to *limit* results for *query* across every applicable route.
@@ -257,6 +262,10 @@ class MemorySearch:
         since / until:
                   Hard limits: memory record time, conversation event time.
                   Skills carry no event time and are excluded when set.
+        mark_accessed:
+                  Record access for the returned memory items.  A caller
+                  that shows only part of the results passes ``False`` and
+                  calls :meth:`mark_accessed` with what it actually showed.
         """
         terms = _split_terms(query)
         if not terms:
@@ -307,11 +316,12 @@ class MemorySearch:
 
         fused = _fuse(routes)
         ranked = fused[:limit]
-        await self._mark_accessed(ranked)
+        if mark_accessed:
+            await self.mark_accessed(ranked)
         notes.append(f"{len(fused)} candidates, showing {len(ranked)}")
         return RecallResults(ranked, coverage="Coverage — " + "; ".join(notes) + ".")
 
-    async def _mark_accessed(self, results: list[MemorySearchResult]) -> None:
+    async def mark_accessed(self, results: list[MemorySearchResult]) -> None:
         """Bump last_accessed_at for semantic + relational hits (Memory Ontology v0.1).
 
         Issue #451 phase A: ``relational`` is a display label for ``rel:*``
@@ -468,8 +478,9 @@ class MemorySearch:
     ) -> tuple[list[MemorySearchResult], str]:
         """Conversation route over ``session_log``: one result per turn.
 
-        Candidates are picked per *turn*, never per row, so one turn with
-        hundreds of matching rows cannot push other turns out of the pool.
+        Candidates are counted per distinct *source turn*, never per row or
+        per fork copy, so neither a turn with hundreds of matching rows nor
+        many forks of one turn can push other turns out of the pool.
         Returns ``(results, coverage note)``.
         """
         db = self._semantic._db
@@ -507,58 +518,101 @@ class MemorySearch:
             )
             params.append(_fts_phrase(short_terms))
         where = " AND ".join(match)
-        turn_cap = ROUTE_CANDIDATES + 1  # one extra to detect overflow
-
-        if long_terms:
-            cursor = await db.execute(
-                "SELECT l.session_id, l.turn_index FROM session_log_fts f "
-                "JOIN session_log l ON l.id = f.rowid "
-                f"WHERE f.session_log_fts MATCH ? AND {where} "
-                "GROUP BY l.session_id, l.turn_index ORDER BY MIN(f.rank) LIMIT ?",
-                (_fts_phrase(long_terms), *params, turn_cap),
-            )
-            turns = await cursor.fetchall()
-        elif short_terms:
-            # Stream matches newest-first and stop once the turn budget is
-            # full: cost follows the budget, not how common the term is.
-            cursor = await db.execute(
-                "SELECT l.session_id, l.turn_index FROM session_log_terms t "
-                "JOIN session_log l ON l.id = t.rowid "
-                f"WHERE session_log_terms MATCH ? AND {where} ORDER BY t.rowid DESC",
-                (_fts_phrase(short_terms), *params),
-            )
-            turns = []
-            seen: set = set()
-            while len(turns) < turn_cap:
-                batch = await cursor.fetchmany(256)
-                if not batch:
-                    break
-                for turn in batch:
-                    if turn not in seen and len(turns) < turn_cap:
-                        seen.add(turn)
-                        turns.append(turn)
-            await cursor.close()
-        else:
-            turns, frontier = await self._scan_conversation(db, where, params, since, until)
-            if frontier:
-                lo, earliest = frontier
-                note_parts.append(
-                    f"single-character scan covered event times from {lo} on; earlier "
-                    f"turns not searched (continue with since={earliest} until={lo})"
-                )
-        if len(turns) > ROUTE_CANDIDATES:
-            turns = turns[:ROUTE_CANDIDATES]
-            note_parts.append(
-                f"more matching turns beyond the {ROUTE_CANDIDATES}-turn candidate budget "
-                "(add terms or since/until to narrow)"
-            )
         index_matches = []
         if long_terms:
             index_matches.append(("session_log_fts", _fts_phrase(long_terms)))
         if short_terms:
             index_matches.append(("session_log_terms", _fts_phrase(short_terms)))
-        rows = await self._turn_rows(db, turns, plain_where, plain_params, index_matches)
-        return _conversation_results(rows, terms), ", ".join(note_parts)
+
+        scan_state: dict[str, Any] = {}
+        if long_terms:
+            stream = self._ranked_turns(db, long_terms, where, params)
+        elif short_terms:
+            stream = self._newest_turns(db, short_terms, where, params)
+        else:
+            stream = self._scan_conversation(db, where, params, since, until, scan_state)
+
+        # Fill the budget with distinct *sources*: fork copies are merged as
+        # each batch is read, so copies cannot use up the candidate slots.
+        results: list[MemorySearchResult] = []
+        seen_sources: set[tuple] = set()
+        examined = 0
+        capped = False
+        try:
+            async for batch in stream:
+                examined += len(batch)
+                rows = await self._turn_rows(db, batch, plain_where, plain_params, index_matches)
+                results.extend(_conversation_results(rows, terms, seen_sources))
+                if len(results) > ROUTE_CANDIDATES:
+                    break
+                if examined >= _TURNS_EXAMINED_CAP:
+                    capped = True
+                    break
+        finally:
+            await stream.aclose()
+
+        frontier = scan_state.get("frontier")
+        if frontier:
+            lo, earliest = frontier
+            note_parts.append(
+                f"single-character scan covered event times from {lo} on; earlier "
+                f"turns not searched (continue with since={earliest} until={lo})"
+            )
+        if len(results) > ROUTE_CANDIDATES:
+            results = results[:ROUTE_CANDIDATES]
+            note_parts.append(
+                f"more matching turns beyond the {ROUTE_CANDIDATES}-turn candidate budget "
+                "(add terms or since/until to narrow)"
+            )
+        elif capped:
+            note_parts.append(
+                f"stopped after examining {examined} matching turns "
+                f"({examined - len(results)} were copies of the same source); "
+                "lower-ranked turns not examined (add terms or since/until to narrow)"
+            )
+        return results, ", ".join(note_parts)
+
+    @staticmethod
+    async def _ranked_turns(db, long_terms: list[str], where: str, params: list[Any]):
+        """Turns in full-text rank order, in candidate-sized batches."""
+        cursor = await db.execute(
+            "SELECT l.session_id, l.turn_index FROM session_log_fts f "
+            "JOIN session_log l ON l.id = f.rowid "
+            f"WHERE f.session_log_fts MATCH ? AND {where} "
+            "GROUP BY l.session_id, l.turn_index ORDER BY MIN(f.rank)",
+            (_fts_phrase(long_terms), *params),
+        )
+        try:
+            while batch := await cursor.fetchmany(_TURN_BATCH):
+                yield batch
+        finally:
+            await cursor.close()
+
+    @staticmethod
+    async def _newest_turns(db, short_terms: list[str], where: str, params: list[Any]):
+        """Turns newest-first from the short-term index, streamed: cost follows
+        how many candidates are taken, not how common the term is."""
+        cursor = await db.execute(
+            "SELECT l.session_id, l.turn_index FROM session_log_terms t "
+            "JOIN session_log l ON l.id = t.rowid "
+            f"WHERE session_log_terms MATCH ? AND {where} ORDER BY t.rowid DESC",
+            (_fts_phrase(short_terms), *params),
+        )
+        seen: set = set()
+        batch: list = []
+        try:
+            while rows := await cursor.fetchmany(256):
+                for turn in rows:
+                    if turn not in seen:
+                        seen.add(turn)
+                        batch.append(turn)
+                        if len(batch) == _TURN_BATCH:
+                            yield batch
+                            batch = []
+            if batch:
+                yield batch
+        finally:
+            await cursor.close()
 
     @staticmethod
     async def _turn_rows(db, turns, plain_where: str, plain_params: list[Any],
@@ -608,21 +662,22 @@ class MemorySearch:
     @staticmethod
     async def _scan_conversation(
         db, where: str, params: list[Any], since: datetime | None, until: datetime | None,
+        state: dict[str, Any],
     ):
         """Newest-event-first bounded scan for single-character CJK terms.
 
         Walks ``created_at`` downwards in chunks, so the stopping point is an
         event time and ``since``/``until`` can continue exactly where it
         stopped — row ids are not event order (forks keep the original time).
-        Returns ``(turns, frontier)``; ``frontier`` is ``(stopped_at,
-        earliest)`` when older rows were left unsearched.
+        Yields turns in candidate-sized batches.  When the time budget runs
+        out with older rows unsearched, sets ``state["frontier"]`` to
+        ``(stopped_at, earliest)``.
         """
         floor = since.isoformat() if since is not None else None
         deadline = time.monotonic() + _SCAN_SECONDS
-        turns: list = []
         seen: set = set()
         hi: str | None = until.isoformat() if until is not None else None
-        while len(turns) < ROUTE_CANDIDATES + 1:
+        while True:
             bound = ["1=1"]
             bound_params: list[Any] = []
             if hi is not None:
@@ -652,24 +707,23 @@ class MemorySearch:
                 "ORDER BY MAX(l.created_at) DESC",
                 chunk_params,
             )
-            for turn in await cursor.fetchall():
-                if turn not in seen:
-                    seen.add(turn)
-                    turns.append(turn)
+            fresh = [t for t in await cursor.fetchall() if t not in seen]
+            seen.update(fresh)
+            for i in range(0, len(fresh), _TURN_BATCH):
+                yield fresh[i:i + _TURN_BATCH]
             if lo is None:
-                return turns, None
+                return
             hi = lo
             if time.monotonic() >= deadline:
                 break
-        if hi is None:
-            return turns, None
         cursor = await db.execute(
             "SELECT MIN(created_at) FROM session_log WHERE created_at < ?"
             + (" AND created_at >= ?" if floor is not None else ""),
             (hi, floor) if floor is not None else (hi,),
         )
         earliest = (await cursor.fetchone())[0]
-        return turns, ((hi, earliest) if earliest is not None else None)
+        if earliest is not None:
+            state["frontier"] = (hi, earliest)
 
     async def _search_skills(self, query: str, limit: int) -> list[MemorySearchResult]:
         if not query.strip():
@@ -756,8 +810,11 @@ def _fuse(routes: list[list[MemorySearchResult]]) -> list[MemorySearchResult]:
     return out
 
 
-def _conversation_results(rows, terms: list[str]) -> list[MemorySearchResult]:
-    """Group matched rows into one result per (session, turn), in rank order."""
+def _conversation_results(rows, terms: list[str], seen_sources: set[tuple]) -> list[MemorySearchResult]:
+    """Group matched rows into one result per (session, turn), in rank order.
+
+    ``seen_sources`` carries fork-source identities across batches.
+    """
     turns: dict[str, list] = {}
     for row in rows:
         ref = f"log:{row[1]}:{row[2]}"
@@ -765,7 +822,6 @@ def _conversation_results(rows, terms: list[str]) -> list[MemorySearchResult]:
             continue
         turns.setdefault(ref, []).append(row)
     results: list[MemorySearchResult] = []
-    seen_sources: set[tuple] = set()
     for ref, matched in turns.items():
         matched.sort(key=lambda r: r[0])
         # fork_session copies turn_index, role, content and created_at

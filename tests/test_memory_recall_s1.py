@@ -454,3 +454,65 @@ async def test_tool_output_respects_the_whole_call_budget(tmp_path):
     assert len(result.output) <= RECALL_OUTPUT_CHARS
     assert result.output.rstrip().splitlines()[-1].startswith("Coverage")
     assert "budget" in result.output
+
+
+async def test_fork_copies_do_not_use_up_the_candidate_budget(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        log = SessionLog(db)
+        await _log(db, "quiet", 1, "assistant", "量測失敗 安靜回合有另一項結果",
+                   "2026-01-01T00:00:00+00:00")
+        await log.create_session("root", "m")
+        await _log(db, "root", 1, "assistant", "量測失敗", "2026-02-01T00:00:00+00:00")
+        for i in range(42):
+            await log.fork_session("root", f"fork{i}", 1)
+        search = MemorySearch(SemanticMemory(db), ProceduralMemory(db))
+        long_term = await search.recall("量測失敗", limit=10)
+        short_term = await search.recall("量測", limit=10)
+    for found in (long_term, short_term):
+        refs = {_ref(r) for r in found}
+        assert "log:quiet:1" in refs, found.coverage
+        assert len(refs) == 2
+
+
+async def test_results_cut_by_the_output_budget_are_not_marked_accessed(tmp_path):
+    from loom.core.harness.middleware import ToolCall
+    from loom.core.harness.permissions import TrustLevel
+    from loom.core.memory.facade import MemoryFacade
+    from loom.platform.cli.tools import make_recall_tool
+    from unittest.mock import MagicMock
+
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        semantic, procedural = SemanticMemory(db), ProceduralMemory(db)
+        for i in range(10):
+            await semantic.upsert(SemanticEntry(
+                key=f"k:lantern:{i}:" + "z" * 250, value=f"lantern {i} " + "y" * 600))
+        await db.execute("UPDATE semantic_entries SET last_accessed_at = NULL")
+        await db.commit()
+        facade = MemoryFacade(semantic=semantic, procedural=procedural, episodic=MagicMock(),
+                              search=MemorySearch(semantic, procedural), governor=None)
+        result = await make_recall_tool(facade).executor(ToolCall(
+            id="c", tool_name="recall", args={"query": "lantern", "limit": 10},
+            trust_level=TrustLevel.SAFE, session_id="s1"))
+        cursor = await db.execute("SELECT key, last_accessed_at FROM semantic_entries")
+        accessed = dict(await cursor.fetchall())
+    shown = {k for k in accessed if k in result.output}
+    assert "omitted" in result.output
+    assert shown and len(shown) < len(accessed)
+    for key, at in accessed.items():
+        assert (at is not None) == (key in shown), key
+
+
+async def test_fork_flood_past_the_examination_cap_is_reported(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        log = SessionLog(db)
+        await _log(db, "quiet", 1, "assistant", "量測失敗 較早的回合", "2026-01-01T00:00:00+00:00")
+        await log.create_session("root", "m")
+        await _log(db, "root", 1, "assistant", "量測失敗", "2026-02-01T00:00:00+00:00")
+        for i in range(165):
+            await log.fork_session("root", f"fork{i}", 1)
+        found = await MemorySearch(SemanticMemory(db), ProceduralMemory(db)).recall("量測")
+    assert len(found) == 1
+    assert "stopped after examining" in found.coverage
