@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS session_log (
 
 CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_session_log_role    ON session_log(session_id, role);
+CREATE INDEX IF NOT EXISTS idx_session_log_created ON session_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 
 -- Issue #42: Action lifecycle records
@@ -291,6 +292,8 @@ class SQLiteStore:
             # Ensure new indexes exist even on pre-existing databases.
             for _index_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_session_log_role ON session_log(session_id, role)",
+                # #650 S1: recall's single-character scan walks event time.
+                "CREATE INDEX IF NOT EXISTS idx_session_log_created ON session_log(created_at)",
                 "CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed "
                 "ON episodic_entries(session_id) WHERE compressed_at IS NULL",
                 # Memory Ontology v0.1 (issue #281): filter by (domain, temporal)

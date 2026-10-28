@@ -1298,7 +1298,32 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=True, output=output)
 
-        lines = [r.format() for r in results]
+        # Whole-call budget (spec 61 r2 §1.2): coverage and the cut notice are
+        # reserved first; results fill what is left, in rank order.
+        from loom.core.memory.search import RECALL_OUTPUT_CHARS
+        notice_room = 200
+        room = RECALL_OUTPUT_CHARS - len(coverage) - notice_room
+        blocks: list[str] = []
+        trimmed = 0
+        for r in results:
+            block = r.format()
+            sep = 2 if blocks else 0
+            if len(block) + sep <= room:
+                blocks.append(block)
+                room -= len(block) + sep
+                continue
+            if room - sep > 120:  # keep the ref line and a useful excerpt
+                blocks.append(block[:room - sep - 1] + "…")
+                trimmed = 1
+            break
+        lines = list(blocks)
+        omitted = len(results) - len(blocks)
+        if trimmed or omitted:
+            lines.append(
+                f"Output budget ({RECALL_OUTPUT_CHARS:,} chars) reached: "
+                f"{trimmed} result trimmed, {omitted} omitted — lower the limit, or "
+                "narrow with more terms or since/until."
+            )
         if coverage:
             lines.append(coverage)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,

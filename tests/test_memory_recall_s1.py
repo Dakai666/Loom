@@ -364,3 +364,93 @@ async def test_fresh_database_needs_no_backup(tmp_path):
     store = SQLiteStore(str(tmp_path / "memory.db"))
     await store.initialize()
     assert not (tmp_path / "backups").exists()
+
+
+# ---------------------------------------------------------------------------
+# Candidate and output budgets (PR #652 review)
+# ---------------------------------------------------------------------------
+
+async def test_a_dense_turn_does_not_crowd_other_turns_out_of_the_candidate_pool(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "quiet", 1, "assistant", "量測失敗一次", "2026-01-01T00:00:00+00:00")
+        for i in range(210):
+            await db.execute(
+                "INSERT INTO session_log (session_id, turn_index, role, content, metadata, created_at) "
+                "VALUES ('dense', 1, 'tool', ?, '{}', '2026-02-01T00:00:00+00:00')",
+                (f"量測失敗 第{i}次",),
+            )
+        await db.commit()
+        search = MemorySearch(SemanticMemory(db), ProceduralMemory(db))
+        long_term = await search.recall("量測失敗", limit=10)
+        short_term = await search.recall("量測", limit=10)
+    assert {_ref(r) for r in long_term} == {"log:dense:1", "log:quiet:1"}
+    assert {_ref(r) for r in short_term} == {"log:dense:1", "log:quiet:1"}
+
+
+async def test_identical_text_in_different_turns_is_not_a_fork_copy(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "assistant", "夜間驗證失敗", "2026-01-01T00:00:00+00:00")
+        await _log(db, "s1", 9, "assistant", "夜間驗證失敗", "2026-01-09T00:00:00+00:00")
+        found = await MemorySearch(SemanticMemory(db), ProceduralMemory(db)).recall("夜間驗證")
+    assert {_ref(r) for r in found} == {"log:s1:1", "log:s1:9"}
+
+
+async def test_forked_copy_of_a_turn_takes_one_slot(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        log = SessionLog(db)
+        await log.create_session("root", "m")
+        await _log(db, "root", 1, "assistant", "copper kettle whistle", "2026-01-01T00:00:00+00:00")
+        await log.fork_session("root", "branch", 1)
+        found = await MemorySearch(SemanticMemory(db), ProceduralMemory(db)).recall("copper kettle")
+    assert len(found) == 1
+
+
+async def test_single_character_scan_continuation_reaches_older_event_times(tmp_path, monkeypatch):
+    import re
+    monkeypatch.setattr("loom.core.memory.search._SCAN_CHUNK_ROWS", 2)
+    monkeypatch.setattr("loom.core.memory.search._SCAN_SECONDS", 0.0)
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "assistant", "貓在窗邊", "2026-03-01T00:00:00+00:00")
+        await _log(db, "s1", 2, "assistant", "貓在睡覺", "2026-03-02T00:00:00+00:00")
+        # Fork-shaped rows: written later (larger id) but keep older event times.
+        await _log(db, "s2", 1, "assistant", "貓在吃飯", "2020-01-01T00:00:00+00:00")
+        await _log(db, "s2", 2, "assistant", "貓在玩耍", "2020-01-02T00:00:00+00:00")
+        search = MemorySearch(SemanticMemory(db), ProceduralMemory(db))
+        first = await search.recall("貓", limit=10)
+        assert {_ref(r) for r in first} == {"log:s1:1", "log:s1:2"}
+        hint = re.search(r"since=(\S+) until=(\S+?)\)", first.coverage)
+        assert hint, first.coverage
+        rest = await search.recall(
+            "貓", limit=10,
+            since=datetime.fromisoformat(hint.group(1)),
+            until=datetime.fromisoformat(hint.group(2)))
+    assert {_ref(r) for r in rest} == {"log:s2:1", "log:s2:2"}
+    assert "stopped" not in rest.coverage
+
+
+async def test_tool_output_respects_the_whole_call_budget(tmp_path):
+    from loom.core.harness.middleware import ToolCall
+    from loom.core.harness.permissions import TrustLevel
+    from loom.core.memory.facade import MemoryFacade
+    from loom.core.memory.search import RECALL_OUTPUT_CHARS
+    from loom.platform.cli.tools import make_recall_tool
+    from unittest.mock import MagicMock
+
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        for turn in range(10):
+            await _log(db, "s1", turn, "assistant", f"lantern note {turn} " + "x" * 700)
+        semantic, procedural = SemanticMemory(db), ProceduralMemory(db)
+        facade = MemoryFacade(semantic=semantic, procedural=procedural, episodic=MagicMock(),
+                              search=MemorySearch(semantic, procedural), governor=None)
+        result = await make_recall_tool(facade).executor(ToolCall(
+            id="c", tool_name="recall", args={"query": "lantern", "limit": 10},
+            trust_level=TrustLevel.SAFE, session_id="s1"))
+    assert result.success
+    assert len(result.output) <= RECALL_OUTPUT_CHARS
+    assert result.output.rstrip().splitlines()[-1].startswith("Coverage")
+    assert "budget" in result.output

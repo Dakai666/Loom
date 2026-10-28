@@ -38,7 +38,7 @@ S0 報告：[`61a-整合記憶系統-S0基準與盤點.md`](61a-整合記憶系�
 2. **改述／跨語言分兩層驗收。** 單次呼叫層（S1 硬門檻）：literal 中文、兩字詞、identifier、無答案、範圍限制、去重案例一次 `recall` 必過。agent 迴圈層（另計）：改述／跨語言允許主模型以同一使用者問題自主改寫搜尋詞，最多 3 次 `recall`，記錄次數與延遲；此層結果不得宣稱為單次改善。不加 hidden LLM；迴圈層不足再附數據評估 `session_log` embedding。
 3. **child 經歷先接來源再退 episodic。** subagent trace 只寫 `episodic`、不在 `session_log`。S3 停 episodic 寫入／TTL 前，先把 child trace 接到可保存、可找回的來源，並測「child 工具失敗 → 原始經歷可讀」。
 4. **索引容量：新索引淨增上限 128 MiB**（`memory.db` 當時約 356 MiB）。
-5. **兩字詞須有上限且隨成長有效。** 不採固定 row 數的線性掃描（以每月約 1.2 萬列的成長，100,000 rows 上限一到兩個月內即觸頂）。改用 **CJK bigram 影子索引**：user／assistant 文字的 CJK 段展開成 bigram、其餘文字原樣保留，`unicode61`、`content=''`、`detail=none`、`contentless_delete=1`；只回答「哪些回合含此詞」，片段與排序仍讀 `session_log`。副本實測（45,092 列）：4.3 MiB、建索引 1.0 秒、查詢 <1 ms，成長約每月 1 MiB，含在 128 MiB 內。單一 CJK 字查詢走限時、由新到舊的線性掃描，超限明示「已查到哪個時間點，可用 `until=` 續查」，不回報不存在。
+5. **兩字詞須有上限且隨成長有效。** 不採固定 row 數的線性掃描（以每月約 1.2 萬列的成長，100,000 rows 上限一到兩個月內即觸頂）。改用 **CJK bigram 影子索引**：user／assistant 文字的 CJK 段展開成 bigram、其餘文字原樣保留，`unicode61`、`content=''`、`detail=none`、`contentless_delete=1`；只回答「哪些回合含此詞」，片段與排序仍讀 `session_log`。副本實測（45,092 列）：4.3 MiB、建索引 1.0 秒、查詢 <1 ms，成長約每月 1 MiB，含在 128 MiB 內。單一 CJK 字查詢走限時、依事件時間（`created_at` 索引）由新到舊的分段掃描，超限明示「已查到哪個時間點，可用 `since=… until=…` 續查」，不回報不存在；掃描不依 row id，因 fork 列保留原事件時間、id 大不代表事件新。
 
 **S1 預算（依 S0 §7，DK 確認）**：每路候選 ≤40 個獨立 ref／回合、最終預設 5 筆；`ref` 展開 ≤3 回合／128 rows／8,000 字並標截斷；初次輸出每筆 ≤512 字、整次 ≤4,000 字（含來源與覆蓋行）；工具摘要索引 512 字；暖機 recall p95 ≤700 ms（同 profile 比較，主模型追查另計）；migration 單機 rebuild ≤30 秒；額外必跑 LLM 0。字元數不冒充 token 數。
 
@@ -231,7 +231,8 @@ recall(ref="前次回傳的引用", limit?)
 - **中文斷詞**：`session_log_fts` 與 `semantic_fts` 皆用 FTS5 `trigram` tokenizer（專案 Python 的 SQLite 3.49.1 已實測支援）。trigram 對 <3 字查詞無法用索引：兩字 CJK 詞走 bigram 影子索引，單字走限時線性掃描（§1.2 第 5 項）。
 - **索引範圍**：user／assistant `content` 全文；tool 列索引 512 字摘要並標「摘要」，展開時從 `action_records` 補原文（§1.2 第 1 項）。external-content FTS 只索引截斷內容時，`rebuild`／insert／update／delete 必須使用同一內容投影（S0 測試已示範）。
 - **合併**：semantic（BM25／embedding）、skills、`session_log` 三路各取 top-k，以 RRF 合併；移除 Tier 1 短路，query 無命中時不回最近資料。
-- **去重單位是回合**：同一回合的多個命中合併為一筆；同 session 的不同回合各自保留——早期判斷與後來修正不能因同屬一 session 被壓掉。
+- **去重單位是回合**：同一回合的多個命中合併為一筆；同 session 的不同回合各自保留——早期判斷與後來修正不能因同屬一 session 被壓掉。候選預算按回合計：先挑 ≤40 個回合再讀其命中列（每回合 ≤8 列），一個命中密集的回合不能把其他回合擠出候選池；超出預算時覆蓋行明示。
+- **fork 副本只在可證明同源時合併**：`fork_session` 原樣複製 `turn_index`／`role`／`content`／`created_at`，四者完全相同才視為同一來源；摘錄文字相同但時間不同是反覆發生的事件，各自保留。
 - **不做 latest-wins**：結果依時間排列並標內容性質；後來的解讀不被呈現為對早期解讀的客觀更正，來源未明講的因果不補。
 - **記錯名稱**：部分線索命中仍回候選並標出不符處；不照錯名拼答案，也不因一個錯名拒絕所有候選。
 - **`session_log` embedding 不在 S1**：先驗證 lexical＋既有 semantic embedding 能否通過案例，不過再評估成本。
@@ -423,3 +424,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r0**（2026-10-28）：Codex 依 DK 初步方向起草。
 - **r1**（2026-10-28）：收斂 Loom agent end-user review 與 Claude Code 實作 review。主要變更：§1.1 收斂主軸與 DK 三項裁決（compress_session 於 S1 關閉、`session_log` 為無 TTL 權威來源、既有 `session:` facts 不清理）；§2 補實測數字、join 鍵與 #643 根因；§4.2 定案 ref 格式；§4.4 對話投影改用同 DB FTS5 trigger、不需 checkpoint，ledger 不建索引；§5.2.1 writer 盤點；§6.2 trigram 斷詞、RRF、回合級去重、不做 latest-wins；§6.3 覆蓋狀態每查詢一行；§9 每切片刪除清單與 S1 範圍；#643 修正併入 S1 首個 PR。
 - **r2**（2026-10-28）：納入 S0（#651）。主要變更：§1.2 S0 後 DK 裁決（工具原文改由 `action_records.output_prefix` 補、改述／跨語言兩層驗收、child 經歷先接來源再退 episodic、索引淨增 ≤128 MiB、兩字詞改 CJK bigram 影子索引）與 S1 預算、修改前基準；§1.1／§2 更正 r1 錯誤（工具回覆只存 500 字摘要、SQLite 版本為 3.49.1、stub 口徑）；§5.2.1 盤點修正（relate 不經 governor、subagent 細節、補列 writer、`success_rate` 讀者）；§6.2／§9.1 對應更新。
+- **r2.1**（2026-10-29）：S1 PR-A review（#652，Codex）修正：候選預算改按回合計；fork 去重改為可證明同源才合併；單字掃描改依事件時間並以 `since`／`until` 續查（新增 `session_log(created_at)` 索引）；工具輸出加整次 4,000 字硬上限與截斷說明。

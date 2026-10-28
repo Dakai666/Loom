@@ -117,6 +117,8 @@ MemoryType = Literal["semantic", "skill", "all"]
 # Per-route candidate budget and output bounds (spec 61 r2 §1.2).
 ROUTE_CANDIDATES = 40
 EXCERPT_CHARS = 512
+# Whole initial recall output, sources and coverage line included.
+RECALL_OUTPUT_CHARS = 4_000
 # Below this cosine an embedding neighbour is noise, not an answer: #643
 # measured unrelated queries topping out at 0.45–0.52 against the live corpus
 # while true hits sat at 0.68–0.75.  Lexical routes are unaffected.
@@ -125,6 +127,8 @@ _RRF_K = 60
 # Single CJK characters have no index; scan newest-first within this budget.
 _SCAN_SECONDS = 0.15
 _SCAN_CHUNK_ROWS = 20_000
+# Matched rows read per turn to build its excerpt.
+_TURN_ROWS = 8
 # Unindexed short-term rows a recall call will catch up before reading.
 _TERMS_SYNC_BUDGET = 5_000
 
@@ -464,6 +468,8 @@ class MemorySearch:
     ) -> tuple[list[MemorySearchResult], str]:
         """Conversation route over ``session_log``: one result per turn.
 
+        Candidates are picked per *turn*, never per row, so one turn with
+        hundreds of matching rows cannot push other turns out of the pool.
         Returns ``(results, coverage note)``.
         """
         db = self._semantic._db
@@ -478,73 +484,192 @@ class MemorySearch:
         single_cjk = [t for t in terms if recall_index.is_cjk_char(t)]
         short_terms = [t for t in terms if len(t) < 3 and t not in single_cjk]
 
-        where = [f"l.role IN {recall_index.SEARCHABLE_ROLES!r}"]
-        params: list[Any] = []
-        if short_terms:
-            where.append(
+        # Row conditions that need no full-text index (role, single
+        # characters, event time); index conditions are added per query.
+        plain = [f"l.role IN {recall_index.SEARCHABLE_ROLES!r}"]
+        plain_params: list[Any] = []
+        for t in single_cjk:
+            plain.append("l.content LIKE ? ESCAPE '\\'")
+            plain_params.append(_like(t))
+        if since is not None:
+            plain.append("l.created_at >= ?")
+            plain_params.append(since.isoformat())
+        if until is not None:
+            plain.append("l.created_at < ?")
+            plain_params.append(until.isoformat())
+        plain_where = " AND ".join(plain)
+        # Turn picking: the driving index is joined; the other is a filter.
+        match = list(plain)
+        params = list(plain_params)
+        if long_terms and short_terms:
+            match.append(
                 "l.id IN (SELECT rowid FROM session_log_terms WHERE session_log_terms MATCH ?)"
             )
             params.append(_fts_phrase(short_terms))
-        for t in single_cjk:
-            where.append("l.content LIKE ? ESCAPE '\\'")
-            params.append(_like(t))
-        if since is not None:
-            where.append("l.created_at >= ?")
-            params.append(since.isoformat())
-        if until is not None:
-            where.append("l.created_at < ?")
-            params.append(until.isoformat())
-        row_cap = ROUTE_CANDIDATES * 5
-        cols = "l.id, l.session_id, l.turn_index, l.role, l.content, l.metadata, l.created_at"
+        where = " AND ".join(match)
+        turn_cap = ROUTE_CANDIDATES + 1  # one extra to detect overflow
 
         if long_terms:
             cursor = await db.execute(
-                f"SELECT {cols} FROM session_log_fts f JOIN session_log l ON l.id = f.rowid "
-                f"WHERE f.session_log_fts MATCH ? AND {' AND '.join(where)} "
-                "ORDER BY f.rank LIMIT ?",
-                (_fts_phrase(long_terms), *params, row_cap),
+                "SELECT l.session_id, l.turn_index FROM session_log_fts f "
+                "JOIN session_log l ON l.id = f.rowid "
+                f"WHERE f.session_log_fts MATCH ? AND {where} "
+                "GROUP BY l.session_id, l.turn_index ORDER BY MIN(f.rank) LIMIT ?",
+                (_fts_phrase(long_terms), *params, turn_cap),
             )
-            rows = await cursor.fetchall()
+            turns = await cursor.fetchall()
         elif short_terms:
+            # Stream matches newest-first and stop once the turn budget is
+            # full: cost follows the budget, not how common the term is.
             cursor = await db.execute(
-                f"SELECT {cols} FROM session_log l WHERE {' AND '.join(where)} "
-                "ORDER BY l.id DESC LIMIT ?",
-                (*params, row_cap),
+                "SELECT l.session_id, l.turn_index FROM session_log_terms t "
+                "JOIN session_log l ON l.id = t.rowid "
+                f"WHERE session_log_terms MATCH ? AND {where} ORDER BY t.rowid DESC",
+                (_fts_phrase(short_terms), *params),
             )
-            rows = await cursor.fetchall()
+            turns = []
+            seen: set = set()
+            while len(turns) < turn_cap:
+                batch = await cursor.fetchmany(256)
+                if not batch:
+                    break
+                for turn in batch:
+                    if turn not in seen and len(turns) < turn_cap:
+                        seen.add(turn)
+                        turns.append(turn)
+            await cursor.close()
         else:
-            rows, frontier = await self._scan_conversation(db, cols, where, params, row_cap)
+            turns, frontier = await self._scan_conversation(db, where, params, since, until)
             if frontier:
+                lo, earliest = frontier
                 note_parts.append(
-                    f"single-character scan stopped at {frontier}; "
-                    f"older turns not searched (continue with until={frontier})"
+                    f"single-character scan covered event times from {lo} on; earlier "
+                    f"turns not searched (continue with since={earliest} until={lo})"
                 )
-
+        if len(turns) > ROUTE_CANDIDATES:
+            turns = turns[:ROUTE_CANDIDATES]
+            note_parts.append(
+                f"more matching turns beyond the {ROUTE_CANDIDATES}-turn candidate budget "
+                "(add terms or since/until to narrow)"
+            )
+        index_matches = []
+        if long_terms:
+            index_matches.append(("session_log_fts", _fts_phrase(long_terms)))
+        if short_terms:
+            index_matches.append(("session_log_terms", _fts_phrase(short_terms)))
+        rows = await self._turn_rows(db, turns, plain_where, plain_params, index_matches)
         return _conversation_results(rows, terms), ", ".join(note_parts)
 
     @staticmethod
-    async def _scan_conversation(db, cols, where, params, row_cap):
-        """Newest-first bounded scan for single-character CJK terms."""
-        cursor = await db.execute("SELECT COALESCE(MAX(id), 0) FROM session_log")
-        hi = (await cursor.fetchone())[0]
-        deadline = time.monotonic() + _SCAN_SECONDS
-        rows: list = []
-        while hi > 0 and len(rows) < row_cap:
-            lo = max(0, hi - _SCAN_CHUNK_ROWS)
+    async def _turn_rows(db, turns, plain_where: str, plain_params: list[Any],
+                         index_matches: list[tuple[str, str]]) -> list:
+        """Matched rows of the picked turns, in turn rank order, bounded per turn.
+
+        Each full-text index is queried once over the picked rows' id range;
+        a per-row correlated MATCH re-reads the doclist for every row of a
+        long turn.
+        """
+        if not turns:
+            return []
+        picked = ", ".join("(?, ?, ?)" for _ in turns)
+        picked_params = [v for i, (sid, turn) in enumerate(turns) for v in (sid, turn, i)]
+        cursor = await db.execute(
+            f"WITH picked(session_id, turn_index, ord) AS (VALUES {picked}) "
+            "SELECT l.id, p.ord FROM picked p JOIN session_log l "
+            "  ON l.session_id = p.session_id AND l.turn_index = p.turn_index "
+            f"WHERE {plain_where}",
+            (*picked_params, *plain_params),
+        )
+        order = dict(await cursor.fetchall())
+        if not order:
+            return []
+        keep = set(order)
+        lo, hi = min(keep), max(keep)
+        for table, phrase in index_matches:
             cursor = await db.execute(
-                f"SELECT {cols} FROM session_log l WHERE l.id > ? AND l.id <= ? "
-                f"AND {' AND '.join(where)} ORDER BY l.id DESC LIMIT ?",
-                (lo, hi, *params, row_cap - len(rows)),
+                f"SELECT rowid FROM {table} WHERE {table} MATCH ? AND rowid BETWEEN ? AND ?",
+                (phrase, lo, hi),
             )
-            rows.extend(await cursor.fetchall())
+            keep &= {r[0] for r in await cursor.fetchall()}
+        per_turn: dict[int, list[int]] = {}
+        for row_id in sorted(keep):
+            ids = per_turn.setdefault(order[row_id], [])
+            if len(ids) < _TURN_ROWS:
+                ids.append(row_id)
+        wanted = [i for ord_ in sorted(per_turn) for i in per_turn[ord_]]
+        cursor = await db.execute(
+            "SELECT id, session_id, turn_index, role, content, metadata, created_at "
+            "FROM session_log WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(wanted),),
+        )
+        by_id = {r[0]: r for r in await cursor.fetchall()}
+        return [by_id[i] for i in wanted if i in by_id]
+
+    @staticmethod
+    async def _scan_conversation(
+        db, where: str, params: list[Any], since: datetime | None, until: datetime | None,
+    ):
+        """Newest-event-first bounded scan for single-character CJK terms.
+
+        Walks ``created_at`` downwards in chunks, so the stopping point is an
+        event time and ``since``/``until`` can continue exactly where it
+        stopped — row ids are not event order (forks keep the original time).
+        Returns ``(turns, frontier)``; ``frontier`` is ``(stopped_at,
+        earliest)`` when older rows were left unsearched.
+        """
+        floor = since.isoformat() if since is not None else None
+        deadline = time.monotonic() + _SCAN_SECONDS
+        turns: list = []
+        seen: set = set()
+        hi: str | None = until.isoformat() if until is not None else None
+        while len(turns) < ROUTE_CANDIDATES + 1:
+            bound = ["1=1"]
+            bound_params: list[Any] = []
+            if hi is not None:
+                bound.append("created_at < ?")
+                bound_params.append(hi)
+            if floor is not None:
+                bound.append("created_at >= ?")
+                bound_params.append(floor)
+            cursor = await db.execute(
+                f"SELECT created_at FROM session_log WHERE {' AND '.join(bound)} "
+                "ORDER BY created_at DESC LIMIT 1 OFFSET ?",
+                (*bound_params, _SCAN_CHUNK_ROWS - 1),
+            )
+            row = await cursor.fetchone()
+            lo = row[0] if row else None
+            chunk = [where]
+            chunk_params = list(params)
+            if hi is not None:
+                chunk.append("l.created_at < ?")
+                chunk_params.append(hi)
+            if lo is not None:
+                chunk.append("l.created_at >= ?")
+                chunk_params.append(lo)
+            cursor = await db.execute(
+                f"SELECT l.session_id, l.turn_index FROM session_log l "
+                f"WHERE {' AND '.join(chunk)} GROUP BY l.session_id, l.turn_index "
+                "ORDER BY MAX(l.created_at) DESC",
+                chunk_params,
+            )
+            for turn in await cursor.fetchall():
+                if turn not in seen:
+                    seen.add(turn)
+                    turns.append(turn)
+            if lo is None:
+                return turns, None
             hi = lo
-            if time.monotonic() > deadline:
+            if time.monotonic() >= deadline:
                 break
-        if hi <= 0:
-            return rows, None
-        cursor = await db.execute("SELECT created_at FROM session_log WHERE id > ? ORDER BY id LIMIT 1", (hi,))
-        row = await cursor.fetchone()
-        return rows, (row[0] if row else None)
+        if hi is None:
+            return turns, None
+        cursor = await db.execute(
+            "SELECT MIN(created_at) FROM session_log WHERE created_at < ?"
+            + (" AND created_at >= ?" if floor is not None else ""),
+            (hi, floor) if floor is not None else (hi,),
+        )
+        earliest = (await cursor.fetchone())[0]
+        return turns, ((hi, earliest) if earliest is not None else None)
 
     async def _search_skills(self, query: str, limit: int) -> list[MemorySearchResult]:
         if not query.strip():
@@ -640,9 +765,16 @@ def _conversation_results(rows, terms: list[str]) -> list[MemorySearchResult]:
             continue
         turns.setdefault(ref, []).append(row)
     results: list[MemorySearchResult] = []
-    seen_excerpts: set[str] = set()
+    seen_sources: set[tuple] = set()
     for ref, matched in turns.items():
         matched.sort(key=lambda r: r[0])
+        # fork_session copies turn_index, role, content and created_at
+        # verbatim; only that exact match proves a shared source.  Equal
+        # text alone may be a recurring event and keeps its own slot.
+        source = (matched[0][2], tuple((r[3], r[6], r[4]) for r in matched))
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
         parts: list[str] = []
         budget = EXCERPT_CHARS
         for _id, _sid, _turn, role, content, metadata, _at in matched:
@@ -660,10 +792,6 @@ def _conversation_results(rows, terms: list[str]) -> list[MemorySearchResult]:
             if budget <= 80:
                 break
         excerpt = " / ".join(parts)[:EXCERPT_CHARS]
-        # Forked sessions copy rows verbatim: one source, one slot.
-        if excerpt in seen_excerpts:
-            continue
-        seen_excerpts.add(excerpt)
         results.append(MemorySearchResult(
             type="conversation",
             key=ref,
