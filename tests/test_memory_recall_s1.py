@@ -23,6 +23,8 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+import pytest
+
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
@@ -456,7 +458,9 @@ async def test_tool_output_respects_the_whole_call_budget(tmp_path):
     assert "budget" in result.output
 
 
-async def test_fork_copies_do_not_use_up_the_candidate_budget(tmp_path):
+@pytest.mark.parametrize("forks", [38, 39, 40, 41, 42])
+async def test_fork_copies_do_not_use_up_the_candidate_budget(tmp_path, forks):
+    # 39 forks put the other source exactly at the batch edge (turn 41).
     store = await _store(tmp_path)
     async with store.connect() as db:
         log = SessionLog(db)
@@ -464,7 +468,7 @@ async def test_fork_copies_do_not_use_up_the_candidate_budget(tmp_path):
                    "2026-01-01T00:00:00+00:00")
         await log.create_session("root", "m")
         await _log(db, "root", 1, "assistant", "量測失敗", "2026-02-01T00:00:00+00:00")
-        for i in range(42):
+        for i in range(forks):
             await log.fork_session("root", f"fork{i}", 1)
         search = MemorySearch(SemanticMemory(db), ProceduralMemory(db))
         long_term = await search.recall("量測失敗", limit=10)

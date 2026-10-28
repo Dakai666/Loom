@@ -817,10 +817,8 @@ def _conversation_results(rows, terms: list[str], seen_sources: set[tuple]) -> l
     """
     turns: dict[str, list] = {}
     for row in rows:
-        ref = f"log:{row[1]}:{row[2]}"
-        if ref not in turns and len(turns) >= ROUTE_CANDIDATES:
-            continue
-        turns.setdefault(ref, []).append(row)
+        # No cap here: the caller limits *distinct sources*, after merging.
+        turns.setdefault(f"log:{row[1]}:{row[2]}", []).append(row)
     results: list[MemorySearchResult] = []
     for ref, matched in turns.items():
         matched.sort(key=lambda r: r[0])
