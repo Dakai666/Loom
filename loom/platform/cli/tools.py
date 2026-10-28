@@ -1370,17 +1370,18 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     "type": "string",
                     "enum": ["self", "user", "project", "knowledge"],
                     "description": (
-                        "Optional Memory-Ontology axis filter — return only "
-                        "facts in this domain. Skills are unaffected; "
-                        "conversation is excluded (it has no domain)."
+                        "Optional — omit unless you specifically want facts "
+                        "from one domain. Narrows memory facts only; skills "
+                        "and conversation are unaffected."
                     ),
                 },
                 "temporal": {
                     "type": "string",
                     "enum": ["ephemeral", "recent", "milestone", "archived"],
                     "description": (
-                        "Optional temporal filter — e.g. 'milestone' to find "
-                        "permanent anchors only."
+                        "Optional — omit unless you specifically want one "
+                        "tier, e.g. 'milestone' for permanent anchors. Narrows "
+                        "memory facts only."
                     ),
                 },
                 "since": {

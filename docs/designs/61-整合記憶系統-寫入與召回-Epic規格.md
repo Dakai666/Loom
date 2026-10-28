@@ -211,6 +211,7 @@ recall(ref="前次回傳的引用", limit?)
 - `query` 不要求事先提供來源名稱、日期、工具名稱或 session id。
 - `ref` 用於取得更多原文／周邊脈絡；不需切換到另一組資料庫工具。若同時有互斥或無法遵守的參數，要明確拒絕或說明，不靜默忽略。
 - 日期與 session 是選擇性的縮小範圍條件；明確給定時為硬限制，不讓模型自行放寬。
+- `domain`／`temporal` 只縮小記憶這一路；對話沒有這兩軸，照常搜尋，覆蓋行註明篩選只套用於記憶。不得因模型填了只屬於某一路的選填欄位，就整路關掉其他來源——live 實測（2026-10-29）模型每次 recall 都習慣性填滿這兩欄，使對話路由從未被查到。
 - 自然語言日期由主模型轉成既有時間參數；不先新增一個必跑的 LLM query router 或大量關鍵字判斷規則。
 - `recall_period` 與 `ledger_recall` 暫作既有呼叫者的相容入口。相同 reader 與輸出原語由新 recall 使用；完成等價驗收後，移出主 agent 的預設工具清單與教學 prompt。
 - 精確審計、統計、raw event 查詢可保留管理／除錯入口；不要求日常回憶記住這些入口。
@@ -425,3 +426,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r1**（2026-10-28）：收斂 Loom agent end-user review 與 Claude Code 實作 review。主要變更：§1.1 收斂主軸與 DK 三項裁決（compress_session 於 S1 關閉、`session_log` 為無 TTL 權威來源、既有 `session:` facts 不清理）；§2 補實測數字、join 鍵與 #643 根因；§4.2 定案 ref 格式；§4.4 對話投影改用同 DB FTS5 trigger、不需 checkpoint，ledger 不建索引；§5.2.1 writer 盤點；§6.2 trigram 斷詞、RRF、回合級去重、不做 latest-wins；§6.3 覆蓋狀態每查詢一行；§9 每切片刪除清單與 S1 範圍；#643 修正併入 S1 首個 PR。
 - **r2**（2026-10-28）：納入 S0（#651）。主要變更：§1.2 S0 後 DK 裁決（工具原文改由 `action_records.output_prefix` 補、改述／跨語言兩層驗收、child 經歷先接來源再退 episodic、索引淨增 ≤128 MiB、兩字詞改 CJK bigram 影子索引）與 S1 預算、修改前基準；§1.1／§2 更正 r1 錯誤（工具回覆只存 500 字摘要、SQLite 版本為 3.49.1、stub 口徑）；§5.2.1 盤點修正（relate 不經 governor、subagent 細節、補列 writer、`success_rate` 讀者）；§6.2／§9.1 對應更新。
 - **r2.1**（2026-10-29）：S1 PR-A review（#652，Codex）修正：候選預算改按回合計；fork 去重改為可證明同源才合併；單字掃描改依事件時間並以 `since`／`until` 續查（新增 `session_log(created_at)` 索引）；工具輸出加整次 4,000 字硬上限與截斷說明。複審（Codex）追加：候選名額改按去重後的獨立來源計（分批補取、檢查上限 160 回合並明示）；存取只記實際送進輸出的項目（§6.3）。
+- **r2.2**（2026-10-29）：§6.1 `domain`／`temporal` 改為只縮小記憶路由、不再排除對話路由（PR-A 上線後 live 實測：模型習慣性填滿選填篩選欄位，對話路由因此全被排除）。
