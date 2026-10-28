@@ -33,6 +33,8 @@ coverage.xml
 # Loom runtime data
 ~/.loom/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
@@ -61,6 +63,9 @@ PLAN.md
 CODE_REVIEW.md
 IMPLEMENTATION_STATUS.md
 *.md.bak
+# Timestamped config backups / snapshots (e.g. rhythm.toml.bak-20261022-orig)
+*.bak-*
+*.snapshot-*
 scripts/
 *.jpg
 loom/_commit_msg.txt
@@ -111,6 +116,9 @@ skills/silky_chatgpt_draw
 silu-video-creator/
 skills/silky_hyperframes
 skills/wiki_maintenance
+skills/world-journey/
+skills/silky_tts_local/
+reading/
 autonomy/circadian/dreams
 
 # Personal config (use loom.toml.example as template)
@@ -129,7 +137,12 @@ autonomy/circadian/room.toml
 autonomy/circadian/daily_weave.md
 # Weave revision proposals (issue #462) — per-day TOML audit artifacts
 autonomy/circadian/proposals/
+# Per-day daily weave archive — personal life-log, same as journal/
+autonomy/circadian/daily_weave/
 # Weave journal (issue #463) — per-day life-log artifacts, personal not project
 autonomy/circadian/journal/
 
 .gitnexus
+
+# uv lockfile — project installs via pip install -e
+uv.lock
