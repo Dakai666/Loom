@@ -203,7 +203,7 @@ async def synthetic(output: Path, base_url: str | None, model: str, replay: Path
                     if name in kwargs:
                         kwargs[name] = datetime.fromisoformat(kwargs[name])
                 found = await search.recall(case["query"], limit=5, **kwargs)
-                normalized = [{"ref": ("skill:" if r.type == "skill" else "mem:") + r.key,
+                normalized = [{"ref": getattr(r, "ref", "") or (("skill:" if r.type == "skill" else "mem:") + r.key),
                                "excerpt": r.value[:300], "score": round(r.score, 7),
                                "fallback": bool(r.metadata.get("fallback")),
                                "method": r.metadata.get("method", "bm25" if r.score else "recency")}

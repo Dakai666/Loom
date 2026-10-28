@@ -96,6 +96,7 @@ class MemoryFacade:
         temporal: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        mark_accessed: bool = True,
     ) -> list["MemorySearchResult"]:
         """BM25 + embedding ranked retrieval across semantic + procedural memory.
 
@@ -110,11 +111,15 @@ class MemoryFacade:
 
         ``domain`` and ``temporal`` are optional Memory-Ontology filters
         (issue #281) — see :meth:`MemorySearch.recall` for semantics.
+
+        ``mark_accessed=False`` defers access recording to the caller, which
+        then calls :meth:`mark_accessed` with the results it actually showed.
         """
         results = await self.search_index.recall(
             query, type=kind, limit=limit,
             domain=domain, temporal=temporal,
             since=since, until=until,
+            mark_accessed=mark_accessed,
         )
         await self._emit_memory_op(
             operation="read",
@@ -123,6 +128,10 @@ class MemoryFacade:
             memory_ids=[r.id for r in results if getattr(r, "id", None)] or None,
         )
         return results
+
+    async def mark_accessed(self, results: list["MemorySearchResult"]) -> None:
+        """Record access for search results that were actually shown."""
+        await self.search_index.mark_accessed(results)
 
     async def get_fact(self, key: str) -> "SemanticEntry | None":
         """Direct semantic-memory lookup by exact key.

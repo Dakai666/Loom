@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS session_log (
 
 CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id, turn_index);
 CREATE INDEX IF NOT EXISTS idx_session_log_role    ON session_log(session_id, role);
+CREATE INDEX IF NOT EXISTS idx_session_log_created ON session_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 
 -- Issue #42: Action lifecycle records
@@ -192,7 +193,7 @@ CREATE TABLE IF NOT EXISTS memory_meta (
 -- FTS5 Virtual Tables & Sync Triggers
 
 CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
-USING fts5(key, value, content='semantic_entries', content_rowid='rowid');
+USING fts5(key, value, content='semantic_entries', content_rowid='rowid', tokenize='trigram');
 
 CREATE TRIGGER IF NOT EXISTS semantic_entries_ai AFTER INSERT ON semantic_entries BEGIN
   INSERT INTO semantic_fts(rowid, key, value) VALUES (new.rowid, new.key, new.value);
@@ -291,6 +292,8 @@ class SQLiteStore:
             # Ensure new indexes exist even on pre-existing databases.
             for _index_sql in [
                 "CREATE INDEX IF NOT EXISTS idx_session_log_role ON session_log(session_id, role)",
+                # #650 S1: recall's single-character scan walks event time.
+                "CREATE INDEX IF NOT EXISTS idx_session_log_created ON session_log(created_at)",
                 "CREATE INDEX IF NOT EXISTS idx_episodic_session_uncompressed "
                 "ON episodic_entries(session_id) WHERE compressed_at IS NULL",
                 # Memory Ontology v0.1 (issue #281): filter by (domain, temporal)
@@ -318,6 +321,18 @@ class SQLiteStore:
                 logging.getLogger(__name__).warning(
                     "Relational table retirement (backfill+drop) failed: %s",
                     exc,
+                )
+
+            # #650 S1: conversation recall indexes + trigram semantic_fts.
+            # One-time migration snapshots the DB beside itself first; on
+            # failure the old indexes stay and recall reports the gap.
+            try:
+                from loom.core.memory.recall_index import ensure_recall_indexes
+                await ensure_recall_indexes(db, self.path)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Recall index migration failed: %s", exc,
                 )
 
             # Ensure FTS indexes are up-to-date with existing content (idempotent, fast)

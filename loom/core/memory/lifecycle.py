@@ -17,7 +17,7 @@ State transitions per cycle (single threshold, two-stage):
 Step 1 runs first so a row newly-demoted in step 2 doesn't get deleted in
 the same cycle — its archived life starts fresh next pass.
 
-``last_accessed_at`` (set by :meth:`MemorySearch._mark_accessed` on every
+``last_accessed_at`` (set by :meth:`MemorySearch.mark_accessed` on every
 recall hit) is the time anchor when more recent than ``updated_at``, so a
 fact still in active use never decays — N1 from PR #303 review.
 

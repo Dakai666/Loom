@@ -354,7 +354,8 @@ class TestRecallTool:
         result = await tool.executor(call)
 
         assert result.success is True
-        assert "No memories stored yet." in result.output
+        assert result.output.startswith("No match.")
+        assert "never happened" in result.output
 
     async def test_type_filter_forwarded(self, semantic, procedural):
         skill = SkillGenome(name="bash_skill", body="use bash for automation", tags=["bash"])
@@ -386,6 +387,7 @@ class TestRecallTool:
                 score=1.0,
             )
         ])
+        facade.mark_accessed = AsyncMock()
         tool = make_recall_tool(facade)
         call = _make_call("recall", {
             "query": "loom",
@@ -400,6 +402,9 @@ class TestRecallTool:
         kwargs = facade.search.await_args.kwargs
         assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
         assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
+        # Access is recorded by the tool for what it showed, not by search.
+        assert kwargs["mark_accessed"] is False
+        assert [r.key for r in facade.mark_accessed.await_args.args[0]] == ["k"]
 
     async def test_until_without_since_returns_error(self):
         facade = MagicMock()
@@ -690,7 +695,8 @@ class TestMemorySearchEmbeddingTier:
         results = await search.recall("middleware", type="semantic", limit=5)
 
         assert len(results) >= 1
-        assert results[0].metadata.get("method") == "embedding"
+        # #650 S1: routes fuse — the lexical hit no longer hides behind embedding.
+        assert "embedding" in results[0].metadata.get("method", "")
 
     async def test_falls_through_to_bm25_on_embedding_error(self, db_conn, procedural):
         mock_provider = AsyncMock()
@@ -704,17 +710,18 @@ class TestMemorySearchEmbeddingTier:
         results = await search.recall("harness", type="semantic", limit=5)
         assert any(r.key == "bm25:fact" for r in results)
 
-    async def test_falls_through_to_recency_when_no_embedding_no_bm25(
+    async def test_no_match_is_empty_not_recent_entries(
         self, db_conn, procedural
     ):
         sem = SemanticMemory(db_conn)
         await sem.upsert(SemanticEntry(key="recent:1", value="some stored fact"))
 
         search = MemorySearch(sem, procedural)
-        # Chinese query → no BM25 match → recency fallback
+        # #650 S1 / #643: no match is reported as no match, not as the most
+        # recent entries.
         results = await search.recall("查詢完全不相關", type="semantic", limit=5)
-        assert len(results) == 1
-        assert results[0].metadata.get("fallback") is True
+        assert list(results) == []
+        assert results.coverage
 
 
 # ---------------------------------------------------------------------------
