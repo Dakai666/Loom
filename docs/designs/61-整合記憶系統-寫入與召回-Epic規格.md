@@ -225,7 +225,7 @@ recall(ref="前次回傳的引用", limit?)
 - `query` 不要求事先提供來源名稱、日期、工具名稱或 session id。
 - `ref` 用於取得更多原文／周邊脈絡；不需切換到另一組資料庫工具。若同時有互斥或無法遵守的參數，要明確拒絕或說明，不靜默忽略。
 - 日期與 session 是選擇性的縮小範圍條件；明確給定時為硬限制，不讓模型自行放寬。
-- `domain`／`temporal` 只縮小記憶這一路；對話沒有這兩軸，照常搜尋，覆蓋行註明篩選只套用於記憶。不得因模型填了只屬於某一路的選填欄位，就整路關掉其他來源——live 實測（2026-10-29）模型每次 recall 都習慣性填滿這兩欄，使對話路由從未被查到。
+- `domain`／`temporal` **不再是 `recall` 的參數**（S1 PR-C，DK 裁決）。r2.2 曾改為「只縮小記憶這一路」：live 實測時模型每次 recall 都習慣性填滿這兩欄，使對話路由從未被查到。PR-C 的 agent 迴圈量測中，即使說明已寫「沒有特定需求就省略」，gpt-6.1-terra 仍在 28／28 次呼叫填了這兩欄，猜錯的 domain 也擋掉了正確的記憶（模型已找對搜尋詞）。現在工具 schema 移除這兩欄；模型若仍送出，忽略並在覆蓋行註明。`MemorySearch.recall` 保留這兩個參數給內部呼叫者。
 - 自然語言日期由主模型轉成既有時間參數；不先新增一個必跑的 LLM query router 或大量關鍵字判斷規則。
 - `recall_period` 與 `ledger_recall` 暫作既有呼叫者的相容入口。相同 reader 與輸出原語由新 recall 使用；完成等價驗收後，移出主 agent 的預設工具清單與教學 prompt。
 - 精確審計、統計、raw event 查詢可保留管理／除錯入口；不要求日常回憶記住這些入口。
@@ -442,3 +442,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r2.1**（2026-10-29）：S1 PR-A review（#652，Codex）修正：候選預算改按回合計；fork 去重改為可證明同源才合併；單字掃描改依事件時間並以 `since`／`until` 續查（新增 `session_log(created_at)` 索引）；工具輸出加整次 4,000 字硬上限與截斷說明。複審（Codex）追加：候選名額改按去重後的獨立來源計（分批補取、檢查上限 160 回合並明示）；存取只記實際送進輸出的項目（§6.3）。
 - **r2.2**（2026-10-29）：§6.1 `domain`／`temporal` 改為只縮小記憶路由、不再排除對話路由（PR-A 上線後 live 實測：模型習慣性填滿選填篩選欄位，對話路由因此全被排除）。
 - **r2.3**（2026-10-29）：S1 PR-B（`recall(ref=...)`）定案顯示 ref 的版本後綴、`log:` 展開的鄰近回合與預算分配、`action_records` join 標示、工具層互斥與「ignored with ref」說明，以及 `ledger_turn_id` 寫入（§4.2）。
+- **r2.4**（2026-10-29）：S1 PR-C：`compress_session` 預設關閉（`[memory] compress_session`，可開回一個版本）；`memorize` 回覆附 `mem:` ref；`domain`／`temporal` 移出 `recall` schema（§6.1）；新增 agent 迴圈層量測腳本 `scripts/memory_s1_agent_loop.py`。

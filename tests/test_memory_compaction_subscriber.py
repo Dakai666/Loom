@@ -22,6 +22,7 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
 import pytest_asyncio
 
 from loom.core.events import CompressDone
@@ -63,6 +64,7 @@ def _make_stub(
     threshold: int = 30,
     fact_count: int = 4,
     raise_in_compress: bool = False,
+    compress_enabled: bool = True,
 ):
     """Bind the three #336 helpers from LoomSession onto an Any-shaped
     stub. Avoids spinning up a full LoomSession (which needs router /
@@ -86,6 +88,9 @@ def _make_stub(
     s._governor = None
     s._telemetry = None
     s._episodic_compress_threshold = threshold
+    # These tests cover the compaction mechanics, so they switch it on;
+    # the #650 S1 default (off) is pinned in the tests below.
+    s._compress_session_enabled = compress_enabled
     s._compaction_lock = asyncio.Lock()
     s._pending_compactions: list[Any] = []
     s._ledger_store = None  # subscriber path tests set this when needed
@@ -142,6 +147,38 @@ def _signal_subscriber_ready(ledger: LedgerStore, monkeypatch) -> asyncio.Event:
 
     monkeypatch.setattr(ledger, "subscribe", _subscribe_and_signal)
     return ready
+
+
+# ---------------------------------------------------------------------------
+# #650 S1 — compress_session is off by default
+# ---------------------------------------------------------------------------
+
+
+async def test_compaction_is_off_unless_switched_on(monkeypatch) -> None:
+    """Neither the turn-driven check nor force_compact (Discord resume /
+    daily) distils anything while [memory] compress_session is off."""
+    s = _make_stub(ep_count=500, threshold=30, compress_enabled=False)
+    monkeypatch.setattr(s._session_module, "compress_session", s._fake_compress)
+    await s._run_compaction_check()
+    await s.force_compact()
+    assert s.compress_called == 0
+    assert s._pending_compactions == []
+
+
+@pytest.mark.parametrize("memory_cfg, expected", [
+    ({}, False),
+    ({"compress_session": False}, False),
+    ({"compress_session": True}, True),
+])
+def test_compress_session_switch_defaults_off(monkeypatch, tmp_path, memory_cfg, expected) -> None:
+    from loom.core import session as session_module
+    from loom.core.session import LoomSession
+
+    monkeypatch.setenv("HOME", str(tmp_path))  # never touch the real ~/.loom
+    monkeypatch.setattr(session_module, "build_router", lambda *a, **k: types.SimpleNamespace())
+    monkeypatch.setattr(session_module, "_load_loom_config", lambda: {"memory": memory_cfg})
+    session = LoomSession(model="gpt-test", db_path=str(tmp_path / "m.db"), workspace=tmp_path)
+    assert session._compress_session_enabled is expected
 
 
 # ---------------------------------------------------------------------------

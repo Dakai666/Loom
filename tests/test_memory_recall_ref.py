@@ -479,3 +479,58 @@ async def test_tool_reports_an_unresolved_ref_as_a_failed_read(tmp_path):
         tool = make_recall_tool(_Facade())  # type: ignore[arg-type]
         res = await tool.executor(_tool_call({"ref": "mem:does:not:exist"}))
     assert not res.success and "mem:does:not:exist" in res.error
+
+
+async def test_memorize_replies_with_a_ref_that_reads_back_unrevised(tmp_path):
+    """spec 61 §5.2.1: memorize answers with the mem: ref recall would show."""
+    import re
+
+    from loom.core.memory.episodic import EpisodicMemory
+    from loom.core.memory.facade import MemoryFacade
+    from loom.platform.cli.tools import make_memorize_tool
+
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        semantic, procedural = SemanticMemory(db), ProceduralMemory(db)
+        search = MemorySearch(semantic, procedural)
+        facade = MemoryFacade(semantic=semantic, procedural=procedural,
+                              episodic=EpisodicMemory(db), search=search)
+        tool = make_memorize_tool(facade)
+        call = _tool_call({"key": "user:kettle", "value": "the kettle whistles at dawn"})
+        call.tool_name = "memorize"
+        res = await tool.executor(call)
+        assert res.success, res.error
+        ref = re.search(r"ref: (mem:\S+)", res.output)[1]
+        out = await search.expand(ref)
+    assert out.found and "the kettle whistles at dawn" in out.text and "revised" not in out.text
+
+
+async def test_recall_ignores_habitual_axis_filters_and_says_so(tmp_path):
+    """PR-C measurement: the model set domain/temporal on 28/28 calls and a
+    guessed domain hid the right fact. They are no longer recall parameters."""
+    from loom.platform.cli.tools import make_recall_tool
+
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        semantic = SemanticMemory(db)
+        await semantic.upsert(SemanticEntry(key="s0:batch", value="Cedar batch limit is 12",
+                                            domain="knowledge"))
+        search = MemorySearch(semantic, ProceduralMemory(db))
+
+        class _Facade:
+            async def search(self, query, *, kind="all", limit=5, since=None, until=None,
+                             mark_accessed=True, **axes):
+                assert not axes  # the tool never forwards an axis filter
+                return await search.recall(query, type=kind, limit=limit, since=since,
+                                           until=until, mark_accessed=mark_accessed)
+
+            async def mark_accessed(self, results):
+                await search.mark_accessed(results)
+
+        tool = make_recall_tool(_Facade())  # type: ignore[arg-type]
+        assert "domain" not in tool.input_schema["properties"]
+        assert "temporal" not in tool.input_schema["properties"]
+        res = await tool.executor(_tool_call(
+            {"query": "Cedar batch", "domain": "project", "temporal": "recent"}))
+    assert res.success and "mem:s0:batch" in res.output
+    assert "ignored: domain, temporal" in res.output
