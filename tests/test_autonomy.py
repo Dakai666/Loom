@@ -1212,3 +1212,51 @@ class TestRunAgentAttachments:
         reports = [n for n in received if n.type == NotificationType.REPORT]
         assert len(reports) == 1
         assert reports[0].attachments == []
+
+
+@pytest.mark.parametrize("stop_reason, alerted", [
+    ("repeat_call_limit", True),
+    ("max_tokens", True),
+    ("sensitive_image_stripped", False),  # self-heal, not a failure
+])
+async def test_dropped_autonomy_turn_alerts_instead_of_reading_as_completed(stop_reason, alerted):
+    """#654: an unattended turn the harness ended must reach the operator."""
+    from loom.autonomy.daemon import AutonomyDaemon
+    from loom.autonomy.planner import ActionDecision, PlannedAction
+    from loom.core.events import TurnDropped
+    from loom.core.harness.permissions import TrustLevel
+    from loom.notify.confirm import ConfirmFlow
+    from loom.notify.router import BaseNotifier, NotificationRouter
+
+    async def mock_stream(prompt, **_):
+        yield TurnDropped(
+            stop_reason=stop_reason, tool_count=10,
+            provider_error_detail="post was called 10 times this turn",
+        )
+
+    session = MagicMock()
+    session.stream_turn = mock_stream
+    session._memory = None
+    received: list = []
+
+    class _Capture(BaseNotifier):
+        channel = "test_capture"
+        async def send(self, n): received.append(n)
+
+    router = NotificationRouter()
+    router.register(_Capture())
+    daemon = AutonomyDaemon(
+        notify_router=router, confirm_flow=ConfirmFlow(send_fn=lambda n: None),
+        loom_session=session,
+    )
+    await daemon._execute_plan(PlannedAction(
+        trigger_name="morning", intent="x", decision=ActionDecision.EXECUTE,
+        trust_level=TrustLevel.SAFE, prompt="x",
+    ))
+
+    alerts = [n for n in received if n.type == NotificationType.ALERT]
+    if alerted:
+        assert len(alerts) == 1
+        assert stop_reason in alerts[0].body and "10 times" in alerts[0].body
+    else:
+        assert alerts == []

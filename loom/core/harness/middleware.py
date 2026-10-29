@@ -10,6 +10,7 @@ Execution order (outermost → innermost):
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -415,6 +416,9 @@ class JITRetrievalMiddleware(Middleware):
             "jit_spilled": True,
             "jit_ref": ref,
             "jit_original_size": size,
+            # Lets RepeatCallTracker (#654) compare spilled outputs: the
+            # placeholder's ref is unique per call, the content is not.
+            "jit_digest": hashlib.sha256(output_str.encode("utf-8", "replace")).hexdigest(),
         }
         return ToolResult(
             call_id=result.call_id,

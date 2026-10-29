@@ -131,6 +131,7 @@ from loom.core.memory.pulse import (
 )
 from loom.core.memory.search import MemorySearch
 from loom.core.memory.prediction_settle import format_settlement_suffix
+from loom.core.harness.repeat_guard import RepeatCallTracker
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
 from loom.core.memory.store import SQLiteStore
@@ -839,6 +840,9 @@ class LoomSession:
         self._pending_verdicts: list[str] = []
         # #528: in-session `predict` verdicts keyed by the settling call id.
         self._bet_settlements: dict[str, list[str]] = {}
+        # #654: identical (tool, args, result) repeats within a turn get a
+        # reminder on the tool result. Reset at every stream_turn start.
+        self._repeat_calls = RepeatCallTracker()
         # Issue #281 P3 Hook G/A — MemoryPulse appends PulseRecords here,
         # drained as <system-reminder> alongside verdicts in stream_turn.
         # Records (vs. bare strings) so Issue #377 can persist pulse_type
@@ -2022,6 +2026,7 @@ class LoomSession:
         # batches).
         self._call_metadata.clear()
         self._envelope_metadata.clear()
+        self._repeat_calls.reset()
         if self._ledger_emitter is not None:
             _ledger_turn_token = set_turn_id(_turn_id_v2)
             _ledger_corr_token = set_correlation(_turn_corr_id)
@@ -2661,7 +2666,7 @@ class LoomSession:
                                 self.model, tu.id,
                                 tool_output + format_settlement_suffix(
                                     getattr(self, "_bet_settlements", {}).pop(tu.id, [])
-                                ),
+                                ) + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
                             # see_image (agent vision): if the tool returned an
@@ -2755,7 +2760,7 @@ class LoomSession:
                                 self.model, tu.id,
                                 tool_output + format_settlement_suffix(
                                     getattr(self, "_bet_settlements", {}).pop(tu.id, [])
-                                ),
+                                ) + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
                             # see_image (agent vision): if the tool returned an
@@ -2802,6 +2807,24 @@ class LoomSession:
                             await self._telemetry.maybe_flush()
                         except Exception as exc:
                             logger.debug("Telemetry flush deferred: %s", exc)
+
+                    # #654: hard stop for an identical-call loop. Checked after
+                    # the whole batch so every tool call already has its result.
+                    if self._repeat_calls.limit_hit is not None:
+                        logger.warning(
+                            "stream_turn: repeated identical tool call — ending turn (%s)",
+                            self._repeat_calls.limit_hit,
+                        )
+                        yield TurnDropped(
+                            stop_reason="repeat_call_limit",
+                            tool_count=tool_count,
+                            provider_error_detail=self._repeat_calls.limit_hit,
+                        )
+                        _stop_reason = "repeat_call_limit"
+                        # The HITL block below is skipped; a pause requested
+                        # during this batch must not fire in the next turn.
+                        self._pause_requested = False
+                        break
 
                     # Check budget after tool results are appended — the next LLM
                     # call in this loop will include them and may push over the limit.
