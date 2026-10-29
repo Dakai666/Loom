@@ -152,6 +152,23 @@ class TestModelThinkingStarted:
 
 
 class TestBuildRouter:
+    @pytest.fixture(autouse=True)
+    def _isolate_router_inputs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from loom.core import session as session_module
+        from loom.core.cognition import router as router_module
+
+        # get_default_model has its own loader; use each test's patched config.
+        monkeypatch.setattr(
+            router_module, "load_loom_config", lambda: session_module._load_loom_config(),
+        )
+        # build_router also falls back to os.environ after its patched _load_env.
+        for name in (
+            "MINIMAX_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+            "OLLAMA_BASE_URL", "LMSTUDIO_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
     def test_registers_openai_provider_from_env(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
 
