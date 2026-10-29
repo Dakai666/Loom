@@ -1355,6 +1355,11 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         output = expansion.text
         if ignored:
             output += f"\n(ignored with ref: {', '.join(ignored)})"
+        if not expansion.found:
+            # A ref that resolves to nothing is a failed read, not a recall
+            # (#655: success must mean the result, not that the call ran).
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=output)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output=output)
 

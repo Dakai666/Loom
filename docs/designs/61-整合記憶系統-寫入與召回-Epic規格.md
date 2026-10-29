@@ -122,9 +122,9 @@ flowchart TD
 | `log:{session_id}:{turn_index}` | 一個回合的 `session_log` 列；展開給該回合＋前後各一回合（有上限） | append-only，內容不變；session 被刪 → 明示「來源已刪除」 |
 | `mem:{key}` | semantic entry（key 已 UNIQUE） | 附 value 短 hash；展開時 hash 不同 → 明示「已修訂，以下為現版」；沿用 consolidation redirect |
 | `skill:{name}` | skill genome | 附 version |
+| `doc:{collection}/{path}#{chunk}@{digest}` | 文件篇章 | S2 定案 |
 
 S1 PR-B 定案的顯示形式：結果顯示 `mem:{key}@{sha256(value) 前 8 碼}`、`skill:{name}@v{version}`；版本後綴只在顯示與展開時使用，結果本身的身分（RRF 合併與案例評估的鍵）仍是不帶後綴的 `mem:{key}`／`skill:{name}`。展開時不帶後綴的 ref 也接受，此時不做版本比對。
-| `doc:{collection}/{path}#{chunk}@{digest}` | 文件篇章 | S2 定案 |
 
 - 行動脈絡不另設 `act:` ref：`log:` 回合內的 tool 列已帶 `tool_call_id`，展開時 join `action_records` 取 `final_state`／`intent_summary`，必要時唯讀查 ledger。
 - 前進補強：`_log_message` 的 metadata 寫入 `ledger_turn_id`（無 schema 變更）。舊資料只有工具回合能對到 ledger；純文字回合標「無 ledger 關聯」，不猜。
@@ -136,6 +136,9 @@ S1 PR-B 定案的顯示形式：結果顯示 `mem:{key}@{sha256(value) 前 8 碼
   - 字數上限 8,000 字，每個鄰近回合預留 1,200 字，避免工具輸出很多的目標回合把前後回合擠成只剩標題。單列上限：目標回合 2,500 字、鄰近回合 600 字。
   - 每一處截斷都要註明是哪個回合、顯示了幾列中的幾列。
   - tool 列以 `session_id＋tool_call_id` join `action_records`，顯示 `final_state`、`intent_summary` 與 `output_prefix`；擷取時就已截斷的，標「stored output: first N of M chars」。對不到的列標「stored preview only」。
+  - 列數同樣替每個鄰近回合預留 16 列（live 有 250–800+ 列的回合）；某回合一列都沒顯示時，標題只寫「N rows, none shown」，不對沒讀過的列下 ledger 等斷言。標題依實際存在的鄰近回合描述（只有前一回合、只有後一回合或唯一回合）。
+  - 動作紀錄存在但沒有輸出擷取（#569 之前的資料，`output_prefix` 為 NULL）時，回退到 `session_log` 的摘要，標「stored preview only — no captured output」。
+  - ref 讀不到時工具回 `success=False`（#655：success 表示讀到了結果，而不只是呼叫有跑完）。`mem:`／`skill:` 展開也套讀取時的秘密遮罩。
   - session 在 `session_log` 已無任何列時，回報「已刪除，或不屬於此 instance」；回合不存在時，回報該 session 實際的回合範圍。
   - 回合標題顯示 `ledger_turn_id`；沒有時明示「no ledger link recorded」。
   - 工具層：`ref` 與 `query` 同時給 → 拒絕；其他填了的篩選欄位不適用於 ref，會在輸出中列為「ignored with ref」而不是報錯（模型習慣填滿選填欄位，見 §6.1）。`recall` 標 `inline_only`，輸出不被 JIT 轉存到 scratchpad。

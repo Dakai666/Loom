@@ -148,6 +148,9 @@ _REF_ROW_CHARS_NEIGHBOUR = 600
 # Chars held back for each neighbour turn, so a tool-heavy target turn
 # cannot reduce "the turns before and after" to bare headers.
 _REF_NEIGHBOUR_RESERVE = 1_200
+# Rows held back for each neighbour turn, for the same reason: the live
+# store has turns of 250–800+ rows that would otherwise take all 128.
+_REF_NEIGHBOUR_ROWS = 16
 
 
 def value_hash(value: str) -> str:
@@ -253,11 +256,15 @@ def _local_stamp(iso: str | None) -> str:
 
 
 def _cut(text: str, limit: int) -> str:
-    """*text* within *limit* chars, with a marker saying how much was cut."""
+    """*text* within *limit* chars, with a marker giving the true shown count."""
     if len(text) <= limit:
         return text
-    marker = f" …[cut: {limit:,} of {len(text):,} chars shown]"
-    return text[:max(0, limit - len(marker))] + marker
+    shown = limit
+    for _ in range(3):  # the marker's own length depends on the number in it
+        marker = f" …[cut: {shown:,} of {len(text):,} chars shown]"
+        shown = max(0, limit - len(marker))
+    marker = f" …[cut: {shown:,} of {len(text):,} chars shown]"
+    return text[:shown] + marker
 
 
 def _split_terms(query: str) -> list[str]:
@@ -456,7 +463,7 @@ class MemorySearch:
             head += f" [{stamp}]"
         lines = [head] + [f"({n})" for n in notes]
         body_room = REF_EXPAND_CHARS - sum(len(l) + 1 for l in lines)
-        lines.append(_cut(entry.value, body_room))
+        lines.append(_cut(_redact_secrets(entry.value) or "", body_room))
         return RefExpansion("\n".join(lines), found=True)
 
     async def _expand_skill(self, name: str, seen_version: int | None) -> RefExpansion:
@@ -474,7 +481,7 @@ class MemorySearch:
                 f"(ref was @v{seen_version}; showing the stored v{skill.version})"
             )
         body_room = REF_EXPAND_CHARS - sum(len(l) + 1 for l in lines)
-        lines.append(_cut(skill.body, body_room))
+        lines.append(_cut(_redact_secrets(skill.body) or "", body_room))
         return RefExpansion("\n".join(lines), found=True)
 
     async def _expand_log(self, session_id: str, turn: int) -> RefExpansion:
@@ -513,29 +520,44 @@ class MemorySearch:
         )
         nxt = (await cur.fetchone())[0]
 
-        # Rows: the target turn first, neighbours take what is left.
-        priority = [t for t in (turn, prev, nxt) if t is not None][:REF_EXPAND_TURNS]
-        rows_by_turn: dict[int, list] = {}
+        # Rows: the target turn first, but each neighbour keeps a share, so
+        # a turn of hundreds of rows cannot leave "before and after" empty.
+        priority = [t for t in (turn, prev, nxt) if t is not None]  # ≤ REF_EXPAND_TURNS
         rows_total: dict[int, int] = {}
-        room = REF_EXPAND_ROWS
         for t in priority:
             cur = await db.execute(
                 "SELECT COUNT(*) FROM session_log WHERE session_id = ? AND turn_index = ?",
                 (session_id, t),
             )
             rows_total[t] = (await cur.fetchone())[0]
+        reserved = {t: min(rows_total[t], _REF_NEIGHBOUR_ROWS) for t in priority if t != turn}
+        limits = {turn: min(rows_total[turn], REF_EXPAND_ROWS - sum(reserved.values()))}
+        spare = REF_EXPAND_ROWS - limits[turn] - sum(reserved.values())
+        for t, keep in reserved.items():
+            extra = min(rows_total[t] - keep, spare)
+            limits[t] = keep + extra
+            spare -= extra
+        rows_by_turn: dict[int, list] = {}
+        for t in priority:
             cur = await db.execute(
                 "SELECT role, content, raw_json, metadata, created_at FROM session_log "
                 "WHERE session_id = ? AND turn_index = ? ORDER BY id LIMIT ?",
-                (session_id, t, room),
+                (session_id, t, limits[t]),
             )
             rows_by_turn[t] = list(await cur.fetchall())
-            room -= len(rows_by_turn[t])
 
         actions = await self._actions_for(db, session_id, rows_by_turn)
 
         # Text: same priority; each row capped so one output cannot eat all.
-        header = f"{ref} — turn {turn} with the turns before and after it"
+        if prev is not None and nxt is not None:
+            around = "with the turn before and the turn after it"
+        elif prev is not None:
+            around = "with the turn before it (no later turn is logged)"
+        elif nxt is not None:
+            around = "with the turn after it (the session's first logged turn)"
+        else:
+            around = "(the only logged turn in this session)"
+        header = f"{ref} — turn {turn} {around}"
         cuts: list[str] = []
         room = REF_EXPAND_CHARS - len(header) - 260  # header + closing note
         rendered: dict[int, list[str]] = {}
@@ -551,15 +573,16 @@ class MemorySearch:
                 row_cap = _REF_ROW_CHARS_NEIGHBOUR
             allowance -= title_room
             used = 0
-            meta_ledger = None
+            metas = []
+            for row in rows_by_turn[t]:
+                try:
+                    metas.append(json.loads(row[3] or "{}"))
+                except ValueError:
+                    metas.append({})
+            meta_ledger = next((m["ledger_turn_id"] for m in metas if m.get("ledger_turn_id")), None)
             lines: list[str] = []
             shown = 0
-            for role, content, raw_json, metadata, _at in rows_by_turn[t]:
-                try:
-                    meta = json.loads(metadata or "{}")
-                except ValueError:
-                    meta = {}
-                meta_ledger = meta_ledger or meta.get("ledger_turn_id")
+            for (role, content, raw_json, _md, _at), meta in zip(rows_by_turn[t], metas):
                 line = _render_log_row(role, content, raw_json, meta, actions)
                 cap = min(row_cap, allowance - used)
                 if cap < 120:
@@ -573,10 +596,16 @@ class MemorySearch:
             omitted = rows_total[t] - shown
             if omitted:
                 cuts.append(f"turn {t}: {omitted} of {rows_total[t]} rows not shown")
-            stamp = _local_stamp(rows_by_turn[t][0][4]) if rows_by_turn[t] else ""
-            ledger = f"ledger {meta_ledger}" if meta_ledger else "no ledger link recorded"
             mark = " (this ref)" if t == turn else ""
-            title = f"── turn {t}{mark} [{stamp}] {ledger}"[:title_room]
+            if not shown:
+                # Nothing of this turn was shown: state only that, not what
+                # its rows might hold.
+                title = f"── turn {t}{mark}: {rows_total[t]} rows, none shown (expansion budget used up)"
+            else:
+                stamp = _local_stamp(rows_by_turn[t][0][4])
+                ledger = f"ledger {meta_ledger}" if meta_ledger else "no ledger link recorded"
+                title = f"── turn {t}{mark} [{stamp}] {ledger}"
+            title = title[:title_room]
             room -= used + len(title) + 1
             rendered[t] = [title] + lines
 
@@ -584,7 +613,10 @@ class MemorySearch:
         for t in sorted(rendered):
             out.extend(rendered[t])
         if cuts:
-            note = "Expansion limits (3 turns, 128 rows, 8,000 chars) cut: " + "; ".join(
+            note = (
+                f"Expansion limits ({REF_EXPAND_TURNS} turns, {REF_EXPAND_ROWS} rows, "
+                f"{REF_EXPAND_CHARS:,} chars) cut: "
+            ) + "; ".join(
                 dict.fromkeys(cuts)
             )
             out.append(_cut(note, 250))
@@ -1081,9 +1113,14 @@ def _render_log_row(role: str, content: str, raw_json: str | None,
         label = f"tool {name} [{state}]"
         if intent:
             label += f" intent: {_redact_secrets(intent)}"
+        if prefix is None:
+            # Action rows before #569 carry no output capture: the
+            # session_log preview is all there is, and it says so.
+            text = _redact_secrets(content) or ""
+            return f"{label} (stored preview only — no captured output): {text}"
         text = _redact_secrets(prefix) or ""
-        if full_len and full_len > len(prefix or ""):
-            label += f" (stored output: first {len(prefix or ''):,} of {full_len:,} chars)"
+        if full_len and full_len > len(prefix):
+            label += f" (stored output: first {len(prefix):,} of {full_len:,} chars)"
         return f"{label}: {text}"
     if role == "assistant" and raw_json:
         try:
@@ -1095,7 +1132,7 @@ def _render_log_row(role: str, content: str, raw_json: str | None,
             for c in calls:
                 fn = c.get("function") or {}
                 args = _redact_secrets(str(fn.get("arguments", ""))) or ""
-                shown.append(f"{fn.get('name', '?')}({args[:200]})")
+                shown.append(f"{fn.get('name', '?')}({_cut(args, 200)})")
             text = (content or "").strip()
             prefix = "" if text in ("", "[tool_use]") else f"{_redact_secrets(text)} "
             return f"assistant: {prefix}[calls {', '.join(shown)}]"

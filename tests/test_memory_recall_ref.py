@@ -135,7 +135,7 @@ async def test_expansion_respects_the_char_budget_and_marks_cuts(tmp_path):
     assert "TARGET" in out.text
     assert "cut" in out.text
     # the target turn is served first; neighbours take what is left
-    assert out.text.count("t") > out.text.count("b")
+    assert out.text.count("t" * 100) > out.text.count("b" * 100) > 0
 
 
 async def test_expansion_caps_rows_and_says_so(tmp_path):
@@ -364,3 +364,118 @@ async def test_a_tool_heavy_target_turn_leaves_room_for_its_neighbours(tmp_path)
         out = await _search(db).expand("log:s1:2")
     assert len(out.text) <= REF_EXPAND_CHARS
     assert "BEFORE-QUESTION" in out.text and "AFTER-QUESTION" in out.text
+
+
+# ── #659 review (opencode, Loom Agent) ───────────────────────────────────────
+
+
+async def test_a_target_turn_over_the_row_budget_leaves_rows_for_its_neighbours(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "user", "BEFORE-QUESTION", metadata={"ledger_turn_id": "turn_b"})
+        for i in range(200):
+            await _log(db, "s1", 2, "assistant", f"r{i}")
+        await _log(db, "s1", 3, "user", "AFTER-QUESTION", metadata={"ledger_turn_id": "turn_a"})
+        out = await _search(db).expand("log:s1:2")
+    assert "BEFORE-QUESTION" in out.text and "AFTER-QUESTION" in out.text
+    titles = {l.split(" ")[2]: l for l in out.text.splitlines() if l.startswith("── turn")}
+    assert "turn_b" in titles["1"] and "turn_a" in titles["3"]
+
+
+async def test_a_turn_with_no_rows_shown_makes_no_claim_about_them(tmp_path, monkeypatch):
+    """With the reserves a neighbour always gets rows; force the defensive
+    path (no reserve) and check its title claims nothing about unread rows."""
+    import loom.core.memory.search as search_module
+
+    monkeypatch.setattr(search_module, "_REF_NEIGHBOUR_ROWS", 0)
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "user", "x", metadata={"ledger_turn_id": "turn_b"})
+        for i in range(200):
+            await _log(db, "s1", 2, "assistant", f"r{i}")
+        out = await _search(db).expand("log:s1:2")
+    title = next(l for l in out.text.splitlines() if l.startswith("── turn 1"))
+    assert "none shown" in title and "ledger" not in title
+
+
+async def test_joined_action_without_a_capture_falls_back_to_the_preview(tmp_path):
+    """Pre-#569 action rows have NULL output_prefix (32k rows live)."""
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "tool", "THE-STORED-PREVIEW",
+                   metadata={"tool_call_id": "old", "tool_name": "fetch"})
+        await db.execute(
+            "INSERT INTO action_records (id, envelope_id, session_id, turn_index, tool_name, "
+            "call_id, final_state, created_at) VALUES ('a','e','s1',1,'fetch','old','memorialized',"
+            "'2026-01-01T00:00:00+00:00')"
+        )
+        await db.commit()
+        out = await _search(db).expand("log:s1:1")
+    assert "THE-STORED-PREVIEW" in out.text
+    assert "memorialized" in out.text and "no captured output" in out.text
+
+
+async def test_header_describes_only_the_neighbours_that_exist(tmp_path):
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "only", 7, "user", "x")
+        await _log(db, "s2", 1, "user", "x")
+        await _log(db, "s2", 2, "user", "y")
+        search = _search(db)
+        alone = (await search.expand("log:only:7")).text.splitlines()[0]
+        first = (await search.expand("log:s2:1")).text.splitlines()[0]
+        last = (await search.expand("log:s2:2")).text.splitlines()[0]
+    assert "only logged turn" in alone and "before" not in alone
+    assert "after" in first and "before" not in first
+    assert "before" in last and "turn after" not in last
+
+
+def test_cut_marker_states_the_true_shown_count():
+    import re
+
+    from loom.core.memory.search import _cut
+
+    out = _cut("z" * 10_000, 500)
+    shown = int(re.search(r"cut: ([\d,]+) of", out)[1].replace(",", ""))
+    assert len(out) <= 500 and out.count("z") == shown
+
+
+async def test_long_tool_call_arguments_are_cut_visibly(tmp_path):
+    raw = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function",
+         "function": {"name": "write", "arguments": json.dumps({"body": "q" * 1000})}},
+    ]}
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        await _log(db, "s1", 1, "assistant", "[tool_use]", raw_json=json.dumps(raw))
+        out = await _search(db).expand("log:s1:1")
+    assert "cut:" in out.text
+
+
+async def test_mem_and_skill_expansions_keep_secret_redaction(tmp_path):
+    secret = "sk-ant-" + "a" * 40
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        semantic, procedural = SemanticMemory(db), ProceduralMemory(db)
+        await semantic.upsert(SemanticEntry(key="k:s", value=f"api_key={secret}"))
+        await procedural.upsert(SkillGenome(name="sk", body=f"use api_key={secret}"))
+        search = MemorySearch(semantic, procedural)
+        mem = await search.expand("mem:k:s")
+        skill = await search.expand("skill:sk")
+    assert secret not in mem.text and secret not in skill.text
+
+
+async def test_tool_reports_an_unresolved_ref_as_a_failed_read(tmp_path):
+    from loom.platform.cli.tools import make_recall_tool
+
+    store = await _store(tmp_path)
+    async with store.connect() as db:
+        search = _search(db)
+
+        class _Facade:
+            async def expand_ref(self, ref, mark_accessed=True):
+                return await search.expand(ref, mark_accessed=mark_accessed)
+
+        tool = make_recall_tool(_Facade())  # type: ignore[arg-type]
+        res = await tool.executor(_tool_call({"ref": "mem:does:not:exist"}))
+    assert not res.success and "mem:does:not:exist" in res.error
