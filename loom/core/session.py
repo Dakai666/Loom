@@ -2228,6 +2228,10 @@ class LoomSession:
             # can't wedge the conversation (the persisted image would
             # otherwise re-trigger the rejection every turn).
             _vision_sensitive_healed = False
+            # Same guard for fetched external content (#660): a text filter
+            # (DeepSeek "Content Exists Risk") refuses the whole request once
+            # a fetched page with bait strings sits in history.
+            _external_redacted = False
 
             # Issue #205: TaskList self-check. On end_turn we inject a reminder
             # at most once per stream_turn if the list still has active nodes,
@@ -2388,7 +2392,32 @@ class LoomSession:
                                 tool_count=tool_count,
                             )
                             continue
-                    raise
+                    # Text moderation: redact fetched external content.
+                    if not _external_redacted:
+                        _external_redacted = True
+                        _redacted = _redact_external_content(self.messages)
+                        if _redacted:
+                            logger.warning(
+                                "provider rejected request on content moderation; "
+                                "redacted %d external tool result(s), retrying: %s",
+                                _redacted, _sc_exc,
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": _EXTERNAL_REDACTED_NOTE,
+                            })
+                            self._sanitize_history()
+                            yield TurnDropped(
+                                stop_reason="external_content_redacted",
+                                retry_count=0,
+                                tool_count=tool_count,
+                            )
+                            continue
+                    raise SensitiveContentError(
+                        "provider content moderation rejected the conversation "
+                        "and self-heal (image strip / external-content redaction) "
+                        f"could not clear it; start a new thread or compact: {_sc_exc}"
+                    ) from _sc_exc
 
                 # Flush any buffered non-think content after each streaming call ends.
                 if _tbuf and not _think_in:
@@ -5123,6 +5152,77 @@ _VISION_SENSITIVE_NOTE = (
     "移除，本輪改以純文字繼續。若你先前已觀察過該圖，可依記憶向使用者說明；否則"
     "請告知使用者該圖無法被處理。]"
 )
+
+
+_EXTERNAL_REDACTED_NOTE = (
+    "[系統通知：模型供應商以內容審查為由拒絕了整個請求。對話中抓取的外部內容"
+    "（網頁 / 搜尋結果）已遮蔽，本輪繼續。外部內容可能刻意埋了觸發安全機制的"
+    "字串；需要時請依記憶說明，不要原樣重抓同一頁。]"
+)
+
+_EXTERNAL_REDACTED_MARKER = "[外部內容已遮蔽：供應商內容審查拒收]"
+
+
+def _is_external_text(text: object) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith("<untrusted_external_content>")
+
+
+def _fetched_ref_reads(messages: list) -> set[str]:
+    """Tool-call ids of ``scratchpad_read`` calls on a fetch_url job body."""
+    from loom.core.jobs.scratchpad import Scratchpad
+
+    ids: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if fn.get("name") != "scratchpad_read":
+                continue
+            try:
+                ref = json.loads(fn.get("arguments") or "{}").get("ref") or ""
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(ref, str) and Scratchpad._strip_uri(ref.strip()).startswith("fetch_"):
+                ids.add(tc.get("id"))
+    return ids
+
+
+def _redact_external_content(messages: list) -> int:
+    """Replace tool results carrying fetched external content with a marker.
+
+    Used by the session self-heal when a provider refuses the request on
+    content moderation (#660). External content is recognised structurally,
+    never by guessing at the text: the ``<untrusted_external_content>``
+    wrapper fetch_url / web_search / scratchpad_read put on it, or — for
+    history written before scratchpad_read kept that wrapper — the result
+    of a ``scratchpad_read`` on a ``fetch_*`` ref. The tool message (and its
+    ``tool_call_id`` pairing) is kept; only its content changes, so later
+    turns don't re-trip the filter.
+
+    Returns the number of tool results redacted.
+    """
+    fetched_reads = _fetched_ref_reads(messages)
+    redacted = 0
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if content == _EXTERNAL_REDACTED_MARKER:
+            continue
+        if msg.get("tool_call_id") in fetched_reads:
+            hit = True
+        elif isinstance(content, list):
+            hit = any(
+                isinstance(b, dict) and b.get("type") == "text" and _is_external_text(b.get("text"))
+                for b in content
+            )
+        else:
+            hit = _is_external_text(content)
+        if hit:
+            msg["content"] = _EXTERNAL_REDACTED_MARKER
+            redacted += 1
+    return redacted
 
 
 def _strip_images_from_messages(messages: list) -> int:

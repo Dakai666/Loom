@@ -4375,6 +4375,15 @@ def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
         except (KeyError, ValueError) as exc:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
+        # A filtered or truncated read of fetched content would otherwise
+        # drop the wrapper sanitize_untrusted_text() put on the stored body —
+        # and with it the only marker the moderation self-heal keys on (#660).
+        # Literal tags can only come from the wrapper (the body's < > are
+        # escaped), so stripping and re-wrapping yields exactly one pair.
+        head = scratchpad.read(ref, max_bytes=len(_SANITIZE_OPEN.encode()))
+        if head.startswith(_SANITIZE_OPEN):
+            body = content.replace(_SANITIZE_OPEN, "").replace(_SANITIZE_CLOSE, "")
+            content = f"{_SANITIZE_OPEN}{body}{_SANITIZE_CLOSE}"
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=content,

@@ -1885,6 +1885,14 @@ class LoomDiscordBot:
                                 "-# 🖼️ 圖片被供應商判定為敏感內容、已自動移除，"
                                 "正以純文字重試…"
                             )
+                        elif event.stop_reason == "external_content_redacted":
+                            # Self-heal (#660): the provider's content filter
+                            # refused the request; fetched external content was
+                            # redacted from history and the turn retries.
+                            drop_msg = (
+                                "-# 🧹 供應商內容審查拒收，已遮蔽抓取的外部內容，"
+                                "正在重試…"
+                            )
                         else:
                             drop_msg = (
                                 f"-# ⚠️ 任務中止：`stop_reason={event.stop_reason}` "

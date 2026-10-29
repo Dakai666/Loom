@@ -58,8 +58,8 @@ class SensitiveContentError(RuntimeError):
 
     Distinct from a transient 5xx: retrying the identical payload can
     never succeed, so this is non-retryable. The session layer catches
-    it to self-heal (strip the offending image from history and retry
-    text-only) rather than wedging the conversation.
+    it to self-heal (strip the offending image, or redact fetched external
+    content, from history and retry) rather than wedging the conversation.
 
     Kept a ``RuntimeError`` subclass so existing broad handlers that
     don't know about it still degrade gracefully.
@@ -71,13 +71,37 @@ def _is_sensitive_content_rejection(exc: BaseException) -> bool:
 
     Conservative on purpose — a generic 5xx, timeout, or rate limit must
     NOT match, or we'd wrongly skip retries on transient failures. Keys
-    off the MiniMax signature: the word ``sensitive`` (as in
-    ``"... image is sensitive ..."``) or its error code ``1026``. The
-    provider mislabels this as HTTP 500, so status alone can't classify
-    it — the message text is the only reliable signal.
+    off provider signatures in the error body:
+
+    * MiniMax: the word ``sensitive`` (as in ``"... image is sensitive
+      ..."``) or its error code ``1026``. Mislabeled as HTTP 500, so status
+      alone can't classify it.
+    * DeepSeek: ``Content Exists Risk`` (HTTP 400) — the whole request is
+      refused when any part of history trips its filter (#660).
     """
     msg = (str(exc) or "").lower()
-    return "sensitive" in msg or "(1026)" in msg
+    return "sensitive" in msg or "(1026)" in msg or "content exists risk" in msg
+
+
+def _echo_thinking_blocks(anthropic_msgs: list[dict]) -> None:
+    """Give every assistant wire message a thinking block (DeepSeek, #660).
+
+    DeepSeek's thinking mode 400s (``content[].thinking ... must be passed
+    back``) when a tool-call round of the current turn has none — which is
+    every round produced before a mid-turn failover from a provider without
+    thinking (ChatGPT). An empty block satisfies the check (live-probed
+    2026-10-29); DeepSeek itself emits empty ones. Never apply to real
+    Anthropic, which rejects unsigned thinking blocks.
+    """
+    for msg in anthropic_msgs:
+        if msg["role"] != "assistant":
+            continue
+        content = msg["content"]
+        if not isinstance(content, list):
+            content = [{"type": "text", "text": content}] if content else []
+        if not any(b.get("type") == "thinking" for b in content):
+            content = [{"type": "thinking", "thinking": ""}, *content]
+        msg["content"] = content
 
 
 def _reduce_tool_result_to_text(content: Any) -> str:
@@ -397,6 +421,12 @@ class AnthropicProvider(LLMProvider):
         # omits the field so the vendor default applies.
         self.effort: str | None = None
 
+    def _wire_messages(self, messages: list[dict]) -> tuple[str | None, list[dict]]:
+        system_text, anthropic_msgs = _to_anthropic_messages(messages)
+        if self.name == "deepseek":
+            _echo_thinking_blocks(anthropic_msgs)
+        return system_text, anthropic_msgs
+
     def supports_effort(self, model: str | None = None) -> bool:
         return (model if model is not None else self.model or "").lower() in self.EFFORT_MODELS
 
@@ -432,7 +462,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict] | None,
         max_tokens: int,
     ) -> LLMResponse:
-        system_text, anthropic_msgs = _to_anthropic_messages(messages)
+        system_text, anthropic_msgs = self._wire_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -554,7 +584,7 @@ class AnthropicProvider(LLMProvider):
         *,
         abort_signal: Any = None,
     ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
-        system_text, anthropic_msgs = _to_anthropic_messages(messages)
+        system_text, anthropic_msgs = self._wire_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
