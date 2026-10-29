@@ -64,3 +64,33 @@ async def test_evidence_the_tool_did_not_show_is_not_a_hit(tmp_path):
     assert "hidden-evidence" in expanded.output
     assert _visible_hit(_gold("mem:tail", "hidden-evidence"),
                         [res.output, expanded.output]) == "ref read"
+
+
+async def test_evidence_after_a_blank_line_inside_a_result_still_counts(tmp_path):
+    """Codex re-review: a value's own paragraphs are not result boundaries,
+    and evidence of the next result must not be credited to the previous."""
+    store = SQLiteStore(str(tmp_path / "m.db"))
+    await store.initialize()
+    async with store.connect() as db:
+        semantic = SemanticMemory(db)
+        await semantic.upsert(SemanticEntry(key="paragraph", value="maple gate\n\nvisible-evidence"))
+        await semantic.upsert(SemanticEntry(key="other", value="maple gate second-evidence"))
+        tool = make_recall_tool(_Facade(MemorySearch(semantic, ProceduralMemory(db))))  # type: ignore[arg-type]
+        res = await tool.executor(ToolCall(
+            tool_name="recall", args={"query": "maple gate"},
+            trust_level=TrustLevel.SAFE, session_id="t"))
+    assert "\n\nvisible-evidence" in res.output
+    assert _visible_hit(_gold("mem:paragraph", "visible-evidence"), [res.output]) == "search"
+    assert _visible_hit(_gold("mem:paragraph", "second-evidence"), [res.output]) is None
+    assert _visible_hit(_gold("mem:other", "visible-evidence"), [res.output]) is None
+    assert _visible_hit(_gold("mem:other", "Coverage"), [res.output]) is None  # trailer is no one's
+
+
+def test_refs_wrapped_in_markdown_or_quotes_are_cited():
+    gold = _gold("log:s0-design:2")
+    for answer in ("見 log:s0-design:2。", "見 `log:s0-design:2`。", "**log:s0-design:2**",
+                   "「log:s0-design:2」", '"log:s0-design:2"'):
+        assert _cited(answer, gold), answer
+    assert not _cited("見 `log:s0-design:20`。", gold)
+    assert _cited("`mem:s0:batch:limit@1a2b3c4d`", _gold("mem:s0:batch:limit"))
+    assert _cited("`skill:brew@v2`", _gold("skill:brew"))

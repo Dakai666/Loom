@@ -66,7 +66,13 @@ class _Facade:
         return await self._search.expand(ref, mark_accessed=mark_accessed)
 
 
-_REF = re.compile(r"(?:log|mem|skill):[^\s，。、；;,)）\]」]+")
+# A ref ends at whitespace, CJK/ASCII punctuation, or a Markdown / quote
+# wrapper (`log:x:2`, **mem:k**, "skill:s") — answers often format refs.
+_REF = re.compile(r"(?:log|mem|skill):[^\s，。、；;,)）\]」`'\"*“”‘’<>]+")
+# A search result's header line, as MemorySearchResult.format() writes it.
+_RESULT_HEAD = re.compile(r"^\[[a-z]+\](?: \[[^\]]*\])?.*\s(?:log|mem|skill):\S+$")
+# Lines the recall tool appends after the results.
+_TRAILER = ("Coverage — ", "Output budget (", "No match.")
 
 
 def _canonical(ref: str) -> str:
@@ -112,13 +118,20 @@ def _shown(outputs: list[str]) -> list[tuple[str, str]]:
             if refs:
                 shown.append((_canonical(refs[0]), out))
             continue
-        for block in out.split("\n\n"):
-            first = block.split("\n", 1)[0]
-            if not first.startswith("["):
-                continue  # coverage / budget / notice lines
-            refs = _REF.findall(first)
-            if refs:
-                shown.append((_canonical(refs[-1]), block))
+        # Results are split on their header lines, not on blank lines: a
+        # value keeps its own paragraphs, and the next header (or the
+        # tool's trailer) is the only boundary.
+        blocks: list[tuple[str, list[str]]] = []
+        open_block = False
+        for line in out.split("\n"):
+            if _RESULT_HEAD.match(line):
+                blocks.append((_canonical(_REF.findall(line)[-1]), [line]))
+                open_block = True
+            elif line.startswith(_TRAILER):
+                open_block = False
+            elif open_block:
+                blocks[-1][1].append(line)
+        shown.extend((ref, "\n".join(lines)) for ref, lines in blocks)
     return shown
 
 
