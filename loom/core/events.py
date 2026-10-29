@@ -188,7 +188,7 @@ class TurnDone:
     # Defaulted fields must follow non-default fields (dataclass rule).
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
-    stop_reason: str = "complete"  # "complete" | "cancelled"
+    stop_reason: str = "complete"  # "complete" | "cancelled" | "repeat_call_limit" (#654)
 
 
 @dataclass

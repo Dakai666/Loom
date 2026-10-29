@@ -10,10 +10,16 @@ that ran 47 minutes and used up the provider quota.
 Nothing in the harness noticed. This tracker counts, per user turn, how many
 times each ``(tool, args, result)`` triple has been seen; from the
 ``THRESHOLD``-th occurrence on, the tool result the model reads carries a
-one-line reminder. Nudge only — the call is never blocked and the turn is
-never ended, so the agent stays the one who corrects course. A call whose
-arguments or result differ is a different triple and is never counted: a
-retry that changes something is legitimate.
+one-line reminder, so the agent gets the chance to correct course itself.
+
+The reminder alone is not trusted to stop a loop — the 384-call turn ignored
+an error message that already named the cause. At ``HARD_LIMIT`` the result
+says the turn is ending, ``limit_hit`` is set, and ``stream_turn`` ends the
+turn once the current tool batch is complete (so every tool call keeps its
+result). The call itself is never blocked.
+
+A call whose arguments or result differ is a different triple and is never
+counted: a retry that changes something is legitimate.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import Any
 from loom.core.harness.middleware import ToolResult
 
 THRESHOLD = 3
+HARD_LIMIT = 10
 
 
 def _digest(tool_name: str, args: dict[str, Any] | None, result: ToolResult) -> str:
@@ -51,12 +58,16 @@ def _digest(tool_name: str, args: dict[str, Any] | None, result: ToolResult) -> 
 class RepeatCallTracker:
     """Turn-scoped counter of identical ``(tool, args, result)`` triples."""
 
-    def __init__(self, threshold: int = THRESHOLD) -> None:
+    def __init__(self, threshold: int = THRESHOLD, hard_limit: int = HARD_LIMIT) -> None:
         self._threshold = threshold
+        self._hard_limit = hard_limit
         self._counts: dict[str, int] = {}
+        self.limit_hit: str | None = None
+        """Set to a one-line description once a triple reaches the hard limit."""
 
     def reset(self) -> None:
         self._counts.clear()
+        self.limit_hit = None
 
     def observe(self, tool_name: str, args: dict[str, Any] | None, result: ToolResult) -> str:
         """Record one completed call; return the suffix for its tool result.
@@ -69,6 +80,18 @@ class RepeatCallTracker:
         self._counts[key] = n
         if n < self._threshold:
             return ""
+        if n >= self._hard_limit:
+            if self.limit_hit is None:
+                self.limit_hit = (
+                    f"{tool_name} was called {n} times this turn with identical "
+                    f"arguments and returned the identical result each time"
+                )
+            return (
+                f"\n\n[harness] This is call #{n} this turn of {tool_name} with "
+                f"identical arguments and the identical result. The harness is "
+                f"ending this turn now. Do not retry this call unchanged; next "
+                f"turn, report what failed or take a different approach."
+            )
         return (
             f"\n\n[harness] This is call #{n} this turn of {tool_name} with "
             f"identical arguments, and it returned the identical result. "

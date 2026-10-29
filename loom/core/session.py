@@ -2808,6 +2808,21 @@ class LoomSession:
                         except Exception as exc:
                             logger.debug("Telemetry flush deferred: %s", exc)
 
+                    # #654: hard stop for an identical-call loop. Checked after
+                    # the whole batch so every tool call already has its result.
+                    if self._repeat_calls.limit_hit is not None:
+                        logger.warning(
+                            "stream_turn: repeated identical tool call — ending turn (%s)",
+                            self._repeat_calls.limit_hit,
+                        )
+                        yield TurnDropped(
+                            stop_reason="repeat_call_limit",
+                            tool_count=tool_count,
+                            provider_error_detail=self._repeat_calls.limit_hit,
+                        )
+                        _stop_reason = "repeat_call_limit"
+                        break
+
                     # Check budget after tool results are appended — the next LLM
                     # call in this loop will include them and may push over the limit.
                     # Refresh block_count first: a parallel-tool batch just
