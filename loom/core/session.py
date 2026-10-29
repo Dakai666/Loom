@@ -403,7 +403,9 @@ def build_router(active_model: str | None = None) -> LLMRouter:
     env = _load_env()
     cfg = _load_loom_config()
     router = LLMRouter()
-    default = get_default_model()
+    # The same cfg as every provider block below — get_default_model() alone
+    # would re-read loom.toml through its own loader (#661).
+    default = get_default_model(cfg)
     requested_model = active_model or default
 
     # MiniMax — Anthropic-compatible endpoint, registered under provider name "minimax"

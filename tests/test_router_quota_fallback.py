@@ -268,8 +268,10 @@ async def test_fallback_provider_not_registered_disables_failover():
 def _build(monkeypatch, cognition: dict, env: dict):
     from loom.core import session
     monkeypatch.setattr(session, "_load_env", lambda: env)
-    monkeypatch.setattr(session, "_load_loom_config", lambda: {"cognition": cognition})
-    monkeypatch.setattr(router_mod, "get_default_model", lambda: "chatgpt/gpt-6.1-terra")
+    # The default model travels in the same config build_router reads (#661),
+    # so no separate get_default_model stub is needed.
+    cfg = {"cognition": {"default_model": "chatgpt/gpt-6.1-terra", **cognition}}
+    monkeypatch.setattr(session, "_load_loom_config", lambda: cfg)
     return session.build_router()
 
 

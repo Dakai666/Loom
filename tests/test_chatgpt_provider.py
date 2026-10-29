@@ -213,8 +213,10 @@ def test_chatgpt_effort_does_not_silently_downgrade_max_or_ultra():
 def test_build_router_registers_chatgpt_separately_and_backup_stays_explicit(monkeypatch):
     from loom.core import session
     monkeypatch.setattr(session, "_load_env", lambda: {})
-    monkeypatch.setattr(session, "_load_loom_config", lambda: {"providers": {"codex": {"enabled": True}}})
-    monkeypatch.setattr("loom.core.cognition.router.get_default_model", lambda: "chatgpt/model-a")
+    monkeypatch.setattr(session, "_load_loom_config", lambda: {
+        "cognition": {"default_model": "chatgpt/model-a"},  # one config source (#661)
+        "providers": {"codex": {"enabled": True}},
+    })
     router = session.build_router()
     assert router.get_provider("chatgpt/model-a").name == "chatgpt"
     assert router.get_provider("codex/model-a").name == "codex"

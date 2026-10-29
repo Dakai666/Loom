@@ -151,7 +151,40 @@ class TestModelThinkingStarted:
         assert tool_end_index < after_tool_index < text_index
 
 
+# Every provider credential build_router can pick up from the process
+# environment as well as from .env (#661).
+_PROVIDER_ENV = (
+    "MINIMAX_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY", "OLLAMA_BASE_URL", "LMSTUDIO_BASE_URL",
+)
+
+
 class TestBuildRouter:
+    @pytest.fixture(autouse=True)
+    def _no_ambient_providers(self, monkeypatch: pytest.MonkeyPatch):
+        """Each test states its providers; none leak in from the shell (#661).
+
+        The config side needs no patch: build_router reads the default model
+        from the same (patched) config as everything else.
+        """
+        for name in _PROVIDER_ENV:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_default_model_comes_from_the_same_config(self, monkeypatch: pytest.MonkeyPatch):
+        """#661: build_router must not re-read loom.toml behind the patched
+        config — a real default of chatgpt/… used to register a provider."""
+        from loom.core import session as session_module
+        import loom.core.cognition.router as router_module
+
+        monkeypatch.setattr(router_module, "load_loom_config",
+                            lambda: {"cognition": {"default_model": "chatgpt/gpt-6.1-terra"}})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "MiniMax-M2.7"},
+        })
+        with pytest.raises(RuntimeError, match="No LLM provider configured"):
+            session_module.build_router()
+
     def test_registers_openai_provider_from_env(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
 
