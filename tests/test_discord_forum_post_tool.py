@@ -549,3 +549,31 @@ async def test_read_zero_id_falls_back_to_default_forum():
 
     assert res.success, res.error
     client.get_channel.assert_called_once_with(1515038365085470781)
+
+
+async def test_read_zero_thread_id_lists_instead_of_reading_post_zero():
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.threads = [_post(1, "晨報", "2026-10-29T01:00:00+00:00")]
+    forum.archived_threads = _async_iter([])
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=forum)
+
+    tool = make_read_discord_forum_tool(client, default_forum_id=1515038365085470781)
+    res = await tool.executor(ToolCall(
+        tool_name="read_discord_forum",
+        args={"forum_channel_id": 0, "thread_id": 0},
+        trust_level=TrustLevel.SAFE,
+        session_id="test-session",
+    ))
+
+    assert res.success, res.error
+    assert res.output["count"] == 1
+    client.get_channel.assert_called_once_with(1515038365085470781)
+
+
+def test_validate_bool_id_is_rejected_not_read_as_one():
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": True},
+        has_default_forum=True,
+    )
+    assert err and "Invalid" in err
