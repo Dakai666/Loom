@@ -17,6 +17,7 @@ Contract:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -198,7 +199,7 @@ async def _session(monkeypatch, tmp_path: Path, script: list[list[dict]]):
                 "role": "assistant", "content": None if uses else "done",
                 **({"tool_calls": [
                     {"id": u.id, "type": "function",
-                     "function": {"name": u.name, "arguments": "{}"}} for u in uses
+                     "function": {"name": u.name, "arguments": json.dumps(u.args)}} for u in uses
                 ]} if uses else {}),
             },
         )
@@ -307,5 +308,27 @@ async def test_hard_limit_does_not_carry_into_the_next_turn(monkeypatch, tmp_pat
         events = [e async for e in session.stream_turn("second")]
         assert len(runs) == HARD_LIMIT + 1
         assert [e.stop_reason for e in events if isinstance(e, TurnDone)] == ["complete"]
+    finally:
+        await session.stop()
+
+
+async def test_pause_requested_in_the_final_batch_does_not_leak(monkeypatch, tmp_path):
+    """The hard stop skips the HITL block; a pause() that lands during the
+    final batch must not fire after the next turn's first batch."""
+    session, _ = await _session(monkeypatch, tmp_path, [[{"id": 0}]] * HARD_LIMIT)
+    try:
+        tracker = session._repeat_calls
+        orig = tracker.observe
+
+        def observe(name, args, result):
+            suffix = orig(name, args, result)
+            if tracker.limit_hit:
+                session._pause_requested = True  # pause() arrives mid-batch
+            return suffix
+
+        tracker.observe = observe
+        async for _ in session.stream_turn("post"):
+            pass
+        assert session._pause_requested is False
     finally:
         await session.stop()

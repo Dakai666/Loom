@@ -2821,6 +2821,9 @@ class LoomSession:
                             provider_error_detail=self._repeat_calls.limit_hit,
                         )
                         _stop_reason = "repeat_call_limit"
+                        # The HITL block below is skipped; a pause requested
+                        # during this batch must not fire in the next turn.
+                        self._pause_requested = False
                         break
 
                     # Check budget after tool results are appended — the next LLM

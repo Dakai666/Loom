@@ -32,6 +32,7 @@ from loom.autonomy.maintenance import (
 from loom.autonomy.planner import ActionPlanner, PlannedAction, ActionDecision
 from loom.autonomy.triggers import CronTrigger, EventTrigger, ConditionTrigger
 from loom.autonomy.schedules import DEFAULT_SCHEDULES_PATH, load_schedules
+from loom.core.events import TurnDropped
 from loom.core.infra import AbortController, wait_aborted
 from loom.notify.confirm import ConfirmFlow
 from loom.notify.router import NotificationRouter
@@ -418,6 +419,7 @@ class AutonomyDaemon:
         # covered by existing scope grants (no human to prompt).
         try:
             output_chunks: list[str] = []
+            drops: list[TurnDropped] = []
             async for event in self._session.stream_turn(
                 plan.prompt,
                 abort_signal=self._abort.signal,
@@ -426,12 +428,35 @@ class AutonomyDaemon:
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
                     output_chunks.append(event.text)
+                # A dropped turn (e.g. #654 repeat_call_limit) must not read
+                # as "completed" — nobody is watching an unattended turn.
+                # sensitive_image_stripped is a self-heal, not a failure.
+                if isinstance(event, TurnDropped) and event.stop_reason != "sensitive_image_stripped":
+                    drops.append(event)
                 # ActionStateChange / ActionRolledBack events are silently
                 # consumed — daemon doesn't need lifecycle visualization.
 
             thread_id = plan.context.get("notify_thread_id", 0)
             response = "".join(output_chunks).strip()
-            logger.info("[autonomy] trigger=%s — completed (%d chars)", plan.trigger_name, len(response))
+            if drops:
+                summary = "; ".join(
+                    f"{d.stop_reason}"
+                    + (f" — {d.provider_error_detail[:300]}" if d.provider_error_detail else "")
+                    for d in drops
+                )
+                logger.warning(
+                    "[autonomy] trigger=%s — turn dropped (%d chars): %s",
+                    plan.trigger_name, len(response), summary,
+                )
+                await self._notify.send(Notification(
+                    type=NotificationType.ALERT,
+                    title=f"Autonomy turn dropped: {plan.trigger_name}",
+                    body=summary[:1000],
+                    trigger_name=plan.trigger_name,
+                    thread_id=plan.context.get("notify_thread_id", 0),
+                ))
+            else:
+                logger.info("[autonomy] trigger=%s — completed (%d chars)", plan.trigger_name, len(response))
 
             attachments = _resolve_attachments(
                 self._session.workspace,
