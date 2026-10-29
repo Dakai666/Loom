@@ -53,6 +53,24 @@ def resolve_news_forum_id() -> int | None:
         return None
 
 
+def _positive_channel_id(raw: Any) -> int | None:
+    """Coerce a model-supplied channel id to a usable int, or ``None``.
+
+    ``0`` and negatives mean "not supplied". An ``integer`` schema field
+    invites the model to fill a blank with 0 when it does not know the value,
+    and ``0 is not None`` was enough to shadow ``default_forum_id`` — turning
+    every post into ``404 Unknown Channel`` and provoking 384 identical
+    retries in one turn (2026-10-29 morning-briefing incident).
+
+    Malformed input still raises ``TypeError``/``ValueError`` so callers can
+    answer "Invalid 'forum_channel_id'" instead of silently defaulting.
+    """
+    if raw is None:
+        return None
+    value = int(raw)
+    return value if value > 0 else None
+
+
 # Discord SelectMenu hard limits — surface as constants so callers and tests
 # can reference them without re-deriving from the API docs.
 _SELECT_MAX_OPTIONS = 25
@@ -533,7 +551,15 @@ def _validate_forum_post_args(args: dict[str, Any], *, has_default_forum: bool) 
     if not isinstance(content, str) or not content:
         return "Missing or empty 'content'."
 
-    if args.get("forum_channel_id") is None and not has_default_forum:
+    raw_fid = args.get("forum_channel_id")
+    if raw_fid is not None:
+        try:
+            explicit_forum = _positive_channel_id(raw_fid)
+        except (TypeError, ValueError):
+            return "Invalid 'forum_channel_id'."
+        if explicit_forum is None and not has_default_forum:
+            return "No forum channel — pass 'forum_channel_id' or set DISCORD_NEWS_FORUM_ID."
+    elif not has_default_forum:
         return "No forum channel — pass 'forum_channel_id' or set DISCORD_NEWS_FORUM_ID."
 
     files = args.get("files")
@@ -605,9 +631,10 @@ def make_create_discord_forum_post_tool(
         if err:
             return ToolResult(call.id, call.tool_name, False, error=err)
 
-        raw_fid = call.args.get("forum_channel_id")
         try:
-            forum_id = int(raw_fid) if raw_fid is not None else int(default_forum_id)  # type: ignore[arg-type]
+            forum_id = _positive_channel_id(call.args.get("forum_channel_id"))
+            if forum_id is None:
+                forum_id = int(default_forum_id)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return ToolResult(call.id, call.tool_name, False, error="Invalid 'forum_channel_id'.")
 
@@ -769,11 +796,10 @@ def make_read_discord_forum_tool(
     async def executor(call: ToolCall) -> ToolResult:
         import discord as _discord
 
-        raw_fid = call.args.get("forum_channel_id")
         try:
-            forum_id = int(raw_fid) if raw_fid is not None else (
-                int(default_forum_id) if default_forum_id is not None else None
-            )
+            forum_id = _positive_channel_id(call.args.get("forum_channel_id"))
+            if forum_id is None and default_forum_id is not None:
+                forum_id = int(default_forum_id)
         except (TypeError, ValueError):
             return ToolResult(call.id, call.tool_name, False, error="Invalid 'forum_channel_id'.")
         if forum_id is None:
