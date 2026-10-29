@@ -1748,6 +1748,11 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                         "圖片被供應商判定為敏感、已移除，正以純文字重試…",
                         level="warning",
                     )
+                elif event.stop_reason == "external_content_redacted":
+                    harness.inline(
+                        "供應商內容審查拒收，已遮蔽抓取的外部內容，正在重試…",
+                        level="warning",
+                    )
                 else:
                     message = f"turn dropped: stop_reason={event.stop_reason}"
                     if detail:
