@@ -260,6 +260,15 @@ episodic_retention_days = 7
 # Skills whose EMA confidence drops below this are marked deprecated.
 skill_deprecation_threshold = 0.3
 
+# Routine episodic → semantic distillation (``compress_session``): mid-session
+# compaction, the Discord resume/daily passes, and the session-end pass.
+# Off by default since #650 S1 — past conversation is searched directly from
+# session_log by ``recall`` (and expanded with ``recall(ref=log:...)``), so
+# turning it into facts is no longer the only way to remember it. Kept for one
+# release as a way back; set true to restore the old behaviour.
+compress_session = false
+
+# Only used when compress_session = true.
 # Compress episodic → semantic after this many **uncompressed** entries
 # accumulate per session. Already-compressed rows are excluded from the count
 # and kept on disk (soft-delete) for audit and recovery — TTL prune eventually

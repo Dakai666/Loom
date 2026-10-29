@@ -1244,8 +1244,6 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     The tool performs BM25-ranked retrieval across semantic facts and
     skills via :meth:`MemoryFacade.search`.
     """
-    from loom.core.memory.ontology import DOMAINS, TEMPORALS
-
     async def _recall(call: ToolCall) -> ToolResult:
         query = (call.args.get("query") or "").strip()
         ref = (call.args.get("ref") or "").strip()
@@ -1253,8 +1251,12 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             return await _expand(call, ref, query)
         mem_type = call.args.get("type", "all")
         limit = min(max(int(call.args.get("limit", 5)), 1), 10)
-        domain = (call.args.get("domain") or "").strip().lower() or None
-        temporal = (call.args.get("temporal") or "").strip().lower() or None
+        # #650 S1 PR-C: domain/temporal are not recall parameters any more.
+        # Models filled them on every call (28/28 measured, even with "omit
+        # unless…" wording), and a guessed axis hid the right fact. A model
+        # that still sends them is told they were ignored.
+        ignored_axes = [n for n in ("domain", "temporal")
+                        if call.args.get(n) not in (None, "")]
         try:
             since = _parse_memory_datetime(call.args.get("since"))
             until = _parse_memory_datetime(call.args.get("until"))
@@ -1275,22 +1277,18 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
 
         if mem_type not in ("semantic", "skill", "all"):
             mem_type = "all"
-        # Drop unknown axis filters silently rather than 400 — keeps the
-        # recall hot path forgiving.
-        if domain and domain not in DOMAINS:
-            domain = None
-        if temporal and temporal not in TEMPORALS:
-            temporal = None
 
         results = await memory.search(  # type: ignore[arg-type]
             query, kind=mem_type, limit=limit,
-            domain=domain, temporal=temporal,
             since=since, until=until,
             # Access is recorded below, for what the output actually carries.
             mark_accessed=False,
         )
 
         coverage = getattr(results, "coverage", "")
+        if ignored_axes:
+            coverage += (f" (ignored: {', '.join(ignored_axes)} — not recall "
+                         "parameters; all of memory was searched)")
         if not results:
             # #650 S1: a miss is reported as a miss — never padded with the
             # most recent entries, and never claimed as "it never happened".
@@ -1406,24 +1404,6 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 "limit": {
                     "type": "integer",
                     "description": "Max results to return (1–10, default 5)",
-                },
-                "domain": {
-                    "type": "string",
-                    "enum": ["self", "user", "project", "knowledge"],
-                    "description": (
-                        "Optional — omit unless you specifically want facts "
-                        "from one domain. Narrows memory facts only; skills "
-                        "and conversation are unaffected."
-                    ),
-                },
-                "temporal": {
-                    "type": "string",
-                    "enum": ["ephemeral", "recent", "milestone", "archived"],
-                    "description": (
-                        "Optional — omit unless you specifically want one "
-                        "tier, e.g. 'milestone' for permanent anchors. Narrows "
-                        "memory facts only."
-                    ),
                 },
                 "since": {
                     "type": "string",
@@ -1831,6 +1811,10 @@ def make_memorize_tool(
             msg = f"Memorized: {key!r} (overwrote previous value — history preserved)"
         else:
             msg = f"Memorized: {key!r}"
+        # #650 S1: the same versioned ref recall shows, so the agent can
+        # read this entry back by identity (recall(ref=...)) later.
+        from loom.core.memory.search import value_hash
+        msg += f"\nref: mem:{key}@{value_hash(entry.value)}"
 
         if near_dups:
             dup_lines = []

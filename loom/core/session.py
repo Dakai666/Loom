@@ -753,6 +753,13 @@ class LoomSession:
         self._episodic_compress_threshold: int = (
             config.get("memory", {}).get("episodic_compress_threshold", 30)
         )
+        # #650 S1: session_log is searchable raw experience now, so the
+        # routine episodic→semantic distillation (≈71% of semantic facts) is
+        # off by default. Kept behind this switch for one release as a way
+        # back; the code itself retires in S3.
+        self._compress_session_enabled: bool = bool(
+            config.get("memory", {}).get("compress_session", False)
+        )
         # Issue #181: cache the whole config so ``output_max_tokens`` resolves
         # cheaply on every LLM call, and responds live to ``set_model``.
         self._loom_config: dict = config
@@ -1799,29 +1806,31 @@ class LoomSession:
         _health = self._governor.health if self._governor else None
 
         try:
-            # Step 1: Compress session into semantic memory
-            try:
-                console.print(Rule("[dim]Compressing session to memory…[/dim]"))
-                count = await compress_session(
-                    self.session_id,
-                    self._memory.episodic,
-                    self._memory.semantic,
-                    self.router,
-                    self.model,
-                    governor=self._governor,
-                    telemetry=self._telemetry,
-                )
-                if count:
-                    console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
-                if _health:
-                    _health.record_success("session_compress")
-            except Exception as exc:
-                logger.error(
-                    "Session compress failed — episodic→semantic transfer lost: %s",
-                    exc, exc_info=True,
-                )
-                if _health:
-                    _health.record_failure("session_compress", str(exc))
+            # Step 1: Compress session into semantic memory — off by default
+            # since #650 S1 ([memory] compress_session).
+            if self._compress_session_enabled:
+                try:
+                    console.print(Rule("[dim]Compressing session to memory…[/dim]"))
+                    count = await compress_session(
+                        self.session_id,
+                        self._memory.episodic,
+                        self._memory.semantic,
+                        self.router,
+                        self.model,
+                        governor=self._governor,
+                        telemetry=self._telemetry,
+                    )
+                    if count:
+                        console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
+                    if _health:
+                        _health.record_success("session_compress")
+                except Exception as exc:
+                    logger.error(
+                        "Session compress failed — episodic→semantic transfer lost: %s",
+                        exc, exc_info=True,
+                    )
+                    if _health:
+                        _health.record_failure("session_compress", str(exc))
 
             # Step 2: Skill evolution analysis (Issue #58)
             if self._memory is not None:
@@ -4216,6 +4225,8 @@ class LoomSession:
         configured threshold gate but still avoids a no-op LLM call when
         there are no uncompressed episodic rows.
         """
+        if not self._compress_session_enabled:
+            return  # #650 S1: off by default ([memory] compress_session)
         ep_count = await self._memory.episodic.count_session(
             self.session_id, uncompressed_only=True,
         )
