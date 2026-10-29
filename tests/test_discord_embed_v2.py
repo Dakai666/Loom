@@ -269,3 +269,22 @@ def test_reaction_tool_description_mentions_expressive_shortcodes():
     assert "received=" not in tool.description
     assert "done=" not in tool.description
     assert "failed=" not in tool.description
+
+
+@pytest.mark.asyncio
+async def test_reaction_tool_zero_message_id_falls_back_to_last_user_message():
+    """0 is the model's "don't know" filler, not a message id (PR #657)."""
+    target = MagicMock()
+    target.add_reaction = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=target)
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+
+    tool = make_add_discord_reaction_tool(
+        client, 123, last_user_message_lookup=lambda _: 999,
+    )
+
+    result = await tool.executor(_call(tool.name, {"emoji": "🎉", "message_id": 0}))
+    assert result.success, result.error
+    channel.fetch_message.assert_awaited_once_with(999)

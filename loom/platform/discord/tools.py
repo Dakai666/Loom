@@ -53,6 +53,33 @@ def resolve_news_forum_id() -> int | None:
         return None
 
 
+def _positive_id(raw: Any) -> int | None:
+    """Coerce a model-supplied Discord id (channel / thread / message) to a
+    usable int, or ``None``.
+
+    ``0`` means "not supplied". An ``integer`` schema field
+    invites the model to fill a blank with 0 when it does not know the value,
+    and ``0 is not None`` was enough to shadow ``default_forum_id`` — turning
+    every post into ``404 Unknown Channel`` and provoking 384 identical
+    retries in one turn (2026-10-29 morning-briefing incident).
+
+    Malformed input still raises ``TypeError``/``ValueError`` so callers can
+    answer "Invalid '<field>'" instead of silently defaulting. ``bool`` is
+    malformed too — ``int(True)`` would be a real-looking id 1 — and so is a
+    ``float``: a 19-digit snowflake does not survive float precision
+    (``int(1515038365085470781.0)`` is ``...720``). Negatives are malformed,
+    not "not supplied".
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (bool, float)):
+        raise TypeError(f"{type(raw).__name__} is not a Discord id")
+    value = int(raw)
+    if value < 0:
+        raise ValueError("negative Discord id")
+    return value or None
+
+
 # Discord SelectMenu hard limits — surface as constants so callers and tests
 # can reference them without re-deriving from the API docs.
 _SELECT_MAX_OPTIONS = 25
@@ -227,7 +254,10 @@ def make_add_discord_reaction_tool(
                 error="Discord channel/thread not found or accessible.",
             )
 
-        message_id = call.args.get("message_id")
+        try:
+            message_id = _positive_id(call.args.get("message_id"))
+        except (TypeError, ValueError):
+            return ToolResult(call.id, call.tool_name, False, error="Invalid message_id.")
         if message_id is None:
             message_id = last_user_message_lookup(thread_id)
         if message_id is None:
@@ -278,7 +308,7 @@ def make_add_discord_reaction_tool(
                 },
                 "message_id": {
                     "type": "integer",
-                    "description": "Optional. Defaults to the most recent user message in the thread.",
+                    "description": "Optional — omit to react to the most recent user message in the thread.",
                 },
             },
             "required": ["emoji"],
@@ -533,7 +563,15 @@ def _validate_forum_post_args(args: dict[str, Any], *, has_default_forum: bool) 
     if not isinstance(content, str) or not content:
         return "Missing or empty 'content'."
 
-    if args.get("forum_channel_id") is None and not has_default_forum:
+    raw_fid = args.get("forum_channel_id")
+    if raw_fid is not None:
+        try:
+            explicit_forum = _positive_id(raw_fid)
+        except (TypeError, ValueError):
+            return "Invalid 'forum_channel_id'."
+        if explicit_forum is None and not has_default_forum:
+            return "No forum channel — pass 'forum_channel_id' or set DISCORD_NEWS_FORUM_ID."
+    elif not has_default_forum:
         return "No forum channel — pass 'forum_channel_id' or set DISCORD_NEWS_FORUM_ID."
 
     files = args.get("files")
@@ -605,9 +643,10 @@ def make_create_discord_forum_post_tool(
         if err:
             return ToolResult(call.id, call.tool_name, False, error=err)
 
-        raw_fid = call.args.get("forum_channel_id")
         try:
-            forum_id = int(raw_fid) if raw_fid is not None else int(default_forum_id)  # type: ignore[arg-type]
+            forum_id = _positive_id(call.args.get("forum_channel_id"))
+            if forum_id is None:
+                forum_id = int(default_forum_id)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return ToolResult(call.id, call.tool_name, False, error="Invalid 'forum_channel_id'.")
 
@@ -730,7 +769,7 @@ def make_create_discord_forum_post_tool(
                 },
                 "forum_channel_id": {
                     "type": "integer",
-                    "description": "Optional. Forum channel id; defaults to DISCORD_NEWS_FORUM_ID.",
+                    "description": "Optional — omit to use the configured news forum (DISCORD_NEWS_FORUM_ID). Pass only to target a different forum.",
                 },
                 "files": {
                     "type": "array",
@@ -769,11 +808,10 @@ def make_read_discord_forum_tool(
     async def executor(call: ToolCall) -> ToolResult:
         import discord as _discord
 
-        raw_fid = call.args.get("forum_channel_id")
         try:
-            forum_id = int(raw_fid) if raw_fid is not None else (
-                int(default_forum_id) if default_forum_id is not None else None
-            )
+            forum_id = _positive_id(call.args.get("forum_channel_id"))
+            if forum_id is None and default_forum_id is not None:
+                forum_id = int(default_forum_id)
         except (TypeError, ValueError):
             return ToolResult(call.id, call.tool_name, False, error="Invalid 'forum_channel_id'.")
         if forum_id is None:
@@ -783,12 +821,11 @@ def make_read_discord_forum_tool(
             )
 
         # Detail mode: read one post back.
-        thread_id = call.args.get("thread_id")
-        if thread_id is not None:
-            try:
-                tid = int(thread_id)
-            except (TypeError, ValueError):
-                return ToolResult(call.id, call.tool_name, False, error="Invalid 'thread_id'.")
+        try:
+            tid = _positive_id(call.args.get("thread_id"))
+        except (TypeError, ValueError):
+            return ToolResult(call.id, call.tool_name, False, error="Invalid 'thread_id'.")
+        if tid is not None:
             thread = client.get_channel(tid)
             if thread is None:
                 try:
@@ -880,11 +917,11 @@ def make_read_discord_forum_tool(
             "properties": {
                 "forum_channel_id": {
                     "type": "integer",
-                    "description": "Optional. Forum channel id; defaults to DISCORD_NEWS_FORUM_ID.",
+                    "description": "Optional — omit to use the configured news forum (DISCORD_NEWS_FORUM_ID). Pass only to target a different forum.",
                 },
                 "thread_id": {
                     "type": "integer",
-                    "description": "Optional. If given, read this post's body instead of listing.",
+                    "description": "Optional — omit to list recent posts. Pass a post id only to read that one post's body.",
                 },
                 "limit": {
                     "type": "integer",

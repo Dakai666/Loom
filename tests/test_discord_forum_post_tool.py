@@ -482,3 +482,116 @@ def test_read_tool_definition_metadata():
     tool = make_read_discord_forum_tool(client, default_forum_id=1)
     assert tool.name == "read_discord_forum"
     assert tool.trust_level == TrustLevel.SAFE
+
+
+# ── channel id 0 must never shadow the configured default ────────────────────
+# 2026-10-29 morning-briefing incident: the model filled the optional
+# `forum_channel_id` with 0, `0 is not None` won over `default_forum_id`, and
+# every post became 404 Unknown Channel — 384 identical retries in one turn.
+
+
+def test_validate_zero_id_with_default_is_accepted():
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": 0},
+        has_default_forum=True,
+    )
+    assert err is None
+
+
+def test_validate_zero_id_without_default_reports_missing_forum():
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": 0},
+        has_default_forum=False,
+    )
+    assert err and "No forum channel" in err
+
+
+def test_validate_malformed_id_still_rejected():
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": "not-an-int"},
+        has_default_forum=True,
+    )
+    assert err and "Invalid" in err
+
+
+async def test_post_zero_id_falls_back_to_default_forum(tmp_path: Path):
+    forum, thread = _forum_with_thread()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=forum)
+
+    tool = make_create_discord_forum_post_tool(
+        client, tmp_path, default_forum_id=1515038365085470781
+    )
+    res = await tool.executor(
+        _call({"title": "晨報", "content": "今天的新聞", "forum_channel_id": 0})
+    )
+
+    assert res.success, res.error
+    client.get_channel.assert_called_once_with(1515038365085470781)
+    assert res.output["thread_id"] == 999
+
+
+async def test_read_zero_id_falls_back_to_default_forum():
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.threads = [_post(1, "晨報", "2026-10-29T01:00:00+00:00")]
+    forum.archived_threads = _async_iter([])
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=forum)
+
+    tool = make_read_discord_forum_tool(client, default_forum_id=1515038365085470781)
+    read_call = ToolCall(
+        tool_name="read_discord_forum",
+        args={"forum_channel_id": 0},
+        trust_level=TrustLevel.SAFE,
+        session_id="test-session",
+    )
+    res = await tool.executor(read_call)
+
+    assert res.success, res.error
+    client.get_channel.assert_called_once_with(1515038365085470781)
+
+
+async def test_read_zero_thread_id_lists_instead_of_reading_post_zero():
+    forum = MagicMock(spec=discord.ForumChannel)
+    forum.threads = [_post(1, "晨報", "2026-10-29T01:00:00+00:00")]
+    forum.archived_threads = _async_iter([])
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=forum)
+
+    tool = make_read_discord_forum_tool(client, default_forum_id=1515038365085470781)
+    res = await tool.executor(ToolCall(
+        tool_name="read_discord_forum",
+        args={"forum_channel_id": 0, "thread_id": 0},
+        trust_level=TrustLevel.SAFE,
+        session_id="test-session",
+    ))
+
+    assert res.success, res.error
+    assert res.output["count"] == 1
+    client.get_channel.assert_called_once_with(1515038365085470781)
+
+
+def test_validate_bool_id_is_rejected_not_read_as_one():
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": True},
+        has_default_forum=True,
+    )
+    assert err and "Invalid" in err
+
+
+@pytest.mark.parametrize("bad", [1515038365085470781.0, 1.5, float("inf"), -5])
+def test_validate_float_or_negative_id_is_rejected(bad):
+    """Floats lose snowflake precision (…781.0 → …720) and negatives are
+    garbage — both must error, never post somewhere else or default."""
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": bad},
+        has_default_forum=True,
+    )
+    assert err and "Invalid" in err
+
+
+def test_string_ids_are_still_accepted():
+    from loom.platform.discord.tools import _positive_id
+
+    assert _positive_id(" 1515038365085470781 ") == 1515038365085470781
+    assert _positive_id("0") is None
