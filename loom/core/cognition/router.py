@@ -109,12 +109,16 @@ def _emit(event: FailoverEvent) -> None:
             logger.exception("quota fallback listener failed")
 
 
-def get_default_model() -> str:
+def get_default_model(config: dict | None = None) -> str:
     """
     Return the default model from loom.toml [cognition]default_model,
     falling back to "MiniMax-M3.1-Flash".
+
+    Pass *config* when the caller already loaded it, so one call site never
+    reads two different configs (#661).
     """
-    config = load_loom_config()
+    if config is None:
+        config = load_loom_config()
     model = config.get("cognition", {}).get("default_model", "")
     return model if model else "MiniMax-M3.1-Flash"
 

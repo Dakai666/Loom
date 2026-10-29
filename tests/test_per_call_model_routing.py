@@ -147,10 +147,9 @@ class TestBuildRouterDefault:
     def test_lowercase_minimax_default_is_honoured(self, monkeypatch):
         import loom.core.session as session_mod
         monkeypatch.setattr(session_mod, "_load_env", lambda: {"MINIMAX_API_KEY": "x"})
-        monkeypatch.setattr(session_mod, "_load_loom_config", lambda: {})
-        monkeypatch.setattr(
-            "loom.core.cognition.router.get_default_model",
-            lambda: "minimax-m3.1-flash",
-        )
+        # One config source for the default model (#661).
+        monkeypatch.setattr(session_mod, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "minimax-m3.1-flash"},
+        })
         r = session_mod.build_router()
         assert r._providers["minimax"].model == "minimax-m3.1-flash"

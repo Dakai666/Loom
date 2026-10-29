@@ -152,6 +152,24 @@ class TestModelThinkingStarted:
 
 
 class TestBuildRouter:
+    # Ambient provider env is cleared suite-wide (conftest, #661); the config
+    # side needs no patch beyond _load_loom_config — see the test below.
+
+    def test_default_model_comes_from_the_same_config(self, monkeypatch: pytest.MonkeyPatch):
+        """#661: build_router must not re-read loom.toml behind the patched
+        config — a real default of chatgpt/… used to register a provider."""
+        from loom.core import session as session_module
+        import loom.core.cognition.router as router_module
+
+        monkeypatch.setattr(router_module, "load_loom_config",
+                            lambda: {"cognition": {"default_model": "chatgpt/gpt-6.1-terra"}})
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+            "cognition": {"default_model": "MiniMax-M2.7"},
+        })
+        with pytest.raises(RuntimeError, match="No LLM provider configured"):
+            session_module.build_router()
+
     def test_registers_openai_provider_from_env(self, monkeypatch: pytest.MonkeyPatch):
         from loom.core import session as session_module
 
