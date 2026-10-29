@@ -1247,7 +1247,10 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     from loom.core.memory.ontology import DOMAINS, TEMPORALS
 
     async def _recall(call: ToolCall) -> ToolResult:
-        query = call.args.get("query", "").strip()
+        query = (call.args.get("query") or "").strip()
+        ref = (call.args.get("ref") or "").strip()
+        if ref:
+            return await _expand(call, ref, query)
         mem_type = call.args.get("type", "all")
         limit = min(max(int(call.args.get("limit", 5)), 1), 10)
         domain = (call.args.get("domain") or "").strip().lower() or None
@@ -1261,7 +1264,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
 
         if not query:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error="'query' argument is required")
+                              success=False,
+                              error="Pass 'query' to search, or 'ref' to read a result by its ref")
         if since is None and until is not None:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'since' is required when 'until' is provided")
@@ -1334,6 +1338,31 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
                           success=True, output="\n\n".join(lines))
 
+    async def _expand(call: ToolCall, ref: str, query: str) -> ToolResult:
+        # spec 61 §6.1: conflicting inputs are refused or explained, never
+        # silently dropped. query+ref is a real conflict; filters are only
+        # inapplicable, so they are named (models fill optional fields).
+        if query:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error="Pass either 'ref' (read one result) or 'query' "
+                                    "(search), not both.")
+        ignored = [
+            name for name in ("type", "limit", "domain", "temporal", "since", "until")
+            if call.args.get(name) not in (None, "")
+            and not (name == "type" and call.args.get(name) == "all")
+        ]
+        expansion = await memory.expand_ref(ref)
+        output = expansion.text
+        if ignored:
+            output += f"\n(ignored with ref: {', '.join(ignored)})"
+        if not expansion.found:
+            # A ref that resolves to nothing is a failed read, not a recall
+            # (#655: success must mean the result, not that the call ran).
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=output)
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=True, output=output)
+
     return ToolDefinition(
         name="recall",
         description=(
@@ -1344,7 +1373,11 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             "and retry with other words if nothing comes back. Each result has a "
             "ref (mem:/skill:/log:); conversation results are one turn each, "
             "dated by when it happened. The last line reports which sources were "
-            "searched and where the search was limited."
+            "searched and where the search was limited. To read more of one "
+            "result, call recall again with only ref set to that result's ref: "
+            "a log: ref returns that turn and the turns around it, with the "
+            "fuller stored tool output; mem:/skill: refs say if the entry "
+            "changed since."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1353,6 +1386,14 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 "query": {
                     "type": "string",
                     "description": "Search keywords separated by spaces (all must match)",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "Instead of query: a ref copied from an earlier recall "
+                        "result (e.g. log:abc:12, mem:user:tea@1a2b3c4d), to "
+                        "read that result in full. Omit when searching."
+                    ),
                 },
                 "type": {
                     "type": "string",
@@ -1403,11 +1444,14 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     ),
                 },
             },
-            "required": ["query"],
+            "required": [],
         },
         executor=_recall,
         tags=["memory", "search", "recall"],
         impact_scope="memory",
+        # Output is bounded by design (4,000 / 8,000 chars); spilling it to
+        # scratchpad would only add a hop between the agent and its memory.
+        inline_only=True,
     )
 
 

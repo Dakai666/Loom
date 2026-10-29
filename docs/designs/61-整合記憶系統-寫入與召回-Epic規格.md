@@ -124,10 +124,24 @@ flowchart TD
 | `skill:{name}` | skill genome | 附 version |
 | `doc:{collection}/{path}#{chunk}@{digest}` | 文件篇章 | S2 定案 |
 
+S1 PR-B 定案的顯示形式：結果顯示 `mem:{key}@{sha256(value) 前 8 碼}`、`skill:{name}@v{version}`；版本後綴只在顯示與展開時使用，結果本身的身分（RRF 合併與案例評估的鍵）仍是不帶後綴的 `mem:{key}`／`skill:{name}`。展開時不帶後綴的 ref 也接受，此時不做版本比對。
+
 - 行動脈絡不另設 `act:` ref：`log:` 回合內的 tool 列已帶 `tool_call_id`，展開時 join `action_records` 取 `final_state`／`intent_summary`，必要時唯讀查 ledger。
 - 前進補強：`_log_message` 的 metadata 寫入 `ledger_turn_id`（無 schema 變更）。舊資料只有工具回合能對到 ledger；純文字回合標「無 ledger 關聯」，不猜。
 - `session_log` 不可變，不需要「適用版本／片段」欄位；版本只對 `mem:` 與 `doc:` 有意義。
 - `recall(ref=...)` 是 identity 讀取，不跑模糊搜尋；讀到新版、舊版不可用或長度截斷都要明示。
+- S1 PR-B 實作細節：
+  - `log:` 展開以目標回合為準，加上同一 session 中最近的前一個與後一個**實際存在的**回合（不是 turn_index ±1）。
+  - 列數上限 128 列，依「目標回合 → 前一回合 → 後一回合」的順序分配。
+  - 字數上限 8,000 字，每個鄰近回合預留 1,200 字，避免工具輸出很多的目標回合把前後回合擠成只剩標題。單列上限：目標回合 2,500 字、鄰近回合 600 字。
+  - 每一處截斷都要註明是哪個回合、顯示了幾列中的幾列。
+  - tool 列以 `session_id＋tool_call_id` join `action_records`，顯示 `final_state`、`intent_summary` 與 `output_prefix`；擷取時就已截斷的，標「stored output: first N of M chars」。對不到的列標「stored preview only」。
+  - 列數同樣替每個鄰近回合預留 16 列（live 有 250–800+ 列的回合）；某回合一列都沒顯示時，標題只寫「N rows, none shown」，不對沒讀過的列下 ledger 等斷言。標題依實際存在的鄰近回合描述（只有前一回合、只有後一回合或唯一回合）。
+  - 動作紀錄存在但沒有輸出擷取（#569 之前的資料，`output_prefix` 為 NULL）時，回退到 `session_log` 的摘要，標「stored preview only — no captured output」。
+  - ref 讀不到時工具回 `success=False`（#655：success 表示讀到了結果，而不只是呼叫有跑完）。`mem:`／`skill:` 展開也套讀取時的秘密遮罩。
+  - session 在 `session_log` 已無任何列時，回報「已刪除，或不屬於此 instance」；回合不存在時，回報該 session 實際的回合範圍。
+  - 回合標題顯示 `ledger_turn_id`；沒有時明示「no ledger link recorded」。
+  - 工具層：`ref` 與 `query` 同時給 → 拒絕；其他填了的篩選欄位不適用於 ref，會在輸出中列為「ignored with ref」而不是報錯（模型習慣填滿選填欄位，見 §6.1）。`recall` 標 `inline_only`，輸出不被 JIT 轉存到 scratchpad。
 
 ### 4.3 範圍與時間
 
@@ -427,3 +441,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r2**（2026-10-28）：納入 S0（#651）。主要變更：§1.2 S0 後 DK 裁決（工具原文改由 `action_records.output_prefix` 補、改述／跨語言兩層驗收、child 經歷先接來源再退 episodic、索引淨增 ≤128 MiB、兩字詞改 CJK bigram 影子索引）與 S1 預算、修改前基準；§1.1／§2 更正 r1 錯誤（工具回覆只存 500 字摘要、SQLite 版本為 3.49.1、stub 口徑）；§5.2.1 盤點修正（relate 不經 governor、subagent 細節、補列 writer、`success_rate` 讀者）；§6.2／§9.1 對應更新。
 - **r2.1**（2026-10-29）：S1 PR-A review（#652，Codex）修正：候選預算改按回合計；fork 去重改為可證明同源才合併；單字掃描改依事件時間並以 `since`／`until` 續查（新增 `session_log(created_at)` 索引）；工具輸出加整次 4,000 字硬上限與截斷說明。複審（Codex）追加：候選名額改按去重後的獨立來源計（分批補取、檢查上限 160 回合並明示）；存取只記實際送進輸出的項目（§6.3）。
 - **r2.2**（2026-10-29）：§6.1 `domain`／`temporal` 改為只縮小記憶路由、不再排除對話路由（PR-A 上線後 live 實測：模型習慣性填滿選填篩選欄位，對話路由因此全被排除）。
+- **r2.3**（2026-10-29）：S1 PR-B（`recall(ref=...)`）定案顯示 ref 的版本後綴、`log:` 展開的鄰近回合與預算分配、`action_records` join 標示、工具層互斥與「ignored with ref」說明，以及 `ledger_turn_id` 寫入（§4.2）。

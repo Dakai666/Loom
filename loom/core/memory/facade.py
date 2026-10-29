@@ -133,6 +133,10 @@ class MemoryFacade:
         """Record access for search results that were actually shown."""
         await self.search_index.mark_accessed(results)
 
+    async def expand_ref(self, ref: str, *, mark_accessed: bool = True):
+        """Identity read of a recall ref (``log:``/``mem:``/``skill:``)."""
+        return await self.search_index.expand(ref, mark_accessed=mark_accessed)
+
     async def get_fact(self, key: str) -> "SemanticEntry | None":
         """Direct semantic-memory lookup by exact key.
 
