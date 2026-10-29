@@ -57,7 +57,7 @@ def _positive_id(raw: Any) -> int | None:
     """Coerce a model-supplied Discord id (channel / thread / message) to a
     usable int, or ``None``.
 
-    ``0`` and negatives mean "not supplied". An ``integer`` schema field
+    ``0`` means "not supplied". An ``integer`` schema field
     invites the model to fill a blank with 0 when it does not know the value,
     and ``0 is not None`` was enough to shadow ``default_forum_id`` — turning
     every post into ``404 Unknown Channel`` and provoking 384 identical
@@ -65,14 +65,19 @@ def _positive_id(raw: Any) -> int | None:
 
     Malformed input still raises ``TypeError``/``ValueError`` so callers can
     answer "Invalid '<field>'" instead of silently defaulting. ``bool`` is
-    malformed too — ``int(True)`` would be a real-looking id 1.
+    malformed too — ``int(True)`` would be a real-looking id 1 — and so is a
+    ``float``: a 19-digit snowflake does not survive float precision
+    (``int(1515038365085470781.0)`` is ``...720``). Negatives are malformed,
+    not "not supplied".
     """
     if raw is None:
         return None
-    if isinstance(raw, bool):
-        raise TypeError("bool is not a Discord id")
+    if isinstance(raw, (bool, float)):
+        raise TypeError(f"{type(raw).__name__} is not a Discord id")
     value = int(raw)
-    return value if value > 0 else None
+    if value < 0:
+        raise ValueError("negative Discord id")
+    return value or None
 
 
 # Discord SelectMenu hard limits — surface as constants so callers and tests

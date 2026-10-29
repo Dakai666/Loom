@@ -577,3 +577,21 @@ def test_validate_bool_id_is_rejected_not_read_as_one():
         has_default_forum=True,
     )
     assert err and "Invalid" in err
+
+
+@pytest.mark.parametrize("bad", [1515038365085470781.0, 1.5, float("inf"), -5])
+def test_validate_float_or_negative_id_is_rejected(bad):
+    """Floats lose snowflake precision (…781.0 → …720) and negatives are
+    garbage — both must error, never post somewhere else or default."""
+    err = _validate_forum_post_args(
+        {"title": "t", "content": "c", "forum_channel_id": bad},
+        has_default_forum=True,
+    )
+    assert err and "Invalid" in err
+
+
+def test_string_ids_are_still_accepted():
+    from loom.platform.discord.tools import _positive_id
+
+    assert _positive_id(" 1515038365085470781 ") == 1515038365085470781
+    assert _positive_id("0") is None
