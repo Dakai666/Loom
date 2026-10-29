@@ -430,7 +430,17 @@ class TestRecallTool:
     def test_tool_has_correct_schema(self):
         tool = make_recall_tool(MagicMock())
         assert "query" in tool.input_schema["properties"]
-        assert "query" in tool.input_schema["required"]
+        # #650 S1 PR-B: query and ref are mutually exclusive alternatives,
+        # so neither is schema-required; the executor enforces one of them.
+        assert "ref" in tool.input_schema["properties"]
+        assert tool.input_schema["required"] == []
+
+    async def test_neither_query_nor_ref_is_an_error(self):
+        tool = make_recall_tool(MagicMock())
+        call = ToolCall(tool_name="recall", args={}, trust_level=TrustLevel.SAFE,
+                        session_id="t")
+        result = await tool.executor(call)
+        assert not result.success and "query" in result.error and "ref" in result.error
 
 
 class TestRecallPeriodTool:

@@ -50,6 +50,7 @@ from loom.core.ledger import (
     ThoughtPayload,
     TurnEndPayload,
     TurnStartPayload,
+    current_turn_id,
     new_correlation_id,
     reset_correlation,
     reset_turn_id,
@@ -3991,8 +3992,15 @@ class LoomSession:
         if self._session_log is None:
             return
         ti = turn_index if turn_index is not None else self._turn_index
+        metadata = dict(metadata or {})
+        # #650 S1: link the row to its ledger turn. Callers schedule this via
+        # ensure_future, which copies the context — so this is the turn that
+        # was current at the call site, not whatever runs now.
+        ledger_turn = current_turn_id()
+        if ledger_turn and "ledger_turn_id" not in metadata:
+            metadata["ledger_turn_id"] = ledger_turn
         await self._session_log.log_message(
-            self.session_id, ti, role, content, metadata or {},
+            self.session_id, ti, role, content, metadata,
             raw_json=raw_json,
         )
 

@@ -28,6 +28,7 @@ Usage
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -135,6 +136,23 @@ _TURN_BATCH = ROUTE_CANDIDATES + 1
 _TURNS_EXAMINED_CAP = ROUTE_CANDIDATES * 4
 # Unindexed short-term rows a recall call will catch up before reading.
 _TERMS_SYNC_BUDGET = 5_000
+# recall(ref=...) expansion bounds (spec 61 r2 §1.2): the target turn plus
+# the turn before and after, at most this many rows and chars in all.
+REF_EXPAND_TURNS = 3
+REF_EXPAND_ROWS = 128
+REF_EXPAND_CHARS = 8_000
+# One row's share of the expansion, so a single long tool output cannot
+# take the whole budget; the target turn's rows get the larger share.
+_REF_ROW_CHARS_TARGET = 2_500
+_REF_ROW_CHARS_NEIGHBOUR = 600
+# Chars held back for each neighbour turn, so a tool-heavy target turn
+# cannot reduce "the turns before and after" to bare headers.
+_REF_NEIGHBOUR_RESERVE = 1_200
+
+
+def value_hash(value: str) -> str:
+    """Short digest of a memory value — the version part of a ``mem:`` ref."""
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:8]
 
 
 @dataclass
@@ -182,7 +200,21 @@ class MemorySearchResult:
             return f"[conversation]{date_hint} {self.ref}\n  {self.value[:EXCERPT_CHARS]}"
         conf = self.metadata.get("effective_confidence") or self.metadata.get("confidence")
         conf_hint = f" conf={conf:.2f}" if conf is not None else ""
-        return f"[{self.type}]{date_hint}{conf_hint} {self.ref}\n  {truncated}"
+        return f"[{self.type}]{date_hint}{conf_hint} {self.versioned_ref}\n  {truncated}"
+
+    @property
+    def versioned_ref(self) -> str:
+        """The ref as shown to the model, with its version (spec 61 §4.2).
+
+        ``ref`` stays the bare identity (fusion and evaluation key on it);
+        the shown form lets a later ``recall(ref=...)`` tell whether the
+        source changed since it was read.
+        """
+        if self.type == "skill" and self.metadata.get("version") is not None:
+            return f"{self.ref}@v{self.metadata['version']}"
+        if self.ref.startswith("mem:"):
+            return f"{self.ref}@{value_hash(self.value)}"
+        return self.ref
 
 
 class RecallResults(list):
@@ -191,6 +223,41 @@ class RecallResults(list):
     def __init__(self, items=(), coverage: str = "") -> None:
         super().__init__(items)
         self.coverage = coverage
+
+
+@dataclass
+class RefExpansion:
+    """What ``recall(ref=...)`` read: agent-facing text, and whether the ref
+    resolved.  ``found=False`` text says why (malformed, gone, missing)."""
+
+    text: str
+    found: bool
+
+
+_REF_FORMS = "log:{session}:{turn}, mem:{key}[@hash] or skill:{name}[@vN]"
+_LOG_REF = re.compile(r"^log:(?P<sid>.+):(?P<turn>\d+)$")
+_MEM_REF = re.compile(r"^mem:(?P<key>.+?)(?:@(?P<hash>[0-9a-f]{8}))?$")
+_SKILL_REF = re.compile(r"^skill:(?P<name>.+?)(?:@v(?P<version>\d+))?$")
+
+
+def _local_stamp(iso: str | None) -> str:
+    if not iso:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(user_zone()).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso[:16]
+
+
+def _cut(text: str, limit: int) -> str:
+    """*text* within *limit* chars, with a marker saying how much was cut."""
+    if len(text) <= limit:
+        return text
+    marker = f" …[cut: {limit:,} of {len(text):,} chars shown]"
+    return text[:max(0, limit - len(marker))] + marker
 
 
 def _split_terms(query: str) -> list[str]:
@@ -333,6 +400,223 @@ class MemorySearch:
         keys = [r.key for r in results if r.type in ("semantic", "relational")]
         if keys:
             await self._semantic.mark_accessed(keys)
+
+    # ------------------------------------------------------------------
+    # recall(ref=...) — identity reads, never a search
+    # ------------------------------------------------------------------
+
+    async def expand(self, ref: str, *, mark_accessed: bool = True) -> RefExpansion:
+        """Read *ref* by identity (spec 61 §4.2, §6.1).
+
+        ``log:`` expands the turn with its neighbours, ``mem:`` and
+        ``skill:`` return the current content and say when it differs from
+        the version the ref was taken at.  Nothing here runs a fuzzy search.
+        """
+        ref = (ref or "").strip()
+        if m := _LOG_REF.match(ref):
+            return await self._expand_log(m["sid"], int(m["turn"]))
+        if m := _MEM_REF.match(ref):
+            return await self._expand_mem(m["key"], m["hash"], mark_accessed)
+        if m := _SKILL_REF.match(ref):
+            version = int(m["version"]) if m["version"] else None
+            return await self._expand_skill(m["name"], version)
+        return RefExpansion(
+            f"Not a recall ref: {ref!r}. Expected {_REF_FORMS}, as shown in "
+            "recall results. To search, pass query instead.",
+            found=False,
+        )
+
+    async def _expand_mem(self, key: str, seen_hash: str | None,
+                          mark_accessed: bool) -> RefExpansion:
+        entry = await self._semantic.get(key)
+        if entry is None:
+            return RefExpansion(
+                f"mem:{key} — no memory entry with this key (deleted, or never "
+                "stored in this instance).", found=False,
+            )
+        notes: list[str] = []
+        if entry.metadata.get("redirected_to"):
+            survivor = await self._semantic.resolve_redirect(key)
+            if survivor is None:
+                return RefExpansion(
+                    f"mem:{key} — was merged into "
+                    f"mem:{entry.metadata['redirected_to']}, which is no longer "
+                    "readable.", found=False,
+                )
+            notes.append(f"merged into mem:{survivor.key}; showing that entry")
+            entry = survivor
+        current = value_hash(entry.value)
+        if seen_hash and not notes and seen_hash != current:
+            notes.append(f"revised since @{seen_hash}; showing the current version")
+        if mark_accessed:
+            await self._semantic.mark_accessed([entry.key])
+        head = f"mem:{entry.key}@{current}"
+        stamp = _local_stamp(entry.updated_at.isoformat() if entry.updated_at else "")
+        if stamp:
+            head += f" [{stamp}]"
+        lines = [head] + [f"({n})" for n in notes]
+        body_room = REF_EXPAND_CHARS - sum(len(l) + 1 for l in lines)
+        lines.append(_cut(entry.value, body_room))
+        return RefExpansion("\n".join(lines), found=True)
+
+    async def _expand_skill(self, name: str, seen_version: int | None) -> RefExpansion:
+        skill = await self._procedural.get(name)
+        if skill is None:
+            return RefExpansion(
+                f"skill:{name} — no skill with this name in this instance.",
+                found=False,
+            )
+        lines = [f"skill:{skill.name}@v{skill.version}"]
+        if seen_version is not None and seen_version != skill.version:
+            lines.append(
+                f"(ref was @v{seen_version}; v{skill.version} is newer — "
+                "showing the current version)" if skill.version > seen_version else
+                f"(ref was @v{seen_version}; showing the stored v{skill.version})"
+            )
+        body_room = REF_EXPAND_CHARS - sum(len(l) + 1 for l in lines)
+        lines.append(_cut(skill.body, body_room))
+        return RefExpansion("\n".join(lines), found=True)
+
+    async def _expand_log(self, session_id: str, turn: int) -> RefExpansion:
+        db = self._semantic._db
+        ref = f"log:{session_id}:{turn}"
+        cur = await db.execute(
+            "SELECT 1 FROM session_log WHERE session_id = ? AND turn_index = ? LIMIT 1",
+            (session_id, turn),
+        )
+        if await cur.fetchone() is None:
+            cur = await db.execute(
+                "SELECT MIN(turn_index), MAX(turn_index), COUNT(DISTINCT turn_index) "
+                "FROM session_log WHERE session_id = ?", (session_id,),
+            )
+            lo, hi, n = await cur.fetchone()
+            if not n:
+                return RefExpansion(
+                    f"{ref} — session_log has no rows for session {session_id!r}: "
+                    "the session was deleted, or is not from this instance.",
+                    found=False,
+                )
+            return RefExpansion(
+                f"{ref} — session {session_id!r} has no turn {turn} "
+                f"(its {n} logged turns run from {lo} to {hi}).",
+                found=False,
+            )
+
+        cur = await db.execute(
+            "SELECT MAX(turn_index) FROM session_log WHERE session_id = ? AND turn_index < ?",
+            (session_id, turn),
+        )
+        prev = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT MIN(turn_index) FROM session_log WHERE session_id = ? AND turn_index > ?",
+            (session_id, turn),
+        )
+        nxt = (await cur.fetchone())[0]
+
+        # Rows: the target turn first, neighbours take what is left.
+        priority = [t for t in (turn, prev, nxt) if t is not None][:REF_EXPAND_TURNS]
+        rows_by_turn: dict[int, list] = {}
+        rows_total: dict[int, int] = {}
+        room = REF_EXPAND_ROWS
+        for t in priority:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM session_log WHERE session_id = ? AND turn_index = ?",
+                (session_id, t),
+            )
+            rows_total[t] = (await cur.fetchone())[0]
+            cur = await db.execute(
+                "SELECT role, content, raw_json, metadata, created_at FROM session_log "
+                "WHERE session_id = ? AND turn_index = ? ORDER BY id LIMIT ?",
+                (session_id, t, room),
+            )
+            rows_by_turn[t] = list(await cur.fetchall())
+            room -= len(rows_by_turn[t])
+
+        actions = await self._actions_for(db, session_id, rows_by_turn)
+
+        # Text: same priority; each row capped so one output cannot eat all.
+        header = f"{ref} — turn {turn} with the turns before and after it"
+        cuts: list[str] = []
+        room = REF_EXPAND_CHARS - len(header) - 260  # header + closing note
+        rendered: dict[int, list[str]] = {}
+        neighbours_left = len(priority) - 1
+        for t in priority:
+            title_room = 90
+            if t == turn:
+                allowance = room - neighbours_left * _REF_NEIGHBOUR_RESERVE
+                row_cap = _REF_ROW_CHARS_TARGET
+            else:
+                allowance = room // neighbours_left
+                neighbours_left -= 1
+                row_cap = _REF_ROW_CHARS_NEIGHBOUR
+            allowance -= title_room
+            used = 0
+            meta_ledger = None
+            lines: list[str] = []
+            shown = 0
+            for role, content, raw_json, metadata, _at in rows_by_turn[t]:
+                try:
+                    meta = json.loads(metadata or "{}")
+                except ValueError:
+                    meta = {}
+                meta_ledger = meta_ledger or meta.get("ledger_turn_id")
+                line = _render_log_row(role, content, raw_json, meta, actions)
+                cap = min(row_cap, allowance - used)
+                if cap < 120:
+                    break
+                if len(line) > cap:
+                    line = _cut(line, cap)
+                    cuts.append(f"turn {t}")
+                lines.append(line)
+                used += len(line) + 1
+                shown += 1
+            omitted = rows_total[t] - shown
+            if omitted:
+                cuts.append(f"turn {t}: {omitted} of {rows_total[t]} rows not shown")
+            stamp = _local_stamp(rows_by_turn[t][0][4]) if rows_by_turn[t] else ""
+            ledger = f"ledger {meta_ledger}" if meta_ledger else "no ledger link recorded"
+            mark = " (this ref)" if t == turn else ""
+            title = f"── turn {t}{mark} [{stamp}] {ledger}"[:title_room]
+            room -= used + len(title) + 1
+            rendered[t] = [title] + lines
+
+        out = [header]
+        for t in sorted(rendered):
+            out.extend(rendered[t])
+        if cuts:
+            note = "Expansion limits (3 turns, 128 rows, 8,000 chars) cut: " + "; ".join(
+                dict.fromkeys(cuts)
+            )
+            out.append(_cut(note, 250))
+        return RefExpansion("\n".join(out)[:REF_EXPAND_CHARS], found=True)
+
+    @staticmethod
+    async def _actions_for(db, session_id: str, rows_by_turn: dict[int, list]) -> dict[str, tuple]:
+        """``action_records`` for the tool rows shown, keyed by tool_call_id.
+
+        Joined on session + call id only (spec 61 §1.2 item 1); a row with
+        no match is shown as its stored preview and says so.
+        """
+        call_ids: list[str] = []
+        for rows in rows_by_turn.values():
+            for role, _c, _r, metadata, _at in rows:
+                if role != "tool":
+                    continue
+                try:
+                    cid = json.loads(metadata or "{}").get("tool_call_id")
+                except ValueError:
+                    cid = None
+                if cid:
+                    call_ids.append(cid)
+        if not call_ids:
+            return {}
+        marks = ",".join("?" * len(call_ids))
+        cur = await db.execute(
+            "SELECT call_id, final_state, intent_summary, output_prefix, output_len "
+            f"FROM action_records WHERE session_id = ? AND call_id IN ({marks})",
+            (session_id, *call_ids),
+        )
+        return {r[0]: r[1:] for r in await cur.fetchall()}
 
     async def _search_semantic_embedding(
         self, query: str, limit: int,
@@ -771,7 +1055,8 @@ class MemorySearch:
                     key=skill.name,
                     value=skill.body,
                     score=score,
-                    metadata={"confidence": skill.confidence, "tags": skill.tags},
+                    metadata={"confidence": skill.confidence, "tags": skill.tags,
+                              "version": skill.version},
                     updated_at=skill.updated_at.isoformat() if skill.updated_at else "",
                 )
             )
@@ -782,6 +1067,40 @@ class MemorySearch:
 # ---------------------------------------------------------------------------
 # Fusion and conversation shaping
 # ---------------------------------------------------------------------------
+
+def _render_log_row(role: str, content: str, raw_json: str | None,
+                    meta: dict, actions: dict[str, tuple]) -> str:
+    """One ``session_log`` row as an expansion line, secrets redacted."""
+    if role == "tool":
+        name = meta.get("tool_name", "tool")
+        action = actions.get(meta.get("tool_call_id") or "")
+        if action is None:
+            text = _redact_secrets(content) or ""
+            return f"tool {name} (stored preview only — no action record): {text}"
+        state, intent, prefix, full_len = action
+        label = f"tool {name} [{state}]"
+        if intent:
+            label += f" intent: {_redact_secrets(intent)}"
+        text = _redact_secrets(prefix) or ""
+        if full_len and full_len > len(prefix or ""):
+            label += f" (stored output: first {len(prefix or ''):,} of {full_len:,} chars)"
+        return f"{label}: {text}"
+    if role == "assistant" and raw_json:
+        try:
+            calls = json.loads(raw_json).get("tool_calls") or []
+        except (ValueError, AttributeError):
+            calls = []
+        if calls:
+            shown = []
+            for c in calls:
+                fn = c.get("function") or {}
+                args = _redact_secrets(str(fn.get("arguments", ""))) or ""
+                shown.append(f"{fn.get('name', '?')}({args[:200]})")
+            text = (content or "").strip()
+            prefix = "" if text in ("", "[tool_use]") else f"{_redact_secrets(text)} "
+            return f"assistant: {prefix}[calls {', '.join(shown)}]"
+    return f"{role}: {_redact_secrets(content) or ''}"
+
 
 def _like(term: str) -> str:
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
