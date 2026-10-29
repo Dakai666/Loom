@@ -151,24 +151,9 @@ class TestModelThinkingStarted:
         assert tool_end_index < after_tool_index < text_index
 
 
-# Every provider credential build_router can pick up from the process
-# environment as well as from .env (#661).
-_PROVIDER_ENV = (
-    "MINIMAX_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY", "OLLAMA_BASE_URL", "LMSTUDIO_BASE_URL",
-)
-
-
 class TestBuildRouter:
-    @pytest.fixture(autouse=True)
-    def _no_ambient_providers(self, monkeypatch: pytest.MonkeyPatch):
-        """Each test states its providers; none leak in from the shell (#661).
-
-        The config side needs no patch: build_router reads the default model
-        from the same (patched) config as everything else.
-        """
-        for name in _PROVIDER_ENV:
-            monkeypatch.delenv(name, raising=False)
+    # Ambient provider env is cleared suite-wide (conftest, #661); the config
+    # side needs no patch beyond _load_loom_config — see the test below.
 
     def test_default_model_comes_from_the_same_config(self, monkeypatch: pytest.MonkeyPatch):
         """#661: build_router must not re-read loom.toml behind the patched

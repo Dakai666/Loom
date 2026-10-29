@@ -75,6 +75,25 @@ def _forbid_live_memory_db(monkeypatch):
     monkeypatch.setattr(_store_module.SQLiteStore, "__init__", guarded)
 
 
+# Every provider credential ``build_router`` can read from the process
+# environment as well as from .env (#661).
+PROVIDER_ENV = (
+    "MINIMAX_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY", "OLLAMA_BASE_URL", "LMSTUDIO_BASE_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_provider_env(monkeypatch):
+    """A test states its providers; none leak in from the developer's shell.
+
+    #661: build_router falls back to ``os.environ`` for each key, so a key
+    exported in the shell registered providers the test never asked for.
+    """
+    for name in PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_backup_dir(tmp_path, monkeypatch):
     """Memory snapshots (consolidation execute, lifecycle prune) default to
