@@ -946,6 +946,7 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 #   provider = "ollama"
 #   base_url = "http://localhost:11434"
 #   model    = "qwen3-embedding:0.6b"
+#   num_ctx  = 4096   # context window per input; caps Ollama RAM (its 32K default ≈ 5.8 GB). Longer inputs are truncated
 #
 # MINIMAX example:
 #   [embeddings]

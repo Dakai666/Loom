@@ -21,6 +21,7 @@ loom.toml example:
     provider = "ollama"           # "ollama" or "minimax"
     base_url = "http://localhost:11434"   # Ollama server
     model    = "qwen3-embedding:0.6b"    # Ollama embedding model
+    num_ctx  = 4096                       # Ollama context window (default 4096)
 
     # For MiniMax (requires API key):
     # provider     = "minimax"
@@ -77,16 +78,25 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
 
     Response:
       ``{"model": "...", "embeddings": [[float, ...], ...], ...}``
+
+    ``options.num_ctx`` is always sent: without it Ollama sizes the model
+    for its own default context (32K for qwen3-embedding → ~5.8 GB resident),
+    while memory entries are short. Inputs beyond ``num_ctx`` are silently
+    truncated by Ollama, so keep it above the longest entry you embed.
     """
+
+    DEFAULT_NUM_CTX = 4096
 
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
         model: str = "qwen3-embedding:0.6b",
+        num_ctx: int = DEFAULT_NUM_CTX,
     ) -> None:
         import httpx
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._num_ctx = int(num_ctx)
         self._client = httpx.AsyncClient(timeout=60.0)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -97,6 +107,7 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
             json={
                 "model": self._model,
                 "input": texts,          # Ollama handles list batching natively
+                "options": {"num_ctx": self._num_ctx},
             },
         )
         response.raise_for_status()
@@ -225,6 +236,7 @@ def build_embedding_provider(
         provider  = "ollama"
         base_url  = "http://localhost:11434"
         model     = "qwen3-embedding:0.6b"
+        num_ctx   = 4096          # optional; Ollama context window
 
         # For MiniMax instead:
         # provider    = "minimax"
@@ -242,7 +254,8 @@ def build_embedding_provider(
     if provider_name == "ollama":
         base_url = embeddings_cfg.get("base_url", "http://localhost:11434")
         model = embeddings_cfg.get("model", "qwen3-embedding:0.6b")
-        return OllamaEmbeddingProvider(base_url=base_url, model=model)
+        num_ctx = embeddings_cfg.get("num_ctx", OllamaEmbeddingProvider.DEFAULT_NUM_CTX)
+        return OllamaEmbeddingProvider(base_url=base_url, model=model, num_ctx=num_ctx)
 
     if provider_name == "minimax":
         import os

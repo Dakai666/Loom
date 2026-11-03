@@ -33,6 +33,7 @@ make_memorize_tool (integration)
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -591,6 +592,7 @@ class TestMemorizeTool:
 from loom.core.memory.embeddings import (
     cosine_similarity,
     MiniMaxEmbeddingProvider,
+    OllamaEmbeddingProvider,
     build_embedding_provider,
 )
 
@@ -642,6 +644,54 @@ class TestBuildEmbeddingProvider:
             cfg={"embeddings": {"provider": "minimax"}},
         )
         assert provider is not None
+
+
+class TestOllamaNumCtx:
+    """Invariant: every /api/embed request carries options.num_ctx.
+
+    Without it Ollama sizes the model for its default context (32K for
+    qwen3-embedding), allocating GBs of KV cache for short memory entries.
+    """
+
+    @staticmethod
+    def _capture(provider):
+        import httpx
+        sent: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append({"path": request.url.path, "body": json.loads(request.content)})
+            return httpx.Response(200, json={"embeddings": [[0.1, 0.2]]})
+
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return sent
+
+    async def test_default_num_ctx_sent(self):
+        provider = OllamaEmbeddingProvider()
+        sent = self._capture(provider)
+        await provider.embed(["hello"])
+        assert sent[0]["path"] == "/api/embed"
+        assert sent[0]["body"]["options"]["num_ctx"] == OllamaEmbeddingProvider.DEFAULT_NUM_CTX
+        assert OllamaEmbeddingProvider.DEFAULT_NUM_CTX == 4096
+
+    async def test_explicit_num_ctx_sent(self):
+        provider = OllamaEmbeddingProvider(num_ctx=2048)
+        sent = self._capture(provider)
+        await provider.embed(["hello"])
+        assert sent[0]["body"]["options"]["num_ctx"] == 2048
+
+    async def test_config_num_ctx_flows_through_builder(self):
+        provider = build_embedding_provider(
+            {}, {"embeddings": {"provider": "ollama", "num_ctx": 8192}},
+        )
+        sent = self._capture(provider)
+        await provider.embed(["hello"])
+        assert sent[0]["body"]["options"]["num_ctx"] == 8192
+
+    async def test_builder_applies_default_when_unset(self):
+        provider = build_embedding_provider({}, {"embeddings": {"provider": "ollama"}})
+        sent = self._capture(provider)
+        await provider.embed(["hello"])
+        assert sent[0]["body"]["options"]["num_ctx"] == OllamaEmbeddingProvider.DEFAULT_NUM_CTX
 
 
 class TestSemanticMemoryWithEmbeddings:
