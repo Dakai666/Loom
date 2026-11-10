@@ -279,6 +279,18 @@ compress_session = false
 # 30 for short CLI sessions.
 episodic_compress_threshold = 30
 
+# #650 S2: document collections that ``recall`` searches as documents — one
+# result per Markdown section (``#``–``###`` heading), ref
+# ``doc:{name}/{path}#{section}@{hash}``. Paths are relative to the workspace
+# and must stay inside it; only ``.md`` files are read, hidden folders and
+# every symlink are skipped. Changed files are picked up at recall time (no
+# scheduler). Every section version seen is kept in memory.db, so an old
+# version stays searchable and readable after the file is edited; a deleted
+# file (or a collection removed here) reports its status only. Omit the table
+# to leave documents out of recall.
+[memory.documents]
+collections = { notes = "notes", journal = "autonomy/circadian/journal" }
+
 # ─────────────────────────────────────────────
 # Memory governance (Issue #43, dedup hardened in #411)
 # ─────────────────────────────────────────────
