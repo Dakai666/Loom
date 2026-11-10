@@ -681,3 +681,68 @@ async def test_document_route_failure_never_fails_recall(db, ws, monkeypatch):
     await sem.upsert(SemanticEntry(key="k", value="內容 記憶"))
     results = await MemorySearch(sem, ProceduralMemory(db), documents=index).recall("內容")
     assert results and "documents: unavailable" in results.coverage
+
+
+# ---------------------------------------------------------------------------
+# PR #667 re-review regressions (Codex, round 2)
+# ---------------------------------------------------------------------------
+
+async def test_root_replaced_by_symlink_is_out_of_scope(db, ws, tmp_path):
+    _write(ws / "notes" / "in.md", "# 段\ninsidemarker\n")
+    index = _index(db, ws)
+    search = _search(db, index)
+    ref = (await _docs(search, "insidemarker"))[0][0].ref
+    (ws / "notes" / "in.md").unlink()
+    (ws / "notes").rmdir()
+    _write(tmp_path / "outside" / "secret.md", "# 外\noutsidescopemarker\n")
+    (ws / "notes").symlink_to(tmp_path / "outside", target_is_directory=True)
+    found, cov = await _docs(search, "outsidescopemarker")
+    assert found == [] and "root is no longer" in cov
+    assert (await _docs(search, "insidemarker"))[0] == []
+    exp = await search.expand(ref)
+    assert not exp.found and "insidemarker" not in exp.text
+
+
+async def test_discovery_budget_holds_inside_one_directory(db, ws):
+    for i in range(5):
+        _write(ws / "notes" / f"f{i}.md", f"# 段\n單目錄內容{i}\n")
+    index = DocumentIndex(db, ws, {"notes": "notes"}, max_entries=1)
+    counts = []
+    for _ in range(8):
+        await index.sync()
+        cur = await db.execute("SELECT COUNT(*) FROM doc_files")
+        counts.append((await cur.fetchone())[0])
+    assert counts[0] <= 1                 # one entry per call, not the whole dir
+    assert counts[-1] == 5
+
+
+async def test_move_across_discovery_batches_keeps_history(db, ws):
+    src = _write(ws / "wiki" / "old.md", "# 段\nversionA\n")
+    index = DocumentIndex(db, ws, {"dst": "notes", "src": "wiki"}, max_entries=1)
+    for _ in range(4):
+        await index.sync()
+    _write(src, "# 段\nversionB\n")
+    for _ in range(4):
+        await index.sync()
+    search = _search(db, index)
+    old_a = (await _docs(search, "versionA"))[0][0].ref
+    src.rename(ws / "notes" / "new.md")
+    for _ in range(8):
+        await index.sync()
+    found = (await _docs(search, "versionA"))[0]
+    assert found and found[0].ref.startswith("doc:dst/new.md#")
+    exp = await search.expand(old_a)
+    assert exp.found and "moved to doc:dst/new.md" in exp.text
+
+
+async def test_literal_hash_like_heading_resolves_to_itself(db, ws):
+    from loom.core.memory.documents import _hashed
+    long_title = "A" * 121
+    token = _hashed(long_title)
+    _write(ws / "notes" / "x.md",
+           f"# {long_title}\nlongbody\n# {token}\nliteralbody\n")
+    search = _search(db, _index(db, ws))
+    for marker in ("literalbody", "longbody"):
+        found = (await _docs(search, marker))[0]
+        exp = await search.expand(found[0].ref)
+        assert exp.found and marker in exp.text and "not saved" not in exp.text

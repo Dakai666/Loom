@@ -241,7 +241,10 @@ def _hashed(part: str) -> str:
 
 def _ref_part(part: str) -> str:
     """A path or anchor as printed: hashed if it would leak a secret or is long."""
-    if len(part) > _REF_PART_CHARS or (_redact_secrets(part) or "") != part:
+    if (len(part) > _REF_PART_CHARS or _HASHED.match(part)
+            or (_redact_secrets(part) or "") != part):
+        # A literal that already looks like a hash token is hashed as well,
+        # so a printed ``~h…`` always means "hashed" (#667 re-review).
         return _hashed(part)
     return _encode(part)
 
@@ -314,7 +317,9 @@ def _open_parent(root: str, rel: str) -> tuple[int, str]:
     component raises ``OSError`` (ELOOP / ENOTDIR).
     """
     parts = rel.split("/")
-    fd = os.open(root, os.O_RDONLY | _DIRECTORY)
+    if os.path.realpath(root) != root:
+        raise _OutOfScope(root)        # the root itself was replaced or moved
+    fd = os.open(root, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
     try:
         for comp in parts[:-1]:
             nxt = os.open(comp, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
@@ -427,9 +432,11 @@ class DocumentIndex:
         self._max_entries = max_entries
         self._ready = False
         self._roots: dict[str, str] = {}
+        self._literal: dict[str, str] = {}
         self._bad: list[str] = []
         for name, rel in self._config.items():
-            root = os.path.realpath(os.path.join(self._workspace, str(rel)))
+            self._literal[name] = os.path.join(self._workspace, str(rel))
+            root = os.path.realpath(self._literal[name])
             if (not _COLLECTION_NAME.match(name) or os.path.isabs(str(rel))
                     or not _inside(root, self._workspace) or not os.path.isdir(root)):
                 self._bad.append(name)
@@ -437,6 +444,8 @@ class DocumentIndex:
             self._roots[name] = root
         # Discovery generation, resumed across recalls (see _discover).
         self._queue: deque[tuple[str, str]] | None = None
+        self._iter: tuple[str, Any] | None = None     # directory being read
+        self._valid: set[str] = set(self._roots)
         self._gen_seen: dict[tuple[str, str], Fingerprint] = {}
         self._gen_failed: set[str] = set()
         self._last_complete: dict[tuple[str, str], Fingerprint] | None = None
@@ -472,9 +481,18 @@ class DocumentIndex:
 
     async def _sync(self, conn) -> SyncReport:
         report = SyncReport(collections=len(self._roots), bad_collections=list(self._bad))
+        # A root replaced after start-up (by a symlink, or moved) is out of
+        # scope until it is the configured directory again: nothing under it
+        # is discovered, read, judged gone, searched or expanded.
+        self._valid = {n for n in self._roots if self._root_ok(n)}
+        for n in self._roots:
+            if n not in self._valid:
+                report.bad_collections.append(f"{n} (root is no longer the configured directory)")
+        if self._valid != set(self._roots) and self._queue is not None:
+            self._reset_walk()
         await self._check_roots(conn)
         seen, complete = self._discover(report)
-        names = list(self._roots)
+        names = [n for n in self._roots if n in self._valid]
         known = await self._known(conn, names)
 
         new = sorted(k for k in seen if k not in known or known[k][0] != "present")
@@ -489,6 +507,11 @@ class DocumentIndex:
         for k in new:
             if k not in known:
                 new_sizes[seen[k][1]] = new_sizes.get(seen[k][1], 0) + 1
+        # A never-seen file sharing (inode, size) with a file still marked
+        # present may be the far end of a move whose source the walk has not
+        # reached yet: it waits for the generation to complete, so the move
+        # can be paired instead of the history being lost (#667 re-review).
+        present_ids = {(row[3], row[2]) for row in known.values() if row[0] == "present"}
 
         # Gone files are hidden first — before any read — so a deletion is
         # never visible-while-pending.  Only a completed discovery
@@ -496,6 +519,8 @@ class DocumentIndex:
         if complete is not None:
             for key, row in known.items():
                 if row[0] == "present" and key not in complete and key[0] not in self._gen_failed_done:
+                    if key[0] not in self._valid:
+                        continue
                     try:
                         _lstat_in(self._roots[key[0]], key[1])
                         continue  # still there (e.g. skipped by discovery limits)
@@ -516,6 +541,9 @@ class DocumentIndex:
             size = seen[key][1]
             if size > self._max_file_bytes:
                 report.too_large += 1
+                continue
+            if complete is None and key not in known and (seen[key][2], size) in present_ids:
+                report.pending += 1
                 continue
             if (done >= self._max_files or time.monotonic() >= deadline
                     or (done and spent + size > self._max_bytes)):
@@ -566,6 +594,8 @@ class DocumentIndex:
     async def _check_roots(self, conn) -> None:
         """A collection whose root moved is out of scope as a whole."""
         for name, root in self._roots.items():
+            if name not in self._valid:
+                continue
             cur = await conn.execute("SELECT root FROM doc_collections WHERE name=?", (name,))
             row = await cur.fetchone()
             if row and row[0] == root:
@@ -588,48 +618,78 @@ class DocumentIndex:
                     "INSERT INTO doc_collections(name, root) VALUES (?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET root=excluded.root", (name, root))
             if row:
-                self._queue = None   # rediscover from scratch
+                self._reset_walk()   # rediscover from scratch
                 self._last_complete = None
 
-    def _discover(self, report: SyncReport):
-        """One bounded step of a resumable walk over every collection.
+    def _root_ok(self, name: str) -> bool:
+        root = self._roots[name]
+        try:
+            st = os.lstat(root)
+        except OSError:
+            return False
+        return (stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+                and os.path.realpath(root) == root
+                and os.path.realpath(self._literal[name]) == root)
 
-        Returns ``(seen, complete)``: *seen* holds every file found so far in
-        the current generation plus, for files not reached yet, the last
-        completed generation (so a partial walk never looks like deletion);
-        *complete* is the finished generation's file set when this step
-        completed one, else ``None``.  The queue is breadth-first across all
-        collections, so none starves the others.
+    def _reset_walk(self) -> None:
+        if self._iter is not None:
+            self._iter[1].close()
+        self._iter = None
+        self._queue = None
+
+    def _discover(self, report: SyncReport):
+        """One bounded step of a resumable walk over every valid collection.
+
+        At most ``max_entries`` directory entries are examined per call —
+        inside one directory as well: an open directory iterator is kept and
+        resumed next call.  Returns ``(seen, complete)``: *seen* holds every
+        file found so far in the current generation plus, for files not
+        reached yet, the last completed generation (so a partial walk never
+        looks like deletion); *complete* is the finished generation's file
+        set when this step completed one, else ``None``.  The queue is
+        breadth-first across all collections, so none starves the others.
         """
         if self._queue is None:
-            self._queue = deque((name, root) for name, root in self._roots.items())
+            self._queue = deque((n, r) for n, r in self._roots.items() if n in self._valid)
             self._gen_seen = {}
             self._gen_failed = set()
         budget = self._max_entries
-        while self._queue and budget > 0:
-            name, folder = self._queue.popleft()
+        while budget > 0 and (self._iter is not None or self._queue):
+            if self._iter is None:
+                name, folder = self._queue.popleft()
+                if name not in self._valid:
+                    continue
+                try:
+                    self._iter = (name, os.scandir(folder))
+                except OSError:
+                    report.unreadable += 1
+                    self._gen_failed.add(name)
+                    continue
+            name, it = self._iter
             try:
-                with os.scandir(folder) as it:
-                    for entry in it:
-                        budget -= 1
-                        if entry.name.startswith(".") or entry.is_symlink():
-                            continue
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                self._queue.append((name, entry.path))
-                            elif (entry.is_file(follow_symlinks=False)
-                                  and entry.name.lower().endswith(".md")):
-                                rel = os.path.relpath(entry.path, self._roots[name])
-                                self._gen_seen[(name, rel.replace(os.sep, "/"))] = \
-                                    _fingerprint(entry.stat(follow_symlinks=False))
-                        except OSError:
-                            report.unreadable += 1
+                entry = next(it, None)
             except OSError:
+                entry = None
                 report.unreadable += 1
                 self._gen_failed.add(name)
+            if entry is None:
+                it.close()
+                self._iter = None
+                continue
+            budget -= 1
+            if entry.name.startswith(".") or entry.is_symlink():
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    self._queue.append((name, entry.path))
+                elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".md"):
+                    rel = os.path.relpath(entry.path, self._roots[name]).replace(os.sep, "/")
+                    self._gen_seen[(name, rel)] = _fingerprint(entry.stat(follow_symlinks=False))
+            except OSError:
+                report.unreadable += 1
         seen = dict(self._last_complete or {})
         seen.update(self._gen_seen)
-        if self._queue:
+        if self._iter is not None or self._queue:
             self._gen_failed_done = set(self._roots)   # nothing is judged gone
             return seen, None
         complete = dict(self._gen_seen)
@@ -708,7 +768,7 @@ class DocumentIndex:
     async def _try_move(self, conn, r: _Read, digest: str, now: str) -> bool:
         """A never-seen file is a move when exactly one removed file in scope
         had its inode, size and whole-file digest, and is still gone."""
-        names = list(self._roots)
+        names = [n for n in self._roots if n in self._valid]
         cur = await conn.execute(
             "SELECT collection, path FROM doc_files WHERE state='removed' AND inode=? "
             "AND size=? AND file_digest=? AND collection IN "
@@ -813,7 +873,7 @@ class DocumentIndex:
             return [], "documents: not configured"
         async with self._connect() as conn:
             report = await self._locked_sync(conn)
-            if not self._roots:
+            if not self._valid:
                 return [], report.note()
             rows = await self._match(conn, terms)
 
@@ -855,7 +915,7 @@ class DocumentIndex:
         long_terms = [t for t in terms if len(t) >= 3]
         single = [t for t in terms if is_cjk_char(t)]
         short = [t for t in terms if len(t) < 3 and t not in single]
-        names = list(self._roots)
+        names = [n for n in self._roots if n in self._valid]
         where = [
             f"v.collection IN ({','.join('?' * len(names))})",
             "EXISTS (SELECT 1 FROM doc_files f WHERE f.collection=v.collection "
@@ -908,6 +968,8 @@ class DocumentIndex:
             return RefExpansion(_gone(*parsed), found=False)
         async with self._connect() as conn:
             await self._locked_sync(conn)
+            if parsed[0] not in self._valid:
+                return RefExpansion(_gone(*parsed), found=False)
             return await self._expand(conn, parsed)
 
     async def _expand(self, conn, parsed):
@@ -918,7 +980,10 @@ class DocumentIndex:
         if _HASHED.match(path):
             cur = await conn.execute(
                 "SELECT DISTINCT path FROM doc_files WHERE collection=?", (coll,))
-            path = next((p for (p,) in await cur.fetchall() if _hashed(p) == path), path)
+            hits = [p for (p,) in await cur.fetchall() if _hashed(p) == path]
+            if len(hits) > 1:
+                return RefExpansion(f"{path} matches {len(hits)} paths; ambiguous.", found=False)
+            path = hits[0] if hits else path
 
         notes: list[str] = []
         start = (coll, path)
@@ -932,7 +997,7 @@ class DocumentIndex:
             if row[0] == "present":
                 break
             new_coll, _, new_path = (row[1] or "").partition("/")
-            if new_coll not in self._roots or not new_path:
+            if new_coll not in self._valid or not new_path:
                 return gone
             coll, path = new_coll, new_path
         else:
@@ -946,7 +1011,11 @@ class DocumentIndex:
             cur = await conn.execute(
                 "SELECT DISTINCT anchor FROM doc_versions WHERE collection=? AND path=?",
                 (coll, path))
-            anchor = next((a for (a,) in await cur.fetchall() if _hashed(a) == anchor), anchor)
+            hits = [a for (a,) in await cur.fetchall() if _hashed(a) == anchor]
+            if len(hits) > 1:
+                return RefExpansion(f"{anchor} matches {len(hits)} sections; ambiguous.",
+                                    found=False)
+            anchor = hits[0] if hits else anchor
         cur = await conn.execute(
             "SELECT v.id, v.digest, v.content, v.first_seen, c.ord FROM doc_current c "
             "JOIN doc_versions v ON v.id=c.version_id "
