@@ -484,12 +484,19 @@ class DocumentIndex:
         # A root replaced after start-up (by a symlink, or moved) is out of
         # scope until it is the configured directory again: nothing under it
         # is discovered, read, judged gone, searched or expanded.
-        self._valid = {n for n in self._roots if self._root_ok(n)}
+        valid = {n for n in self._roots if self._root_ok(n)}
         for n in self._roots:
-            if n not in self._valid:
+            if n not in valid:
                 report.bad_collections.append(f"{n} (root is no longer the configured directory)")
-        if self._valid != set(self._roots) and self._queue is not None:
+        # Restart the walk only when the set of valid roots *changes* — a root
+        # that stays invalid must not keep resetting the other collections'
+        # progress (#667 round 3).
+        if valid != self._valid:
             self._reset_walk()
+            if self._last_complete is not None:
+                self._last_complete = {k: v for k, v in self._last_complete.items()
+                                       if k[0] in valid}
+        self._valid = valid
         await self._check_roots(conn)
         seen, complete = self._discover(report)
         names = [n for n in self._roots if n in self._valid]
@@ -687,7 +694,7 @@ class DocumentIndex:
                     self._gen_seen[(name, rel)] = _fingerprint(entry.stat(follow_symlinks=False))
             except OSError:
                 report.unreadable += 1
-        seen = dict(self._last_complete or {})
+        seen = {k: v for k, v in (self._last_complete or {}).items() if k[0] in self._valid}
         seen.update(self._gen_seen)
         if self._iter is not None or self._queue:
             self._gen_failed_done = set(self._roots)   # nothing is judged gone

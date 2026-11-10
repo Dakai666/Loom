@@ -746,3 +746,22 @@ async def test_literal_hash_like_heading_resolves_to_itself(db, ws):
         found = (await _docs(search, marker))[0]
         exp = await search.expand(found[0].ref)
         assert exp.found and marker in exp.text and "not saved" not in exp.text
+
+
+async def test_persistently_invalid_root_does_not_starve_other_collections(db, ws):
+    import shutil
+    (ws / "bad").mkdir()
+    for i in range(4):
+        _write(ws / "notes" / f"g{i}.md", f"# 段\n正常集合{i}\n")
+    gone = _write(ws / "notes" / "gone.md", "# 段\n將被刪除\n")
+    index = DocumentIndex(db, ws, {"bad": "bad", "notes": "notes"}, max_entries=1)
+    shutil.rmtree(ws / "bad")
+    for _ in range(8):
+        await index.sync()
+    gone.unlink()
+    for _ in range(10):
+        report = await index.sync()
+    found = (await _docs(_search(db, index), "正常集合", limit=10))[0]
+    assert len(found) == 4
+    assert (await _docs(_search(db, index), "將被刪除"))[0] == []
+    assert any("bad" in b for b in report.bad_collections)
