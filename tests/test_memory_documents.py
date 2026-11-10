@@ -520,3 +520,164 @@ async def test_changed_root_never_lends_old_history_to_same_path(db, ws):
     s2 = _search(db, _index(db, ws, collections={"notes": "elsewhere"}))
     assert (await _docs(s2, "新根的內容"))[0]
     assert (await _docs(s2, "舊根的祕密"))[0] == []
+
+
+# ---------------------------------------------------------------------------
+# PR #667 review regressions (Codex)
+# ---------------------------------------------------------------------------
+
+class TestReviewRegressions:
+    async def test_deletion_is_hidden_while_new_files_are_pending(self, db, ws):
+        old = _write(ws / "notes" / "old.md", "# 段\nuniquedeletedsecret\n")
+        index = DocumentIndex(db, ws, {"notes": "notes"}, max_files=1)
+        search = _search(db, index)
+        assert (await _docs(search, "uniquedeletedsecret"))[0]
+        old.unlink()
+        _write(ws / "notes" / "n1.md", "# 段\n新檔一\n")
+        _write(ws / "notes" / "n2.md", "# 段\n新檔二\n")
+        assert (await _docs(search, "uniquedeletedsecret"))[0] == []
+
+    async def test_failed_file_never_half_commits_through_shared_connection(
+            self, db, ws, monkeypatch):
+        _write(ws / "notes" / "f.md", "# 段\n索引缺失測試\n")
+        index = _index(db, ws)
+        real = docs_mod.bigram_projection
+
+        def boom(text):
+            raise RuntimeError("terms projection failed")
+
+        monkeypatch.setattr(docs_mod, "bigram_projection", boom)
+        report = await index.sync()
+        assert report.failed == 1
+        await SemanticMemory(db).upsert(SemanticEntry(key="k", value="v"))  # shared commit
+        cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
+        assert (await cur.fetchone())[0] == 0
+        monkeypatch.setattr(docs_mod, "bigram_projection", real)
+        search = _search(db, index)
+        assert (await _docs(search, "索引"))[0]          # two-char route repaired
+        assert (await _docs(search, "索引缺失"))[0]
+
+    async def test_older_read_cannot_overwrite_newer_commit(self, db, ws, monkeypatch):
+        f = _write(ws / "notes" / "c.md", "# 段\n版本甲甲\n")
+        a = _index(db, ws)
+        b = _index(db, ws)
+        original = DocumentIndex._commit_file
+        fired = {}
+
+        async def racing(self, conn, r, sizes):
+            if self is a and not fired:
+                fired["x"] = True
+                _write(f, "# 段\n版本乙乙乙\n")
+                monkeypatch.setattr(docs_mod, "_lock_for", lambda p: asyncio.Lock())
+                await b.sync()                      # "another process" commits B
+            return await original(self, conn, r, sizes)
+
+        import asyncio
+        monkeypatch.setattr(DocumentIndex, "_commit_file", racing)
+        await a.sync()
+        cur = await db.execute(
+            "SELECT v.content FROM doc_current c JOIN doc_versions v ON v.id=c.version_id")
+        assert "版本乙乙乙" in (await cur.fetchone())[0]
+
+    async def test_symlinked_parent_never_serves_the_old_path(self, db, ws):
+        _write(ws / "notes" / "sub" / "s.md", "# 段\nsymlinksecret\n")
+        search = _search(db, _index(db, ws))
+        ref = (await _docs(search, "symlinksecret"))[0][0].ref
+        (ws / "notes" / "sub").rename(ws / "notes" / "real")
+        (ws / "notes" / "sub").symlink_to(ws / "notes" / "real", target_is_directory=True)
+        found = (await _docs(search, "symlinksecret"))[0]
+        assert all("/sub/" not in r.ref for r in found)
+        exp = await search.expand(ref)
+        assert "doc:notes/sub/" not in exp.text.split("\n", 1)[0] or not exp.found
+        if exp.found:
+            assert "moved to doc:notes/real/s.md" in exp.text
+
+    async def test_many_identical_copies_neither_stall_nor_move(self, db, ws):
+        old = _write(ws / "notes" / "old.md", "# 段\n範本內容\n")
+        index = DocumentIndex(db, ws, {"notes": "notes"}, max_files=1)
+        search = _search(db, index)
+        ref = (await _docs(search, "範本內容"))[0][0].ref
+        old.unlink()
+        for i in range(3):
+            _write(ws / "notes" / f"copy{i}.md", "# 段\n範本內容\n")
+        for _ in range(4):
+            await index.sync()
+        found = (await _docs(search, "範本內容", limit=10))[0]
+        assert sorted(r.ref.split("#")[0] for r in found) == [
+            f"doc:notes/copy{i}.md" for i in range(3)]
+        exp = await search.expand(ref)
+        assert not exp.found and "moved to" not in exp.text
+
+    async def test_discovery_resumes_across_recalls(self, db, ws):
+        for i in range(3):
+            _write(ws / "notes" / f"d{i}.md", f"# 段\n續掃內容{i}\n")
+        index = DocumentIndex(db, ws, {"notes": "notes"}, max_entries=1)
+        for _ in range(6):
+            await index.sync()
+        found = (await _docs(_search(db, index), "續掃內容", limit=10))[0]
+        assert len(found) == 3
+
+    async def test_literal_headings_cannot_collide_with_generated_anchors(self, db, ws):
+        text = "前言\n# _preamble\nx\n# A\none\n# A\ntwo\n# A~2\nthree\n"
+        anchors = [s.anchor for s in split_sections(text)]
+        assert len(anchors) == len(set(anchors))
+        _write(ws / "notes" / "dup.md", text)
+        found, cov = await _docs(_search(db, _index(db, ws)), "three")
+        assert found and "failed" not in cov
+
+    async def test_secret_in_heading_never_printed_in_refs(self, db, ws):
+        _write(ws / "notes" / "k.md", "# api_key=abcdefgh12345678\nsearchmarker\n")
+        search = _search(db, _index(db, ws))
+        found = (await _docs(search, "searchmarker"))[0]
+        assert found and "abcdefgh12345678" not in found[0].format()
+        exp = await search.expand(found[0].ref)
+        assert exp.found and "abcdefgh12345678" not in exp.text
+
+    async def test_output_budget_never_cuts_a_result_header(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from loom.core.harness.middleware import ToolCall
+        from loom.core.harness.permissions import TrustLevel
+        from loom.core.memory.search import MemorySearchResult, RecallResults
+        from loom.platform.cli.tools import make_recall_tool
+
+        results = RecallResults([
+            MemorySearchResult(type="document", key=f"k{i}",
+                               value="正文" * 200, score=0.0,
+                               metadata={"status": "current"},
+                               ref=f"doc:n/{i}.md#" + "長" * 700 + "@12345678")
+            for i in range(6)
+        ], coverage="Coverage — test.")
+        facade = MagicMock()
+        facade.search = AsyncMock(return_value=results)
+        facade.mark_accessed = AsyncMock()
+        out = await make_recall_tool(facade).executor(ToolCall(
+            id="c", tool_name="recall", args={"query": "x", "limit": 6},
+            trust_level=TrustLevel.SAFE, session_id="s"))
+        heads = [l for l in out.output.split("\n") if l.startswith("[document]")]
+        assert heads and all(h.endswith("(current)") for h in heads)
+        assert len(out.output) <= 4_000
+        shown = facade.mark_accessed.await_args.args[0]
+        assert len(shown) == len(heads)   # access recorded only for what was shown
+
+    async def test_byte_budget_is_reserved_not_overrun(self, db, ws):
+        _write(ws / "notes" / "b1.md", "# 段\n" + "a" * 55)
+        _write(ws / "notes" / "b2.md", "# 段\n" + "b" * 55)
+        index = DocumentIndex(db, ws, {"notes": "notes"}, max_bytes=100)
+        report = await index.sync()
+        assert report.pending == 1
+        cur = await db.execute("SELECT COUNT(*) FROM doc_files")
+        assert (await cur.fetchone())[0] == 1
+
+
+async def test_document_route_failure_never_fails_recall(db, ws, monkeypatch):
+    _write(ws / "notes" / "x.md", "# 段\n內容\n")
+    index = _index(db, ws)
+
+    async def broken(terms):
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr(index, "search", broken)
+    sem = SemanticMemory(db)
+    await sem.upsert(SemanticEntry(key="k", value="內容 記憶"))
+    results = await MemorySearch(sem, ProceduralMemory(db), documents=index).recall("內容")
+    assert results and "documents: unavailable" in results.coverage

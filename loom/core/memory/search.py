@@ -400,7 +400,11 @@ class MemorySearch:
                     # content happened (spec 61 r3 §9.2) — no stand-in dates.
                     notes.append("documents: excluded (no event time)")
                 else:
-                    found, note = await self._documents.search(terms)
+                    try:
+                        found, note = await self._documents.search(terms)
+                    except Exception as exc:  # documents never fail recall
+                        logger.warning("Document search failed: %s", exc)
+                        found, note = [], "documents: unavailable (search failed)"
                     routes.append(found)
                     notes.append(note)
         else:

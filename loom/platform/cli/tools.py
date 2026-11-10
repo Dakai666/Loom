@@ -1316,8 +1316,13 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 blocks.append(block)
                 room -= len(block) + sep
                 continue
-            if room - sep > 120:  # keep the ref line and a useful excerpt
-                blocks.append(block[:room - sep - 1] + "…")
+            # A result's first line (type, ref, version/status) is never cut:
+            # a cut ref cannot be read back and a cut status misleads (#667
+            # review). Trim only the text below it, or omit the result.
+            head, _, body = block.partition("\n")
+            body_room = room - sep - len(head) - 2  # newline + ellipsis
+            if body and body_room >= 80:
+                blocks.append(head + "\n" + body[:body_room] + "…")
                 trimmed = 1
             break
         # A trimmed result still showed its ref and part of the text; an
