@@ -1316,8 +1316,13 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 blocks.append(block)
                 room -= len(block) + sep
                 continue
-            if room - sep > 120:  # keep the ref line and a useful excerpt
-                blocks.append(block[:room - sep - 1] + "…")
+            # A result's first line (type, ref, version/status) is never cut:
+            # a cut ref cannot be read back and a cut status misleads (#667
+            # review). Trim only the text below it, or omit the result.
+            head, _, body = block.partition("\n")
+            body_room = room - sep - len(head) - 2  # newline + ellipsis
+            if body and body_room >= 80:
+                blocks.append(head + "\n" + body[:body_room] + "…")
                 trimmed = 1
             break
         # A trimmed result still showed its ref and part of the text; an
@@ -1364,18 +1369,22 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     return ToolDefinition(
         name="recall",
         description=(
-            "Search your memory, skills and past conversation turns in one call. "
+            "Search your memory, skills, past conversation turns and your notes "
+            "and documents (configured folders) in one call. "
             "Use short keywords separated by spaces — all terms must match, and a "
             "long sentence is matched as one literal phrase, so for a vague "
             "question pick the distinctive words (a name, a phrase you remember) "
             "and retry with other words if nothing comes back. Each result has a "
-            "ref (mem:/skill:/log:); conversation results are one turn each, "
-            "dated by when it happened. The last line reports which sources were "
+            "ref (mem:/skill:/log:/doc:); conversation results are one turn each, "
+            "dated by when it happened; document results are one section each, "
+            "marked current or old version (old versions stay readable). The last "
+            "line reports which sources were "
             "searched and where the search was limited. To read more of one "
             "result, call recall again with only ref set to that result's ref: "
             "a log: ref returns that turn and the turns around it, with the "
-            "fuller stored tool output; mem:/skill: refs say if the entry "
-            "changed since."
+            "fuller stored tool output; a doc: ref returns that section (with the "
+            "sections around it when current); mem:/skill:/doc: refs say if the "
+            "entry changed since."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={
@@ -1397,7 +1406,7 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                     "type": "string",
                     "enum": ["semantic", "skill", "all"],
                     "description": (
-                        "'all' (default) searches memory, skills and conversation; "
+                        "'all' (default) searches memory, skills, conversation and documents; "
                         "'semantic' memory only; 'skill' skills only"
                     ),
                 },

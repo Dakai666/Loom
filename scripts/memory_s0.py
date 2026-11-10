@@ -165,6 +165,54 @@ async def build_fixture(path: Path, fixture: dict, provider=None):
     return store
 
 
+DOC_COLLECTION = "synthetic"
+
+
+def _doc_gold(ref: str) -> tuple[str, str, int]:
+    """Fixture ``doc:synthetic/{path}#{anchor}@v{n}`` → (path, anchor, n).
+
+    ``@v1``/``@v2`` are metric labels for version order (61a), not runtime
+    digests; :func:`build_documents` maps runtime refs onto them.
+    """
+    body = ref.removeprefix(f"doc:{DOC_COLLECTION}/")
+    path, _, rest = body.partition("#")
+    anchor, _, label = rest.partition("@v")
+    return path, anchor, int(label)
+
+
+async def build_documents(db, workdir: Path, fixture: dict):
+    """Write the fixture documents as Markdown files, version by version.
+
+    Each version label is written and synced in order (v1, then v2), so the
+    later version is current and the earlier one is kept as history (spec 61
+    r3 §9.2, decision A1).  Returns ``(DocumentIndex, runtime ref → gold ref)``.
+    """
+    from loom.core.memory.documents import DocumentIndex, format_doc_ref, split_sections
+    root = workdir / "documents"
+    root.mkdir(parents=True, exist_ok=True)
+    index = DocumentIndex(db, workdir, {DOC_COLLECTION: "documents"})
+    golds = [(_doc_gold(d["ref"]), d) for d in fixture.get("documents", [])]
+    mapping: dict[str, str] = {}
+    for label in sorted({g[2] for g, _ in golds}):
+        files: dict[str, dict[str, dict]] = {}
+        for (path, anchor, n), doc in golds:
+            if n <= label:
+                latest = files.setdefault(path, {})
+                if anchor not in latest or _doc_gold(latest[anchor]["ref"])[2] < n:
+                    latest[anchor] = doc
+        for path, sections in files.items():
+            text = "".join(f"# {a}\n{d['content']}\n\n" for a, d in sections.items())
+            (root / path).write_text(text, encoding="utf-8")
+            for sec in split_sections(text):
+                gold = sections[sec.anchor]["ref"]
+                digest = hashlib.sha256(sec.content.encode()).hexdigest()
+                mapping[format_doc_ref(DOC_COLLECTION, path, sec.anchor, digest)] = gold
+        report = await index.sync()
+        if report.pending:
+            raise RuntimeError("fixture documents were not fully indexed")
+    return index, mapping
+
+
 async def synthetic(output: Path, base_url: str | None, model: str, replay: Path | None = None) -> dict:
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
@@ -196,15 +244,20 @@ async def synthetic(output: Path, base_url: str | None, model: str, replay: Path
         store = await build_fixture(Path(directory) / "fixture.db", fixture, provider)
         rows = []
         async with store.connect() as db:
-            search = MemorySearch(SemanticMemory(db, embedding_provider=provider), ProceduralMemory(db))
+            documents, doc_gold = await build_documents(db, Path(directory), fixture)
+            search = MemorySearch(SemanticMemory(db, embedding_provider=provider), ProceduralMemory(db),
+                                  documents=documents)
             for case in fixture["cases"]:
                 kwargs = dict(case.get("args", {}))
                 for name in ("since", "until"):
                     if name in kwargs:
                         kwargs[name] = datetime.fromisoformat(kwargs[name])
                 found = await search.recall(case["query"], limit=5, **kwargs)
-                normalized = [{"ref": getattr(r, "ref", "") or (("skill:" if r.type == "skill" else "mem:") + r.key),
-                               "excerpt": r.value[:300], "score": round(r.score, 7),
+                normalized = [{"ref": doc_gold.get(r.ref, r.ref) if r.type == "document"
+                               else getattr(r, "ref", "") or (("skill:" if r.type == "skill" else "mem:") + r.key),
+                               # documents: the shown excerpt (format() caps it at 512)
+                               "excerpt": r.value[:512] if r.type == "document" else r.value[:300],
+                               "score": round(r.score, 7),
                                "fallback": bool(r.metadata.get("fallback")),
                                "method": r.metadata.get("method", "bm25" if r.score else "recency")}
                               for r in found]

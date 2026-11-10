@@ -15,8 +15,13 @@ its evidence — a search result block whose visible text carries it, or a
 Evidence cut by formatting or the output budget does not count. Refs are
 parsed to their canonical identity (version suffix dropped, turn split at the
 last colon) and compared exactly; ``cited`` asks whether the final answer
-names an expected ref. ``doc-*`` cases need S2
-(documents) and are skipped.
+names an expected ref.
+
+``--stage S2`` runs the ``doc-*`` cases instead (#650 S2, spec 61 r3 §9.2):
+the fixture documents are written as files version by version, and a shown
+``doc:`` ref is mapped onto its fixture label through the section digest.
+A ``recall(ref=doc:...)`` read counts the target section and the neighbour
+sections it printed, each under its own ref.
 
 Usage::
 
@@ -35,7 +40,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from scripts.memory_s0 import CASES, build_fixture
+from scripts.memory_s0 import CASES, build_documents, build_fixture
 
 MAX_RECALLS = 3
 SYSTEM = (
@@ -68,16 +73,24 @@ class _Facade:
 
 # A ref ends at whitespace, CJK/ASCII punctuation, or a Markdown / quote
 # wrapper (`log:x:2`, **mem:k**, "skill:s") — answers often format refs.
-_REF = re.compile(r"(?:log|mem|skill):[^\s，。、；;,)）\]」`'\"*“”‘’<>]+")
+_REF = re.compile(r"(?:log|mem|skill|doc):[^\s，。、；;,)）\]」`'\"*“”‘’<>]+")
 # A search result's header line, as MemorySearchResult.format() writes it.
 _RESULT_HEAD = re.compile(r"^\[[a-z]+\](?: \[[^\]]*\])?.*\s(?:log|mem|skill):\S+$")
 # Lines the recall tool appends after the results.
 _TRAILER = ("Coverage — ", "Output budget (", "No match.")
+# A document result's header: ``[document] {ref} ({status})``.
+_DOC_HEAD = re.compile(r"^\[document\] (doc:\S+) \(")
+# A neighbour section inside a ``doc:`` expansion.
+_DOC_NEIGHBOUR = re.compile(r"^— (?:previous|next) section (doc:\S+) \(current\):$")
+# runtime doc ref (with digest) → fixture label; filled by --stage S2.
+DOC_GOLD: dict[str, str] = {}
 
 
 def _canonical(ref: str) -> str:
     """A ref's identity: no version suffix, no trailing punctuation."""
     ref = ref.rstrip(".:")
+    if ref.startswith("doc:"):
+        return DOC_GOLD.get(ref, ref)
     if ref.startswith("mem:"):
         return re.sub(r"@[0-9a-f]{8}$", "", ref)
     if ref.startswith("skill:"):
@@ -113,6 +126,18 @@ def _shown(outputs: list[str]) -> list[tuple[str, str]]:
                 if turn:
                     shown.append((f"log:{sid}:{turn[0]}", section))
             continue
+        if head.startswith("doc:"):
+            # target section first, then each printed neighbour under its ref
+            current = _canonical(head.split(" ", 1)[0])
+            parts: list[tuple[str, list[str]]] = [(current, [])]
+            for line in out.split("\n"):
+                m = _DOC_NEIGHBOUR.match(line)
+                if m:
+                    parts.append((_canonical(m[1]), []))
+                else:
+                    parts[-1][1].append(line)
+            shown.extend((ref, "\n".join(lines)) for ref, lines in parts)
+            continue
         if head.startswith(("mem:", "skill:")):
             refs = _REF.findall(head)  # a mem:/skill: ref read: the whole entry
             if refs:
@@ -124,7 +149,11 @@ def _shown(outputs: list[str]) -> list[tuple[str, str]]:
         blocks: list[tuple[str, list[str]]] = []
         open_block = False
         for line in out.split("\n"):
-            if _RESULT_HEAD.match(line):
+            doc_head = _DOC_HEAD.match(line)
+            if doc_head:
+                blocks.append((_canonical(doc_head[1]), [line]))
+                open_block = True
+            elif _RESULT_HEAD.match(line):
                 blocks.append((_canonical(_REF.findall(line)[-1]), [line]))
                 open_block = True
             elif line.startswith(_TRAILER):
@@ -189,7 +218,7 @@ async def _run_case(case, router, model, tool, facade: _Facade) -> dict:
     }
 
 
-async def main_async(output: Path, model: str | None) -> None:
+async def main_async(output: Path, model: str | None, stage: str = "S1") -> None:
     from loom.core.cognition.router import get_default_model
     from loom.core.memory.procedural import ProceduralMemory
     from loom.core.memory.search import MemorySearch
@@ -201,13 +230,21 @@ async def main_async(output: Path, model: str | None) -> None:
     model = model or get_default_model()
     router = build_router(active_model=model)
     fixture = json.loads(CASES.read_text())
-    cases = [c for c in fixture["cases"]
-             if c["id"] not in SINGLE_CALL_LAYER and not c["id"].startswith("doc-")]
+    if stage == "S2":
+        cases = [c for c in fixture["cases"] if c["stage"] == "S2"]
+    else:
+        cases = [c for c in fixture["cases"]
+                 if c["id"] not in SINGLE_CALL_LAYER and not c["id"].startswith("doc-")]
     rows = []
     with tempfile.TemporaryDirectory() as tmp:
         store = await build_fixture(Path(tmp) / "fixture.db", fixture)
         async with store.connect() as db:
-            facade = _Facade(MemorySearch(SemanticMemory(db), ProceduralMemory(db)))
+            documents = None
+            if stage == "S2":
+                documents, gold = await build_documents(db, Path(tmp), fixture)
+                DOC_GOLD.update(gold)
+            facade = _Facade(MemorySearch(SemanticMemory(db), ProceduralMemory(db),
+                                          documents=documents))
             tool = make_recall_tool(facade)  # type: ignore[arg-type]
             for case in cases:
                 row = await _run_case(case, router, model, tool, facade)
@@ -217,7 +254,7 @@ async def main_async(output: Path, model: str | None) -> None:
     hits = sum(1 for r in rows if r["hit_within_budget"])
     report = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model": model, "max_recalls": MAX_RECALLS, "cases": len(rows),
+        "model": model, "stage": stage, "max_recalls": MAX_RECALLS, "cases": len(rows),
         "hit_within_budget": hits, "cited": sum(r["cited"] for r in rows),
         "mean_recall_calls": round(sum(r["recall_calls"] for r in rows) / max(len(rows), 1), 2),
         "rows": rows,
@@ -231,8 +268,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model")
+    parser.add_argument("--stage", choices=("S1", "S2"), default="S1")
     args = parser.parse_args()
-    asyncio.run(main_async(args.output, args.model))
+    asyncio.run(main_async(args.output, args.model, args.stage))
 
 
 if __name__ == "__main__":

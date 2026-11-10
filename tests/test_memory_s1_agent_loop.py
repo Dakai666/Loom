@@ -94,3 +94,30 @@ def test_refs_wrapped_in_markdown_or_quotes_are_cited():
     assert not _cited("見 `log:s0-design:20`。", gold)
     assert _cited("`mem:s0:batch:limit@1a2b3c4d`", _gold("mem:s0:batch:limit"))
     assert _cited("`skill:brew@v2`", _gold("skill:brew"))
+
+
+# #650 S2: doc: refs are scored by their fixture label, per section shown.
+
+def _with_doc_gold(mapping):
+    from scripts import memory_s1_agent_loop as loop
+    loop.DOC_GOLD.clear()
+    loop.DOC_GOLD.update(mapping)
+
+
+def test_doc_search_block_maps_to_its_label():
+    _with_doc_gold({"doc:synthetic/p.md#options@aaaaaaaa": "doc:synthetic/p.md#options@v1"})
+    shown = ("[document] doc:synthetic/p.md#options@aaaaaaaa (old version — current: "
+             "doc:synthetic/p.md#options@bbbbbbbb)\n  舊提案只驗證單一說明檔")
+    gold = _gold("doc:synthetic/p.md#options@v1", "單一說明檔")
+    assert _visible_hit(gold, [shown]) == "search"
+    assert _visible_hit(_gold("doc:synthetic/p.md#options@v2", "單一說明檔"), [shown]) is None
+
+
+def test_doc_expansion_neighbour_counts_under_its_own_ref():
+    _with_doc_gold({"doc:synthetic/r.md#chapter@aaaaaaaa": "doc:synthetic/r.md#chapter@v1",
+                    "doc:synthetic/r.md#afterword@cccccccc": "doc:synthetic/r.md#afterword@v1"})
+    out = ("doc:synthetic/r.md#chapter@aaaaaaaa (current; indexed since 2026-11-10 — not the "
+           "date it was written)\n# chapter\n倒影破碎\n\n"
+           "— next section doc:synthetic/r.md#afterword@cccccccc (current):\n# afterword\n保留意見")
+    assert _visible_hit(_gold("doc:synthetic/r.md#afterword@v1", "保留意見"), [out]) == "ref read"
+    assert _visible_hit(_gold("doc:synthetic/r.md#chapter@v1", "保留意見"), [out]) is None

@@ -161,7 +161,7 @@ def value_hash(value: str) -> str:
 @dataclass
 class MemorySearchResult:
     """A single ranked result from memory search."""
-    type: str               # "semantic" | "relational" | "skill" | "conversation"
+    type: str               # "semantic" | "relational" | "skill" | "conversation" | "document"
     key: str                # fact key, skill name, or conversation ref
     value: str              # fact value, skill body, or conversation excerpt
     score: float            # fused rank score — not a probability
@@ -201,6 +201,10 @@ class MemorySearchResult:
                 date_hint = f" [{self.updated_at[:10]}]"
         if self.type == "conversation":
             return f"[conversation]{date_hint} {self.ref}\n  {self.value[:EXCERPT_CHARS]}"
+        if self.type == "document":
+            # Status before the text, so output trimming never drops it.
+            status = self.metadata.get("status", "")
+            return f"[document] {self.ref} ({status})\n  {self.value[:EXCERPT_CHARS]}"
         conf = self.metadata.get("effective_confidence") or self.metadata.get("confidence")
         conf_hint = f" conf={conf:.2f}" if conf is not None else ""
         return f"[{self.type}]{date_hint}{conf_hint} {self.versioned_ref}\n  {truncated}"
@@ -237,7 +241,8 @@ class RefExpansion:
     found: bool
 
 
-_REF_FORMS = "log:{session}:{turn}, mem:{key}[@hash] or skill:{name}[@vN]"
+_REF_FORMS = ("log:{session}:{turn}, mem:{key}[@hash], skill:{name}[@vN] or "
+              "doc:{collection}/{path}#{section}[@hash]")
 _LOG_REF = re.compile(r"^log:(?P<sid>.+):(?P<turn>\d+)$")
 _MEM_REF = re.compile(r"^mem:(?P<key>.+?)(?:@(?P<hash>[0-9a-f]{8}))?$")
 _SKILL_REF = re.compile(r"^skill:(?P<name>.+?)(?:@v(?P<version>\d+))?$")
@@ -304,9 +309,12 @@ class MemorySearch:
         self,
         semantic: SemanticMemory,
         procedural: ProceduralMemory,
+        documents: Any = None,
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
+        # #650 S2: optional DocumentIndex (loom.core.memory.documents).
+        self._documents = documents
         self._health: Any = None  # Optional MemoryHealthTracker, set post-init
 
     async def recall(
@@ -386,8 +394,23 @@ class MemorySearch:
             found, note = await self._search_conversation(terms, since=since, until=until)
             routes.append(found)
             notes.append(note)
+            if self._documents is not None:
+                if windowed:
+                    # A file's mtime or first-indexed time is not when its
+                    # content happened (spec 61 r3 §9.2) — no stand-in dates.
+                    notes.append("documents: excluded (no event time)")
+                else:
+                    try:
+                        found, note = await self._documents.search(terms)
+                    except Exception as exc:  # documents never fail recall
+                        logger.warning("Document search failed: %s", exc)
+                        found, note = [], "documents: unavailable (search failed)"
+                    routes.append(found)
+                    notes.append(note)
         else:
             notes.append(f"conversation: excluded (type={type})")
+            if self._documents is not None:
+                notes.append(f"documents: excluded (type={type})")
 
         fused = _fuse(routes)
         ranked = fused[:limit]
@@ -420,6 +443,12 @@ class MemorySearch:
         the version the ref was taken at.  Nothing here runs a fuzzy search.
         """
         ref = (ref or "").strip()
+        if ref.startswith("doc:"):
+            if self._documents is None:
+                return RefExpansion(
+                    f"{ref} — document collections are not configured in this "
+                    "instance.", found=False)
+            return await self._documents.expand(ref)
         if m := _LOG_REF.match(ref):
             return await self._expand_log(m["sid"], int(m["turn"]))
         if m := _MEM_REF.match(ref):

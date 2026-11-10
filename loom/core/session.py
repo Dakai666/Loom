@@ -1183,7 +1183,13 @@ class LoomSession:
         # Issue #147 Phase C: build the facade up-front so every later step
         # in start() (auto-import, MemoryIndexer, tool registration, etc.)
         # reads memory exclusively through ``self._memory``.
-        search = MemorySearch(semantic, procedural)
+        # #650 S2: configured document collections join recall
+        # ([memory.documents] collections, workspace-relative).
+        from loom.core.memory.documents import DocumentIndex, collections_from_config
+        documents = DocumentIndex(
+            semantic._db, self.workspace, collections_from_config(self._loom_config),
+        )
+        search = MemorySearch(semantic, procedural, documents=documents)
         search._health = self._governor.health
         self._memory = MemoryFacade(
             semantic=semantic,

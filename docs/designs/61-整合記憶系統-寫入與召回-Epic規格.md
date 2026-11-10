@@ -1,7 +1,7 @@
-# 整合記憶系統：寫入與召回 — Epic 規格 r2
+# 整合記憶系統：寫入與召回 — Epic 規格 r3
 
 > - 日期：2026-10-28（Asia/Taipei）
-> - 狀態：r2。S0 已交付並合併（[#651](https://github.com/Dakai666/Loom/pull/651)），盤點修正、S1 預算與 §1.2 裁決由 DK 確認。S1 可動工。
+> - 狀態：r3。S1 已完成（#652／#659／#662）；S2 範圍與 DK 裁決見 §9.2（2026-11-10）。
 > - 版本：r0 由 Codex 依 DK 初步方向起草；r1 依 [#650 Loom agent review](https://github.com/Dakai666/Loom/issues/650) 與 [Claude Code review](https://github.com/Dakai666/Loom/issues/650#issuecomment-6470563466) 收斂；r2 依 S0 報告與 [S0 review](https://github.com/Dakai666/Loom/pull/651#issuecomment-6472177779) 更新（變更摘要見 §15）。
 > - Epic：[#650](https://github.com/Dakai666/Loom/issues/650)，Claude Code 與 Loom agent 的共同 review／補充入口。
 > - 程式核對基準：`51bb2a611a2d5b12c128084f6b46d720f8a34597`。
@@ -122,7 +122,7 @@ flowchart TD
 | `log:{session_id}:{turn_index}` | 一個回合的 `session_log` 列；展開給該回合＋前後各一回合（有上限） | append-only，內容不變；session 被刪 → 明示「來源已刪除」 |
 | `mem:{key}` | semantic entry（key 已 UNIQUE） | 附 value 短 hash；展開時 hash 不同 → 明示「已修訂，以下為現版」；沿用 consolidation redirect |
 | `skill:{name}` | skill genome | 附 version |
-| `doc:{collection}/{path}#{chunk}@{digest}` | 文件篇章 | S2 定案 |
+| `doc:{collection}/{path}#{anchor}@{digest}` | 文件篇章（現版或保存的舊版） | 篇章歷史保存；刪除只回狀態、移動有條件接回（§9.2） |
 
 S1 PR-B 定案的顯示形式：結果顯示 `mem:{key}@{sha256(value) 前 8 碼}`、`skill:{name}@v{version}`；版本後綴只在顯示與展開時使用，結果本身的身分（RRF 合併與案例評估的鍵）仍是不帶後綴的 `mem:{key}`／`skill:{name}`。展開時不帶後綴的 ref 也接受，此時不做版本比對。
 
@@ -340,6 +340,67 @@ S1／S2 可以讓新能力早日可用，但不構成整個 Epic 完成。完成
 
 Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：閱讀篇章（A）、未升格的經歷（C）、放下清單（D）為 S1 必過；改變的判斷（B）、文件修訂（E）依賴修訂鏈與文件，列 S2。
 
+### 9.2 S2 具體範圍（r3，DK 裁決 2026-11-10；依 Codex design review 收斂）
+
+只做文件集合閉環：不碰對話索引、ledger、prediction，不加 embedding、scheduler、背景 agent 或額外 LLM 呼叫。
+
+**DK 裁決（2026-11-10）**
+
+1. **A1 保留篇章歷史**：篇章內容改變時另存一版（只存變動的篇章）；舊版仍可搜尋、可用 ref 讀回，結果標明「舊版」與現版 ref。歷史從首次建索引起累積——這些目錄都不在 git，首次建索引前的版本不可取回，也不得捏造。
+2. **集合**：`reading/`、`diary/`、`autonomy/circadian/journal/`、`outputs/doc/`（wiki；按目錄收錄，未登記於 `_meta/index.md` 的零散檔也收）、`outputs/research/`。**排除 `news/` 與 `outputs/self_check/`**。
+3. **刪除只回狀態**：檔案刪除、移出集合、集合自設定撤下或根目錄換址後，搜尋不再命中，舊 ref 只回「已刪除或已移出範圍」，不吐原文。資料列保留；同路徑恢復相同內容時歷史可接回。
+4. **移動有條件地認**：新路徑在已授權集合內、整檔 hash 相同、配對唯一 → 判定為移動，歷史接到新路徑，舊 ref 回「已移到」新 ref。移動同時改了內容、配對不唯一、或移出範圍 → 一律退回「舊路徑已刪除＋新路徑新增」，不以相似度或單一篇章 hash 推測。**r3.1 收緊（PR #667 review）**：配對改以 inode＋大小＋整檔 hash 判定，並要求同大小的新檔只有一個。原本「同一次同步內看到兩側」的寫法，必須等所有新檔都讀完才能判定，造成刪除後原文在等待期間仍可搜尋，以及複本多於單次上限時永久卡住。`mv` 保留 inode，所以 wiki 歸檔這類移動照樣接回；先複製再刪除改判為刪除＋新增。從未見過的新檔，如果 (inode, 大小) 與某個仍標示存在的檔相同，就等這一輪探索完成再處理，以免來源還沒被走到時，新路徑就先被當成新檔提交，歷史因此接不回來。
+
+**設定**：`loom.toml` 的 `[memory.documents] collections = { 名稱 = "相對 workspace 的路徑" }`（同步寫入 `loom.toml.example`）。未設定則文件路由不參與，覆蓋行註明。
+
+**篇章與 ref**
+
+- 篇章 = Markdown ATX 標題（`#`～`###`）切出的一段（含標題行）；第一個標題前的內容是 `_preamble`。程式碼 fence 內的 `#` 不切；`####` 以下與 setext 標題視為正文。**不再依長度細切**：S2 盤點中 >4,000 字的篇章只有 3 個，細切帶來的錨點漂移與跨塊 AND 問題比收益大；長篇章在展開時明示截斷。
+- 錨點 = 標題路徑（`上層/本層`）；同檔重複的錨點加 `~2`、`~3`，遇到字面上已存在的錨點（例如標題本身就叫 `A~2` 或 `_preamble`）就往下遞增，保證同檔錨點唯一。ref：`doc:{collection}/{path}#{anchor}@{sha256 前 8 碼}`。`%`、`#`、`@` 與空白在 path／anchor 中以 `%XX` 編碼，可逆解析。內部保存完整 sha256；8 碼前綴在同一篇章內不唯一時回報歧義，不猜。path 或錨點含秘密（遮罩會改變它）或超過 120 字，或字面上本身就長得像 `~h…` 時，ref 中改印 `~h{sha256 前 12 碼}`，展開時再經索引解析回原值；這樣 ref、狀態與錯誤訊息都不會印出標題裡的秘密。
+- **ref 承諾**：內容與錨點都沒變的篇章，ref 不變；保存過的每一個版本都能用 ref 讀回。只要篇章內容變了（包括在最後一個標題下追加），就產生新 ref。重複標題（`~N`）、父標題改名、篇章拆併不推論修訂關係：原錨點不在現版時，舊版標「此篇章已不在現版文件」；`~N` 錨點的「現版同位置篇章」另標「重複標題，無法確認是同一篇」。
+
+**儲存**（`memory.db`）
+
+- `doc_versions`：不可變的篇章版本（collection、path、anchor、完整 digest、標題、內容、首次與最後觀測時間）。**這是 A1 的歷史來源，不是可丟棄的快取**：不可由現檔重建，任何 rebuild／migration 不得清空；隨 `memory.db` 一起備份。A→B→A 重用 A 的列，「現版」只由 `doc_current` 決定，所以沒有修訂鏈環。
+- `doc_current`：每個 (collection, path, anchor) 的現版指標與檔內順序。
+- `doc_files`：(collection, path) 的指紋與狀態（present／removed／moved＋moved_to）。`doc_collections`：集合名稱 → 解析後的根目錄；根目錄改變時該集合全部標 removed 再重新探索。
+- 搜尋投影：`doc_fts`（trigram，external content 指向 `doc_versions`，insert-only 不需 update 投影）與 `doc_terms`（contentless CJK bigram），與版本列同一交易寫入；`'rebuild'` 只重建投影。
+
+**變動偵測**：recall 時同步，不加 scheduler。
+
+- 探索：所有集合共用一個廣度優先佇列，只收 `.md`，略過隱藏目錄。每次 recall 最多看 20,000 個目錄項目，同一個目錄裡也算在內（目錄讀到一半時保留 iterator），**下次從停下的地方接著走**，一整輪走完才判定消失；還沒走到的檔案沿用上一輪的結果，不會被當成消失。
+- **集合內所有 symlink 一律拒絕，包括父目錄與集合根本身**：讀檔與存在檢查都從集合根開始，逐層以 `O_NOFOLLOW` 開啟每個路徑元件。每次同步都重新確認集合根仍是設定裡的那個實際目錄（不是 symlink，`realpath` 也沒變）；不是的話，這個集合整個視為範圍外，不探索、不讀檔、不判定消失，也不出現在搜尋與展開結果裡，直到根目錄恢復。
+- 指紋：`mtime_ns`、`size`、`inode`、`ctime_ns`。`ctime` 無法以 `utime` 還原，所以「改完內容再把 mtime 改回去」與 atomic replace 都會被偵測到。這是可保證的範圍：只靠 metadata，不逐檔 hash。
+- 讀取：以 `O_NOFOLLOW` 開檔，讀前讀後 `fstat` 指紋都要等於探索時看到的值，而且實際路徑仍在集合根內，否則延到下次。單檔上限 2 MiB，超過標「過大未索引」。
+- 提交：文件索引用**自己的連線**，每個檔一個 `BEGIN IMMEDIATE` 交易，任何例外（包括取消）都會 rollback；session 的共用連線從不用來寫文件索引，所以別的寫入者 `commit()` 也不會帶出寫到一半的檔。取得寫鎖之後，在交易內重新確認：磁碟指紋仍是讀到的那一份，`doc_files` 的狀態也仍是讀取時看到的狀態；任一項變了就整筆放棄，下次再試，較早的讀取因此不會覆蓋較新的提交。同一程序內再以鎖序列化。
+- 上限：每次 recall 最多重讀 40 檔、4 MiB（依檔案大小預留，不會超支一整個檔）、0.5 秒。先處理新檔與最久沒檢查的檔，處理不完的在覆蓋行回「N 檔待更新」；後段檔不會被前段反覆變動的檔餓死。
+- 消失：只有一整輪探索完成後，逐層檢查回 not-found（或已變成 symlink）才算消失，而且在讀任何檔案之前就先隱藏，不會出現「已刪除但仍可搜尋」的等待期。權限或 I/O 錯誤標「無法讀取」，不當刪除。單一檔案索引失敗時記入覆蓋行，下次重試，不會讓整次 recall 失敗。
+
+**召回**
+
+- documents 是 RRF 的另一條 ranked list，與 memory／skills／conversation 同級，不短路；`_fuse` 不改。融合身分含 digest，所以新舊版本不會合併成一筆。
+- 排序：trigram bm25，篇章自己的標題欄權重 10、正文 1。標題就是篇章的名字；只看正文時，長篇章會被長度正規化壓到後面（live 實測：〈圖書館形狀的慾望〉那篇筆記從第 13 名升到第 2 名，第 1 名是以同一篇為標題的 deep_weave 段落）。
+- 每個邏輯篇章（collection, path, anchor）最多佔 2 個候選：最佳命中版本；若最佳的是舊版且現版也命中，再加現版。候選按獨立篇章計，≤40。
+- 只搜 present 檔案的版本（現版與舊版）；removed／moved 舊路徑與未設定集合的列不可見。
+- `type` 為 `semantic`／`skill` 時排除文件。給了 `since`／`until` 時排除文件，並在覆蓋行註明：觀測時間與檔案修改時間都不是內容的事件時間，不拿來冒充。
+- 結果格式：`[document] {ref} (current | old version — current: {ref} | old version — section no longer in the file)`，摘錄 ≤512 字。recall 工具套用整次輸出預算時，**每筆結果的第一行（類型、ref、版本或狀態）不可切**：只截它下面的正文，放不下就整筆略過並計入 omitted。這條規則適用於所有結果類型。
+- `recall(ref=doc:…)`：先核對集合仍在設定內、檔案狀態、實際路徑，必要時同步該檔。現版＝目標篇章，加上現版檔案中的前後篇章各一，各預留 1,200 字，總計 ≤8,000 字。舊版只給該版原文，並明示「當時的前後文未保存」與現版 ref。版本未保存時顯示現版並註明。moved 時回報新 ref 並展開；removed 時回「已刪除或已移出範圍」，`success=False`。所有文件輸出都套秘密遮罩。
+
+**驗收**
+
+- 契約測試先行：篇章切分（fence、前言、重複標題）；ref 編碼往返；追加新標題不改舊 ref、同標題下追加產生新 ref；A→B→C 與 A→B→A 的現版唯一；舊版可搜尋並標記；刪除只回狀態；移動配對與各種不判定的情況；symlink 拒絕；集合撤下或根目錄換址後不洩漏；指紋（同 size、還原 mtime）；讀取中變動延後；上限與覆蓋行；時間與 type 篩選；同篇章佔位上限；重放冪等。
+- S0：`scripts/memory_s0.py` 載入 `documents`，依 v1→v2 順序寫檔並同步，以明確的 runtime ref → gold 對照（依內容 digest）評分；單次呼叫層與 agent 迴圈層分開報告，問句不改。
+- live 副本：五個集合的首次導入時間、空間、暖機 p95，加上 #643 閱讀查詢（含記錯篇名的部分線索）。S2 的數字上限依實測另訂，不沿用 S1。
+
+**實測（2026-11-10）**
+
+- S0 單次呼叫層：S2 0／4（四題都是整句改述，被當成一個字面片語比對，與 Codex review 的預測相同）；S1 維持 13／24，無答案假命中 0／8，沒有退步。
+- S0 agent 迴圈層（gpt-6.1-terra，≤3 次 recall）：S2 3／4 找到並引用。漏掉的 `doc-afterword`，模型選的詞是「河流 散文」，文件裡沒有「散文」（多個詞是 AND）。
+- live 副本，五個集合：487 檔、5,297 個篇章、155 萬字。首次導入 1.36 秒；文件相關表與索引共 18.3 MiB（`doc_versions` 4.9、`doc_fts` 10.9、`doc_terms` 1.5）；沒有變動時同步一次 3 ms；暖機 recall p95 94 ms，其中 documents 路由 p95 12 ms。原本的寫法讓 FTS 直接 join，一個 identifier 查詢就要 0.8 秒，改成先物化 MATCH 結果再 join。
+- #643 閱讀查詢：「趙無極」「光頭報告」「明礬」都直接命中閱讀筆記中對應的篇章。
+
+**刪除**：`skills/wiki_maintenance/SKILL.md` 中「更新宿主記憶的指標」這一步（等該檔現有的他人改動落地後處理）。
+
 ## 10. 驗收與成本
 
 ### 10.1 固定案例，不用資料量代替價值
@@ -392,7 +453,7 @@ T0 是主 agent 真正接通新路徑且完成第一次寫入→召回，不是 
 
 **r1 認領狀態**：Claude Code 認領 S0 writer／reader 盤點（§5.2.1 為初稿）、ref mapping、S1 實作與契約測試、各切片刪除清單與 GitNexus impact 報告。Loom agent 認領 end-user 案例私下核對、自然問法與預期脈絡、T0 後第一次寫入／召回／修訂實戰，以及前三個適用機會的失敗回報（不自動增設日常排程）。產品取捨與 issue 收束由 DK 決定。
 
-**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**r2 已解**：工具原文來源、改述驗收層級、兩字詞方案、S1 預算（§1.2）。**仍待定**：文件集合與移動／修訂語意（S2）、舊 confidence／half-life 遷移（S3）、相容入口退出預設清單的時點（S4，以等價驗收為條件）。
+**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**r2 已解**：工具原文來源、改述驗收層級、兩字詞方案、S1 預算（§1.2）。**r3 已解**：文件集合與移動／修訂語意（§9.2）。**仍待定**：舊 confidence／half-life 遷移（S3）、相容入口退出預設清單的時點（S4，以等價驗收為條件）。
 
 以下為 r0 的原始 review 請求，保留作脈絡。
 
@@ -443,3 +504,6 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r2.2**（2026-10-29）：§6.1 `domain`／`temporal` 改為只縮小記憶路由、不再排除對話路由（PR-A 上線後 live 實測：模型習慣性填滿選填篩選欄位，對話路由因此全被排除）。
 - **r2.3**（2026-10-29）：S1 PR-B（`recall(ref=...)`）定案顯示 ref 的版本後綴、`log:` 展開的鄰近回合與預算分配、`action_records` join 標示、工具層互斥與「ignored with ref」說明，以及 `ledger_turn_id` 寫入（§4.2）。
 - **r2.4**（2026-10-29）：S1 PR-C：`compress_session` 預設關閉（`[memory] compress_session`，可開回一個版本）；`memorize` 回覆附 `mem:` ref；`domain`／`temporal` 移出 `recall` schema（§6.1）；新增 agent 迴圈層量測腳本 `scripts/memory_s1_agent_loop.py`。
+- **r3**（2026-11-10）：S2 範圍（§9.2）。DK 裁決：保留篇章歷史（A1）、五個集合（排除 news 與 self_check）、刪除只回狀態、移動以整檔 hash 唯一配對才接回。依 Codex design review 收斂：ref 只承諾未改篇章不變、不依長度細切、`doc_versions` 為不可重建的歷史來源、指紋含 ctime、讀取前後驗證與交易內 CAS、symlink 一律拒絕、時間篩選排除文件。
+- **r3.1**（2026-11-10）：PR #667 Codex code review（2 個 P1、7 個 P2、1 個 P3）修正：文件索引改用獨立連線與每檔一個交易，交易內再驗證；消失的檔先隱藏再讀新檔；移動改以 inode＋大小＋整檔 hash 唯一配對（比 DK 原規則嚴格，先複製再刪除不算移動）；探索可跨 recall 續走；逐層 `O_NOFOLLOW`；錨點保證唯一；含秘密或過長的 path／錨點在 ref 中改印 hash；輸出預算不切結果的第一行；bytes 預算依大小預留。
+- **r3.2**（2026-11-10）：PR #667 複審（1 個 P1、3 個 P2）修正：每次同步重新驗證集合根，根被換成 symlink 時整個集合視為範圍外；同一個目錄內也遵守探索上限；可能是移動目標的新檔等到這一輪探索完成再處理；字面上長得像 `~h` 的標題也改印 hash，解析遇到歧義時明示，不任意挑一個。
