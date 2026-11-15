@@ -125,6 +125,11 @@ class ToolEnd:
     output: str
     duration_ms: float
     call_id: str
+    unattended_skip: bool = False
+    """True when the harness skipped this call because it needed a human's
+    approval and none was attending (``ToolResult.metadata['unattended_skip']``).
+    Distinct from a policy / guard denial. Lets platform renderers report
+    skips without parsing ``output`` (issue #668 S1 chime skip notice)."""
 
 
 @dataclass

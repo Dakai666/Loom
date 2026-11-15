@@ -358,6 +358,37 @@ def _attribute_speaker(content: str, author: Any) -> str:
     return f"[發話者：{who}]\n{content}"
 
 
+_SKIP_NOTICE_MAX_ITEMS = 10
+
+
+def _summarize_skipped_args(args: dict) -> str:
+    """One short, single-line hint of what a skipped call wanted to do."""
+    for key in ("command", "path", "key", "query", "url", "id"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            text = " ".join(val.split()).replace("`", "'")
+            return text if len(text) <= 80 else text[:79] + "…"
+    return ""
+
+
+def _format_chime_skip_notice(req: ChimeRequest, skipped: list[tuple[str, dict]]) -> str:
+    """Issue #668 S1: the one visible notice for calls a chime turn skipped.
+
+    Skipped means *not executed and not denied* — nobody was there to ask.
+    """
+    lines = [
+        f"-# ⏭️ **Chime · {req.schedule_name}** 跳過 {len(skipped)} 個需授權的動作"
+        f"（未執行，不算拒絕）："
+    ]
+    for name, args in skipped[:_SKIP_NOTICE_MAX_ITEMS]:
+        hint = _summarize_skipped_args(args)
+        lines.append(f"-# • `{name}`" + (f" — {hint}" if hint else ""))
+    extra = len(skipped) - _SKIP_NOTICE_MAX_ITEMS
+    if extra > 0:
+        lines.append(f"-# • …另外 {extra} 個")
+    return "\n".join(lines)
+
+
 class LoomDiscordBot:
     """
     Runs LoomSessions behind a Discord bot, one session per thread.
@@ -1151,11 +1182,22 @@ class LoomDiscordBot:
 
             content = format_chime_content(req)
             narration_buf = ""
+            # Issue #668 S1: calls the harness skipped because no human is
+            # attending this chime. Collected so DK gets ONE notice per turn.
+            begun_args: dict[str, dict] = {}
+            skipped: list[tuple[str, dict]] = []
             try:
                 async with channel.typing():
                     async for event in session.stream_turn(content, origin="chime"):
                         if isinstance(event, TextChunk):
                             narration_buf += event.text
+                        elif isinstance(event, ToolBegin):
+                            begun_args[event.call_id] = event.args or {}
+                        elif isinstance(event, ToolEnd):
+                            if event.unattended_skip:
+                                skipped.append(
+                                    (event.name, begun_args.get(event.call_id, {}))
+                                )
                         elif isinstance(event, TurnDropped):
                             detail = (
                                 f" — {event.provider_error_detail[:900]}"
@@ -1171,12 +1213,16 @@ class LoomDiscordBot:
                     "chime turn raised for thread=%s schedule=%s",
                     thread_id, req.schedule_name,
                 )
+                if skipped:
+                    await _safe_send(channel, _format_chime_skip_notice(req, skipped))
                 return
 
             final = narration_buf.strip()
             if final:
                 payload = final if final.startswith("⬥") else f"⬥ {final}"
                 await _safe_send(channel, payload)
+            if skipped:
+                await _safe_send(channel, _format_chime_skip_notice(req, skipped))
         finally:
             # Revoke schedule grants as part of *this* task's unwind, so a
             # cancellation immediately yields the session back to a clean

@@ -39,6 +39,14 @@
 #         The grant alone authorises in-scope calls; an out-of-scope call is
 #         denied. Do NOT also list a fenced tool in ``allowed_tools`` — the
 #         tool-name grant is the blanket form and makes the fence pointless.
+#       · A call NOT covered here is skipped, never prompted (issue #668): a
+#         chime has no one attending, so waiting on a confirm used to hold
+#         the thread for hours. The agent is told it was skipped (not
+#         denied) and DK gets one notice per chime listing what was skipped.
+#         So list every routine tool the phase genuinely needs — e.g.
+#         ``memorize`` — and use the exact registered name: an MCP tool is
+#         ``<server>__<tool>`` (``minimax_coding__web_search``), and the bare
+#         ``web_search`` does not cover it.
 #       · There is no ``trust_level`` field for phases: the chime path has no
 #         planner notify/HOLD gate, so it would be inert. Authorisation here is
 #         allowed_tools + scope_grants only.

@@ -99,6 +99,15 @@ class ToolResult:
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
 
 
+# Origins where no human is available to answer a confirmation prompt.
+# "chime" (issue #668 S1): a scheduled phase turn runs inside a live Discord
+# thread, but nobody is expected to be watching it. Prompting there held the
+# session's turn lock for hours and queued every later life event behind it.
+# Every human-in-the-loop wait — BlastRadius confirms, load_skill check
+# approval, HITL auto-pause — must consult this set and not wait.
+UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent", "chime"})
+
+
 # ---------------------------------------------------------------------------
 # Issue #212: middleware signal preservation helpers
 # ---------------------------------------------------------------------------
@@ -809,13 +818,26 @@ class BlastRadiusMiddleware(Middleware):
         return True
 
     # Origins where no human is available to answer confirmation prompts.
-    _UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent"})
+    _UNATTENDED_ORIGINS = UNATTENDED_ORIGINS
+
+    def _exec_auto_blocked_only_by_probe(self, call: ToolCall) -> bool:
+        """True when exec_auto would approve this call but for the
+        trajectory-anomaly downgrade — i.e. probing first would authorize it."""
+        if not self._perm.exec_auto:
+            return False
+        if not (call.capabilities & ToolCapability.EXEC):
+            return False
+        if self._exec_escape_fn is not None and self._exec_escape_fn(call):
+            return False
+        return bool(call.metadata.get("trajectory_anomaly"))
 
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
         return call.origin in self._UNATTENDED_ORIGINS
 
-    def _deny_unattended(self, call: ToolCall, verdict: str) -> ToolResult:
+    def _deny_unattended(
+        self, call: ToolCall, verdict: str, *, probe_would_authorize: bool = False,
+    ) -> ToolResult:
         """Return a denial ToolResult for unattended calls that need confirmation."""
         _log.info(
             "Denying %s (origin=%s, verdict=%s) — no human to confirm",
@@ -827,8 +849,11 @@ class BlastRadiusMiddleware(Middleware):
         # Issue #168: when the trajectory_anomaly soft-guard tripped, the agent
         # called an EXEC tool without probing first this turn. Tell it that
         # explicitly so it can self-correct (probe, then retry) instead of
-        # looping on a generic "no permission" message.
-        if call.metadata.get("trajectory_anomaly"):
+        # looping on a generic "no permission" message — but only when the
+        # missing probe is the *sole* blocker (exec_auto would otherwise
+        # approve). Without that, probing can't authorize the call and the
+        # hint just invites a pointless retry (#673 review).
+        if probe_would_authorize and call.metadata.get("trajectory_anomaly"):
             error = (
                 f"Permission denied: {call.tool_name} requires a probe tool "
                 f"(read_file, list_dir, search_files, ...) to run earlier in "
@@ -837,16 +862,24 @@ class BlastRadiusMiddleware(Middleware):
                 f"fast. Probe the relevant context first, then re-issue."
             )
         else:
+            # Issue #668: say what actually happened. Nobody denied this —
+            # nobody was there to ask. The call was skipped, not refused, and
+            # routing around it (another tool, a rewritten command) would
+            # launder the very authorization the skip is holding back.
             error = (
-                f"Permission denied: {call.tool_name} requires scope authorization "
-                f"not covered by existing grants. Origin '{call.origin}' cannot "
-                f"request new permissions interactively."
+                f"Skipped (not executed): {call.tool_name} needs authorization "
+                f"beyond this '{call.origin}' turn's grants, and no human is "
+                f"attending to approve it. This is not a denial. Do not retry it "
+                f"or reach the same effect through another tool or command. "
+                f"Note what was skipped, continue with the parts that don't "
+                f"depend on it, and don't treat its result as done."
             )
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=False,
             error=error,
             failure_type="permission_denied",
+            metadata={"unattended_skip": True, "origin": call.origin},
         )
 
     def _notify_lifecycle(self, call: ToolCall, result: bool, reason: str) -> None:
@@ -1146,7 +1179,10 @@ class BlastRadiusMiddleware(Middleware):
 
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):
-            return self._deny_unattended(call, "legacy-not-authorized")
+            return self._deny_unattended(
+                call, "legacy-not-authorized",
+                probe_would_authorize=self._exec_auto_blocked_only_by_probe(call),
+            )
 
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
