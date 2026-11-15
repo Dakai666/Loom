@@ -114,6 +114,7 @@ from loom.core.harness.middleware import (
     ToolCall,
     ToolResult,
     TraceMiddleware,
+    UNATTENDED_ORIGINS,
 )
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolRegistry
@@ -2692,8 +2693,8 @@ class LoomSession:
                                 output=tool_output[:200],
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
-                                failure_type=(
-                                    None if result.success else result.failure_type
+                                unattended_skip=bool(
+                                    (result.metadata or {}).get("unattended_skip")
                                 ),
                             )
                             _last_completed_tool_name = tu.name
@@ -2795,8 +2796,8 @@ class LoomSession:
                                 output=tool_output[:200],
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
-                                failure_type=(
-                                    None if result.success else result.failure_type
+                                unattended_skip=bool(
+                                    (result.metadata or {}).get("unattended_skip")
                                 ),
                             )
                             _last_completed_tool_name = tu.name
@@ -2892,9 +2893,14 @@ class LoomSession:
                     # ── HITL check point ─────────────────────────────────────
                     # Fires after every tool batch, before the next LLM call.
                     # pause() sets _pause_requested; hitl_mode auto-sets it each batch.
-                    if self.hitl_mode:
+                    # Unattended turns (chime / autonomy / subagent) never park
+                    # here: nobody would resume them, and the turn lock would
+                    # hold every later event (#668, PR #673 review). A pending
+                    # pause request is left for the next attended turn.
+                    _attended = origin not in UNATTENDED_ORIGINS
+                    if self.hitl_mode and _attended:
                         self._pause_requested = True
-                    if self._pause_requested:
+                    if self._pause_requested and _attended:
                         self._pause_requested = False
                         self._resume_event.clear()
                         yield TurnPaused(tool_count_so_far=tool_count)

@@ -1194,8 +1194,7 @@ class LoomDiscordBot:
                         elif isinstance(event, ToolBegin):
                             begun_args[event.call_id] = event.args or {}
                         elif isinstance(event, ToolEnd):
-                            if (not event.success
-                                    and event.failure_type == "permission_denied"):
+                            if event.unattended_skip:
                                 skipped.append(
                                     (event.name, begun_args.get(event.call_id, {}))
                                 )

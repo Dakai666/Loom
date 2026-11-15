@@ -99,6 +99,15 @@ class ToolResult:
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
 
 
+# Origins where no human is available to answer a confirmation prompt.
+# "chime" (issue #668 S1): a scheduled phase turn runs inside a live Discord
+# thread, but nobody is expected to be watching it. Prompting there held the
+# session's turn lock for hours and queued every later life event behind it.
+# Every human-in-the-loop wait — BlastRadius confirms, load_skill check
+# approval, HITL auto-pause — must consult this set and not wait.
+UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent", "chime"})
+
+
 # ---------------------------------------------------------------------------
 # Issue #212: middleware signal preservation helpers
 # ---------------------------------------------------------------------------
@@ -809,17 +818,26 @@ class BlastRadiusMiddleware(Middleware):
         return True
 
     # Origins where no human is available to answer confirmation prompts.
-    # "chime" (issue #668 S1): a scheduled phase turn runs inside a live
-    # Discord thread, but nobody is expected to be watching it. Prompting
-    # there held the session's turn lock for hours and queued every later
-    # life event behind it — so a chime skips instead of waiting.
-    _UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent", "chime"})
+    _UNATTENDED_ORIGINS = UNATTENDED_ORIGINS
+
+    def _exec_auto_blocked_only_by_probe(self, call: ToolCall) -> bool:
+        """True when exec_auto would approve this call but for the
+        trajectory-anomaly downgrade — i.e. probing first would authorize it."""
+        if not self._perm.exec_auto:
+            return False
+        if not (call.capabilities & ToolCapability.EXEC):
+            return False
+        if self._exec_escape_fn is not None and self._exec_escape_fn(call):
+            return False
+        return bool(call.metadata.get("trajectory_anomaly"))
 
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
         return call.origin in self._UNATTENDED_ORIGINS
 
-    def _deny_unattended(self, call: ToolCall, verdict: str) -> ToolResult:
+    def _deny_unattended(
+        self, call: ToolCall, verdict: str, *, probe_would_authorize: bool = False,
+    ) -> ToolResult:
         """Return a denial ToolResult for unattended calls that need confirmation."""
         _log.info(
             "Denying %s (origin=%s, verdict=%s) — no human to confirm",
@@ -831,8 +849,11 @@ class BlastRadiusMiddleware(Middleware):
         # Issue #168: when the trajectory_anomaly soft-guard tripped, the agent
         # called an EXEC tool without probing first this turn. Tell it that
         # explicitly so it can self-correct (probe, then retry) instead of
-        # looping on a generic "no permission" message.
-        if call.metadata.get("trajectory_anomaly"):
+        # looping on a generic "no permission" message — but only when the
+        # missing probe is the *sole* blocker (exec_auto would otherwise
+        # approve). Without that, probing can't authorize the call and the
+        # hint just invites a pointless retry (#673 review).
+        if probe_would_authorize and call.metadata.get("trajectory_anomaly"):
             error = (
                 f"Permission denied: {call.tool_name} requires a probe tool "
                 f"(read_file, list_dir, search_files, ...) to run earlier in "
@@ -1158,7 +1179,10 @@ class BlastRadiusMiddleware(Middleware):
 
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):
-            return self._deny_unattended(call, "legacy-not-authorized")
+            return self._deny_unattended(
+                call, "legacy-not-authorized",
+                probe_would_authorize=self._exec_auto_blocked_only_by_probe(call),
+            )
 
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)

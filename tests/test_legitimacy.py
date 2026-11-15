@@ -219,7 +219,14 @@ async def test_trajectory_anomaly_emits_warning_log(handler, caplog):
 @pytest.mark.asyncio
 async def test_unattended_trajectory_anomaly_returns_specific_error(perm_ctx, registry, handler):
     """Issue #168: unattended autonomy origin hitting trajectory_anomaly must
-    fail fast with a probe-first explanation, not the generic 'no scope' deny."""
+    fail fast with a probe-first explanation, not the generic 'no scope' deny.
+
+    The probe hint only applies where it can help: exec_auto is on and the
+    missing probe is what downgraded it (#668 / PR #673 review). Without
+    exec_auto, probing can't authorize the call — see
+    tests/test_chime_unattended_668.py::TestProbeHintOnlyWhenItCouldHelp."""
+    perm_ctx.exec_auto = True
+
     async def never_called(call):
         raise AssertionError("confirm_fn must not be called for unattended origin")
 

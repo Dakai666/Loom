@@ -225,7 +225,7 @@ def make_load_skill_tool(
         # Approval reads/writes go through the semantic store (#451 phase B).
         checks_summary = await _mount_skill_checks(
             name, skill, skill_dir, skill_check_manager, semantic,
-            keep_existing=keep_existing,
+            keep_existing=keep_existing, origin=call.origin,
         )
         if checks_summary:
             lines.append("")
@@ -260,6 +260,7 @@ def make_load_skill_tool(
         manager: "SkillCheckManager | None",
         sem: "SemanticMemory | None",
         keep_existing: bool = False,
+        origin: str = "interactive",
     ) -> list[str]:
         """Resolve and mount precondition checks for a skill. Returns descriptions."""
         if manager is None:
@@ -294,7 +295,19 @@ def make_load_skill_tool(
                 check_lines.append(f"  {ref.ref} → [{tools_str}]: {ref.description}")
             check_preview = "\n".join(check_lines)
 
-            if confirm_fn is not None:
+            from loom.core.harness.middleware import UNATTENDED_ORIGINS
+
+            if origin in UNATTENDED_ORIGINS:
+                # Issue #668: no human is attending this turn, so the approval
+                # prompt would wait forever (and hold the session's turn lock).
+                # Load the skill without its unapproved checks; the next
+                # attended load_skill asks as usual.
+                _log.info(
+                    "skill %r: precondition checks not mounted — unapproved "
+                    "and origin %r is unattended", name, origin,
+                )
+                user_ok = False
+            elif confirm_fn is not None:
                 # Use the platform-aware confirm callback (works on CLI, TUI, Discord)
                 from loom.core.harness.middleware import ToolCall as _ToolCall
                 from loom.core.harness.registry import TrustLevel
@@ -303,6 +316,7 @@ def make_load_skill_tool(
                     args={"action": "mount_precondition_checks", "checks": check_preview},
                     trust_level=TrustLevel.GUARDED,
                     session_id="",
+                    origin=origin,
                 )
                 try:
                     user_ok = await confirm_fn(synthetic_call)
