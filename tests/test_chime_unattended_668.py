@@ -320,6 +320,21 @@ class TestLoadSkillApprovalUnattended:
         confirm.assert_not_called()
         manager.mount.assert_not_called()
 
+    async def test_attended_load_after_chime_skip_still_asks(self, tmp_path):
+        # Same session: chime skips approval, then DK's turn must still be
+        # able to approve — body dedup must not swallow it (#673 review r2).
+        confirm = AsyncMock(return_value=False)
+        tool, manager = _load_skill_tool(tmp_path, confirm)
+        first = await tool.executor(_load_call("chime"))
+        assert "precondition_checks_pending" in first.output
+        confirm.assert_not_called()
+        await tool.executor(_load_call("discord"))
+        confirm.assert_awaited_once()
+        # Once answered, it's settled: a further load is plain dedup.
+        third = await tool.executor(_load_call("discord"))
+        assert "already loaded" in third.output
+        confirm.assert_awaited_once()
+
     async def test_interactive_load_skill_still_asks(self, tmp_path):
         confirm = AsyncMock(return_value=False)
         tool, manager = _load_skill_tool(tmp_path, confirm)
@@ -442,3 +457,45 @@ class TestHitlPauseUnattended:
             await gen.aclose()
         finally:
             await session.stop()
+
+
+# ---------------------------------------------------------------------------
+# send_discord_select blocks on a human pick — skip it when unattended
+# ---------------------------------------------------------------------------
+
+
+class TestSelectMenuUnattended:
+    def _tool(self):
+        from loom.platform.discord.tools import make_send_discord_select_tool
+
+        client = MagicMock()
+        channel = MagicMock()
+        channel.send = AsyncMock()
+        client.get_channel = MagicMock(return_value=channel)
+        return make_send_discord_select_tool(client, 111), channel
+
+    def _call(self, origin):
+        return ToolCall(
+            tool_name="send_discord_select",
+            args={"title": "pick", "options": [
+                {"label": "a", "value": "a"}, {"label": "b", "value": "b"},
+            ]},
+            trust_level=TrustLevel.SAFE, session_id="t", origin=origin,
+        )
+
+    async def test_chime_select_is_skipped_without_posting(self):
+        tool, channel = self._tool()
+        result = await asyncio.wait_for(tool.executor(self._call("chime")), timeout=2)
+        assert not result.success
+        assert result.metadata.get("unattended_skip") is True
+        channel.send.assert_not_called()
+
+    async def test_interactive_select_still_posts(self):
+        tool, channel = self._tool()
+        task = asyncio.ensure_future(tool.executor(self._call("discord")))
+        for _ in range(50):
+            if channel.send.await_count:
+                break
+            await asyncio.sleep(0)
+        assert channel.send.await_count == 1
+        task.cancel()

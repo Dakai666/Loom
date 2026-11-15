@@ -148,6 +148,10 @@ def make_load_skill_tool(
 
     # Per-session dedup tracking (set of already-loaded skill names)
     _loaded_this_session: set[str] = set()
+    # Skills whose precondition-check approval was skipped on an unattended
+    # turn (#668). Kept apart from body dedup so the next attended load_skill
+    # can still ask and mount them (#673 review).
+    _checks_pending_approval: set[str] = set()
     _dirs = skills_dirs or []
 
     async def _load_skill(call: ToolCall) -> ToolResult:
@@ -159,8 +163,14 @@ def make_load_skill_tool(
                 success=False, error="'name' argument is required",
             )
 
-        # Dedup check
-        if name in _loaded_this_session:
+        # Dedup check — unless an attended turn can now settle checks whose
+        # approval an unattended turn had to skip.
+        from loom.core.harness.middleware import UNATTENDED_ORIGINS
+        _retry_checks = (
+            name in _checks_pending_approval
+            and call.origin not in UNATTENDED_ORIGINS
+        )
+        if name in _loaded_this_session and not _retry_checks:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,
@@ -233,6 +243,14 @@ def make_load_skill_tool(
             for desc in checks_summary:
                 lines.append(f"  {desc}")
             lines.append("</mounted_precondition_checks>")
+        if name in _checks_pending_approval:
+            lines.append("")
+            lines.append(
+                "<precondition_checks_pending>These skill checks need DK's "
+                "approval, which can't be asked on this unattended turn, so "
+                "they are NOT mounted. The next attended load_skill will ask."
+                "</precondition_checks_pending>"
+            )
 
         lines.append("</skill_content>")
 
@@ -306,6 +324,7 @@ def make_load_skill_tool(
                     "skill %r: precondition checks not mounted — unapproved "
                     "and origin %r is unattended", name, origin,
                 )
+                _checks_pending_approval.add(name)
                 user_ok = False
             elif confirm_fn is not None:
                 # Use the platform-aware confirm callback (works on CLI, TUI, Discord)
@@ -322,6 +341,8 @@ def make_load_skill_tool(
                     user_ok = await confirm_fn(synthetic_call)
                 except (EOFError, KeyboardInterrupt):
                     user_ok = False
+                # An attended answer (yes or no) settles the pending approval.
+                _checks_pending_approval.discard(name)
             else:
                 user_ok = False
 

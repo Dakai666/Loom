@@ -393,6 +393,21 @@ def make_send_discord_select_tool(
     """
     async def executor(call: ToolCall) -> ToolResult:
         import discord as _discord
+        from loom.core.harness.middleware import UNATTENDED_ORIGINS
+
+        if call.origin in UNATTENDED_ORIGINS:
+            # Issue #668: a select menu blocks on a human pick. Nobody is
+            # attending this turn, so don't post it or wait (#673 review).
+            return ToolResult(
+                call.id, call.tool_name, False,
+                error=(
+                    f"Skipped (not sent): send_discord_select waits for a human "
+                    f"pick, and no human is attending this '{call.origin}' turn. "
+                    f"Decide yourself or leave the question in plain text for "
+                    f"later; don't wait on an answer."
+                ),
+                metadata={"unattended_skip": True, "origin": call.origin},
+            )
 
         err = _validate_select_args(call.args)
         if err:
