@@ -765,3 +765,125 @@ async def test_persistently_invalid_root_does_not_starve_other_collections(db, w
     assert len(found) == 4
     assert (await _docs(_search(db, index), "將被刪除"))[0] == []
     assert any("bad" in b for b in report.bad_collections)
+
+
+# ---------------------------------------------------------------------------
+# #669 — short-term ranking, searchable paths, actionable coverage
+# ---------------------------------------------------------------------------
+
+_TOPIC = "# 量測邊界\n量測的邊界在讀者的實際路徑；邊界不是量測工具的邊界。量測先定邊界。\n"
+
+
+def _filler(i: int) -> str:
+    # Mentions both terms once, deep in a long unrelated body.
+    return f"# 週記{i}\n" + "今天整理房間與書架。" * 40 + "順帶一提量測與邊界。\n"
+
+
+class TestRankingAndPaths:
+    async def test_short_terms_rank_by_relevance_not_recency(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "topic.md", _TOPIC)
+        await index.sync()
+        for i in range(3):
+            _write(ws / "notes" / f"w{i}.md", _filler(i))
+        await index.sync()
+        found = (await _docs(_search(db, index), "量測 邊界", limit=10))[0]
+        assert found[0].ref.startswith("doc:wiki/topic.md#")
+
+    async def test_relevant_old_section_survives_candidate_budget(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "topic.md", _TOPIC)
+        await index.sync()
+        for i in range(docs_mod.ROUTE_SECTIONS + 5):
+            _write(ws / "notes" / f"w{i:02}.md", _filler(i))
+        for _ in range(4):
+            await index.sync()
+        found = (await _docs(_search(db, index), "量測 邊界", limit=5))[0]
+        assert any(r.ref.startswith("doc:wiki/topic.md#") for r in found)
+
+    async def test_filename_finds_the_file_itself(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "measurement-boundaries.md", "# 方法\n讀者實際走的路徑才是邊界。\n")
+        _write(ws / "wiki" / "_meta" / "lint.md",
+               "# 報告\n- measurement-boundaries.md：沒有入鏈\n")
+        found = (await _docs(_search(db, index), "measurement-boundaries"))[0]
+        assert found and found[0].ref.startswith("doc:wiki/measurement-boundaries.md#")
+
+    async def test_old_projection_is_rebuilt_without_touching_history(self, db, ws, tmp_path):
+        _write(ws / "wiki" / "measurement-boundaries.md", "# 方法\n讀者實際走的路徑。\n")
+        await _index(db, ws).sync()
+        # Put back the pre-#669 projection: doc_fts without a path column,
+        # explicitly written by the application (no triggers).
+        await db.executescript(
+            "DROP TRIGGER IF EXISTS doc_versions_search_ai;"
+            "DROP TRIGGER IF EXISTS doc_versions_search_au;"
+            "DROP TRIGGER IF EXISTS doc_versions_search_ad;"
+            "DROP TABLE IF EXISTS doc_search;"
+            "CREATE VIRTUAL TABLE doc_fts USING fts5(title, content, "
+            "content='doc_versions', content_rowid='id', tokenize='trigram');"
+            "INSERT INTO doc_fts(doc_fts) VALUES('rebuild');"
+        )
+        cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
+        before = (await cur.fetchone())[0]
+        index = _index(db, ws)
+        found = (await _docs(_search(db, index), "measurement-boundaries"))[0]
+        assert found and found[0].ref.startswith("doc:wiki/measurement-boundaries.md#")
+        assert (await _docs(_search(db, index), "實際走的路徑"))[0]
+        cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
+        assert (await cur.fetchone())[0] == before
+        cur = await db.execute("SELECT name FROM sqlite_master WHERE name='doc_fts'")
+        assert await cur.fetchone() is None
+
+    async def test_moved_file_is_found_by_its_new_name_only(self, db, ws):
+        # Codex review of #671: the path projection must follow a move,
+        # for the current and the historical versions alike.
+        src = _write(ws / "wiki" / "alpha-original.md", "# 段\n第一版內容\n")
+        index = _index(db, ws)
+        await index.sync()
+        time.sleep(0.01)
+        src.write_text("# 段\n第二版內容\n", encoding="utf-8")
+        await index.sync()
+        os.rename(src, ws / "wiki" / "beta-renamed.md")
+        await index.sync()
+        await index.sync()
+        found = (await _docs(_search(db, index), "beta-renamed", limit=10))[0]
+        assert found and all(r.ref.startswith("doc:wiki/beta-renamed.md#") for r in found)
+        assert (await _docs(_search(db, index), "alpha-original"))[0] == []
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM doc_search WHERE doc_search MATCH 'path:\"beta-renamed\"'")
+        assert (await cur.fetchone())[0] == 2      # both stored versions
+
+    async def test_any_writer_keeps_the_path_projection(self, db, ws):
+        # A pre-#669 process writes doc_versions without knowing about the
+        # path column; the projection must still carry the path.
+        await _index(db, ws).sync()          # creates the projection
+        await db.execute(
+            "INSERT INTO doc_versions(collection, path, anchor, digest, title, content, "
+            "first_seen, last_seen) VALUES ('wiki', 'gamma-legacy.md', '段', 'd', '段', "
+            "'# 段\n舊程式寫入', 'now', 'now')")
+        await db.commit()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM doc_search WHERE doc_search MATCH 'path:\"gamma-legacy\"'")
+        assert (await cur.fetchone())[0] == 1
+
+    async def test_time_window_note_says_how_to_reach_documents(self, db, ws):
+        _write(ws / "notes" / "river.md", RIVER)
+        search = _search(db, _index(db, ws))
+        _, cov = await _docs(search, "倒影破碎", since=datetime(2020, 1, 1, tzinfo=UTC))
+        assert "documents: excluded" in cov and "since/until" in cov
+
+
+def test_recall_tool_warns_about_private_sources():
+    from loom.platform.cli.tools import make_recall_tool
+    desc = make_recall_tool(memory=None).description
+    assert "private" in desc.lower()
+
+
+async def test_new_files_are_indexed_round_robin_across_collections(db, ws):
+    # A backlog in one collection must not hold back another (#669).
+    for i in range(6):
+        _write(ws / "notes" / f"n{i}.md", f"# 段\n積壓筆記{i}\n")
+    _write(ws / "wiki" / "w.md", "# 段\n維基新頁\n")
+    index = DocumentIndex(db, ws, {"notes": "notes", "wiki": "wiki"}, max_files=2)
+    await index.sync()
+    assert (await _docs(_search(db, index), "維基新頁"))[0]

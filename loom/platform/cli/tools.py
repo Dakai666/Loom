@@ -1384,7 +1384,9 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             "a log: ref returns that turn and the turns around it, with the "
             "fuller stored tool output; a doc: ref returns that section (with the "
             "sections around it when current); mem:/skill:/doc: refs say if the "
-            "entry changed since."
+            "entry changed since. Results can carry private sources (diary, "
+            "journal, conversations): when writing anything public — an issue, a "
+            "PR, a post — paraphrase and de-identify, never paste results verbatim."
         ),
         trust_level=TrustLevel.SAFE,
         input_schema={

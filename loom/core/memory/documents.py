@@ -23,7 +23,7 @@ shown as ``~h{hash}`` instead and resolved back through the index.
 ``doc_versions`` keeps every section version ever observed (DK decision A1:
 history is kept).  It is the *source* of that history, not a cache — the
 files are not under git, so an old version exists nowhere else.  Only the
-search projections (``doc_fts`` trigram, ``doc_terms`` CJK bigrams) are
+search projections (``doc_search`` trigram, kept by triggers; ``doc_terms`` CJK bigrams) are
 rebuildable.  ``doc_current`` says which version is current per anchor;
 ``doc_files`` holds each file's fingerprint and state.
 
@@ -85,12 +85,18 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 DISCOVERY_MAX_ENTRIES = 20_000
 # Matching rows read before grouping into sections; candidates per route.
 _MATCH_ROWS = 400
+# Short-term queries (every term < 3 chars) have no bm25 index to rank by:
+# matches are read up to this many and ranked here (#669).
+_SHORT_MATCH_ROWS = 2_000
 ROUTE_SECTIONS = 40
 # Expansion budget: whole output, and what each neighbour section keeps.
 EXPAND_CHARS = 8_000
 _NEIGHBOUR_RESERVE = 1_200
-# bm25 column weight of a section's own heading against its body.
+# bm25 column weight of a section's own heading (and of its file path —
+# a filename is the file's name) against its body.
 _TITLE_WEIGHT = 10.0
+_BM25_K1 = 1.2
+_BM25_B = 0.75
 # Longest path or anchor printed as-is inside a ref.
 _REF_PART_CHARS = 120
 
@@ -143,8 +149,6 @@ CREATE TABLE IF NOT EXISTS doc_collections (
     name        TEXT PRIMARY KEY,
     root        TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts
-USING fts5(title, content, content='doc_versions', content_rowid='id', tokenize='trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_terms
 USING fts5(terms, content='', contentless_delete=1, detail='none', tokenize='unicode61');
 """
@@ -465,6 +469,7 @@ class DocumentIndex:
             await conn.execute("PRAGMA busy_timeout = 5000")
             if not self._ready:
                 await conn.executescript(_DDL)
+                await _migrate_projection(conn)
                 self._ready = True
             yield conn
 
@@ -502,7 +507,7 @@ class DocumentIndex:
         names = [n for n in self._roots if n in self._valid]
         known = await self._known(conn, names)
 
-        new = sorted(k for k in seen if k not in known or known[k][0] != "present")
+        new = _round_robin(sorted(k for k in seen if k not in known or known[k][0] != "present"))
         changed = sorted(
             (k for k in seen if k in known and known[k][0] == "present"
              and tuple(known[k][1:5]) != seen[k]),
@@ -827,8 +832,6 @@ class DocumentIndex:
         )
         if cur.rowcount == 1:
             vid = cur.lastrowid
-            await conn.execute("INSERT INTO doc_fts(rowid, title, content) VALUES (?, ?, ?)",
-                               (vid, sec.title, sec.content))
             await conn.execute("INSERT INTO doc_terms(rowid, terms) VALUES (?, ?)",
                                (vid, bigram_projection(sec.content)))
             return vid
@@ -882,7 +885,7 @@ class DocumentIndex:
             report = await self._locked_sync(conn)
             if not self._valid:
                 return [], report.note()
-            rows = await self._match(conn, terms)
+            rows, truncated = await self._match(conn, terms)
 
         groups: dict[tuple, list] = {}
         for row in rows:
@@ -913,12 +916,13 @@ class DocumentIndex:
                 updated_at="", ref=ref,
             ))
         note = report.note()
-        if len(rows) >= _MATCH_ROWS or len(groups) > ROUTE_SECTIONS:
+        if truncated or len(groups) > ROUTE_SECTIONS:
             note += (f", more matching sections beyond the {ROUTE_SECTIONS}-section "
                      "budget (add terms to narrow)")
         return results, note
 
-    async def _match(self, conn, terms: list[str]) -> list:
+    async def _match(self, conn, terms: list[str]) -> tuple[list, bool]:
+        """Matching section rows, best first, and whether the read was capped."""
         long_terms = [t for t in terms if len(t) >= 3]
         single = [t for t in terms if is_cjk_char(t)]
         short = [t for t in terms if len(t) < 3 and t not in single]
@@ -937,7 +941,7 @@ class DocumentIndex:
             params.append(_like(t))
         select = (
             "SELECT v.id, v.collection, v.path, v.anchor, v.digest, v.content, "
-            "c.version_id, cv.digest FROM doc_versions v "
+            "c.version_id, cv.digest, v.title FROM doc_versions v "
             "LEFT JOIN doc_current c ON c.collection=v.collection AND c.path=v.path "
             "AND c.anchor=v.anchor LEFT JOIN doc_versions cv ON cv.id=c.version_id "
         )
@@ -945,19 +949,26 @@ class DocumentIndex:
             # Full-text hits first, materialised: joined directly, the planner
             # may drive from doc_versions and run MATCH once per row (≈0.8 s
             # on the live corpus for one identifier).  A section's heading is
-            # its name: a title hit outranks the same words deep in a long
-            # body (bm25 alone favours short sections).
+            # its name, and a file's path is the file's: a hit there outranks
+            # the same words deep in a long body (bm25 alone favours short
+            # sections).
             sql = ("WITH hits AS MATERIALIZED (SELECT rowid AS id, "
-                   f"bm25(doc_fts, {_TITLE_WEIGHT}, 1.0) AS rank FROM doc_fts "
-                   "WHERE doc_fts MATCH ?) "
+                   f"bm25(doc_search, {_TITLE_WEIGHT}, {_TITLE_WEIGHT}, 1.0) AS rank "
+                   "FROM doc_search WHERE doc_search MATCH ?) "
                    + select + "JOIN hits ON hits.id=v.id WHERE "
                    + " AND ".join(where) + " ORDER BY hits.rank LIMIT ?")
             args = [_phrase(long_terms), *params, _MATCH_ROWS]
-        else:
-            sql = select + "WHERE " + " AND ".join(where) + " ORDER BY v.id DESC LIMIT ?"
-            args = [*params, _MATCH_ROWS]
-        cur = await conn.execute(sql, args)
-        return await cur.fetchall()
+            cur = await conn.execute(sql, args)
+            rows = await cur.fetchall()
+            return [r[:8] for r in rows], len(rows) >= _MATCH_ROWS
+        # Bigram / single-character matches only: no bm25 index covers them,
+        # so rank here — otherwise the newest sections win regardless of
+        # relevance (#669).
+        sql = select + "WHERE " + " AND ".join(where) + " ORDER BY v.id DESC LIMIT ?"
+        cur = await conn.execute(sql, [*params, _SHORT_MATCH_ROWS])
+        rows = await cur.fetchall()
+        ranked = _rank_short(rows, terms)
+        return [r[:8] for r in ranked], len(rows) >= _SHORT_MATCH_ROWS
 
     # -- expansion -------------------------------------------------------
 
@@ -1131,6 +1142,100 @@ def _status(coll, path, anchor, vid, cur_id, cur_digest) -> str:
     if _repeated(anchor):
         status += " (repeated heading — may not be the same section)"
     return status
+
+
+def _round_robin(keys: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Interleave (collection, path) keys by collection, path order kept within each.
+
+    The per-recall read budget then reaches every collection, so a backlog
+    in one never holds back another (#669).
+    """
+    by_coll: dict[str, deque] = {}
+    for key in keys:
+        by_coll.setdefault(key[0], deque()).append(key)
+    out: list[tuple[str, str]] = []
+    queues = list(by_coll.values())
+    while queues:
+        queues = [q for q in queues if q]
+        for q in queues:
+            out.append(q.popleft())
+    return out
+
+
+def _rank_short(rows: list, terms: list[str]) -> list:
+    """bm25-shaped ranking of short-term matches (#669), newest first on ties.
+
+    Same weights as the trigram route: path and heading count
+    ``_TITLE_WEIGHT`` times a body occurrence; long bodies are normalised
+    against the matched set's average length.
+    """
+    if not rows:
+        return []
+    needles = [t.lower() for t in terms if t]
+    avg = sum(len(r[5]) for r in rows) / len(rows) or 1.0
+
+    def score(row) -> float:
+        body, path, title = row[5].lower(), row[2].lower(), (row[8] or "").lower()
+        norm = _BM25_K1 * (1 - _BM25_B + _BM25_B * len(body) / avg)
+        total = 0.0
+        for t in needles:
+            tf = body.count(t) + _TITLE_WEIGHT * (title.count(t) + path.count(t))
+            total += tf * (_BM25_K1 + 1) / (tf + norm) if tf else 0.0
+        return total
+
+    return sorted(rows, key=lambda r: (-score(r), -r[0]))
+
+
+# The trigram projection is kept by triggers on doc_versions, not by the
+# application: every writer — this code, a process still running older code,
+# a move that rewrites ``path`` — leaves it consistent (#671 review).
+_SEARCH_DDL = (
+    "CREATE VIRTUAL TABLE doc_search USING fts5(path, title, content, "
+    "content='doc_versions', content_rowid='id', tokenize='trigram')",
+    "CREATE TRIGGER doc_versions_search_ai AFTER INSERT ON doc_versions BEGIN "
+    "INSERT INTO doc_search(rowid, path, title, content) "
+    "VALUES (new.id, new.path, new.title, new.content); END",
+    "CREATE TRIGGER doc_versions_search_au AFTER UPDATE OF path, title, content "
+    "ON doc_versions BEGIN "
+    "INSERT INTO doc_search(doc_search, rowid, path, title, content) "
+    "VALUES ('delete', old.id, old.path, old.title, old.content); "
+    "INSERT INTO doc_search(rowid, path, title, content) "
+    "VALUES (new.id, new.path, new.title, new.content); END",
+    "CREATE TRIGGER doc_versions_search_ad AFTER DELETE ON doc_versions BEGIN "
+    "INSERT INTO doc_search(doc_search, rowid, path, title, content) "
+    "VALUES ('delete', old.id, old.path, old.title, old.content); END",
+)
+
+
+async def _migrate_projection(conn) -> None:
+    """Create the trigger-kept ``doc_search`` projection; drop pre-#669 ``doc_fts``.
+
+    Only search projections change, rebuilt from ``doc_versions`` (external
+    content); the version rows — the history — are never touched.  An old
+    ``doc_fts`` is dropped whenever seen: a process still on older code then
+    fails its own insert, rolls the file back and leaves it for this code.
+    """
+    async def pending() -> tuple[bool, bool]:
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('doc_search', 'doc_fts')")
+        names = {r[0] for r in await cur.fetchall()}
+        return "doc_search" not in names, "doc_fts" in names
+
+    if not any(await pending()):
+        return
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        create, old = await pending()
+        if old:
+            await conn.execute("DROP TABLE doc_fts")
+        if create:
+            for stmt in _SEARCH_DDL:
+                await conn.execute(stmt)
+            await conn.execute("INSERT INTO doc_search(doc_search) VALUES('rebuild')")
+        await conn.execute("COMMIT")
+    except BaseException:
+        await conn.execute("ROLLBACK")
+        raise
 
 
 def _phrase(terms: list[str]) -> str:
