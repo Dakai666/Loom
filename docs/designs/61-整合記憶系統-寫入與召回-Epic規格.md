@@ -364,7 +364,7 @@ Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：
 - `doc_versions`：不可變的篇章版本（collection、path、anchor、完整 digest、標題、內容、首次與最後觀測時間）。**這是 A1 的歷史來源，不是可丟棄的快取**：不可由現檔重建，任何 rebuild／migration 不得清空；隨 `memory.db` 一起備份。A→B→A 重用 A 的列，「現版」只由 `doc_current` 決定，所以沒有修訂鏈環。
 - `doc_current`：每個 (collection, path, anchor) 的現版指標與檔內順序。
 - `doc_files`：(collection, path) 的指紋與狀態（present／removed／moved＋moved_to）。`doc_collections`：集合名稱 → 解析後的根目錄；根目錄改變時該集合全部標 removed 再重新探索。
-- 搜尋投影：`doc_fts`（trigram，external content 指向 `doc_versions`，insert-only 不需 update 投影）與 `doc_terms`（contentless CJK bigram），與版本列同一交易寫入；`'rebuild'` 只重建投影。
+- 搜尋投影：`doc_fts`（trigram，欄位為 path／標題／正文，external content 指向 `doc_versions`，insert-only 不需 update 投影；r3.3 加入 path 欄，舊 DB 啟動時只重建投影，不動 `doc_versions`）與 `doc_terms`（contentless CJK bigram），與版本列同一交易寫入；`'rebuild'` 只重建投影。
 
 **變動偵測**：recall 時同步，不加 scheduler。
 
@@ -379,10 +379,10 @@ Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：
 **召回**
 
 - documents 是 RRF 的另一條 ranked list，與 memory／skills／conversation 同級，不短路；`_fuse` 不改。融合身分含 digest，所以新舊版本不會合併成一筆。
-- 排序：trigram bm25，篇章自己的標題欄權重 10、正文 1。標題就是篇章的名字；只看正文時，長篇章會被長度正規化壓到後面（live 實測：〈圖書館形狀的慾望〉那篇筆記從第 13 名升到第 2 名，第 1 名是以同一篇為標題的 deep_weave 段落）。
+- 排序：trigram bm25，篇章自己的標題欄與檔案路徑權重 10、正文 1（檔名就是檔案的名字，r3.3 起可搜尋）。**查詢詞全部短於 3 字**（兩字中文、單字）時沒有 bm25 索引可用，取回至多 2,000 個符合的篇章後以同樣權重的 bm25 公式在程式內排序；r3.2 以前這條路徑按寫入新舊排序，較舊的相關篇章會被擠出候選（#669）。標題就是篇章的名字；只看正文時，長篇章會被長度正規化壓到後面（live 實測：〈圖書館形狀的慾望〉那篇筆記從第 13 名升到第 2 名，第 1 名是以同一篇為標題的 deep_weave 段落）。
 - 每個邏輯篇章（collection, path, anchor）最多佔 2 個候選：最佳命中版本；若最佳的是舊版且現版也命中，再加現版。候選按獨立篇章計，≤40。
 - 只搜 present 檔案的版本（現版與舊版）；removed／moved 舊路徑與未設定集合的列不可見。
-- `type` 為 `semantic`／`skill` 時排除文件。給了 `since`／`until` 時排除文件，並在覆蓋行註明：觀測時間與檔案修改時間都不是內容的事件時間，不拿來冒充。
+- `type` 為 `semantic`／`skill` 時排除文件。給了 `since`／`until` 時排除文件，並在覆蓋行註明：觀測時間與檔案修改時間都不是內容的事件時間，不拿來冒充。覆蓋行同時給出改法（拿掉時間範圍、改用內容詞查，例如照原文寫法的日期）。
 - 結果格式：`[document] {ref} (current | old version — current: {ref} | old version — section no longer in the file)`，摘錄 ≤512 字。recall 工具套用整次輸出預算時，**每筆結果的第一行（類型、ref、版本或狀態）不可切**：只截它下面的正文，放不下就整筆略過並計入 omitted。這條規則適用於所有結果類型。
 - `recall(ref=doc:…)`：先核對集合仍在設定內、檔案狀態、實際路徑，必要時同步該檔。現版＝目標篇章，加上現版檔案中的前後篇章各一，各預留 1,200 字，總計 ≤8,000 字。舊版只給該版原文，並明示「當時的前後文未保存」與現版 ref。版本未保存時顯示現版並註明。moved 時回報新 ref 並展開；removed 時回「已刪除或已移出範圍」，`success=False`。所有文件輸出都套秘密遮罩。
 
@@ -398,6 +398,12 @@ Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：
 - S0 agent 迴圈層（gpt-6.1-terra，≤3 次 recall）：S2 3／4 找到並引用。漏掉的 `doc-afterword`，模型選的詞是「河流 散文」，文件裡沒有「散文」（多個詞是 AND）。
 - live 副本，五個集合：487 檔、5,297 個篇章、155 萬字。首次導入 1.36 秒；文件相關表與索引共 18.3 MiB（`doc_versions` 4.9、`doc_fts` 10.9、`doc_terms` 1.5）；沒有變動時同步一次 3 ms；暖機 recall p95 94 ms，其中 documents 路由 p95 12 ms。原本的寫法讓 FTS 直接 join，一個 identifier 查詢就要 0.8 秒，改成先物化 MATCH 結果再 join。
 - #643 閱讀查詢：「趙無極」「光頭報告」「明礬」都直接命中閱讀筆記中對應的篇章。
+
+**已知限制（S2 完成時，2026-11-15）**
+
+1. 文件路徑只有字面比對，沒有 embedding。只帶意思、用字不同的問題，文件路徑到不了，要靠記憶路徑的 embedding 找到指向文件的記憶。
+2. 帶 `since`／`until` 時文件排除（見上）。
+3. 2 字以下的查詢詞只比對正文，不比對路徑。
 
 **刪除**：`skills/wiki_maintenance/SKILL.md` 中「更新宿主記憶的指標」這一步（等該檔現有的他人改動落地後處理）。
 
@@ -507,3 +513,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r3**（2026-11-10）：S2 範圍（§9.2）。DK 裁決：保留篇章歷史（A1）、五個集合（排除 news 與 self_check）、刪除只回狀態、移動以整檔 hash 唯一配對才接回。依 Codex design review 收斂：ref 只承諾未改篇章不變、不依長度細切、`doc_versions` 為不可重建的歷史來源、指紋含 ctime、讀取前後驗證與交易內 CAS、symlink 一律拒絕、時間篩選排除文件。
 - **r3.1**（2026-11-10）：PR #667 Codex code review（2 個 P1、7 個 P2、1 個 P3）修正：文件索引改用獨立連線與每檔一個交易，交易內再驗證；消失的檔先隱藏再讀新檔；移動改以 inode＋大小＋整檔 hash 唯一配對（比 DK 原規則嚴格，先複製再刪除不算移動）；探索可跨 recall 續走；逐層 `O_NOFOLLOW`；錨點保證唯一；含秘密或過長的 path／錨點在 ref 中改印 hash；輸出預算不切結果的第一行；bytes 預算依大小預留。
 - **r3.2**（2026-11-10）：PR #667 複審（1 個 P1、3 個 P2）修正：每次同步重新驗證集合根，根被換成 symlink 時整個集合視為範圍外；同一個目錄內也遵守探索上限；可能是移動目標的新檔等到這一輪探索完成再處理；字面上長得像 `~h` 的標題也改印 hash，解析遇到歧義時明示，不任意挑一個。
+- **r3.3**（2026-11-15）：S2 使用回饋（Loom Agent）後修正（#669）：短詞查詢改依相關度排序（原本按寫入新舊）；檔案路徑進 `doc_fts` 可搜尋；時間範圍排除文件時覆蓋行附改法；`recall` 工具描述提醒結果可能含私人來源、對外須改寫。§9.2 補已知限制。

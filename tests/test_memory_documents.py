@@ -765,3 +765,77 @@ async def test_persistently_invalid_root_does_not_starve_other_collections(db, w
     assert len(found) == 4
     assert (await _docs(_search(db, index), "將被刪除"))[0] == []
     assert any("bad" in b for b in report.bad_collections)
+
+
+# ---------------------------------------------------------------------------
+# #669 — short-term ranking, searchable paths, actionable coverage
+# ---------------------------------------------------------------------------
+
+_TOPIC = "# 量測邊界\n量測的邊界在讀者的實際路徑；邊界不是量測工具的邊界。量測先定邊界。\n"
+
+
+def _filler(i: int) -> str:
+    # Mentions both terms once, deep in a long unrelated body.
+    return f"# 週記{i}\n" + "今天整理房間與書架。" * 40 + "順帶一提量測與邊界。\n"
+
+
+class TestRankingAndPaths:
+    async def test_short_terms_rank_by_relevance_not_recency(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "topic.md", _TOPIC)
+        await index.sync()
+        for i in range(3):
+            _write(ws / "notes" / f"w{i}.md", _filler(i))
+        await index.sync()
+        found = (await _docs(_search(db, index), "量測 邊界", limit=10))[0]
+        assert found[0].ref.startswith("doc:wiki/topic.md#")
+
+    async def test_relevant_old_section_survives_candidate_budget(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "topic.md", _TOPIC)
+        await index.sync()
+        for i in range(docs_mod.ROUTE_SECTIONS + 5):
+            _write(ws / "notes" / f"w{i:02}.md", _filler(i))
+        for _ in range(4):
+            await index.sync()
+        found = (await _docs(_search(db, index), "量測 邊界", limit=5))[0]
+        assert any(r.ref.startswith("doc:wiki/topic.md#") for r in found)
+
+    async def test_filename_finds_the_file_itself(self, db, ws):
+        index = _index(db, ws)
+        _write(ws / "wiki" / "measurement-boundaries.md", "# 方法\n讀者實際走的路徑才是邊界。\n")
+        _write(ws / "wiki" / "_meta" / "lint.md",
+               "# 報告\n- measurement-boundaries.md：沒有入鏈\n")
+        found = (await _docs(_search(db, index), "measurement-boundaries"))[0]
+        assert found and found[0].ref.startswith("doc:wiki/measurement-boundaries.md#")
+
+    async def test_old_projection_is_rebuilt_without_touching_history(self, db, ws, tmp_path):
+        _write(ws / "wiki" / "measurement-boundaries.md", "# 方法\n讀者實際走的路徑。\n")
+        await _index(db, ws).sync()
+        # Put back the pre-#669 projection (no path column).
+        await db.executescript(
+            "DROP TABLE doc_fts;"
+            "CREATE VIRTUAL TABLE doc_fts USING fts5(title, content, "
+            "content='doc_versions', content_rowid='id', tokenize='trigram');"
+            "INSERT INTO doc_fts(doc_fts) VALUES('rebuild');"
+        )
+        cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
+        before = (await cur.fetchone())[0]
+        index = _index(db, ws)
+        found = (await _docs(_search(db, index), "measurement-boundaries"))[0]
+        assert found and found[0].ref.startswith("doc:wiki/measurement-boundaries.md#")
+        assert (await _docs(_search(db, index), "實際走的路徑"))[0]
+        cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
+        assert (await cur.fetchone())[0] == before
+
+    async def test_time_window_note_says_how_to_reach_documents(self, db, ws):
+        _write(ws / "notes" / "river.md", RIVER)
+        search = _search(db, _index(db, ws))
+        _, cov = await _docs(search, "倒影破碎", since=datetime(2020, 1, 1, tzinfo=UTC))
+        assert "documents: excluded" in cov and "since/until" in cov
+
+
+def test_recall_tool_warns_about_private_sources():
+    from loom.platform.cli.tools import make_recall_tool
+    desc = make_recall_tool(memory=None).description
+    assert "private" in desc.lower()

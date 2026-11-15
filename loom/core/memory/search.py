@@ -398,7 +398,7 @@ class MemorySearch:
                 if windowed:
                     # A file's mtime or first-indexed time is not when its
                     # content happened (spec 61 r3 §9.2) — no stand-in dates.
-                    notes.append("documents: excluded (no event time)")
+                    notes.append("documents: excluded (no event time) — to search documents, drop since/until and use content words, e.g. a date as written")
                 else:
                     try:
                         found, note = await self._documents.search(terms)
