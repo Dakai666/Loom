@@ -509,7 +509,7 @@ class DocumentIndex:
         names = [n for n in self._roots if n in self._valid]
         known = await self._known(conn, names)
 
-        new = sorted(k for k in seen if k not in known or known[k][0] != "present")
+        new = _round_robin(sorted(k for k in seen if k not in known or known[k][0] != "present"))
         changed = sorted(
             (k for k in seen if k in known and known[k][0] == "present"
              and tuple(known[k][1:5]) != seen[k]),
@@ -1147,6 +1147,24 @@ def _status(coll, path, anchor, vid, cur_id, cur_digest) -> str:
     if _repeated(anchor):
         status += " (repeated heading — may not be the same section)"
     return status
+
+
+def _round_robin(keys: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Interleave (collection, path) keys by collection, path order kept within each.
+
+    The per-recall read budget then reaches every collection, so a backlog
+    in one never holds back another (#669).
+    """
+    by_coll: dict[str, deque] = {}
+    for key in keys:
+        by_coll.setdefault(key[0], deque()).append(key)
+    out: list[tuple[str, str]] = []
+    queues = list(by_coll.values())
+    while queues:
+        queues = [q for q in queues if q]
+        for q in queues:
+            out.append(q.popleft())
+    return out
 
 
 def _rank_short(rows: list, terms: list[str]) -> list:

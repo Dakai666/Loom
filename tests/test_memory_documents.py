@@ -839,3 +839,13 @@ def test_recall_tool_warns_about_private_sources():
     from loom.platform.cli.tools import make_recall_tool
     desc = make_recall_tool(memory=None).description
     assert "private" in desc.lower()
+
+
+async def test_new_files_are_indexed_round_robin_across_collections(db, ws):
+    # A backlog in one collection must not hold back another (#669).
+    for i in range(6):
+        _write(ws / "notes" / f"n{i}.md", f"# 段\n積壓筆記{i}\n")
+    _write(ws / "wiki" / "w.md", "# 段\n維基新頁\n")
+    index = DocumentIndex(db, ws, {"notes": "notes", "wiki": "wiki"}, max_files=2)
+    await index.sync()
+    assert (await _docs(_search(db, index), "維基新頁"))[0]
