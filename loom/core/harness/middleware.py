@@ -809,7 +809,11 @@ class BlastRadiusMiddleware(Middleware):
         return True
 
     # Origins where no human is available to answer confirmation prompts.
-    _UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent"})
+    # "chime" (issue #668 S1): a scheduled phase turn runs inside a live
+    # Discord thread, but nobody is expected to be watching it. Prompting
+    # there held the session's turn lock for hours and queued every later
+    # life event behind it — so a chime skips instead of waiting.
+    _UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent", "chime"})
 
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
@@ -837,16 +841,24 @@ class BlastRadiusMiddleware(Middleware):
                 f"fast. Probe the relevant context first, then re-issue."
             )
         else:
+            # Issue #668: say what actually happened. Nobody denied this —
+            # nobody was there to ask. The call was skipped, not refused, and
+            # routing around it (another tool, a rewritten command) would
+            # launder the very authorization the skip is holding back.
             error = (
-                f"Permission denied: {call.tool_name} requires scope authorization "
-                f"not covered by existing grants. Origin '{call.origin}' cannot "
-                f"request new permissions interactively."
+                f"Skipped (not executed): {call.tool_name} needs authorization "
+                f"beyond this '{call.origin}' turn's grants, and no human is "
+                f"attending to approve it. This is not a denial. Do not retry it "
+                f"or reach the same effect through another tool or command. "
+                f"Note what was skipped, continue with the parts that don't "
+                f"depend on it, and don't treat its result as done."
             )
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=False,
             error=error,
             failure_type="permission_denied",
+            metadata={"unattended_skip": True, "origin": call.origin},
         )
 
     def _notify_lifecycle(self, call: ToolCall, result: bool, reason: str) -> None:

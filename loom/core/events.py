@@ -125,6 +125,10 @@ class ToolEnd:
     output: str
     duration_ms: float
     call_id: str
+    failure_type: str | None = None
+    """``ToolResult.failure_type`` when ``success`` is False. Lets platform
+    renderers tell a permission skip apart from an execution error without
+    parsing ``output`` (issue #668 S1 chime skip notice)."""
 
 
 @dataclass

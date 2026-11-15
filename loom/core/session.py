@@ -2692,6 +2692,9 @@ class LoomSession:
                                 output=tool_output[:200],
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
+                                failure_type=(
+                                    None if result.success else result.failure_type
+                                ),
                             )
                             _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(
@@ -2792,6 +2795,9 @@ class LoomSession:
                                 output=tool_output[:200],
                                 duration_ms=duration_ms,
                                 call_id=tu.id,
+                                failure_type=(
+                                    None if result.success else result.failure_type
+                                ),
                             )
                             _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(
