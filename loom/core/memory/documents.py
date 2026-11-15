@@ -23,7 +23,7 @@ shown as ``~h{hash}`` instead and resolved back through the index.
 ``doc_versions`` keeps every section version ever observed (DK decision A1:
 history is kept).  It is the *source* of that history, not a cache — the
 files are not under git, so an old version exists nowhere else.  Only the
-search projections (``doc_fts`` trigram, ``doc_terms`` CJK bigrams) are
+search projections (``doc_search`` trigram, kept by triggers; ``doc_terms`` CJK bigrams) are
 rebuildable.  ``doc_current`` says which version is current per anchor;
 ``doc_files`` holds each file's fingerprint and state.
 
@@ -149,8 +149,6 @@ CREATE TABLE IF NOT EXISTS doc_collections (
     name        TEXT PRIMARY KEY,
     root        TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts
-USING fts5(path, title, content, content='doc_versions', content_rowid='id', tokenize='trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_terms
 USING fts5(terms, content='', contentless_delete=1, detail='none', tokenize='unicode61');
 """
@@ -834,9 +832,6 @@ class DocumentIndex:
         )
         if cur.rowcount == 1:
             vid = cur.lastrowid
-            await conn.execute(
-                "INSERT INTO doc_fts(rowid, path, title, content) VALUES (?, ?, ?, ?)",
-                (vid, path, sec.title, sec.content))
             await conn.execute("INSERT INTO doc_terms(rowid, terms) VALUES (?, ?)",
                                (vid, bigram_projection(sec.content)))
             return vid
@@ -958,8 +953,8 @@ class DocumentIndex:
             # the same words deep in a long body (bm25 alone favours short
             # sections).
             sql = ("WITH hits AS MATERIALIZED (SELECT rowid AS id, "
-                   f"bm25(doc_fts, {_TITLE_WEIGHT}, {_TITLE_WEIGHT}, 1.0) AS rank "
-                   "FROM doc_fts WHERE doc_fts MATCH ?) "
+                   f"bm25(doc_search, {_TITLE_WEIGHT}, {_TITLE_WEIGHT}, 1.0) AS rank "
+                   "FROM doc_search WHERE doc_search MATCH ?) "
                    + select + "JOIN hits ON hits.id=v.id WHERE "
                    + " AND ".join(where) + " ORDER BY hits.rank LIMIT ?")
             args = [_phrase(long_terms), *params, _MATCH_ROWS]
@@ -1191,26 +1186,52 @@ def _rank_short(rows: list, terms: list[str]) -> list:
     return sorted(rows, key=lambda r: (-score(r), -r[0]))
 
 
+# The trigram projection is kept by triggers on doc_versions, not by the
+# application: every writer — this code, a process still running older code,
+# a move that rewrites ``path`` — leaves it consistent (#671 review).
+_SEARCH_DDL = (
+    "CREATE VIRTUAL TABLE doc_search USING fts5(path, title, content, "
+    "content='doc_versions', content_rowid='id', tokenize='trigram')",
+    "CREATE TRIGGER doc_versions_search_ai AFTER INSERT ON doc_versions BEGIN "
+    "INSERT INTO doc_search(rowid, path, title, content) "
+    "VALUES (new.id, new.path, new.title, new.content); END",
+    "CREATE TRIGGER doc_versions_search_au AFTER UPDATE OF path, title, content "
+    "ON doc_versions BEGIN "
+    "INSERT INTO doc_search(doc_search, rowid, path, title, content) "
+    "VALUES ('delete', old.id, old.path, old.title, old.content); "
+    "INSERT INTO doc_search(rowid, path, title, content) "
+    "VALUES (new.id, new.path, new.title, new.content); END",
+    "CREATE TRIGGER doc_versions_search_ad AFTER DELETE ON doc_versions BEGIN "
+    "INSERT INTO doc_search(doc_search, rowid, path, title, content) "
+    "VALUES ('delete', old.id, old.path, old.title, old.content); END",
+)
+
+
 async def _migrate_projection(conn) -> None:
-    """Rebuild a pre-#669 ``doc_fts`` (no ``path`` column).
+    """Create the trigger-kept ``doc_search`` projection; drop pre-#669 ``doc_fts``.
 
-    Only the search projection is dropped and rebuilt from ``doc_versions``
-    (external content); the version rows — the history — are never touched.
+    Only search projections change, rebuilt from ``doc_versions`` (external
+    content); the version rows — the history — are never touched.  An old
+    ``doc_fts`` is dropped whenever seen: a process still on older code then
+    fails its own insert, rolls the file back and leaves it for this code.
     """
-    async def stale() -> bool:
-        cur = await conn.execute("SELECT name FROM pragma_table_info('doc_fts')")
-        return "path" not in {r[0] for r in await cur.fetchall()}
+    async def pending() -> tuple[bool, bool]:
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('doc_search', 'doc_fts')")
+        names = {r[0] for r in await cur.fetchall()}
+        return "doc_search" not in names, "doc_fts" in names
 
-    if not await stale():
+    if not any(await pending()):
         return
     await conn.execute("BEGIN IMMEDIATE")
     try:
-        if await stale():
+        create, old = await pending()
+        if old:
             await conn.execute("DROP TABLE doc_fts")
-            await conn.execute(
-                "CREATE VIRTUAL TABLE doc_fts USING fts5(path, title, content, "
-                "content='doc_versions', content_rowid='id', tokenize='trigram')")
-            await conn.execute("INSERT INTO doc_fts(doc_fts) VALUES('rebuild')")
+        if create:
+            for stmt in _SEARCH_DDL:
+                await conn.execute(stmt)
+            await conn.execute("INSERT INTO doc_search(doc_search) VALUES('rebuild')")
         await conn.execute("COMMIT")
     except BaseException:
         await conn.execute("ROLLBACK")

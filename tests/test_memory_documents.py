@@ -812,9 +812,13 @@ class TestRankingAndPaths:
     async def test_old_projection_is_rebuilt_without_touching_history(self, db, ws, tmp_path):
         _write(ws / "wiki" / "measurement-boundaries.md", "# 方法\n讀者實際走的路徑。\n")
         await _index(db, ws).sync()
-        # Put back the pre-#669 projection (no path column).
+        # Put back the pre-#669 projection: doc_fts without a path column,
+        # explicitly written by the application (no triggers).
         await db.executescript(
-            "DROP TABLE doc_fts;"
+            "DROP TRIGGER IF EXISTS doc_versions_search_ai;"
+            "DROP TRIGGER IF EXISTS doc_versions_search_au;"
+            "DROP TRIGGER IF EXISTS doc_versions_search_ad;"
+            "DROP TABLE IF EXISTS doc_search;"
             "CREATE VIRTUAL TABLE doc_fts USING fts5(title, content, "
             "content='doc_versions', content_rowid='id', tokenize='trigram');"
             "INSERT INTO doc_fts(doc_fts) VALUES('rebuild');"
@@ -827,6 +831,40 @@ class TestRankingAndPaths:
         assert (await _docs(_search(db, index), "實際走的路徑"))[0]
         cur = await db.execute("SELECT COUNT(*) FROM doc_versions")
         assert (await cur.fetchone())[0] == before
+        cur = await db.execute("SELECT name FROM sqlite_master WHERE name='doc_fts'")
+        assert await cur.fetchone() is None
+
+    async def test_moved_file_is_found_by_its_new_name_only(self, db, ws):
+        # Codex review of #671: the path projection must follow a move,
+        # for the current and the historical versions alike.
+        src = _write(ws / "wiki" / "alpha-original.md", "# 段\n第一版內容\n")
+        index = _index(db, ws)
+        await index.sync()
+        time.sleep(0.01)
+        src.write_text("# 段\n第二版內容\n", encoding="utf-8")
+        await index.sync()
+        os.rename(src, ws / "wiki" / "beta-renamed.md")
+        await index.sync()
+        await index.sync()
+        found = (await _docs(_search(db, index), "beta-renamed", limit=10))[0]
+        assert found and all(r.ref.startswith("doc:wiki/beta-renamed.md#") for r in found)
+        assert (await _docs(_search(db, index), "alpha-original"))[0] == []
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM doc_search WHERE doc_search MATCH 'path:\"beta-renamed\"'")
+        assert (await cur.fetchone())[0] == 2      # both stored versions
+
+    async def test_any_writer_keeps_the_path_projection(self, db, ws):
+        # A pre-#669 process writes doc_versions without knowing about the
+        # path column; the projection must still carry the path.
+        await _index(db, ws).sync()          # creates the projection
+        await db.execute(
+            "INSERT INTO doc_versions(collection, path, anchor, digest, title, content, "
+            "first_seen, last_seen) VALUES ('wiki', 'gamma-legacy.md', '段', 'd', '段', "
+            "'# 段\n舊程式寫入', 'now', 'now')")
+        await db.commit()
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM doc_search WHERE doc_search MATCH 'path:\"gamma-legacy\"'")
+        assert (await cur.fetchone())[0] == 1
 
     async def test_time_window_note_says_how_to_reach_documents(self, db, ws):
         _write(ws / "notes" / "river.md", RIVER)

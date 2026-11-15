@@ -364,7 +364,7 @@ Loom agent 的五個案例（去識別形狀見 #650）納入 S0 固定案例：
 - `doc_versions`：不可變的篇章版本（collection、path、anchor、完整 digest、標題、內容、首次與最後觀測時間）。**這是 A1 的歷史來源，不是可丟棄的快取**：不可由現檔重建，任何 rebuild／migration 不得清空；隨 `memory.db` 一起備份。A→B→A 重用 A 的列，「現版」只由 `doc_current` 決定，所以沒有修訂鏈環。
 - `doc_current`：每個 (collection, path, anchor) 的現版指標與檔內順序。
 - `doc_files`：(collection, path) 的指紋與狀態（present／removed／moved＋moved_to）。`doc_collections`：集合名稱 → 解析後的根目錄；根目錄改變時該集合全部標 removed 再重新探索。
-- 搜尋投影：`doc_fts`（trigram，欄位為 path／標題／正文，external content 指向 `doc_versions`，insert-only 不需 update 投影；r3.3 加入 path 欄，舊 DB 啟動時只重建投影，不動 `doc_versions`）與 `doc_terms`（contentless CJK bigram），與版本列同一交易寫入；`'rebuild'` 只重建投影。
+- 搜尋投影：`doc_search`（trigram，欄位為 path／標題／正文，external content 指向 `doc_versions`）與 `doc_terms`（contentless CJK bigram），與版本列同一交易寫入；`'rebuild'` 只重建投影。**r3.3**：`doc_search` 改由 `doc_versions` 上的 trigger 維護（insert／path 更新／delete），不靠應用程式寫入。這樣移動時改寫 `path`，或仍在跑舊版程式的 process 寫入，投影都會一致。舊 DB 首次連線時建立 `doc_search` 並 rebuild，同時刪除 r3.2 的 `doc_fts`；`doc_versions` 不動。
 
 **變動偵測**：recall 時同步，不加 scheduler。
 
@@ -513,4 +513,4 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r3**（2026-11-10）：S2 範圍（§9.2）。DK 裁決：保留篇章歷史（A1）、五個集合（排除 news 與 self_check）、刪除只回狀態、移動以整檔 hash 唯一配對才接回。依 Codex design review 收斂：ref 只承諾未改篇章不變、不依長度細切、`doc_versions` 為不可重建的歷史來源、指紋含 ctime、讀取前後驗證與交易內 CAS、symlink 一律拒絕、時間篩選排除文件。
 - **r3.1**（2026-11-10）：PR #667 Codex code review（2 個 P1、7 個 P2、1 個 P3）修正：文件索引改用獨立連線與每檔一個交易，交易內再驗證；消失的檔先隱藏再讀新檔；移動改以 inode＋大小＋整檔 hash 唯一配對（比 DK 原規則嚴格，先複製再刪除不算移動）；探索可跨 recall 續走；逐層 `O_NOFOLLOW`；錨點保證唯一；含秘密或過長的 path／錨點在 ref 中改印 hash；輸出預算不切結果的第一行；bytes 預算依大小預留。
 - **r3.2**（2026-11-10）：PR #667 複審（1 個 P1、3 個 P2）修正：每次同步重新驗證集合根，根被換成 symlink 時整個集合視為範圍外；同一個目錄內也遵守探索上限；可能是移動目標的新檔等到這一輪探索完成再處理；字面上長得像 `~h` 的標題也改印 hash，解析遇到歧義時明示，不任意挑一個。
-- **r3.3**（2026-11-15）：S2 使用回饋（Loom Agent）後修正（#669）：短詞查詢改依相關度排序（原本按寫入新舊）；檔案路徑進 `doc_fts` 可搜尋；時間範圍排除文件時覆蓋行附改法；`recall` 工具描述提醒結果可能含私人來源、對外須改寫；新檔索引在各集合間輪流；§9.2 移動規則標為 DK 已確認。§9.2 補已知限制；wiki 指標步驟由刪除改為保留待驗證。
+- **r3.3**（2026-11-15）：S2 使用回饋（Loom Agent）後修正（#669）：短詞查詢改依相關度排序（原本按寫入新舊）；檔案路徑可搜尋（投影改為 trigger 維護的 `doc_search`，取代 `doc_fts`；依 Codex review 修正移動與新舊版混跑時的投影一致性）；時間範圍排除文件時覆蓋行附改法；`recall` 工具描述提醒結果可能含私人來源、對外須改寫；新檔索引在各集合間輪流；§9.2 移動規則標為 DK 已確認。§9.2 補已知限制；wiki 指標步驟由刪除改為保留待驗證。
