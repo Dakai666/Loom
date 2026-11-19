@@ -232,12 +232,6 @@ Sampling is only half of sleep. On a weekly rhythm Loom also runs a **consolidat
 
 You can check the store's health any time with a one-shot `loom memory health` — a plain snapshot of fact counts, confidence, uncompressed sessions, and database size.
 
-### `predict` — Write It Down Before You Find Out
-
-Before an uncertain tool call, Loom can write a falsifiable assertion about it ("this probe's output will contain `INJECTION_ALLOWED`"). The next time that tool runs in the session, the assertion is judged mechanically against the real output and the verdict (HIT / MISS) is appended to the tool's result — so being wrong lands while Loom can still act on it. The value is the discipline of turning a hunch into a claim that can be proven wrong.
-
-(The v0.4 Prediction Spine's automatic layers — implicit per-tool bets, weekly reconciliation, calibration residue, and the affect arm — were retired in September 2026; see `docs/retired/prediction-spine/`.)
-
 ---
 
 ## Skills — Procedural Memory with Self-Evolution

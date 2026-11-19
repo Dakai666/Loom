@@ -52,40 +52,6 @@ _OUTCOME_MARKERS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Prediction Spine — autonomy-path betting nudge (epic #528, P0.5-a follow-up)
-# ---------------------------------------------------------------------------
-
-# Origins whose turns are Loom acting on its own (scheduled chime / daemon-planned
-# autonomy), as opposed to a human speaking (interactive / user / discord / mcp)
-# or a sub-agent doing context isolation (subagent). The betting nudge fires only
-# here — keeping the human chat path DK already steers free of spine prompting,
-# per the "emergent mechanisms live in the autonomy path" principle.
-_SELF_DRIVEN_ORIGINS = frozenset({"chime", "autonomy"})
-
-
-def prediction_nudge_body(origin: str, *, predict_tool_enabled: bool) -> str | None:
-    """The ``<system-reminder>`` body inviting one ``predict`` assertion, or
-    ``None`` when this turn should not be nudged.
-
-    Fires only on self-driven turns (never human chat / subagents) and only when
-    the tool is registered. Kept after the #528 retirement at the end user's
-    request (Loom Agent verdict 2026-09-17): the value of a bet is the moment it
-    forces a hunch into a claim that can be proven wrong, and it settles in the
-    same session. Behaviour-neutral wording: a bet must never change which action
-    the agent takes.
-    """
-    if not predict_tool_enabled or origin not in _SELF_DRIVEN_ORIGINS:
-        return None
-    return (
-        "Acting autonomously. If your next consequential tool call has a genuinely "
-        "uncertain outcome, first write it as a claim that can be proven wrong: "
-        "one `predict` bet (e.g. output_contains / output_regex / row_count / "
-        "tool_success). Skip it when you already know the outcome. Optional, and "
-        "it must not change which action you take; the verdict comes back on that "
-        "tool's result."
-    )
-
 def _clean_envelope_metadata_line(text: str, *, max_len: int = 140) -> str:
     line = " ".join(str(text or "").strip().split())
     if len(line) <= max_len:

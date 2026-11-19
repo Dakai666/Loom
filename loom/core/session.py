@@ -132,7 +132,6 @@ from loom.core.memory.pulse import (
     fold_contradiction_pulses,
 )
 from loom.core.memory.search import MemorySearch
-from loom.core.memory.prediction_settle import format_settlement_suffix
 from loom.core.harness.repeat_guard import RepeatCallTracker
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.session_log import SessionLog
@@ -158,7 +157,6 @@ from loom.core.session_support import (  # noqa: F401  (re-export)
     _parse_skill_frontmatter,
     _resolve_context_window,
     _resolve_output_max_tokens,
-    prediction_nudge_body,
 )
 
 console = Console(highlight=False)
@@ -849,8 +847,6 @@ class LoomSession:
         # Verdicts produced async land here; drained as <system-reminder>
         # at the start of the next stream_turn.
         self._pending_verdicts: list[str] = []
-        # #528: in-session `predict` verdicts keyed by the settling call id.
-        self._bet_settlements: dict[str, list[str]] = {}
         # #654: identical (tool, args, result) repeats within a turn get a
         # reminder on the tool result. Reset at every stream_turn start.
         self._repeat_calls = RepeatCallTracker()
@@ -1108,13 +1104,6 @@ class LoomSession:
 
         # Issue #43: Memory Governance — always-on
         _memory_cfg = _load_loom_config().get("memory", {})
-        # #537: the explicit `predict` tool — a falsifiable assertion written
-        # before acting, settled in-session against the target tool's next run
-        # (#528 retirement: the auto-heartbeat / batch reconcile / calibration /
-        # affect layers are gone). Default off.
-        self._predict_tool_enabled = bool(
-            _memory_cfg.get("consolidation_dream", {}).get("predict_tool_enabled", False)
-        )
         _gov_cfg = dict(_memory_cfg.get("governance", {}))
         # Issue #281 P3: lifecycle throttle is owned by [memory.lifecycle]
         # but also gates session.stop()'s run_decay_cycle path, so plumb
@@ -1337,7 +1326,6 @@ class LoomSession:
             make_distill_dream_tool,
             make_dream_cycle_tool,
             make_memory_prune_tool,
-            make_predict_tool,
         )
 
         from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
@@ -1370,17 +1358,6 @@ class LoomSession:
                 allow_execute=distill_execute_enabled(self._loom_config),
             )
         )
-        # #528: give rotting bets an exit — expire open bets older than the TTL
-        # (target tool never ran). Runs regardless of predict_tool_enabled.
-        try:
-            from loom.core.memory.prediction_settle import expire_stale_bets
-            await expire_stale_bets(self._db)
-        except Exception:
-            logger.debug("expire_stale_bets failed (suppressed)", exc_info=True)
-        # #537: predict — a falsifiable assertion before an uncertain call.
-        # Gated (predict_tool_enabled, default off): registered only when opted in.
-        if self._predict_tool_enabled:
-            self.registry.register(make_predict_tool(db=self._db))
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))
@@ -2167,17 +2144,6 @@ class LoomSession:
             self._pending_verdicts.clear()
             self._pending_pulses.clear()
 
-            # Epic #528 (P0.5-a follow-up): on self-driven turns invite one
-            # deliberate `predict` bet so explicit, confidence-varying wagers
-            # flow instead of the auto-heartbeat monoculture. Origin-gated to the
-            # autonomy path (never human chat) and suppressed when the predict
-            # tool isn't registered. Soft + behaviour-neutral (I5).
-            _nudge = prediction_nudge_body(
-                origin,
-                predict_tool_enabled=getattr(self, "_predict_tool_enabled", False),
-            )
-            if _nudge is not None:
-                _emit_reminder(_nudge)
 
             await self._memory.episodic.write(
                 EpisodicEntry(
@@ -2715,9 +2681,8 @@ class LoomSession:
                             # preserved — they're the data basis of masking.
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id,
-                                tool_output + format_settlement_suffix(
-                                    getattr(self, "_bet_settlements", {}).pop(tu.id, [])
-                                ) + self._repeat_calls.observe(tu.name, tu.args, result),
+                                tool_output
+                                + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
                             # see_image (agent vision): if the tool returned an
@@ -2812,9 +2777,8 @@ class LoomSession:
                             # Issue #197 Phase 2: tag for observation masking.
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id,
-                                tool_output + format_settlement_suffix(
-                                    getattr(self, "_bet_settlements", {}).pop(tu.id, [])
-                                ) + self._repeat_calls.observe(tu.name, tu.args, result),
+                                tool_output
+                                + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
                             # see_image (agent vision): if the tool returned an
@@ -4437,12 +4401,10 @@ class LoomSession:
             envelope_id = (
                 f"e{self._envelope_counter}" if self._envelope_counter else ""
             )
-            # #569 semantic observation surface: capture the tool's raw
-            # world-reply on the action row so semantic resolvers
-            # (output_contains / output_regex / row_count) can settle. The
-            # canonical text mirrors exactly what the agent saw in-conversation
-            # (str(output) on success, error text on failure) — world-generated,
-            # never LLM narrative (I2). No result (never executed) → NULLs.
+            # #569: capture the tool's raw reply on the action row (recall
+            # shows output_prefix). The canonical text mirrors what the agent
+            # saw in-conversation (str(output) on success, error text on
+            # failure). No result (never executed) → NULLs.
             from loom.core.memory.observation import capture_output_fields
             if record.result is not None:
                 cap = capture_output_fields(
@@ -4486,21 +4448,6 @@ class LoomSession:
         except Exception:
             pass  # DB write must never crash the pipeline
 
-        # #528: settle this session's `predict` bets on this tool against the
-        # run just persisted. Verdicts are buffered by call id and appended to
-        # the tool result in stream_turn (memorialize completes before _dispatch
-        # returns), so the agent sees them while still present. Not gated on
-        # predict_tool_enabled: betting is optional, closing a placed bet is not.
-        if record.call is not None:
-            try:
-                from loom.core.memory.prediction_settle import settle_bets_for_action
-                lines = await settle_bets_for_action(
-                    self._db, session_id=self.session_id, tool_name=record.tool_name,
-                )
-                if lines:
-                    self._bet_settlements.setdefault(record.call.id, []).extend(lines)
-            except Exception:
-                pass  # settling must never crash the pipeline
 
     async def _on_state_change(
         self, record: ActionRecord, old_state: str, new_state: str

@@ -428,12 +428,8 @@ corpus_limit  = 5000
 # pass (one pass every interval_days) — raise both together.
 max_clusters        = 20
 max_review_clusters = 40
-# Explicit `predict` tool (#537): Loom writes a falsifiable assertion before an
-# uncertain tool call; it settles in-session against that tool's next run and the
-# verdict (HIT / MISS) is appended to the tool's result. (The implicit heartbeat,
-# weekly reconcile, calibration residue and affect layers were retired 2026-09-17,
-# #528 — their keys are no longer read.)
-predict_tool_enabled = false  # opt-in: expose the explicit `predict` tool
+# `predict_tool_enabled` was removed with the `predict` tool (#674); an old
+# value here is ignored.
 
 # ─────────────────────────────────────────────
 # Reflection (Issue #120 PR1) — Skill diagnostic layer
