@@ -135,7 +135,9 @@ class TestSubAgentMemorize:
         assert result.success is True
         entry = await semantic.get("project:fact")
         assert entry is not None
-        assert entry.source == "agent:sub-123"
+        assert entry.source == "memorize"
+        assert entry.metadata["agent_id"] == "sub-123"
+        assert entry.metadata["parent_session_id"] == "parent-1"
 
 
 def _make_failing_tool() -> ToolDefinition:

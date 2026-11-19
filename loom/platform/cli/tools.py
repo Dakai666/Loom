@@ -1786,6 +1786,8 @@ def make_memorize_tool(
             value=value,
             confidence=confidence,
             source="memorize",
+            metadata=(dict(call.metadata.get("memory_provenance") or {})
+                      if call.origin == "subagent" else {}),
             domain=normalize_domain(domain_raw),
             temporal=normalize_temporal(temporal_raw),
         )
@@ -2148,7 +2150,7 @@ def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
     (no separate ``query_relations`` tool).
     """
     from loom.core.memory.relational_bridge import (
-        RelationalEntry, delete_triple,
+        RelationalEntry,
     )
 
     async def _relate(call: ToolCall) -> ToolResult:
@@ -2167,28 +2169,50 @@ def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
             predicate=predicate,
             object=obj,
             confidence=confidence,
-            source="agent",
+            source="relate",
         )
-        await memory.relate(entry)
+        verdict = await memory.relate(entry)
+        from hashlib import sha256
+        from loom.core.memory.relational_bridge import make_rel_key, triple_to_semantic
+        from loom.core.memory.search import value_hash
+        key = make_rel_key(subject, predicate)
+        saved = await memory.semantic.get(key)
+        ref = f"mem:{key}@{value_hash(saved.value)}" if saved is not None else None
+        metadata = {"written": verdict.written, "resolution": verdict.resolution,
+                    "trust_tier": verdict.trust_tier, "ref": ref}
+        if verdict.written and saved is not None:
+            metadata.update({
+                "_written_key": key,
+                "_written_digest": sha256(triple_to_semantic(entry).value.encode()).hexdigest(),
+                "_written_updated_at": saved.updated_at.isoformat(),
+                "_written_source": entry.source,
+            })
+        if not verdict.written:
+            kept = verdict.resolution == "kept"
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=kept, output=f"Kept existing: {ref}" if kept else None,
+                              error=None if kept else f"Relate rejected: {verdict.resolution}",
+                              metadata=metadata)
         return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                          success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}",
-                          metadata={"_subject": subject, "_predicate": predicate})
+                          success=True, output=f"Stored: {subject!r} {predicate!r} {obj!r}\nref: {ref}",
+                          metadata=metadata)
 
     async def _relate_rollback(call: ToolCall, result: ToolResult) -> ToolResult:
-        """Delete the triple that was just stored."""
-        subject = result.metadata.get("_subject") or call.args.get("subject", "").strip()
-        predicate = result.metadata.get("_predicate") or call.args.get("predicate", "").strip()
-        if not subject or not predicate:
-            return ToolResult(call_id=call.id, tool_name="relate",
-                              success=False, error="No subject/predicate to rollback")
+        """Only undo an actual write, with a conditional version check."""
+        meta = result.metadata
+        if not meta.get("written") or not meta.get("_written_key"):
+            return ToolResult(call_id=call.id, tool_name="relate", success=True,
+                              output="No relate write to roll back.")
         try:
-            await delete_triple(memory.semantic, subject, predicate)
-            return ToolResult(call_id=call.id, tool_name="relate",
-                              success=True,
-                              output=f"Rolled back: deleted ({subject!r}, {predicate!r})")
+            deleted = await memory.semantic.delete_if_unchanged(
+                meta["_written_key"], value_digest=meta["_written_digest"],
+                updated_at=meta["_written_updated_at"], source=meta["_written_source"],
+            )
+            return ToolResult(call_id=call.id, tool_name="relate", success=True,
+                              output="Rolled back relate write." if deleted else "Rollback skipped: entry changed or no longer exists.")
         except Exception as exc:
-            return ToolResult(call_id=call.id, tool_name="relate",
-                              success=False, error=f"Rollback failed: {exc}")
+            return ToolResult(call_id=call.id, tool_name="relate", success=False,
+                              error=f"Rollback failed: {exc}")
 
     return ToolDefinition(
         name="relate",

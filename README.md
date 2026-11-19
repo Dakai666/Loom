@@ -212,6 +212,22 @@ session for legacy child-only traces. There is no backfill or data cleanup.
 than treating an uncompressed episodic backlog as unhealthy. Episodic writes and
 TTL remain active until S3 PR-D.
 
+### Governed API and relationship writes
+
+The REST memory POST endpoints use the same governor and configured embedding
+provider as memory tools. API sources default to `api`; custom labels are stored
+as `api:<label>` so they remain external (trust tier 0.5). A written response is
+HTTP 201, a kept existing entry is HTTP 200, and a rejected write is HTTP 422.
+The body reports `written`, `status`, `resolution`, `trust_tier` and the actual
+`mem:` ref (or null when nothing is stored). Embedding failures are reported
+separately: a stored fact remains available by literal lookup and ref.
+
+The `relate` tool also reports the governed outcome; rollback skips kept or
+rejected writes and uses a version check for a write it actually made. Child
+`memorize` keeps source `memorize` and its existing trust tier, recording child
+id and parent session in metadata on the first write. Approval/control-state
+triples still use the raw bridge, and dream admission behavior is unchanged.
+
 ### MemoryPulse — Proactive Session Hooks
 
 `MemoryPulse` (Issue #281 P3) surfaces proactive memory signals directly into the agent's context as `<system-reminder>` blocks at the start of each turn — without polluting session state:

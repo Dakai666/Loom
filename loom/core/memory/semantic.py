@@ -87,6 +87,8 @@ def classify_source(source: str | None) -> tuple[str, float]:
         return "session_compress", TRUST_TIERS["session_compress"]
     if s.startswith("tool:"):
         return "tool_verified", TRUST_TIERS["tool_verified"]
+    if s == "api" or s.startswith("api:") or s == "relate":
+        return "external", TRUST_TIERS["external"]
     if s.startswith("fetch:") or s.startswith("web:"):
         return "external", TRUST_TIERS["external"]
 
@@ -674,6 +676,22 @@ class SemanticMemory:
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+    async def delete_if_unchanged(
+        self, key: str, *, value_digest: str, updated_at: str, source: str,
+    ) -> bool:
+        """Rollback only the observed version; a later write wins the race."""
+        import hashlib
+        entry = await self.get(key)
+        if entry is None or hashlib.sha256(entry.value.encode()).hexdigest() != value_digest:
+            return False
+        cursor = await self._db.execute(
+            "DELETE FROM semantic_entries WHERE key = ? AND value = ? "
+            "AND updated_at = ? AND source = ?",
+            (key, entry.value, updated_at, source),
+        )
+        await self._db.commit()
+        return bool(cursor.rowcount)
 
     async def delete(self, key: str) -> bool:
         """
