@@ -1,0 +1,6 @@
+{
+  "loom/core/agent/subagent.py": "498bb8e12140ae884f8f36e275c193fc86fb9edc7bc1ca188ddd80220b2102c1",
+  "loom/platform/cli/tools.py": "e1d0b4f40a31b46487b94880c6cc186cc566f565891fe85fc8a4a39369859029",
+  "tests/test_subagent.py": "b1187a69e9fbf18eb80c726fee05d861f720fb826b7eaebd89841a2c574a75e5",
+  "tests/test_tool_verifiers.py": "7ed4dd7c4cd4d102ce9072acdb56d84089def90e49390a101da2ddc24b46c060"
+}

@@ -177,10 +177,14 @@ async def test_child_finalizes_metadata_and_completed_rows_on_every_exit(tmp_pat
         if exit_kind == "max_turns":
             result = await child(db, tmp_path, [response(["fail"])], max_turns=1)
             assert not result.success
+        elif exit_kind == "exception":
+            # #648 P4 review F2: a model-call exception is a failure result,
+            # not a raise; the rows are finalized the same way.
+            result = await child(db, tmp_path, [response(["fail"]), RuntimeError("provider failed")])
+            assert not result.success and "RuntimeError" in result.error
         else:
-            error = RuntimeError("provider failed") if exit_kind == "exception" else asyncio.CancelledError()
-            with pytest.raises(type(error)):
-                await child(db, tmp_path, [response(["fail"]), error])
+            with pytest.raises(asyncio.CancelledError):
+                await child(db, tmp_path, [response(["fail"]), asyncio.CancelledError()])
         saved = await rows(db)
         assert [r[1] for r in saved] == ["user", "assistant", "tool"]
         assert {r[0] for r in saved} == {1}
