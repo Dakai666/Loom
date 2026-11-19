@@ -29,7 +29,7 @@ skill_review(
 
 或對應地對照 weekly 報告：`outputs/self_check/<latest>-skill-weekly.md`。
 
-**深挖某個 episode 時改用 `ledger_recall`**：skill_review 的 digest 把每個 episode 壓成摘要，當你想看「episode 7 那 30 個 tool call 完整序列」「同 turn 內使用者實際說了什麼」時，跳到 `ledger_recall(session_id=..., since=..., until=...)` 看原始事件，比 `skill_review max_events_per_episode` 開太大更精準。
+**深挖某個 episode 時改用 `recall`**：skill_review 的 digest 把每個 episode 壓成摘要，當你想看「episode 7 那 30 個 tool call 完整序列」「同 turn 內使用者實際說了什麼」時，先用 episode 的 `loaded_at`／`unloaded_at` 當時間窗 `recall(since=..., until=...)`（不帶 query）找到那個 session 的 `log:` ref，再 `recall(ref=log:…)` 讀該回合的原文與工具輸出，比 `skill_review max_events_per_episode` 開太大更精準。
 
 ### 第二步：解讀關鍵訊號
 

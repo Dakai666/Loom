@@ -6,6 +6,8 @@
 > historical, not current runtime behavior. Activation/tier routing, ledger-backed
 > skill review, shared triple storage, and historical metric readers remain.
 
+> **#650 S4 註記（2026-11-19）**：`recall` 是主 agent 唯一的回憶工具。不帶 `query`、只給 `since`（可加 `until`）時列出時間窗內有對話的 session（依窗內最後活動新到舊，附標題、窗內回合數、窗內第一句與 `log:` ref）與窗內更新的記憶（`mem:` ref）；沒有 `since` 仍報錯、不回補最近資料；不新增參數。`recall_period`、`ledger_recall` 及其專用程式（`facade.recall_period`、`loom/core/ledger/recall.py`）依 DK 第二輪裁決直接移除、不設相容設定，回復方式是 revert；原碼存於 `_archive/s4-recall-tools-retired-2026-11-19/`。ledger 本身、`skill_review` 與 `loom skill weekly` 不變。下文提到兩個舊工具處為歷史設計。
+
 # 整合記憶系統：寫入與召回 — Epic 規格 r3
 
 > - 日期：2026-10-28（Asia/Taipei）
@@ -235,7 +237,7 @@ recall(ref="前次回傳的引用", limit?)
 - 日期與 session 是選擇性的縮小範圍條件；明確給定時為硬限制，不讓模型自行放寬。
 - `domain`／`temporal` **不再是 `recall` 的參數**（S1 PR-C，DK 裁決）。r2.2 曾改為「只縮小記憶這一路」：live 實測時模型每次 recall 都習慣性填滿這兩欄，使對話路由從未被查到。PR-C 的 agent 迴圈量測中，即使說明已寫「沒有特定需求就省略」，gpt-6.1-terra 仍在 28／28 次呼叫填了這兩欄，猜錯的 domain 也擋掉了正確的記憶（模型已找對搜尋詞）。現在工具 schema 移除這兩欄；模型若仍送出，忽略並在覆蓋行註明。`MemorySearch.recall` 保留這兩個參數給內部呼叫者。
 - 自然語言日期由主模型轉成既有時間參數；不先新增一個必跑的 LLM query router 或大量關鍵字判斷規則。
-- `recall_period` 與 `ledger_recall` 暫作既有呼叫者的相容入口。相同 reader 與輸出原語由新 recall 使用；完成等價驗收後，移出主 agent 的預設工具清單與教學 prompt。
+- `recall_period` 與 `ledger_recall` 暫作既有呼叫者的相容入口。相同 reader 與輸出原語由新 recall 使用；完成等價驗收後，移出主 agent 的預設工具清單與教學 prompt。**S4 as-built**：時間窗回顧改由 `recall` 不帶 query 的窗口列表承接；兩個舊工具直接移除、不留相容入口（DK 2026-11-19 第二輪）。
 - 精確審計、統計、raw event 查詢可保留管理／除錯入口；不要求日常回憶記住這些入口。
 
 ### 6.2 搜尋與展開
@@ -332,7 +334,7 @@ S1／S2 可以讓新能力早日可用，但不構成整個 Epic 完成。完成
 | S1 | `compress_session` 預設關閉；recall Tier 1 短路與無命中 recency fallback 刪除 |
 | S2 | 文件可直接索引後，停掉為文件例行產生導航 fact 的流程（人選擇留下的理解不在此列） |
 | S3 | `episodic_entries` 寫入與 TTL 路徑、`CounterFactualReflector`、`SkillEvolutionHook`、四個繞過 governor 的直接 upsert、模型自評 `success_rate` 路徑、`compress_session` 程式碼 |
-| S4 | `recall_period`、`ledger_recall` 移出主 agent 預設清單（`ledger_recall` 保留為管理／除錯入口）；prompt／工具描述中「選哪種回憶工具」的教學刪除 |
+| S4 | `recall_period`、`ledger_recall` 移出主 agent 預設清單（`ledger_recall` 保留為管理／除錯入口）；prompt／工具描述中「選哪種回憶工具」的教學刪除。**as-built**：兩者連同專用程式一起移除、不留管理入口；memory index、`journal_append`／`relate`／`memory_health` 描述與 tracked skills 的選擇教學收斂為「記住用 memorize，找回用 recall」 |
 
 ### 9.1 S1 具體範圍（r1；r2 補充）
 
@@ -467,7 +469,7 @@ T0 是主 agent 真正接通新路徑且完成第一次寫入→召回，不是 
 
 **r1 認領狀態**：Claude Code 認領 S0 writer／reader 盤點（§5.2.1 為初稿）、ref mapping、S1 實作與契約測試、各切片刪除清單與 GitNexus impact 報告。Loom agent 認領 end-user 案例私下核對、自然問法與預期脈絡、T0 後第一次寫入／召回／修訂實戰，以及前三個適用機會的失敗回報（不自動增設日常排程）。產品取捨與 issue 收束由 DK 決定。
 
-**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**r2 已解**：工具原文來源、改述驗收層級、兩字詞方案、S1 預算（§1.2）。**r3 已解**：文件集合與移動／修訂語意（§9.2）。**仍待定**：舊 confidence／half-life 遷移（S3）、相容入口退出預設清單的時點（S4，以等價驗收為條件）。
+**r1 已解的共同待定**：ref 格式與失效（§4.2）、活動投影最小單位＝回合（§6.2）、整合主責＝Claude Code（引用與版本改動）。**r2 已解**：工具原文來源、改述驗收層級、兩字詞方案、S1 預算（§1.2）。**r3 已解**：文件集合與移動／修訂語意（§9.2）。**仍待定**：舊 confidence／half-life 遷移（S3）。相容入口退出時點已由 S4 定案（DK 2026-11-19：直接移除，回復為 revert）。
 
 以下為 r0 的原始 review 請求，保留作脈絡。
 
@@ -521,4 +523,5 @@ review 回覆請分成：同意的契約、反對與反例、可刪除項目、S
 - **r3**（2026-11-10）：S2 範圍（§9.2）。DK 裁決：保留篇章歷史（A1）、五個集合（排除 news 與 self_check）、刪除只回狀態、移動以整檔 hash 唯一配對才接回。依 Codex design review 收斂：ref 只承諾未改篇章不變、不依長度細切、`doc_versions` 為不可重建的歷史來源、指紋含 ctime、讀取前後驗證與交易內 CAS、symlink 一律拒絕、時間篩選排除文件。
 - **r3.1**（2026-11-10）：PR #667 Codex code review（2 個 P1、7 個 P2、1 個 P3）修正：文件索引改用獨立連線與每檔一個交易，交易內再驗證；消失的檔先隱藏再讀新檔；移動改以 inode＋大小＋整檔 hash 唯一配對（比 DK 原規則嚴格，先複製再刪除不算移動）；探索可跨 recall 續走；逐層 `O_NOFOLLOW`；錨點保證唯一；含秘密或過長的 path／錨點在 ref 中改印 hash；輸出預算不切結果的第一行；bytes 預算依大小預留。
 - **r3.2**（2026-11-10）：PR #667 複審（1 個 P1、3 個 P2）修正：每次同步重新驗證集合根，根被換成 symlink 時整個集合視為範圍外；同一個目錄內也遵守探索上限；可能是移動目標的新檔等到這一輪探索完成再處理；字面上長得像 `~h` 的標題也改印 hash，解析遇到歧義時明示，不任意挑一個。
+- **r3.4**（2026-11-19）：S4（單一 PR）：`recall` 窗口模式（無 query＋`since`；session 依窗內活動排序、child trace 只計數不列、輸出預算與覆蓋行沿用）；移除 `recall_period`／`ledger_recall` 與專用程式；啟動 prompt 與記憶相關工具描述的選擇教學收斂。
 - **r3.3**（2026-11-15）：S2 使用回饋（Loom Agent）後修正（#669）：短詞查詢改依相關度排序（原本按寫入新舊）；檔案路徑可搜尋（投影改為 trigger 維護的 `doc_search`，取代 `doc_fts`；依 Codex review 修正移動與新舊版混跑時的投影一致性）；時間範圍排除文件時覆蓋行附改法；`recall` 工具描述提醒結果可能含私人來源、對外須改寫；新檔索引在各集合間輪流；§9.2 移動規則標為 DK 已確認。§9.2 補已知限制；wiki 指標步驟由刪除改為保留待驗證。

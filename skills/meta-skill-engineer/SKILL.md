@@ -57,9 +57,9 @@ tags: [meta, skill, create, register, manage]
 
 | 情境 | 觸發訊號 | 情境檔案 | 主要工具 |
 |------|---------|---------|---------|
-| **創造** | 「我想做一個 X 技能」「這段流程能不能變成技能」「幫我把 Y 寫成技能」 | `contexts/create.md` | write_file（限 skills/）、ledger_recall（找重複工作模式） |
+| **創造** | 「我想做一個 X 技能」「這段流程能不能變成技能」「幫我把 Y 寫成技能」 | `contexts/create.md` | write_file（限 skills/）、recall（找重複工作模式） |
 | **註冊** | 「我剛寫好 X 技能」「幫我看這個 SKILL.md 對不對」「這個技能可以上了嗎」 | `contexts/register.md` | read_file、人工 review |
-| **管理** | 「跑一下 skill_review」「weekly 報告 X 技能該關注」「X 技能可以更好」「Y 技能該不該砍」 | `contexts/manage.md` | skill_review、weekly 報告、ledger_recall（深挖某 episode） |
+| **管理** | 「跑一下 skill_review」「weekly 報告 X 技能該關注」「X 技能可以更好」「Y 技能該不該砍」 | `contexts/manage.md` | skill_review、weekly 報告、recall（深挖某 episode） |
 
 ---
 
@@ -69,7 +69,7 @@ tags: [meta, skill, create, register, manage]
 |------|------|
 | `load_skill` / `unload_skill` | agent 自己拉技能 / 收技能；bookend 必須成對 |
 | `skill_review` tool | agent 主動拉某技能的 ledger 使用紀錄回顧（PR #386） |
-| `ledger_recall` tool | 跨向度敘事式調閱 ledger（session / correlation / skill / 時段）——比 skill_review 更廣，適合追「為什麼 X 失敗」「上次重複工作長什麼樣」（PR #386） |
+| `recall` tool | 深挖某個 episode：用 episode 的時間當 `since`／`until` 列出那段時間的 session，再用 `recall(ref=log:…)` 讀完整回合與工具輸出；適合追「為什麼 X 失敗」「上次重複工作長什麼樣」 |
 | Weekly worker | 每週六排程從 ledger 抽現況，寫到 `outputs/self_check/{date}-skill-weekly.md`；附該關注清單 |
 | `ToolCallDimension` | 即時對話內顯示 tool 統計與 anomaly，是反饋的最隱性層 |
 | `~/.loom/skills/` vs `<repo>/skills/` | 全域技能（跨專案）vs 專案綁定技能 |

@@ -50,7 +50,6 @@ from loom.core.memory.index import MemoryIndex, MemoryIndexer
 from loom.core.harness.middleware import ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
 from loom.platform.cli.tools import (
-    make_recall_period_tool,
     make_recall_tool,
     make_memorize_tool,
 )
@@ -442,77 +441,6 @@ class TestRecallTool:
                         session_id="t")
         result = await tool.executor(call)
         assert not result.success and "query" in result.error and "ref" in result.error
-
-
-class TestRecallPeriodTool:
-    async def test_success_returns_grouped_output(self):
-        facade = MagicMock()
-        facade.recall_period = AsyncMock(return_value={
-            "semantic": [
-                SemanticEntry(
-                    key="k",
-                    value="Loom discussed time-aware recall",
-                    updated_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
-                )
-            ],
-            "episodic": [
-                EpisodicEntry(
-                    session_id="s1",
-                    event_type="message",
-                    content="User asked about yesterday",
-                    created_at=datetime(2026, 5, 10, 13, 0, tzinfo=UTC),
-                )
-            ],
-            "sessions": [
-                {
-                    "session_id": "s1",
-                    "title": "Memory chat",
-                    "last_active": datetime(2026, 5, 10, 14, 0, tzinfo=UTC).isoformat(),
-                    "turn_count": 2,
-                }
-            ],
-            "messages": [
-                {
-                    "session_id": "s1",
-                    "turn_index": 0,
-                    "role": "user",
-                    "content": "raw session message",
-                    "created_at": datetime(2026, 5, 10, 14, 30, tzinfo=UTC).isoformat(),
-                }
-            ],
-        })
-        tool = make_recall_period_tool(facade)
-        call = _make_call("recall_period", {
-            "since": "2026-05-10",
-            "until": "2026-05-11",
-            "include_episodic": True,
-            "include_sessions": True,
-        })
-
-        result = await tool.executor(call)
-
-        assert result.success is True
-        assert "Semantic facts" in result.output
-        assert "Legacy episodic fallback" in result.output
-        assert "Sessions" in result.output
-        assert "Session log messages" in result.output
-        kwargs = facade.recall_period.await_args.kwargs
-        assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
-        assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)
-
-    async def test_until_without_since_returns_error(self):
-        facade = MagicMock()
-        facade.recall_period = AsyncMock(return_value={})
-        tool = make_recall_period_tool(facade)
-        call = _make_call("recall_period", {
-            "until": "2026-05-11",
-        })
-
-        result = await tool.executor(call)
-
-        assert result.success is False
-        assert "since" in result.error
-        facade.recall_period.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

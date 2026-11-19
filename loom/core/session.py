@@ -1041,7 +1041,6 @@ class LoomSession:
             make_xai_tts_tool,
             make_memorize_tool,
             make_memory_health_tool,
-            make_recall_period_tool,
             make_recall_tool,
             make_relate_tool,
             make_spawn_agent_tool,
@@ -1050,8 +1049,8 @@ class LoomSession:
         from loom.platform.cli.skill_tools import make_load_skill_tool
         # ``self._memory`` was built up-front (right after governor init).
         # See "Issue #147 Phase C: build the facade up-front" above.
+        # #650 S4: recall is the single read entry — query, time window, or ref.
         self.registry.register(make_recall_tool(self._memory))
-        self.registry.register(make_recall_period_tool(self._memory))
         # PR-C4: when the governor blocks a write, fire the session-level
         # hook so the platform layer can surface a "governor rejected"
         # harness inline. Accept stays silent.
@@ -1212,12 +1211,6 @@ class LoomSession:
         from loom.platform.cli.skill_tools import make_skill_review_tool
         self.registry.register(make_skill_review_tool(self._ledger_store))
 
-        # Issue #385: ledger_recall — story-form recall over the ledger,
-        # joined with session_log so each turn quotes the user's message.
-        from loom.platform.cli.tools import make_ledger_recall_tool
-        self.registry.register(
-            make_ledger_recall_tool(self._ledger_store, self._memory)
-        )
 
 
         # Register web tools (Phase 5D)

@@ -27,10 +27,10 @@ Boundary cheat sheet
 or ``user_zone()``)::
 
   - LLM prompt timestamp prefix (``user_timestamp()``)
-  - Memory tool inputs: ``recall`` / ``recall_period`` / ``ledger_recall``
-    parse ``since``/``until`` via ``user_zone()``
-  - Memory tool outputs: ``_format_period_results``, ledger
-    narrative/summary/raw render, ``ReflectionAPI.recent_tool_calls``
+  - Memory tool inputs: ``recall`` parses ``since``/``until`` via
+    ``user_zone()``
+  - Memory tool outputs: ``recall`` result dates (``MemorySearchResult``),
+    ``ReflectionAPI.recent_tool_calls``
   - Discord chime delivery stamp + daily compaction loop trigger time
 
 **UTC paths** (internal only — keep ``datetime.now(UTC)``)::

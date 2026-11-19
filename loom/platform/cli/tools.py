@@ -35,7 +35,7 @@ import httpx
 from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest
-from loom.core.timezone import local_zone_name, user_zone
+from loom.core.timezone import user_zone
 from loom.core.security.self_termination_guard import SelfTerminationGuard
 from loom.core.security.command_scanner import CommandScanner
 from loom.core.security.sandbox_runtime import (
@@ -84,7 +84,7 @@ async def _terminate_proc_group(proc: asyncio.subprocess.Process) -> None:
 if TYPE_CHECKING:
     from collections.abc import Callable
     import aiosqlite
-    from loom.core.ledger import LedgerEmitter, LedgerStore
+    from loom.core.ledger import LedgerEmitter
     from loom.core.memory.attention import AttentionList
     from loom.core.harness.skill_checks import SkillCheckManager
     from loom.core.memory.facade import MemoryFacade
@@ -1202,46 +1202,21 @@ def _parse_memory_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _format_local_timestamp(
-    value: datetime | str | None, *, date_only: bool = False
-) -> str:
-    """Format a stored UTC datetime (or ISO string) in the user's zone.
-
-    Agent-facing tool output mirrors the same timezone the agent sees in
-    injected prompt timestamps, so since/until inputs and emitted
-    created_at/updated_at lines match. Returns ``""`` for falsy input.
-    See issue #388.
-    """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return ""
-        try:
-            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            return raw[:10] if date_only else raw[:16]
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    local = value.astimezone(user_zone())
-    return local.strftime("%Y-%m-%d" if date_only else "%Y-%m-%d %H:%M")
-
-
 def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     """
     Create a SAFE ``recall`` tool bound to the given MemoryFacade.
 
     # ==============================================================
-    # SECTION 3 — MEMORY + LEDGER RECALL TOOLS
-    #   make_recall, make_recall_period, make_memorize, make_memory_health,
-    #   make_agent_health, make_probe_file, make_relate, make_query_relations,
-    #   make_ledger_recall_tool
+    # SECTION 3 — MEMORY TOOLS
+    #   make_recall (the single read entry, #650 S4), make_memory_attend,
+    #   make_memorize, make_memory_health, make_agent_health, make_probe_file,
+    #   make_relate
     # NOTE: Skill-loading tools moved to loom.platform.cli.skill_tools
     #       (audit-B / PR #399 — was nested here and pretending to be MEMORY).
     # ==============================================================
-    The tool performs BM25-ranked retrieval across semantic facts and
-    skills via :meth:`MemoryFacade.search`.
+    Searches every source via :meth:`MemoryFacade.search`; with no query
+    and an explicit ``since`` it lists that window via
+    :meth:`MemoryFacade.window`; with ``ref`` it reads one result.
     """
     async def _recall(call: ToolCall) -> ToolResult:
         query = (call.args.get("query") or "").strip()
@@ -1263,39 +1238,55 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error=str(exc))
 
-        if not query:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False,
-                              error="Pass 'query' to search, or 'ref' to read a result by its ref")
         if since is None and until is not None:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'since' is required when 'until' is provided")
         if since is not None and until is not None and until <= since:
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
                               success=False, error="'until' must be after 'since'")
+        if not query and since is None:
+            # No window, no listing: recall never falls back to recent rows.
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False,
+                              error="Pass 'query' to search, 'since' (and optionally "
+                                    "'until') to list a time window, or 'ref' to read "
+                                    "a result by its ref")
 
         if mem_type not in ("semantic", "skill", "all"):
             mem_type = "all"
 
-        results = await memory.search(  # type: ignore[arg-type]
-            query, kind=mem_type, limit=limit,
-            since=since, until=until,
-            # Access is recorded below, for what the output actually carries.
-            mark_accessed=False,
-        )
+        if not query:
+            # #650 S4: window listing — what happened in [since, until).
+            try:
+                results = await memory.window(
+                    since=since, until=until, kind=mem_type, limit=limit,
+                )
+            except ValueError as exc:
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=False, error=str(exc))
+            miss = ("Nothing in this window. This does not mean nothing happened "
+                    "— the window may be off; widen since/until, or search with a query.")
+        else:
+            results = await memory.search(  # type: ignore[arg-type]
+                query, kind=mem_type, limit=limit,
+                since=since, until=until,
+                # Access is recorded below, for what the output actually carries.
+                mark_accessed=False,
+            )
+            # #650 S1: a miss is reported as a miss — never padded with the
+            # most recent entries, and never claimed as "it never happened".
+            miss = (
+                "No match. This does not mean it never happened — try fewer or "
+                "different keywords (terms are ANDed; a long sentence is "
+                "matched as one literal phrase)."
+            )
 
         coverage = getattr(results, "coverage", "")
         if ignored_axes:
             coverage += (f" (ignored: {', '.join(ignored_axes)} — not recall "
                          "parameters; all of memory was searched)")
         if not results:
-            # #650 S1: a miss is reported as a miss — never padded with the
-            # most recent entries, and never claimed as "it never happened".
-            output = (
-                "No match. This does not mean it never happened — try fewer or "
-                "different keywords (terms are ANDed; a long sentence is "
-                "matched as one literal phrase)."
-            )
+            output = miss
             if coverage:
                 output += "\n" + coverage
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
@@ -1368,8 +1359,8 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
     return ToolDefinition(
         name="recall",
         description=(
-            "Search your memory, skills, past conversation turns and your notes "
-            "and documents (configured folders) in one call. "
+            "Your one tool for finding things again: memory, skills, past "
+            "conversation turns and your notes and documents (configured folders). "
             "Use short keywords separated by spaces — all terms must match, and a "
             "long sentence is matched as one literal phrase, so for a vague "
             "question pick the distinctive words (a name, a phrase you remember) "
@@ -1378,7 +1369,12 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             "dated by when it happened; document results are one section each, "
             "marked current or old version (old versions stay readable). The last "
             "line reports which sources were "
-            "searched and where the search was limited. To read more of one "
+            "searched and where the search was limited. "
+            "Without query, give since (and optionally until) to see what happened "
+            "in that time — e.g. the last 48 hours: the sessions active in it, "
+            "newest first, each with its first line and a log: ref, plus the "
+            "memories updated in it. "
+            "To read more of one "
             "result, call recall again with only ref set to that result's ref: "
             "a log: ref returns that turn and the turns around it, with the "
             "fuller stored tool output; a doc: ref returns that section (with the "
@@ -1393,7 +1389,10 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keywords separated by spaces (all must match)",
+                    "description": (
+                        "Search keywords separated by spaces (all must match). "
+                        "Omit it and give since to list a time window instead."
+                    ),
                 },
                 "ref": {
                     "type": "string",
@@ -1418,8 +1417,9 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
                 "since": {
                     "type": "string",
                     "description": (
-                        "Optional hard lower bound — conversation event time, "
-                        "memory record time; excludes skills "
+                        "Hard lower bound — conversation event time, "
+                        "memory record time; excludes skills. Required to list a "
+                        "window without query "
                         "(YYYY-MM-DD or ISO datetime). Naked values are "
                         "interpreted in your configured timezone."
                     ),
@@ -1442,174 +1442,6 @@ def make_recall_tool(memory: "MemoryFacade") -> ToolDefinition:
         # Output is bounded by design (4,000 / 8,000 chars); spilling it to
         # scratchpad would only add a hop between the agent and its memory.
         inline_only=True,
-    )
-
-
-def _format_period_results(groups: dict[str, list]) -> str:
-    """Format grouped period recall evidence for the agent.
-
-    Timestamps are converted to the user's configured timezone so they
-    match what the agent sees in injected prompt timestamps and what
-    since/until inputs are parsed against.
-    """
-    sections: list[str] = []
-    zone_suffix = f" ({local_zone_name()})"
-    semantic = groups.get("semantic", [])
-    if semantic:
-        lines = [f"Semantic facts{zone_suffix}"]
-        for entry in semantic:
-            stamp = _format_local_timestamp(entry.updated_at, date_only=True)
-            lines.append(f"- [{stamp}] {entry.key}: {entry.value[:240]}")
-        sections.append("\n".join(lines))
-
-    episodic = groups.get("episodic", [])
-    if episodic:
-        lines = [f"Legacy episodic fallback{zone_suffix}"]
-        for entry in episodic:
-            stamp = _format_local_timestamp(entry.created_at)
-            outcome = entry.metadata.get("success")
-            state = "ok" if outcome is True else "failed" if outcome is False else "unknown outcome"
-            lines.append(
-                f"- [{stamp}] {entry.session_id} {entry.event_type} ({state}): "
-                f"{entry.content[:240]}"
-            )
-        sections.append("\n".join(lines))
-
-    sessions = groups.get("sessions", [])
-    if sessions:
-        lines = [f"Sessions{zone_suffix}"]
-        for session in sessions:
-            title = session.get("title") or "(untitled)"
-            stamp = _format_local_timestamp(session.get("last_active"))
-            lines.append(
-                f"- [{stamp}] "
-                f"{session.get('session_id')}: {title} "
-                f"({session.get('turn_count', 0)} turns)"
-            )
-        sections.append("\n".join(lines))
-
-    messages = groups.get("messages", [])
-    if messages:
-        lines = [f"Session log messages{zone_suffix}"]
-        for message in messages:
-            stamp = _format_local_timestamp(message.get("created_at"))
-            state = ""
-            if message.get("role") == "tool":
-                meta = message.get("metadata") or {}
-                outcome = meta.get("success") if isinstance(meta, dict) else None
-                state = " (ok)" if outcome is True else " (failed)" if outcome is False else " (unknown outcome)"
-            ref = f"log:{message.get('session_id')}:{message.get('turn_index')}"
-            lines.append(
-                f"- [{stamp}] {ref} {message.get('role')}{state}: "
-                f"{str(message.get('content') or '')[:240]}"
-            )
-        sections.append("\n".join(lines))
-
-    if not sections:
-        sections.append("No memories found for this period.")
-    sections.extend(groups.get("coverage", []))
-    return "\n\n".join(sections)
-
-
-def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
-    """Create a SAFE period recall tool across memory layers."""
-
-    async def _recall_period(call: ToolCall) -> ToolResult:
-        try:
-            since = _parse_memory_datetime(call.args.get("since"))
-            until = _parse_memory_datetime(call.args.get("until"))
-        except ValueError as exc:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=str(exc))
-        if since is None:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error="'since' argument is required")
-        if until is not None and until <= since:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error="'until' must be after 'since'")
-
-        limit = min(max(int(call.args.get("limit", 10)), 1), 20)
-        include_episodic = bool(call.args.get("include_episodic", True))
-        include_sessions = bool(call.args.get("include_sessions", False))
-        session_id = (call.args.get("session_id") or "").strip() or None
-
-        groups = await memory.recall_period(
-            since=since,
-            until=until,
-            session_id=session_id,
-            limit=limit,
-            include_episodic=include_episodic,
-            include_sessions=include_sessions,
-            legacy_episodic=bool(call.args.get("legacy_episodic", False)),
-        )
-        return ToolResult(
-            call_id=call.id,
-            tool_name=call.tool_name,
-            success=True,
-            output=_format_period_results(groups),
-        )
-
-    return ToolDefinition(
-        name="recall_period",
-        description=(
-            "Retrieve time-window memory evidence. Use for questions like "
-            "'what did we discuss yesterday?' or 'what issues did I open last night?' "
-            "Use session_id to narrow all layers to a known session. Semantic "
-            "facts use their update time and stored source session; manually "
-            "memorized facts may have no session scope. Include session_log experience or session "
-            "evidence to inspect the original events and messages."
-        ),
-        trust_level=TrustLevel.SAFE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "since": {
-                    "type": "string",
-                    "description": (
-                        "Required lower bound (YYYY-MM-DD or ISO datetime). "
-                        "Naked values are interpreted in your configured "
-                        "timezone (same as the prompt timestamp prefix)."
-                    ),
-                },
-                "until": {
-                    "type": "string",
-                    "description": (
-                        "Optional exclusive upper bound (YYYY-MM-DD or ISO "
-                        "datetime). Naked values are interpreted in your "
-                        "configured timezone."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max results per layer (1-20, default 10).",
-                },
-                "include_episodic": {
-                    "type": "boolean",
-                    "description": "Compatibility alias: include session_log experience (default true).",
-                },
-                "legacy_episodic": {
-                    "type": "boolean",
-                    "description": "Explicit labeled legacy episodic fallback if this window has no session_log rows (default false); scope to a session for old child history.",
-                },
-                "include_sessions": {
-                    "type": "boolean",
-                    "description": "Include matching session metadata (default false).",
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional exact session scope for all layers. Only "
-                        "semantic facts with that stored source session are "
-                        "included; unknown or historical merged origins are "
-                        "not inferred."
-                    ),
-                },
-            },
-            "required": ["since"],
-        },
-        executor=_recall_period,
-        tags=["memory", "search", "recall", "period"],
-        impact_scope="memory",
     )
 
 
@@ -1991,8 +1823,8 @@ def make_memory_health_tool(
         name="memory_health",
         description=(
             "Check the health of your memory. Default view 'ops': success/"
-            "failure rates for embedding writes, semantic search, session "
-            "compression and other memory operations this session. View "
+            "failure rates for embedding writes, semantic search and other "
+            "memory operations this session. View "
             "'corpus': what the semantic store is made of — source mix "
             "(machine vs hand-written), duplicate groups consolidation missed, "
             "decay and what the next prune removes, how much is never recalled "
@@ -2221,7 +2053,7 @@ def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
             "Use this to record durable facts about preferences, constraints, or associations. "
             "Example: relate(subject='user', predicate='prefers', object='concise answers'). "
             "Upserting with the same subject+predicate replaces the previous object. "
-            "Reading these back is just `recall` — there is no separate query tool."
+            "Read them back with recall."
         ),
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.MUTATES,
@@ -2246,321 +2078,6 @@ def make_relate_tool(memory: "MemoryFacade") -> ToolDefinition:
 # Skill tools — load_skill / unload_skill / skill_review
 # Moved to loom.platform.cli.skill_tools (audit-B / #399).
 # ------------------------------------------------------------------
-
-
-# ------------------------------------------------------------------
-# ledger_recall tool (Issue #385) — narrative recall over AgentLedger
-# ------------------------------------------------------------------
-
-
-_LEDGER_RECALL_EVENT_CAP = 1000
-"""Hard cap on events pulled per ledger_recall call. Renderers truncate
-further per their own semantics (narrative trims to N turn slices, raw
-trims to N events). Prevents runaway queries from drowning the agent."""
-
-
-def make_ledger_recall_tool(
-    ledger_store: "LedgerStore | None",
-    memory: "MemoryFacade | None",
-) -> ToolDefinition:
-    """Create a SAFE ``ledger_recall`` tool — story-form recall over the ledger.
-
-    Wraps the doc/53 §6.2 Pull API (``LedgerStore.events``) and joins
-    against ``memory.session_log`` so each turn's narrative paragraph can
-    quote the user's actual message. Issue #385 design summary:
-    https://github.com/Dakai666/Loom/issues/385#issuecomment-4471257209.
-    """
-    from datetime import datetime, timezone
-
-    from loom.core.ledger.recall import (
-        group_events_by_turn,
-        infer_output_format,
-        render_narrative,
-        render_raw,
-        render_summary,
-    )
-
-    _DIMENSION_KEYS = (
-        "session_id", "correlation_id", "skill_id",
-        "tool_name", "verdict", "since", "until",
-    )
-
-    async def _ledger_recall(call: ToolCall) -> ToolResult:
-        if ledger_store is None:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False,
-                error="Ledger is not available in this session; cannot recall.",
-            )
-
-        args = call.args or {}
-        session_id = (args.get("session_id") or "").strip() or None
-        correlation_id = (args.get("correlation_id") or "").strip() or None
-        skill_id = (args.get("skill_id") or "").strip() or None
-        tool_name = (args.get("tool_name") or "").strip() or None
-        verdict = (args.get("verdict") or "").strip() or None
-        explicit_output = (args.get("output") or "").strip() or None
-        verbose = bool(args.get("verbose", False))
-
-        try:
-            limit = int(args.get("limit", 20))
-        except (TypeError, ValueError):
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error="'limit' must be an integer",
-            )
-        limit = max(1, min(limit, 100))
-
-        try:
-            since_dt = _parse_memory_datetime(args.get("since"))
-            until_dt = _parse_memory_datetime(args.get("until"))
-        except ValueError as exc:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False, error=str(exc),
-            )
-
-        # Require at least one dimension — refuses unbounded ledger scans.
-        if not any([
-            session_id, correlation_id, skill_id,
-            tool_name, verdict, since_dt, until_dt,
-        ]):
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False,
-                error=(
-                    "ledger_recall requires at least one dimension: "
-                    + ", ".join(_DIMENSION_KEYS)
-                ),
-            )
-
-        # Build the EventQuery chain with all user-supplied filters.
-        # Fetch cap+1 so we can detect truncation atomically (no separate
-        # COUNT query) — anything beyond _LEDGER_RECALL_EVENT_CAP is a
-        # signal that aggregates / chronology may be incomplete.
-        query = _build_query(
-            ledger_store,
-            session_id=session_id,
-            correlation_id=correlation_id,
-            skill_id=skill_id,
-            tool_name=tool_name,
-            verdict=verdict,
-            since_dt=since_dt,
-            until_dt=until_dt,
-        )
-        events = await query.all()
-        truncated = len(events) > _LEDGER_RECALL_EVENT_CAP
-        if truncated:
-            events = events[:_LEDGER_RECALL_EVENT_CAP]
-
-        output_format = infer_output_format(
-            session_id=session_id,
-            correlation_id=correlation_id,
-            skill_id=skill_id,
-            tool_name=tool_name,
-            verdict=verdict,
-            since=args.get("since"),
-            until=args.get("until"),
-            explicit=explicit_output,
-        )
-
-        if output_format == "narrative":
-            # Narrative needs full turn context (turn_start, user message
-            # window, every tool, turn_end). When narrowing filters
-            # (skill_id / tool_name / verdict) sit on top of a scope
-            # filter, the initial fetch returns only matching events —
-            # turn_start / turn_end / preceding user message get filtered
-            # out, breaking the story.
-            #
-            # Hydrate by turn_id directly rather than re-querying scope:
-            # the narrow query already pinpointed the turns we care about,
-            # and `idx_turn` makes per-turn lookups cheap. Re-querying
-            # scope risks losing matched turns whose timestamps fall
-            # outside the broad fetch's _LEDGER_RECALL_EVENT_CAP window
-            # (e.g. matched turn at event #1500 of a long session) — see
-            # PR #386 review.
-            has_narrowing = bool(skill_id or tool_name or verdict)
-            has_scope = bool(
-                session_id or correlation_id
-                or since_dt is not None or until_dt is not None
-            )
-            if has_narrowing and has_scope:
-                # Preserve first-seen turn order from the initial query so
-                # `limit` selects the chronologically earliest matches.
-                ordered_turn_ids: list[str] = []
-                seen_turn_ids: set[str] = set()
-                for e in events:
-                    if e.turn_id not in seen_turn_ids:
-                        seen_turn_ids.add(e.turn_id)
-                        ordered_turn_ids.append(e.turn_id)
-                ordered_turn_ids = ordered_turn_ids[:limit]
-
-                hydrated: list = []
-                for tid in ordered_turn_ids:
-                    turn_q = (
-                        ledger_store.events
-                        .where(turn_id=tid)
-                        .order_by("timestamp")
-                        .limit(_LEDGER_RECALL_EVENT_CAP + 1)
-                    )
-                    turn_events = await turn_q.all()
-                    if len(turn_events) > _LEDGER_RECALL_EVENT_CAP:
-                        truncated = True
-                        turn_events = turn_events[
-                            :_LEDGER_RECALL_EVENT_CAP
-                        ]
-                    hydrated.extend(turn_events)
-                events = hydrated
-
-            slices = group_events_by_turn(events)[:limit]
-            messages_by_turn = await _fetch_user_messages_per_turn(
-                memory, slices,
-            )
-            text = render_narrative(
-                slices, messages_by_turn,
-                verbose=verbose, truncated=truncated,
-            )
-        elif output_format == "raw":
-            text = render_raw(
-                events, max_events=limit, truncated=truncated,
-            )
-        else:
-            text = render_summary(events, truncated=truncated)
-
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=True, output=text,
-        )
-
-    def _build_query(
-        store: "LedgerStore",
-        *,
-        session_id: str | None = None,
-        correlation_id: str | None = None,
-        skill_id: str | None = None,
-        tool_name: str | None = None,
-        verdict: str | None = None,
-        since_dt=None,
-        until_dt=None,
-    ):
-        q = store.events
-        if session_id:
-            q = q.where(session_id=session_id)
-        if correlation_id:
-            q = q.where(correlation_id=correlation_id)
-        if skill_id:
-            q = q.where(skill_id=skill_id)
-        if tool_name:
-            q = q.where(tool_name=tool_name)
-        if verdict:
-            q = q.where(verdict=verdict)
-        if since_dt is not None:
-            q = q.since(since_dt)
-        if until_dt is not None:
-            q = q.until(until_dt)
-        return q.order_by("timestamp").limit(_LEDGER_RECALL_EVENT_CAP + 1)
-
-    async def _fetch_user_messages_per_turn(
-        memory: "MemoryFacade | None",
-        slices: list,
-    ) -> dict[str, list[dict]]:
-        """Pull user messages from session_log for each turn's time window.
-
-        Per-turn query rather than a single bulk pull: ledger ``turn_id``
-        and session_log ``turn_index`` are different keys, so we map via
-        the turn's [started_at, ended_at] window. Bounded by the renderer's
-        turn limit (≤100), so per-call query count is small.
-        """
-        if memory is None or memory.session_log is None:
-            return {}
-        out: dict[str, list[dict]] = {}
-        for sl in slices:
-            start_dt = datetime.fromtimestamp(sl.started_at, tz=timezone.utc)
-            # If turn never ended in the result set, take the last event's ts
-            # as a generous upper bound (events are already sorted ASC).
-            end_ts = sl.ended_at if sl.ended_at is not None else (
-                sl.events[-1].timestamp if sl.events else sl.started_at
-            )
-            # +1s slack so an end-aligned message isn't excluded.
-            end_dt = datetime.fromtimestamp(end_ts + 1.0, tz=timezone.utc)
-            try:
-                rows = await memory.session_log.messages_between(
-                    start_dt, end_dt,
-                    session_id=sl.session_id, limit=10,
-                )
-            except Exception:
-                rows = []
-            out[sl.turn_id] = rows
-        return out
-
-    return ToolDefinition(
-        name="ledger_recall",
-        description=(
-            "Recall past activity from the event ledger as story-form "
-            "narrative. Use when you want to remember 'what happened "
-            "in session X' or 'what did I do with skill Y this week'. "
-            "Defaults to per-turn narrative for session/correlation "
-            "queries; aggregate summary for skill/tool/time-range queries. "
-            "Read-only."
-        ),
-        trust_level=TrustLevel.SAFE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "session_id": {"type": "string"},
-                "correlation_id": {"type": "string"},
-                "skill_id": {"type": "string"},
-                "tool_name": {"type": "string"},
-                "verdict": {
-                    "type": "string",
-                    "description": "e.g. 'success' / 'error' (from JudgeVerdict).",
-                },
-                "since": {
-                    "type": "string",
-                    "description": (
-                        "Lower bound (YYYY-MM-DD or ISO datetime). Naked "
-                        "values are interpreted in your configured "
-                        "timezone (same as the prompt timestamp prefix)."
-                    ),
-                },
-                "until": {
-                    "type": "string",
-                    "description": (
-                        "Exclusive upper bound. Naked values are "
-                        "interpreted in your configured timezone."
-                    ),
-                },
-                "output": {
-                    "type": "string",
-                    "enum": ["narrative", "summary", "raw"],
-                    "description": (
-                        "Override the auto-inferred format. Default: "
-                        "narrative for session/correlation; summary otherwise."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": (
-                        "For narrative: max turns. For raw: max events. "
-                        "Ignored for summary. 1–100, default 20."
-                    ),
-                    "default": 20,
-                },
-                "verbose": {
-                    "type": "boolean",
-                    "description": (
-                        "Narrative only — list every tool call instead of "
-                        "compacting when a turn has many actions."
-                    ),
-                    "default": False,
-                },
-            },
-            "required": [],
-        },
-        executor=_ledger_recall,
-        tags=["memory", "recall", "ledger", "read-only"],
-        impact_scope="read-only",
-    )
 
 
 # ------------------------------------------------------------------

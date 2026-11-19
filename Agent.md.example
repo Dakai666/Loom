@@ -65,7 +65,7 @@
 **Task 軸 vs Memory 軸（最關鍵的區別）**：
 
 - Pursuit 屬於**任務軸**——使用者交代的追蹤任務，結束就刪
-- Memory（memory.db）屬於**你自己的認知軸**——身份、經驗、值得長記的事實
+- Memory（memory.db）屬於**你自己的認知軸**——身份、經驗、值得長記的事實；記住用 `memorize`，找回用 `recall`
 - 別把該寫 pursuit 的東西塞進 memorize（會污染 recall 品質）
 - 別把該 memorize 的東西寫成 pursuit（你的認知不該綁在「使用者下指令叫你追的某件事」上）
 
@@ -106,7 +106,7 @@ last_pulled: <date>
 - 同時 `read_file` 多個檔案（檢查 N 個模組的標頭、收 4 篇 doc 的最後一段）
 - 同時 `list_dir` 多個目錄
 - 同時 `grep` 多個 pattern 或多個目錄
-- 同時 `recall` 多個記憶 key
+- 同時 `recall` 多組關鍵字
 - 多個 `fetch_url` 抓獨立 URL（純讀，不寫）
 
 **何時不用**——任何一條打勾就改回序列：
@@ -145,7 +145,7 @@ last_pulled: <date>
 
 - **tool_call** — 每個工具的成功率與延遲
 - **context_layout** — 上下文層（SOUL / Agent / messages）的 token 佔比
-- **memory_compression** — episodic → semantic 的 fact-yield 比率
+- **memory_compression** — 舊 session 壓縮的歷史快照（壓縮已退役，僅供查閱）
 
 **什麼時候會浮出來**：只有當某個維度越出正常界時，harness 會在 turn 邊界注入一行警示，避免變成噪音。其餘時間你不會感覺到它。
 

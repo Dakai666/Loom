@@ -145,7 +145,7 @@ class AttentionList:
     ) -> list["SemanticEntry"]:
         """A random handful of facts nobody has read in ``min_days``.
 
-        recall and recall_period both need a cue; a memory the agent has no
+        recall needs a cue (words or a time window); a memory the agent has no
         cue for never comes back on its own. This is its way in — chance,
         then the agent's judgement (keep, prepare, or ignore). Redirect
         stubs, dreaming hypotheses and items already on the list are left

@@ -19,6 +19,11 @@ fusion — raw scores are never compared across engines.  A query with no
 match returns an empty list (never the most recent entries); the list's
 ``coverage`` line says which routes took part and where they were limited.
 
+#650 S4: with no query but an explicit ``since`` window, :meth:`MemorySearch.window`
+lists what happened in that window instead — sessions active in it (newest
+first) and memories updated in it.  It is an explicit request for a time
+range, not a fallback: no window, no listing.
+
 Usage
 -----
     search = MemorySearch(semantic, procedural)
@@ -120,6 +125,9 @@ ROUTE_CANDIDATES = 40
 EXCERPT_CHARS = 512
 # Whole initial recall output, sources and coverage line included.
 RECALL_OUTPUT_CHARS = 4_000
+# Window listing (#650 S4): chars of a session's first line shown.
+WINDOW_FIRST_LINE_CHARS = 200
+WINDOW_TITLE_CHARS = 80
 # Below this cosine an embedding neighbour is noise, not an answer: #643
 # measured unrelated queries topping out at 0.45–0.52 against the live corpus
 # while true hits sat at 0.68–0.75.  Lexical routes are unaffected.
@@ -201,6 +209,22 @@ class MemorySearchResult:
                 date_hint = f" [{self.updated_at[:10]}]"
         if self.type == "conversation":
             return f"[conversation]{date_hint} {self.ref}\n  {self.value[:EXCERPT_CHARS]}"
+        if self.type == "session":
+            # Header carries everything needed to follow up, so trimming the
+            # first line never loses the ref (spec 61 §6.3).
+            m = self.metadata
+            span = f"{_local_stamp(m.get('first_at'))} – {_local_stamp(m.get('last_at'))}"
+            turns = m.get("turns_in_window", 0)
+            total = m.get("turn_count")
+            turn_note = f"{turns} turn{'s' if turns != 1 else ''} in window"
+            if total:
+                turn_note += f" of {total}"
+            # Titles can be a raw first message (newlines, chime bodies):
+            # one line, bounded, so the header stays one line.
+            title = _cut(" ".join((_redact_secrets(m.get("title")) or "").split()),
+                         WINDOW_TITLE_CHARS) or "(untitled)"
+            return (f"[session] {span} {self.ref} — {title} ({turn_note})\n"
+                    f"  {self.value}")
         if self.type == "document":
             # Status before the text, so output trimming never drops it.
             status = self.metadata.get("status", "")
@@ -418,6 +442,123 @@ class MemorySearch:
             await self.mark_accessed(ranked)
         notes.append(f"{len(fused)} candidates, showing {len(ranked)}")
         return RecallResults(ranked, coverage="Coverage — " + "; ".join(notes) + ".")
+
+    async def window(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+        *,
+        type: MemoryType = "all",
+        limit: int = 5,
+    ) -> RecallResults:
+        """List what happened in ``[since, until)`` — no query (#650 S4).
+
+        Sessions are those with conversation rows *inside* the window, newest
+        activity first; each shows its first line in the window and a ``log:``
+        ref to that turn.  Activity outside the window never decides order or
+        membership.  Sub-agent traces (``session_log`` rows without a
+        ``sessions`` row) are counted, not listed.  Memories are those whose
+        record time falls in the window, newest first, stubs excluded.
+        ``limit`` applies to each list.  Access is recorded by the caller for
+        what it actually shows.
+        """
+        if type == "skill":
+            raise ValueError("skills have no event time; a window lists sessions and memory")
+        db = self._semantic._db
+        notes = ["Coverage — window listing (no query)"]
+        items: list[MemorySearchResult] = []
+
+        if type == "all":
+            sessions, note = await self._window_sessions(db, since, until, limit)
+            items.extend(sessions)
+            notes.append(note)
+        else:
+            notes.append(f"sessions: excluded (type={type})")
+
+        facts = await self._semantic.list_between(since, until, limit=limit + 1)
+        more_facts = len(facts) > limit
+        facts = facts[:limit]
+        for entry in facts:
+            items.append(MemorySearchResult(
+                type=_semantic_result_type(entry.key),
+                key=entry.key,
+                value=entry.value,
+                score=0.0,
+                metadata={
+                    "confidence": entry.confidence,
+                    "effective_confidence": entry.effective_confidence(),
+                    "method": "window",
+                },
+                updated_at=entry.updated_at.isoformat() if entry.updated_at else "",
+            ))
+        memory_note = f"memory: by record time, showing {len(facts)}"
+        if more_facts:
+            memory_note += " (more in window — narrow since/until or raise limit)"
+        notes.append(memory_note)
+        notes.append("skills: excluded (no event time)")
+        if self._documents is not None:
+            notes.append("documents: excluded (no event time) — search them with content words")
+        return RecallResults(items, coverage="; ".join(notes) + ".")
+
+    @staticmethod
+    async def _window_sessions(db, since: datetime, until: datetime | None, limit: int):
+        where = [f"l.role IN {recall_index.SEARCHABLE_ROLES!r}", "l.created_at >= ?"]
+        params: list[Any] = [since.isoformat()]
+        if until is not None:
+            where.append("l.created_at < ?")
+            params.append(until.isoformat())
+        where_sql = " AND ".join(where)
+        cursor = await db.execute(
+            "SELECT l.session_id, MIN(l.created_at), MAX(l.created_at), "
+            "COUNT(DISTINCT l.turn_index), s.title, s.turn_count, "
+            "s.session_id IS NOT NULL "
+            f"FROM session_log l LEFT JOIN sessions s ON s.session_id = l.session_id "
+            f"WHERE {where_sql} GROUP BY l.session_id "
+            "ORDER BY MAX(l.created_at) DESC",
+            tuple(params),
+        )
+        groups = await cursor.fetchall()
+        main = [g for g in groups if g[6]]
+        traces = len(groups) - len(main)
+        shown = main[:limit]
+
+        results: list[MemorySearchResult] = []
+        for sid, first_at, last_at, turns, title, turn_count, _ in shown:
+            # The first line in the window: the user's, else whatever came first.
+            row = None
+            for role_sql in ("l.role = 'user'", "1 = 1"):
+                cur = await db.execute(
+                    f"SELECT l.turn_index, l.role, l.content FROM session_log l "
+                    f"WHERE l.session_id = ? AND {where_sql} AND {role_sql} "
+                    "ORDER BY l.created_at ASC, l.id ASC LIMIT 1",
+                    (sid, *params),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    break
+            turn, role, content = row
+            line = _cut(" ".join((_redact_secrets(content) or "").split()),
+                        WINDOW_FIRST_LINE_CHARS)
+            if role != "user":
+                line = f"{role}: {line}"
+            results.append(MemorySearchResult(
+                type="session",
+                key=f"log:{sid}:{turn}",
+                value=line,
+                score=0.0,
+                metadata={
+                    "title": title, "turn_count": turn_count,
+                    "turns_in_window": turns, "first_at": first_at, "last_at": last_at,
+                },
+                updated_at=last_at or "",
+                ref=f"log:{sid}:{turn}",
+            ))
+        note = f"sessions: {len(main)} active in window, showing {len(shown)}"
+        if len(main) > len(shown):
+            note += " (more in window — narrow since/until or raise limit)"
+        if traces:
+            note += f"; {traces} sub-agent trace{'s' if traces != 1 else ''} not listed (a query finds them)"
+        return results, note
 
     async def mark_accessed(self, results: list[MemorySearchResult]) -> None:
         """Bump last_accessed_at for semantic + relational hits (Memory Ontology v0.1).
