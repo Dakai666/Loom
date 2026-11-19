@@ -1079,47 +1079,13 @@ class LoomSession:
 
         self._reflection = ReflectionAPI(self._memory)
 
-        # Issue #149: dream_cycle / memory_prune are now first-class memory
-        # tools (formerly DreamingPlugin). Wired with dependency injection
-        # so the factories stay session-agnostic.
-        from loom.core.memory.maintenance import (
-            distill_execute_enabled,
-            make_convergent_dream_tool,
-            make_distill_dream_tool,
-            make_dream_cycle_tool,
-            make_memory_prune_tool,
-        )
+        # Issue #149: memory_prune is a first-class memory tool (formerly
+        # DreamingPlugin). The dream agent tools (dream_cycle /
+        # convergent_dream / distill_dream) were retired in #639: dreaming
+        # runs on the autonomy daemon's schedules and `loom memory big-dream`.
+        from loom.core.memory.maintenance import make_memory_prune_tool
 
-        from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
-
-        async def _dream_llm_fn(messages: list[dict]) -> str:
-            response = await self.router.chat(
-                model=self.model, messages=messages,
-                max_tokens=DREAM_LLM_MAX_TOKENS,
-            )
-            return dream_reply_text(response)
-
-        self.registry.register(
-            make_dream_cycle_tool(
-                self._memory.semantic, _dream_llm_fn, db=self._db,
-                governor=self._governor,
-            )
-        )
         self.registry.register(make_memory_prune_tool(self._memory.semantic))
-        # Issue #488 (P1): convergent_dream — read-only consolidation pass
-        # (counterpart to the divergent dream_cycle). Plans/self-reviews/reports
-        # but never writes to the DB; execution lands in P2 (#489).
-        self.registry.register(
-            make_convergent_dream_tool(self._memory.semantic, _dream_llm_fn)
-        )
-        # #613 E: distill_dream — topic distillation; writes only with
-        # execute=true AND [memory.distill_dream] execute = true.
-        self.registry.register(
-            make_distill_dream_tool(
-                self._memory.semantic, _dream_llm_fn,
-                allow_execute=distill_execute_enabled(self._loom_config),
-            )
-        )
 
         if self._telemetry is not None:
             self.registry.register(make_agent_health_tool(self._telemetry))

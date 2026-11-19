@@ -208,21 +208,11 @@ v0.3.6.0（Issue #281 P2）起，衰減不再由單一 threshold 決定，而是
 
 ---
 
-## 4. Dream 2.0 — Themed Round-Robin Sampling
+## 4. 夢：交給 daemon 排程
 
-v0.3.6.0（Issue #281 P3-C）起，`dream_cycle` 的 sampler 支援 themed sampling。
+夢由 autonomy daemon 的兩條排程負責：每週一次的收斂夢（`[memory.consolidation_dream]`，近重複合併／矛盾仲裁／孤兒清理）與每 12h 的蒸餾夢（`[memory.distill_dream]`，依 self → user → project → knowledge 輪替挑種子，把同主題的機器記憶精煉成一條並取代原本那幾條）。兩者各有自己的 `execute` gate、`memory-pre-*` 備份與 `memory_rewrite_lock()`。設計與邊界見 `docs/designs/56`、`docs/designs/57`。
 
-核心改動：sampler 在每次 call 時輪詢（round-robin）非空 domain，確保 Dream 合成的三元組來自多樣的 fact-types，而非過度集中於單一 domain。
-
-```
-dream_cycle(sample_size=15)
-  → 依序取用 knowledge recent / project recent / knowledge archived / ...
-  → 每輪 call 輪詢到下一個非空 domain
-```
-
-這讓 relational triples 更能捕捉 cross-domain 的關係，而非只是同一個 topic 內部的瑣碎連結。
-
-**排程（2026-10-19 起，#613 E）**：daemon 不再每 12h 跑 themed `dream_cycle`。那條路徑只會增加記憶，現在改跑蒸餾夢（`distill_dream`，`[memory.distill_dream]`）：沿用同一個 domain 輪替挑種子，把同主題的機器記憶精煉成一條並取代原本那幾條。`dream_cycle` 仍可透過工具呼叫，03:00 自由夢（themed=false）照常排程。設計與邊界見 `docs/designs/57-記憶蒸餾夢-規格.md`。
+**退役（#639，2026-11-19）**：發散夢 `dream_cycle`（隨機抽事實 → 關聯三元組，`source='dreaming'`）與 `dream_cycle` / `convergent_dream` / `distill_dream` 三個 agent tool 已退役；記什麼由 Loom Agent 透過 `memorize` / `relate` 決定。既有的 `source='dreaming'` 列照舊受 21 天半衰期上限約束，經 lifecycle 自然流出。原始碼保存在 `_archive/dream-entries-retired-2026-11-19/`。
 
 **大夢（一次性全庫整理）**：`loom memory big-dream` 依序跑普查 → 全庫收斂夢（不設上限）→ 蒸餾分批直到沒有可蒸餾的鄰域 → 普查並印出前後對照。預設唯讀；寫入要同時有 `--execute` 和 loom.toml 的 `[memory.consolidation_dream]` / `[memory.distill_dream]` `execute = true`。每個寫入階段都會先備份。寫入中的蒸餾會記下被否決的鄰域，內容改變前不會重審（`distill_dream.suppressed_rejections.v1`）；唯讀模式完全不寫 DB。它跟 daemon 是不同 process，不用停 daemon；同一個 process 裡會寫入的夢，則共用 `consolidation.memory_rewrite_lock()`。操作步驟見 `skills/memory_big_dream/SKILL.md`。
 

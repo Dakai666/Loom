@@ -339,40 +339,6 @@ class TestPass:
 
 def _facts(user: str) -> list[str]:
     return [line for line in user.splitlines() if line.startswith("[")]
-
-
-class TestTool:
-    async def test_tool_writes_report_and_stays_read_only(self, db, semantic, tmp_path):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        await _topic(db)
-        before = await _snapshot(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path / "dreams")
-        res = await tool.executor(_call({}))
-        assert res.success, res.error
-        assert "approved=1" in res.output
-        (report,) = list((tmp_path / "dreams").glob("*.md"))
-        text = report.read_text()
-        assert "· 記憶蒸餾" in text and "精煉後的一條" in text
-        assert await _snapshot(db) == before
-
-    async def test_tool_rejects_bad_input(self, semantic, tmp_path):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
-        bad_domain = await tool.executor(_call({"domain": "nope"}))
-        bad_cap = await tool.executor(_call({"max_neighbourhoods": 0}))
-        bad_sim = await tool.executor(_call({"min_similarity": 1.5}))
-        assert not bad_domain.success and not bad_cap.success and not bad_sim.success
-
-
-def _call(args: dict):
-    from loom.core.harness.middleware import ToolCall
-    from loom.core.harness.permissions import TrustLevel
-    return ToolCall(tool_name="distill_dream", args=args,
-                    trust_level=TrustLevel.SAFE, session_id="t")
-
-
 # ── cross-pass suppression of rejected neighbourhoods ─────────────────────
 
 class TestSuppression:

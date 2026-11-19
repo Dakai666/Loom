@@ -21,7 +21,7 @@ from loom.core.cognition.distillation import (
     run_distill_dream,
 )
 from tests.test_distill_dream import (  # noqa: F401
-    _call, _facts, _llm, _row, _snapshot, _topic, db, semantic,
+    _facts, _llm, _row, _snapshot, _topic, db, semantic,
 )
 
 
@@ -263,31 +263,6 @@ class TestReport:
         assert "已寫入" in report
 
 
-class TestToolExecute:
-    async def test_tool_executes_when_asked(self, db, semantic, tmp_path):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        await _topic(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
-        res = await tool.executor(_call({"execute": True}))
-        assert res.success, res.error
-        assert "executed=1" in res.output
-        stubs = [r for r in await _snapshot(db) if "redirected_to" in r[4]]
-        assert len(stubs) == 2
-
-    @pytest.mark.parametrize("value", ["true", 1, "yes"])
-    async def test_tool_requires_a_real_boolean(self, db, semantic, tmp_path, value):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        await _topic(db)
-        before = await _snapshot(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
-        res = await tool.executor(_call({"execute": value}))
-        assert not res.success
-        assert await _snapshot(db) == before
-
-
-
 class TestReviewFixes:
     async def test_write_racing_the_check_is_not_overwritten(self, db, semantic, monkeypatch):
         # a memorize lands after execute's reads but before consolidate's UPDATE
@@ -319,17 +294,6 @@ class TestReviewFixes:
 
 
 class TestExecuteGate:
-    async def test_tool_refuses_execute_unless_config_allows(self, db, semantic, tmp_path):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        await _topic(db)
-        before = await _snapshot(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path)
-        res = await tool.executor(_call({"execute": True}))
-        assert not res.success and "[memory.distill_dream]" in res.error
-        assert await _snapshot(db) == before
-        assert (await tool.executor(_call({}))).success   # read-only still fine
-
     @pytest.mark.parametrize("cfg, expected", [
         ({}, False),
         ({"memory": {"distill_dream": {"execute": False}}}, False),
@@ -340,24 +304,3 @@ class TestExecuteGate:
     def test_config_gate_needs_a_literal_true(self, cfg, expected):
         from loom.core.memory.maintenance import distill_execute_enabled
         assert distill_execute_enabled(cfg) is expected
-
-    async def test_nothing_approved_is_not_reported_as_backup_failure(self, db, semantic, tmp_path):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        await _topic(db)
-        tool = make_distill_dream_tool(semantic, _llm(review="skip"), dreams_dir=tmp_path,
-                                       allow_execute=True)
-        res = await tool.executor(_call({"execute": True}))
-        assert "backup failed" not in res.output
-        assert "nothing was approved" in res.output
-
-    async def test_failed_backup_is_reported_as_such(self, db, semantic, tmp_path, monkeypatch):
-        from loom.core.memory.maintenance import make_distill_dream_tool
-
-        async def broken(conn, **kw):
-            return None
-        monkeypatch.setattr(backup, "snapshot_before_write", broken)
-        await _topic(db)
-        tool = make_distill_dream_tool(semantic, _llm(), dreams_dir=tmp_path, allow_execute=True)
-        res = await tool.executor(_call({"execute": True}))
-        assert "backup failed" in res.output

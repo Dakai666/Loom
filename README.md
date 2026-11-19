@@ -269,9 +269,9 @@ v0.3.6+ introduced a structured decay matrix keyed by `(domain, temporal)`:
 
 `MaintenanceLoop` (daemon-cron, Issue #281 P3-A) runs the decay table on a configurable interval with a `run()` throttle to prevent overlapping executions.
 
-### Dream 2.0 — Themed Round-Robin Sampling
+### Dreams run on schedules, not tools
 
-`dream_cycle` now supports themed sampling: the sampler rotates through non-empty domains on each call, ensuring relational facts are grounded in diverse fact-types rather than over-sampled from a single domain.
+Dreaming is the autonomy daemon's job: a weekly consolidation dream and a twice-daily distill dream, plus the one-off `loom memory big-dream` CLI for a whole-corpus pass. The earlier divergent `dream_cycle` (random facts → association triples) and the `dream_cycle` / `convergent_dream` / `distill_dream` agent tools were retired in #639 — Loom Agent decides what to remember through `memorize` / `relate`.
 
 ### Consolidation Dream — Memory That Tidies Itself
 

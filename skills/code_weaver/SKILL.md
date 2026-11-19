@@ -81,7 +81,7 @@ Loom 的程式碼圖譜已在本機建立，優先用圖譜建立全局理解，
 
 **Loom 已知高風險 hub**：`permissions.py`、`registry.py`、`procedural.py`、`semantic.py`、`notify/types.py`
 
-**Loom 架構層規則**：`core/` 原則上不 import `autonomy/`；現有例外都是函式內延遲 import circadian 的 journal／proposal 工具（`session.py`、`memory/maintenance.py`、`cognition/big_dream.py`），新增前先確認是否真有必要
+**Loom 架構層規則**：`core/` 原則上不 import `autonomy/`；現有例外都是函式內延遲 import circadian 的 journal／proposal 工具（`session.py`、`cognition/big_dream.py`），新增前先確認是否真有必要
 
 ---
 

@@ -770,8 +770,8 @@ class AutonomyDaemon:
 
     def _one_dream_at_a_time(self, fn: Callable[[], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
         async def serialised() -> Any:
-            # Shared with the session's distill_dream tool: both rewrite
-            # memory on one connection. One pass at a time.
+            # The convergent and distill loops both rewrite memory on the
+            # session's one connection. One pass at a time.
             from loom.core.cognition.consolidation import memory_rewrite_lock
             async with memory_rewrite_lock():
                 return await fn()
@@ -784,8 +784,8 @@ class AutonomyDaemon:
         pass now folds one topic neighbourhood per seed into a refined fact
         (docs/designs/57). Seeds follow the themed domain rotation; cadence
         is restart-safe (``distill_dream.last_run`` in ``memory_meta``). It
-        writes only with ``execute = true`` — the same gate as the tool —
-        after a fresh backup. The 03:00 free dream is a separate schedule.
+        writes only with ``execute = true``, after a fresh backup. (The free
+        dream and the dream agent tools are retired, #639.)
         """
         session = self._session
         db = getattr(session, "_db", None) if session else None
@@ -831,7 +831,7 @@ class AutonomyDaemon:
             from loom.autonomy.circadian.journal import append_distill_report
             from loom.core.cognition.consolidation import DREAM_LLM_MAX_TOKENS, dream_reply_text
             from loom.core.cognition.distillation import run_distill_dream
-            from loom.core.cognition.dreaming import mark_themed_domain, peek_themed_domain
+            from loom.core.cognition.distillation import mark_themed_domain, peek_themed_domain
 
             async def _llm_fn(messages: list[dict]) -> str:
                 response = await router.chat(
@@ -840,8 +840,7 @@ class AutonomyDaemon:
                 )
                 return dream_reply_text(response)
 
-            # Own rotation key (the dream_cycle tool advances dream.last_theme),
-            # advanced only once the pass succeeded so a failure retries it.
+            # Rotation advanced only once the pass succeeded so a failure retries it.
             domain = await peek_themed_domain(db, _DISTILL_THEME_KEY)
             plan, report = await run_distill_dream(
                 memory.semantic, _llm_fn, domain=domain,

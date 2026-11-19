@@ -109,7 +109,7 @@ class ConvergentDreamLoop:
     survive restarts: a daemon bounce must neither reset the week nor
     double-run. So due-ness is decided against a persisted
     ``consolidation_dream.last_run`` in ``memory_meta`` — not an in-memory
-    timer — mirroring ``dreaming.next_themed_domain``'s restart-safe rotation.
+    timer — like the distill dream's restart-safe domain rotation.
 
     The loop wakes on a short *check* interval and runs the dream only when
     ``interval_days`` have elapsed since ``last_run``. ``last_run`` is marked

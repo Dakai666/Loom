@@ -1,8 +1,8 @@
 """One memory-rewriting dream pass at a time per event loop (#624 follow-up).
 
-The daemon's convergent / distill loops and a session's distill_dream tool
-share the session's DB connection; a commit from one inside the other's
-multi-statement write would land half of it.
+The daemon's convergent / distill loops share the session's DB connection; a
+commit from one inside the other's multi-statement write would land half of
+it. (The distill_dream agent tool that also took the lock was retired, #639.)
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def test_each_event_loop_gets_its_own_lock():
     assert a is not b
 
 
-async def test_daemon_and_tool_use_the_same_lock(tmp_path):
+async def test_daemon_and_another_holder_use_the_same_lock(tmp_path):
     import types
 
     from loom.autonomy.daemon import AutonomyDaemon
@@ -47,28 +47,6 @@ async def test_daemon_and_tool_use_the_same_lock(tmp_path):
     await asyncio.gather(wrapped(), tool_side())
     assert order in (["daemon+", "daemon-", "tool+", "tool-"],
                      ["tool+", "tool-", "daemon+", "daemon-"])
-
-
-async def test_distill_tool_execute_waits_for_a_running_dream(tmp_path):
-    from loom.core.memory.maintenance import make_distill_dream_tool
-    from loom.core.memory.semantic import SemanticMemory
-    from loom.core.memory.store import SQLiteStore
-    from tests.test_distill_dream import _call, _llm, _topic
-
-    store = SQLiteStore(str(tmp_path / "lock.db"))
-    await store.initialize()
-    async with store.connect() as db:
-        await _topic(db)
-        tool = make_distill_dream_tool(SemanticMemory(db), _llm(), dreams_dir=tmp_path,
-                                       allow_execute=True)
-        lock = memory_rewrite_lock()
-        await lock.acquire()                 # a daemon pass is mid-write
-        task = asyncio.create_task(tool.executor(_call({"execute": True})))
-        await asyncio.sleep(0.1)
-        assert not task.done()
-        lock.release()
-        res = await asyncio.wait_for(task, timeout=5)
-        assert res.success, res.error
 
 
 async def test_nested_acquire_raises_instead_of_deadlocking():

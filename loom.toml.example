@@ -358,20 +358,21 @@ enabled = false
 # Loom veto it, then writes a 記憶蒸餾 report to the dreams journal.
 # Hand-written and milestone facts are context only, never replaced.
 #
-# The same ``execute`` gate covers the daemon loop and the distill_dream tool:
+# The ``execute`` gate covers the daemon loop:
 #   • execute = false — read-only: reports only, memory untouched.
 #   • execute = true  — approved distillations are written after a fresh
 #     backup (memory-pre-distill-*); every original stays on the survivor's
 #     metadata and the replaced keys become redirect stubs.
 # The cadence is restart-safe (distill_dream.last_run in memory_meta).
-# The 03:00 free dream (dream_cycle themed=false) is a separate schedule.
+# (The free dream and the dream agent tools are retired, #639: dreaming runs
+# on these daemon schedules; Loom Agent decides what to remember.)
 # First time, or after months without it: run one whole-corpus pass with
 # ``loom memory big-dream`` (read-only rehearsal first; see
 # skills/memory_big_dream/SKILL.md). It honours the same execute gates.
 [memory.distill_dream]
 enabled            = true
 interval_hours     = 12      # cadence; restart-safe
-execute            = false   # true = allow writes (daemon loop and tool)
+execute            = false   # true = allow writes (daemon loop)
 max_neighbourhoods = 5       # neighbourhoods distilled per pass (LLM cost bound)
 min_similarity     = 0.70    # stored-vector cosine floor; re-calibrate every 4 weeks (spec §3)
 corpus_limit       = 15000   # most-recent facts scanned; >= corpus size for full coverage
@@ -379,7 +380,7 @@ corpus_limit       = 15000   # most-recent facts scanned; >= corpus size for ful
 # ─────────────────────────────────────────────
 # Convergent dream (#495 P4) — Weekly memory consolidation
 # ─────────────────────────────────────────────
-# The consolidation counterpart to [memory.dream]'s divergent synthesis. Runs
+# The near-duplicate counterpart to the distill dream above. Runs
 # ``run_convergent_dream`` on a *weekly* cadence inside the autonomy daemon:
 # it scans semantic memory for near-duplicate / contradicting / orphaned facts
 # and either reports them (read-only) or fuses them (execute). The cadence is
@@ -660,8 +661,8 @@ backend = "none"   # "none" | "srt"
 #      { resource = "exec", action = "execute", selector = "workspace" },
 #    ]
 #
-# 3. SAFE tools (read_file, list_dir, recall, load_skill, dream_cycle,
-#    memory_prune, etc.) are always pre-authorized — no need to list them.
+# 3. SAFE tools (read_file, list_dir, recall, load_skill, memory_prune,
+#    etc.) are always pre-authorized — no need to list them.
 #
 # ── trust_level + notify interaction ─────────────────────────────────────────
 #   safe                   → execute immediately, no confirmation
@@ -792,24 +793,6 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 # trust_level   = "safe"
 # notify        = false
 # notify_thread = 0
-
-# ── Example: daily free dream (pair with [memory.distill_dream]) ─────────────────
-# The daemon's distill dream (twice a day) only reduces memory. This schedule
-# is the recommended complement: one daily *free* dream (themed=false) that
-# samples cross-domain and proposes new relational triples (admission-gated,
-# 21-day half-life). Together: ~2 distill passes + 1 free dream per day.
-#
-# [[autonomy.schedules]]
-# name          = "offline_dreaming_free"
-# cron          = "0 19 * * *"       # 19:00 UTC = 03:00 Asia/Taipei
-# intent        = """Run a free cross-domain dream. Call dream_cycle with
-#                    themed=false (the default) so the sample spans all
-#                    four ontology domains at random. Report how many
-#                    new relational insights were written."""
-# trust_level   = "safe"
-# notify        = false
-# notify_thread = 0
-# allowed_tools = ["dream_cycle", "memorize"]
 
 # ── Example: weekly memory housekeeping ──────────────────────────────────────────
 # memory_prune is a SAFE tool — no allowed_tools needed.
