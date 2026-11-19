@@ -1464,11 +1464,13 @@ def _format_period_results(groups: dict[str, list]) -> str:
 
     episodic = groups.get("episodic", [])
     if episodic:
-        lines = [f"Episodic events{zone_suffix}"]
+        lines = [f"Legacy episodic fallback{zone_suffix}"]
         for entry in episodic:
             stamp = _format_local_timestamp(entry.created_at)
+            outcome = entry.metadata.get("success")
+            state = "ok" if outcome is True else "failed" if outcome is False else "unknown outcome"
             lines.append(
-                f"- [{stamp}] {entry.session_id} {entry.event_type}: "
+                f"- [{stamp}] {entry.session_id} {entry.event_type} ({state}): "
                 f"{entry.content[:240]}"
             )
         sections.append("\n".join(lines))
@@ -1488,17 +1490,25 @@ def _format_period_results(groups: dict[str, list]) -> str:
 
     messages = groups.get("messages", [])
     if messages:
-        lines = [f"Session messages{zone_suffix}"]
+        lines = [f"Session log messages{zone_suffix}"]
         for message in messages:
             stamp = _format_local_timestamp(message.get("created_at"))
+            state = ""
+            if message.get("role") == "tool":
+                meta = message.get("metadata") or {}
+                outcome = meta.get("success") if isinstance(meta, dict) else None
+                state = " (ok)" if outcome is True else " (failed)" if outcome is False else " (unknown outcome)"
+            ref = f"log:{message.get('session_id')}:{message.get('turn_index')}"
             lines.append(
-                f"- [{stamp}] "
-                f"{message.get('session_id')} {message.get('role')}: "
+                f"- [{stamp}] {ref} {message.get('role')}{state}: "
                 f"{str(message.get('content') or '')[:240]}"
             )
         sections.append("\n".join(lines))
 
-    return "\n\n".join(sections) if sections else "No memories found for this period."
+    if not sections:
+        sections.append("No memories found for this period.")
+    sections.extend(groups.get("coverage", []))
+    return "\n\n".join(sections)
 
 
 def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
@@ -1530,6 +1540,7 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
             limit=limit,
             include_episodic=include_episodic,
             include_sessions=include_sessions,
+            legacy_episodic=bool(call.args.get("legacy_episodic", False)),
         )
         return ToolResult(
             call_id=call.id,
@@ -1545,7 +1556,7 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
             "'what did we discuss yesterday?' or 'what issues did I open last night?' "
             "Use session_id to narrow all layers to a known session. Semantic "
             "facts use their update time and stored source session; manually "
-            "memorized facts may have no session scope. Include episodic/session "
+            "memorized facts may have no session scope. Include session_log experience or session "
             "evidence to inspect the original events and messages."
         ),
         trust_level=TrustLevel.SAFE,
@@ -1574,7 +1585,11 @@ def make_recall_period_tool(memory: "MemoryFacade") -> ToolDefinition:
                 },
                 "include_episodic": {
                     "type": "boolean",
-                    "description": "Include episodic events (default true).",
+                    "description": "Compatibility alias: include session_log experience (default true).",
+                },
+                "legacy_episodic": {
+                    "type": "boolean",
+                    "description": "Explicit labeled legacy episodic fallback if this window has no session_log rows (default false); scope to a session for old child history.",
                 },
                 "include_sessions": {
                     "type": "boolean",

@@ -2159,10 +2159,13 @@ async def _gather_memory_health(conn) -> dict:
     by_domain = await cur.fetchall()
 
     cur = await conn.execute(
-        "SELECT COUNT(DISTINCT session_id) FROM episodic_entries "
-        "WHERE compressed_at IS NULL"
+        "SELECT COUNT(*), COUNT(DISTINCT session_id), "
+        "COALESCE(SUM(role='tool'),0), "
+        "COALESCE(SUM(role='tool' AND COALESCE(CASE WHEN json_valid(metadata) "
+        "THEN json_type(metadata, '$.success') END, '') "
+        "NOT IN ('true','false')),0) FROM session_log"
     )
-    uncompressed = (await cur.fetchone())[0]
+    log_rows, log_sessions, tool_rows, unknown_outcomes = await cur.fetchone()
 
     pr = ProceduralMemory(conn)
     skills = await pr.list_active()
@@ -2173,7 +2176,10 @@ async def _gather_memory_health(conn) -> dict:
         "semantic_low_conf": low_conf,
         "semantic_oldest": oldest,
         "semantic_by_domain": by_domain,
-        "episodic_uncompressed_sessions": uncompressed,
+        "session_log_rows": log_rows,
+        "session_log_sessions": log_sessions,
+        "session_log_tool_rows": tool_rows,
+        "session_log_unknown_outcomes": unknown_outcomes,
         "compressed_sessions": compressed_sessions,
         "skills_active": len(skills),
         "skills_low_conf": low_conf_skills,
@@ -2298,9 +2304,10 @@ async def _memory_health(db: str) -> None:
     table.add_row("Semantic 條目數", str(h["semantic_total"]), status(h["semantic_total"] < 1000))
     table.add_row("低 confidence (<0.3)", str(h["semantic_low_conf"]), status(h["semantic_low_conf"] == 0))
     table.add_row("最舊條目", h["semantic_oldest"] or "—", "")
-    table.add_row("未壓縮 episodic sessions", str(h["episodic_uncompressed_sessions"]),
-                  status(h["episodic_uncompressed_sessions"] < 10))
-    table.add_row("已壓縮 sessions", str(h["compressed_sessions"]), "")
+    table.add_row("Session log rows", str(h["session_log_rows"]), "")
+    table.add_row("Session log sources (含 child)", str(h["session_log_sessions"]), "")
+    table.add_row("Tool outcomes unknown", str(h["session_log_unknown_outcomes"]), "coverage gap")
+    table.add_row("歷史已壓縮 sessions", str(h["compressed_sessions"]), "legacy metric")
     skill_names = ", ".join(h["skills_low_conf"]) or "—"
     table.add_row("低信心技能 (<0.5)", skill_names, status(not h["skills_low_conf"]))
     table.add_row("DB 大小", f"{db_mb:.1f} MB", status(db_mb < 100))
@@ -2318,14 +2325,15 @@ async def _memory_health(db: str) -> None:
 
 
 @cli.command()
-@click.option("--session", default=None, help="Session ID (latest if omitted)")
+@click.option("--session", default=None, help="Session ID (skill health only if omitted)")
+@click.option("--legacy-episodic", is_flag=True, help="Explicit labeled fallback for history without known log outcomes.")
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
-def reflect(session: str | None, db: str) -> None:
+def reflect(session: str | None, db: str, legacy_episodic: bool = False) -> None:
     """Show reflection report for a session."""
-    asyncio.run(_reflect(session, db))
+    asyncio.run(_reflect(session, db, legacy_episodic=legacy_episodic))
 
 
-async def _reflect(session_id: str | None, db: str) -> None:
+async def _reflect(session_id: str | None, db: str, *, legacy_episodic: bool = False) -> None:
     from loom.core.memory.facade import MemoryFacade
     from loom.core.memory.search import MemorySearch
 
@@ -2340,21 +2348,23 @@ async def _reflect(session_id: str | None, db: str) -> None:
             procedural=pr,
             episodic=ep,
             search=MemorySearch(sem, pr),
+            session_log=SessionLog(conn),
         )
         api = ReflectionAPI(facade)
 
         if session_id is None:
             console.print("[loom.muted]No session ID given — showing skill health only.[/loom.muted]")
         else:
-            summary = await api.session_summary(session_id)
+            summary = await api.session_summary(session_id, legacy_episodic=legacy_episodic)
             console.print(Panel(summary, title=f"[loom.accent]Session {session_id}[/loom.accent]"))
 
-            rates = await api.tool_success_rate(session_id)
-            if rates:
-                console.print(Rule("Tool success rates"))
-                for name, rate in sorted(rates.items()):
-                    c = "green" if rate > 0.8 else "yellow" if rate > 0.5 else "red"
-                    console.print(f"  [{c}]{rate:.0%}[/{c}]  {name}")
+            report = await api.tool_success_rate(session_id, legacy_episodic=legacy_episodic)
+            if report["rates"]:
+                console.print(Rule(f"Tool success rates — {report['source']} (known outcomes only)"))
+                for name, rate in sorted(report["rates"].items()):
+                    shown = "unknown" if rate is None else f"{rate:.0%}"
+                    unknown = report["unknown_outcomes"].get(name, 0)
+                    console.print(f"  {shown}  {name} ({unknown} unknown outcomes)")
 
         skills = await api.skill_health_report()
         if skills:

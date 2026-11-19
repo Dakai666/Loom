@@ -271,7 +271,7 @@ class TestMemoryIndex:
 
 class TestMemoryIndexer:
     async def test_empty_db_produces_empty_index(self, semantic, procedural, episodic):
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert idx.is_empty
         assert idx.semantic_count == 0
@@ -282,13 +282,13 @@ class TestMemoryIndexer:
         for i in range(3):
             await semantic.upsert(SemanticEntry(key=f"k{i}", value=f"loom fact {i}",
                                                 source="session:abc:fact:0"))
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert idx.semantic_count == 3
 
     async def test_topics_extracted(self, semantic, procedural, episodic):
         await semantic.upsert(SemanticEntry(key="k1", value="loom framework middleware pipeline"))
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert len(idx.semantic_topics) > 0
         # "loom" should be in topics (4+ chars, not stopword)
@@ -300,7 +300,7 @@ class TestMemoryIndexer:
         await procedural.upsert(s1)
         await procedural.upsert(s2)
 
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert idx.skill_count == 2
         assert "python" in idx.skill_tags
@@ -312,7 +312,7 @@ class TestMemoryIndexer:
         await semantic.upsert(SemanticEntry(key="k2", value="fact", source="session:aaa:fact:1"))
         await semantic.upsert(SemanticEntry(key="k3", value="fact", source="session:bbb:fact:0"))
 
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert idx.episode_sessions == 2
 
@@ -320,7 +320,7 @@ class TestMemoryIndexer:
         await semantic.upsert(SemanticEntry(key="k1", value="fact", source="manual"))
         await semantic.upsert(SemanticEntry(key="k2", value="fact", source=None))
 
-        indexer = MemoryIndexer(semantic, procedural, episodic)
+        indexer = MemoryIndexer(semantic, procedural)
         idx = await indexer.build()
         assert idx.episode_sessions == 0
 
@@ -493,9 +493,9 @@ class TestRecallPeriodTool:
 
         assert result.success is True
         assert "Semantic facts" in result.output
-        assert "Episodic events" in result.output
+        assert "Legacy episodic fallback" in result.output
         assert "Sessions" in result.output
-        assert "Session messages" in result.output
+        assert "Session log messages" in result.output
         kwargs = facade.recall_period.await_args.kwargs
         assert kwargs["since"] == datetime(2026, 5, 10, tzinfo=UTC)
         assert kwargs["until"] == datetime(2026, 5, 11, tzinfo=UTC)

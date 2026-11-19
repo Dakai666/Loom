@@ -32,7 +32,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.procedural import ProceduralMemory
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 
@@ -191,12 +190,10 @@ class MemoryIndexer:
         self,
         semantic: SemanticMemory,
         procedural: ProceduralMemory,
-        episodic: EpisodicMemory | None = None,
         skill_catalog: list[SkillCatalogEntry] | None = None,
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
-        self._episodic = episodic
         self._skill_catalog: list[SkillCatalogEntry] = skill_catalog or []
 
     async def build(self) -> MemoryIndex:

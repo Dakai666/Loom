@@ -168,7 +168,7 @@ async def test_recall_period_returns_grouped_memory_layers(facade):
     )
 
     assert [e.key for e in result["semantic"]] == ["inside:fact"]
-    assert [e.content for e in result["episodic"]] == ["User asked about yesterday"]
+    assert result["episodic"] == []  # log wins; no duplicate episodic copy
     assert [s["session_id"] for s in result["sessions"]] == ["s1"]
     assert [m["content"] for m in result["messages"]] == ["raw session message"]
 
