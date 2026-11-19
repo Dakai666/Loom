@@ -118,10 +118,9 @@ CREATE INDEX IF NOT EXISTS idx_session_log_created ON session_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_active     ON sessions(last_active DESC);
 
 -- Issue #42: Action lifecycle records
--- #569 semantic observation surface: output_* columns capture the tool's raw
--- world-reply (capped prefix + sha256 of the full text + length + row count)
--- so semantic resolvers (output_contains / output_regex / row_count) can
--- settle. NULL output_len marks a pre-#569 row — no capture, no retro-scoring.
+-- #569: output_* columns capture the tool's raw reply (capped prefix + sha256
+-- of the full text + length + row count); recall shows output_prefix.
+-- NULL output_len marks a pre-#569 row (no capture).
 CREATE TABLE IF NOT EXISTS action_records (
     id             TEXT PRIMARY KEY,
     envelope_id    TEXT NOT NULL,
@@ -146,31 +145,8 @@ CREATE INDEX IF NOT EXISTS idx_action_session ON action_records(session_id);
 CREATE INDEX IF NOT EXISTS idx_action_state   ON action_records(final_state);
 CREATE INDEX IF NOT EXISTS idx_action_env     ON action_records(envelope_id);
 
--- Prediction log (#537; batch reconcile/calibration retired 2026-09-17, #528):
--- explicit `predict` bets, settled in-session against the target tool's next
--- action_records row (loom/core/memory/prediction_settle.py).
--- I1: (claim, due_condition, resolver) are mandatory (enforced in PredictionStore).
--- I4: status is a state machine (pending → due → reconciled / stale); only a
---     reconciled record carries a score + observation_ref.
-CREATE TABLE IF NOT EXISTS prediction_records (
-    id              TEXT PRIMARY KEY,
-    session_id      TEXT NOT NULL,
-    claim           TEXT NOT NULL,        -- what is predicted (structured/text)
-    due_condition   TEXT NOT NULL,        -- JSON: when it can be reconciled
-    resolver        TEXT NOT NULL,        -- JSON: how to mechanically judge
-    status          TEXT NOT NULL DEFAULT 'pending',  -- pending|due|reconciled|stale
-    domain          TEXT NOT NULL DEFAULT 'knowledge',
-    context         TEXT,                 -- optional free context label
-    observation_ref TEXT,                 -- ground-truth pointer, set at reconcile
-    score           REAL,                 -- error_score, NULL until reconciled
-    metadata        TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL,
-    reconciled_at   TEXT                  -- NULL until reconciled
-);
-
-CREATE INDEX IF NOT EXISTS idx_prediction_status ON prediction_records(status);
-CREATE INDEX IF NOT EXISTS idx_prediction_domain ON prediction_records(domain);
-CREATE INDEX IF NOT EXISTS idx_prediction_session ON prediction_records(session_id);
+-- prediction_records (predict bets) retired in #674: no longer created; an
+-- existing table in older DBs is left untouched and unread.
 
 -- Issue #142: Agent self-observability snapshots (one row per dimension per session)
 CREATE TABLE IF NOT EXISTS agent_telemetry (
