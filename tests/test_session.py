@@ -602,8 +602,11 @@ class TestConfigPathResolution:
         # The fallback candidate must be inside the repo root, not outside it.
         # We can't assert the file exists (CI may lack loom.toml), but we can
         # assert the path resolution is correct relative to this file.
-        assert expected_root.name == "Loom", (
-            f"parents[2] resolved to {expected_root!r}, expected the repo root 'Loom'. "
+        # Identify the repo root by tracked marker files, not by the checkout
+        # directory's name (a clone may live in any dir, e.g. ``repo/``).
+        assert (expected_root / "pyproject.toml").is_file(), (
+            f"parents[2] resolved to {expected_root!r}, which has no pyproject.toml "
+            "(not the repo root). "
             "If parents[] index changed, update _load_loom_config and _load_env."
         )
 
@@ -615,8 +618,9 @@ class TestConfigPathResolution:
 
         session_file = Path(inspect.getfile(_load_env))
         expected_root = session_file.parents[2]
-        assert expected_root.name == "Loom", (
-            f"parents[2] resolved to {expected_root!r}, expected the repo root 'Loom'. "
+        assert (expected_root / "pyproject.toml").is_file(), (
+            f"parents[2] resolved to {expected_root!r}, which has no pyproject.toml "
+            "(not the repo root). "
             "If parents[] index changed, update _load_loom_config and _load_env."
         )
 
@@ -1112,6 +1116,16 @@ class TestStreamTurnLock:
     twice": turn B observes turn A's partial assistant+tool history plus
     the new user input, so the model re-runs A's last action.
     """
+
+    @pytest.fixture(autouse=True)
+    def _stub_router(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """These tests exercise the turn lock, not provider wiring. Without a
+        stub, ``build_router`` needs a real credential from the gitignored
+        ``.env`` / ``loom.toml`` and raises "No LLM provider configured" on a
+        clean checkout."""
+        from loom.core import session as session_module
+
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
 
     async def test_lock_initialised_unlocked(self, tmp_path) -> None:
         from loom.core.session import LoomSession
