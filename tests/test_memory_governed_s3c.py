@@ -158,7 +158,8 @@ async def test_relate_write_and_stale_rollback(memory):
     mem, provider = memory
     tool = make_relate_tool(mem)
     result = await tool.executor(relate_call())
-    assert result.metadata["written"] and result.metadata["trust_tier"] == "external"
+    assert result.metadata["written"] and result.metadata["trust_tier"] == "unknown"
+    assert (await mem.semantic.get("rel:alice::knows")).source == "relate"
     assert provider.calls.count("rel:alice::knows alice knows bob") == 1
     # A later update must not be erased by a rollback for the earlier write.
     await upsert_triple(mem.semantic, RelationalEntry(subject="alice", predicate="knows", object="newer", source="manual"))
@@ -229,3 +230,7 @@ async def test_conditional_rollback_does_not_delete_same_value_new_version(memor
     await tool.rollback_fn(relate_call(), result)
     entry = await mem.semantic.get("rel:alice::knows")
     assert entry is not None and entry.metadata["later"] is True
+
+
+def test_relate_keeps_unknown_provenance_tier():
+    assert classify_source("relate") == ("unknown", 0.5)

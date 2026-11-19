@@ -87,7 +87,7 @@ def classify_source(source: str | None) -> tuple[str, float]:
         return "session_compress", TRUST_TIERS["session_compress"]
     if s.startswith("tool:"):
         return "tool_verified", TRUST_TIERS["tool_verified"]
-    if s == "api" or s.startswith("api:") or s == "relate":
+    if s == "api" or s.startswith("api:"):
         return "external", TRUST_TIERS["external"]
     if s.startswith("fetch:") or s.startswith("web:"):
         return "external", TRUST_TIERS["external"]
