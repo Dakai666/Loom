@@ -1,3 +1,8 @@
+> **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
+> diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
+> `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。
+> skill activation／tier routing、ledger review、shared triple store 與歷史 metrics readers 保留。
+
 # Loom 文檔總索引
 
 > 這是 Loom 框架的完整文檔索引。所有功能說明都會收錄於 `/doc` 目錄下。

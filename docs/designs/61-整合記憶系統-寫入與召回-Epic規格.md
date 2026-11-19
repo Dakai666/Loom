@@ -1,3 +1,9 @@
+> **Retired in #675 (2026-11-19):** descriptions below of TaskReflector skill
+> diagnostics, diagnostic-triggered behavioural self-reflection, confidence EMA,
+> session-end SkillEvolutionHook, `[reflection]`, and `loom diagnostic` are
+> historical, not current runtime behavior. Activation/tier routing, ledger-backed
+> skill review, shared triple storage, and historical metric readers remain.
+
 # 整合記憶系統：寫入與召回 — Epic 規格 r3
 
 > - 日期：2026-10-28（Asia/Taipei）

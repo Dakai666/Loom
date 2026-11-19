@@ -1,8 +1,8 @@
 """
 Procedural Memory — persisted metadata for loadable skills.
 
-Tracks active SkillGenome rows for skill loading, indexing, and confidence
-tracking.
+Tracks active SkillGenome rows for skill loading, indexing, and historical
+confidence reporting.
 """
 
 import json
@@ -19,8 +19,8 @@ class SkillGenome:
     """
     A skill with evolutionary metadata.
 
-    The confidence score drifts based on observed success/failure.
-    When it falls below `deprecation_threshold`, the skill is retired.
+    Confidence, success_rate, and usage_count are historical snapshots since
+    #675 retired automatic self-assessment. Existing deprecation readers remain.
     """
     name: str
     body: str                          # The skill content in natural language

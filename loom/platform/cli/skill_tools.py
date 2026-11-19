@@ -88,7 +88,7 @@ async def _get_evolution_hints(
 ) -> list[str]:
     """Fetch evolution hints for a skill.
 
-    Reads real evolution hints written by ``SkillEvolutionHook`` from
+    Reads historical evolution hints (the writer retired in #675) from
     SemanticMemory (key pattern ``skill:<name>:evolution_hint:*``).
     Falls back to a confidence-based generic warning if no stored hints.
     """

@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import time
 import tomllib
@@ -227,19 +228,6 @@ async def _chat(
     # observes it and exits the LoomApp; this function reads + returns
     # it so the outer loop in ``_resolve_and_chat`` can act
     session._cli_next_target = None  # type: ignore[attr-defined]
-
-    # Issue #120 PR1: show diagnostic summaries inline in the CLI.
-    async def _cli_diagnostic(diagnostic):
-        vis = session._reflection_visibility
-        if vis == "off":
-            return
-        console.print(f"[loom.muted]  ⇢ diagnosed {diagnostic.one_line_summary()}[/loom.muted]")
-        if vis == "verbose" and diagnostic.skill_edit_suggestions:
-            for hint in diagnostic.skill_edit_suggestions[:2]:
-                console.print(f"[loom.muted]      · {hint}[/loom.muted]")
-
-    session.subscribe_diagnostic(_cli_diagnostic)
-
 
     # PR-C3: route BlastRadiusMiddleware authorisation decisions through
     # the harness channel. Red-light events留底 inline so the user can
@@ -2098,6 +2086,22 @@ def memory() -> None:
     """Inspect the memory store."""
 
 
+@memory.command("retire-skill-diagnostics")
+@click.option("--db", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--execute", is_flag=True, help="Back up, export, and delete the exact manifest.")
+@click.option("--output-dir", type=click.Path(file_okay=False, path_type=Path),
+              help="Parent for private backup/export directory (default: beside DB).")
+def memory_retire_skill_diagnostics(db: Path, execute: bool, output_dir: Path | None) -> None:
+    """List retired diagnostic id/key rows; dry-run unless --execute is given."""
+    from loom.core.memory.retire_diagnostics import retire_skill_diagnostics
+
+    try:
+        result = retire_skill_diagnostics(db, execute=execute, output_dir=output_dir)
+    except (OSError, sqlite3.Error) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 @memory.command("list")
 @click.option("--db", default="~/.loom/memory.db", show_default=True)
 @click.option("--limit", default=20, show_default=True)
@@ -2362,80 +2366,6 @@ async def _reflect(session_id: str | None, db: str) -> None:
                     f"[loom.muted]used {s['usage_count']}×  "
                     f"tags: {s['tags']}[/loom.muted]"
                 )
-
-
-# ---------------------------------------------------------------------------
-# loom diagnostic commands (Issue #120 PR 1)
-# ---------------------------------------------------------------------------
-
-
-@cli.group()
-def diagnostic() -> None:
-    """Inspect structured skill diagnostics (TaskReflector output)."""
-
-
-@diagnostic.command("recent")
-@click.option("--skill", default=None, metavar="NAME", help="Filter by skill name.")
-@click.option("--limit", default=10, show_default=True, type=int)
-@click.option("--db", default="~/.loom/memory.db", show_default=True)
-def diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
-    """Show recent TaskDiagnostic entries from semantic memory."""
-    # ==============================================================
-    # SECTION 6 — DIAGNOSTICS (diagnostic)
-    # ==============================================================
-    asyncio.run(_diagnostic_recent(skill, limit, db))
-
-
-async def _diagnostic_recent(skill: str | None, limit: int, db: str) -> None:
-    from loom.core.cognition.task_reflector import TaskDiagnostic
-
-    store = SQLiteStore(db)
-    await store.initialize()
-    async with store.connect() as conn:
-        sem = SemanticMemory(conn)
-        # Two key shapes:
-        #   skill:<name>:diagnostic:<ts>     when --skill is given
-        #   skill:                           otherwise (we filter :diagnostic: in-memory)
-        if skill is not None:
-            prefix = f"skill:{skill}:diagnostic:"
-            entries = await sem.list_by_prefix(prefix, limit=limit)
-        else:
-            raw = await sem.list_by_prefix("skill:", limit=limit * 5)
-            entries = [e for e in raw if ":diagnostic:" in e.key][:limit]
-
-    if not entries:
-        where = f" for skill '{skill}'" if skill else ""
-        console.print(f"[loom.muted]No diagnostics found{where}.[/loom.muted]")
-        return
-
-    console.print(Rule("[loom.accent]Recent skill diagnostics[/loom.accent]"))
-    for e in entries:
-        try:
-            diag = TaskDiagnostic.from_json(e.value)
-        except Exception:
-            console.print(f"  [loom.error]![/loom.error] [loom.muted]{e.key}[/loom.muted]  (unparseable)")
-            continue
-
-        score_color = (
-            "green" if diag.quality_score >= 4.0
-            else "yellow" if diag.quality_score >= 2.5
-            else "red"
-        )
-        ts = diag.timestamp.strftime("%Y-%m-%d %H:%M")
-        console.print(
-            f"[loom.muted]{ts}[/loom.muted]  "
-            f"[bold loom.accent]{diag.skill_name}[/bold loom.accent]  "
-            f"[loom.muted]{diag.task_type}[/loom.muted]  "
-            f"[{score_color}]{diag.quality_score:.1f}[/{score_color}]"
-        )
-        if diag.instructions_violated:
-            for v in diag.instructions_violated[:3]:
-                console.print(f"   [loom.error]✗[/loom.error] {v}")
-        if diag.skill_edit_suggestions:
-            console.print("   [bold]→ suggestions:[/bold]")
-            for s in diag.skill_edit_suggestions[:3]:
-                console.print(f"     • {s}")
-        console.print()
 
 
 # ---------------------------------------------------------------------------

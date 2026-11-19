@@ -69,10 +69,6 @@ enabled        = true
 interval_hours = 12
 sample_size    = 15
 
-[reflection]
-auto_reflect = true
-visibility   = "summary"
-
 [telemetry]
 enabled          = true
 persist_interval = 100

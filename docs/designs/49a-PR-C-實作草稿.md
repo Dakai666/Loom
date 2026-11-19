@@ -1,3 +1,9 @@
+> **Retired in #675 (2026-11-19):** descriptions below of TaskReflector skill
+> diagnostics, diagnostic-triggered behavioural self-reflection, confidence EMA,
+> session-end SkillEvolutionHook, `[reflection]`, and `loom diagnostic` are
+> historical, not current runtime behavior. Activation/tier routing, ledger-backed
+> skill review, shared triple storage, and historical metric readers remain.
+
 # PR-C 實作草稿 — Harness vs Loom Agent 視覺切分
 
 本文件是 `docs/designs/49-CLI-Refresh-設計.md` 中 **PR-C** 的詳細實作藍圖。完成後內容會折回 issue #236 PR-C 的 PR body 與相關 follow-up。

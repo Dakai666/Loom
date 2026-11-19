@@ -79,7 +79,6 @@ from loom.core.cognition.judge import (
 )
 from loom.core.cognition.reflection import ReflectionAPI
 from loom.core.cognition.router import LLMRouter
-from loom.core.cognition.task_reflector import TaskDiagnostic, TaskReflector
 from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
     ActionRolledBack,
@@ -944,14 +943,6 @@ class LoomSession:
         self._confirm_fn: "Callable[[ToolCall], Any] | None" = None  # set in start()
         # Issue #56: Skill outcome tracking
         self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
-        # Issue #120 PR1: structured post-turn diagnostics (replaces maybe_evaluate).
-        self._task_reflector: TaskReflector | None = None
-        _refl_cfg = config.get("reflection", {})
-        self._reflection_enabled: bool = bool(_refl_cfg.get("auto_reflect", True))
-        visibility_raw = str(_refl_cfg.get("visibility", "summary")).lower()
-        if visibility_raw not in ("off", "summary", "verbose"):
-            visibility_raw = "summary"
-        self._reflection_visibility: str = visibility_raw
 
         self._mcp_clients: list[Any] = []
 
@@ -1309,7 +1300,7 @@ class LoomSession:
         # ReflectionAPI / CounterFactualReflector previously took
         # discrete subsystems; they now take the facade so the
         # construction site no longer reaches into ``self._semantic``
-        # etc.  TaskReflector follows the same pattern further below.
+        # etc.
         self._reflection = ReflectionAPI(self._memory)
         self._reflector = CounterFactualReflector(
             router=self.router,
@@ -1379,25 +1370,10 @@ class LoomSession:
         from loom.autonomy.circadian.journal import make_journal_append_tool
         self.registry.register(make_journal_append_tool())
 
-        # Issue #56: Register load_skill tool with outcome tracker
+        # #675: activation tracking only; model-tier routing consumes it.
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
-        self._skill_outcome_tracker = SkillOutcomeTracker(
-            procedural=self._memory.procedural,
-            semantic=self._memory.semantic,
-            session_id=self.session_id,
-        )
+        self._skill_outcome_tracker = SkillOutcomeTracker()
 
-
-        # Issue #120 PR1: TaskReflector produces structured diagnostics at
-        # each TurnDone, replacing the scalar self-assessment path.
-        self._task_reflector = TaskReflector(
-            router=self.router,
-            model=self.model,
-            memory=self._memory,
-            session_id=self.session_id,
-            enabled=self._reflection_enabled,
-            visibility=self._reflection_visibility,
-        )
         skills_dirs = [
             self.workspace / "skills",
             Path.home() / ".loom" / "skills",
@@ -1818,26 +1794,6 @@ class LoomSession:
                     if _health:
                         _health.record_failure("session_compress", str(exc))
 
-            # Step 2: Skill evolution analysis (Issue #58)
-            if self._memory is not None:
-                try:
-                    from loom.core.cognition.counter_factual import SkillEvolutionHook
-                    evolution_hook = SkillEvolutionHook(
-                        router=self.router, model=self.model,
-                        memory=self._memory,
-                    )
-                    evolved = await evolution_hook.check_all_skills()
-                    if evolved:
-                        console.print(
-                            f"[dim]  Queued evolution analysis for {evolved} skill(s).[/dim]"
-                        )
-                    if _health:
-                        _health.record_success("skill_evolution")
-                except Exception as exc:
-                    logger.warning("Skill evolution analysis failed: %s", exc)
-                    if _health:
-                        _health.record_failure("skill_evolution", str(exc))
-
             # Step 3: Memory decay cycle (Issue #43)
             if self._governor is not None:
                 try:
@@ -1895,24 +1851,6 @@ class LoomSession:
                 except Exception as exc:
                     logger.debug("Telemetry flush failed: %s", exc)
         finally:
-            # Issue #61 Bug 2 + #120 PR1/PR2: wait for pending skill reflection
-            # background tasks before closing the DB so their upsert writes can
-            # complete.  Covers TaskReflector (task_reflect), its behavioural
-            # post-hook (behavioural_triples).
-            pending_evals = [
-                t for t in asyncio.all_tasks()
-                if t.get_name().startswith((
-                    "task_reflect:", "behavioural_triples:",
-                ))
-            ]
-            if pending_evals:
-                done, still_pending = await asyncio.wait(pending_evals, timeout=5.0)
-                if still_pending:
-                    logger.warning(
-                        "%d skill reflection(s) unfinished on shutdown",
-                        len(still_pending),
-                    )
-
             # Clients are shared across sessions (#601): hand our borrow back;
             # the connection closes only when its last session lets go.
             from loom.extensibility.mcp_client import release_mcp_client
@@ -2575,8 +2513,8 @@ class LoomSession:
 
                     self._turn_index += 1
 
-                    # Issue #58: trigger skill self-assessment before TurnDone
-                    self._trigger_skill_assessment()
+                    # #675: release turn-local skill activations before TurnDone
+                    self._clear_turn_skill_activations()
 
                     # #336 — mid-session episodic compaction was previously
                     # an inline ``ep_count >= threshold`` check here. The
@@ -2874,8 +2812,8 @@ class LoomSession:
                             self._cancel_requested = False
                             self._last_think = "".join(_think_parts).strip()
                             self._turn_index += 1
-                            # Issue #58: trigger skill self-assessment before TurnDone
-                            self._trigger_skill_assessment()
+                            # #675: release turn-local skill activations before TurnDone
+                            self._clear_turn_skill_activations()
                             _tier_hint = self._tick_tier_counter()
                             if _tier_hint is not None:
                                 yield _tier_hint
@@ -2958,8 +2896,8 @@ class LoomSession:
 
             self._last_think = "".join(_think_parts).strip()
             self._turn_index += 1
-            # Issue #58: trigger skill self-assessment before TurnDone
-            self._trigger_skill_assessment()
+            # #675: release turn-local skill activations before TurnDone
+            self._clear_turn_skill_activations()
             _tier_hint = self._tick_tier_counter()
             if _tier_hint is not None:
                 yield _tier_hint
@@ -3057,67 +2995,13 @@ class LoomSession:
                 # turn lock and brick the session.
                 self._turn_lock.release()
 
-    # ------------------------------------------------------------------
-    # Issue #58: Skill self-assessment trigger
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Issue #120 PR1: Diagnostic subscriber plumbing
-    # ------------------------------------------------------------------
-
     # =========================================================================
     # SECTION 5 — JUDGE / TURN HOOKS
     # =========================================================================
-    def subscribe_diagnostic(
-        self, callback: "Callable[[TaskDiagnostic], Awaitable[None]]",
-    ) -> None:
-        """Register a platform callback for each completed ``TaskDiagnostic``.
-
-        CLI, TUI, and Discord each call this once after ``start()`` to
-        render their own view of the diagnostic (status bar, side panel,
-        Discord summary message).  Subscribers run after the diagnostic
-        is already persisted — they are purely for display.
-        """
-        if self._task_reflector is not None:
-            self._task_reflector.subscribe(callback)
-
-    def _trigger_skill_assessment(self) -> None:
-        """
-        Fire-and-forget: schedule structured skill diagnostic if a skill was
-        activated during this session (Issue #120 PR1).
-
-        Called at each TurnDone point in stream_turn(). The LLM diagnostic
-        runs as a background task and never blocks the conversation.
-        """
-        if (
-            self._skill_outcome_tracker is None
-            or self._task_reflector is None
-            or not self._skill_outcome_tracker.has_active_skills()
-        ):
-            return
-
-        # Extract last assistant message as turn summary
-        turn_summary = ""
-        for msg in reversed(self.messages):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    turn_summary = content[:2000]
-                break
-
-        if not turn_summary:
-            # Still drain the tracker so stale activations don't leak
-            # across turns even when there was nothing to reflect on.
-            self._skill_outcome_tracker.drain_for_reflection(self._turn_index)
-            self._skill_outcome_tracker.pop_turn_tool_count()
-            return
-
-        self._task_reflector.maybe_reflect(
-            tracker=self._skill_outcome_tracker,
-            turn_index=self._turn_index,
-            turn_summary=turn_summary,
-            envelopes=list(self._recent_envelopes),
-        )
+    def _clear_turn_skill_activations(self) -> None:
+        """Release turn-local tier inputs independently of retired diagnostics."""
+        if self._skill_outcome_tracker is not None:
+            self._skill_outcome_tracker.clear_through(self._turn_index)
 
     # ------------------------------------------------------------------
     # Issue #196 Phase 2: turn-boundary judge
@@ -4372,10 +4256,6 @@ class LoomSession:
                     metadata=meta,
                 )
             )
-
-        # Track tool usage for SkillOutcomeTracker
-        if self._skill_outcome_tracker is not None:
-            self._skill_outcome_tracker.record_tool_usage()
 
         # Counter-factual reflection: fire-and-forget for execution_error failures.
         # Only triggers when a SkillGenome exists for the tool (checked inside reflector).

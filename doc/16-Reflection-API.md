@@ -1,3 +1,8 @@
+> **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
+> diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
+> `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。
+> skill activation／tier routing、ledger review、shared triple store 與歷史 metrics readers 保留。
+
 # Reflection API
 
 Reflection API 是 Loom 的「自我反思」機制。它在每個 session 結束時執行分析，生成摘要、工具報告和健康狀態報告，讓 agent 的經驗得以累積和改進。
@@ -367,7 +372,7 @@ LLM 提問：「什麼 pattern 導致了這個失敗？下次應避免什麼？�
 
 由 `TaskReflector`（Issue #120 PR 1）在每次結構化診斷後自動呼叫 `run_self_reflection`，產出 `loom-self` 三元組。
 
-> **變更**：`SelfReflectionPlugin` 與 `reflect_self` 工具已於 Issue #120 PR 1 移除，`run_self_reflection` 核心邏輯保留於 `loom/core/cognition/self_reflection.py`（audit-B / #399 從 `loom/autonomy/` 搬位置 — 該函式只依賴 core memory，沒有 autonomy daemon 狀態）。
+> **變更**：`SelfReflectionPlugin` 與 `reflect_self` 工具已於 Issue #120 PR 1 移除，`run_self_reflection` 核心邏輯保留於 `loom/core/cognition/self_reflection.py`（audit-B / #399 從 `loom/autonomy/` 搬位置 — 該函式只依賴 core memory，沒有 autonomy daemon 狀態）。 <!-- doc-integrity:ignore — deleted in #675; historical reference -->
 
 ---
 
