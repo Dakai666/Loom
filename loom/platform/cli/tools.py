@@ -3604,6 +3604,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 config,
                 router=parent_session.router,
                 episodic=parent_session._memory.episodic,
+                session_log=parent_session._memory.session_log,
                 semantic=parent_session._memory.semantic,
                 procedural=parent_session._memory.procedural,
                 tool_registry=parent_session.registry,

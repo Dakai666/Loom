@@ -2636,6 +2636,9 @@ class LoomSession:
                                     "tool_call_id": tu.id,
                                     "tool_name": tu.name,
                                     "emit_turn": self._turn_index,
+                                    "success": result.success,
+                                    "failure_type": result.failure_type,
+                                    "duration_ms": duration_ms,
                                 },
                                 turn_index=self._turn_index,
                             ))
@@ -2732,6 +2735,9 @@ class LoomSession:
                                     "tool_call_id": tu.id,
                                     "tool_name": tu.name,
                                     "emit_turn": self._turn_index,
+                                    "success": result.success,
+                                    "failure_type": result.failure_type,
+                                    "duration_ms": duration_ms,
                                 },
                                 turn_index=self._turn_index,
                             ))
