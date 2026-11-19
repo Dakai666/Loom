@@ -44,29 +44,19 @@ class SubAgentConfig:
 
 @dataclass
 class SubAgentResult:
-    """Result returned to the parent session after sub-agent completes."""
+    """Result returned to the parent session after sub-agent completes.
+
+    One exit rule (#648 P4): ``success`` ⇔ the loop reached ``end_turn`` and
+    the final reply has text; ``output`` is that text. Any other exit
+    (max_turns, max_tokens, an empty reply, no response) is a failure whose
+    ``output`` is the most recent assistant text and whose ``error`` says why.
+    """
     success: bool
-    output: str          # Final assistant text (or error description)
+    output: str
     agent_id: str
     turns_used: int
     tool_calls: int
     error: str | None = None
-    # Failure context (Issue #192 P0) — populated when success=False so the
-    # parent agent can diagnose without re-running. Scratchpad ref
-    # "subagent_failure:<agent_id>" holds the full structured trace.
-    last_tool_name: str | None = None
-    last_tool_error: str | None = None
-    partial_output: str | None = None
-    # Structured failure classification (Issue #193 P1) — lets the parent
-    # switch on failure_code instead of parsing error strings.
-    failure_code: str | None = None
-    recovery_suggestion: str | None = None
-    error_context: dict[str, Any] = field(default_factory=dict)
-    # Issue #225: best-effort result the sub-agent explicitly committed via
-    # ``result_write``. Survives both end_turn and max_turns paths so the
-    # parent never gets an empty hand even when the sub-agent runs out of
-    # turns. None ⇒ sub-agent never called result_write.
-    result_slot: str | None = None
 
 
 async def run_subagent(
@@ -80,7 +70,6 @@ async def run_subagent(
     parent_session_id: str,
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
-    scratchpad: Any = None,
     # parent session's LedgerEmitter (#334). The subagent inherits the
     # parent's ``turn_id`` via contextvar, so its ``model_event`` events
     # file under the parent turn during replay. Caveat (#334 review S2):
@@ -131,79 +120,6 @@ async def run_subagent(
         if config.allowed_tools is None and tool.trust_level != TrustLevel.SAFE:
             continue
         child_registry.register(tool)
-
-    # ── result_write — issue #225 ────────────────────────────────────────────
-    # Always-available tool that lets the sub-agent rewrite its best-effort
-    # result every turn. The slot is captured below as a closure cell so both
-    # end_turn and max_turns paths can read it. Registered AFTER the parent
-    # registry filtering so allowed_tools does not gate it.
-    _result_slot_cell: dict[str, str | None] = {"value": None}
-
-    async def _result_write(call: ToolCall) -> ToolResult:
-        content = call.args.get("content")
-        if not isinstance(content, str):
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False,
-                error="'content' must be a string",
-                failure_type="validation_error",
-            )
-        mode = call.args.get("mode", "append")
-        if mode not in ("append", "replace"):
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False,
-                error=f"'mode' must be 'append' or 'replace', got {mode!r}",
-                failure_type="validation_error",
-            )
-        prev = _result_slot_cell["value"]
-        if mode == "replace" or not prev:
-            _result_slot_cell["value"] = content
-        else:
-            # append: join with a single blank line so sections stay readable
-            joiner = "" if prev.endswith("\n\n") else ("\n" if prev.endswith("\n") else "\n\n")
-            _result_slot_cell["value"] = prev + joiner + content
-        new_len = len(_result_slot_cell["value"] or "")
-        return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=True,
-            output=f"[result slot {mode}d, +{len(content)} chars, total {new_len}]",
-        )
-
-    child_registry.register(ToolDefinition(
-        name="result_write",
-        description=(
-            "Commit your best-effort task result to the hand-off slot the parent "
-            "receives when you exit (end_turn or max_turns). Default mode is "
-            "'append' — each call concatenates onto what is already there with a "
-            "blank-line separator, ideal for multi-section reports / audits / "
-            "reviews. Use mode='replace' when you want to overwrite (e.g. to "
-            "refine a single coherent answer). Whatever is in the slot at exit "
-            "is what the parent gets; empty / never-called ⇒ parent gets your "
-            "end_turn text on success or nothing on max_turns. Call early and "
-            "often: write something useful before any long tool chain."
-        ),
-        trust_level=TrustLevel.SAFE,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Text to commit to the slot.",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["append", "replace"],
-                    "description": (
-                        "'append' (default) concatenates onto the existing slot "
-                        "with a blank-line separator. 'replace' overwrites."
-                    ),
-                },
-            },
-            "required": ["content"],
-        },
-        executor=_result_write,
-    ))
 
     # Wrap memorize so writes are tagged with this agent's provenance
     _orig_memorize = child_registry.get("memorize")
@@ -270,19 +186,12 @@ async def run_subagent(
         f"  {available_tools}\n"
         f"If the task description names a tool not in this list (for example "
         f"`write_file` or `run_bash`), DO NOT attempt to call it. Treat the "
-        f"task's wording as intent, not literal instruction: route any file or "
-        f"shell output you would have produced through `result_write` instead.\n"
+        f"task's wording as intent, not literal instruction: put "
+        f"anything you would have written to a file or printed to the shell "
+        f"into your final reply instead.\n"
         f"\n"
-        f"HAND-OFF CONTRACT — result_write:\n"
-        f"Your only channel back to the parent agent is the result_write slot. "
-        f"Whatever is in the slot when you exit (end_turn or max_turns) is what "
-        f"the parent receives — nothing else (no files, no console output, no "
-        f"end_turn free text once the slot is non-empty) is observed. "
-        f"Default mode is 'append': each call concatenates onto the slot, ideal "
-        f"for multi-section reports / reviews / audits. Use mode='replace' only "
-        f"when you want to overwrite (e.g. refining a single coherent answer). "
-        f"Call result_write early — write something useful before any long tool "
-        f"chain, so a max_turns cut never costs you the work."
+        f"Your final reply is the result handed to the parent agent: put "
+        f"everything the parent needs in it."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -292,18 +201,11 @@ async def run_subagent(
     tools_schema = child_registry.to_openai_schema()
     turns_used = 0
     total_tool_calls = 0
-    final_output = ""
-    last_tool_name: str | None = None
-    last_tool_error: str | None = None
-    assistant_text_trail = ""  # Accumulated free text from assistant turns (for partial_output)
-    # Issue #193 P1: per-tool failure stats + longest consecutive-failure streak
-    # for the same tool (resets on success or when a different tool is called).
-    tool_failure_counts: dict[str, int] = {}
-    consecutive_failure_tool: str | None = None
-    consecutive_failure_count = 0
-    max_consecutive_failures = 0
-    # Issue #225: idempotency for the wrap-up reminder injected near max_turns.
-    wrapup_warned = False
+    final_output: str | None = None
+    exit_reason = ""
+    # Free text from every assistant message (tool-use preambles included);
+    # its tail is what the parent gets when there is no final reply.
+    assistant_text_trail = ""
 
     provenance: dict[str, Any] = {
         "agent_id": agent_id,
@@ -342,6 +244,7 @@ async def run_subagent(
                 response = final
 
         if response is None:
+            exit_reason = "the model returned no response"
             break
 
         # #334 — emit model_event for the subagent's LLM call. Subagent
@@ -383,32 +286,15 @@ async def run_subagent(
             raw_json=json.dumps(raw, ensure_ascii=False),
         )
 
-        # Accumulate free text from this assistant message (even during tool_use
-        # turns it may contain a preamble). Used to populate partial_output on
-        # failure so the parent sees what the agent was thinking.
-        if isinstance(raw_content, str):
-            if raw_content:
-                assistant_text_trail += raw_content + "\n"
-        elif isinstance(raw_content, list):
-            for block in raw_content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")
-                    if text:
-                        assistant_text_trail += text + "\n"
+        if assistant_text.strip():
+            assistant_text_trail += assistant_text + "\n"
 
         if response.stop_reason == "end_turn":
             turns_used += 1
-            if isinstance(raw_content, str):
-                final_output = raw_content
-            elif isinstance(raw_content, list):
-                final_output = " ".join(
-                    b.get("text", "") for b in raw_content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            # Issue #225: result_slot is the explicit best-effort the sub-agent
-            # committed; prefer it over end_turn free text when both exist.
-            if _result_slot_cell["value"]:
-                final_output = _result_slot_cell["value"]
+            if assistant_text.strip():
+                final_output = assistant_text.strip()
+            else:
+                exit_reason = "the final reply was empty"
             break
 
         if response.stop_reason == "tool_use":
@@ -419,22 +305,10 @@ async def run_subagent(
                 tool_def = child_registry.get(tu.name)
                 if tool_def is None:
                     available = sorted(child_registry._tools.keys())
-                    # File-output redirect hint: the most common cause of an
-                    # "unknown tool" hit in sub-agents is the LLM reaching for
-                    # write_file / run_bash when they were not whitelisted by
-                    # the parent. Point it at result_write so it does not burn
-                    # turns retrying.
-                    redirect = ""
-                    if tu.name in ("write_file", "run_bash"):
-                        redirect = (
-                            " To produce output, call result_write(content=..., "
-                            "mode='append') — the parent agent will persist whatever "
-                            "is in the slot when you exit."
-                        )
                     tool_output = (
                         f"Unknown tool: {tu.name!r}. This tool is not in your "
                         f"available set; do not retry it. Available tools: "
-                        f"{', '.join(available) or 'none'}.{redirect}"
+                        f"{', '.join(available) or 'none'}."
                     )
                     result = ToolResult(
                         call_id=tu.id, tool_name=tu.name,
@@ -463,180 +337,29 @@ async def run_subagent(
                     "failure_type": result.failure_type,
                     "duration_ms": (time.monotonic() - tool_started) * 1000,
                 })
-                if not result.success:
-                    last_tool_name = tu.name
-                    last_tool_error = result.error or tool_output or "(no error message)"
-                    tool_failure_counts[tu.name] = tool_failure_counts.get(tu.name, 0) + 1
-                    if consecutive_failure_tool == tu.name:
-                        consecutive_failure_count += 1
-                    else:
-                        consecutive_failure_tool = tu.name
-                        consecutive_failure_count = 1
-                    if consecutive_failure_count > max_consecutive_failures:
-                        max_consecutive_failures = consecutive_failure_count
-                else:
-                    # Reset the streak on any success
-                    consecutive_failure_tool = None
-                    consecutive_failure_count = 0
                 messages.append(
                     router.format_tool_result(config.model, tu.id, tool_output, result.success)
                 )
-
-            # Issue #225: wrap-up reminder. When two turns remain, force the
-            # sub-agent to commit a result and end_turn rather than burn the
-            # last slot on a fresh tool chain. Idempotent — fires once.
-            turns_remaining = config.max_turns - turns_used
-            if (
-                turns_remaining == 2
-                and config.max_turns >= 3
-                and not wrapup_warned
-            ):
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "<system-reminder>\n"
-                        "You have 2 turns left. On your next turn, call "
-                        "`result_write(content=..., mode='append')` (or "
-                        "mode='replace' for a final coherent rewrite) to "
-                        "commit your best-effort result, then end_turn. "
-                        "Do not start new long tool chains — wrap up.\n"
-                        "</system-reminder>"
-                    ),
-                })
-                wrapup_warned = True
         else:
+            turns_used += 1
+            exit_reason = f"the model stopped with stop_reason={response.stop_reason!r}"
             break
 
-    result_slot_value = _result_slot_cell["value"]
-
-    if turns_used >= config.max_turns and not final_output:
-        partial = assistant_text_trail.strip()
-        partial_output = partial[-2000:] if partial else None
-        stuck_tool = (
-            consecutive_failure_tool if max_consecutive_failures >= 3 else None
-        )
-        failure_code, recovery_suggestion = _classify_failure(
-            partial_output=partial_output,
-            stuck_tool=stuck_tool,
-            stuck_count=max_consecutive_failures,
-        )
-        error_context = {
-            "tool_failure_counts": dict(tool_failure_counts),
-            "max_consecutive_failures": max_consecutive_failures,
-            "stuck_tool": stuck_tool,
-        }
-        error_msg = f"Sub-agent reached max_turns limit ({config.max_turns}) without completing."
-        _write_failure_scratchpad(
-            scratchpad, agent_id, turns_used, total_tool_calls,
-            config.max_turns, last_tool_name, last_tool_error,
-            partial_output, error_msg,
-            failure_code=failure_code,
-            recovery_suggestion=recovery_suggestion,
-            error_context=error_context,
-            result_slot=result_slot_value,
-        )
-        # Issue #225: surface the explicit slot as the failure's output so the
-        # parent never sees an empty hand. success stays False — end_turn is
-        # the only honest "done" signal — but the work isn't lost.
+    if final_output is not None:
         return SubAgentResult(
-            success=False,
-            output=result_slot_value or "",
+            success=True,
+            output=final_output,
             agent_id=agent_id,
             turns_used=turns_used,
             tool_calls=total_tool_calls,
-            error=error_msg,
-            last_tool_name=last_tool_name,
-            last_tool_error=last_tool_error,
-            partial_output=partial_output,
-            failure_code=failure_code,
-            recovery_suggestion=recovery_suggestion,
-            error_context=error_context,
-            result_slot=result_slot_value,
         )
 
+    exit_reason = exit_reason or f"reached max_turns ({config.max_turns})"
     return SubAgentResult(
-        success=True,
-        output=final_output,
+        success=False,
+        output=assistant_text_trail.strip()[-2000:],
         agent_id=agent_id,
         turns_used=turns_used,
         tool_calls=total_tool_calls,
-        result_slot=result_slot_value,
+        error=f"Sub-agent exited without a final reply: {exit_reason} after {turns_used} turn(s).",
     )
-
-
-def _classify_failure(
-    *,
-    partial_output: str | None,
-    stuck_tool: str | None,
-    stuck_count: int,
-) -> tuple[str, str]:
-    """Classify a max_turns failure into a code + one-line recovery suggestion.
-
-    Priority: tool_loop (a clear repeating pattern) > partial (task making
-    progress but ran out of room) > no_progress (empty trail, likely
-    infeasible). The three codes are a deliberately small vocabulary so
-    parent agents can reliably switch on them (Issue #193 P1).
-    """
-    if stuck_tool is not None:
-        return (
-            "tool_loop",
-            f"Sub-agent called '{stuck_tool}' {stuck_count} times consecutively without "
-            f"success — try alternative tools or give more explicit task guidance.",
-        )
-    if partial_output:
-        return (
-            "max_turns_partial",
-            "Partial result captured in scratchpad — consider resuming with a narrower "
-            "scope or a higher max_turns.",
-        )
-    return (
-        "max_turns_no_progress",
-        "No progress detected — task may be infeasible with given tools; consider "
-        "splitting the task or expanding allowed_tools.",
-    )
-
-
-def _write_failure_scratchpad(
-    scratchpad: Any,
-    agent_id: str,
-    turns_used: int,
-    tool_calls: int,
-    max_turns: int,
-    last_tool_name: str | None,
-    last_tool_error: str | None,
-    partial_output: str | None,
-    error: str,
-    *,
-    failure_code: str | None = None,
-    recovery_suggestion: str | None = None,
-    error_context: dict[str, Any] | None = None,
-    result_slot: str | None = None,
-) -> None:
-    """Write sub-agent failure context to scratchpad if available.
-
-    Ref format: ``subagent_failure:<agent_id>``. Parent agent can read via
-    scratchpad_read to recover partial context when spawn_agent returns an
-    error. Silent no-op if no scratchpad is provided.
-    """
-    if scratchpad is None:
-        return
-    ref = f"subagent_failure:{agent_id}"
-    payload = {
-        "agent_id": agent_id,
-        "turns_used": turns_used,
-        "tool_calls": tool_calls,
-        "max_turns": max_turns,
-        "last_tool_name": last_tool_name,
-        "last_tool_error": last_tool_error,
-        "partial_output": partial_output,
-        "error": error,
-        "failure_code": failure_code,
-        "recovery_suggestion": recovery_suggestion,
-        "error_context": error_context or {},
-        "result_slot": result_slot,
-    }
-    try:
-        scratchpad.write(ref, json.dumps(payload, ensure_ascii=False, indent=2))
-    except Exception:
-        # Scratchpad write must never mask the real failure — swallow.
-        pass

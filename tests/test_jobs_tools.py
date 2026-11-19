@@ -300,7 +300,7 @@ class TestScratchpadTool:
 
     async def test_list_when_no_ref(self):
         pad = Scratchpad()
-        for ref in ("auto_x", "masked_x", "subagent_failure:x", "other"):
+        for ref in ("auto_x", "masked_x", "bash_x", "other"):
             pad.write(ref, "body")
         r = await make_scratchpad_read_tool(pad).executor(_call("scratchpad_read", {}))
         assert r.success and json.loads(r.output) == {"available_refs": pad.list_refs()}

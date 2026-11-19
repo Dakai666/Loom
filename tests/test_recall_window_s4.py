@@ -290,12 +290,10 @@ def test_retired_recall_tool_code_is_gone():
         importlib.import_module("loom.core.ledger.recall")
 
 
-# A mention that is true although the tool is not in this registry:
-# result_write is registered in every sub-agent's own registry, which is
-# what spawn_agent describes. Conditionally registered tools (e.g. a web
-# search that needs a key) are not allowed here: text the model always sees
-# must not name them.
-ALLOWED_MENTIONS = {("spawn_agent", "result_write")}
+# Text the model always sees must not name a tool that is not in this
+# registry (conditionally registered tools, e.g. a web search that needs a
+# key, included). No exceptions.
+ALLOWED_MENTIONS: set[tuple[str, str]] = set()
 
 AGENT_TEMPLATE = Path(__file__).resolve().parents[1] / "Agent.md.example"
 # A line only the tracked template has — proves it reached the prompt.

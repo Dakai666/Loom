@@ -23,7 +23,6 @@ from loom.core.memory.store import SQLiteStore
 from loom.platform.cli.tools import (
     _verify_fetch_url,
     _verify_run_bash,
-    _verify_spawn_agent,
     make_filesystem_tools,
     make_memorize_tool,
     sanitize_untrusted_text,
@@ -256,78 +255,6 @@ class TestMemorizeVerifier:
         verdict = await tool.post_validator(call, fake_result)
         assert verdict.passed is False
         assert verdict.signal == "key_not_found"
-
-
-class TestSpawnAgentVerifier:
-    """spawn_agent post_validator catches hollow successes — 0 turns or
-    near-empty output despite success=True (Issue #196, PR #198 review)."""
-
-    async def test_passes_on_healthy_subagent_result(self) -> None:
-        result = ToolResult(
-            call_id="c1", tool_name="spawn_agent",
-            success=True,
-            output="[sub-agent sub-abc] 5 turn(s), 3 tool call(s)\n\n"
-                   "The analysis found three relevant patterns in the codebase...",
-            metadata={
-                "subagent_agent_id": "sub-abc",
-                "subagent_turns_used": 5,
-                "subagent_tool_calls": 3,
-                "subagent_output_len": 250,
-            },
-        )
-        verdict = await _verify_spawn_agent(
-            _call("spawn_agent", task="analyze"), result,
-        )
-        assert verdict.passed is True
-
-    async def test_fails_on_zero_turns_executed(self) -> None:
-        result = ToolResult(
-            call_id="c1", tool_name="spawn_agent",
-            success=True,
-            output="[sub-agent sub-abc] 0 turn(s), 0 tool call(s)\n\nok",
-            metadata={
-                "subagent_agent_id": "sub-abc",
-                "subagent_turns_used": 0,
-                "subagent_tool_calls": 0,
-                "subagent_output_len": 2,
-            },
-        )
-        verdict = await _verify_spawn_agent(
-            _call("spawn_agent", task="analyze"), result,
-        )
-        assert verdict.passed is False
-        assert verdict.signal == "no_execution"
-
-    async def test_fails_on_suspiciously_short_output(self) -> None:
-        result = ToolResult(
-            call_id="c1", tool_name="spawn_agent",
-            success=True,
-            output="[sub-agent sub-abc] 4 turn(s), 2 tool call(s)\n\ndone",
-            metadata={
-                "subagent_agent_id": "sub-abc",
-                "subagent_turns_used": 4,
-                "subagent_tool_calls": 2,
-                "subagent_output_len": 4,
-            },
-        )
-        verdict = await _verify_spawn_agent(
-            _call("spawn_agent", task="analyze"), result,
-        )
-        assert verdict.passed is False
-        assert verdict.signal == "empty_output"
-
-    async def test_passes_when_metadata_absent(self) -> None:
-        """Defensive: if metadata is missing for some reason, don't false-
-        positive — we'd rather miss a true failure than block legitimate ones."""
-        result = ToolResult(
-            call_id="c1", tool_name="spawn_agent",
-            success=True, output="some output",
-            metadata={},
-        )
-        verdict = await _verify_spawn_agent(
-            _call("spawn_agent", task="analyze"), result,
-        )
-        assert verdict.passed is True
 
 
 def _fetch_url_output(title: str, body: str) -> str:

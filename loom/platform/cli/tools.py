@@ -3091,38 +3091,6 @@ def make_xai_tts_tool(
     )
 
 
-async def _verify_spawn_agent(call: ToolCall, result: ToolResult) -> VerifierResult:
-    """Catch hollow sub-agent successes (Issue #196 Phase 1, PR #198 review).
-
-    spawn_agent's failure path already surfaces rich context via #192/#193,
-    but its *success* path can still be pathological — zero executed turns,
-    near-empty output. This validator checks structured signals stashed in
-    metadata by the spawn_agent executor, not the output string.
-    """
-    meta = result.metadata or {}
-    turns = meta.get("subagent_turns_used", -1)
-    output_len = meta.get("subagent_output_len", -1)
-
-    if turns == 0:
-        return VerifierResult(
-            passed=False,
-            reason="Sub-agent reported success but executed 0 turns — "
-                   "the task likely wasn't attempted.",
-            signal="no_execution",
-        )
-    # 50 chars is a deliberate floor — shorter than a typical one-sentence
-    # reply. Legitimate sub-agents answering simple questions exceed this;
-    # suspiciously empty returns sit well below.
-    if 0 <= output_len < 50:
-        return VerifierResult(
-            passed=False,
-            reason=f"Sub-agent output suspiciously short ({output_len} chars) "
-                   f"despite {turns} turn(s) — likely didn't complete the task.",
-            signal="empty_output",
-        )
-    return VerifierResult(passed=True)
-
-
 def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
     """Return a GUARDED tool that spawns an ephemeral sub-agent for a bounded task."""
     from loom.core.agent.subagent import SubAgentConfig, run_subagent
@@ -3162,7 +3130,6 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 parent_session_id=parent_session.session_id,
                 workspace=parent_session.workspace,
                 parent_grants=parent_session.perm.grants,
-                scratchpad=getattr(parent_session, "_scratchpad", None),
                 ledger_emitter=getattr(parent_session, "_ledger_emitter", None),
             )
         except Exception as exc:
@@ -3175,53 +3142,16 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 f"[sub-agent {result.agent_id}] "
                 f"{result.turns_used} turn(s), {result.tool_calls} tool call(s)\n\n"
             )
-            # Surface structured signals for _verify_spawn_agent (Issue #196).
-            metadata = {
-                "subagent_agent_id": result.agent_id,
-                "subagent_turns_used": result.turns_used,
-                "subagent_tool_calls": result.tool_calls,
-                "subagent_output_len": len(result.output or ""),
-            }
             return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=True, output=header + result.output,
-                              metadata=metadata)
-        else:
-            # Issue #192 P0 / #193 P1: attach failure context, code, and
-            # recovery hint so the parent can choose a next action without
-            # parsing strings. Full trace at scratchpad_read(subagent_failure:...).
-            prefix = f"[{result.failure_code}] " if result.failure_code else ""
-            parts = [prefix + (result.error or "Sub-agent failed")]
-            if result.last_tool_name:
-                parts.append(
-                    f"last_tool={result.last_tool_name}"
-                    + (f" error={result.last_tool_error!r}" if result.last_tool_error else "")
-                )
-            if result.recovery_suggestion:
-                parts.append(f"hint: {result.recovery_suggestion}")
-            # Issue #225: if the sub-agent committed a best-effort result via
-            # result_write, surface it inline so the parent can act on it
-            # without a follow-up scratchpad_read. Truncate aggressively —
-            # full content stays in the scratchpad payload.
-            if result.result_slot:
-                slot_preview = result.result_slot
-                if len(slot_preview) > 800:
-                    slot_preview = slot_preview[:800] + " […truncated]"
-                parts.append(f"result_slot: {slot_preview}")
-            parts.append(
-                f"Full failure context at scratchpad ref: subagent_failure:{result.agent_id} "
-                f"(read via scratchpad_read)."
-            )
-            metadata = {
-                "subagent_agent_id": result.agent_id,
-                "subagent_turns_used": result.turns_used,
-                "subagent_tool_calls": result.tool_calls,
-                "subagent_failure_code": result.failure_code or "",
-                "subagent_has_result_slot": bool(result.result_slot),
-            }
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=" | ".join(parts),
-                              failure_type="execution_error",
-                              metadata=metadata)
+                              success=True, output=header + result.output)
+        # One exit rule (#648 P4): a failure is the reason plus the most
+        # recent assistant text, inline — nothing left behind to fetch.
+        error = result.error or "Sub-agent failed"
+        if result.output:
+            error += f"\n\nlast reply:\n{result.output}"
+        return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                          success=False, error=error,
+                          failure_type="execution_error")
 
     return ToolDefinition(
         name="spawn_agent",
@@ -3232,14 +3162,15 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             "The sub-agent cannot interact with the user — it works autonomously until done.\n"
             "\n"
             "Tool scope: by default the sub-agent only sees SAFE tools (read_file, "
-            "fetch_url, list_dir, scratchpad_read, plus result_write). "
+            "fetch_url, list_dir, scratchpad_read). "
             "If your task description requires write_file, run_bash, or any other "
             "GUARDED tool, you MUST list it in `tools=[...]` — otherwise the "
             "sub-agent will reach for a tool that does not exist and burn turns. "
-            "Result hand-off goes through the sub-agent's result_write slot; the "
-            "sub-agent CANNOT persist files for you under default tool scope, "
-            "so prefer instructing it to put everything in result_write and "
-            "letting the parent persist the artifact after."
+            "The sub-agent's final reply is the result you get back; it CANNOT "
+            "persist files for you under default tool scope, so ask for the full "
+            "answer in its reply and persist the artifact yourself. If it ends "
+            "without a final reply (max_turns, truncated or empty reply) the call "
+            "fails and carries its last text."
         ),
         trust_level=TrustLevel.GUARDED,
         capabilities=ToolCapability.AGENT_SPAN | ToolCapability.MUTATES,
@@ -3277,8 +3208,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
         impact_scope="agent",
         scope_descriptions=["spawns one sub-agent"],
         scope_resolver=_spawn_agent_resolver,
-        post_validator=_verify_spawn_agent,
-    )
+        )
 
 
 # run_bash is registered via make_run_bash_tool(workspace, strict_sandbox) in
