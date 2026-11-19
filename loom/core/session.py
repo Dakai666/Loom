@@ -1221,7 +1221,7 @@ class LoomSession:
                 for s in skill_catalog:
                     _ls.add(s.name)
         indexer = MemoryIndexer(
-            semantic, procedural, episodic,
+            semantic, procedural,
             skill_catalog=skill_catalog,
         )
         self._memory_index = await indexer.build()
@@ -4782,7 +4782,6 @@ class LoomSession:
         try:
             indexer = MemoryIndexer(
                 self._memory.semantic, self._memory.procedural,
-                self._memory.episodic,
             )
             new_index = await indexer.build()
             if new_index.is_empty:

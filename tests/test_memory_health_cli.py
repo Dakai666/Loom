@@ -56,7 +56,8 @@ async def test_gather_memory_health_metrics(seeded_db):
     assert health["semantic_total"] == 3
     assert health["semantic_low_conf"] == 1
     assert health["semantic_oldest"] == "2026-01-01T00:00:00+00:00"
-    assert health["episodic_uncompressed_sessions"] == 1
+    assert health["session_log_rows"] == 0
+    assert "episodic_uncompressed_sessions" not in health
     # domain breakdown surfaces the two domains
     assert dict(health["semantic_by_domain"])["self"] == 2
     assert dict(health["semantic_by_domain"])["world"] == 1
@@ -70,4 +71,4 @@ async def test_gather_memory_health_empty(tmp_path: Path):
     assert health["semantic_total"] == 0
     assert health["semantic_low_conf"] == 0
     assert health["semantic_oldest"] is None
-    assert health["episodic_uncompressed_sessions"] == 0
+    assert health["session_log_unknown_outcomes"] == 0

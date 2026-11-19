@@ -599,7 +599,7 @@ class TestReflectionAPI:
                 metadata={"tool_name": name, "success": ok},
             ))
 
-        summary = await api.session_summary("s1")
+        summary = await api.session_summary("s1", legacy_episodic=True)
         assert "1 user message" in summary
         assert "2 tool call" in summary
 
@@ -616,7 +616,7 @@ class TestReflectionAPI:
                 metadata={"tool_name": f"tool_{i}", "success": True},
             ))
 
-        recent = await api.recent_tool_calls("s2", n=3)
+        recent = await api.recent_tool_calls("s2", n=3, legacy_episodic=True)
         assert len(recent) == 3
         # Most recent first
         assert recent[0]["content"] == "step 4"
@@ -634,9 +634,10 @@ class TestReflectionAPI:
                 metadata={"tool_name": "run_bash", "success": ok},
             ))
 
-        rates = await api.tool_success_rate("s3")
-        assert "run_bash" in rates
-        assert abs(rates["run_bash"] - 2/3) < 0.01
+        rates = await api.tool_success_rate("s3", legacy_episodic=True)
+        assert rates["source"] == "legacy episodic fallback"
+        assert "run_bash" in rates["rates"]
+        assert abs(rates["rates"]["run_bash"] - 2/3) < 0.01
 
     @pytest.mark.asyncio
     async def test_skill_health_report_empty(self, reflection_db):

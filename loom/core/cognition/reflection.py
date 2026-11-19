@@ -1,17 +1,12 @@
+"""Read-only reflection over session_log and historical skill snapshots.
+
+Legacy episodic is available only on explicit request when the log has no
+known tool outcomes. Sources are selected as a whole, never merged by time.
 """
-Reflection API — lets the agent observe its own execution trace.
-
-This is the "self-awareness" layer: the agent can query what tools it
-called, how often they succeeded, and get a plain-language summary of
-the current session without reading raw DB rows.
-
-Phase 2: query interface over episodic + procedural memory.
-Phase 3: the Autonomy Engine will call this to decide what to do next.
-"""
-
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from loom.core.memory.session_log import _redact_in_place, _redact_secrets
 from loom.core.timezone import user_zone
 
 if TYPE_CHECKING:
@@ -19,76 +14,76 @@ if TYPE_CHECKING:
 
 
 class ReflectionAPI:
-    """
-    Read-only window into the agent's own history and skill health.
-
-    Injected with the session's :class:`MemoryFacade` at start; reads
-    episodic and procedural memory through the facade's handles.
-    """
+    """Read trace outcomes without turning missing observations into failures."""
 
     def __init__(self, memory: "MemoryFacade") -> None:
         self._memory = memory
-        self._episodic = memory.episodic
         self._procedural = memory.procedural
 
-    # ------------------------------------------------------------------
-    # Session trace queries
-    # ------------------------------------------------------------------
+    async def _trace(
+        self, session_id: str, *, legacy_episodic: bool = False,
+        n: int | None = None, tools_only: bool = False,
+    ) -> tuple[str, list[dict]]:
+        log = self._memory.session_log
+        source = "session_log" if log is not None else "session_log unavailable"
+        roles = ("tool",) if tools_only else ("user", "tool")
+        # The normal recent-tools path is bounded in SQL. Explicit legacy
+        # selection checks the whole session, so a recent unknown row cannot
+        # hide an older known log outcome and trigger a mixed-source report.
+        rows = await log.read_trace(
+            session_id, roles=roles, limit=None if legacy_episodic else n,
+            newest_first=tools_only and not legacy_episodic,
+        ) if log is not None else []
+        if legacy_episodic and not any(
+            r["role"] == "tool" and type(r["metadata"].get("success")) is bool for r in rows
+        ):
+            episodes = await self._memory.episodic.read_session(session_id)
+            if episodes:
+                source = "legacy episodic fallback"
+                rows = [{
+                    "role": "tool" if e.event_type == "tool_result" else "user",
+                    "content": _redact_secrets(e.content) or "",
+                    "metadata": _redact_in_place(dict(e.metadata)),
+                    "created_at": e.created_at.isoformat(),
+                } for e in episodes if e.event_type in ("tool_result", "message")]
+        for row in rows:
+            meta = row["metadata"]
+            if row["role"] == "tool" and type(meta.get("success")) is not bool:
+                meta["success"] = None
+        if tools_only and legacy_episodic:
+            rows = [r for r in rows if r["role"] == "tool"][::-1]
+            if n is not None:
+                rows = rows[:n]
+        return source, rows
 
     async def recent_tool_calls(
-        self, session_id: str, n: int = 10
+        self, session_id: str, n: int = 10, *, legacy_episodic: bool = False,
     ) -> list[dict]:
-        """
-        Return the last `n` tool_result entries for a session,
-        ordered most-recent first.
-        """
-        entries = await self._episodic.read_session(session_id)
-        zone = user_zone()
-        tool_entries = [
-            {
-                "content": e.content,
-                "metadata": e.metadata,
-                "timestamp": (
-                    e.created_at if e.created_at.tzinfo else e.created_at.replace(tzinfo=UTC)
-                ).astimezone(zone).isoformat(),
-            }
-            for e in entries
-            if e.event_type == "tool_result"
-        ]
-        return tool_entries[-n:][::-1]
+        """Last n tool rows, newest first; source and unknown outcomes explicit."""
+        if n <= 0:
+            return []
+        source, rows = await self._trace(session_id, legacy_episodic=legacy_episodic, n=n, tools_only=True)
+        return [{
+            "content": r["content"], "metadata": r["metadata"], "source": source,
+            "timestamp": (
+                datetime.fromisoformat(r["created_at"]).replace(tzinfo=UTC)
+                if datetime.fromisoformat(r["created_at"]).tzinfo is None
+                else datetime.fromisoformat(r["created_at"])
+            ).astimezone(user_zone()).isoformat(),
+        } for r in rows]
 
-    async def session_summary(self, session_id: str) -> str:
-        """
-        One-paragraph plain-text summary of what happened in the session.
-        Suitable for inserting into the LLM context as a system message.
-        """
-        entries = await self._episodic.read_session(session_id)
-        if not entries:
-            return "No activity recorded yet in this session."
-
-        tool_results = [e for e in entries if e.event_type == "tool_result"]
-        messages = [e for e in entries if e.event_type == "message"]
-        ok = sum(1 for e in tool_results if e.metadata.get("success"))
-        fail = len(tool_results) - ok
-
-        tool_names: list[str] = []
-        for e in tool_results:
-            name = e.metadata.get("tool_name")
-            if name and name not in tool_names:
-                tool_names.append(name)
-
-        parts = [
-            f"Session so far: {len(messages)} user message(s), "
-            f"{len(tool_results)} tool call(s) ({ok} ok, {fail} failed).",
-        ]
-        if tool_names:
-            parts.append(f"Tools used: {', '.join(tool_names)}.")
-
-        return " ".join(parts)
-
-    # ------------------------------------------------------------------
-    # Skill health queries
-    # ------------------------------------------------------------------
+    async def session_summary(self, session_id: str, *, legacy_episodic: bool = False) -> str:
+        source, rows = await self._trace(session_id, legacy_episodic=legacy_episodic)
+        if not rows:
+            return f"No activity recorded in this source. Source: {source}. Legacy episodic requires explicit opt-in."
+        tools = [r for r in rows if r["role"] == "tool"]
+        ok = sum(r["metadata"].get("success") is True for r in tools)
+        fail = sum(r["metadata"].get("success") is False for r in tools)
+        users = sum(r["role"] == "user" for r in rows)
+        names = list(dict.fromkeys(r["metadata"].get("tool_name") for r in tools if r["metadata"].get("tool_name")))
+        text = (f"Session so far: {users} user message(s), {len(tools)} tool call(s) "
+                f"({ok} ok, {fail} failed, {len(tools)-ok-fail} unknown). Source: {source}.")
+        return text + (f" Tools used: {', '.join(names)}." if names else "")
 
     async def skill_health_report(self) -> list[dict]:
         """
@@ -107,42 +102,39 @@ class ReflectionAPI:
             for s in skills
         ]
 
-    async def failure_summary(self, session_id: str) -> dict[str, int]:
-        """
-        Return failure counts grouped by failure_type for the session.
-        Example: {"permission_denied": 2, "timeout": 1, "execution_error": 3}
-        Entries without a failure_type are grouped under "unclassified".
-        """
-        entries = await self._episodic.read_session(session_id)
+    async def failure_summary(self, session_id: str, *, legacy_episodic: bool = False) -> dict:
+        """Known failures only; report unknown observations separately."""
+        source, rows = await self._trace(session_id, legacy_episodic=legacy_episodic)
         counts: dict[str, int] = {}
-        for e in entries:
-            if e.event_type != "tool_result":
+        unknown = 0
+        for row in rows:
+            if row["role"] != "tool":
                 continue
-            if e.metadata.get("success"):
-                continue
-            ftype = e.metadata.get("failure_type") or "unclassified"
-            counts[ftype] = counts.get(ftype, 0) + 1
-        return counts
+            meta = row["metadata"]
+            if meta.get("success") is None:
+                unknown += 1
+            elif meta["success"] is False:
+                kind = meta.get("failure_type") or "unclassified"
+                counts[kind] = counts.get(kind, 0) + 1
+        return {"source": source, "counts": counts, "unknown_outcomes": unknown}
 
-    async def tool_success_rate(self, session_id: str) -> dict[str, float]:
+    async def tool_success_rate(self, session_id: str, *, legacy_episodic: bool = False) -> dict:
+        """Rates use known outcomes only; an entirely unknown tool has rate None.
+
+        The envelope labels source and the per-tool excluded unknown counts,
+        so callers cannot present a partial denominator as a full success rate.
         """
-        Per-tool success rates for the current session.
-        Returns {tool_name: success_rate_0_to_1}.
-        """
-        entries = await self._episodic.read_session(session_id)
-        counts: dict[str, list[int]] = {}   # {name: [ok, total]}
-        for e in entries:
-            if e.event_type != "tool_result":
+        source, rows = await self._trace(session_id, legacy_episodic=legacy_episodic)
+        counts: dict[str, list[int]] = {}
+        for row in rows:
+            if row["role"] != "tool":
                 continue
-            name = e.metadata.get("tool_name")
-            if not name:
-                continue
-            if name not in counts:
-                counts[name] = [0, 0]
-            counts[name][1] += 1
-            if e.metadata.get("success"):
-                counts[name][0] += 1
+            name = row["metadata"].get("tool_name") or "unknown tool"
+            ok, known, unknown = counts.setdefault(name, [0, 0, 0])
+            value = row["metadata"].get("success")
+            counts[name] = [ok + int(value is True), known + int(value is not None), unknown + int(value is None)]
         return {
-            name: v[0] / v[1] if v[1] else 0.0
-            for name, v in counts.items()
+            "source": source,
+            "rates": {name: ok / known if known else None for name, (ok, known, _) in counts.items()},
+            "unknown_outcomes": {name: unknown for name, (_, _, unknown) in counts.items() if unknown},
         }

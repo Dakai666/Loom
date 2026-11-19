@@ -92,7 +92,7 @@ async def test_period_scopes_all_layers_before_limit(period_memory, session_id, 
                        if session_id is None or sid == session_id][:limit]
     assert [row["session_id"] for row in result["sessions"]] == expected_sessions
     assert [row["session_id"] for row in result["messages"]] == expected_events
-    assert [row.session_id for row in result["episodic"]] == expected_events
+    assert result["episodic"] == []  # compatibility alias now selects log experience
 
     facts = result["semantic"]
     if session_id is None:

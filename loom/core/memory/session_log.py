@@ -380,6 +380,43 @@ class SessionLog:
     # Read path
     # ------------------------------------------------------------------
 
+    async def read_trace(
+        self, session_id: str, *, roles: tuple[str, ...] = ("user", "tool"),
+        limit: int | None = None, newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read trace rows with scope/role filtering before an optional limit.
+
+        Unlike replay, this exposes outcome metadata and event timestamps.
+        Content and metadata both pass the existing presentation redaction.
+        """
+        if not roles or (limit is not None and limit <= 0):
+            return []
+        order = "DESC" if newest_first else "ASC"
+        marks = ",".join("?" for _ in roles)
+        sql = (
+            "SELECT role, content, metadata, created_at FROM session_log "
+            f"WHERE session_id = ? AND role IN ({marks}) "
+            f"ORDER BY created_at {order}, id {order}"
+        )
+        params: list[Any] = [session_id, *roles]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        cursor = await self._db.execute(sql, params)
+        events = []
+        for role, content, metadata, created_at in await cursor.fetchall():
+            try:
+                meta = json.loads(metadata or "{}")
+            except (ValueError, TypeError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            events.append({
+                "role": role, "content": _redact_secrets(content) or "",
+                "metadata": _redact_in_place(meta), "created_at": created_at,
+            })
+        return events
+
     async def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         """Return sessions ordered by last_active DESC."""
         cursor = await self._db.execute(
