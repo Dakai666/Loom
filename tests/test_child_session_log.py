@@ -128,8 +128,8 @@ async def test_child_failure_reopens_recall_and_colon_ref_without_facts(tmp_path
             assert meta["duration_ms"] >= 0
             # PR-A must leave the original episodic trace intact.
             assert len(await EpisodicMemory(db).read_session("parent:child")) == 1
-            cur = await db.execute("SELECT turn_count FROM sessions WHERE session_id='parent:child'")
-            assert (await cur.fetchone())[0] == 2
+            assert saved[-1][0] == 2
+            assert await SessionLog(db).get_session("parent:child") is None
     finally:
         reset_turn_id(token)
     async with store.connect() as db:
@@ -184,10 +184,9 @@ async def test_child_finalizes_metadata_and_completed_rows_on_every_exit(tmp_pat
                 await child(db, tmp_path, [response(["fail"]), error])
         saved = await rows(db)
         assert [r[1] for r in saved] == ["user", "assistant", "tool"]
-        cur = await db.execute("SELECT turn_count,last_active,model FROM sessions WHERE session_id='parent:child'")
-        count, active, model = await cur.fetchone()
-        assert count == 1 and model == "test"
-        assert datetime.fromisoformat(active).tzinfo is not None
+        assert {r[0] for r in saved} == {1}
+        assert all(r[4]["agent_id"] == "child" for r in saved)
+        assert await SessionLog(db).get_session("parent:child") is None
 
 
 async def test_child_scope_time_limit_redaction_and_tool_heavy_history(tmp_path):
@@ -325,5 +324,70 @@ async def test_task_cancellation_flushes_already_completed_child_trace(tmp_path,
             with pytest.raises(asyncio.CancelledError):
                 await task
         assert [r[1] for r in await rows(db)] == ["user", "assistant", "tool"]
-        cur = await db.execute("SELECT turn_count FROM sessions WHERE session_id='parent:child'")
-        assert (await cur.fetchone())[0] == 1
+        assert await SessionLog(db).get_session("parent:child") is None
+
+
+async def test_child_never_becomes_the_resume_or_sessions_listing_target(tmp_path):
+    """F1: a newer child must not replace the crashed parent's resume target."""
+    from loom.core.memory.pulse import MemoryPulse
+
+    store = SQLiteStore(str(tmp_path / "memory.db"))
+    await store.initialize()
+    async with store.connect() as db:
+        log = SessionLog(db)
+        await log.create_session("parent", "test")
+        await log.update_session("parent", 1, "2000-01-01T00:00:00+00:00", "main conversation")
+        await child(db, tmp_path, [response(["fail"]), response()])
+        assert [s["session_id"] for s in await log.list_sessions(limit=1)] == ["parent"]
+        assert [s["session_id"] for s in await log.list_sessions(limit=20)] == ["parent"]
+        pulse = MemoryPulse(db=db, semantic=SemanticMemory(db), session_id="next-main",
+                            session_started_at=datetime.now(UTC), pending_buffer=[])
+        previous = await pulse._previous_active_session()
+        assert previous is not None and previous[0] == "parent"
+        # No listing entry is needed to expand the durable child source.
+        expanded = await MemorySearch(SemanticMemory(db), ProceduralMemory(db)).expand(
+            "log:parent:child:1", mark_accessed=False)
+        assert expanded.found and "execution_error" in expanded.text
+
+
+@pytest.mark.parametrize("parent,sibling", [
+    ("abc", "abcd"),
+    ("abc", "ABC"),
+    ("a%_!\\b", "aZZx!\\b"),
+])
+async def test_delete_parent_cascades_to_child_sources_and_indexes_only(tmp_path, parent, sibling):
+    """F2: include log-only descendants; treat wildcard characters as literal ids."""
+    from loom.core.memory.recall_index import sync_terms
+
+    store = SQLiteStore(str(tmp_path / "memory.db"))
+    await store.initialize()
+    async with store.connect() as db:
+        log = SessionLog(db)
+        owned = [parent, f"{parent}:child", f"{parent}:child:grandchild"]
+        kept = [sibling, f"{sibling}:child"]
+        for sid in owned + kept:
+            # Grandchild intentionally has log rows but no sessions row.
+            if sid != owned[-1]:
+                await log.create_session(sid, "test")
+            await log.log_message(sid, 1, "user", "旅行 cascade_probe")
+        await sync_terms(db)
+        cur = await db.execute("SELECT id FROM session_log WHERE session_id IN (?,?,?)", owned)
+        owned_rowids = [r[0] for r in await cur.fetchall()]
+        cur = await db.execute("SELECT id FROM session_log WHERE session_id IN (?,?)", kept)
+        kept_rowids = [r[0] for r in await cur.fetchall()]
+        await log.delete_session(parent)
+        cur = await db.execute("SELECT DISTINCT session_id FROM session_log ORDER BY session_id")
+        assert [r[0] for r in await cur.fetchall()] == sorted(kept)
+        cur = await db.execute("SELECT session_id FROM sessions ORDER BY session_id")
+        assert [r[0] for r in await cur.fetchall()] == sorted(kept)
+        cur = await db.execute("SELECT rowid FROM session_log_terms ORDER BY rowid")
+        indexed = {r[0] for r in await cur.fetchall()}
+        assert not indexed.intersection(owned_rowids)
+        assert indexed.issuperset(kept_rowids)
+        search = MemorySearch(SemanticMemory(db), ProceduralMemory(db))
+        for query in ["旅行", "cascade_probe"]:
+            assert {r.ref for r in await search.recall(query, limit=20, mark_accessed=False)} == {
+                f"log:{sid}:1" for sid in kept
+            }
+        for sid in owned:
+            assert not (await search.expand(f"log:{sid}:1", mark_accessed=False)).found
