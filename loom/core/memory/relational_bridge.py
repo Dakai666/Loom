@@ -23,8 +23,7 @@ Encoding rules:
 
 Callers:
 
-* Producers — ``relate`` tool, ``dream_cycle``,
-  ``counter_factual``, REST ``POST /memory/relational`` — use
+* Producers — ``relate`` tool, ``counter_factual``, REST ``POST /memory/relational`` — use
   :func:`upsert_triple`.
 * Readers — :class:`MemoryIndex` self-portrait projection, REST
   ``GET /memory/relational`` — use :func:`query_triples` or

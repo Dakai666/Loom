@@ -203,31 +203,9 @@ class AutonomyDaemon:
 
 ---
 
-## Offline Dreaming（v0.2.5.3）
+## Offline Dreaming（已退役）
 
-`DreamingPlugin` 在 session 結束後執行離線夢境週期，探索記憶中的隱藏關聯：
-
-```python
-# loom/core/cognition/dreaming.py
-async def dream_cycle(*, semantic, llm_fn, ...) -> dict:
-    """
-    1. semantic.get_random(limit=15) 隨機抽樣事實
-    2. LLM 分析：「這些事實之間有什麼非顯而易見的關聯？」
-    3. 透過 relational_bridge.upsert_triple(semantic, ...) 寫入三元組
-       （source="dreaming"，鍵格式 rel:{S}::{P}）— #451 phase B
-    """
-```
-
-DreamingPlugin 將 `dream_cycle` 註冊為 SAFE 工具，可透過 loom.toml cron 排程：
-
-```toml
-[[autonomy.schedules]]
-name = "nightly_dream"
-cron = "0 3 * * *"
-intent = "執行 dream_cycle，探索記憶中的隱藏關聯"
-trust_level = "safe"
-notify = false
-```
+v0.2.5.3 起的發散夢 `dream_cycle`（隨機抽事實 → 關聯三元組）與其 agent tool 已於 #639（2026-11-19）退役，原始碼保存在 `_archive/dream-entries-retired-2026-11-19/`。現在的夢由 daemon 排程負責：每週收斂夢（`[memory.consolidation_dream]`）與每 12h 蒸餾夢（`[memory.distill_dream]`）；一次性的全庫整理用 `loom memory big-dream`。
 
 ---
 

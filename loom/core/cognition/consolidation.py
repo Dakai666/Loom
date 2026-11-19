@@ -1,8 +1,8 @@
 """
 Convergent Dream — read-only memory consolidation planner for Loom (#488, P1).
 
-The counterpart to ``dreaming.dream_cycle`` (the *divergent* dream that grows
-new connections). The convergent dream *consolidates*: it scans the semantic
+Once the counterpart to the divergent ``dream_cycle`` (retired in #639). The
+convergent dream *consolidates*: it scans the semantic
 store, finds duplicate / contradicting / orphaned facts, and proposes how to
 fuse or reconcile them — but in this first phase it **never writes to the DB**.
 
@@ -22,8 +22,8 @@ Design decisions
   ``semantic`` only through ``list_recent`` / ``find_near_duplicates`` /
   ``get`` and ``ContradictionDetector.detect`` (all reads). The orchestrator
   asserts the corpus is byte-identical before and after.
-* **Pure cognition** — no imports from platform, harness, or autonomy. The
-  ``ToolDefinition`` adapter lives in ``loom.core.memory.maintenance``.
+* **Pure cognition** — no imports from platform, harness, or autonomy. Driven
+  by the autonomy daemon's weekly loop and ``loom memory big-dream``.
 * **dreaming exemption** (spec §6.5) — facts whose source classifies as
   ``dreaming`` are never proposed for reconcile, and a dreaming fact with no
   relations is an *allowed orphan* (a connection still waiting for its place),

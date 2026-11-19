@@ -26,7 +26,7 @@
 # The target forum defaults to ``DISCORD_NEWS_FORUM_ID`` in ``.env``; pass
 # ``forum_channel_id`` to the tool to override. See 範例 4b below.
 
-# ── 範例 1: 每日記憶整理（dream + housekeeping） ─────────────────
+# ── 範例 1: 每週記憶整理（housekeeping） ─────────────────────────
 [[schedules]]
 name          = "memory_housekeeping"
 cron          = "0 19 * * 0"            # 19:00 UTC Sunday = 03:00 Asia/Taipei Monday
@@ -38,17 +38,8 @@ trust_level   = "safe"
 notify        = false
 notify_thread = 0
 
-# ── 範例 2: 每日 free dream（跨域聯想；daemon 的蒸餾夢只減不增，這條負責發散） ────
-[[schedules]]
-name          = "offline_dreaming_free"
-cron          = "0 19 * * *"            # 19:00 UTC = 03:00 Asia/Taipei
-intent        = """Run a free cross-domain dream. Call dream_cycle with
-                   themed=false so the sample spans all four ontology
-                   domains at random."""
-trust_level   = "safe"
-notify        = false
-notify_thread = 0
-allowed_tools = ["dream_cycle", "memorize"]
+# （範例 2 的每日 free dream 已隨 dream_cycle 工具退役，#639：夢交給 daemon 的
+#  收斂夢／蒸餾夢排程，見 loom.toml 的 [memory.consolidation_dream] / [memory.distill_dream]。）
 
 # ── 範例 3: weekly skill review ────────────────────────────────
 [[schedules]]

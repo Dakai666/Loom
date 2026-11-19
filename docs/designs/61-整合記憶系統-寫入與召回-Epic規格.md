@@ -200,7 +200,7 @@ S1 PR-B 定案的顯示形式：結果顯示 `mem:{key}@{sha256(value) 前 8 碼
 | `CounterFactualReflector`（工具失敗 → anti_pattern fact＋rel triple） | `counter_factual.py` | 否，直接 upsert | S3 退役：失敗已在 `session_log`／`action_records`，可被 recall 找回 |
 | `SkillEvolutionHook`（session-end，每 skill 一次 LLM） | `counter_factual.py`，由 `session.py::stop` Step 2 啟動 | 否 | S3 退役或併入 TaskReflector 的單一診斷 |
 | `TaskReflector._persist`（每 TurnDone → diagnostic fact＋skill EMA） | `task_reflector.py` | 否 | 保留為「一份主要診斷」，改寫為 ledger event 而非長期 fact；`success_rate` 不再由模型自評 EMA 更新（S3，先盤點讀者） |
-| `dream_cycle` 三元組 | `dreaming.py` | 是 | agent 主動呼叫的工具，本 Epic 不動 |
+| `dream_cycle` 三元組 | `dreaming.py` | 是 | agent 主動呼叫的工具，本 Epic 不動。**已於 #639 退役（2026-11-19）** |
 | `memorize`／`relate` | `platform/cli/tools.py`、`facade.memorize` | 是 | 主要主動入口；S1 起回覆帶 `mem:` ref 與索引狀態 |
 | subagent memorize、API server | `agent/subagent.py`、`platform/api/server.py` | 否 | S3 改走 `facade.memorize` |
 | skill auto-import | `session.py` | — | 檔案同步，非理解，不動 |

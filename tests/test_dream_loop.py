@@ -3,8 +3,8 @@
 The daemon's ``"dream"`` loop now runs ``run_distill_dream`` twice a day on
 the restart-safe cadence the convergent dream uses (``last_run`` persisted in
 ``memory_meta`` under its own key), seeding each pass from the themed domain
-rotation. Writes need ``[memory.distill_dream] execute = true`` — the same
-gate as the tool. The 03:00 free dream is a separate schedule and untouched.
+rotation. Writes need ``[memory.distill_dream] execute = true``. (The free
+dream and the dream agent tools are retired, #639.)
 """
 
 from __future__ import annotations
@@ -83,7 +83,6 @@ async def _wire(monkeypatch, db, cfg: dict):
     import loom.autonomy.circadian.journal as journal_mod
     import loom.autonomy.daemon as daemon_mod
     import loom.core.cognition.distillation as distill_mod
-    import loom.core.cognition.dreaming as dreaming_mod
     import loom.core.config as config_mod
 
     captured: dict = {}
@@ -100,11 +99,7 @@ async def _wire(monkeypatch, db, cfg: dict):
         )
         return plan, "distill report"
 
-    async def no_dream_cycle(**_):
-        raise AssertionError("the dream loop must not run dream_cycle any more")
-
     monkeypatch.setattr(distill_mod, "run_distill_dream", fake_run)
-    monkeypatch.setattr(dreaming_mod, "dream_cycle", no_dream_cycle)
     def fake_append(report, **_):
         if captured.get("journal_broken"):
             raise OSError("disk full")
@@ -230,12 +225,13 @@ class TestReviewFixes:
         await loop_kw["dream_fn"]()
         assert captured["domains"] == ["self", "self"]
 
-    async def test_rotation_is_independent_of_the_dream_cycle_tool(self, monkeypatch, db):
-        from loom.core.cognition.dreaming import next_themed_domain
+    async def test_rotation_uses_only_its_own_key(self, monkeypatch, db):
+        # dream.last_theme belonged to the retired dream_cycle tool (#639);
+        # a leftover row must not steer the distill rotation.
+        from loom.core.cognition.distillation import mark_themed_domain
         _, loop_kw, captured, _ = await _wire(monkeypatch, db, {})
         await loop_kw["dream_fn"]()
-        await next_themed_domain(db)                # dream_cycle(themed=True) via the tool
-        await next_themed_domain(db)
+        await mark_themed_domain(db, "dream.last_theme", "knowledge")
         await loop_kw["dream_fn"]()
         assert captured["domains"] == ["self", "user"]
 
@@ -338,7 +334,7 @@ class TestRealClosure:
         session = types.SimpleNamespace(
             _db=db, _memory=types.SimpleNamespace(semantic=SemanticMemory(db)),
             router=Router(), model="m")
-        from loom.core.cognition.dreaming import mark_themed_domain
+        from loom.core.cognition.distillation import mark_themed_domain
         # the fixture topic lives in "knowledge" — the domain after "project"
         await mark_themed_domain(db, "distill_dream.last_theme", "project")
         assert _daemon(session)._maybe_start_dream_loop() is not None

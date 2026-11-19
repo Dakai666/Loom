@@ -1,9 +1,9 @@
 """
-Issue #149 — dream_cycle / memory_prune factories live in
-``loom.core.memory.maintenance`` (formerly DreamingPlugin).
+Issue #149 — the memory_prune factory lives in
+``loom.core.memory.maintenance`` (formerly DreamingPlugin). The dream_cycle
+tool that shared this file was retired in #639 (see test_dream_tools_retired).
 
-Verifies factory-shape, executor wiring, dry-run formatting, and that
-``LoomSession`` registers both tools at startup.
+Verifies factory-shape and executor wiring.
 """
 from __future__ import annotations
 
@@ -13,10 +13,7 @@ import pytest
 
 from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import TrustLevel
-from loom.core.memory.maintenance import (
-    make_dream_cycle_tool,
-    make_memory_prune_tool,
-)
+from loom.core.memory.maintenance import make_memory_prune_tool
 
 
 def _call(name: str, args: dict | None = None) -> ToolCall:
@@ -24,64 +21,6 @@ def _call(name: str, args: dict | None = None) -> ToolCall:
         tool_name=name, args=args or {},
         trust_level=TrustLevel.SAFE, session_id="test",
     )
-
-
-# ── make_dream_cycle_tool ──────────────────────────────────────────────────
-
-def test_dream_cycle_definition_shape():
-    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
-    assert tool.name == "dream_cycle"
-    assert tool.trust_level == TrustLevel.SAFE
-    props = tool.input_schema["properties"]
-    assert set(props) == {"sample_size", "dry_run", "domain", "themed"}
-    assert props["sample_size"]["default"] == 15
-    assert props["dry_run"]["default"] is False
-    assert props["themed"]["default"] is False
-    assert set(props["domain"]["enum"]) == {"self", "user", "project", "knowledge"}
-
-
-async def test_dream_cycle_executor_passes_args_through(monkeypatch):
-    captured = {}
-
-    async def fake_dream_cycle(*, semantic, llm_fn, sample_size, dry_run, **kwargs):
-        captured["sample_size"] = sample_size
-        captured["dry_run"] = dry_run
-        captured.update({k: kwargs[k] for k in ("domain", "themed") if k in kwargs})
-        return {
-            "facts_sampled": 7, "triples_found": 3,
-            "triples_written": 0 if dry_run else 3,
-            "domain": kwargs.get("domain"),
-            "errors": [],
-        }
-
-    monkeypatch.setattr(
-        "loom.core.cognition.dreaming.dream_cycle", fake_dream_cycle,
-    )
-
-    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
-    res = await tool.executor(_call("dream_cycle", {"sample_size": 7, "dry_run": True}))
-
-    assert res.success
-    assert captured == {
-        "sample_size": 7, "dry_run": True, "domain": None, "themed": False,
-    }
-    assert "Facts sampled: 7" in res.output
-    assert "dry-run" in res.output  # dry_run banner appears
-
-
-async def test_dream_cycle_executor_reports_warnings(monkeypatch):
-    async def fake_dream_cycle(**_):
-        return {
-            "facts_sampled": 5, "triples_found": 2, "triples_written": 1,
-            "errors": ["malformed JSON"],
-        }
-    monkeypatch.setattr(
-        "loom.core.cognition.dreaming.dream_cycle", fake_dream_cycle,
-    )
-
-    tool = make_dream_cycle_tool(semantic=object(), llm_fn=AsyncMock())
-    res = await tool.executor(_call("dream_cycle"))
-    assert "Warnings: malformed JSON" in res.output
 
 
 # ── make_memory_prune_tool ─────────────────────────────────────────────────

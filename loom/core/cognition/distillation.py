@@ -61,11 +61,20 @@ from loom.core.cognition.consolidation import (
     _trust_of,
 )
 from loom.core.memory.clustering import stack_normalised
-from loom.core.memory.ontology import TEMPORAL_ARCHIVED, TEMPORAL_MILESTONE
+from loom.core.memory.ontology import (
+    DOMAIN_KNOWLEDGE,
+    DOMAIN_PROJECT,
+    DOMAIN_SELF,
+    DOMAIN_USER,
+    TEMPORAL_ARCHIVED,
+    TEMPORAL_MILESTONE,
+)
 from loom.core.memory.relational_bridge import REL_KEY_PREFIX
 from loom.core.memory.semantic import SemanticEntry, StaleWriteError, classify_source
 
 if TYPE_CHECKING:
+    import aiosqlite
+
     from loom.core.memory.semantic import SemanticMemory
 
 logger = logging.getLogger(__name__)
@@ -118,6 +127,44 @@ SUPPRESS_RETENTION_DAYS = 30.0
 DISTILL_REVIEW_BATCH_SIZE = 2
 MODE_READ_ONLY = "read-only"
 MODE_EXECUTE = "execute"
+
+
+# ---------------------------------------------------------------------------
+# Themed-domain rotation (seeds one ontology domain per pass)
+# ---------------------------------------------------------------------------
+#
+# The daemon's distill loop cycles through the four ontology domains in order,
+# persisting the last one under its own ``memory_meta`` key so restarts don't
+# reset the rotation. Moved here from ``cognition/dreaming.py`` when the
+# ``dream_cycle`` tool was retired (#639): the distill dream is the only user.
+
+_THEME_ROTATION = (DOMAIN_SELF, DOMAIN_USER, DOMAIN_PROJECT, DOMAIN_KNOWLEDGE)
+
+
+async def peek_themed_domain(db: "aiosqlite.Connection", meta_key: str) -> str:
+    """The domain after the one stored under *meta_key*, without advancing.
+
+    The caller advances only after its pass succeeded, via
+    :func:`mark_themed_domain`, so a failed pass retries the same domain.
+    """
+    cursor = await db.execute("SELECT value FROM memory_meta WHERE key = ?", (meta_key,))
+    row = await cursor.fetchone()
+    last = row[0] if row else None
+    if last in _THEME_ROTATION:
+        return _THEME_ROTATION[(_THEME_ROTATION.index(last) + 1) % len(_THEME_ROTATION)]
+    return _THEME_ROTATION[0]  # first call, or stored value drifted out of the enum
+
+
+async def mark_themed_domain(db: "aiosqlite.Connection", meta_key: str, theme: str) -> None:
+    """Persist *theme* as the last one dreamed under *meta_key* (commits)."""
+    now = datetime.now(UTC).isoformat()
+    await db.execute(
+        "INSERT INTO memory_meta(key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = excluded.updated_at",
+        (meta_key, theme, now),
+    )
+    await db.commit()
 
 
 def planned_survivor_metadata(*, now: datetime | None = None) -> dict[str, str]:
