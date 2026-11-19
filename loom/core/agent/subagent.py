@@ -9,7 +9,7 @@ Design principles:
   - GUARDED tools are auto-confirmed (no human in the loop for sub-agents).
   - CRITICAL tools are always blocked.
   - Bounded execution: stops at max_turns to prevent infinite loops.
-  - Memory writes carry source="agent:<agent_id>" for provenance tracking (5F-1).
+  - Memory writes retain source="memorize" with child provenance in metadata.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
@@ -108,7 +108,6 @@ async def run_subagent(
     from loom.core.harness.validation import SchemaValidationMiddleware
     from loom.core.harness.permissions import PermissionContext, TrustLevel
     from loom.core.memory.episodic import EpisodicEntry
-    from loom.core.memory.semantic import SemanticEntry
 
     agent_id = config.agent_id
     session_id = f"{parent_session_id}:{agent_id}"
@@ -213,15 +212,13 @@ async def run_subagent(
         _orig_executor = _orig_memorize.executor
 
         async def _tagged_memorize(call: ToolCall) -> ToolResult:
-            result = await _orig_executor(call)
-            # Re-tag: update the written entry's source to agent:<agent_id>
-            key = call.args.get("key", "").strip()
-            if key and result.success:
-                entry = await semantic.get(key)
-                if entry and entry.source == "memorize":
-                    entry.source = f"agent:{agent_id}"
-                    await semantic.upsert(entry)
-            return result
+            # Trusted execution context, never an LLM argument. Preserve the
+            # inherited executor and tag the FIRST governed write only.
+            tagged = replace(call, metadata={
+                **call.metadata,
+                "memory_provenance": {"agent_id": agent_id, "parent_session_id": parent_session_id},
+            })
+            return await _orig_executor(tagged)
 
         child_registry.register(ToolDefinition(
             name="memorize",

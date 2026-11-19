@@ -27,6 +27,7 @@ from typing import Any
 
 try:
     from fastapi import FastAPI, HTTPException, Query
+    from fastapi.responses import JSONResponse
     from pydantic import BaseModel
     import uvicorn
 except ImportError as exc:  # pragma: no cover
@@ -35,13 +36,21 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install loom[api]"
     ) from exc
 
-import aiosqlite
+from loom.core.config import load_loom_config
+from loom.core.session_support import _load_env
+from loom.core.memory.embeddings import build_embedding_provider
+from loom.core.memory.episodic import EpisodicMemory
+from loom.core.memory.facade import MemoryFacade
+from loom.core.memory.governance import MemoryGovernor
+from loom.core.memory.procedural import ProceduralMemory
+from loom.core.memory.search import MemorySearch, value_hash
+from loom.core.memory.store import SQLiteStore
 
 from loom.core.memory.relational_bridge import (
     RelationalEntry,
     delete_triple,
     query_triples,
-    upsert_triple,
+    triple_to_semantic,
 )
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.notify.types import ConfirmResult
@@ -98,12 +107,50 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.db = await aiosqlite.connect(resolved_path)
-        app.state.db.row_factory = aiosqlite.Row
-        app.state.webhook_notifier = webhook_notifier
-        app.state.trigger_evaluator = trigger_evaluator
-        yield
-        await app.state.db.close()
+        cfg = load_loom_config()
+        provider = build_embedding_provider(_load_env(), cfg)
+        store = SQLiteStore(resolved_path)
+        await store.initialize()
+        async with store.connect() as db:
+            app.state.db = db
+            semantic = SemanticMemory(db, embedding_provider=provider)
+            procedural, episodic = ProceduralMemory(db), EpisodicMemory(db)
+            governor = MemoryGovernor(
+                semantic=semantic, procedural=procedural, episodic=episodic,
+                db=db, config=cfg.get("memory", {}).get("governance", {}), session_id="api",
+            )
+            await governor.health.ensure_table()
+            semantic._health = governor.health
+            app.state.memory = MemoryFacade(
+                semantic=semantic, procedural=procedural, episodic=episodic,
+                search=MemorySearch(semantic, procedural), governor=governor,
+            )
+            app.state.webhook_notifier = webhook_notifier
+            app.state.trigger_evaluator = trigger_evaluator
+            try:
+                yield
+            finally:
+                if provider is not None and callable(getattr(provider, "close", None)):
+                    await provider.close()
+
+    async def write_response(entry: SemanticEntry, verdict, **identity) -> JSONResponse:
+        saved = await app.state.memory.semantic.get(entry.key)
+        ref = f"mem:{entry.key}@{value_hash(saved.value)}" if saved is not None else None
+        status = "written" if verdict.written else "kept" if verdict.resolution == "kept" else "rejected"
+        embedding = "failed" if saved and saved.metadata.get("embedding_status") == "failed" else (
+            "configured" if app.state.memory.semantic.has_embeddings else "not_configured"
+        )
+        return JSONResponse(status_code=201 if verdict.written else 200 if status == "kept" else 422, content={
+            "ok": verdict.written, "written": verdict.written, "status": status,
+            "key": entry.key, "ref": ref, "resolution": verdict.resolution,
+            "trust_tier": verdict.trust_tier, "adjusted_confidence": verdict.adjusted_confidence,
+            "index_status": "lexical_available" if saved is not None else "not_stored",
+            "embedding_status": embedding, **identity,
+        })
+
+    def external_source(label: str) -> str:
+        label = label.strip()
+        return "api" if not label or label == "api" else f"api:{label}"
 
     app = FastAPI(
         title="Loom API",
@@ -135,17 +182,16 @@ def create_app(
             for e in entries
         ]
 
-    @app.post("/memory/semantic", status_code=201, tags=["memory"])
+    @app.post("/memory/semantic", tags=["memory"])
     async def upsert_semantic(body: SemanticBody):
-        mem = SemanticMemory(app.state.db)
         entry = SemanticEntry(
             key=body.key,
             value=body.value,
             confidence=body.confidence,
-            source=body.source,
+            source=external_source(body.source),
         )
-        await mem.upsert(entry)
-        return {"ok": True, "key": body.key}
+        verdict = await app.state.memory.memorize(entry)
+        return await write_response(entry, verdict)
 
     # ── Relational memory ─────────────────────────────────────────────────
 
@@ -173,18 +219,18 @@ def create_app(
             for e in entries
         ]
 
-    @app.post("/memory/relational", status_code=201, tags=["memory"])
+    @app.post("/memory/relational", tags=["memory"])
     async def upsert_relational(body: RelationalBody):
-        sem = SemanticMemory(app.state.db)
         entry = RelationalEntry(
             subject=body.subject,
             predicate=body.predicate,
             object=body.object,
             confidence=body.confidence,
-            source=body.source,
+            source=external_source(body.source),
         )
-        await upsert_triple(sem, entry)
-        return {"ok": True, "subject": body.subject, "predicate": body.predicate}
+        verdict = await app.state.memory.relate(entry)
+        return await write_response(triple_to_semantic(entry), verdict,
+                                    subject=body.subject, predicate=body.predicate)
 
     @app.delete("/memory/relational", tags=["memory"])
     async def delete_relational(subject: str, predicate: str):

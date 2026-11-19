@@ -219,7 +219,10 @@ class MemoryFacade:
 
     # ── write API ────────────────────────────────────────────────────────
 
-    async def memorize(self, entry: "SemanticEntry") -> "GovernedWriteResult":
+    async def memorize(
+        self, entry: "SemanticEntry", *, trigger: str = "agent_memorize",
+        type_summary: str = "semantic_fact",
+    ) -> "GovernedWriteResult":
         """Persist a semantic fact through the governance pipeline.
 
         When a :class:`MemoryGovernor` is wired, delegates to
@@ -264,32 +267,23 @@ class MemoryFacade:
         await self._emit_memory_op(
             operation="write",
             memory_id=entry.key,  # SemanticEntry uses key as identity
-            type_summary="semantic_fact",
+            type_summary=type_summary,
             trust_tier=result.trust_tier,
             content_digest=_content_digest(entry.value),
-            trigger="agent_memorize",
+            trigger=trigger,
         )
         return result
 
-    async def relate(self, entry: "RelationalEntry") -> None:
-        """Upsert a relational (subject, predicate, object) triple.
+    async def relate(self, entry: "RelationalEntry") -> "GovernedWriteResult":
+        """Convert a triple once, then use the common governed write path.
 
-        Since #451 phase B this routes through the bridge into the
-        semantic store; ``relational_entries`` no longer exists. The
-        bridge encodes the triple as a ``SemanticEntry`` keyed
-        ``rel:{subject}::{predicate}``, so ``recall`` surfaces it
-        naturally with ``type="relational"``.
+        The raw bridge remains available for approval/control-state storage;
+        changing it globally would subject authorization state to fact rules.
         """
-        from loom.core.memory.relational_bridge import upsert_triple
-
-        await upsert_triple(self.semantic, entry)
-        triple = f"{entry.subject}|{entry.predicate}|{entry.object}"
-        await self._emit_memory_op(
-            operation="write",
-            memory_id=getattr(entry, "id", None),
+        from loom.core.memory.relational_bridge import triple_to_semantic
+        return await self.memorize(
+            triple_to_semantic(entry), trigger="agent_relate",
             type_summary="relational_triple",
-            content_digest=_content_digest(triple),
-            trigger="agent_relate",
         )
 
     async def prune_decayed(
