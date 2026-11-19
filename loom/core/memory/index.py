@@ -18,7 +18,7 @@ Rendered format (example)
     Semantic  : 47 facts   [topics: python, loom, testing, config]
     Episodes  : 8 sessions compressed
     ─────────────────────────────────────────────
-    Use recall(query) to retrieve relevant entries.
+    Keep something with memorize; find anything again with recall (...).
 
     <available_skills>
     <skill><name>loom-engineer</name>
@@ -122,17 +122,12 @@ class MemoryIndex:
                 f"Anti-patterns: {self.anti_pattern_count} recorded"
                 "  [recall 'anti_pattern' to review]"
             )
+        # #650 S4: one line for both sides — no choosing between backends.
         lines += [
             bar,
-            "Use recall(query) to retrieve relevant entries.",
-            "Use memorize(key, value) to store a new fact.",
+            "Keep something with memorize; find anything again with recall "
+            "(keywords, a since/until window, or a ref).",
         ]
-        if self.relational_count > 0:
-            lines.append(
-                f"Relational triples: {self.relational_count} stored "
-                f"(returned by recall alongside ordinary facts; "
-                f"use relate(subject, predicate, object) to add more)."
-            )
 
         # Issue #26: Self-Portrait — show agent's own behavioural notes inline
         if self.self_triples:

@@ -7,7 +7,7 @@ the ``MemorySearch`` index and an optional ``MemoryGovernor``.
 ``LoomSession`` holds it as ``self._memory`` and forwards subsystem
 references through the facade's handles.
 
-Read API: :meth:`search` / :meth:`get_fact` / :meth:`recall_period`.
+Read API: :meth:`search` / :meth:`window` / :meth:`expand_ref` / :meth:`get_fact`.
 Agent recall is the *sole* path for surfacing relational triples
 (issue #451 phase B — ``query_relations`` retired).
 
@@ -152,70 +152,26 @@ class MemoryFacade:
         )
         return entry
 
-    async def recall_period(
+    async def window(
         self,
         *,
         since: datetime,
         until: datetime | None = None,
-        session_id: str | None = None,
-        limit: int = 10,
-        include_episodic: bool = True,
-        include_sessions: bool = False,
-        legacy_episodic: bool = False,
-    ) -> dict[str, list]:
-        """Period evidence with include_episodic as a compatible experience alias.
+        kind: Literal["semantic", "skill", "all"] = "all",
+        limit: int = 5,
+    ) -> list["MemorySearchResult"]:
+        """What happened in ``[since, until)``: sessions and updated memories.
 
-        session_log is authoritative. Explicit legacy fallback selects one
-        source for this window; it never time-matches or merges duplicate rows.
+        Wraps :meth:`MemorySearch.window` — the no-query form of ``recall``
+        (#650 S4). Callers record access for what they actually show.
         """
-        capped = min(max(int(limit), 1), 20)
-        semantic = await self.semantic.list_between(
-            since, until, limit=capped, session_id=session_id,
-        )
-        sessions = (
-            await self.session_log.list_sessions_between(
-                since, until, limit=capped, session_id=session_id,
-            ) if include_sessions and self.session_log is not None else []
-        )
-        messages = (
-            await self.session_log.messages_between(
-                since, until, session_id=session_id, limit=capped,
-            ) if (include_episodic or include_sessions) and self.session_log is not None else []
-        )
-        episodic = []
-        if not (include_episodic or include_sessions):
-            coverage = "experience: disabled"
-        elif self.session_log is None:
-            coverage = "experience: session_log unavailable"
-        else:
-            coverage = "experience: session_log (legacy episodic excluded)"
-        # Fallback is deliberately whole-window and explicit. Missing outcome
-        # metadata stays unknown; no timestamp-based episode/log correlation.
-        if legacy_episodic and include_episodic and not messages:
-            episodic = await self.episodic.list_between(
-                since, until, session_id=session_id, limit=capped,
-            )
-            from dataclasses import replace
-            from loom.core.memory.session_log import _redact_in_place, _redact_secrets
-            episodic = [replace(e, content=_redact_secrets(e.content) or "",
-                                metadata=_redact_in_place(dict(e.metadata))) for e in episodic]
-            coverage = "experience: legacy episodic fallback (explicit; no session_log rows in this window)"
-            if not episodic:
-                coverage += "; no matching legacy rows"
-        if semantic:
-            await self.semantic.mark_accessed([entry.key for entry in semantic])
+        results = await self.search_index.window(since, until, type=kind, limit=limit)
         await self._emit_memory_op(
             operation="read",
-            type_summary="period_recall",
-            trigger="agent_recall_period",
+            type_summary=f"window:{kind}",
+            trigger="agent_window",
         )
-        return {
-            "semantic": semantic,
-            "episodic": episodic,
-            "sessions": sessions,
-            "messages": messages,
-            "coverage": [coverage],
-        }
+        return results
 
     # ── write API ────────────────────────────────────────────────────────
 

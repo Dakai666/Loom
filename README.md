@@ -205,10 +205,14 @@ Semantic confidence has a 90-day half-life. Memories that are never reinforced f
 **unknown**, excluded from known-outcome success-rate denominators and displayed
 with their count. For older history, `--legacy-episodic` explicitly requests a
 labeled fallback only when that session has no known log outcomes; sources are
-never merged by timestamp. `recall_period` keeps `include_episodic` as a compatible
-switch for session-log experience, while `legacy_episodic=true` requests old
-episodic history only when the scoped time window has no log rows. Scope it to a
-session for legacy child-only traces. There is no backfill or data cleanup.
+never merged by timestamp. There is no backfill or data cleanup.
+
+The agent has one memory read tool, `recall` (#650 S4): keywords search every
+source; with no query, `since` (and optionally `until`) lists the sessions
+active in that window, newest first, and the memories updated in it; `ref`
+reads one result in full. `recall_period` and `ledger_recall` were retired —
+the ledger itself is unchanged and still read by `skill_review` and
+`loom skill weekly`.
 `loom memory health` reports log coverage, including unknown outcomes, rather
 than treating an uncompressed episodic backlog as unhealthy. S3 PR-D retires episodic writes and
 TTL without deleting the table or existing data. Automatic `compress_session`

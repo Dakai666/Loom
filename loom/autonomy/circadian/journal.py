@@ -219,11 +219,12 @@ def make_journal_append_tool(
             "Append a dated entry to today's weave journal "
             "(autonomy/circadian/journal/YYYY-MM-DD.md). Use this for life "
             "fragments, curious findings, keepsakes worth remembering, and "
-            "soft 'maybe try tomorrow' notes — anything you want to keep "
-            "without polluting semantic memory. Structural insights still "
-            "go to memorize. Commitments to actually change tomorrow's plan "
-            "go to weave_revise. One file per day, append-only. Always "
-            "callable; especially natural during evening_closure."
+            "soft 'maybe try tomorrow' notes, kept as written. recall finds "
+            "journal entries again when the journal is a document collection "
+            "(it is in the default config). Commitments to actually change "
+            "tomorrow's plan go to weave_revise. One file per day, "
+            "append-only. Always callable; especially natural during "
+            "evening_closure."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.MUTATES,
@@ -236,8 +237,7 @@ def make_journal_append_tool(
                     "description": (
                         "moment: a piece of today's texture. "
                         "finding: something curious noticed today. "
-                        "keepsake: worth remembering, but not a structural "
-                        "insight (those go to memorize). "
+                        "keepsake: something worth keeping as written. "
                         "tomorrow: a soft note about what to try tomorrow "
                         "(commitments go via weave_revise instead)."
                     ),
