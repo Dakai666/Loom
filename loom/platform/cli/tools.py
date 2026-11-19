@@ -92,7 +92,6 @@ if TYPE_CHECKING:
     from loom.core.memory.search import MemorySearch
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.governance import MemoryGovernor
-    from loom.core.memory.skill_outcome import SkillOutcomeTracker
     from loom.core.infra.telemetry import AgentTelemetryTracker
     from loom.core.tasks.manager import TaskListManager
     from loom.core.tasks.pursuit import PursuitStore

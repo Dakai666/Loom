@@ -60,7 +60,6 @@ async def test_start_session_runs_resume_compaction_pass(monkeypatch) -> None:
     session._pipeline._middlewares = []
     session._pipeline.use = MagicMock()
     session._loom_config = {"task_write": {"discord_reminder": False}}
-    session.subscribe_diagnostic = MagicMock()
     session.start = AsyncMock()
 
     monkeypatch.setattr(session_module, "LoomSession", MagicMock(return_value=session))
@@ -90,7 +89,6 @@ async def test_start_session_resume_compacts_only_new_session(monkeypatch) -> No
     session._pipeline._middlewares = []
     session._pipeline.use = MagicMock()
     session._loom_config = {"task_write": {"discord_reminder": False}}
-    session.subscribe_diagnostic = MagicMock()
     session.start = AsyncMock()
     session.force_compact = AsyncMock()
 

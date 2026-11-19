@@ -9,10 +9,9 @@ Covers:
 - Auto-import from skills/ directory
 """
 
-import asyncio
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from loom.core.memory.index import MemoryIndex, SkillCatalogEntry
 
@@ -239,121 +238,25 @@ class TestFindSkillResources:
 
 
 class TestSkillOutcomeTracker:
-    """Per-session activation + tool-usage bookkeeping (Issue #120 PR 1).
-
-    Structured diagnostics live in ``TaskReflector`` now; see
-    ``tests/test_task_reflector.py`` for that layer.
-    """
+    """Activation state is independent of retired diagnostic bookkeeping."""
 
     def test_record_activation(self):
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
+        tracker = SkillOutcomeTracker()
         tracker.record_activation("test-skill", 1)
-        assert "test-skill" in tracker.activated_skills
-        assert tracker.has_active_skills()
+        assert tracker.activated_skills == ["test-skill"]
 
-    def test_record_tool_usage(self):
+    def test_clear_through_respects_turn_index(self):
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
-        tracker.record_tool_usage()
-        tracker.record_tool_usage()
-        assert tracker._turn_tool_count == 2
-
-    def test_drain_for_reflection_respects_turn_index(self):
-        from loom.core.memory.skill_outcome import SkillOutcomeTracker
-
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
+        tracker = SkillOutcomeTracker()
         tracker.record_activation("skill-a", 3)
         tracker.record_activation("skill-b", 5)
-
-        # Drain at turn 4 should only pick up skill-a
-        drained = tracker.drain_for_reflection(turn_index=4)
-        assert drained == ["skill-a"]
-        assert "skill-a" not in tracker._activated
-        assert "skill-b" in tracker._activated
-
-    def test_pop_turn_tool_count_resets(self):
-        from loom.core.memory.skill_outcome import SkillOutcomeTracker
-
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
-        tracker.record_tool_usage()
-        tracker.record_tool_usage()
-        tracker.record_tool_usage()
-        assert tracker.pop_turn_tool_count() == 3
-        assert tracker.pop_turn_tool_count() == 0
-
-
-# ---------------------------------------------------------------------------
-# SkillEvolutionHook
-# ---------------------------------------------------------------------------
-
-
-class TestSkillEvolutionHook:
-    """Test evolution hook trigger conditions."""
-
-    def test_should_evolve_low_confidence(self):
-        from loom.core.cognition.counter_factual import SkillEvolutionHook
-
-        hook = SkillEvolutionHook(
-            router=MagicMock(),
-            model="test",
-            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
-        )
-
-        # Mock skill with low confidence
-        skill = MagicMock()
-        skill.confidence = 0.4
-        skill.usage_count = 5
-
-        assert hook._should_evolve(skill) is True
-
-    def test_should_not_evolve_high_confidence(self):
-        from loom.core.cognition.counter_factual import SkillEvolutionHook
-
-        hook = SkillEvolutionHook(
-            router=MagicMock(),
-            model="test",
-            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
-        )
-
-        skill = MagicMock()
-        skill.confidence = 0.8
-        skill.usage_count = 5
-
-        assert hook._should_evolve(skill) is False
-
-    def test_should_not_evolve_low_usage(self):
-        from loom.core.cognition.counter_factual import SkillEvolutionHook
-
-        hook = SkillEvolutionHook(
-            router=MagicMock(),
-            model="test",
-            memory=MagicMock(procedural=MagicMock(), semantic=MagicMock()),
-        )
-
-        skill = MagicMock()
-        skill.confidence = 0.3
-        skill.usage_count = 1  # too few uses
-
-        assert hook._should_evolve(skill) is False
+        tracker.clear_through(4)
+        assert tracker.activated_skills == ["skill-b"]
+        tracker.clear_through(5)
+        assert tracker.activated_skills == []
 
 
 # ---------------------------------------------------------------------------
@@ -494,52 +397,13 @@ class TestRecordActivationTurnIndex:
     def test_turn_index_fn_called(self):
         from loom.core.memory.skill_outcome import SkillOutcomeTracker
 
-        tracker = SkillOutcomeTracker(
-            procedural=MagicMock(),
-            semantic=MagicMock(),
-            session_id="test-session",
-        )
+        tracker = SkillOutcomeTracker()
 
         # Simulate what make_load_skill_tool does with turn_index_fn
         turn_index = 7
         tracker.record_activation("my-skill", turn_index)
 
         assert tracker._activated["my-skill"] == 7
-
-class TestCheckAllSkillsSequential:
-    """Test that check_all_skills runs sequentially (not fire-and-forget)."""
-
-    @pytest.mark.asyncio
-    async def test_sequential_execution(self):
-        from loom.core.cognition.counter_factual import SkillEvolutionHook
-
-        mock_procedural = AsyncMock()
-        mock_semantic = AsyncMock()
-
-        # Create a skill that qualifies for evolution
-        mock_skill = MagicMock()
-        mock_skill.name = "test-skill"
-        mock_skill.confidence = 0.3
-        mock_skill.usage_count = 5
-        mock_skill.success_rate = 0.3
-        mock_procedural.list_active = AsyncMock(return_value=[mock_skill])
-
-        mock_router = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "Improve step 3 by validating input first."
-        mock_router.chat = AsyncMock(return_value=mock_response)
-
-        hook = SkillEvolutionHook(
-            router=mock_router,
-            model="test",
-            memory=MagicMock(procedural=mock_procedural, semantic=mock_semantic),
-        )
-
-        count = await hook.check_all_skills()
-        assert count == 1
-        # Verify semantic.upsert was called (evolution hint written)
-        assert mock_semantic.upsert.called
-
 
 class TestLoadSkillCheckResolutionFailure:
     """Regression for PR #407 review P2.

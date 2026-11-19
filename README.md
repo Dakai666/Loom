@@ -246,9 +246,25 @@ Skills are versioned instruction sets stored in `SkillGenome` that follow a thre
 
 Drop a `SKILL.md` into your `skills/` directory — Loom auto-imports it at session start.
 
-### Structured Diagnostic Feedback Loop
+### Skill activation and historical metrics
 
-After each turn where a skill was used, `TaskReflector` runs a background LLM self-assessment that produces a `TaskDiagnostic` — a structured record of which instructions were followed or violated, failure and success patterns, concrete `skill_edit_suggestions`, and a `quality_score` (1–5). The score feeds into the skill's `confidence` via EMA (α = 0.15). Skills whose confidence drops below a configurable threshold are deprecated and removed from the Tier 1 catalog.
+Skill loading still drives model-tier escalation, precondition checks, and ledger
+load/unload evidence. The Tier 1 catalog comes from skills on disk; it does not
+filter skills by confidence. Skill `confidence`, `success_rate`, and `usage_count`
+are historical values: #675 retired per-turn `TaskReflector` diagnostics,
+behavioural self-reflection, and session-end `SkillEvolutionHook` suggestions.
+Existing deprecation filters, health reports, and historical evolution hints
+remain readable; weekly `skill_review` uses ledger evidence rather than EMA scores.
+Old `[reflection]` configuration is ignored.
+
+To inspect retired diagnostic rows, run
+`loom memory retire-skill-diagnostics --db /path/to/memory.db`.
+It prints an exact id/key manifest without changing the
+store. After reviewing the manifest, add `--execute` to create a SQLite online
+backup and JSON export in a private directory beside the DB (or under
+`--output-dir`), delete the matching rows, and check SQLite/FTS integrity before
+commit. Repeating execution after cleanup is a no-op. Startup never deletes these
+rows automatically.
 
 ### Skill Optimization Loop
 

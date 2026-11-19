@@ -1,3 +1,8 @@
+> **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
+> diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
+> `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。
+> skill activation／tier routing、ledger review、shared triple store 與歷史 metrics readers 保留。
+
 # Autonomy Engine 概述
 
 Autonomy Engine 是 Loom 的「自主行動引擎」。它讓 Loom 不只是回應用戶請求，還能根據觸發條件自動執行任務。
@@ -231,7 +236,7 @@ notify = false
 原本由 `SelfReflectionPlugin.on_session_stop` 觸發的自我反思，Issue #120 PR 1 起合併進 `TaskReflector`。每次 `TaskReflector` 完成一份結構化 `TaskDiagnostic` 之後，以 fire-and-forget 的方式呼叫 `run_self_reflection` 產生 ``loom-self`` 三元組（#451 phase B 起寫入 SemanticMemory，鍵 ``rel:loom-self::*``）：
 
 ```python
-# loom/core/cognition/task_reflector.py（簡化）
+# loom/core/cognition/task_reflector.py（簡化） <!-- doc-integrity:ignore — deleted in #675; historical reference -->
 class TaskReflector:
     def _schedule_behavioural_triples(self) -> None:
         asyncio.create_task(run_self_reflection(

@@ -1,3 +1,8 @@
+> **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
+> diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
+> `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。
+> skill activation／tier routing、ledger review、shared triple store 與歷史 metrics readers 保留。
+
 # Extensibility 概述
 
 Extensibility 是 Loom 對外開放的擴充介面：新增工具、新增 plugin、接入 MCP 生態，全部不需要 fork 核心。
@@ -114,7 +119,7 @@ snapshot 存於 `_archive/extensibility-lens-retired-2026-05-23/`（gitignored�
 更早期還有 `DreamingPlugin` / `SelfReflectionPlugin` 兩個內建 plugin，現已併入核心模組：
 
 - `dream_cycle` 邏輯 → `loom/core/memory/`（v0.2.6.4 / #172）
-- self-reflection → `loom/core/cognition/self_reflection.py`，由 `TaskReflector` 觸發（Issue #120 / audit-B / #399）
+- self-reflection → `loom/core/cognition/self_reflection.py`，由 `TaskReflector` 觸發（Issue #120 / audit-B / #399） <!-- doc-integrity:ignore — deleted in #675; historical reference -->
 
 所以目前 `loom/extensibility/` **沒有**內建 LoomPlugin 實作，只剩抽象介面（`adapter.py` / `plugin.py`）與 MCP runtime（`mcp_client.py` / `mcp_server.py`）。
 
