@@ -317,12 +317,15 @@ class TestMtimeConflict:
 
         def _fake_stat(self, *a, **kw):
             real = original_stat(self, *a, **kw)
-            # Snapshot calls stat twice (before+after read). Only bump on the
-            # *third* stat (the tool's pre-write guard) so the snapshot itself
-            # is stable; the conflict surfaces at the post-snapshot check.
+            # load_weave_for_revision stats the file three times: the
+            # ``p.exists()`` probe, then stat-before / stat-after around the
+            # read. Only bump on the *fourth* stat (the tool's pre-write
+            # guard) so the snapshot itself is stable; the conflict surfaces
+            # at the post-snapshot check. (Bumping on the third tore the
+            # snapshot — "could not take a stable snapshot" — instead.)
             if self.name == "daily_weave.md":
                 _fake_stat._n += 1
-                if _fake_stat._n >= 3:
+                if _fake_stat._n >= 4:
                     return _FakeStat(real, 100_000_000)  # +100 ms in ns
             return real
 
