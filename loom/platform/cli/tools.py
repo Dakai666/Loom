@@ -1619,9 +1619,7 @@ def make_memory_attend_tool(attention: "AttentionList") -> ToolDefinition:
     One tool, edit-style: no arguments shows the list; ``items`` replaces it
     whole; ``keep`` / ``let_go`` promote to or release from the milestone
     tier. Every write is validated in full before anything changes. The
-    tool's own trace is kept out of session compression (see
-    ``records_episodic_trace``) so curating doesn't breed facts about
-    curating.
+    Session log remains the durable trace; no automatic fact extraction runs.
     """
     from loom.core.memory.attention import MAX_ITEMS, STATE_LABELS, AttentionError
 
@@ -2039,7 +2037,9 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
     async def _agent_health(call: ToolCall) -> ToolResult:
         dimension = call.args.get("dimension")
         full = bool(call.args.get("full", False))
-        if dimension:
+        if dimension == "memory_compression":
+            output = await tracker.legacy_compression_report()
+        elif dimension:
             output = tracker.report_detail(dimension) or "(no telemetry data yet)"
         elif full:
             output = tracker.report_detail() or "(no telemetry data yet)"
@@ -2059,7 +2059,7 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
         name="agent_health",
         description=(
             "Inspect your own observability telemetry: tool call success/latency, "
-            "context token layout, memory-compression yield, runtime identity, "
+            "context token layout, runtime identity, "
             "context budget, session turns, and loaded skills. "
             "Default is a one-line summary across all dimensions. "
             "Pass `dimension=<name>` to drill into one, or `full=true` to dump "
@@ -2074,7 +2074,7 @@ def make_agent_health_tool(tracker: "AgentTelemetryTracker") -> ToolDefinition:
                 "dimension": {
                     "type": "string",
                     "enum": ["tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills"],
-                    "description": "Specific dimension to inspect.",
+                    "description": "Specific dimension to inspect; memory_compression reads labeled legacy snapshots only (retired producer).",
                 },
                 "full": {
                     "type": "boolean",

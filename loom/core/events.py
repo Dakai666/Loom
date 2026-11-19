@@ -29,7 +29,6 @@ add ``Producers:`` / ``Consumers:`` entries to the event's docstring.
 | ReasoningContinuation |  ✓  |  ✓  |    ✓    |   no     |
 | TierChanged         |  ✓  |  ✓  |    ✓    |   no     |
 | TierExpiryHint      |  ✓  |  ✓  |    ✓    |   no     |
-| CompressDone        |  —  |  —  |    ✓    |   no     |
 | ActionStateChange   |  —  |  ✓  |  skip   |   no     |
 | ActionRolledBack    |  —  |  ✓  |    ✓    |   no     |
 | EnvelopeStarted     |  ✓  |  ✓  |    ✓    |   no     |
@@ -154,22 +153,6 @@ class TurnPaused:
     """
 
     tool_count_so_far: int = 0
-
-
-@dataclass
-class CompressDone:
-    """Episodic memory was compressed to semantic facts mid-session.
-
-    Producers:
-        LoomSession._smart_compact() — emitted after compression finishes.
-
-    Consumers:
-        CLI     —  intentionally not displayed (too noisy for inline chat)
-        TUI     —  intentionally not displayed
-        Discord ✓  sends a brief status message to the thread
-    """
-
-    fact_count: int
 
 
 @dataclass
@@ -614,7 +597,7 @@ class EventConsumer(Protocol):
     See the Consumer Map in the module docstring for platform-specific coverage:
 
     ``ThinkCollapsed``, ``TurnPaused``, ``TurnDropped``,
-    ``ModelThinkingStarted``, ``CompressDone``, ``ActionStateChange``,
+    ``ModelThinkingStarted``, ``ActionStateChange``,
     ``ActionRolledBack``,
     ``EnvelopeStarted``, ``EnvelopeUpdated``, ``EnvelopeCompleted``,
     ``GrantsSnapshot``
@@ -640,7 +623,6 @@ class EventConsumer(Protocol):
 __all__ = [
     "ActionRolledBack",
     "ActionStateChange",
-    "CompressDone",
     "EnvelopeCompleted",
     "EnvelopeStarted",
     "EnvelopeUpdated",

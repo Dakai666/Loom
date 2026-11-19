@@ -157,8 +157,8 @@ class EpisodicMemory:
         """Mark the given entries as compressed (soft-delete).
 
         Preserves the original rows for audit and potential recovery; the
-        TTL prune in ``MemoryGovernor._prune_episodic_ttl`` eventually hard-
-        deletes them based on ``created_at``.
+        The automatic compression and TTL paths retired in S3 PR-D.
+        This primitive remains for legacy callers; runtime producers do not use it.
         """
         if not entry_ids:
             return 0

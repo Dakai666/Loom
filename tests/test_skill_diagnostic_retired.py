@@ -28,6 +28,7 @@ def isolated_registry():
 
 @pytest.mark.parametrize("module", [
     "loom.core.cognition.task_reflector", "loom.core.cognition.self_reflection",
+    "loom.core.cognition.counter_factual",
 ])
 def test_retired_modules_are_gone(module):
     with pytest.raises(ModuleNotFoundError):
@@ -36,11 +37,9 @@ def test_retired_modules_are_gone(module):
 
 def test_retired_public_surfaces_are_gone():
     from loom.autonomy import __all__ as autonomy_exports
-    from loom.core.cognition import counter_factual
     from loom.platform.cli.main import cli
 
     assert "run_self_reflection" not in autonomy_exports
-    assert not hasattr(counter_factual, "SkillEvolutionHook")
     assert not hasattr(LoomSession, "subscribe_diagnostic")
     assert "diagnostic" not in cli.commands
 

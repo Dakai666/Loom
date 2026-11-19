@@ -6,7 +6,7 @@ Contracts (docs/designs/58 §4):
 - keep = recent → milestone; let_go only undoes a keep this flow made
 - Hook G with the list on: prepared + still-valid only, silent when empty,
   never falls back to the old milestone top-3; Hook A stays independent
-- the attend tool's own trace never becomes compression input
+- automatic episodic compression is retired (see test_memory_producers_retired)
 """
 
 from datetime import UTC, datetime, timedelta
@@ -29,7 +29,6 @@ from loom.core.memory.pulse import (
 )
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
-from loom.core.session import records_episodic_trace
 from loom.platform.cli.tools import make_memory_attend_tool
 
 
@@ -279,9 +278,6 @@ async def test_tool_writes_and_shows_list_with_diff(mem):
     assert [i.key for i in await att.read()] == ["taste"]
 
 
-def test_attend_trace_is_not_compression_input():
-    assert records_episodic_trace("memory_attend") is False
-    assert records_episodic_trace("recall") is True
 
 
 # ── serialization with dream rewrites (Codex review on #637) ───────────────

@@ -254,30 +254,14 @@ reminder_after_turns = 10
 backend    = "sqlite"
 db_path    = "~/.loom/memory.db"
 
-# Episodic entries older than this are eligible for pruning.
-episodic_retention_days = 7
-
-# Skills whose EMA confidence drops below this are marked deprecated.
+# Historical SkillGenome confidence; model self-assessment is retired.
 skill_deprecation_threshold = 0.3
 
-# Routine episodic → semantic distillation (``compress_session``): mid-session
-# compaction, the Discord resume/daily passes, and the session-end pass.
-# Off by default since #650 S1 — past conversation is searched directly from
-# session_log by ``recall`` (and expanded with ``recall(ref=log:...)``), so
-# turning it into facts is no longer the only way to remember it. Kept for one
-# release as a way back; set true to restore the old behaviour.
-compress_session = false
-
-# Only used when compress_session = true.
-# Compress episodic → semantic after this many **uncompressed** entries
-# accumulate per session. Already-compressed rows are excluded from the count
-# and kept on disk (soft-delete) for audit and recovery — TTL prune eventually
-# clears them per ``episodic_retention_days``. The LLM compression pass caps
-# at 60 entries per batch, so values above ~55 will silently drop the oldest.
-# Lower values keep semantic memory fresher but shrink each batch, which can
-# hurt fact-extraction quality. 10 is fine for long-running Discord sessions,
-# 30 for short CLI sessions.
-episodic_compress_threshold = 30
+# #650 S3: session_log is the durable conversation/trace source.
+# Automatic session extraction, CounterFactual and episodic writes/TTL are retired.
+# Old compress_session, episodic_compress_threshold, episodic_retention_days and
+# governance.episodic_ttl_days settings are ignored; remove them when migrating.
+# Context-window management (_smart_compact and Discord /compact) remains active.
 
 # #650 S2: document collections that ``recall`` searches as documents — one
 # result per Markdown section (``#``–``###`` heading), ref
@@ -312,7 +296,6 @@ collections = { notes = "notes", journal = "autonomy/circadian/journal" }
 
 [memory.governance]
 admission_threshold       = 0.5    # composite score floor for admission
-episodic_ttl_days         = 30     # episodic rows older than this get pruned
 semantic_decay_threshold  = 0.1    # min effective_confidence to keep a fact
 dup_window_days           = 7      # lexical-dup lookback window (days)
 # semantic_dup_window_days = 90    # cap the embedding-dup lookback (days);
@@ -437,7 +420,7 @@ max_review_clusters = 40
 # The agent tracks three dimensions of its own behavior:
 #   tool_call          — per-tool success rate + latency
 #   context_layout     — token share across SOUL / Agent / messages layers
-#   memory_compression — episodic → semantic fact-yield ratio
+#   Historical memory_compression snapshots are explicit legacy reads only.
 #
 # Counters live in-memory; snapshots persist to the ``agent_telemetry``
 # table every ``persist_interval`` tool calls AND at session stop.
@@ -452,7 +435,7 @@ retention_days   = 30             # reserved for future decay — not yet active
 
 # Subset the default dimension set if you want a lighter-weight install.
 # Leave unset to enable all three.
-# dimensions = ["tool_call", "context_layout", "memory_compression"]
+# dimensions = ["tool_call", "context_layout"]
 
 # ─────────────────────────────────────────────
 # Session

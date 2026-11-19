@@ -14,10 +14,9 @@ v1 dimensions
                           reconstructed from the last real ``input_tokens``
                           (authoritative total) + char-weighted attribution
                           per layer
-- ``memory_compression`` — episodic entries compressed vs facts actually
-                           extracted; the fact-yield ratio is the proxy for
-                           whether ``compress_session`` is losing content
-                           to the LLM extractor or the admission gate
+
+Legacy memory_compression snapshots remain readable through an explicit
+agent_health request; the active tracker never records that dimension.
 
 Persistence layout
 ------------------
@@ -223,113 +222,6 @@ class ToolCallDimension(DimensionTracker):
         )
         worst_str = f" worst: {worst.tool_name} ({worst.failure_count}/{worst.total})" if worst else ""
         return f"tool_call failure rate {rate:.0%} over {total} calls.{worst_str}"
-
-
-# ── Dimension: memory_compression ─────────────────────────────────────────
-
-class MemoryCompressionDimension(DimensionTracker):
-    """Observes compress_session runs: how many entries went in, how many
-    facts came out, whether the yield ratio is healthy.
-
-    Backed by the soft-delete landed in #158 — when yield is low, operators
-    know the raw episodic trace is still on disk and can be re-mined.
-
-    Tool-event entries (``tool_call`` / ``tool_result``) are excluded from
-    the yield denominator (#173): they record operational side-effects, not
-    knowledge, so a low facts/entries ratio on a tool-heavy session is
-    semantically correct and shouldn't fire an anomaly.
-
-    No anomaly at all (2026-09-17): what remains in the denominator is only the
-    user messages of a batch — often ~3 — so yield swings 0%↔200% on noise and
-    the alert pushed false "facts are being lost" reminders into the agent's
-    context. The numbers stay available on demand via snapshot / detail.
-    """
-
-    name = "memory_compression"
-
-    def __init__(self) -> None:
-        self._runs: int = 0
-        self._entries_total: int = 0
-        self._tool_events_total: int = 0
-        self._facts_total: int = 0
-        # Window of recent yield ratios for anomaly detection
-        self._recent_yields: list[float] = []
-        self._last_at: str | None = None
-        # Runs that had no knowledge entries after filtering — tracked for
-        # visibility but excluded from the anomaly window.
-        self._skipped_runs: int = 0
-
-    def record(self, *, entries: int, facts: int, tool_events: int = 0) -> None:
-        self._runs += 1
-        self._entries_total += entries
-        self._tool_events_total += tool_events
-        self._facts_total += facts
-        knowledge_entries = entries - tool_events
-        if knowledge_entries > 0:
-            self._recent_yields.append(facts / knowledge_entries)
-            # Keep the window bounded — rolling average over last 10 runs
-            if len(self._recent_yields) > 10:
-                self._recent_yields.pop(0)
-        else:
-            self._skipped_runs += 1
-        self._last_at = datetime.now(UTC).isoformat()
-
-    @property
-    def knowledge_entries_total(self) -> int:
-        return max(self._entries_total - self._tool_events_total, 0)
-
-    @property
-    def overall_yield(self) -> float:
-        denom = self.knowledge_entries_total
-        return self._facts_total / denom if denom > 0 else 0.0
-
-    @property
-    def recent_yield(self) -> float:
-        if not self._recent_yields:
-            return 0.0
-        return sum(self._recent_yields) / len(self._recent_yields)
-
-    # ── DimensionTracker ──────────────────────────────────────────
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "runs": self._runs,
-            "entries_total": self._entries_total,
-            "tool_events_total": self._tool_events_total,
-            "knowledge_entries_total": self.knowledge_entries_total,
-            "facts_total": self._facts_total,
-            "overall_yield": round(self.overall_yield, 3),
-            "recent_yields": [round(y, 3) for y in self._recent_yields],
-            "skipped_runs": self._skipped_runs,
-            "last_at": self._last_at,
-        }
-
-    def render_summary(self) -> str:
-        if self._runs == 0:
-            return "compress: (not run)"
-        return (
-            f"compress:{self.overall_yield:.0%} yield "
-            f"({self._facts_total}/{self.knowledge_entries_total}, n={self._runs})"
-        )
-
-    def render_detail(self) -> str:
-        if self._runs == 0:
-            return "memory_compression: no runs this session."
-        lines = [
-            "## memory_compression",
-            f"- runs: {self._runs}",
-            f"- entries processed: {self._entries_total}",
-            f"- tool events filtered: {self._tool_events_total}",
-            f"- knowledge entries: {self.knowledge_entries_total}",
-            f"- facts extracted: {self._facts_total}",
-            f"- overall yield: {self.overall_yield:.2%}",
-            f"- recent yield (last {len(self._recent_yields)} runs): "
-            f"{self.recent_yield:.2%}",
-        ]
-        if self._skipped_runs:
-            lines.append(
-                f"- runs skipped (tool-only, no knowledge entries): {self._skipped_runs}"
-            )
-        return "\n".join(lines)
 
 
 # ── Dimension: context_layout ─────────────────────────────────────────────
@@ -602,7 +494,7 @@ class LoadedSkillsDimension(DimensionTracker):
 # ── Aggregator ────────────────────────────────────────────────────────────
 
 #: Default v1 dimension set. Overridable via ``loom.toml [telemetry].dimensions``.
-DEFAULT_DIMENSIONS = ("tool_call", "context_layout", "memory_compression", "runtime_identity", "context_budget", "session_turns", "loaded_skills")
+DEFAULT_DIMENSIONS = ("tool_call", "context_layout", "runtime_identity", "context_budget", "session_turns", "loaded_skills")
 
 
 def _build_dimension(name: str, **kwargs: Any) -> DimensionTracker | None:
@@ -614,7 +506,8 @@ def _build_dimension(name: str, **kwargs: Any) -> DimensionTracker | None:
     if name == "context_layout":
         return ContextLayoutDimension(**kwargs)
     if name == "memory_compression":
-        return MemoryCompressionDimension()
+        logger.warning("S3 PR-D: telemetry memory_compression is retired and ignored; stored snapshots remain readable.")
+        return None
     if name == "runtime_identity":
         return RuntimeIdentityDimension()
     if name == "context_budget":
@@ -711,6 +604,19 @@ class AgentTelemetryTracker:
         await self._db.commit()
         self._dirty = False
         self._event_count = 0
+
+    async def legacy_compression_report(self) -> str:
+        """Read stored legacy snapshots only; never create a live dimension."""
+        cursor = await self._db.execute(
+            "SELECT session_id, payload, updated_at FROM agent_telemetry "
+            "WHERE dimension='memory_compression' ORDER BY updated_at DESC LIMIT 10"
+        )
+        rows = await cursor.fetchall()
+        lines = ["memory_compression — legacy stored snapshots (no new samples)"]
+        lines.extend(f"- {sid} [{at}]: {payload}" for sid, payload, at in rows)
+        if not rows:
+            lines.append("No stored legacy snapshots.")
+        return "\n".join(lines)
 
     async def load_prior(self) -> None:
         """Reserved for future cross-session reporting — current dimensions

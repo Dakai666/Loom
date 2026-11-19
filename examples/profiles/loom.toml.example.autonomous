@@ -46,17 +46,14 @@ default_tier         = 1
 reminder_after_turns = 10
 
 [memory]
+# #650 S3: session_log replaces episodic producers; automatic extraction/TTL retired.
 backend                     = "sqlite"
 db_path                     = "~/.loom/memory.db"
-episodic_retention_days     = 7
 skill_deprecation_threshold = 0.3
 
-# PROFILE: 自主運行 session 通常很長 —— 提早 compress
-episodic_compress_threshold = 10
 
 [memory.governance]
 admission_threshold      = 0.5
-episodic_ttl_days        = 30
 semantic_decay_threshold = 0.1
 dup_window_days          = 7
 dup_lookback_limit       = 500

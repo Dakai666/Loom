@@ -2,7 +2,7 @@
 
 Covers the LoomApp.show_transient_hint primitive: dedup, severity gating,
 expiry-driven auto-clear, and the master config toggle. Trigger wiring
-in main.py (TierChanged / CompressDone / context-budget / turn-milestone)
+in main.py (TierChanged / context-budget / turn-milestone)
 is verified end-to-end via the existing integration tests; here we focus
 on the primitive's contract.
 """

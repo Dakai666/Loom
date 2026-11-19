@@ -1,3 +1,5 @@
+> **#650 S3 PR-D 退役註記（2026-11-19）**：本文件保留歷史設計與量測，不代表現行 producer。Loom Agent 已移除 `compress_session`／`_compact_memory`、turn-end subscriber、Discord daily/resume 記憶提煉、`CompressDone` 與整條 `CounterFactualReflector`；停止 parent/child episodic 寫入及 TTL，但保留 `episodic_entries` 與既有資料，不 backfill。`session_log` 是經歷來源，PR-B 的明確標記 legacy fallback 保留，未知 outcome 不視為失敗。舊 `memory_compression` snapshots 可明確讀取，不再產生新資料；tool_call metrics、semantic lifecycle、ledger、manual memorize/relate、`_smart_compact` 與 Discord `/compact` 保留。舊 extraction/TTL config 無法恢復 producer；既有 `session:` facts/stubs 不清理。回滾只能恢復未來寫入，停寫期間不能重播補回。
+
 # AgentLedger 設計文件 — Quest B Phase 1
 
 > **狀態**：Phase 1 設計鎖定（2026-05-08）

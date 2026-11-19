@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import hashlib
 import os
 import time
 import uuid
@@ -67,7 +66,6 @@ from loom.core.cognition.responses_policy import (
 )
 from loom.core.cognition import vision as _vision
 from loom.core.cognition.responses_sse import ResponsesProviderError
-from loom.core.cognition.counter_factual import CounterFactualReflector
 from loom.core.cognition.judge import (
     JudgeVerdict,
     build_trace_digest,
@@ -83,7 +81,6 @@ from loom.core.timezone import user_timestamp  # Issue #124
 from loom.core.events import (
     ActionRolledBack,
     ActionStateChange,
-    CompressDone,
     EnvelopeCompleted,
     EnvelopeStarted,
     EnvelopeUpdated,
@@ -121,7 +118,7 @@ from loom.core.harness.validation import SchemaValidationMiddleware
 from loom.core.infra import AbortController, wait_aborted
 from loom.core.infra.telemetry import AgentTelemetryTracker, DEFAULT_DIMENSIONS
 from loom.core.memory.embeddings import build_embedding_provider
-from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
+from loom.core.memory.episodic import EpisodicMemory
 from loom.core.memory.governance import MemoryGovernor
 from loom.core.memory.index import MemoryIndex, MemoryIndexer, SkillCatalogEntry
 from loom.core.memory.procedural import ProceduralMemory
@@ -167,43 +164,8 @@ logger = logging.getLogger(__name__)
 _MAX_SMART_COMPACT_PASSES = 3
 
 # ---------------------------------------------------------------------------
-# Session compression (episodic → semantic)
+# Context-window compaction (preserved)
 # ---------------------------------------------------------------------------
-
-COMPRESS_BATCH_SIZE = 60
-
-COMPRESS_PROMPT = """\
-Below are tool calls from an agent session.
-Extract 0-7 reusable INSIGHTS that would be valuable in future sessions.
-
-Three tiers of session content — only the middle tier belongs in semantic memory:
-
-  1. OPERATIONAL TRACE (do NOT emit): step-by-step records of what happened
-     this session — "ran tool X with args Y", "called Z before W", "diary
-     write succeeded after list_dir". These are SOPs for *this* run; the
-     episodic log already keeps them.
-
-  2. INSIGHT (EMIT as FACT): durable, reusable knowledge that future sessions
-     would benefit from — non-obvious user preferences, project facts that
-     survive across sessions, lessons learned from failures, conceptual
-     understanding. Should still be true and useful next week.
-
-  3. SNAPSHOT (do NOT emit here): in-progress work state, current TODO,
-     "next we should do X". That belongs in pursuit trackers, not semantic.
-
-Quality bar: if a fact reads like "always do X before Y in this kind of
-operation", that's almost always tier 1 (operational), not tier 2. Insights
-are about *what is true*, not *what procedure to follow*.
-
-It is fine to emit 0 facts if the session contains no genuine insights.
-Do NOT pad to reach a minimum count.
-
-Format each insight on its own line starting with "FACT: ".
-IMPORTANT: Write every FACT in the same language as the session content below.
-
-Session log:
-{log}
-"""
 
 COMPACT_PROMPT = """\
 You are summarizing an AI assistant conversation for context compression.
@@ -217,148 +179,6 @@ Include:
 
 Output as flowing prose. Be dense and accurate. Do not include any preamble.
 """
-
-
-def _session_fact_key(session_id: str, ts: str, fact: str) -> str:
-    """Content-addressed key for a single session-compression fact.
-
-    The leaf is a hash of the fact *content*, not a positional index. This
-    makes re-compression idempotent: the same fact always maps to the same
-    key, so a second pass over the same session (e.g. a background
-    compaction in-flight while ``stop()`` runs its own compress, both
-    landing in the same second and thus sharing ``ts``) no longer collides
-    slot-by-slot. Identical facts coincide on an identical key *and* value
-    (a no-op upsert); distinct facts get distinct keys.
-
-    Root cause of the drain-supersede false-positive chain (pursuit
-    ``drain-supersede-fp-tracking``, 11 logged events): positional
-    ``fact:<i>`` keys plus a second-resolution ``ts`` turned a shifted
-    re-extraction (the admission gate drops facts the first pass already
-    wrote, shifting the remainder up one slot) into N spurious tier-1
-    ``supersede`` contradictions — each slot's old value equalled the
-    previous slot's new value, the "off-by-one chain".
-
-    The first three segments (``session:<id>:<ts>``) are unchanged, so
-    ``contradiction.is_session_sibling`` grouping still holds.
-    """
-    digest = hashlib.sha1(fact.encode("utf-8")).hexdigest()[:12]
-    return f"session:{session_id}:{ts}:fact:{digest}"
-
-
-# Tools whose trace never enters the episodic log, so session compression
-# can't turn them into new semantic facts. ``memory_attend`` is the agent
-# curating its own memory — the list is already the durable record, and a
-# fact like "I prepared X" would be the operational trace COMPRESS_PROMPT
-# tier 1 forbids, re-entering the corpus as raw material (#635 §4.1).
-_EPISODIC_EXCLUDED_TOOLS = frozenset({"memory_attend"})
-
-
-def records_episodic_trace(tool_name: str) -> bool:
-    return tool_name not in _EPISODIC_EXCLUDED_TOOLS
-
-
-async def compress_session(
-    session_id: str,
-    episodic: EpisodicMemory,
-    semantic: SemanticMemory,
-    router: LLMRouter,
-    model: str,
-    *,
-    governor: "MemoryGovernor | None" = None,
-    telemetry: "AgentTelemetryTracker | None" = None,
-) -> int:
-    """Compress unprocessed episodic entries to semantic facts.
-
-    Uses a timestamp in the semantic key so repeated compressions (mid-session
-    and on close) never overwrite each other. Processed entries are **soft-
-    deleted** via ``mark_compressed`` rather than removed, so the original
-    trace remains available for audit and recovery until TTL prune aged
-    them out (``MemoryGovernor._prune_episodic_ttl``).
-
-    When a MemoryGovernor is provided, candidate facts are filtered through
-    the admission gate before being written to semantic memory (Issue #43).
-    """
-    entries = await episodic.read_session(session_id, uncompressed_only=True)
-    if not entries:
-        return 0
-    # One LLM call reads at most this many entries; the rest stay uncompressed
-    # and are picked up by the next trigger rather than marked unread.
-    entries = entries[:COMPRESS_BATCH_SIZE]
-
-    log_text = "\n".join(f"[{e.event_type}] {e.content}" for e in entries)
-
-    response = await router.chat(
-        model=model,
-        messages=[{"role": "user", "content": COMPRESS_PROMPT.format(log=log_text)}],
-        max_tokens=1024,
-    )
-
-    raw = response.text or ""
-    # Issue #411 review: the old "no FACT: prefix → use raw text as one fact"
-    # fallback turned compliant zero-insight responses ("No reusable
-    # insights found.") into admissible semantic facts. With COMPRESS_PROMPT
-    # now explicitly permitting 0 facts, that fallback is actively harmful —
-    # any response without a FACT: prefix is treated as the model declaring
-    # zero insights.
-    facts = [
-        line[len("FACT:") :].strip()
-        for line in raw.splitlines()
-        if line.strip().startswith("FACT:")
-    ]
-
-    # Issue #43: Admission gate — filter facts through governance
-    if governor is not None and facts:
-        admission_results = await governor.evaluate_admission(
-            facts, source=f"session:{session_id}",
-        )
-        facts = [r.fact for r in admission_results if r.admitted]
-
-    # Timestamp groups one compression's facts under a shared provenance
-    # prefix; the per-fact leaf is content-addressed (see _session_fact_key)
-    # so a repeated/concurrent compression in the same second is idempotent
-    # rather than a chain of false tier-1 supersede contradictions.
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    source = f"session:{session_id}"
-    for fact in facts:
-        entry = SemanticEntry(
-            key=_session_fact_key(session_id, ts, fact),
-            value=fact,
-            confidence=0.8,
-            source=source,
-        )
-        if governor is not None:
-            await governor.governed_upsert(entry)
-        else:
-            await semantic.upsert(entry)
-
-    # Soft-delete: mark every entry we sent to the LLM as compressed,
-    # regardless of whether facts survived parsing + admission. Previously
-    # this only ran when ``facts`` was non-empty, which meant duplicate-heavy
-    # or zero-insight sessions kept re-paying the LLM cost on every trigger
-    # (issue #411 review). The episodic rows are soft-deleted, not removed,
-    # so audit + recovery still work via TTL-bounded retention.
-    await episodic.mark_compressed([e.id for e in entries])
-
-    # Issue #142: record the yield ratio so a silently degrading extractor
-    # (facts << entries) surfaces as an anomaly on the next turn boundary.
-    # Issue #173: exclude tool_call/tool_result entries from the denominator —
-    # they describe operations, not knowledge, so their inclusion produced a
-    # permanent false-positive low-yield alert on tool-heavy sessions.
-    if telemetry is not None:
-        dim = telemetry.get("memory_compression")
-        if dim is not None:
-            tool_events = sum(
-                1 for e in entries
-                if e.event_type in ("tool_call", "tool_result")
-            )
-            dim.record(
-                entries=len(entries),
-                facts=len(facts),
-                tool_events=tool_events,
-            )
-            telemetry.mark_dirty()
-
-    return len(facts)
 
 
 # ---------------------------------------------------------------------------
@@ -750,16 +570,14 @@ class LoomSession:
         # Build prompt stack from loom.toml [identity] config
         config = _load_loom_config()
         self._stack = PromptStack.from_config(config)
-        self._episodic_compress_threshold: int = (
-            config.get("memory", {}).get("episodic_compress_threshold", 30)
-        )
-        # #650 S1: session_log is searchable raw experience now, so the
-        # routine episodic→semantic distillation (≈71% of semantic facts) is
-        # off by default. Kept behind this switch for one release as a way
-        # back; the code itself retires in S3.
-        self._compress_session_enabled: bool = bool(
-            config.get("memory", {}).get("compress_session", False)
-        )
+        memory_cfg = config.get("memory", {})
+        retired = [f"memory.{key}" for key in (
+            "compress_session", "episodic_compress_threshold", "episodic_retention_days",
+        ) if key in memory_cfg]
+        if "episodic_ttl_days" in memory_cfg.get("governance", {}):
+            retired.append("memory.governance.episodic_ttl_days")
+        if retired:
+            logger.warning("S3 PR-D: retired memory producer settings ignored; remove %s", ", ".join(retired))
         # Issue #181: cache the whole config so ``output_max_tokens`` resolves
         # cheaply on every LLM call, and responds live to ``set_model``.
         self._loom_config: dict = config
@@ -857,20 +675,6 @@ class LoomSession:
         # In-flight judge background tasks — kept so stop() can cancel them
         # cleanly and so a single turn can't fire judge twice.
         self._judge_tasks: set[asyncio.Task] = set()
-        # #336 — memory compaction subscriber. The inline trigger from
-        # stream_turn is replaced by a background task that subscribes
-        # to ledger ``turn_end`` events. _compaction_lock serialises
-        # concurrent runs (rare but possible when turn_end events
-        # arrive faster than the LLM call inside compress_session can
-        # finish). _pending_compactions buffers CompressDone events
-        # for the next stream_turn to yield; if the session ends
-        # before that yield, the signal is lost — which mirrors the
-        # old inline behaviour when the turn that triggered compaction
-        # was itself the last one.
-        self._compaction_lock: asyncio.Lock = asyncio.Lock()
-        self._pending_compactions: list[CompressDone] = []
-        self._compaction_task: asyncio.Task | None = None
-
         self.registry = ToolRegistry()
         # Issue #154: JobStore + Scratchpad must exist before tools that may
         # submit to them (run_bash, fetch_url). Session-scoped, in-memory,
@@ -924,7 +728,6 @@ class LoomSession:
         # All memory access now flows through ``self._memory`` (built in start()).
         self._memory: MemoryFacade | None = None
         self._reflection: ReflectionAPI | None = None
-        self._reflector: CounterFactualReflector | None = None
         self._pipeline: MiddlewarePipeline | None = None
         # Issue #213: result of the last StartupDiagnostic.run_all() call.
         # Populated at the end of start(); platforms (CLI/TUI/Discord) and
@@ -1087,10 +890,6 @@ class LoomSession:
                     "Relational embedding backfill failed (will retry next "
                     "session start): %s", exc,
                 )
-        # Issue #147 Phase C.1: ReflectionAPI / CounterFactualReflector
-        # now take the MemoryFacade. They are constructed below, after
-        # ``self._memory`` is built (search "Phase C.1: facade-aware
-        # cognition wiring" in this file).
         self._session_log = SessionLog(self._db)
 
         # Issue #43: Memory Governance — always-on
@@ -1143,23 +942,6 @@ class LoomSession:
                 self._ledger_store = None
                 self._ledger_emitter = None
                 self._envelope_projector = None
-
-        # #336 — start the memory compaction subscriber. Bound to the
-        # ledger; if ledger init failed above, no subscriber spawns and
-        # compaction never fires (which matches Discord-without-ledger
-        # mode's existing behaviour for envelope projection).
-        #
-        # Spawning here (before facade build below) is safe even though
-        # ``_run_compaction_check`` reaches into ``self._memory``: the
-        # subscriber blocks on ``turn_end`` events, which only fire
-        # from inside ``stream_turn``. ``stream_turn`` is only called
-        # after ``start()`` returns, by which point the facade has been
-        # built. (#346 review S1.)
-        if self._ledger_store is not None:
-            self._compaction_task = asyncio.create_task(
-                self._compaction_subscriber_loop(),
-                name=f"memory_compaction:{self.session_id}",
-            )
 
         # Issue #147 Phase C: build the facade up-front so every later step
         # in start() (auto-import, MemoryIndexer, tool registration, etc.)
@@ -1296,17 +1078,7 @@ class LoomSession:
             self._attention = AttentionList(self._db, self._memory.semantic)
             self.registry.register(make_memory_attend_tool(self._attention))
 
-        # Issue #147 Phase C.1: facade-aware cognition wiring.
-        # ReflectionAPI / CounterFactualReflector previously took
-        # discrete subsystems; they now take the facade so the
-        # construction site no longer reaches into ``self._semantic``
-        # etc.
         self._reflection = ReflectionAPI(self._memory)
-        self._reflector = CounterFactualReflector(
-            router=self.router,
-            model=self.model,
-            memory=self._memory,
-        )
 
         # Issue #149: dream_cycle / memory_prune are now first-class memory
         # tools (formerly DreamingPlugin). Wired with dependency injection
@@ -1734,23 +1506,6 @@ class LoomSession:
             for _t in list(self._judge_tasks):
                 _t.cancel()
             self._judge_tasks.clear()
-        # #336 — cancel the compaction subscriber loop. Same rationale
-        # as judge tasks: a torn-down router / governor / facade must
-        # not have a background task still trying to call into them.
-        if self._compaction_task is not None:
-            self._compaction_task.cancel()
-            try:
-                await self._compaction_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # Subscriber loop has its own outer except Exception,
-                # so this branch should never fire. If it does, surface
-                # the trace rather than silently swallow. (#346 review N2.)
-                logger.exception(
-                    "memory compaction subscriber raised during shutdown"
-                )
-            self._compaction_task = None
         if hasattr(self, "_scratchpad"):
             self._scratchpad.clear()
         # Issue #64: unmount all skill-declared checks before closing
@@ -1761,39 +1516,10 @@ class LoomSession:
         db, self._db = self._db, None
         db_ctx, self._db_ctx = self._db_ctx, None
         # ── Session shutdown: each step is independently guarded ──────
-        # Issue #133: the previous monolithic try/except silently swallowed
-        # all errors — a failure in compress_session would also prevent
-        # session log update, evolution analysis, and decay from running.
         # Alias for concise health recording
         _health = self._governor.health if self._governor else None
 
         try:
-            # Step 1: Compress session into semantic memory — off by default
-            # since #650 S1 ([memory] compress_session).
-            if self._compress_session_enabled:
-                try:
-                    console.print(Rule("[dim]Compressing session to memory…[/dim]"))
-                    count = await compress_session(
-                        self.session_id,
-                        self._memory.episodic,
-                        self._memory.semantic,
-                        self.router,
-                        self.model,
-                        governor=self._governor,
-                        telemetry=self._telemetry,
-                    )
-                    if count:
-                        console.print(f"[dim]  Saved {count} fact(s) to semantic memory.[/dim]")
-                    if _health:
-                        _health.record_success("session_compress")
-                except Exception as exc:
-                    logger.error(
-                        "Session compress failed — episodic→semantic transfer lost: %s",
-                        exc, exc_info=True,
-                    )
-                    if _health:
-                        _health.record_failure("session_compress", str(exc))
-
             # Step 3: Memory decay cycle (Issue #43)
             if self._governor is not None:
                 try:
@@ -1801,8 +1527,7 @@ class LoomSession:
                     if decay.total_pruned > 0:
                         console.print(
                             f"[dim]  Decayed {decay.total_pruned} stale entries "
-                            f"(semantic={decay.semantic_pruned}, "
-                            f"episodic={decay.episodic_pruned}).[/dim]"
+                            f"(semantic={decay.semantic_pruned}).[/dim]"
                         )
                     if _health:
                         _health.record_success("decay_cycle")
@@ -1983,15 +1708,6 @@ class LoomSession:
         try:
             self._current_origin = origin
 
-            # #336 — surface CompressDone events buffered by the
-            # compaction subscriber from the previous turn. Yielded
-            # before any other turn-level events so Discord shows the
-            # status message at the natural turn boundary.
-            if self._pending_compactions:
-                for _ev in self._pending_compactions:
-                    yield _ev
-                self._pending_compactions.clear()
-
             # Issue #131: Reset abort signal from previous turn so the session
             # is not permanently stuck after a circuit-breaker trip.
             self._abort.reset()
@@ -2082,14 +1798,6 @@ class LoomSession:
             self._pending_verdicts.clear()
             self._pending_pulses.clear()
 
-
-            await self._memory.episodic.write(
-                EpisodicEntry(
-                    session_id=self.session_id,
-                    event_type="message",
-                    content=f"User: {user_input[:200]}",
-                )
-            )
 
             # Sanitize first so _smart_compact never sees orphaned tool_call sequences.
             # (Restart or mid-turn cancel can leave the assistant message in DB without
@@ -2515,14 +2223,6 @@ class LoomSession:
 
                     # #675: release turn-local skill activations before TurnDone
                     self._clear_turn_skill_activations()
-
-                    # #336 — mid-session episodic compaction was previously
-                    # an inline ``ep_count >= threshold`` check here. The
-                    # trigger is now ``_compaction_subscriber_loop``, fed
-                    # by ledger ``turn_end`` events. ``CompressDone`` lands
-                    # in ``self._pending_compactions`` and surfaces at the
-                    # start of the next stream_turn; this turn's TurnDone
-                    # no longer waits on the LLM compaction call.
 
                     self._last_think = "".join(_think_parts).strip()
                     _tier_hint = self._tick_tier_counter()
@@ -4117,113 +3817,6 @@ class LoomSession:
         except Exception:
             logger.exception("ledger thought emit failed; continuing")
 
-    # ------------------------------------------------------------------
-    # #336 — memory compaction subscriber (doc/53 §6.4 push pattern)
-    # ------------------------------------------------------------------
-
-    async def _compact_memory(self, *, force: bool = False) -> None:
-        """Run one episodic-to-semantic compaction pass.
-
-        The caller owns ``_compaction_lock``. ``force=True`` skips the
-        configured threshold gate but still avoids a no-op LLM call when
-        there are no uncompressed episodic rows.
-        """
-        if not self._compress_session_enabled:
-            return  # #650 S1: off by default ([memory] compress_session)
-        ep_count = await self._memory.episodic.count_session(
-            self.session_id, uncompressed_only=True,
-        )
-        if ep_count <= 0:
-            return
-        if not force and ep_count < self._episodic_compress_threshold:
-            return
-        fact_count = await compress_session(
-            self.session_id,
-            self._memory.episodic, self._memory.semantic,
-            self.router, self.model,
-            governor=self._governor,
-            telemetry=self._telemetry,
-        )
-        if fact_count:
-            self._pending_compactions.append(
-                CompressDone(fact_count=fact_count)
-            )
-        # Rebuild MemoryIndex so long-running sessions (Discord)
-        # see updated fact/anti-pattern counts without restarting.
-        await self._refresh_memory_index()
-
-    async def _run_compaction_check(self) -> None:
-        """One pass of the threshold-driven compaction logic.
-
-        Extracted from the prior inline trigger in ``stream_turn``.
-        Behaviour is unchanged: count uncompressed episodic rows, run
-        ``compress_session`` if past threshold, refresh the memory
-        index. The CompressDone signal is appended to
-        ``_pending_compactions`` so the next ``stream_turn`` yields
-        it for Discord/CLI consumers; if no next turn fires, the
-        signal is lost — same as before #336 for late-turn triggers.
-
-        Race contract: a new turn writing fresh episodic entries
-        during this call is safe — ``compress_session`` reads a
-        snapshot up front, marks only that snapshot at the end.
-        Concurrent compaction runs are blocked by ``_compaction_lock``.
-        """
-        try:
-            async with self._compaction_lock:
-                await self._compact_memory(force=False)
-        except Exception:
-            logger.exception(
-                "memory compaction subscriber: compress_session failed; "
-                "continuing"
-            )
-
-    async def force_compact(self) -> None:
-        """Force one compaction pass, bypassing the episodic count threshold.
-
-        Used by long-running platform frontends as a safety net for idle
-        sessions. The implementation intentionally shares the same lock,
-        compression path, pending ``CompressDone`` buffer, and memory-index
-        refresh as the turn-driven subscriber.
-        """
-        try:
-            async with self._compaction_lock:
-                await self._compact_memory(force=True)
-        except Exception:
-            logger.exception(
-                "memory force_compact: compress_session failed; continuing"
-            )
-
-    async def _compaction_subscriber_loop(self) -> None:
-        """Background task: subscribe to ``turn_end`` events for this
-        session and trigger compaction. Runs for the lifetime of the
-        session; cancelled by ``stop()`` alongside other background
-        tasks.
-
-        Subscribing rather than polling means compaction is decoupled
-        from stream_turn's hot path: the turn returns immediately
-        after ``turn_end`` is emitted, and the LLM compaction call
-        happens off the user-visible timeline.
-        """
-        if self._ledger_store is None:
-            return
-        try:
-            async with self._ledger_store.subscribe(
-                event_types=["turn_end"],
-                session_id=self.session_id,
-            ) as subscriber:
-                async for _event in subscriber:
-                    # Serialise concurrent runs. If a turn_end fires
-                    # while the previous compaction is still mid-LLM,
-                    # the second attempt waits rather than running in
-                    # parallel and double-writing semantic facts.
-                    await self._run_compaction_check()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "memory compaction subscriber loop crashed; will not restart"
-            )
-
     async def _on_trace(self, call: ToolCall, result: ToolResult) -> None:
         # #334 / doc/53 §3.3 — feed the per-turn artifact size accumulator
         # so the "artifact > 10 KB" thought capture signal actually fires.
@@ -4236,41 +3829,6 @@ class LoomSession:
             if size > self._turn_artifact_max_size:
                 self._turn_artifact_max_size = size
 
-        summary = (
-            f"Tool '{call.tool_name}' "
-            f"({'ok' if result.success else 'failed'}, "
-            f"{result.duration_ms:.0f}ms)"
-        )
-        if result.error:
-            summary += f" — {result.error}"
-        elif result.output and isinstance(result.output, str):
-            summary += f" → {result.output[:120].replace(chr(10), ' ')}"
-
-        meta: dict[str, Any] = {
-            "tool_name": call.tool_name,
-            "success": result.success,
-            "duration_ms": result.duration_ms,
-        }
-        if result.failure_type:
-            meta["failure_type"] = result.failure_type
-        if records_episodic_trace(call.tool_name):
-            await self._memory.episodic.write(
-                EpisodicEntry(
-                    session_id=self.session_id,
-                    event_type="tool_result",
-                    content=summary,
-                    metadata=meta,
-                )
-            )
-
-        # Counter-factual reflection: fire-and-forget for execution_error failures.
-        # Only triggers when a SkillGenome exists for the tool (checked inside reflector).
-        if (
-            self._reflector is not None
-            and not result.success
-            and result.failure_type == "execution_error"
-        ):
-            self._reflector.maybe_reflect(call, result, self.session_id)
 
     async def _on_lifecycle(self, record: ActionRecord) -> None:
         """
@@ -4768,9 +4326,8 @@ class LoomSession:
         """
         Rebuild MemoryIndex and update the system prompt in-place.
 
-        Called after mid-session episodic compression so long-running sessions
-        (e.g. Discord bots that never restart) see fresh fact/anti-pattern counts
-        without waiting for the next session start.
+        Explicit refresh hook for long-running sessions to see current
+        fact/anti-pattern counts without waiting for the next session start.
 
         Replaces the ``memory_index`` section wholesale (Issue #597).  The
         old sentinel-based splice stopped at the hint lines and left the
@@ -4973,12 +4530,10 @@ class LoomSession:
 __all__ = [
     "LoomSession",
     "build_router",
-    "compress_session",
     "_load_loom_config",
     "_load_env",
     "_parse_skill_frontmatter",
     "_resolve_output_max_tokens",
-    "COMPRESS_PROMPT",
     "COMPACT_PROMPT",
 ]
 
@@ -5176,4 +4731,3 @@ def _detect_vision_paths_in_text(user_input: str, base_dir=None) -> list:
         except _vision.VisionInputError:
             continue
     return images
-
