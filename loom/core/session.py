@@ -602,11 +602,10 @@ class LoomSession:
         _harness_cfg = config.get("harness", {})
         _strict_sandbox: bool = _harness_cfg.get("strict_sandbox", False)
         self._strict_sandbox = _strict_sandbox
-        # Issue #197: JIT spill threshold for tool outputs. Tokens × 4 ≈
-        # chars; 2000 tokens ≈ 8000 chars is conservative — most tool
-        # outputs stay inline. 0 disables spilling entirely.
-        _jit_tokens: int = int(_harness_cfg.get("jit_spill_threshold_tokens", 2000))
-        self._jit_threshold_chars = max(0, _jit_tokens) * 4
+        if "jit_spill_threshold_tokens" in _harness_cfg:
+            logger.warning(
+                "[harness] jit_spill_threshold_tokens is retired and ignored; JIT uses a fixed 24000-character threshold."
+            )
         # Issue #197 Phase 2: mask tool observations older than N turns.
         # 20 = balance for deep-research tasks (15+ turns of fetch_url
         # collection followed by synthesis). 0 disables masking. JIT
@@ -1349,7 +1348,6 @@ class LoomSession:
                 JITRetrievalMiddleware(
                     scratchpad=self._scratchpad,
                     registry=self.registry,
-                    threshold_chars=self._jit_threshold_chars,
                 ),
                 LifecycleMiddleware(
                     registry=self.registry,
@@ -3000,17 +2998,6 @@ class LoomSession:
         top — it never causes data loss, only changes inline visibility.
         Scratchpad write failures gracefully degrade (keep inline).
 
-        **Scratchpad ref prefix conventions** (canonical list lives in
-        ``loom/platform/cli/tools.py:_categorize_scratchpad_refs``):
-
-        - ``auto_<tool>_<id>``          → JIT spill (Phase 1)
-        - ``masked_<tool>_<id>``        → this method (Phase 2)
-        - ``subagent_failure:<id>``     → sub-agent failure trace (#192)
-
-        Both the ``auto_`` and ``masked_`` prefixes are tool-output caches
-        an agent can read back via ``scratchpad_read``. The
-        ``scratchpad_read`` tool's listing groups refs by these prefixes so
-        the agent can scan its own folded state.
         """
         if self._mask_age_turns <= 0:
             return

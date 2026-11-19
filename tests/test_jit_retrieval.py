@@ -1,354 +1,138 @@
-"""
-Tests for JITRetrievalMiddleware (Issue #197 Phase 1).
+"""Fixed JIT threshold, bounded preview, and existing preservation contracts."""
 
-The middleware spills large tool outputs to scratchpad and replaces the
-inline output with a structured placeholder. These tests cover the
-threshold logic, opt-out via inline_only, async-mode passthrough,
-graceful degradation on scratchpad failures, and placeholder shape.
-"""
-
-from __future__ import annotations
+import hashlib
+from unittest.mock import MagicMock
 
 import pytest
 
-from loom.core.harness.middleware import (
-    JITRetrievalMiddleware,
-    MiddlewarePipeline,
-    ToolCall,
-    ToolResult,
-)
+from loom.core.harness.middleware import JITRetrievalMiddleware, ToolCall, ToolResult
 from loom.core.harness.permissions import TrustLevel
-from loom.core.harness.registry import ToolDefinition, ToolRegistry
-from loom.core.jobs.scratchpad import Scratchpad
+from loom.core.harness.registry import ToolRegistry
+from loom.core.jobs import Scratchpad
 
 
-def _call(tool_name: str = "fetch_url") -> ToolCall:
+def _call(name="test"):
     return ToolCall(
-        id="c1", tool_name=tool_name, args={},
-        trust_level=TrustLevel.SAFE, session_id="s",
+        id="c", tool_name=name, args={}, trust_level=TrustLevel.SAFE, session_id="s"
     )
 
 
-def _make_registry(*tools: ToolDefinition) -> ToolRegistry:
-    reg = ToolRegistry()
-    for t in tools:
-        reg.register(t)
-    return reg
-
-
-def _make_tool(
-    name: str, *,
-    inline_only: bool = False,
-    spill_threshold_chars: int | None = None,
-) -> ToolDefinition:
-    async def _executor(call: ToolCall) -> ToolResult:
+async def _run(pad, text, *, registry=None, metadata=None, success=True, name="test"):
+    async def inner(c):
         return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=True, output="placeholder — overridden in tests",
+            call_id=c.id,
+            tool_name=c.tool_name,
+            success=success,
+            output=text,
+            metadata=metadata or {},
+            error="failure" if not success else None,
+            failure_type="execution_error" if not success else None,
+            duration_ms=42,
+            error_context="stack trace" if not success else None,
         )
-    return ToolDefinition(
-        name=name, description="", input_schema={},
-        executor=_executor, trust_level=TrustLevel.SAFE,
-        inline_only=inline_only,
-        spill_threshold_chars=spill_threshold_chars,
+
+    return await JITRetrievalMiddleware(pad, registry).process(_call(name), inner)
+
+
+@pytest.mark.parametrize(
+    "size,spilled", [(8001, False), (23999, False), (24000, False), (24001, True)]
+)
+async def test_real_threshold_boundary(size, spilled):
+    pad = Scratchpad()
+    text = "x" * size
+    result = await _run(pad, text)
+    assert bool(result.metadata.get("jit_spilled")) is spilled
+    if spilled:
+        ref = result.metadata["jit_ref"]
+        assert pad.read(ref).rsplit("\n\n[lines ", 1)[0] == text
+        assert result.metadata["jit_original_size"] == size
+        assert (
+            result.metadata["jit_digest"] == hashlib.sha256(text.encode()).hexdigest()
+        )
+    else:
+        assert result.output == text and pad.list_refs() == []
+
+
+async def test_preview_has_first_twenty_lines_without_dual_path_teaching():
+    text = "\n".join(
+        [f"line-{i:02d}" for i in range(20)] + ["large remainder " + "x" * 30_000]
+    )
+    result = await _run(Scratchpad(), text)
+    assert result.metadata["jit_ref"] in result.output
+    assert f"{len(text)} chars, 21 lines" in result.output
+    assert "line-19" in result.output and "large remainder" not in result.output
+    assert "re-call" not in result.output and "fresh data" not in result.output
+
+
+async def test_single_giant_line_preview_is_bounded():
+    result = await _run(Scratchpad(), "中" * 100_000)
+    assert "1 lines" in result.output and len(result.output) < 24000
+
+
+@pytest.mark.parametrize(
+    "factory", ["load_skill", "scratchpad_read", "list_dir", "task_write"]
+)
+async def test_content_tools_remain_inline_even_above_new_threshold(factory):
+    from loom.platform.cli.skill_tools import make_load_skill_tool
+    from loom.platform.cli.tools import (
+        make_scratchpad_read_tool,
+        make_filesystem_tools,
+        make_task_write_tool,
+    )
+    from pathlib import Path
+
+    if factory == "load_skill":
+        tool = make_load_skill_tool(MagicMock())
+    elif factory == "scratchpad_read":
+        tool = make_scratchpad_read_tool(Scratchpad())
+    elif factory == "list_dir":
+        tool = next(
+            t for t in make_filesystem_tools(Path.cwd()) if t.name == "list_dir"
+        )
+    else:
+        tool = make_task_write_tool(MagicMock())
+    assert tool.inline_only
+    registry = ToolRegistry()
+    registry.register(tool)
+    text = "x" * 50_000
+    pad = Scratchpad()
+    result = await _run(pad, text, registry=registry, name=factory)
+    assert result.output == text and pad.list_refs() == []
+
+
+async def test_async_job_output_never_spills():
+    pad = Scratchpad()
+    text = "job handle " + "x" * 30_000
+    result = await _run(pad, text, metadata={"async": True, "job_id": "job_x"})
+    assert (
+        result.output == text
+        and not result.metadata.get("jit_spilled")
+        and pad.list_refs() == []
     )
 
 
-async def _run(jit: JITRetrievalMiddleware, call: ToolCall, output: str = "",
-               *, success: bool = True, metadata: dict | None = None) -> ToolResult:
-    """Drive jit.process with an inner handler returning a fixed result."""
-    async def _inner(c: ToolCall) -> ToolResult:
-        return ToolResult(
-            call_id=c.id, tool_name=c.tool_name,
-            success=success, output=output, metadata=metadata or {},
-        )
-    return await jit.process(call, _inner)
-
-
-class TestJITRetrievalThreshold:
-    """Threshold logic — spill above, inline below."""
-
-    async def test_output_below_threshold_stays_inline(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("fetch_url"), output="x" * 50)
-
-        assert result.output == "x" * 50
-        assert "jit_spilled" not in result.metadata
-        assert scratchpad.list_refs() == []
-
-    async def test_output_above_threshold_spills_to_scratchpad(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        big_output = "y" * 5000
-        result = await _run(jit, _call("fetch_url"), output=big_output)
-
-        # Inline output is the placeholder, not the original content
-        assert "spilled to scratchpad" in result.output
-        assert "fetch_url" in result.output
-        assert "5000 chars" in result.output
-
-        # Scratchpad has the original content under the metadata's ref
-        assert result.metadata["jit_spilled"] is True
-        ref = result.metadata["jit_ref"]
-        assert ref.startswith("auto_fetch_url_")
-        assert scratchpad.read(ref) == big_output
-
-    async def test_threshold_at_exact_boundary(self) -> None:
-        """Output equal to threshold stays inline (>, not >=)."""
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("fetch_url"), output="z" * 100)
-
-        assert result.output == "z" * 100
-        assert "jit_spilled" not in result.metadata
-
-    async def test_threshold_zero_disables_spilling(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=0)
-
-        big_output = "y" * 100_000
-        result = await _run(jit, _call("fetch_url"), output=big_output)
-
-        assert result.output == big_output
-        assert scratchpad.list_refs() == []
-
-
-class TestJITPerToolSpillThreshold:
-    """Issue #302 F1: ToolDefinition.spill_threshold_chars overrides the
-    pipeline-wide threshold for a specific tool. Used by read_file so that
-    mid-size source files (8K–24K chars) stay inline."""
-
-    async def test_per_tool_threshold_raises_inline_budget(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(
-            _make_tool("read_file", spill_threshold_chars=24000)
-        )
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        # 17K chars — would spill under default 100, must stay inline at 24000.
-        body = "x" * 17_000
-        result = await _run(jit, _call("read_file"), output=body)
-
-        assert result.output == body
-        assert "jit_spilled" not in result.metadata
-        assert scratchpad.list_refs() == []
-
-    async def test_per_tool_threshold_still_spills_above_override(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(
-            _make_tool("read_file", spill_threshold_chars=24000)
-        )
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        # 30K chars exceeds the override → still spills.
-        body = "y" * 30_000
-        result = await _run(jit, _call("read_file"), output=body)
-
-        assert "spilled to scratchpad" in result.output
-        assert result.metadata["jit_spilled"] is True
-
-    async def test_per_tool_threshold_zero_disables_spill(self) -> None:
-        """spill_threshold_chars=0 acts like inline_only — never spills."""
-        scratchpad = Scratchpad()
-        registry = _make_registry(
-            _make_tool("never_spill", spill_threshold_chars=0)
-        )
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        body = "z" * 100_000
-        result = await _run(jit, _call("never_spill"), output=body)
-
-        assert result.output == body
-        assert "jit_spilled" not in result.metadata
-
-    async def test_default_none_falls_back_to_global(self) -> None:
-        """spill_threshold_chars=None → uses pipeline-wide threshold."""
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("plain"))  # default: None
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("plain"), output="q" * 5000)
-
-        assert result.metadata["jit_spilled"] is True
-
-
-class TestJITInlineOnlyOptOut:
-    """Tools marked inline_only=True bypass JIT regardless of size."""
-
-    async def test_inline_only_tool_never_spills(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("task_read", inline_only=True))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        big_output = "important content " * 1000  # well past threshold
-        result = await _run(jit, _call("task_read"), output=big_output)
-
-        assert result.output == big_output
-        assert "jit_spilled" not in result.metadata
-        assert scratchpad.list_refs() == []
-
-    async def test_unknown_tool_still_spills(self) -> None:
-        """If the tool isn't in the registry, default to spilling — better
-        to spill an unknown than silently bloat context."""
-        scratchpad = Scratchpad()
-        registry = _make_registry()  # empty
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        big_output = "?" * 5000
-        result = await _run(jit, _call("mystery_tool"), output=big_output)
-
-        assert result.metadata["jit_spilled"] is True
-
-
-class TestJITAsyncModePassthrough:
-    """Tools that already returned a job_id (async_mode=True) should not be
-    re-spilled — the body is destined for scratchpad through its own path."""
-
-    async def test_async_mode_result_skips_spill(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        # Job submission output is short anyway, but use a long one to
-        # prove the metadata flag — not size — is what skips JIT.
-        long_msg = "Submitted as job_xyz. " * 100
-        result = await _run(
-            jit, _call("fetch_url"), output=long_msg,
-            metadata={"job_id": "job_xyz", "async": True},
-        )
-
-        assert result.output == long_msg
-        assert "jit_spilled" not in result.metadata
-        assert result.metadata.get("async") is True
-
-
-class TestJITFailureBehavior:
-    """Failed tool results: spill on size, like successful ones (consistency)."""
-
-    async def test_failed_result_with_large_error_output_spills(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("run_bash"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        big_error_output = "stderr line\n" * 1000
-        result = await _run(
-            jit, _call("run_bash"), output=big_error_output, success=False,
-        )
-
-        assert result.success is False
-        assert "spilled to scratchpad" in result.output
-        assert result.metadata["jit_spilled"] is True
-
-    async def test_scratchpad_write_failure_keeps_inline(self) -> None:
-        """Graceful degradation: if scratchpad.write raises, log a warning
-        and return the original result unchanged. JIT must never fail the
-        underlying tool call."""
-
-        class _FailingScratchpad:
-            def write(self, ref, content):
-                raise RuntimeError("disk full")
-
-            def read(self, ref):
-                raise KeyError(ref)
-
-            def list_refs(self):
-                return []
-
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(_FailingScratchpad(), registry, threshold_chars=100)
-
-        big_output = "y" * 5000
-        result = await _run(jit, _call("fetch_url"), output=big_output)
-
-        # Original content preserved; no spill metadata claims
-        assert result.output == big_output
-        assert "jit_spilled" not in result.metadata
-
-
-class TestJITPlaceholderShape:
-    """Placeholder text is the agent's only signal of what was spilled —
-    its structure must communicate retrieval paths clearly."""
-
-    async def test_placeholder_contains_tool_name_size_and_ref(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("fetch_url"), output="z" * 5000)
-
-        placeholder = result.output
-        ref = result.metadata["jit_ref"]
-        assert "fetch_url" in placeholder
-        assert ref in placeholder
-        assert "5000 chars" in placeholder
-
-    async def test_placeholder_offers_both_retrieval_paths(self) -> None:
-        """Cached (scratchpad_read) AND fresh (re-call tool) — agent should
-        understand both options without parsing prose."""
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("fetch_url"), output="z" * 5000)
-
-        placeholder = result.output
-        assert "scratchpad_read" in placeholder
-        assert "fresh" in placeholder.lower()  # re-call hint
-
-    async def test_metadata_carries_structured_jit_info(self) -> None:
-        """Telemetry / future learning loops parse metadata, not the
-        placeholder text — pin the metadata shape."""
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        result = await _run(jit, _call("fetch_url"), output="z" * 5000)
-
-        meta = result.metadata
-        assert meta["jit_spilled"] is True
-        assert meta["jit_ref"].startswith("auto_fetch_url_")
-        assert meta["jit_original_size"] == 5000
-
-
-class TestJITRefUniqueness:
-    """Many spills in a turn must not collide on ref names."""
-
-    async def test_multiple_spills_get_distinct_refs(self) -> None:
-        scratchpad = Scratchpad()
-        registry = _make_registry(_make_tool("fetch_url"))
-        jit = JITRetrievalMiddleware(scratchpad, registry, threshold_chars=100)
-
-        refs = set()
-        for i in range(10):
-            result = await _run(
-                jit, _call("fetch_url"), output=f"content {i} " + "x" * 200,
-            )
-            refs.add(result.metadata["jit_ref"])
-
-        assert len(refs) == 10
-        assert len(scratchpad.list_refs()) == 10
-
-
-class TestInstructionToolsStayInline:
-    """#647: instructions the model must read right away never spill."""
-
-    async def test_load_skill_output_is_never_spilled(self) -> None:
-        from unittest.mock import MagicMock
-        from loom.platform.cli.skill_tools import make_load_skill_tool
-
-        load_skill = make_load_skill_tool(MagicMock())
-        pad = Scratchpad()
-        jit = JITRetrievalMiddleware(pad, _make_registry(load_skill))
-        # pet-cat's SKILL.md was 8030 chars — 30 over the default threshold.
-        body = "x" * 8030
-        result = await _run(jit, _call("load_skill"), body)
-        assert result.output == body
-        assert pad.list_refs() == []
+async def test_write_failure_keeps_original_result_inline():
+    class Broken:
+        def write(self, *a):
+            raise OSError("synthetic write failure")
+
+    result = await _run(Broken(), "x" * 30_000)
+    assert result.output == "x" * 30_000 and not result.metadata.get("jit_spilled")
+
+
+async def test_failed_tool_metadata_and_error_context_survive_spill():
+    result = await _run(
+        Scratchpad(), "stderr\n" * 5000, metadata={"custom": "value"}, success=False
+    )
+    assert not result.success and result.metadata["jit_spilled"]
+    assert result.metadata["custom"] == "value" and result.error == "failure"
+    assert result.failure_type == "execution_error" and result.duration_ms == 42
+    assert result.error_context == "stack trace"
+
+
+async def test_spills_get_unique_refs_and_stable_digest():
+    pad = Scratchpad()
+    a = await _run(pad, "x" * 30_000)
+    b = await _run(pad, "x" * 30_000)
+    assert a.metadata["jit_ref"] != b.metadata["jit_ref"]
+    assert a.metadata["jit_digest"] == b.metadata["jit_digest"]

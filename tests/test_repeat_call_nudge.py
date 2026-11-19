@@ -116,8 +116,8 @@ async def test_spilled_outputs_compare_by_content_not_placeholder(tmp_path: Path
     differs on every call; identical spilled content must still count."""
     from loom.core.jobs.scratchpad import Scratchpad
 
-    jit = JITRetrievalMiddleware(scratchpad=Scratchpad(), registry=None, threshold_chars=10)
-    big = "x" * 100
+    jit = JITRetrievalMiddleware(scratchpad=Scratchpad(), registry=None)
+    big = "x" * 30_000
 
     async def handler(call: ToolCall) -> ToolResult:
         return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output=big)

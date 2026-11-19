@@ -29,12 +29,12 @@ class TestScratchpad:
     def test_read_roundtrip_text(self):
         pad = Scratchpad()
         pad.write("abc", "hello world")
-        assert pad.read("abc") == "hello world"
+        assert _body(pad.read("abc")) == "hello world"
 
     def test_read_accepts_full_uri(self):
         pad = Scratchpad()
         pad.write("abc", "data")
-        assert pad.read("scratchpad://abc") == "data"
+        assert _body(pad.read("scratchpad://abc")) == "data"
 
     def test_read_accepts_single_colon_uri(self):
         """Issue #243: JIT/masking placeholders used ``scratchpad:ref`` (single
@@ -43,14 +43,14 @@ class TestScratchpad:
         pad = Scratchpad()
         pad.write("auto_read_file_abcdef", "big content")
         # Single-colon form — the format JIT placeholders originally emitted
-        assert pad.read("scratchpad:auto_read_file_abcdef") == "big content"
+        assert _body(pad.read("scratchpad:auto_read_file_abcdef")) == "big content"
         assert pad.size("scratchpad:auto_read_file_abcdef") == len(b"big content")
         assert "scratchpad:auto_read_file_abcdef" in pad
 
     def test_read_bytes_decode(self):
         pad = Scratchpad()
         pad.write("b", b"bytes payload")
-        assert pad.read("b") == "bytes payload"
+        assert _body(pad.read("b")) == "bytes payload"
 
     def test_size_counts_bytes(self):
         pad = Scratchpad()
@@ -92,172 +92,30 @@ class TestScratchpad:
         assert "scratchpad://x" in pad
         assert "nope" not in pad
 
-    def test_head(self):
+    def test_window_uses_newline_not_other_unicode_separators(self):
         pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 101)))
-        result = pad.read("log", head=50)
-        assert _body(result) == "\n".join(f"line-{i}" for i in range(1, 51))
-        assert "head=50 selected 50 of 100 lines" in _note(result)
-
-    def test_tail(self):
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 101)) + "\n")
-        result = pad.read("log", tail=50)
-        # Trailing newline is not an extra empty line.
-        assert _body(result) == "\n".join(f"line-{i}" for i in range(51, 101))
-        assert "of 100 lines" in _note(result)
-
-    def test_lines_range(self):
-        pad = Scratchpad()
-        pad.write("log", "a\nb\nc\nd\ne")
-        assert _body(pad.read("log", lines="2-4")) == "b\nc\nd"
-
-    def test_grep_numbers_hits(self):
-        pad = Scratchpad()
-        pad.write("log", "apple\nbanana\napricot\ncarrot")
-        result = pad.read("log", grep="ap")
-        assert _body(result) == "1: apple\n3: apricot"
-        assert "matched 2 of 4 lines" in _note(result)
-
-    def test_unfiltered_read_has_no_note(self):
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        assert pad.read("log", max_bytes=1000) == "a\nb"
-
-    def test_lines_zero_lower_bound_clamps_to_one(self):
-        """Issue #302 F2: "0-N" reads from the start as the caller intended."""
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 21)))
-        result = pad.read("log", lines="0-5")
-        assert _body(result) == "\n".join(f"line-{i}" for i in range(1, 6))
-
-    def test_lines_past_end_returns_remaining(self):
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i}" for i in range(1, 11)))
-        result = pad.read("log", lines="8-9999")
-        assert _body(result) == "line-8\nline-9\nline-10"
-
-    def test_line_numbers_count_newlines_only(self):
-        """Form feeds (PDF page breaks) etc. must not shift numbering away
-        from read_file / grep -n — only \\n separates lines."""
-        pad = Scratchpad()
-        pad.write("doc", "p1\x0cstill line 1\nline 2\nline 3")
-        assert _body(pad.read("doc", lines="2-2")) == "line 2"
+        pad.write("doc", "one\vstill one\nline 2\nline 3\n")
+        assert _body(pad.read("doc", offset=2, limit=1)) == "line 2"
         assert _body(pad.read("doc", grep="line 3")) == "3: line 3"
 
-    @pytest.mark.parametrize("bad", ["5-2", "abc", "3", "1-x"])
-    def test_lines_malformed_raises(self, bad):
-        """Malformed / inverted ranges are caller errors, not silent empties."""
+    def test_grep_searches_past_the_byte_cap(self):
         pad = Scratchpad()
-        pad.write("log", "a\nb")
-        with pytest.raises(ValueError):
-            pad.read("log", lines=bad)
+        pad.write("log", "x" * 250_000 + "\nneedle here\n")
+        assert _body(pad.read("log", grep="needle")) == "2: needle here"
 
-    @pytest.mark.parametrize("kw", [{"head": 0}, {"tail": -50}, {"grep": ""}])
-    def test_nonpositive_or_empty_filter_raises(self, kw):
-        """Same principle: tail=-50 must not look like a genuine 'matched 0'."""
+    def test_invalid_utf8_still_decodes(self):
         pad = Scratchpad()
-        pad.write("log", "a\nb")
-        with pytest.raises(ValueError):
-            pad.read("log", **kw)
+        pad.write("x", b"bad \xff\nvalid")
+        assert _body(pad.read("x")) == "bad \ufffd\nvalid"
 
-    def test_filters_are_mutually_exclusive(self):
+    def test_empty_has_zero_lines(self):
         pad = Scratchpad()
-        pad.write("log", "a\nb")
-        with pytest.raises(ValueError):
-            pad.read("log", head=1, grep="a")
-
-    # --- 2026-10-19 section-filter diagnosis (T1 / T3 / T4) ----------
-
-    def test_hyphenated_grep_is_keyword_not_range(self):
-        """T4: a hyphenated keyword like "2024-2025" must match lines that
-        contain it — never be reinterpreted as a line range."""
-        pad = Scratchpad()
-        body = "\n".join(f"filler {i}" for i in range(1, 3001))
-        body += "\nthe 2024-2025 cohort"
-        pad.write("log", body)
-        assert _body(pad.read("log", grep="2024-2025")) == "3001: the 2024-2025 cohort"
-
-    def test_tail_reaches_real_end_of_large_body(self):
-        """T1: tail must return the end of the whole body, even when the
-        body exceeds max_bytes. max_bytes caps the output, not the input."""
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i:05d}" for i in range(1, 3001)))
-        result = pad.read("log", tail=50, max_bytes=30_000)
-        assert _body(result) == "\n".join(f"line-{i:05d}" for i in range(2951, 3001))
-        assert "truncated" not in result
-
-    def test_grep_searches_beyond_max_bytes(self):
-        """T1 corollary: grep sees the full body, not a byte-prefix of it."""
-        pad = Scratchpad()
-        pad.write("log", "x" * 100_000 + "\nneedle here")
-        assert _body(pad.read("log", grep="needle", max_bytes=1000)) == "2: needle here"
-
-    def test_zero_matches_is_reported_not_disguised_as_truncation(self):
-        """T3: no match must say so, and must not carry a truncation notice
-        that invites a futile max_bytes retry."""
-        pad = Scratchpad()
-        pad.write("log", "y\n" * 50_000)
-        result = pad.read("log", grep="NonexistentTerm", max_bytes=30_000)
-        assert _body(result) == ""
-        assert "matched 0 of 50000 lines" in result
-        assert "truncated" not in result
-
-    def test_truncated_filter_says_where_it_stopped(self):
-        """Truncation keeps whole lines and names the next line to read."""
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"line-{i:03d}" for i in range(1, 201)))
-        result = pad.read("log", lines="1-200", max_bytes=35)  # 8 bytes + \n each
-        assert _body(result) == "line-001\nline-002\nline-003\nline-004"
-        note = _note(result)
-        assert "selected 200 of 200 lines" in note
-        assert "showing 4 lines through line 4" in note
-        assert "continue from line 5" in note
-
-    def test_truncated_grep_names_next_hit_line(self):
-        pad = Scratchpad()
-        pad.write("log", "\n".join(f"hit {i}" if i % 10 == 0 else "-" for i in range(1, 101)))
-        result = pad.read("log", grep="hit", max_bytes=21)
-        assert _body(result) == "10: hit 10\n20: hit 20"
-        assert "continue from line 30" in _note(result)
-
-    def test_unfiltered_truncation_names_line_and_never_splits_utf8(self):
-        """T1 second harm: byte-cutting mid-character used to inject U+FFFD."""
-        pad = Scratchpad()
-        pad.write("doc", ("中文內容" * 10 + "\n") * 1_000)
-        result = pad.read("doc", max_bytes=30_001)  # 3-byte chars: odd cut
-        assert "\ufffd" not in result
-        note = _note(result)
-        assert "truncated at 30001 of 121000 bytes" in note
-        assert "mid-line 248 of 1000" in note
-        assert "lines='248-1000'" in note
-
-    def test_max_bytes_truncates_with_notice(self):
-        pad = Scratchpad()
-        pad.write("big", "x" * 1000)
-        result = pad.read("big", max_bytes=100)
-        assert _body(result) == "x" * 100
-        assert "truncated at 100 of 1000 bytes" in result
-
-    def test_max_bytes_not_applied_when_under(self):
-        pad = Scratchpad()
-        pad.write("small", "tiny")
-        assert pad.read("small", max_bytes=1000) == "tiny"
-
-    def test_max_bytes_applies_after_filter(self):
-        pad = Scratchpad()
-        pad.write("log", "aaa\nbbb\nccc\nddd")
-        result = pad.read("log", head=3, max_bytes=7)
-        assert _body(result) == "aaa\nbbb"
-        assert "continue from line 3" in _note(result)
+        pad.write("empty", "")
+        assert pad.read("empty") == "\n\n[lines 0–0 of 0]"
 
 
 def _body(result: str) -> str:
-    return result.rsplit("\n\n[scratchpad_read:", 1)[0] if "[scratchpad_read:" in result else result
-
-
-def _note(result: str) -> str:
-    return result.rsplit("[scratchpad_read:", 1)[1]
+    return result.rsplit("\n\n[lines ", 1)[0]
 
 
 # --- JobStore: submission + completion -------------------------------

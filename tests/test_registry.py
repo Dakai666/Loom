@@ -61,7 +61,7 @@ class TestToolDefinition:
             name="noop", description="x", trust_level=TrustLevel.SAFE,
             input_schema={}, executor=self._noop,
         )
-        assert td.spill_threshold_chars is None
+        assert not hasattr(td, "spill_threshold_chars")
 
     def test_to_anthropic_schema(self):
         td = ToolDefinition(
