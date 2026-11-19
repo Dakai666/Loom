@@ -4,7 +4,7 @@ SubAgent — ephemeral child agent that runs a bounded task and returns a result
 Design principles:
   - Shares the parent's already-open DB connection (shared semantic memory).
   - Has its own session_id in episodic so its trace is isolated.
-  - Does NOT write to session_log (no persistence — ephemeral by design).
+  - Persists child task, assistant messages and tool previews in session_log.
   - Tool scope: SAFE tools by default; parent can extend via allowed_tools whitelist.
   - GUARDED tools are auto-confirmed (no human in the loop for sub-agents).
   - CRITICAL tools are always blocked.
@@ -18,13 +18,14 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
 from typing import TYPE_CHECKING, Any
 
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
 from loom.core.timezone import user_timestamp
+from loom.core.ledger import current_turn_id
 
 if TYPE_CHECKING:
+    from loom.core.memory.session_log import SessionLog
     from loom.core.memory.episodic import EpisodicMemory
     from loom.core.memory.semantic import SemanticMemory
     from loom.core.memory.procedural import ProceduralMemory
@@ -88,12 +89,13 @@ async def run_subagent(
     # spawns the subagent in a separate process or thread pool, the caller
     # must explicitly thread ``turn_id`` instead of relying on this kwarg.
     ledger_emitter: Any = None,
+    session_log: "SessionLog | None" = None,
 ) -> SubAgentResult:
     """
     Run a sub-agent to completion and return a SubAgentResult.
 
     The sub-agent:
-    - Gets its own ephemeral session_id (written to episodic, not session_log)
+    - Gets its own session_id, with durable experience when session_log is wired
     - Filters the parent's tool registry by trust level + allowed_tools whitelist
     - Auto-confirms GUARDED tools; blocks CRITICAL tools
     - Stops at max_turns or when the LLM returns end_turn
@@ -329,6 +331,28 @@ async def run_subagent(
     # Issue #225: idempotency for the wrap-up reminder injected near max_turns.
     wrapup_warned = False
 
+    provenance: dict[str, Any] = {
+        "agent_id": agent_id,
+        "parent_session_id": parent_session_id,
+    }
+    if ledger_turn := current_turn_id():
+        provenance["ledger_turn_id"] = ledger_turn
+
+    async def _log_child(
+        turn: int, role: str, content: str, *,
+        metadata: dict[str, Any] | None = None, raw_json: str | None = None,
+    ) -> None:
+        if session_log is not None:
+            await session_log.log_message(
+                session_id, turn, role, content,
+                {**provenance, **(metadata or {})}, raw_json=raw_json,
+            )
+
+    # Child provenance belongs to log rows, not the resumable main-session
+    # registry. Keeping sessions untouched also preserves pulse's previous
+    # main-session selection. Await each source write before continuing.
+    await _log_child(1, "user", messages[1]["content"])
+
     # ── Agent loop ────────────────────────────────────────────────────────────
     while turns_used < config.max_turns:
         response: Any = None
@@ -366,12 +390,28 @@ async def run_subagent(
                 pass
 
         messages.append(response.raw_message)
+        # Capture the model turn before executing tools. All tool rows from
+        # this response share this index, even if the loop is later cancelled.
+        child_turn = turns_used + 1
+        raw = response.raw_message
+        raw_content = raw.get("content")
+        assistant_text = response.text
+        if not assistant_text:
+            if isinstance(raw_content, str):
+                assistant_text = raw_content
+            elif isinstance(raw_content, list):
+                assistant_text = "\n".join(
+                    block.get("text", "") for block in raw_content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+        await _log_child(
+            child_turn, "assistant", assistant_text or ("[tool_use]" if response.tool_uses else ""),
+            raw_json=json.dumps(raw, ensure_ascii=False),
+        )
 
         # Accumulate free text from this assistant message (even during tool_use
         # turns it may contain a preamble). Used to populate partial_output on
         # failure so the parent sees what the agent was thinking.
-        raw = response.raw_message
-        raw_content = raw.get("content")
         if isinstance(raw_content, str):
             if raw_content:
                 assistant_text_trail += raw_content + "\n"
@@ -400,6 +440,7 @@ async def run_subagent(
         if response.stop_reason == "tool_use":
             turns_used += 1
             for tu in response.tool_uses:
+                tool_started = time.monotonic()
                 total_tool_calls += 1
                 tool_def = child_registry.get(tu.name)
                 if tool_def is None:
@@ -441,6 +482,13 @@ async def run_subagent(
                     result.duration_ms = (time.monotonic() - ts) * 1000
 
                 tool_output = str(result.output) if result.success else (result.error or "")
+                await _log_child(child_turn, "tool", tool_output[:500], metadata={
+                    "tool_call_id": tu.id,
+                    "tool_name": tu.name,
+                    "success": result.success,
+                    "failure_type": result.failure_type,
+                    "duration_ms": (time.monotonic() - tool_started) * 1000,
+                })
                 if not result.success:
                     last_tool_name = tu.name
                     last_tool_error = result.error or tool_output or "(no error message)"

@@ -306,15 +306,31 @@ class SessionLog:
         await self._db.commit()
 
     async def delete_session(self, session_id: str) -> None:
-        """Delete session metadata and all message rows."""
+        """Delete a session and its child sources, including recall indexes."""
         from loom.core.memory.recall_index import forget_terms_for_session
-        await forget_terms_for_session(self._db, session_id)
-        await self._db.execute(
-            "DELETE FROM session_log WHERE session_id = ?", (session_id,)
+
+        prefix = session_id + ":"
+        # IDs are literal: neither SQL wildcards nor a similarly named parent
+        # (abc vs abcd) may widen the deletion. Children can be log-only.
+        pattern = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+        cursor = await self._db.execute(
+            "SELECT session_id FROM ("
+            "SELECT session_id FROM sessions UNION SELECT session_id FROM session_log"
+            ") WHERE session_id = ? OR session_id LIKE ? ESCAPE '!'",
+            (session_id, pattern),
         )
-        await self._db.execute(
-            "DELETE FROM sessions WHERE session_id = ?", (session_id,)
-        )
+        for (sid,) in await cursor.fetchall():
+            # SQLite LIKE is case-insensitive by default; session identity is
+            # case-sensitive, so discard case-only matches before any mutation.
+            if sid != session_id and not sid.startswith(prefix):
+                continue
+            await forget_terms_for_session(self._db, sid)
+            await self._db.execute(
+                "DELETE FROM session_log WHERE session_id = ?", (sid,)
+            )
+            await self._db.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (sid,)
+            )
         await self._db.commit()
 
     async def update_title(self, session_id: str, title: str) -> None:
