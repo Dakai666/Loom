@@ -27,7 +27,7 @@ This is what *harness engineering* means: the execution machinery around your to
 | Principle | What it means |
 |-----------|---------------|
 | **Harness-first** | Every tool call flows through a structured middleware pipeline. Logging, tracing, trust control, and abort handling are built-in, not bolted on. |
-| **Memory-native** | Memory is a substrate, not a plugin. Four types — episodic, semantic, procedural, relational — are core architecture, not an afterthought. |
+| **Memory-native** | Memory is a substrate, not a plugin. Durable session logs, governed facts, skill instructions and relationships are core architecture. |
 | **Reflexive** | The agent observes its own execution history, self-assesses skill quality after each turn, and evolves low-performing skills automatically. |
 | **Self-directing** | Cron, event, and condition triggers fire autonomously without human prompting. The autonomy engine shares the same middleware pipeline as interactive sessions. |
 | **Model-agnostic** | Routes between cloud and local providers by model name prefix. Switch mid-session without losing context. |
@@ -73,7 +73,7 @@ All tool calls — regardless of origin — flow through the same ordered middle
 | Layer | Responsibility |
 |-------|----------------|
 | **Lifecycle** (outermost) | Opens / closes the `ActionRecord`: `DECLARED` at entry, `MEMORIALIZED` at exit |
-| **Log + Trace** | Rich-formatted terminal output; timing + episodic memory write |
+| **Log + Trace** | Rich-formatted terminal output; timing + durable session_log outcomes |
 | **SchemaValidation** | JSON schema validation; hallucinated-parameter guard |
 | **BlastRadius** | Trust classification + user confirmation; writes authorization result to `LifecycleContext` |
 | **LifecycleGate** (innermost) | Real-time control gates: `AUTHORIZED → PREPARED → EXECUTING → OBSERVED` |
@@ -153,15 +153,16 @@ Defaults to off so existing installs keep working byte-for-byte. Sessions fail c
 
 ## Memory System
 
-Loom's memory is not a key-value store bolted onto a chat loop. It is a four-type system with its own governance layer, all backed by a single SQLite WAL database with vector search via `sqlite-vec`.
+Loom's memory is not a key-value store bolted onto a chat loop. It combines durable raw sources with governed long-term memory, all backed by a single SQLite WAL database with vector search via `sqlite-vec`.
 
-### Four Memory Types
+### Memory sources and stores
 
 | Type | Role |
 |------|------|
-| **Episodic** | Timestamped log of what happened — every tool call, every turn, with full lifecycle metadata. Auto-compressed after a configurable threshold. |
+| **Session log** | Parent and child conversation/tool traces with canonical assistant messages and measured tool outcomes. Missing old outcomes remain unknown. |
+| **Legacy episodic** | Frozen historical table, readable through explicit labeled fallbacks. No new writes, TTL deletion or backfill. |
 | **Semantic** | Long-term factual beliefs with confidence scores and three-axis ontology (domain × temporal × confidence). Supports BM25 full-text search and embedding-based cosine similarity retrieval. |
-| **Procedural** | Versioned skill instructions (`SkillGenome`). Quality tracked via EMA self-assessment; low-quality skills evolve or deprecate automatically. |
+| **Procedural** | Versioned skill instructions (`SkillGenome`). Historical quality fields remain readable; model self-assessment and automatic evolution are retired. |
 | **Relational** | Triple-store of entity relationships (`subject → predicate → object`). Powers cross-session reasoning and `dreaming` synthesis. |
 
 ### Multi-Fallback Recall
@@ -189,12 +190,12 @@ write request
   └─ upsert or reject
 
 session end
-  └─ Decay Cycle: episodic TTL prune · semantic low-confidence prune · relational dreaming decay
+  └─ Decay Cycle: semantic low-confidence prune · relational dreaming decay
 ```
 
 Semantic-dup detection and the time-window admission gate landed in v0.3.8.0 (PR #411); the existing `memorize` tool also surfaces near-duplicate hints at write time. Batch dedup is now handled by the consolidation dream's MERGE arm (epic #491), which supersedes the retired `memory_hygiene` skill (#504); a one-shot `loom memory health` reports a store snapshot on demand.
 
-Trust tiers (highest → lowest): `user_explicit` → `tool_verified` → `agent_memorize` → `session_compress` → `counter_factual` → `agent_inferred` → `skill_evolution` → `dreaming` → `external`
+Active writes include explicit `memorize`/`relate`, governed external API input (trust 0.5), and dream admission/reinforcement. Historical `session_compress`, `counter_factual` and `skill_evolution` source labels remain readable; their automatic producers are retired.
 
 Semantic confidence has a 90-day half-life. Memories that are never reinforced fade. Contradictions from lower-trust sources are suppressed. The system gradually builds a coherent, stable belief state across sessions.
 
@@ -209,8 +210,20 @@ switch for session-log experience, while `legacy_episodic=true` requests old
 episodic history only when the scoped time window has no log rows. Scope it to a
 session for legacy child-only traces. There is no backfill or data cleanup.
 `loom memory health` reports log coverage, including unknown outcomes, rather
-than treating an uncompressed episodic backlog as unhealthy. Episodic writes and
-TTL remain active until S3 PR-D.
+than treating an uncompressed episodic backlog as unhealthy. S3 PR-D retires episodic writes and
+TTL without deleting the table or existing data. Automatic `compress_session`
+extraction, the CounterFactual chain, and Discord daily/resume extraction are
+removed. `_smart_compact` and Discord `/compact` still manage context windows;
+`session_log`, `action_records`, ledger and semantic lifecycle remain active.
+Existing `session:` facts and redirect stubs are retained for S4.
+
+Remove obsolete `compress_session`, `episodic_compress_threshold`,
+`episodic_retention_days` and `memory.governance.episodic_ttl_days` config keys;
+they are ignored with a migration note. Remove `memory_compression` from
+telemetry dimensions: no new samples are collected, while
+`agent_health(dimension="memory_compression")` explicitly reads labeled legacy
+snapshots. Real tool-call metrics remain active. Rolling back restores producers
+for future turns; the interval without episodic writes cannot be replayed.
 
 ### Governed API and relationship writes
 
@@ -260,7 +273,7 @@ v0.3.6+ introduced a structured decay matrix keyed by `(domain, temporal)`:
 
 Sampling is only half of sleep. On a weekly rhythm Loom also runs a **consolidation dream**: it reviews its own memory and proposes housekeeping — merge near-duplicate facts, reconcile contradictions, clear dangling references — then writes a dated report of what it found. Merges preserve the losing fact's wording verbatim so nothing is silently lost, and the pass is read-only by default: it shows its work before it's trusted to act on it.
 
-You can check the store's health any time with a one-shot `loom memory health` — a plain snapshot of fact counts, confidence, uncompressed sessions, and database size.
+You can check the store's health any time with a one-shot `loom memory health` — a plain snapshot of fact counts, confidence, session-log coverage, unknown outcomes, and database size.
 
 ---
 

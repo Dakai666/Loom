@@ -126,8 +126,8 @@ async def test_child_failure_reopens_recall_and_colon_ref_without_facts(tmp_path
             assert meta["success"] is False
             assert meta["failure_type"] == "execution_error"
             assert meta["duration_ms"] >= 0
-            # PR-A must leave the original episodic trace intact.
-            assert len(await EpisodicMemory(db).read_session("parent:child")) == 1
+            # PR-D freezes episodic; the child source remains in session_log.
+            assert await EpisodicMemory(db).read_session("parent:child") == []
             assert saved[-1][0] == 2
             assert await SessionLog(db).get_session("parent:child") is None
     finally:
@@ -166,8 +166,7 @@ async def test_each_tool_result_is_saved_once_including_unknown(tmp_path, names)
             assert row[4]["success"] == (name == "ok")
             assert row[4].get("failure_type") == expected[name]
             assert row[4]["duration_ms"] >= 0
-        # Only known tools passed through the existing episodic callback.
-        assert len(await EpisodicMemory(db).read_session("parent:child")) == sum(n != "missing" for n in names)
+        assert await EpisodicMemory(db).read_session("parent:child") == []
 
 
 @pytest.mark.parametrize("exit_kind", ["max_turns", "exception", "cancel"])

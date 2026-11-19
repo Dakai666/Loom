@@ -3,7 +3,7 @@ SubAgent — ephemeral child agent that runs a bounded task and returns a result
 
 Design principles:
   - Shares the parent's already-open DB connection (shared semantic memory).
-  - Has its own session_id in episodic so its trace is isolated.
+  - Has its own session_id in session_log so its trace is isolated.
   - Persists child task, assistant messages and tool previews in session_log.
   - Tool scope: SAFE tools by default; parent can extend via allowed_tools whitelist.
   - GUARDED tools are auto-confirmed (no human in the loop for sub-agents).
@@ -107,7 +107,6 @@ async def run_subagent(
     )
     from loom.core.harness.validation import SchemaValidationMiddleware
     from loom.core.harness.permissions import PermissionContext, TrustLevel
-    from loom.core.memory.episodic import EpisodicEntry
 
     agent_id = config.agent_id
     session_id = f"{parent_session_id}:{agent_id}"
@@ -241,28 +240,6 @@ async def run_subagent(
         for g in parent_grants:
             perm.grant(g)
 
-    # ── Trace callback → episodic (child's own session trace) ────────────────
-    async def on_trace(call: ToolCall, result: ToolResult) -> None:
-        summary = (
-            f"[sub:{agent_id}] Tool '{call.tool_name}' "
-            f"({'ok' if result.success else 'fail'}, {result.duration_ms:.0f}ms)"
-        )
-        if result.error:
-            summary += f" — {result.error}"
-        meta: dict[str, Any] = {
-            "tool_name": call.tool_name,
-            "success": result.success,
-            "agent_id": agent_id,
-        }
-        if result.failure_type:
-            meta["failure_type"] = result.failure_type
-        await episodic.write(EpisodicEntry(
-            session_id=session_id,
-            event_type="tool_result",
-            content=summary,
-            metadata=meta,
-        ))
-
     async def _subagent_confirm(call: ToolCall) -> bool:
         # Should never be reached — _is_unattended catches origin="subagent"
         # before confirm_fn is called. Deny as safety net.
@@ -270,7 +247,7 @@ async def run_subagent(
 
     pipeline = MiddlewarePipeline([
         LifecycleMiddleware(registry=child_registry),  # outer: lifecycle bookends
-        TraceMiddleware(on_trace=on_trace),
+        TraceMiddleware(),
         SchemaValidationMiddleware(registry=child_registry),
         BlastRadiusMiddleware(
             perm_ctx=perm, confirm_fn=_subagent_confirm, registry=child_registry,

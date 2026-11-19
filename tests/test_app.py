@@ -323,9 +323,8 @@ class TestFooterRender:
         assert "still waiting" not in text
 
     def test_transient_hint_does_not_disturb_active_heartbeat(self, app: LoomApp) -> None:
-        # Regression for the codex review of PR #426: a CompressDone
-        # event lands at the start of a turn before the LLM call (see
-        # ``LoomSession.stream_turn`` draining ``_pending_compactions``).
+        # Regression for the codex review of PR #426: a transient hint
+        # lands at the start of a turn before the LLM call.
         # The CLI fires a transient hint for it, but the heartbeat
         # must keep showing THINKING because the agent round-trip is
         # still pending. Any future helper that does both "show hint"

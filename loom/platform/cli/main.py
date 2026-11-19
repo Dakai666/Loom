@@ -45,7 +45,6 @@ if _sys.platform == "win32":
 from loom.core.session import (
     LoomSession,
     build_router,
-    compress_session,
     _load_loom_config,
     _load_env,
 )
@@ -62,7 +61,6 @@ from loom.platform.cli.theme_persist import load_preference, save_preference, av
 from loom.platform.cli.ui import (
     ActionRolledBack,
     ActionStateChange,
-    CompressDone,
     ModelThinkingStarted,
     ReasoningContinuation,
     TextChunk,
@@ -1441,7 +1439,7 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
     # Heartbeat (#418/#419) is THINKING from turn dispatch. We only
     # transition it OUT of THINKING when the agent actually produces
     # visible output (text or tool) — never on system-only boundary
-    # events like CompressDone or TierExpiryHint, because the LLM
+    # events like TierExpiryHint, because the LLM
     # round-trip is still pending across those. ToolBegin / TurnPaused
     # / TurnDone branches drive their own heartbeat transitions, so
     # only TextChunk needs the explicit "first chunk wins" clear.
@@ -1532,29 +1530,6 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
                         f"{arrow} tier T{event.from_tier} → T{event.to_tier} ({event.to_model})",
                         severity="info",
                         duration_s=4.0,
-                    )
-
-            elif isinstance(event, CompressDone):
-                # Issue #284: surface compaction as a transient hint
-                # rather than a console line — CompressDone was
-                # previously not displayed in CLI ("too noisy for
-                # inline chat"); a 3-second flash is the right weight.
-                #
-                # Heartbeat is intentionally untouched here. ``stream_turn``
-                # drains ``_pending_compactions`` before the LLM call
-                # (session.py around line 1885), so CompressDone is
-                # often the FIRST event of a turn with the LLM round-
-                # trip still pending. Stopping the heartbeat here would
-                # blank the footer for the rest of the turn even though
-                # the agent is still working — codex review caught this
-                # on PR #426. If the heartbeat happens to be in a stale
-                # TOOLING from elsewhere, that's a bug to fix at the
-                # source, not by laundering through CompressDone.
-                if (loom_app := getattr(session, "_loom_app", None)) is not None:
-                    loom_app.show_transient_hint(
-                        f"🗜 compacted → {event.fact_count} facts",
-                        severity="info",
-                        duration_s=3.0,
                     )
 
             elif isinstance(event, TierExpiryHint):

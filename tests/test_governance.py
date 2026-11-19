@@ -275,7 +275,6 @@ class TestContradictionDetector:
         provenance namespace, not a subtopic — so tier-2 must not flag them.
         Real case: 6 complementary facts → 30/30 pairs flagged → supersede ring.
         """
-        from loom.core.session import _session_fact_key
 
         ts = "20261020T163907"
         facts = [
@@ -285,11 +284,11 @@ class TestContradictionDetector:
         ]
         for v in facts[:-1]:
             await semantic.upsert(SemanticEntry(
-                key=_session_fact_key("4a082709", ts, v), value=v,
+                key=f"session:4a082709:{ts}:fact:{facts.index(v)}", value=v,
                 source="session:4a082709",
             ))
         proposed = SemanticEntry(
-            key=_session_fact_key("4a082709", ts, facts[-1]), value=facts[-1],
+            key=f"session:4a082709:{ts}:fact:{len(facts)-1}", value=facts[-1],
             source="session:4a082709",
         )
 
@@ -450,7 +449,6 @@ class TestGovernedUpsert:
     async def test_compression_siblings_write_without_contradiction(self, governor, semantic):
         """#628 end-to-end: governed writes of one compression's facts report
         no contradiction (so no supersede, no contradiction pulse)."""
-        from loom.core.session import _session_fact_key
 
         ts = "20261021T003900"
         facts = ["重複記憶以 redirect stub 保留追溯關係",
@@ -458,7 +456,7 @@ class TestGovernedUpsert:
                  "embedding 層減少約 30%"]
         results = [
             await governor.governed_upsert(SemanticEntry(
-                key=_session_fact_key("4a082709", ts, v), value=v,
+                key=f"session:4a082709:{ts}:fact:{facts.index(v)}", value=v,
                 source="session:4a082709",
             ))
             for v in facts
@@ -767,33 +765,6 @@ class TestAdmissionSemanticNovelty:
 
 class TestDecayCycle:
 
-    @pytest.mark.asyncio
-    async def test_episodic_ttl_prunes_old(self, governor, db):
-        """Episodic entries older than TTL should be pruned."""
-        old_date = (datetime.now(UTC) - timedelta(days=60)).isoformat()
-        await db.execute(
-            "INSERT INTO episodic_entries (id, session_id, event_type, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), "old-session", "user", "old message", old_date),
-        )
-        await db.commit()
-
-        result = await governor.run_decay_cycle()
-        assert result.episodic_pruned >= 1
-
-    @pytest.mark.asyncio
-    async def test_episodic_ttl_keeps_recent(self, governor, db):
-        """Recent episodic entries should survive the decay cycle."""
-        recent_date = datetime.now(UTC).isoformat()
-        await db.execute(
-            "INSERT INTO episodic_entries (id, session_id, event_type, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), "new-session", "user", "recent message", recent_date),
-        )
-        await db.commit()
-
-        result = await governor.run_decay_cycle()
-        assert result.episodic_pruned == 0
 
     @pytest.mark.asyncio
     async def test_semantic_decay_prunes_ancient(self, governor, semantic):
@@ -818,214 +789,11 @@ class TestDecayCycle:
 
         assert isinstance(result, DecayCycleResult)
         assert result.semantic_pruned >= 0
-        assert result.episodic_pruned >= 0
+        assert result.episodic_pruned == 0  # frozen legacy counter
         # #451 phase B: relational counter remains as a back-compat field
         # (always 0 on fresh installs) so external readers don't crash.
         assert result.relational_pruned == 0
         assert result.total_pruned >= 0
-
-
-# ===========================================================================
-# 7. Integration: compress_session with Admission Gate
-# ===========================================================================
-
-class TestCompressWithGovernance:
-
-    @pytest.mark.asyncio
-    async def test_compress_filters_via_admission(
-        self, db, semantic, episodic, governor
-    ):
-        """compress_session with governor should pass facts through admission."""
-        from loom.platform.cli.main import compress_session
-
-        # Write some episodic entries
-        session_id = "test-session"
-        for i in range(3):
-            await episodic.write(EpisodicEntry(
-                session_id=session_id,
-                event_type="user",
-                content=f"User said something interesting about topic {i} "
-                        f"that is long enough to be a useful fact",
-            ))
-
-        # Mock the router
-        mock_router = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = (
-            "FACT: User prefers working with TypeScript for backend development\n"
-            "FACT: ok\n"
-            "FACT: The project uses SQLite for persistence with FTS5 for search\n"
-        )
-        mock_router.chat = AsyncMock(return_value=mock_response)
-
-        count = await compress_session(
-            session_id, episodic, semantic, mock_router, "test-model",
-            governor=governor,
-        )
-
-        # "ok" should be filtered out by admission, so 2 facts instead of 3
-        assert count == 2
-
-    @pytest.mark.asyncio
-    async def test_zero_insight_response_writes_nothing(
-        self, db, semantic, episodic
-    ):
-        """Issue #411 review: a compliant zero-insight LLM response (no
-        ``FACT:`` prefix) must NOT pollute semantic memory via the old
-        raw-text fallback. The new COMPRESS_PROMPT permits 0 facts, so
-        responses like "No reusable insights found." must round-trip to
-        zero writes."""
-        from loom.platform.cli.main import compress_session
-
-        session_id = "zero-insight-session"
-        await episodic.write(EpisodicEntry(
-            session_id=session_id,
-            event_type="user",
-            content="trivial operational chatter not worth keeping",
-        ))
-
-        mock_router = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "No reusable insights found."
-        mock_router.chat = AsyncMock(return_value=mock_response)
-
-        count = await compress_session(
-            session_id, episodic, semantic, mock_router, "test-model",
-        )
-
-        assert count == 0
-        # Confirm nothing was written under the session-fact key prefix.
-        recent = await semantic.list_recent(limit=20)
-        assert all(not e.key.startswith(f"session:{session_id}:") for e in recent)
-
-    @pytest.mark.asyncio
-    async def test_zero_facts_still_marks_episodic_compressed(
-        self, db, semantic, episodic
-    ):
-        """Issue #411 review: even when zero facts survive parsing /
-        admission, episodic rows we sent to the LLM must be marked
-        compressed. Otherwise duplicate-heavy or zero-insight sessions
-        burn the LLM repeatedly on the same content every trigger."""
-        from loom.platform.cli.main import compress_session
-
-        session_id = "no-fact-session"
-        await episodic.write(EpisodicEntry(
-            session_id=session_id,
-            event_type="user",
-            content="trivial chatter not worth keeping",
-        ))
-
-        mock_router = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = ""  # LLM emits literally nothing
-        mock_router.chat = AsyncMock(return_value=mock_response)
-
-        await compress_session(
-            session_id, episodic, semantic, mock_router, "test-model",
-        )
-
-        # Re-reading the session with uncompressed_only should now return
-        # nothing — the entries were marked compressed despite zero facts.
-        leftover = await episodic.read_session(session_id, uncompressed_only=True)
-        assert leftover == []
-
-
-# ===========================================================================
-# 7b. Regression: content-addressed session-fact keys
-#     (pursuit drain-supersede-fp-tracking — 11 logged false positives)
-# ===========================================================================
-
-class TestSessionFactKeyContentAddressed:
-    """Root-cause fix for the drain-supersede false-positive chain.
-
-    The compress path used ``session:<id>:<ts>:fact:<i>`` — a *positional*
-    index plus a *second-resolution* timestamp. When the same session was
-    compressed twice in the same second (e.g. a background compaction
-    in-flight while ``stop()`` runs its own compress), the second pass
-    re-extracted a fact list shifted by one position (the admission gate
-    drops facts the first pass already wrote). Every positional slot then
-    held a different value → a chain of spurious tier-1 ``supersede``
-    contradictions. Content-addressed keys make re-extraction idempotent.
-    """
-
-    def test_key_is_deterministic_for_same_fact(self):
-        from loom.core.session import _session_fact_key
-
-        k1 = _session_fact_key("sess", "20260613T020407", "DK 偏好 TypeScript")
-        k2 = _session_fact_key("sess", "20260613T020407", "DK 偏好 TypeScript")
-        assert k1 == k2
-
-    def test_distinct_facts_get_distinct_keys(self):
-        from loom.core.session import _session_fact_key
-
-        ts = "20260613T020407"
-        k_a = _session_fact_key("sess", ts, "fact about news pipeline")
-        k_b = _session_fact_key("sess", ts, "fact about DK health")
-        assert k_a != k_b
-
-    def test_key_preserves_session_sibling_prefix(self):
-        """contradiction.is_session_sibling groups by the first three
-        segments (``session:<id>:<ts>``). The content hash lives in the
-        leaf, so sibling grouping must be unaffected."""
-        from loom.core.session import _session_fact_key
-        from loom.core.memory.contradiction import is_session_sibling
-
-        ts = "20260613T020407"
-        k_a = _session_fact_key("sess", ts, "fact A")
-        k_b = _session_fact_key("sess", ts, "fact B")
-        assert k_a.startswith(f"session:sess:{ts}:fact:")
-        assert is_session_sibling(k_a, k_b)
-
-    @pytest.mark.asyncio
-    async def test_recompression_same_second_no_false_supersede(
-        self, db, semantic, episodic
-    ):
-        """The regression itself: two compressions of one session in the
-        same second, where the second pass re-extracts a list shifted by
-        one position, must NOT clobber/supersede the first pass's facts.
-
-        Under the old positional scheme this produced N same-key value
-        changes (the FP chain). With content-addressed keys, each distinct
-        fact owns its own key, so the union survives intact.
-        """
-        from loom.core.session import compress_session, _session_fact_key
-
-        session_id = "recompress-sess"
-        pinned_ts = "20260613T020407"
-
-        async def run_once(facts: list[str]) -> None:
-            await episodic.write(EpisodicEntry(
-                session_id=session_id, event_type="user",
-                content="some session content to compress",
-            ))
-            mock_router = MagicMock()
-            mock_response = MagicMock()
-            mock_response.text = "".join(f"FACT: {f}\n" for f in facts)
-            mock_router.chat = AsyncMock(return_value=mock_response)
-            with patch("loom.core.session.datetime") as mock_dt:
-                mock_dt.now.return_value.strftime.return_value = pinned_ts
-                await compress_session(
-                    session_id, episodic, semantic,
-                    mock_router, "test-model",
-                )
-
-        first = ["fact alpha about news", "fact beta about health",
-                 "fact gamma about circadian"]
-        # Shifted by one: alpha dropped (already stored), delta appended.
-        shifted = ["fact beta about health", "fact gamma about circadian",
-                   "fact delta about philosophy"]
-
-        await run_once(first)
-        await run_once(shifted)
-
-        # Every distinct fact must occupy its own content-addressed key,
-        # holding exactly its own value — no slot clobbered another fact.
-        for fact in set(first) | set(shifted):
-            entry = await semantic.get(
-                _session_fact_key(session_id, pinned_ts, fact)
-            )
-            assert entry is not None, f"fact lost: {fact!r}"
-            assert entry.value == fact
 
 
 # ===========================================================================
@@ -1047,27 +815,6 @@ class TestBackwardCompat:
         assert stored is not None
         assert stored.value == "direct write"
 
-    @pytest.mark.asyncio
-    async def test_compress_without_governor(self, db, semantic, episodic):
-        """compress_session without governor should work as before."""
-        from loom.platform.cli.main import compress_session
-
-        session_id = "compat-session"
-        await episodic.write(EpisodicEntry(
-            session_id=session_id,
-            event_type="user",
-            content="A test message for compatibility",
-        ))
-
-        mock_router = MagicMock()
-        mock_response = MagicMock()
-        mock_response.text = "FACT: User sent a test message for compatibility check\n"
-        mock_router.chat = AsyncMock(return_value=mock_response)
-
-        count = await compress_session(
-            session_id, episodic, semantic, mock_router, "test-model",
-        )
-        assert count == 1
 
     @pytest.mark.asyncio
     async def test_existing_entries_readable(self, semantic):

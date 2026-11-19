@@ -7,8 +7,8 @@ The Governor is always-on — instantiated in every LoomSession.start() and
 wired into the memory write path.  It provides:
 
 1. **Governed upsert** — trust-tier-adjusted writes with contradiction checks
-2. **Admission gate** — filters candidate facts before episodic→semantic promotion
-3. **Decay cycle** — automated TTL enforcement across all memory types
+2. **Admission gate** — filters candidate facts before admission
+3. **Decay cycle** — semantic lifecycle maintenance; legacy episodic rows are frozen
 
 Governance events are logged to ``audit_log`` with ``tool_name`` prefixed
 by ``governance:`` so they can be filtered alongside regular tool audit entries.
@@ -136,13 +136,11 @@ class MemoryGovernor:
     ) -> None:
         self._semantic = semantic
         self._procedural = procedural
-        self._episodic = episodic
         self._db = db
         self._detector = ContradictionDetector(semantic)
 
         cfg = config or {}
         self._admission_threshold: float = cfg.get("admission_threshold", 0.5)
-        self._episodic_ttl_days: int = cfg.get("episodic_ttl_days", 30)
         self._semantic_decay_threshold: float = cfg.get("semantic_decay_threshold", 0.1)
         # Issue #411: time-windowed novelty lookback. Old code used
         # ``list_recent(limit=50)`` — a position window that pushed yesterday's
@@ -466,10 +464,8 @@ class MemoryGovernor:
     async def run_decay_cycle(self) -> DecayCycleResult:
         """Execute periodic decay across all memory types.
 
-        Called at session shutdown (after compression). Memory Lifecycle
-        (issue #281 P2) drives the semantic + relational paths via a single
-        ``(domain, temporal)`` half-life table; episodic TTL stays here
-        because it's a flat age cutoff, not effective_confidence.
+        Called at shutdown. Semantic lifecycle continues; episodic TTL was
+        retired in S3 PR-D. The legacy episodic_pruned counter stays zero.
 
         Fixes issue #299 — relational triples from every source are now
         examined, not just ``source='dreaming'``.
@@ -481,8 +477,7 @@ class MemoryGovernor:
             min_gap_minutes=self._lifecycle_min_gap_minutes,
         )
 
-        # ── Episodic TTL (still a flat age check, not lifecycle-managed) ──
-        episodic_pruned = await self._prune_episodic_ttl()
+        # episodic_entries is retained as a frozen legacy source (S3 PR-D).
 
         # #451 phase B: rel:* triples live in semantic_entries, so the
         # semantic decay path covers them. Lifecycle's relational counters
@@ -492,7 +487,7 @@ class MemoryGovernor:
             semantic_pruned=(
                 lifecycle_result.semantic_archived + lifecycle_result.semantic_deleted
             ),
-            episodic_pruned=episodic_pruned,
+            episodic_pruned=0,
             total_examined=lifecycle_result.semantic_examined,
             semantic_archived=lifecycle_result.semantic_archived,
         )
@@ -504,28 +499,12 @@ class MemoryGovernor:
                 {
                     "semantic_archived": lifecycle_result.semantic_archived,
                     "semantic_deleted":  lifecycle_result.semantic_deleted,
-                    "episodic": episodic_pruned,
                     "examined": result.total_examined,
                 },
             )
 
         return result
 
-    async def _prune_episodic_ttl(self) -> int:
-        """Delete episodic entries older than TTL days."""
-        cutoff = datetime.now(UTC) - timedelta(days=self._episodic_ttl_days)
-        cutoff_iso = cutoff.isoformat()
-
-        try:
-            cursor = await self._db.execute(
-                "DELETE FROM episodic_entries WHERE created_at < ?",
-                (cutoff_iso,),
-            )
-            await self._db.commit()
-            return cursor.rowcount or 0
-        except Exception as exc:
-            logger.debug("Episodic TTL prune failed: %s", exc)
-            return 0
 
     # ------------------------------------------------------------------
     # Audit logging

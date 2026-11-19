@@ -16,7 +16,6 @@ from loom.core.infra.telemetry import (
     AgentTelemetryTracker,
     ContextLayoutDimension,
     DEFAULT_DIMENSIONS,
-    MemoryCompressionDimension,
     ToolCallDimension,
     _build_dimension,
 )
@@ -74,70 +73,6 @@ def test_tool_call_anomaly_fires_above_threshold():
     desc = dim.describe_anomaly()
     assert desc is not None
     assert "recall" in desc
-
-
-# ---------------------------------------------------------------------------
-# MemoryCompressionDimension
-# ---------------------------------------------------------------------------
-
-def test_memory_compression_yield_math():
-    dim = MemoryCompressionDimension()
-    dim.record(entries=10, facts=4)
-    dim.record(entries=20, facts=6)
-
-    snap = dim.snapshot()
-    assert snap["runs"] == 2
-    assert snap["entries_total"] == 30
-    assert snap["facts_total"] == 10
-    # overall = 10/30 = 0.333; recent = (0.4 + 0.3) / 2 = 0.35
-    assert abs(snap["overall_yield"] - 0.333) < 0.01
-    assert abs(dim.recent_yield - 0.35) < 0.01
-
-
-def test_memory_compression_never_raises_anomaly():
-    """Yield's denominator is only the user messages in a batch (often ~3), so
-    the ratio swings 0%↔200% on noise. It stays visible in the snapshot /
-    detail view but must never push a system-reminder into the agent's context."""
-    dim = MemoryCompressionDimension()
-    for _ in range(5):
-        dim.record(entries=20, facts=0, tool_events=17)
-    assert dim.recent_yield == 0.0
-    assert dim.has_anomaly() is False
-    assert dim.describe_anomaly() is None
-
-
-def test_memory_compression_rolling_window_bounded():
-    dim = MemoryCompressionDimension()
-    for _ in range(15):
-        dim.record(entries=10, facts=5)
-    # window capped at 10
-    assert len(dim._recent_yields) == 10
-
-
-def test_memory_compression_tool_events_excluded_from_denominator():
-    """Issue #173: tool_call/tool_result entries don't count as knowledge input.
-
-    A session with 18 tool events and 2 message entries yielding 1 fact should
-    score as 1/2 = 50% yield, not 1/20 = 5%.
-    """
-    dim = MemoryCompressionDimension()
-    dim.record(entries=20, facts=1, tool_events=18)
-    snap = dim.snapshot()
-    assert snap["entries_total"] == 20
-    assert snap["tool_events_total"] == 18
-    assert snap["knowledge_entries_total"] == 2
-    assert abs(snap["overall_yield"] - 0.5) < 0.01
-
-
-def test_memory_compression_tool_only_runs_skip_anomaly_window():
-    """Tool-only runs (no knowledge entries) must not poison the yield window
-    or trip the anomaly detector — this was the #173 false positive."""
-    dim = MemoryCompressionDimension()
-    for _ in range(5):
-        dim.record(entries=15, facts=0, tool_events=15)
-    assert dim.has_anomaly() is False
-    assert dim.snapshot()["skipped_runs"] == 5
-    assert dim._recent_yields == []
 
 
 # ---------------------------------------------------------------------------
@@ -303,10 +238,10 @@ async def test_tracker_reports(store):
 
         detail_all = tracker.report_detail()
         assert "tool_call" in detail_all
-        assert "memory_compression" in detail_all
+        assert "memory_compression" not in detail_all
 
-        per_dim = tracker.report_detail("memory_compression")
-        assert "no runs" in per_dim
+        per_dim = await tracker.legacy_compression_report()
+        assert "legacy" in per_dim and "No stored" in per_dim
 
 
 async def test_tracker_unknown_dimension_in_detail(store):

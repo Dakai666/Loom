@@ -1,26 +1,16 @@
-"""
-Integration tests — wires Harness + Memory together as the first-milestone
-milestone specifies:
+"""Harness/tool integration, including the retained legacy episodic primitive.
 
-  "A CLI agent that executes tools through the full middleware pipeline,
-   records every tool call in episodic memory, and on session exit
-   compresses to semantic memory."
-
-These tests do NOT call the real Anthropic API.  They exercise:
-  1. Full middleware pipeline → episodic write (TraceMiddleware callback)
-  2. Built-in tools: read_file, write_file, list_dir, run_bash
-  3. Pipeline blocks GUARDED tools until confirm callback approves
-  4. Session compression: episodic entries → semantic facts (mocked LLM)
+The explicit test callback writes legacy fixtures; LoomSession and subagent
+runtime producers no longer write episodic rows (#650 S3 PR-D). Their contract
+is tested in test_memory_producers_retired.py. No real LLM API calls are made.
 """
 
-import asyncio
 import os
 import sys
 import pytest
 import pytest_asyncio
-import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from loom.core.harness.middleware import (
     ToolCall, ToolResult,
@@ -29,9 +19,7 @@ from loom.core.harness.middleware import (
 from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
 from loom.core.memory.episodic import EpisodicEntry, EpisodicMemory
-from loom.core.memory.semantic import SemanticMemory
 from loom.core.memory.store import SQLiteStore
-from loom.core.cognition.providers import LLMResponse
 from loom.platform.cli.tools import (
     make_filesystem_tools,
     make_run_bash_tool,
@@ -39,16 +27,6 @@ from loom.platform.cli.tools import (
 from pathlib import Path as _Path
 _tmp_bash_tool = make_run_bash_tool(_Path.cwd())
 _run_bash = _tmp_bash_tool.executor
-from loom.platform.cli.main import compress_session
-
-
-def _make_mock_router(text: str):
-    """Return a mock LLMRouter whose chat() yields an LLMResponse with given text."""
-    async def mock_chat(**kwargs):
-        return LLMResponse(text=text, tool_uses=[], stop_reason="end_turn")
-    router = MagicMock()
-    router.chat = mock_chat
-    return router
 
 
 # ---------------------------------------------------------------------------
@@ -349,156 +327,3 @@ class TestFullPipeline:
         # Both recorded in episodic
         entries = await em.read_session("full-test")
         assert len(entries) == 2
-
-
-# ---------------------------------------------------------------------------
-# 4. Session compression: episodic → semantic (mocked LLM)
-# ---------------------------------------------------------------------------
-
-class TestSessionCompression:
-    @pytest.mark.asyncio
-    async def test_compress_writes_facts_to_semantic(self, db_conn):
-        em = EpisodicMemory(db_conn)
-        sm = SemanticMemory(db_conn)
-
-        # Seed episodic entries
-        for i in range(3):
-            await em.write(EpisodicEntry(
-                session_id="comp-test",
-                event_type="tool_result",
-                content=f"Tool 'read_file' ok → some content {i}",
-            ))
-
-        mock_router = _make_mock_router(
-            "FACT: The project reads configuration from config.yaml\n"
-            "FACT: Python 3.14 is in use\n"
-            "FACT: Tests are located in the tests/ directory\n"
-        )
-
-        count = await compress_session(
-            session_id="comp-test",
-            episodic=em,
-            semantic=sm,
-            router=mock_router,
-            model="MiniMax-M2.7",
-        )
-
-        assert count == 3
-        results = await sm.list_recent(10)
-        values = [r.value for r in results]
-        assert any("config.yaml" in v for v in values)
-        assert any("Python 3.14" in v for v in values)
-        assert any("tests/" in v for v in values)
-
-    @pytest.mark.asyncio
-    async def test_compress_marks_only_entries_sent_to_llm(self, db_conn):
-        """Only the batch the LLM actually read is marked compressed; the rest
-        stays uncompressed for the next run instead of being silently skipped."""
-        em = EpisodicMemory(db_conn)
-        sm = SemanticMemory(db_conn)
-        for i in range(70):
-            await em.write(EpisodicEntry(
-                session_id="big", event_type="message", content=f"User: msg {i}",
-            ))
-        seen = []
-
-        async def mock_chat(**kwargs):
-            seen.append(kwargs["messages"][0]["content"])
-            return LLMResponse(text="", tool_uses=[], stop_reason="end_turn")
-
-        router = MagicMock()
-        router.chat = mock_chat
-
-        await compress_session(session_id="big", episodic=em, semantic=sm,
-                               router=router, model="MiniMax-M2.7")
-        left = await em.read_session("big", uncompressed_only=True)
-        assert len(left) == 10
-        assert "msg 60" not in seen[0]
-
-        await compress_session(session_id="big", episodic=em, semantic=sm,
-                               router=router, model="MiniMax-M2.7")
-        assert await em.read_session("big", uncompressed_only=True) == []
-        assert "msg 69" in seen[1]
-
-    @pytest.mark.asyncio
-    async def test_compress_empty_session_returns_zero(self, db_conn):
-        em = EpisodicMemory(db_conn)
-        sm = SemanticMemory(db_conn)
-        chat_called = []
-
-        async def mock_chat(**kwargs):
-            chat_called.append(True)
-            return LLMResponse(text="", tool_uses=[], stop_reason="end_turn")
-
-        mock_router = MagicMock()
-        mock_router.chat = mock_chat
-
-        count = await compress_session(
-            session_id="empty-session",
-            episodic=em, semantic=sm,
-            router=mock_router, model="MiniMax-M2.7",
-        )
-        assert count == 0
-        assert chat_called == []   # router never called for empty session
-
-    @pytest.mark.asyncio
-    async def test_compress_soft_deletes_entries(self, db_conn):
-        """Issue #142: compress_session must mark entries compressed, not delete."""
-        em = EpisodicMemory(db_conn)
-        sm = SemanticMemory(db_conn)
-
-        ids: list[str] = []
-        for i in range(3):
-            entry = EpisodicEntry(
-                session_id="soft-comp", event_type="tool_result",
-                content=f"tool call {i}",
-            )
-            ids.append(entry.id)
-            await em.write(entry)
-
-        mock_router = _make_mock_router("FACT: Something happened\n")
-
-        count = await compress_session(
-            session_id="soft-comp",
-            episodic=em, semantic=sm,
-            router=mock_router, model="MiniMax-M2.7",
-        )
-        assert count == 1
-
-        # Entries still exist — but all flagged compressed_at
-        all_rows = await em.read_session("soft-comp")
-        assert len(all_rows) == 3
-        assert all(r.compressed_at is not None for r in all_rows)
-
-        # Uncompressed view is empty — so the threshold won't re-trigger
-        assert await em.count_session("soft-comp", uncompressed_only=True) == 0
-
-        # A subsequent compress_session does nothing (no fresh input)
-        count2 = await compress_session(
-            session_id="soft-comp",
-            episodic=em, semantic=sm,
-            router=mock_router, model="MiniMax-M2.7",
-        )
-        assert count2 == 0
-
-    @pytest.mark.asyncio
-    async def test_compress_facts_have_correct_source(self, db_conn):
-        em = EpisodicMemory(db_conn)
-        sm = SemanticMemory(db_conn)
-
-        await em.write(EpisodicEntry(
-            session_id="src-test", event_type="tool_result",
-            content="Tool 'list_dir' ok",
-        ))
-
-        mock_router = _make_mock_router(
-            "FACT: Root directory contains 5 Python files\n"
-        )
-
-        await compress_session(
-            session_id="src-test",
-            episodic=em, semantic=sm,
-            router=mock_router, model="MiniMax-M2.7",
-        )
-        results = await sm.list_recent(5)
-        assert all(r.source == "session:src-test" for r in results)
