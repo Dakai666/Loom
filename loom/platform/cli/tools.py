@@ -3237,7 +3237,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             "The sub-agent cannot interact with the user — it works autonomously until done.\n"
             "\n"
             "Tool scope: by default the sub-agent only sees SAFE tools (read_file, "
-            "fetch_url, web_search, list_dir, scratchpad_read, plus result_write). "
+            "fetch_url, list_dir, scratchpad_read, plus result_write). "
             "If your task description requires write_file, run_bash, or any other "
             "GUARDED tool, you MUST list it in `tools=[...]` — otherwise the "
             "sub-agent will reach for a tool that does not exist and burn turns. "
@@ -3260,7 +3260,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                     "items": {"type": "string"},
                     "description": (
                         "Tool whitelist for the sub-agent. "
-                        "List of tool names (e.g. ['read_file', 'web_search']) or comma-separated string. "
+                        "List of tool names (e.g. ['read_file', 'fetch_url']) or comma-separated string. "
                         "Omit or null for SAFE-only tools. CRITICAL tools are always blocked. "
                         "MUST explicitly include GUARDED tools like 'write_file' or 'run_bash' if "
                         "the task needs them — otherwise the sub-agent has no way to call them."

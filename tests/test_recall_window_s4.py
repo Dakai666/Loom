@@ -19,6 +19,7 @@ Synthetic sources only.
 import importlib
 import json
 import re
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -195,17 +196,19 @@ async def test_window_does_not_regress_into_the_earliest_rows(mem):
 
 
 async def test_window_output_budget_and_access_marking(mem):
-    for i in range(10):
-        sid = f"s{i}"
-        await _session(mem, sid, f"Session {i} " + "t" * 300)
-        await _row(mem, sid, 1, "user", f"line {i} " + "x" * 2_000, _h(i))
-    for i in range(10):
-        await _fact(mem, f"fact-{i}", "v" * 2_000, _h(i))
+    # Memories alone overflow the budget: some are shown, the rest omitted.
+    # Only the shown ones may be marked accessed (spec 61 §6.3).
+    total = 10
+    for i in range(total):
+        await _fact(mem, f"fact-{i}-" + "k" * 150, "v" * 2_000, _h(i))
 
-    result = await _recall(mem, since=_h(0).isoformat(), until=_h(24).isoformat(), limit=10)
+    result = await _recall(mem, since=_h(0).isoformat(), until=_h(24).isoformat(),
+                           limit=total)
 
     assert len(result.output) <= RECALL_OUTPUT_CHARS
-    shown = {k for k in (f"fact-{i}" for i in range(10)) if f"mem:{k}@" in result.output}
+    shown = {m for m in re.findall(r"mem:(fact-\d+-k+)@", result.output)}
+    assert 0 < len(shown) < total, len(shown)
+    assert "omitted" in result.output
     db = mem.semantic._db
     cur = await db.execute(
         "SELECT key FROM semantic_entries WHERE last_accessed_at IS NOT NULL")
@@ -287,11 +290,16 @@ def test_retired_recall_tool_code_is_gone():
         importlib.import_module("loom.core.ledger.recall")
 
 
-# Mentions that are true even though the tool is not in this registry:
-# result_write is registered in every sub-agent's own registry, and
-# web_search is registered whenever a Brave key is configured (this test
-# has none) — spawn_agent names both as what a sub-agent can get.
-ALLOWED_MENTIONS = {("spawn_agent", "result_write"), ("spawn_agent", "web_search")}
+# A mention that is true although the tool is not in this registry:
+# result_write is registered in every sub-agent's own registry, which is
+# what spawn_agent describes. Conditionally registered tools (e.g. a web
+# search that needs a key) are not allowed here: text the model always sees
+# must not name them.
+ALLOWED_MENTIONS = {("spawn_agent", "result_write")}
+
+AGENT_TEMPLATE = Path(__file__).resolve().parents[1] / "Agent.md.example"
+# A line only the tracked template has — proves it reached the prompt.
+AGENT_TEMPLATE_MARKER = "## 長期追蹤（Pursuit）"
 
 RETIRED_TOOL_NAMES = {
     "recall_period", "ledger_recall", "query_relations", "predict",
@@ -309,12 +317,17 @@ async def started_session(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    # Hermetic: no repo-local SOUL.md / Agent.md reaches the prompt.
+    # Hermetic: no repo-local SOUL.md / Agent.md reaches the prompt; the
+    # tracked Agent.md.example is loaded as the agent template instead.
     monkeypatch.chdir(workspace)
+    agent_md = workspace / "Agent.md"
+    agent_md.write_text(AGENT_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setattr(core_session, "build_router", lambda *a, **k: MagicMock())
     # Optional memory tools on, so their descriptions are checked too.
-    monkeypatch.setattr(core_session, "_load_loom_config",
-                        lambda: {"memory": {"attention": {"enabled": True}}})
+    monkeypatch.setattr(core_session, "_load_loom_config", lambda: {
+        "identity": {"agent": str(agent_md)},
+        "memory": {"attention": {"enabled": True}},
+    })
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(core_session, "build_embedding_provider", lambda env, cfg: None)
     from rich.prompt import Confirm
@@ -366,6 +379,7 @@ async def test_no_tool_description_or_startup_prompt_names_an_unregistered_tool(
         m["content"] for m in started_session.messages
         if m["role"] == "system" and isinstance(m.get("content"), str)
     )
+    assert AGENT_TEMPLATE_MARKER in texts["<system prompt>"]
     offenders = {
         where: sorted(
             n for n in universe

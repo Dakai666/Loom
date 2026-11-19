@@ -72,7 +72,7 @@
 **On-demand 紀律**：不要自己排程主動輪詢。只在使用者問起時走流程：
 
 1. `pursuit_read(id)` 看上次追到哪、有哪些維度
-2. 跑 `web_search` / `fetch_url` / 其他工具撈當下的新資訊
+2. 用網路搜尋（若已設定）、`fetch_url` 或其他工具撈當下的新資訊
 3. `pursuit_write(id, ...)` 把新快照 append 上去，回摘要給使用者
 
 **建議的 markdown 形狀**（不強制）：
