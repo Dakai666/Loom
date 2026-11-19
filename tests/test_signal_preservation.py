@@ -122,12 +122,12 @@ class TestToolResultErrorContext:
 
         pad = _Pad()
         jit = JITRetrievalMiddleware(
-            scratchpad=pad, registry=ToolRegistry(), threshold_chars=10,
+            scratchpad=pad, registry=ToolRegistry(),
         )
 
         # Use a failure ToolResult with a large output AND error_context
         # to verify JIT preserves the latter.
-        big_out = "x" * 200
+        big_out = "x" * 30_000
         async def handler(_: ToolCall) -> ToolResult:
             return ToolResult(
                 call_id="c", tool_name="t", success=False,

@@ -131,7 +131,9 @@ last_pulled: <date>
 
 **Autonomy 預設同步**。穩定與可預期優先於壁鐘時間；除非明確有並行意義且你會 `jobs_await`，否則 autonomy path 都走 `async_mode=False`。
 
-**工具鏈**：`jobs_list` / `jobs_status` / `jobs_await(ids, timeout)` / `jobs_cancel(id, reason)` / `scratchpad_read(ref)`。
+**工具鏈**：`jobs_list` / `jobs_status` / `jobs_await(ids, timeout)` / `jobs_cancel(id, reason)` / `scratchpad_read(ref?, offset?, limit?, grep?)`：先 grep 再按 1-indexed offset/limit 取行，0／空值等同未設；看 footer 的總行數與 `continue with offset=K` 續讀。
+
+**Scratchpad 上限**：固定 200000 bytes；超長單行只回 UTF-8-safe 前綴並標出行號／完整 byte 長度，續讀從下一行開始（該行尾段不會補回）。
 
 **Cancel 必帶 reason**——軌跡留在 `jobs_list()`，未來回頭可追。Session 結束 harness 自動 `cancel_all(reason="session_ended")`，Scratchpad 清空。
 

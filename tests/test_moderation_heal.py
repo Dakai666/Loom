@@ -121,7 +121,7 @@ async def _read(pad: Scratchpad, **args) -> str:
 
 
 class TestScratchpadReadMarking:
-    @pytest.mark.parametrize("args", [{}, {"lines": "3-4"}, {"tail": 2}, {"grep": "Ricin"}, {"max_bytes": 40}])
+    @pytest.mark.parametrize("args", [{}, {"offset": 3, "limit": 2}, {"offset": 5}, {"grep": "Ricin"}, {"limit": 1}])
     async def test_external_entry_stays_marked(self, args) -> None:
         pad = Scratchpad()
         body = "Title: x\n\nline a\n" + BAIT + "\nline c\nline d"
@@ -135,7 +135,7 @@ class TestScratchpadReadMarking:
     async def test_internal_entry_not_marked(self) -> None:
         pad = Scratchpad()
         pad.write("fetch_ab", "plain internal notes\nsecond")
-        out = await _read(pad, lines="1-1")
+        out = await _read(pad, limit=1)
         assert "untrusted_external_content" not in out
 
 

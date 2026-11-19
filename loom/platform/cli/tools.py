@@ -652,11 +652,6 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
             executor=_read_file,
             tags=["filesystem", "read"],
             impact_scope="filesystem",
-            # Issue #302 F1: source files in the 8K–24K char range are
-            # nearly always wanted inline (mid-size Python modules, configs).
-            # Spilling them forces a redundant scratchpad_read round trip.
-            # 24K ≈ ~6K tokens — still safely under typical attention budgets.
-            spill_threshold_chars=24000,
         ),
         ToolDefinition(
             name="write_file",
@@ -3831,166 +3826,85 @@ def make_jobs_cancel_tool(jobstore: Any) -> ToolDefinition:
     )
 
 
-_SCRATCHPAD_DEFAULT_MAX_BYTES = 200_000
-
-
-# ── Scratchpad ref naming convention (Issue #197 review) ───────────────────
-# Different harness mechanisms write into the same scratchpad; the prefix
-# tells you why each ref exists. Add a new prefix here when introducing a
-# new producer so scratchpad_read's listing keeps surfacing it correctly.
-#
-#   auto_<tool>_<6hex>          → JITRetrievalMiddleware (Phase 1, #197)
-#                                  Original tool output >threshold; cached
-#                                  here, agent saw a JIT placeholder.
-#   masked_<tool>_<6hex>        → _apply_observation_masking (Phase 2, #197)
-#                                  Older superseded tool call folded for
-#                                  token budget; agent saw a fold placeholder.
-#   subagent_failure:<agent_id> → run_subagent failure path (#192 P0)
-#                                  Diagnostic context from a max_turns or
-#                                  loop-detected sub-agent failure.
-#   <other>                     → ad-hoc agent or job-pipeline writes.
-def _categorize_scratchpad_refs(refs: list[str]) -> dict[str, list[str]]:
-    """Group scratchpad refs by their producer prefix."""
-    by_kind: dict[str, list[str]] = {
-        "jit_spilled": [],
-        "observation_masked": [],
-        "subagent_failure": [],
-        "other": [],
-    }
-    for ref in refs:
-        if ref.startswith("auto_"):
-            by_kind["jit_spilled"].append(ref)
-        elif ref.startswith("masked_"):
-            by_kind["observation_masked"].append(ref)
-        elif ref.startswith("subagent_failure:"):
-            by_kind["subagent_failure"].append(ref)
-        else:
-            by_kind["other"].append(ref)
-    return by_kind
-
-
 def make_scratchpad_read_tool(scratchpad: Any) -> ToolDefinition:
-    """Read content from the session's Scratchpad."""
+    """Read a window of scratchpad content or list its refs."""
 
     async def _scratchpad_read(call: ToolCall) -> ToolResult:
         ref = (call.args.get("ref") or "").strip()
         if not ref:
-            refs = scratchpad.list_refs()
-            # Issue #197 Phase 2 review: categorize refs so an agent doing
-            # discovery can pick the right one without trial-and-error.
-            # ``available_refs`` stays a flat list for backward compat;
-            # ``by_kind`` is the new categorized view.
             return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
+                call_id=call.id,
+                tool_name=call.tool_name,
                 success=True,
-                output=json.dumps(
-                    {
-                        "available_refs": refs,
-                        "by_kind": _categorize_scratchpad_refs(refs),
-                    },
-                    indent=2,
-                ),
+                output=json.dumps({"available_refs": scratchpad.list_refs()}, indent=2),
             )
-        # Models often fill every schema field with a placeholder; treat
-        # None / "" as "not set" so they don't count as filters. head/tail
-        # must be >= 1, so 0 can only be a placeholder too (#647).
-        args = {k: v for k, v in call.args.items()
-                if v is not None and v != ""
-                and not (k in ("head", "tail") and v == 0 and not isinstance(v, bool))}
-        if "section" in args:
-            return ToolResult(
-                call_id=call.id, tool_name=call.tool_name,
-                success=False,
-                error=(
-                    "'section' was removed: it guessed between head/tail/range/"
-                    "keyword from one string (e.g. '2024-2025' became a line "
-                    "range). Use exactly one of head=N, tail=N, lines='N-M', "
-                    "or grep='text'."
-                ),
-            )
-        filters: dict[str, Any] = {}
-        for name in ("head", "tail"):
-            if name in args:
-                v = args[name]
-                if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()):
-                    v = None
-                try:
-                    filters[name] = int(v)  # type: ignore[arg-type]
-                except (TypeError, ValueError):
-                    return ToolResult(
-                        call_id=call.id, tool_name=call.tool_name,
-                        success=False, error=f"'{name}' must be an integer line count",
-                    )
-        for name in ("lines", "grep"):
-            if name in args:
-                filters[name] = str(args[name])
-        raw_max = call.args.get("max_bytes")
-        if raw_max is None:
-            max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
-        else:
-            try:
-                max_bytes = int(raw_max)
-                if max_bytes <= 0:
-                    max_bytes = _SCRATCHPAD_DEFAULT_MAX_BYTES
-            except (TypeError, ValueError):
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False, error="'max_bytes' must be a positive integer",
-                )
         try:
-            content = scratchpad.read(ref, max_bytes=max_bytes, **filters)
+            content = scratchpad.read(
+                ref,
+                offset=call.args.get("offset"),
+                limit=call.args.get("limit"),
+                grep=call.args.get("grep"),
+            )
+            # #660: a partial read must keep exactly one external-content wrap.
+            first = scratchpad.read(ref, limit=1)
         except (KeyError, ValueError) as exc:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name,
-                              success=False, error=str(exc))
-        # A filtered or truncated read of fetched content would otherwise
-        # drop the wrapper sanitize_untrusted_text() put on the stored body —
-        # and with it the only marker the moderation self-heal keys on (#660).
-        # Literal tags can only come from the wrapper (the body's < > are
-        # escaped), so stripping and re-wrapping yields exactly one pair.
-        head = scratchpad.read(ref, max_bytes=len(_SANITIZE_OPEN.encode()))
-        if head.startswith(_SANITIZE_OPEN):
-            body = content.replace(_SANITIZE_OPEN, "").replace(_SANITIZE_CLOSE, "")
+            return ToolResult(
+                call_id=call.id, tool_name=call.tool_name, success=False, error=str(exc)
+            )
+        if first.startswith(_SANITIZE_OPEN):
+            body = content.replace(_SANITIZE_OPEN.strip(), "").replace(
+                _SANITIZE_CLOSE.strip(), ""
+            )
             content = f"{_SANITIZE_OPEN}{body}{_SANITIZE_CLOSE}"
         return ToolResult(
-            call_id=call.id, tool_name=call.tool_name,
-            success=True, output=content,
+            call_id=call.id, tool_name=call.tool_name, success=True, output=content
         )
 
     return ToolDefinition(
         name="scratchpad_read",
         description=(
-            "Read content from the session Scratchpad. Omit 'ref' to list "
-            "available refs. Optional line filter (at most one): head=N, "
-            "tail=N, lines='N-M' (1-indexed, inclusive), or grep='text' "
-            "(substring match, output prefixed with line numbers). Filters "
-            "see the whole body; a trailing note reports how many lines "
-            "matched and where truncation stopped. Output is capped at "
-            f"{_SCRATCHPAD_DEFAULT_MAX_BYTES} bytes by default — raise "
-            "'max_bytes' or narrow with lines='N-M' for larger payloads."
+            "Read a scratchpad ref with offset (1-indexed) and limit (line count). "
+            "Optionally grep a substring first, then page through matching lines; "
+            "grep hits retain source line numbers. Zero/empty values are unset. "
+            "Omit ref to list available_refs. One footer reports the source line "
+            "range/total, match count when filtering, and the next offset when cut. "
+            "Output is capped at 200000 bytes. "
+            "An over-cap single line returns a UTF-8-safe prefix with its line number/full byte length; continue skips to the next line."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.NONE,
         input_schema={
             "type": "object",
             "properties": {
-                "ref": {"type": "string", "description": "Scratchpad ref (with or without scratchpad:// prefix). Omit to list all refs."},
-                "head": {"type": "integer", "description": "First N lines."},
-                "tail": {"type": "integer", "description": "Last N lines of the whole body."},
-                "lines": {"type": "string", "description": "Line range 'N-M', 1-indexed, inclusive."},
-                "grep": {"type": "string", "description": "Lines containing this substring (hyphens are literal)."},
-                "max_bytes": {"type": "integer", "description": f"Byte cap on output after filtering (default {_SCRATCHPAD_DEFAULT_MAX_BYTES})."},
+                "ref": {
+                    "type": ["string", "null"],
+                    "description": "Scratchpad ref; omit to list refs.",
+                },
+                "offset": {
+                    "anyOf": [{"type": "integer", "minimum": 0}, {"enum": ["", None]}],
+                    "description": "Start at this 1-indexed line (matching-line index with grep); 0/unset starts at 1.",
+                },
+                "limit": {
+                    "anyOf": [{"type": "integer", "minimum": 0}, {"enum": ["", None]}],
+                    "description": "Line count; 0/unset reads to the fixed byte cap.",
+                },
+                "grep": {
+                    "type": ["string", "null"],
+                    "description": "Substring filter before offset/limit; empty means all lines.",
+                },
             },
         },
         executor=_scratchpad_read,
         tags=["jobs", "scratchpad"],
         impact_scope="agent",
-        inline_only=True,  # Re-spilling scratchpad reads is paradoxical; #197
+        inline_only=True,
     )
 
 
 # ------------------------------------------------------------------
 # Issue #276 — agent-side LLM tier control
 # ------------------------------------------------------------------
+
 
 def make_request_model_tier_tool(session: Any) -> ToolDefinition:
     """Agent-callable: explicitly switch the active LLM tier.

@@ -291,198 +291,45 @@ class TestJobsTools:
 
 
 class TestScratchpadTool:
-    async def test_read_by_ref(self):
+    @pytest.mark.parametrize("ref", ["log", "scratchpad://log", "scratchpad:log"])
+    async def test_read_by_ref(self, ref):
         pad = Scratchpad()
         pad.write("log", "hello world")
-        tool = make_scratchpad_read_tool(pad)
-
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log"}))
-        assert r.success
-        assert r.output == "hello world"
-
-    async def test_read_strips_uri_prefix(self):
-        pad = Scratchpad()
-        pad.write("log", "abc")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "scratchpad://log"}))
-        assert r.success
-        assert r.output == "abc"
+        r = await make_scratchpad_read_tool(pad).executor(_call("scratchpad_read", {"ref": ref}))
+        assert r.success and r.output == "hello world\n\n[lines 1–1 of 1]"
 
     async def test_list_when_no_ref(self):
         pad = Scratchpad()
-        pad.write("a", "1")
-        pad.write("b", "2")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {}))
-        assert r.success
-        payload = json.loads(r.output)
-        assert payload["available_refs"] == ["a", "b"]
-        # Issue #197 Phase 2 review: discoverability — refs categorized so
-        # agent can scan its folded state without trial-and-error reads.
-        assert payload["by_kind"]["other"] == ["a", "b"]
-        assert payload["by_kind"]["jit_spilled"] == []
-        assert payload["by_kind"]["observation_masked"] == []
-        assert payload["by_kind"]["subagent_failure"] == []
+        for ref in ("auto_x", "masked_x", "subagent_failure:x", "other"):
+            pad.write(ref, "body")
+        r = await make_scratchpad_read_tool(pad).executor(_call("scratchpad_read", {}))
+        assert r.success and json.loads(r.output) == {"available_refs": pad.list_refs()}
 
-    async def test_list_groups_refs_by_producer_prefix(self):
-        """Refs from JIT, masking, sub-agent failure paths each land in
-        the right bucket so agents can navigate their folded state."""
+    async def test_missing_ref_fails(self):
+        r = await make_scratchpad_read_tool(Scratchpad()).executor(_call("scratchpad_read", {"ref": "nope"}))
+        assert not r.success and "not found" in r.error
+
+    async def test_fixed_cap_has_explicit_long_line_marker(self):
         pad = Scratchpad()
-        pad.write("auto_fetch_url_a3f7", "JIT-spilled body")
-        pad.write("masked_run_bash_b2c9", "masked older call")
-        pad.write("subagent_failure:sub-xyz", "sub-agent trace")
-        pad.write("ad_hoc_note", "agent-written")
-        tool = make_scratchpad_read_tool(pad)
+        pad.write("big", "x" * 250_000)
+        r = await make_scratchpad_read_tool(pad).executor(_call("scratchpad_read", {"ref": "big"}))
+        assert r.success and len(r.output.encode()) <= 200_000
+        assert "line 1 truncated (250000 bytes)" in r.output
+        assert "continue with offset=2" in r.output
 
-        r = await tool.executor(_call("scratchpad_read", {}))
-
-        payload = json.loads(r.output)
-        assert payload["by_kind"]["jit_spilled"] == ["auto_fetch_url_a3f7"]
-        assert payload["by_kind"]["observation_masked"] == ["masked_run_bash_b2c9"]
-        assert payload["by_kind"]["subagent_failure"] == ["subagent_failure:sub-xyz"]
-        assert payload["by_kind"]["other"] == ["ad_hoc_note"]
-
-    async def test_missing_ref_error(self):
+    async def test_grep_hyphens_are_literal(self):
         pad = Scratchpad()
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "nope"}))
-        assert not r.success
+        pad.write("log", "other\nthe 2024-2025 cohort\ntail")
+        r = await make_scratchpad_read_tool(pad).executor(_call("scratchpad_read", {"ref": "log", "grep": "2024-2025"}))
+        assert r.success and r.output.startswith("2: the 2024-2025 cohort\n\n[lines ")
 
-    async def test_default_max_bytes_caps_output(self):
-        pad = Scratchpad()
-        pad.write("big", "y" * 1_000_000)
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "big"}))
-        assert r.success
-        # Default cap is 200_000; trailing truncation notice adds a few bytes
-        assert len(r.output) < 210_000
-        assert "truncated" in r.output
-
-    async def test_explicit_max_bytes_override(self):
-        pad = Scratchpad()
-        pad.write("med", "z" * 5_000)
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "med", "max_bytes": 1000}))
-        assert r.success
-        assert "truncated at 1000 of 5000 bytes" in r.output
-
-    async def test_grep_arg(self):
-        pad = Scratchpad()
-        pad.write("log", "alpha\nthe 2024-2025 cohort\nbeta")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "grep": "2024-2025"}))
-        assert r.success
-        assert r.output.startswith("2: the 2024-2025 cohort\n\n[scratchpad_read:")
-        assert "matched 1 of 3 lines" in r.output
-
-    async def test_tail_and_head_args(self):
-        pad = Scratchpad()
-        pad.write("log", "\n".join(str(i) for i in range(1, 11)))
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "tail": 2}))
-        assert r.output.startswith("9\n10\n")
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": 2}))
-        assert r.output.startswith("1\n2\n")
-
-    async def test_legacy_section_arg_rejected_with_guidance(self):
-        """``section`` overloaded head/tail/range/keyword in one string and
-        guessed between them (2026-10-19 diagnosis). It now fails loudly and
-        names the explicit replacements."""
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "section": "tail"}))
-        assert not r.success
-        for name in ("head", "tail", "lines", "grep"):
-            assert name in r.error
-
-    async def test_placeholder_args_are_ignored(self):
-        """Weaker models fill every field: "" / None must not count as filters."""
+    async def test_retired_arguments_are_not_interpreted(self):
         pad = Scratchpad()
         pad.write("log", "a\nb\nc")
         tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {
-            "ref": "log", "lines": "2-3", "grep": "", "head": None, "section": "",
-        }))
-        assert r.success, r.error
-        assert r.output.startswith("b\nc\n\n[scratchpad_read:")
-
-    async def test_issue_647_zero_placeholders_are_ignored(self):
-        """#647: the exact call the model sent after the 2026-10-27 switch —
-        head plus zero/empty placeholders for every other filter."""
-        pad = Scratchpad()
-        pad.write("log", "\n".join(str(i) for i in range(1, 11)))
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {
-            "ref": "log", "head": 100, "tail": 0, "lines": "", "grep": "",
-        }))
-        assert r.success, r.error
-        assert r.output.startswith("1\n2\n")
-        assert "head=100" in r.output
-
-    @pytest.mark.parametrize("args", [
-        {"head": 0}, {"tail": 0}, {"head": 0, "tail": 0},
-        {"head": 0, "tail": 0, "lines": "", "grep": "", "max_bytes": 0},
-    ])
-    async def test_all_zero_placeholders_read_whole_body(self, args):
-        """head/tail must be >= 1, so 0 can only mean "not set"."""
-        pad = Scratchpad()
-        pad.write("log", "a\nb\nc")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", **args}))
-        assert r.success, r.error
-        assert r.output == "a\nb\nc"
-
-    async def test_zero_placeholder_does_not_hide_real_conflict(self):
-        """Two real filters still conflict — never silently pick one."""
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {
-            "ref": "log", "head": 1, "tail": 0, "grep": "a",
-        }))
-        assert not r.success
-        assert "head, grep" in r.error
-
-    async def test_negative_head_still_rejected(self):
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": -3}))
-        assert not r.success
-        assert "positive" in r.error
-
-    @pytest.mark.parametrize("bad", [True, 5.9, "five"])
-    async def test_head_rejects_non_integer(self, bad):
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": bad}))
-        assert not r.success
-        assert "integer" in r.error
-
-    async def test_conflicting_filters_error(self):
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": 1, "grep": "a"}))
-        assert not r.success
-
-    async def test_malformed_lines_error(self):
-        pad = Scratchpad()
-        pad.write("log", "a\nb")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "lines": "5-2"}))
-        assert not r.success
-        assert "lines" in r.error
-
-    async def test_max_bytes_rejects_non_int(self):
-        pad = Scratchpad()
-        pad.write("x", "hi")
-        tool = make_scratchpad_read_tool(pad)
-        r = await tool.executor(_call("scratchpad_read", {"ref": "x", "max_bytes": "many"}))
-        assert not r.success
-        assert "max_bytes" in r.error
+        r = await tool.executor(_call("scratchpad_read", {"ref": "log", "head": 1, "tail": 2,
+            "lines": "5-2", "section": "tail", "max_bytes": "many"}))
+        assert r.success and r.output == pad.read("log")
 
 
 # --- event injection helper ----------------------------------------

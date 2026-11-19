@@ -492,24 +492,11 @@ require_audit_log   = true
 
 # ── Context management (Issue #197) ──────────────────────────────────────────
 #
-# Just-in-time retrieval: when a tool's output exceeds this token budget,
-# the harness automatically writes the full content to the session
-# scratchpad and replaces the inline output with a structured reference.
-# The agent can then either re-call the tool for fresh data or read the
-# scratchpad ref for cached content.
-#
-# Tokens are estimated as len(output) // 4 (≈ char-to-token ratio for most
-# real-world tool outputs). Rough estimate is sufficient — a 30% error has
-# no practical effect on whether content is spilled.
-#
-# Tools whose purpose is content retrieval (task_read, scratchpad_read,
-# list_dir, memorize, task_done) are marked inline_only and bypass JIT.
-#
-# Recommended values:
-#   2000 (default) — most tool outputs stay inline; large fetches/reads spill
-#    500           — aggressive spilling for very long sessions
-#       0           — disables JIT entirely
-jit_spill_threshold_tokens = 2000  # internally × 4 → 8000-char threshold
+# Just-in-time retrieval uses one fixed threshold: 24000 characters.
+# Larger outputs stay in the session scratchpad; the placeholder has the ref,
+# size, total lines and up to 20 preview lines (bounded to 2000 characters).
+# Content tools marked inline_only and async job results never spill.
+# The old jit_spill_threshold_tokens key is ignored with a migration warning.
 
 # ── Observation masking (Issue #197 Phase 2) ─────────────────────────────────
 #

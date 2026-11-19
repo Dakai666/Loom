@@ -322,7 +322,7 @@ class LogMiddleware(Middleware):
 class JITRetrievalMiddleware(Middleware):
     """Just-in-time spill of large tool outputs to scratchpad (Issue #197).
 
-    When a tool produces output larger than ``threshold_chars``, this
+    When a tool produces output larger than 24,000 characters, this
     middleware writes the full output to the session scratchpad and
     replaces ``result.output`` with a structured placeholder pointing at
     the scratchpad ref. The model sees a compact reference instead of the
@@ -343,26 +343,23 @@ class JITRetrievalMiddleware(Middleware):
     scratchpad through its own job pipeline — JIT skips to avoid double
     indirection.
 
-    **Threshold**: configured in chars (~tokens × 4). Defaults to 8000
-    chars (~2000 tokens) if not specified.
+    **Threshold**: one fixed 24,000-character bound, without tool overrides.
     """
 
-    DEFAULT_THRESHOLD_CHARS = 8000
+    THRESHOLD_CHARS = 24_000
 
     def __init__(
         self,
         scratchpad: Any,
         registry: Any,
-        threshold_chars: int = DEFAULT_THRESHOLD_CHARS,
     ) -> None:
         self._scratchpad = scratchpad
         self._registry = registry
-        self._threshold_chars = max(0, threshold_chars)
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         result = await next(call)
 
-        if self._threshold_chars <= 0 or self._scratchpad is None:
+        if self._scratchpad is None:
             return result
         if (result.metadata or {}).get("async") is True:
             return result
@@ -373,18 +370,9 @@ class JITRetrievalMiddleware(Middleware):
         if tool_def is not None and getattr(tool_def, "inline_only", False):
             return result
 
-        # Per-tool override — see ToolDefinition.spill_threshold_chars (#302).
-        threshold = self._threshold_chars
-        if tool_def is not None:
-            override = getattr(tool_def, "spill_threshold_chars", None)
-            if override is not None:
-                if override <= 0:
-                    return result
-                threshold = override
-
         output_str = "" if result.output is None else str(result.output)
         size = len(output_str)
-        if size <= threshold:
+        if size <= self.THRESHOLD_CHARS:
             return result
 
         # Generate a stable, agent-readable ref. uuid suffix avoids
@@ -396,28 +384,39 @@ class JITRetrievalMiddleware(Middleware):
         except Exception as exc:
             _log.warning(
                 "JIT spill to scratchpad failed for %r: %s — keeping inline.",
-                call.tool_name, exc, exc_info=True,
+                call.tool_name,
+                exc,
+                exc_info=True,
             )
             _trace_middleware(
-                call, "JITRetrieval", "spill-failed",
-                reason=str(exc), error_context=traceback.format_exc(),
+                call,
+                "JITRetrieval",
+                "spill-failed",
+                reason=str(exc),
+                error_context=traceback.format_exc(),
             )
             return result
 
-        # Build a placeholder that gives the model two retrieval paths and
-        # explicit signals for fresh-vs-cached semantics. Designed to be
-        # parseable: every line uses the format expected by docs / tests,
-        # and the structured info lives in metadata as well.
+        lines = output_str.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        # A giant single line must not turn the preview back into the payload.
+        preview = "\n".join(lines[:20])
+        if len(preview) > 2_000:
+            preview = preview[:2_000] + "…"
+        # #660: a clipped preview must not leave fetched content unclosed.
+        if (
+            preview.startswith("<untrusted_external_content>\n")
+            and "</untrusted_external_content>" not in preview
+        ):
+            preview = (
+                "\n".join(preview.split("\n")[:19]) + "\n</untrusted_external_content>"
+            )
         placeholder = (
             f"[tool output spilled to scratchpad — {size} chars]\n"
-            f"  tool: {call.tool_name}\n"
-            f"  ref:  scratchpad://{ref}\n"
-            f"  size: {size} chars (~{size // 4} tokens)\n"
-            f"\n"
-            f"  Read with scratchpad_read(ref='{ref}') for cached content,\n"
-            f"  or re-call {call.tool_name} for fresh data.\n"
-            f"  Agent: prefer cached for immutable resources (web pages,\n"
-            f"  static files); re-call for state that may have changed."
+            f"  ref: scratchpad://{ref}\n"
+            f"  size: {size} chars, {len(lines)} lines\n"
+            f"\nPreview (up to 20 lines, 2000 chars):\n{preview}"
         )
 
         new_metadata = {
@@ -427,7 +426,9 @@ class JITRetrievalMiddleware(Middleware):
             "jit_original_size": size,
             # Lets RepeatCallTracker (#654) compare spilled outputs: the
             # placeholder's ref is unique per call, the content is not.
-            "jit_digest": hashlib.sha256(output_str.encode("utf-8", "replace")).hexdigest(),
+            "jit_digest": hashlib.sha256(
+                output_str.encode("utf-8", "replace")
+            ).hexdigest(),
         }
         return ToolResult(
             call_id=result.call_id,

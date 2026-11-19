@@ -88,20 +88,21 @@ class Scratchpad:
     def write(self, ref: str, content: str | bytes) -> str:
         """回傳 scratchpad://<ref>。ref 必須不含 /、不以 . 起頭、非空。"""
     def read(self, ref: str, *,
-             head: int | None = None, tail: int | None = None,
-             lines: str | None = None, grep: str | None = None,
-             max_bytes: int | None = None) -> str: ...
+             offset: int | None = None, limit: int | None = None,
+             grep: str | None = None) -> str: ...
     def size(self, ref: str) -> int: ...
     def list_refs(self) -> list[str]: ...   # sorted
     def clear(self) -> None: ...            # session stop 時呼叫
     def __contains__(self, ref: str) -> bool: ...
 ```
 
-最多一個行篩選，每個參數只有一種語意：`head=N` / `tail=N`（前/後 N 行）、`lines="N-M"`（1-indexed、含頭尾）、`grep="text"`（子字串，命中行加 `N: ` 行號前綴，方便接著用 `lines` 讀上下文）。行號只以 `\n` 切分，和 `read_file` / `grep -n` 一致。篩選永遠作用在完整內容上；衝突的篩選、反向或格式錯誤的範圍、非正數的 head/tail、空的 grep 都直接報錯，不會靜默回空。
+`offset` 是 1-indexed 起始行，`limit` 是行數；省略或 0 讀至固定 byte cap。`grep` 是子字串（空值不篩選），先在完整內容上找命中行，再依 offset/limit 對命中行開窗，沒有互斥組合。命中行保留原始 `N: ` 行號；footer 的行號／總數以原文為準，`matched` 是總命中數，grep 分頁的 continue offset 是命中序列的位置。行號只按 `\n` 切分。
 
-`max_bytes` 在篩選**之後**限制輸出（預設 200_000 bytes）。有篩選時只保留完整的行，切點不會切壞 UTF-8 字元。只要用到篩選或發生截斷，結尾就會附一行 `[scratchpad_read: …]`，寫明命中/選取幾行（共幾行）、截斷停在哪一行、下一步從哪一行接著讀。沒篩選且沒超過上限時，原文照樣回傳。
+每次回傳一行 `[lines a–b of N]` footer；仍有內容時同一行附 `continue with offset=K`。超過 EOF 成功回空內容與總行數，grep 未命中明示 `matched 0`。輸出固定上限 200000 bytes（含 footer；預留 external-content wrap 空間），一般截斷只取完整行，以 K 續讀不重不漏。**單行超過可用 byte cap 時只回 UTF-8-safe prefix**，footer 標示該行號與完整 byte 長度，continue 指下一行；未顯示的該行尾段不會補回。這是無 byte-offset 介面的明確限制。
 
-> 2026-10-19 前用的是單一 `section` 字串，靠內容猜是 head/tail/範圍/關鍵字（`"2024-2025"` 會被當成行號範圍），而且是在已截斷的 bytes 上篩選（`tail` 會落在檔案中段）。舊參數現在會回錯誤，並列出四個新參數。
+#660 的 `<untrusted_external_content>` 標記在任意讀取形狀仍維持恰好一對。省略 ref 只回平面 `available_refs` 清單，不再依 ref 命名分類。舊 head/tail/lines/max_bytes/section 不再解析或提供 shim。
+
+JIT 使用唯一固定門檻 24000 字元，沒有 config 或逐工具 override。Placeholder 提供 ref、大小、總行數、前最多 20 行預覽（最多 2000 字元，避免超長單行預覽重新塞滿 context）；保留 jit_digest、寫入失敗時 inline、inline_only 與 async job 不 spill。舊 `[harness] jit_spill_threshold_tokens` 被忽略並記錄一行 migration warning。
 
 **為什麼 Scratchpad 獨立於記憶系統？** — Scratchpad 存的是**過程產物**（抓到的 HTML、build log），只對當前 session 有意義。真正要進長期記憶的應該是 agent 讀完後**自己決定的結論**，透過 `memorize` 寫入 semantic store。session stop 時 Scratchpad 會 `clear()`，任何沒被主動撈出來的內容就丟了。
 
@@ -135,7 +136,7 @@ run_bash(command=..., async_mode=True)
 | `jobs_status(job_id)` | 單個 job 的完整狀態（含 elapsed、args、error） |
 | `jobs_await(job_ids, timeout)` | 等到全部 terminal 或 timeout。**不 raise**——回傳 `{timeout_hit, finished, still_running}` 讓 agent 自己決定 cancel 或再等 |
 | `jobs_cancel(job_id, reason)` | `reason` 必填——schema 層就擋掉沒帶理由的呼叫 |
-| `scratchpad_read(ref?, head?/tail?/lines?/grep?, max_bytes?)` | 省略 `ref` 時列出可用 refs；最多一個行篩選，結尾附命中數與截斷位置 |
+| `scratchpad_read(ref?, offset?, limit?, grep?)` | 省略 ref 列 refs；先 grep 再開窗，單行 footer 與固定 byte cap |
 
 所有這 5 個工具 trust level 都是 `SAFE`——純讀操作，不需要確認。
 

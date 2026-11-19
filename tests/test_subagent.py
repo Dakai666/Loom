@@ -238,7 +238,7 @@ class TestSubAgentFailureContext:
         # Scratchpad ref populated with full structured payload
         ref = "subagent_failure:sub-fail"
         assert ref in scratchpad
-        payload = json.loads(scratchpad.read(ref))
+        payload = json.loads(scratchpad.read(ref).rsplit("\n\n[lines ", 1)[0])
         assert payload["agent_id"] == "sub-fail"
         assert payload["turns_used"] == 2
         assert payload["tool_calls"] == 2
@@ -556,7 +556,7 @@ class TestSubAgentFailureCodes:
             scratchpad=scratchpad,
         )
 
-        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}"))
+        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}").rsplit("\n\n[lines ", 1)[0])
         # Field exists; None because result_write was never called.
         assert "result_slot" in payload
         assert payload["result_slot"] is None
@@ -596,7 +596,7 @@ class TestSubAgentFailureCodes:
             scratchpad=scratchpad,
         )
 
-        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}"))
+        payload = json.loads(scratchpad.read(f"subagent_failure:{result.agent_id}").rsplit("\n\n[lines ", 1)[0])
         assert payload["failure_code"] == "tool_loop"
         assert "always_fail" in payload["recovery_suggestion"]
         assert payload["error_context"]["stuck_tool"] == "always_fail"
@@ -765,7 +765,7 @@ class TestResultWriteSlot:
         # The key contract: output is non-empty on max_turns when slot was set.
         assert result.output == "checkpoint A: 3/5 done"
         # And the scratchpad payload carries it for full audit.
-        payload = json.loads(scratchpad.read(f"subagent_failure:sub-slot-maxturns"))
+        payload = json.loads(scratchpad.read(f"subagent_failure:sub-slot-maxturns").rsplit("\n\n[lines ", 1)[0])
         assert payload["result_slot"] == "checkpoint A: 3/5 done"
 
     async def test_slot_replace_mode_overwrites(

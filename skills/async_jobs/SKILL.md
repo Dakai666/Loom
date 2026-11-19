@@ -33,7 +33,7 @@ at turn boundaries — you never need to poll blindly.
 | `jobs_status(job_id)` | Full state for one job |
 | `jobs_await(job_ids, timeout)` | Block until all complete or timeout. Does not raise on timeout — check `timeout_hit` in the result and decide (cancel vs. keep waiting) |
 | `jobs_cancel(job_id, reason)` | Cancel in-flight job — `reason` is mandatory |
-| `scratchpad_read(ref, head?/tail?/lines?/grep?)` | Read the body (at most one line filter: `head=N`, `tail=N`, `lines="N-M"`, `grep="text"`); omit `ref` to list available refs |
+| `scratchpad_read(ref?, offset?, limit?, grep?)` | Read a 1-indexed window; grep first, then offset/limit over matching lines (original line numbers retained). 0/empty means unset; omit ref to list refs |
 
 ## Typical flow (parallel fetch)
 
@@ -70,3 +70,5 @@ Session stop calls `cancel_all(reason="session_ended")` automatically;
 Scratchpad is cleared. Any in-flight work at that point is lost — if
 stability matters more than parallelism for this task, just use
 synchronous mode.
+
+Scratchpad reads have a fixed 200000-byte cap and one `[lines a–b of N]` footer; follow `continue with offset=K` to page. An over-cap single line returns a UTF-8-safe prefix, labels its source line/full byte length, and continues at the next line (that line’s unseen tail is not recoverable by paging).
