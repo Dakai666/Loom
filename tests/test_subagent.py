@@ -326,6 +326,81 @@ class TestSingleExitRule:
         assert "response" in result.error
         assert result.turns_used == 0
 
+    async def test_failure_output_is_exactly_the_last_text_not_the_history(
+        self, semantic, episodic, procedural, tmp_path,
+    ):
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response("c1", "STALE first proposal"),
+            _tool_use_response("c2", "CURRENT last proposal"),
+        ])
+        result = await _run(router, registry, tmp_path, max_turns=2,
+                            allowed_tools=["always_fail"],
+                            semantic=semantic, episodic=episodic, procedural=procedural)
+        assert result.success is False
+        assert result.output == "CURRENT last proposal"
+
+    async def test_failure_output_keeps_last_non_empty_text_when_latest_is_empty(
+        self, semantic, episodic, procedural, tmp_path,
+    ):
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+        router = _FakeRouter([
+            _tool_use_response("c1", "first"),
+            _tool_use_response("c2", "second"),
+            _tool_use_response("c3", ""),
+        ])
+        result = await _run(router, registry, tmp_path, max_turns=3,
+                            allowed_tools=["always_fail"],
+                            semantic=semantic, episodic=episodic, procedural=procedural)
+        assert result.success is False
+        assert result.output == "second"
+
+    async def test_model_call_exception_is_a_failure_with_last_text(
+        self, semantic, episodic, procedural, tmp_path,
+    ):
+        registry = ToolRegistry()
+        registry.register(_make_failing_tool())
+
+        class _RaisingRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                if not self._responses_left():
+                    raise RuntimeError("synthetic provider failed")
+                async for item in super().stream_chat(model, messages, tools, max_tokens):
+                    yield item
+
+            def _responses_left(self):
+                try:
+                    nxt = next(self._responses)
+                except StopIteration:
+                    return False
+                self._responses = iter([nxt])
+                return True
+
+        router = _RaisingRouter([_tool_use_response("c1", "collected findings")])
+        result = await _run(router, registry, tmp_path, allowed_tools=["always_fail"],
+                            semantic=semantic, episodic=episodic, procedural=procedural)
+        assert result.success is False
+        assert result.output == "collected findings"
+        assert "RuntimeError" in result.error and "1 turn(s)" in result.error
+        assert result.turns_used == 1
+
+    async def test_cancellation_still_propagates(
+        self, semantic, episodic, procedural, tmp_path,
+    ):
+        import asyncio
+        import pytest
+
+        class _CancelRouter(_FakeRouter):
+            async def stream_chat(self, model, messages, tools=None, max_tokens=8096):
+                raise asyncio.CancelledError()
+                yield  # pragma: no cover
+
+        with pytest.raises(asyncio.CancelledError):
+            await _run(_CancelRouter([]), ToolRegistry(), tmp_path,
+                       semantic=semantic, episodic=episodic, procedural=procedural)
+
     async def test_result_carries_only_the_slim_fields(self):
         import dataclasses
         from loom.core.agent.subagent import SubAgentResult
@@ -471,6 +546,8 @@ class TestSpawnAgentTool:
     def test_definition_has_no_verifier_and_no_result_write(self, tmp_path):
         from loom.platform.cli import tools
         definition = tools.make_spawn_agent_tool(_spawn_parent(tmp_path))
+        assert "CANNOT persist" not in definition.description
+        assert "no arbitrary write_file" in definition.description
         assert definition.post_validator is None
         assert "result_write" not in definition.description
         assert not hasattr(tools, "_verify_spawn_agent")

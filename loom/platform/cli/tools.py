@@ -3166,9 +3166,10 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
             "If your task description requires write_file, run_bash, or any other "
             "GUARDED tool, you MUST list it in `tools=[...]` — otherwise the "
             "sub-agent will reach for a tool that does not exist and burn turns. "
-            "The sub-agent's final reply is the result you get back; it CANNOT "
-            "persist files for you under default tool scope, so ask for the full "
-            "answer in its reply and persist the artifact yourself. If it ends "
+            "The sub-agent's final reply is the result you get back. The default "
+            "scope has no arbitrary write_file permission, so ask for the full "
+            "answer in its reply and persist the artifact yourself (or list "
+            "write_file in `tools`). If it ends "
             "without a final reply (max_turns, truncated or empty reply) the call "
             "fails and carries its last text."
         ),

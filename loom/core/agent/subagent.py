@@ -203,9 +203,9 @@ async def run_subagent(
     total_tool_calls = 0
     final_output: str | None = None
     exit_reason = ""
-    # Free text from every assistant message (tool-use preambles included);
-    # its tail is what the parent gets when there is no final reply.
-    assistant_text_trail = ""
+    # The most recent non-empty assistant text (tool-use preambles included);
+    # it is what the parent gets when there is no final reply.
+    last_text = ""
 
     provenance: dict[str, Any] = {
         "agent_id": agent_id,
@@ -234,14 +234,19 @@ async def run_subagent(
         response: Any = None
 
         # Collect full response (no streaming needed for sub-agents)
-        async for _chunk, final in router.stream_chat(
-            model=config.model,
-            messages=messages,
-            tools=tools_schema,
-            max_tokens=4096,
-        ):
-            if final is not None:
-                response = final
+        try:
+            async for _chunk, final in router.stream_chat(
+                model=config.model,
+                messages=messages,
+                tools=tools_schema,
+                max_tokens=4096,
+            ):
+                if final is not None:
+                    response = final
+        except Exception as exc:  # CancelledError is a BaseException: it propagates
+            detail = " ".join(str(exc).split())[:200]
+            exit_reason = f"the model call raised {type(exc).__name__}" + (f" ({detail})" if detail else "")
+            break
 
         if response is None:
             exit_reason = "the model returned no response"
@@ -287,7 +292,7 @@ async def run_subagent(
         )
 
         if assistant_text.strip():
-            assistant_text_trail += assistant_text + "\n"
+            last_text = assistant_text.strip()
 
         if response.stop_reason == "end_turn":
             turns_used += 1
@@ -357,7 +362,7 @@ async def run_subagent(
     exit_reason = exit_reason or f"reached max_turns ({config.max_turns})"
     return SubAgentResult(
         success=False,
-        output=assistant_text_trail.strip()[-2000:],
+        output=last_text[-2000:],
         agent_id=agent_id,
         turns_used=turns_used,
         tool_calls=total_tool_calls,
