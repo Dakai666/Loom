@@ -622,7 +622,7 @@ class TestHeartbeatMinDwell:
         class _Session:
             _loom_app = app
 
-            async def stream_turn(self, _user_input: str):
+            async def stream_turn(self, _user_input: str, **_kw):
                 yield TextChunk(text="hello")
 
         app.start_heartbeat(
@@ -635,13 +635,32 @@ class TestHeartbeatMinDwell:
         assert app.footer.heartbeat_state == HeartbeatState.IDLE.value
         assert app.footer.heartbeat_pending_stop is False
 
+    def test_cli_turn_passes_origin_and_submit_time(self, app: LoomApp) -> None:
+        """#690 S3b: the ledger turn_start learns origin and fired_at from
+        the CLI entry point, not from the turn text."""
+        from datetime import UTC, datetime
+
+        seen: dict = {}
+
+        class _Session:
+            _loom_app = app
+
+            async def stream_turn(self, _user_input: str, **kw):
+                seen.update(kw)
+                yield TextChunk(text="hello")
+
+        submitted = datetime(2026, 11, 23, 3, 45, tzinfo=UTC)
+        asyncio.run(cli_main._run_streaming_turn(_Session(), "hi", fired_at=submitted))
+
+        assert seen == {"origin": "cli", "fired_at": submitted}
+
     def test_model_thinking_started_restores_heartbeat_after_tool_end(self, app: LoomApp) -> None:
         from loom.platform.interaction_language import ActionFamily
 
         class _Session:
             _loom_app = app
 
-            async def stream_turn(self, _user_input: str):
+            async def stream_turn(self, _user_input: str, **_kw):
                 yield ToolEnd(
                     name="read_file",
                     success=True,
@@ -674,7 +693,7 @@ class TestHeartbeatMinDwell:
         class _Session:
             _loom_app = None
 
-            async def stream_turn(self, _user_input: str):
+            async def stream_turn(self, _user_input: str, **_kw):
                 yield TurnDropped(
                     stop_reason="provider_ttfb_timeout",
                     exhausted=True,

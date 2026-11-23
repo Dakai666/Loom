@@ -974,6 +974,7 @@ class BlastRadiusMiddleware(Middleware):
                         else str(call.trust_level),
                         scope_grant=scope_grant if isinstance(scope_grant, dict) else None,
                         reason=reason,
+                        origin=call.origin,
                     ),
                 )
             except Exception:
@@ -1707,6 +1708,40 @@ class LifecycleMiddleware(Middleware):
         if self._ledger_emitter is not None:
             await self._emit_lifecycle_begin(call, record)
 
+        try:
+            return await self._run(call, next, ctx, record, tool_def)
+        except BaseException as exc:
+            # #690 S3b: cancelled (a preempting turn, CancelledError while
+            # waiting at confirm) or an exception passed through before
+            # memorialize. Record the END this BEGIN is owed, then re-raise.
+            if (
+                self._ledger_emitter is not None
+                and record.state != ActionState.MEMORIALIZED
+            ):
+                outcome = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError)
+                    else "exception"
+                )
+                # Shielded so a second cancel cannot cut the END write short.
+                await asyncio.shield(self._emit_lifecycle_end(
+                    call, record, outcome=outcome,
+                    error=(
+                        f"{type(exc).__name__}: {exc}" if str(exc)
+                        else type(exc).__name__
+                    ),
+                ))
+            raise
+
+    async def _run(
+        self,
+        call: ToolCall,
+        next: ToolHandler,
+        ctx: "LifecycleContext",
+        record: "ActionRecord",
+        tool_def: Any,
+    ) -> ToolResult:
+        ActionState = self._ActionState
+
         # ── Run inner pipeline ────────────────────────────────────────
         # The chain: Trace → SchemaValidation → BlastRadius →
         # LifecycleGateMiddleware → handler.
@@ -1966,55 +2001,88 @@ class LifecycleMiddleware(Middleware):
                 ),
                 event_id=f"evt_tool_begin_{record.id[:12]}",
             )
-        except Exception:
+        except Exception as exc:
             _log.exception("ledger tool_lifecycle BEGIN emit failed; continuing")
+            await self._ledger_emitter.record_gap(
+                missing_event_type="tool_lifecycle",
+                missing_event_id=f"evt_tool_begin_{record.id[:12]}",
+                exc=exc, tool_name=call.tool_name, tool_call_id=call.id,
+            )
+
+    async def _emit_lifecycle_end(
+        self,
+        call: "ToolCall",
+        rec: "ActionRecord",
+        *,
+        outcome: str | None,
+        result: "ToolResult | None" = None,
+        error: str | None = None,
+    ) -> None:
+        """Emit tool_lifecycle phase=END. Failure never breaks the call.
+
+        ``result`` is None when the call ended without one (cancelled, or an
+        exception passed through process()); the END then carries no digest
+        or summary, only ``outcome`` and ``error``.
+        """
+        from loom.core.ledger import ToolLifecyclePayload
+
+        event_id = f"evt_tool_end_{rec.id[:12]}"
+        summary: str | None = None
+        if result is not None and result.success:
+            summary = output_text(result.output)[:200] or None
+        elif result is not None:
+            error = result.error
+            summary = error[:200] if error else None
+        try:
+            await self._ledger_emitter.emit_tool_lifecycle(
+                payload=ToolLifecyclePayload(
+                    phase="END",
+                    tool_name=call.tool_name,
+                    tool_call_id=call.id,
+                    args_digest=self._args_digest(call.args),
+                    result_digest=self._result_digest(result),
+                    result_summary=summary,
+                    state_history=rec.history_dicts(),
+                    rolled_back=any(
+                        t.to_state.value == "reverted" for t in rec.state_history
+                    ),
+                    error=error,
+                    skill_id=_skill_id_from_call(call),
+                    outcome=outcome,
+                ),
+                event_id=event_id,
+                # parent links the END to its sibling BEGIN, whose event_id
+                # was derived from record.id the same way.
+                parent_event_id=f"evt_tool_begin_{rec.id[:12]}",
+            )
+        except Exception as exc:
+            _log.exception(
+                "ledger tool_lifecycle END emit failed; continuing "
+                "(tool_name=%s call_id=%s event_id=%s)",
+                call.tool_name, call.id, event_id,
+            )
+            await self._ledger_emitter.record_gap(
+                missing_event_type="tool_lifecycle",
+                missing_event_id=event_id,
+                exc=exc, tool_name=call.tool_name, tool_call_id=call.id,
+            )
 
     def _compose_on_lifecycle(
         self, call: "ToolCall", record: "ActionRecord"
     ) -> Callable[["ActionRecord"], Awaitable[None]]:
         """Return a wrapper that emits END to ledger then calls user hook."""
-        from loom.core.ledger import ToolLifecyclePayload
-
         original = self._on_lifecycle
-        emitter = self._ledger_emitter
 
         async def wrapped(rec: "ActionRecord") -> None:
-            try:
-                result = rec.result
-                # By the time on_lifecycle fires, state is MEMORIALIZED;
-                # check the history for any REVERTED transition.
-                rolled_back = any(
-                    t.to_state.value == "reverted" for t in rec.state_history
-                )
-                await emitter.emit_tool_lifecycle(
-                    payload=ToolLifecyclePayload(
-                        phase="END",
-                        tool_name=call.tool_name,
-                        tool_call_id=call.id,
-                        args_digest=self._args_digest(call.args),
-                        result_digest=self._result_digest(result),
-                        result_summary=(
-                            (output_text(result.output)[:200] or None)
-                            if (result and result.success)
-                            else (result.error[:200] if result and result.error else None)
-                        ),
-                        state_history=rec.history_dicts(),
-                        rolled_back=rolled_back,
-                        error=(result.error if result and not result.success else None),
-                        skill_id=_skill_id_from_call(call),
-                        # parent links the END to its sibling BEGIN.
-                        # event_id of BEGIN was deterministically derived
-                        # from record.id; mirror that here.
-                    ),
-                    event_id=f"evt_tool_end_{rec.id[:12]}",
-                    parent_event_id=f"evt_tool_begin_{rec.id[:12]}",
-                )
-            except Exception:
-                _log.exception(
-                    "ledger tool_lifecycle END emit failed; continuing "
-                    "(tool_name=%s call_id=%s event_id=%s)",
-                    call.tool_name, call.id, f"evt_tool_end_{rec.id[:12]}",
-                )
+            result = rec.result
+            # By the time on_lifecycle fires, state is MEMORIALIZED;
+            # check the history for any REVERTED transition.
+            rolled_back = any(
+                t.to_state.value == "reverted" for t in rec.state_history
+            )
+            await self._emit_lifecycle_end(
+                call, rec, outcome=rec.state_history[-1].reason, result=result,
+            )
 
             # #334 — emit artifact_emit for known producer tools.
             if result is not None and result.success and not rolled_back:

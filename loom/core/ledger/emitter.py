@@ -21,6 +21,7 @@ doc/53 references:
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
@@ -36,6 +37,7 @@ from loom.core.ledger.schema import (
     EnvObservationPayload,
     JudgeVerdictPayload,
     LedgerEvent,
+    LedgerGapPayload,
     MemoryOpPayload,
     ModelEventPayload,
     PermissionDecisionPayload,
@@ -46,6 +48,9 @@ from loom.core.ledger.schema import (
     TurnStartPayload,
 )
 from loom.core.ledger.store import LedgerStore
+
+
+_log = logging.getLogger(__name__)
 
 
 def _new_event_id(prefix: str = "evt") -> str:
@@ -65,6 +70,10 @@ class LedgerEmitter:
         self.store = store
         self.session_id = session_id
         self.branch_id = branch_id
+        # Ledger writes that failed and whose ledger_gap event failed too
+        # (#690 S3b). Stamped onto every turn_end, so it becomes durable
+        # once the store accepts writes again.
+        self.unrecorded_gaps = 0
 
     # -- generic emit ------------------------------------------------------
 
@@ -123,7 +132,43 @@ class LedgerEmitter:
     async def emit_turn_end(
         self, *, turn_id: str | None = None, payload: TurnEndPayload, **kwargs: Any
     ) -> str:
+        payload.unrecorded_ledger_gaps = self.unrecorded_gaps
         return await self.emit("turn_end", payload, turn_id=turn_id, **kwargs)
+
+    async def record_gap(
+        self,
+        *,
+        missing_event_type: str,
+        missing_event_id: str,
+        exc: BaseException,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
+        """Leave a durable trace of a ledger write that failed (#690 S3b).
+
+        Writes a ``ledger_gap`` event naming the missing event. It never
+        writes the missing event itself, so no reader mistakes a guess for
+        a record. If the gap cannot be written either, counts it in
+        ``unrecorded_gaps``. Never raises.
+        """
+        try:
+            await self.emit(
+                "ledger_gap",
+                LedgerGapPayload(
+                    missing_event_type=missing_event_type,
+                    missing_event_id=missing_event_id,
+                    error=f"{type(exc).__name__}: {exc}"[:500],
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                ),
+            )
+        except Exception:
+            self.unrecorded_gaps += 1
+            _log.exception(
+                "ledger_gap emit failed; %d unrecorded gap(s) this session "
+                "(missing %s %s)",
+                self.unrecorded_gaps, missing_event_type, missing_event_id,
+            )
 
     async def emit_thought(
         self, *, turn_id: str | None = None, payload: ThoughtPayload, **kwargs: Any

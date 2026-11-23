@@ -636,8 +636,13 @@ class LoomDiscordBot:
             _attribute_speaker(content, message.author), attachment_images or None
         )
 
+        # #690 S3b: the turn's fired_at is when DK's message was created,
+        # not when this turn gets to run (it may queue behind another).
+        fired_at = message.created_at
         if is_thread:
-            await self._run_turn(message, user_input_for_turn, session)
+            await self._run_turn(
+                message, user_input_for_turn, session, fired_at=fired_at,
+            )
         else:
             # Re-route to thread (message is already the first user turn)
             # Echo a short text preview; full vision content still goes
@@ -647,7 +652,9 @@ class LoomDiscordBot:
             else:
                 preview = "[含圖片附件]"
             fake_msg = await _safe_send(thread, f"> {preview}")  # echo starter
-            await self._run_turn(fake_msg, user_input_for_turn, session)
+            await self._run_turn(
+                fake_msg, user_input_for_turn, session, fired_at=fired_at,
+            )
 
     # ------------------------------------------------------------------
     # Thread / session helpers
@@ -1151,7 +1158,9 @@ class LoomDiscordBot:
             skipped: list[tuple[str, dict]] = []
             try:
                 async with channel.typing():
-                    async for event in session.stream_turn(content, origin="chime"):
+                    async for event in session.stream_turn(
+                        content, origin="chime", fired_at=req.fired_at,
+                    ):
                         if isinstance(event, TextChunk):
                             narration_buf += event.text
                         elif isinstance(event, ToolBegin):
@@ -1561,6 +1570,8 @@ class LoomDiscordBot:
         message: discord.Message,
         content,  # str | list[dict] (canonical vision content, see #505)
         session: "LoomSession",
+        *,
+        fired_at: "datetime | None" = None,
     ) -> None:
         """
         Run one agent turn with a split display strategy:
@@ -1633,7 +1644,9 @@ class LoomDiscordBot:
         # ── Run turn with typing indicator ────────────────────────────────
         async with message.channel.typing():
             try:
-                async for event in session.stream_turn(content):
+                async for event in session.stream_turn(
+                    content, origin="discord", fired_at=fired_at,
+                ):
                     # ── Stall-clock observation (#422, now via LivenessSensor) ──
                     # The sensor decides observed-vs-displayed by comparing the
                     # supplied fingerprint against its own stored observation,

@@ -184,7 +184,7 @@ def _sent_texts(channel) -> list[str]:
 
 class TestChimeSkipNotice:
     async def test_skipped_calls_produce_one_notice(self):
-        async def stream(content, *, origin):
+        async def stream(content, *, origin, **_kw):
             yield ToolBegin(name="memorize", args={"key": "k"}, call_id="c1")
             yield ToolEnd(
                 name="memorize", success=False, output="skipped",
@@ -212,7 +212,7 @@ class TestChimeSkipNotice:
         assert "read_file" not in notices[0]
 
     async def test_no_notice_when_nothing_skipped(self):
-        async def stream(content, *, origin):
+        async def stream(content, *, origin, **_kw):
             yield ToolBegin(name="read_file", args={"path": "x"}, call_id="c1")
             yield ToolEnd(
                 name="read_file", success=False, output="not found",

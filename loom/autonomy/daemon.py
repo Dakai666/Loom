@@ -54,6 +54,15 @@ caller should fall back per ``target['fallback']``."""
 _CONFIG_HASH_PATH = Path.home() / ".loom" / "schedules.hash"
 
 
+def _plan_fired_at(plan: PlannedAction) -> datetime | None:
+    """When the plan's trigger fired, as stamped by the evaluator (#690 S3b).
+
+    None for a plan built outside the evaluator, which knows no fire time.
+    """
+    ts = plan.context.get("fired_at")
+    return datetime.fromtimestamp(ts, UTC) if ts is not None else None
+
+
 def _hash_schedule_registry(sched_cfg: dict) -> str:
     """Deterministic SHA-256 of the loaded schedule registry."""
     canonical = _json.dumps(sched_cfg, sort_keys=True, ensure_ascii=False)
@@ -376,7 +385,7 @@ class AutonomyDaemon:
         req = ChimeRequest(
             schedule_name=plan.trigger_name,
             intent=plan.prompt,
-            fired_at=datetime.now(UTC),
+            fired_at=_plan_fired_at(plan) or datetime.now(UTC),
             target=dict(target),
             trust_level=plan.context.get("trust_level"),
             allowed_tools=tuple(plan.context.get("allowed_tools", [])),
@@ -424,6 +433,7 @@ class AutonomyDaemon:
                 plan.prompt,
                 abort_signal=self._abort.signal,
                 origin="autonomy",
+                fired_at=_plan_fired_at(plan),
             ):
                 # Collect streaming text without importing platform event types
                 if hasattr(event, "text") and isinstance(event.text, str):
