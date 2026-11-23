@@ -49,29 +49,20 @@ Loom/
 
 ### 步驟 1：建立寫入上下文（先後次序重要）
 
-```
-1. list_dir("news/")                          # 建立 news/ 的 Legitimacy Guard 上下文
-2. run_bash("mkdir -p news/YYYY-MM-DD")       # 創建當日目錄（不走 fetch_news.py）
-3. list_dir("news/YYYY-MM-DD/")                # ★ 關鍵：建立日期目錄的上下文
-```
-
-> ⚠️ **為什麼步驟 3 不可省略**：`run_bash mkdir` 創建新目錄後，Loom 的 Legitimacy Guard
-> 需要該目錄的 `list_dir` 記錄才能允許後續 `write_file` 寫入該目錄內的檔案。
-> 只做 `list_dir("news/")` 是不夠的——那建立了 `news/` 的上下文，不是 `news/YYYY-MM-DD/` 的。
-> **過去連續 20+ 天的 LEGITIMACY_GUARD blocked 就是因為漏掉了這一步。**
+先 `list_dir("news/")` 建立父目錄上下文；今日目錄若已存在，再列出並讀取既有檔案，避免覆寫。
+今日目錄尚不存在時，使用 `write_file` 寫第一份正式報告（工具會建立父目錄），再列出今日目錄確認。
+不要另下 shell 建目錄；guard 若拒絕就回報，不繞過。
 
 ### 步驟 2：抓取（fetch）
 ```bash
-cd skills/news-aggregator/scripts
-
 # 四軌一次抓（晨報用）
-python fetch_news.py --all-tracks --limit 8
+python3 skills/news-aggregator/scripts/fetch_news.py --all-tracks --limit 8
 
 # 單一軌
-python fetch_news.py --source tech --limit 8 --no-save
+python3 skills/news-aggregator/scripts/fetch_news.py --source tech --limit 8 --no-save
 
 # 單一來源
-python fetch_news.py --source hackernews --no-save
+python3 skills/news-aggregator/scripts/fetch_news.py --source hackernews --no-save
 ```
 
 > ⚠️ **`--limit` 是「整軌」的上限，不是「每個來源」的上限**（2026-10-27 實測）。
@@ -81,17 +72,17 @@ python fetch_news.py --source hackernews --no-save
 >
 > **因此聚合後必須補抓每個 ok 來源的獨立清單**，否則 briefing 會漏掉整個媒體的視角：
 > ```bash
-> python fetch_news.py --source bbc_world --limit 8 --no-save
-> python fetch_news.py --source nasa_news --limit 8 --no-save
+> python3 skills/news-aggregator/scripts/fetch_news.py --source bbc_world --limit 8 --no-save
+> python3 skills/news-aggregator/scripts/fetch_news.py --source nasa_news --limit 8 --no-save
 > ```
 > 判斷方式：看 JSON 陣列裡出現了幾個不同的 `source` 值，與 `_source_health` 裡 `status=ok` 的來源數比對。
 > 少了哪個來源就補抓哪個。
 
-> ⚠️ **`checks.scripts_only_bash` 守門的實際放行條件**（2026-10-27 實測）：
-> 指令必須以 `cd skills/news-aggregator/scripts` **或** `cd skills/news-aggregator` 開頭才會放行。
-> 直接在 workspace 根目錄跑 `python3 fetch_news.py` 會被 deny，
-> `ls ../../../news/...` 也會被 deny（`ls`、`wc`、`stat` 都不放行）。
-> 驗檔請用 `list_dir` + `see_image`，不要用 shell 指令。
+> **workspace 指令與 guard**：使用 `python3 skills/news-aggregator/scripts/fetch_news.py ...`。
+> guard 已接受完整 scripts 路徑，不需切換目錄；guard 不是授權機制。
+> 每次 fetch 分別呼叫，不串接、重導向、shell 展開或額外 Python 後處理。
+> `--all-tracks` 自行保存 JSON；預設輸出從腳本位置解析。
+> 驗檔使用 `list_dir`／`read_file`；所需呼叫不在 scope 時回報，不繞過。
 
 ### 步驟 2.5：讀取來源健康狀態（不要靠猜）
 
