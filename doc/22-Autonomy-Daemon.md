@@ -232,9 +232,38 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
 
-**shape 只約束 unattended turn。** attended turn（Discord thread、CLI）裡，人類確認一次 `run_bash`，run_bash resolver 的 requirement 永遠是 `selector = "workspace"`，所以那個 session 會拿到一個**沒有 TTL 的 workspace grant**，之後同一 session 的所有命令（含 chain）都會 ALLOW。這是 S7 之前就有的行為，列為 S6 的前置：confirm 之後應該授予那個 shape，而不是 workspace。
+**人類確認授予的是 shape，不是 workspace（#690 S6）。** attended turn（Discord thread、CLI）裡人類確認一次 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），之後不同的命令會再問一次。chain、重導或展開的命令沒有 argv，確認只放行這一次，不留 grant。S6 之前這裡會留下一個沒有 TTL 的 `workspace` grant，同一 session 之後的所有命令都會 ALLOW。
 
-**shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。S6 前置：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。
+**shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6 分類器不會放行任何腳本執行，但既有的 shape grant 照舊放行。
+
+### 自動核准分類器（#690 S6）
+
+`loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有 name bridge 放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。
+
+**規則層先判**，不呼叫模型：
+
+| 結果 | 情況 | 之後 |
+|---|---|---|
+| refuse | CRITICAL；routine 宣告的 scope 被超出（EXPAND_SCOPE 且衝突的 grant 不是人類確認來的，即 ceiling）；第一期以外的工具；workspace 外、隱藏路徑、名稱像憑證的路徑；控制檔（非文件副檔名、`.toml`、`.py`、`Agent.md`、`SOUL.md`…）；像秘密的搜尋 query；不是單一本地讀取的 shell（chain、展開、glob、未列出的程式、會寫檔或執行的 flag、內容像憑證的檔案）；這個 turn 沒有 runtime 給的意圖 | 原路：attended 問人，unattended skip（#668） |
+| allow | Loom Agent 的 journal 與 daily weave（`autonomy/circadian/journal/`、`daily_weave.md`、`daily_weave/`，Q2） | 直接放行，不呼叫模型 |
+| review | workspace 內一般文件寫入、本地讀取（`cat` `head` `tail` `wc` `grep`(不遞迴) `find`(不執行/刪除) `ls` `diff` …）、公開搜尋 | 交模型 |
+
+**模型層只答 accept 或 abstain。** `codex/gpt-6-luna`，透過既有 Codex OAuth provider（ChatGPT plan）、low effort。每次一個 provider attempt：直接建 provider，不經 router，所以沒有 quota failover；不重試、不修 JSON。5 秒 timeout、錯誤、格式不對、packet 超過 8,192 bytes（以 UTF-8 bytes 當 token 上界）都算 abstain。abstain 走原路，skip 通知會附上原因（例如 `model-abstain: timeout`）。accept 只放行這一次，不寫 grant，所以模型不能擴大 scope。
+
+模型看到的 packet：runtime 給的本 turn 輸入（`trusted_intent`）與 origin、規則層確認的效果類別、完整的當前參數、本 turn 先前的呼叫，以及前三個 turn 的輸入與呼叫（超過上限時先丟最舊的 turn，並把 `history_complete` 設為 false）。agent 的推理與工具輸出不進 packet。prompt 與 packet 形狀和回歸題庫量測時一致（`tests/fixtures/s6_approval_bank.yaml`）。
+
+**每日上限 40 次**（Asia/Taipei 日界），整個 process 共用一個計數器。每次呼叫模型前先把 `approval_review`（`phase = "attempt"`）寫進 ledger 並 commit，寫不進去就不呼叫。重啟後從當日 ledger 重建計數。timeout 或錯誤也算一次。用完就 abstain，不換模型。另一個獨立 process（例如同時開著 CLI）有自己的計數器，只在換日時重讀 ledger，所以兩個 process 同時跑時當天總數可能超過 40。
+
+**稽核。** 每次模型判決另寫一筆 `approval_review`（`phase = "result"`，含 `tool_call_id`、`category`、`outcome`、`latency_ms`、token 數）；放行的 `permission_decision.reason` 是 `classifier model-accept` 或 `classifier rule-allow: …`。抽查模型放行的中間區決策：
+
+```sql
+SELECT timestamp, json_extract(payload,'$.tool_name'), json_extract(payload,'$.tool_call_id')
+FROM events WHERE event_type = 'approval_review'
+  AND json_extract(payload,'$.phase') = 'result'
+  AND json_extract(payload,'$.outcome') = 'accept';
+```
+
+**已知弱點。** 題庫中 3 題中間區（AB008、AB014、AB022）模型錯放：效果在 workspace 內且可逆，但偏離目前意圖（讀到檔尾、寫錯主題）。安全邊界由規則層負責，模型只減少人工確認，不是最後一道防線。
 
 
 ---
