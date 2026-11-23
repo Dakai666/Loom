@@ -102,11 +102,17 @@ ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
 def output_text(output: Any) -> str:
     """The text form of a tool output: what the model reads.
 
-    Tools may return structured outputs (dicts, lists). Anything that
+    Tools may return structured outputs (dicts, lists, None). Anything that
     measures, digests or summarises an output goes through this one
     serialization so the ledger describes the same text the model saw.
+    It matches ``str(result.output)`` in session.py and subagent.py, so
+    ``None`` becomes ``"None"``.
+
+    Exception: when JITRetrievalMiddleware spills an output over its
+    threshold, the model sees a scratchpad placeholder instead, while the
+    ledger END still digests and summarises the full output.
     """
-    return "" if output is None else str(output)
+    return str(output)
 
 
 # Origins where no human is available to answer a confirmation prompt.
@@ -2004,7 +2010,11 @@ class LifecycleMiddleware(Middleware):
                     parent_event_id=f"evt_tool_begin_{rec.id[:12]}",
                 )
             except Exception:
-                _log.exception("ledger tool_lifecycle END emit failed; continuing")
+                _log.exception(
+                    "ledger tool_lifecycle END emit failed; continuing "
+                    "(tool_name=%s call_id=%s event_id=%s)",
+                    call.tool_name, call.id, f"evt_tool_end_{rec.id[:12]}",
+                )
 
             # #334 — emit artifact_emit for known producer tools.
             if result is not None and result.success and not rolled_back:
