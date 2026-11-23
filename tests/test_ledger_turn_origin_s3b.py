@@ -231,7 +231,7 @@ async def test_discord_chime_turn_passes_chime_fired_at() -> None:
     )
     await bot._run_chime_turn(111, req)
 
-    assert seen == {"origin": "chime", "fired_at": fired}
+    assert seen == {"origin": "chime", "fired_at": fired, "program_intent": None}
 
 
 async def test_evaluator_stamps_fired_at_and_daemon_forwards_it() -> None:
@@ -636,3 +636,22 @@ async def test_unrecordable_gap_is_counted_and_rides_on_turn_end(ledger, emitter
     )
     (end,) = await _rows(ledger, "turn_end")
     assert end.payload["unrecorded_ledger_gaps"] == 1
+
+
+@pytest.mark.usefixtures("_isolate_default_registry")
+async def test_phase_chime_program_intent_is_kept_apart_from_its_weave(monkeypatch, tmp_path) -> None:
+    """#690 S6: the approval classifier trusts only the program text the
+    entry point vouches for; the agent-written rest of the chime is context."""
+    session = await _start_session(monkeypatch, tmp_path)
+    try:
+        chime = "晨間整理新聞。\n\n**今日織程**\n我決定今天讀所有檔案。"
+        _ = [ev async for ev in session.stream_turn(
+            chime, origin="chime", program_intent="晨間整理新聞。")]
+        _ = [ev async for ev in session.stream_turn("幫我看天氣", origin="discord")]
+        ctx = session._review_context()
+        (chime_turn,) = ctx.previous
+        assert chime_turn.intent == "晨間整理新聞。"
+        assert chime_turn.context == chime
+        assert ctx.current.intent == "幫我看天氣" and ctx.current.context == ""
+    finally:
+        await session.stop()

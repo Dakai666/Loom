@@ -37,6 +37,10 @@ class ChimeRequest:
     ``None`` — i.e. fall back to the default tier. The tier then holds until
     the next phase chime, not just for this turn. Plain schedule chimes leave
     this False and never touch the tier."""
+    program_intent: str | None = None
+    """The static part of ``intent`` (a phase's rhythm meaning) when the rest
+    is agent-written (today's weave). The approval classifier trusts only
+    this part (#690 S6). None: the whole intent is the program's."""
 
 
 def format_chime_content(req: ChimeRequest) -> str:

@@ -150,6 +150,9 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
     # Discord bot token: three base64url segments, the middle one 6 chars.
     (re.compile(r'(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}'),
      '[REDACTED]'),
+    # PEM private key block (#690 S6: a key file behind an ordinary name).
+    (re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)'),
+     '[REDACTED]'),
     # Discord webhook URL: the path's last segment is the secret.
     (re.compile(r'(?i)(discord(?:app)?\.com/api/webhooks/\d+/)[A-Za-z0-9_\-]+'),
      r'\1[REDACTED]'),

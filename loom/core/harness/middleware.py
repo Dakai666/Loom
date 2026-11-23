@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import shlex
 import time
 import traceback
 import uuid
@@ -791,8 +792,13 @@ class BlastRadiusMiddleware(Middleware):
         exec_escape_fn: Callable[[ToolCall], bool] | None = None,
         registry: Any | None = None,
         ledger_emitter: Any = None,
+        classifier: Any = None,
     ) -> None:
         self._perm = perm_ctx
+        # #690 S6: consulted where a call would otherwise go to a human or
+        # be skipped (see ``loom.core.harness.approval``). None = no
+        # classifier (sub-agents, tests of the bare middleware).
+        self._classifier = classifier
         self._confirm = confirm_fn
         self._exec_escape_fn = exec_escape_fn
         self._registry = registry
@@ -869,6 +875,7 @@ class BlastRadiusMiddleware(Middleware):
 
     def _deny_unattended(
         self, call: ToolCall, verdict: str, *, probe_would_authorize: bool = False,
+        classifier_note: str | None = None,
     ) -> ToolResult:
         """Return a denial ToolResult for unattended calls that need confirmation."""
         _log.info(
@@ -878,8 +885,9 @@ class BlastRadiusMiddleware(Middleware):
         # A skip is not a deny (#690 S7 review): its own decision value keeps
         # it out of deny rates, and its reason says skip (#690 S3c). Rows
         # before S3c read "unattended-deny (...)" for the same thing.
+        detail = f"; classifier {classifier_note}" if classifier_note else ""
         self._notify_lifecycle(
-            call, False, f"unattended-skip ({call.origin}, {verdict})", decision="skip",
+            call, False, f"unattended-skip ({call.origin}, {verdict}{detail})", decision="skip",
         )
         call.metadata["user_decision"] = False
 
@@ -911,12 +919,15 @@ class BlastRadiusMiddleware(Middleware):
                 f"Note what was skipped, continue with the parts that don't "
                 f"depend on it, and don't treat its result as done."
             )
+            if classifier_note:
+                error += f" (The approval classifier did not approve it: {classifier_note}.)"
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=False,
             error=error,
             failure_type="permission_denied",
-            metadata={"unattended_skip": True, "origin": call.origin},
+            metadata={"unattended_skip": True, "origin": call.origin,
+                      "skip_note": classifier_note or ""},
         )
 
     def _notify_lifecycle(
@@ -1054,10 +1065,21 @@ class BlastRadiusMiddleware(Middleware):
                 k: v for k, v in req.constraints.items()
                 if k not in self._INFORMATIONAL_CONSTRAINTS
             }
+            # A confirmed shell command grants exactly that command, never
+            # the whole workspace (#690 S6): a later command with other or
+            # extra arguments asks again. A chain or expansion has no argv,
+            # so the human's yes covers this call only.
+            selector = req.selector
+            if req.resource == "exec" and selector == "workspace":
+                argv = req.constraints.get("argv")
+                if argv is None:
+                    continue
+                selector = shlex.join(argv)
+                grant_constraints["exact_argv"] = True
             self._perm.grant(ScopeGrant(
                 resource=req.resource,
                 action=req.action,
-                selector=req.selector,
+                selector=selector,
                 constraints=grant_constraints,
                 source=source,
                 granted_at=now,
@@ -1130,8 +1152,24 @@ class BlastRadiusMiddleware(Middleware):
             self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized")
             return None  # proceed
 
+        # #690 S6: before asking a human or skipping, the approval
+        # classifier may approve this one call. It grants nothing, so a
+        # refusal or an abstain leaves exactly the path below.
+        note = None
+        if self._classifier is not None:
+            try:
+                approval = await self._classifier.decide(call, scope_request, verdict)
+            except Exception:
+                _log.exception("approval classifier failed; not approving")
+                note = "error"
+            else:
+                if approval.approved:
+                    self._notify_lifecycle(call, True, f"classifier {approval.reason}")
+                    return None  # proceed
+                note = approval.reason
+
         if self._is_unattended(call):
-            return self._deny_unattended(call, verdict.value)
+            return self._deny_unattended(call, verdict.value, classifier_note=note)
 
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)

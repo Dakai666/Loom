@@ -129,6 +129,9 @@ class ToolEnd:
     approval and none was attending (``ToolResult.metadata['unattended_skip']``).
     Distinct from a policy / guard denial. Lets platform renderers report
     skips without parsing ``output`` (issue #668 S1 chime skip notice)."""
+    skip_note: str = ""
+    """Why the approval classifier did not approve a skipped call, e.g.
+    ``model-abstain: reviewer_unavailable`` (#690 S6). Empty otherwise."""
 
 
 @dataclass

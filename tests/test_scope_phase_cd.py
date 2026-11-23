@@ -276,10 +276,9 @@ class TestInformationalConstraintFiltering:
         call = _call("run_bash", {"command": "ls | grep foo"}, caps=ToolCapability.EXEC)
         await _run_middleware(perm, call, confirm_result=True, registry=reg)
 
-        # Grant should exist but without scope_unknown
-        assert len(perm.grants) >= 1
-        for g in perm.grants:
-            assert "scope_unknown" not in g.constraints
+        # A chain has no command shape, so the confirm covers this call only
+        # and leaves no grant to copy scope_unknown into (#690 S6).
+        assert perm.grants == []
 
     async def test_has_absolute_paths_not_copied_to_grant(self):
         """has_absolute_paths is informational — should not be in grants."""
