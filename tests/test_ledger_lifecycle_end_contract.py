@@ -25,13 +25,14 @@ import pytest
 import pytest_asyncio
 
 from loom.core.harness.middleware import (
+    BlastRadiusMiddleware,
     LifecycleGateMiddleware,
     LifecycleMiddleware,
     MiddlewarePipeline,
     ToolCall,
     ToolResult,
 )
-from loom.core.harness.permissions import TrustLevel
+from loom.core.harness.permissions import PermissionContext, TrustLevel
 from loom.core.harness.registry import ToolDefinition, ToolRegistry
 from loom.core.ledger import (
     LedgerEmitter,
@@ -62,17 +63,27 @@ def emitter(ledger: LedgerStore) -> LedgerEmitter:
     return LedgerEmitter(ledger, session_id="sess_s3a")
 
 
-async def _run(tool: ToolDefinition, emitter: LedgerEmitter, args: dict) -> ToolResult:
+async def _run(
+    tool: ToolDefinition, emitter: LedgerEmitter, args: dict, *, confirm: bool = True,
+) -> ToolResult:
     reg = ToolRegistry()
     reg.register(tool)
-    # Outer + inner lifecycle layers, as session.py and subagent.py wire them.
+    # Lifecycle (outer) -> BlastRadius -> LifecycleGate (inner), the
+    # authorization and lifecycle layers of subagent.py's chain. session.py
+    # also wraps JITRetrievalMiddleware outside Lifecycle; it is left out,
+    # so the spill case (model sees a placeholder) is not covered here.
     pipeline = MiddlewarePipeline([
         LifecycleMiddleware(registry=reg, ledger_emitter=emitter),
+        BlastRadiusMiddleware(
+            perm_ctx=PermissionContext(session_id="sess_s3a"),
+            confirm_fn=AsyncMock(return_value=confirm),
+            registry=reg,
+        ),
         LifecycleGateMiddleware(registry=reg),
     ])
     call = ToolCall(
         tool_name=tool.name, args=args,
-        trust_level=TrustLevel.SAFE, session_id="sess_s3a",
+        trust_level=tool.trust_level, session_id="sess_s3a",
     )
     async with async_turn_scope(TURN), async_correlation_scope("c1"):
         return await pipeline.execute(call, tool.executor)
@@ -85,7 +96,9 @@ async def _lifecycle(ledger: LedgerStore) -> tuple[list[dict], list[dict]]:
     return begins, ends
 
 
-def _tool(name: str, result: Any) -> ToolDefinition:
+def _tool(
+    name: str, result: Any, trust_level: TrustLevel = TrustLevel.SAFE,
+) -> ToolDefinition:
     """A tool that returns ``result`` (a ToolResult factory) or raises it."""
     async def executor(call: ToolCall) -> ToolResult:
         if isinstance(result, BaseException):
@@ -93,7 +106,7 @@ def _tool(name: str, result: Any) -> ToolDefinition:
         return result(call)
 
     return ToolDefinition(
-        name=name, description="s3a probe", trust_level=TrustLevel.SAFE,
+        name=name, description="s3a probe", trust_level=trust_level,
         input_schema={"type": "object"}, executor=executor,
     )
 
@@ -121,9 +134,16 @@ CASES = {
 }
 
 
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("case", [*CASES, "permission-denied"])
 async def test_every_begin_gets_an_end(case, ledger, emitter) -> None:
-    await _run(_tool("probe", CASES[case]), emitter, {"v": 1})
+    if case == "permission-denied":
+        # GUARDED tool, confirm says no: BlastRadius returns
+        # permission_denied and the executor never runs.
+        tool = _tool("probe", _ok("never"), TrustLevel.GUARDED)
+        result = await _run(tool, emitter, {"v": 1}, confirm=False)
+        assert result.failure_type == "permission_denied"
+    else:
+        await _run(_tool("probe", CASES[case]), emitter, {"v": 1})
 
     begins, ends = await _lifecycle(ledger)
     assert len(begins) == 1
@@ -136,6 +156,7 @@ async def test_every_begin_gets_an_end(case, ledger, emitter) -> None:
     _LONG,
     [1, 2, 3],
     "plain text",
+    None,  # success with no output: the model reads str(None) == "None"
 ])
 async def test_summary_is_the_text_the_model_sees(output, ledger, emitter) -> None:
     await _run(_tool("probe", _ok(output)), emitter, {})
