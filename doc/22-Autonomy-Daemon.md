@@ -248,13 +248,26 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 | allow | Loom Agent 的 journal 與 daily weave（`autonomy/circadian/journal/`、`daily_weave.md`、`daily_weave/`，Q2） | 直接放行，不呼叫模型 |
 | review | workspace 內一般文件寫入、本地讀取（`cat` `head` `tail` `wc` `grep`(不遞迴) `find`(不執行/刪除) `ls` `diff` …）、公開搜尋 | 交模型 |
 
-**模型層只答 accept 或 abstain。** `codex/gpt-6-luna`，透過既有 Codex OAuth provider（ChatGPT plan）、low effort。每次一個 provider attempt：直接建 provider，不經 router，所以沒有 quota failover；不重試、不修 JSON。5 秒 timeout、錯誤、格式不對、packet 超過 8,192 bytes（以 UTF-8 bytes 當 token 上界）都算 abstain。abstain 走原路，skip 通知會附上原因（例如 `model-abstain: timeout`）。accept 只放行這一次，不寫 grant，所以模型不能擴大 scope。
+**模型層只答 accept 或 abstain。** `codex/gpt-6-luna`，透過既有 Codex OAuth provider（ChatGPT plan）、low effort。每次一個 provider attempt：直接建 provider，不經 router，所以沒有 quota failover；不重試、不修 JSON。5 秒 timeout、錯誤、格式不對、整個請求（含 prompt）超過 16,384 bytes 都算 abstain。abstain 走原路，skip 通知會附上原因（例如 `model-abstain: timeout`）。accept 只放行這一次，不寫 grant，所以模型不能擴大 scope。
 
 模型看到的 packet：runtime 給的本 turn 意圖（`trusted_intent`）與 origin、規則層確認的效果類別、當前參數、本 turn 先前的呼叫，以及前三個 turn 的輸入與呼叫（超過上限時先丟最舊的 turn，並把 `history_complete` 設為 false）。agent 的推理與工具輸出不進 packet。
 
 phase chime 的意圖分兩塊：`rhythm.toml` 的 `meaning` 是靜態 program 描述，由 `ChimeRequest.program_intent` 帶進 `stream_turn`，只有它是 `trusted_intent`；整段 chime（含 agent 自己寫的今日織程）放在 `agent_authored_context`，標 `trusted: false`，prompt 寫明只能當背景，不能當授權依據。其他入口（Discord、CLI、schedule、room）的整段輸入就是意圖。
 
-**送出前遮罩與限長。** packet 裡每個字串都先過 S3c 的 `_redact_secrets`，再限長：一般字串 2000 字，`write_file` 的 `content` 1200 字，超過的送「頭段＋尾段＋總長度」。為什麼不另做白名單或摘要：Loom Agent 的主模型本來就走 ChatGPT plan（OpenAI），意圖、weave 與內容送到同一家的 Luna 沒有新的資料去向；要防的是 secret 與送出量。
+**送出前遮罩與限長。** packet 裡每個字串都先過 S3c 的 `_redact_secrets`，再依 UTF-8 bytes 限長（中文一字約 3 bytes），超過的送「頭段＋尾段＋總 bytes」，不切斷字元：
+
+| 欄位 | 上限 |
+|---|---:|
+| trusted program / user intent | 1,500 bytes |
+| `agent_authored_context`（weave、chime 全文） | 1,500 bytes |
+| 當前呼叫的每個參數字串 | 1,500 bytes |
+| 當前 `write_file` 的 `content` | 2,000 bytes |
+| 先前呼叫與前三 turn 的每個字串 | 300 bytes |
+| 整個請求（含 2,379 bytes 的 prompt） | 16,384 bytes |
+
+整體仍超過時，先丟最舊的 turn，再丟本 turn 最早的呼叫（`history_complete` 設為 false）；當前呼叫與意圖不會被切。只有當前呼叫的參數本身太多才會 0-call abstain。
+
+**每次呼叫的 token 成本。** UTF-8 bytes 是 token 數的上界（每個 token 至少涵蓋 1 byte），所以每次 input 最多 16,384 tokens，40 次一天最多約 65.5 萬 input tokens；output 只有 `{"verdict":…}`，約 10 tokens，但 plan provider 不支援硬性 output 上限。實際值遠低於上界：題庫 80 題實測短 packet 約 840 tokens、長歷史 packet 約 5,200 tokens；接近 live dawn 規模的中文合成 packet 是 6.3–8.3 KB（無歷史）到 13.6–15.7 KB（滿歷史）；若中文約 1 token／字（估計，未對這個模型量測），token 數約為 bytes 的三分之一。走 ChatGPT plan，沒有 API 現金計費；佔 plan 額度的比例沒有公開換算，未量測。為什麼不另做白名單或摘要：Loom Agent 的主模型本來就走 ChatGPT plan（OpenAI），意圖、weave 與內容送到同一家的 Luna 沒有新的資料去向；要防的是 secret 與送出量。
 
 prompt 是回歸題庫量測時的版本（`tests/fixtures/s6_approval_bank.yaml`）加一段尚未實測的補充（weave 只能當背景；accept 前確認範圍與意圖一致）。
 

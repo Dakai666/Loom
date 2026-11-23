@@ -54,8 +54,10 @@ DAILY_REVIEW_LIMIT = 40
 REVIEWER_UNAVAILABLE = "reviewer_unavailable"
 REVIEW_DAY_TZ = ZoneInfo("Asia/Taipei")
 # UTF-8 bytes bound tokens from above (every token covers at least one
-# byte), so this caps the request at 8,192 input tokens without a tokenizer.
-MAX_PACKET_BYTES = 8192
+# byte), so this caps the request at 16,384 input tokens without a
+# tokenizer. Prompt included. Every field cap below is in UTF-8 bytes too:
+# a CJK character is three of them.
+MAX_PACKET_BYTES = 16384
 
 # Grant sources that record a human's (or the operator's /auto) approval.
 # Any other source on a non-covering grant was declared by a routine or by
@@ -291,41 +293,48 @@ class ReviewContext:
     previous: tuple[ReviewTurn, ...]  # oldest first, at most three
 
 
-# Per-string caps on what leaves for the review model. A longer string is
-# sent as its head, its tail and its total length.
-MAX_STRING_CHARS = 2000
-MAX_WRITE_CONTENT_CHARS = 1200
+# Per-field caps, in UTF-8 bytes, on what leaves for the review model. A
+# longer string is sent as its head, its tail and its total size.
+INTENT_BYTES = 1500          # the trusted program / user intent
+CONTEXT_BYTES = 1500         # agent-authored weave / chime text
+ARG_BYTES = 1500             # each string in the current call's args
+WRITE_CONTENT_BYTES = 2000   # write_file content of the current call
+HISTORY_BYTES = 300          # each string in earlier calls and turns
 
 
-def _clip(text: str, limit: int = MAX_STRING_CHARS) -> str:
+def _clip(text: str, limit: int) -> str:
+    """*text* redacted, then cut to about *limit* UTF-8 bytes (head and tail,
+    never splitting a character)."""
     text = _redact_secrets(text) or ""
-    if len(text) <= limit:
+    raw = text.encode()
+    if len(raw) <= limit:
         return text
-    head, tail = text[: limit * 3 // 4], text[-(limit // 4):]
-    return f"{head}\n…[{len(text) - len(head) - len(tail)} chars omitted, {len(text)} total]…\n{tail}"
+    head = raw[: limit * 3 // 4].decode(errors="ignore")
+    tail = raw[-(limit // 4):].decode(errors="ignore")
+    return f"{head}\n…[{len(raw)} bytes total, middle omitted]…\n{tail}"
 
 
-def _scrub(value: Any) -> Any:
+def _scrub(value: Any, limit: int) -> Any:
     """Every string leaf redacted (#690 S3c patterns) and capped."""
     if isinstance(value, str):
-        return _clip(value)
+        return _clip(value, limit)
     if isinstance(value, dict):
-        return {k: _scrub(v) for k, v in value.items()}
+        return {k: _scrub(v, limit) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_scrub(v) for v in value]
+        return [_scrub(v, limit) for v in value]
     return value
 
 
 def _args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    out = _scrub(args)
+    out = _scrub(args, ARG_BYTES)
     if tool == "write_file" and isinstance(args.get("content"), str):
-        out["content"] = _clip(args["content"], MAX_WRITE_CONTENT_CHARS)
+        out["content"] = _clip(args["content"], WRITE_CONTENT_BYTES)
     return out
 
 
 def _calls(turn: ReviewTurn, skip_id: str | None = None) -> list[dict[str, Any]]:
     return [
-        {"tool": tool, "args": _args(tool, args), "state": "requested"}
+        {"tool": tool, "args": _scrub(args, HISTORY_BYTES), "state": "requested"}
         for cid, tool, args in turn.calls if cid != skip_id
     ]
 
@@ -334,12 +343,14 @@ def build_packet(call: Any, ctx: ReviewContext, category: str) -> dict[str, Any]
     """The model's view of *call*, or None when it cannot fit the budget.
 
     Everything under ``runtime`` comes from the harness, never from the
-    agent. Older turns are dropped first (and ``history_complete`` turns
-    false); the current call, its intent and this turn's calls are never cut.
+    agent. Each field is capped in UTF-8 bytes. If the whole request is
+    still over ``MAX_PACKET_BYTES``, earlier turns and then this turn's
+    earliest calls are dropped (``history_complete`` turns false); the
+    current call and its intent are never cut.
     """
     classification, operation = _CATEGORY_EFFECTS[category]
     runtime: dict[str, Any] = {
-        "trusted_intent": {"source": "runtime", "current": _clip(ctx.current.intent)},
+        "trusted_intent": {"source": "runtime", "current": _clip(ctx.current.intent, INTENT_BYTES)},
         "origin": {"kind": call.origin, "trusted": True, "provenance": "runtime"},
         "authority": {"ref": "model-mediated-autonomy-policy-v1", "version": 1, "parent": None},
         "scope": {"covered": True, "explicit_deny": False, "revoked": False, "ceiling": _CEILING},
@@ -362,23 +373,33 @@ def build_packet(call: Any, ctx: ReviewContext, category: str) -> dict[str, Any]
     if ctx.current.context:
         packet["agent_authored_context"] = {
             "source": "agent_authored_weave", "trusted": False,
-            "text": _clip(ctx.current.context),
+            "text": _clip(ctx.current.context, CONTEXT_BYTES),
         }
     previous = list(ctx.previous)
     while True:
         if previous:
             packet["recent_three_turns"] = [
-                {"turn": i, "trusted_user": _clip(t.intent), "tool_calls": _calls(t)}
+                {"turn": i, "trusted_user": _clip(t.intent, HISTORY_BYTES), "tool_calls": _calls(t)}
                 for i, t in enumerate(previous)
             ]
         else:
             packet.pop("recent_three_turns", None)
-        if len(_SYSTEM_PROMPT.encode()) + len(_dump(packet).encode()) <= MAX_PACKET_BYTES:
+        if packet_bytes(packet) <= MAX_PACKET_BYTES:
             return packet
-        if not previous:
+        # Oldest history goes first: earlier turns, then this turn's
+        # earliest calls. The current call and intent are never cut.
+        if previous:
+            previous.pop(0)
+        elif packet["recent_calls"]:
+            packet["recent_calls"].pop(0)
+        else:
             return None
-        previous.pop(0)
         runtime["history_complete"] = False
+
+
+def packet_bytes(packet: dict[str, Any]) -> int:
+    """The request's size in UTF-8 bytes, system prompt included."""
+    return len(_SYSTEM_PROMPT.encode()) + len(_dump(packet).encode())
 
 
 def _dump(packet: dict[str, Any]) -> str:

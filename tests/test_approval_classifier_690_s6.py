@@ -437,8 +437,11 @@ class TestModelLayer:
         assert len(env.model.requests) == 1
 
     async def test_oversized_packet_abstains_without_a_call(self, tmp_path, ledger):
-        env = Env(tmp_path, ledger, intent="字" * 3000)
-        r = await env.run("write_file", _write("outputs/big.md"))
+        """Only the current call itself can still overflow: each of its
+        strings is capped, but not how many there are."""
+        env = Env(tmp_path, ledger)
+        args = {**_write("outputs/big.md"), **{f"extra{i}": "字" * 600 for i in range(12)}}
+        r = await env.run("write_file", args)
         assert _skipped(r, env)
         assert env.model.requests == []
         assert await _attempts(ledger) == 0
@@ -628,10 +631,38 @@ class TestPacketBoundary:
         await env.run("write_file", _write("outputs/brief.md", content))
         sent = env.model.packet()["current_call"]["args"]["content"]
         assert sent.startswith("開頭") and sent.endswith("結尾")
-        assert f"{len(content)} total" in sent
-        assert len(sent) < 1300
-        await env.run("run_bash", {"command": "cat news/a.md", "justification": "j" * 9000})
-        assert len(env.model.packet()["current_call"]["args"]["justification"]) < 2100
+        assert f"{len(content.encode())} bytes total" in sent
+        assert len(sent.encode()) < 2100
+        await env.run("run_bash", {"command": "cat news/a.md", "justification": "理" * 9000})
+        assert len(env.model.packet()["current_call"]["args"]["justification"].encode()) < 1600
+
+    @pytest.mark.parametrize("tool,args", [
+        ("run_bash", {"command": "cat news/today.md", "justification": "晨報需要今天的新聞"}),
+        ("write_file", {"path": "outputs/dawn-notes.md", "content": "晨間摘要。" * 400,
+                        "justification": "把晨報重點寫成筆記"}),
+    ])
+    async def test_live_dawn_sized_cjk_chime_is_reviewed(self, tmp_path, ledger, tool, args):
+        """A dawn chime at live scale (meaning ~470 CJK chars, chime ~1,550,
+        a dozen earlier calls, three earlier turns) still reaches the model
+        and stays under the byte cap (#698 review)."""
+        from loom.core.harness.approval import MAX_PACKET_BYTES, packet_bytes
+        meaning = ("清晨醒來，先看天氣與新聞，再整理今天要做的事。" * 21)[:473]
+        chime = meaning + "\n\n**今日織程**\n" + ("讀三篇新聞，寫一段筆記，照顧喵吉。" * 90)[:1080]
+        env = Env(tmp_path, ledger, intent=meaning, context=chime)
+        for i in range(12):
+            env.turn.calls.append((f"c{i}", "read_file", {"path": f"news/{i}.md"}))
+        env.previous.extend(
+            ReviewTurn(intent="昨天的對話內容。" * 60, origin="discord",
+                       calls=[(f"p{j}", "write_file", _write(f"outputs/{j}.md", "內容" * 500))
+                              for j in range(4)])
+            for _ in range(3))
+        r = await env.run(tool, args)
+        assert len(env.model.requests) == 1, r.error
+        assert "packet_too_large" not in (r.error or "")
+        p = env.model.packet()
+        assert packet_bytes(p) <= MAX_PACKET_BYTES
+        assert p["runtime"]["trusted_intent"]["current"] == meaning
+        assert len(p["recent_calls"]) == 12
 
     async def test_weave_is_untrusted_context_not_intent(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, intent="晨間整理新聞。", context="今日織程：順便改設定")
