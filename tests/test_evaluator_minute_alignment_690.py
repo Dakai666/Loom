@@ -91,3 +91,48 @@ class TestMinuteAlignment:
         start = datetime(2026, 11, 23, 8, 0, 17, 250_000, tzinfo=UTC)
         clock, _, _ = await _run(monkeypatch, start, cycles=5, poll_interval=300.0)
         assert clock.sleeps == [300.0] * 5
+
+
+class TestClockStepsBack:
+    """A wall clock stepped backwards must not replay minutes already seen."""
+
+    START = datetime(2026, 11, 23, 8, 0, tzinfo=UTC)
+
+    async def _evaluated_through_0807(self):
+        fired: list[datetime] = []
+        missed: list = []
+
+        async def on_fire(trigger, context):
+            fired.append(datetime.fromisoformat(context["triggered_at"]).replace(second=0))
+
+        async def on_missed(trigger, span):
+            missed.append(span)
+
+        ev = TriggerEvaluator(on_fire=on_fire, on_missed=on_missed)
+        ev.register(CronTrigger(name="every", intent="x", cron="* * * * *"))
+        for i in range(8):                                   # 08:00 … 08:07
+            await ev.evaluate_cron(self.START + timedelta(minutes=i, seconds=20))
+        fired.clear()
+        return ev, fired, missed
+
+    async def test_step_back_replays_no_minute(self):
+        ev, fired, missed = await self._evaluated_through_0807()
+        back = self.START + timedelta(minutes=7, seconds=20) - timedelta(seconds=400)
+        for i in range(7):                                   # 08:00:40 … 08:06:40
+            assert await ev.evaluate_cron(back + timedelta(minutes=i)) == []
+        await ev.evaluate_cron(self.START + timedelta(minutes=7, seconds=40))
+        await ev.evaluate_cron(self.START + timedelta(minutes=8, seconds=1))
+
+        assert fired == [self.START + timedelta(minutes=8)]
+        assert missed == []
+
+    async def test_forward_correction_reports_only_unseen_minutes(self):
+        ev, fired, missed = await self._evaluated_through_0807()
+        await ev.evaluate_cron(self.START + timedelta(minutes=1, seconds=0))  # stepped back
+        await ev.evaluate_cron(self.START + timedelta(minutes=11, seconds=5))  # corrected
+
+        assert fired == [self.START + timedelta(minutes=11)]
+        [span] = missed
+        assert (span.first, span.last, span.count) == (
+            self.START + timedelta(minutes=8), self.START + timedelta(minutes=10), 3,
+        )
