@@ -219,7 +219,9 @@ class TriggerFirePayload:
 
     Times are UTC epochs. ``started_at`` / ``ended_at`` are None when the
     fire never ran (``outcome="missed"``). ``reason`` explains missed,
-    skipped and failed outcomes.
+    skipped and failed outcomes. An ``evaluator_gap`` miss covers a span:
+    ``fired_at`` is its first due minute, ``missed_through`` its last, and
+    ``missed_count`` how many due minutes it holds.
     """
 
     source: str          # cron | event | condition | memory_loop
@@ -229,6 +231,8 @@ class TriggerFirePayload:
     ended_at: float | None
     outcome: str         # loom.autonomy.fire_record.FireOutcome
     reason: str | None = None
+    missed_through: float | None = None
+    missed_count: int | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 

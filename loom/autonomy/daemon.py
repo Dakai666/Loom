@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 from typing import Any, Awaitable, Callable
 
 from loom.autonomy.chime import ChimeRequest
-from loom.autonomy.evaluator import TriggerEvaluator
+from loom.autonomy.evaluator import MissedSpan, TriggerEvaluator
 from loom.autonomy.fire_record import COMPLETED, FireLog, FireOutcome, RunResult
 from loom.autonomy.permission_fields import parse_permission_fields
 from loom.autonomy.permission_names import (
@@ -243,6 +243,12 @@ class AutonomyDaemon:
         # without a session (``autonomy status``) never runs triggers.
         db = getattr(loom_session, "_db", None)
         emitter = getattr(loom_session, "_ledger_emitter", None)
+        if loom_session is not None and db is None:
+            logger.warning(
+                "[autonomy] session has no memory DB (not started yet?) — "
+                "trigger_history is off, so a restart can re-fire a cron "
+                "in the same minute",
+            )
         self._fire_log = FireLog(emitter)
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
         # may be unset on test doubles or pre-start sessions — fall back
@@ -290,15 +296,17 @@ class AutonomyDaemon:
         self._direct_handlers.pop(name, None)
         self._missed_handlers.pop(name, None)
 
-    async def _on_cron_missed(self, trigger, due_at: datetime) -> None:
+    async def _on_cron_missed(self, trigger, span: MissedSpan) -> None:
         reason = "evaluator_gap"
         logger.warning(
-            "[autonomy] trigger=%s was due at %s but the evaluator never ran "
-            "that minute", trigger.name, due_at.isoformat(),
+            "[autonomy] trigger=%s was due %d time(s) from %s to %s but the "
+            "evaluator never ran those minutes",
+            trigger.name, span.count, span.first.isoformat(), span.last.isoformat(),
         )
         await self._fire_log.record(
-            source=trigger.kind.value, name=trigger.name, fired_at=due_at,
+            source=trigger.kind.value, name=trigger.name, fired_at=span.first,
             result=RunResult(FireOutcome.MISSED, reason),
+            missed_through=span.last, missed_count=span.count,
         )
         on_missed = self._missed_handlers.get(trigger.name)
         if on_missed is not None:
@@ -324,7 +332,8 @@ class AutonomyDaemon:
             self._react(trigger, context), name=f"trigger:{trigger.name}"
         )
         try:
-            result = await reaction or COMPLETED
+            result = await reaction
+            result = result or COMPLETED
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if current is not None and current.cancelling():

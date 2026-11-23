@@ -15,6 +15,8 @@ platform. The memory DB and the ledger are real SQLite files under tmp_path.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -234,6 +236,13 @@ class TestFireRecord:
         [rec] = await _fire_records(ledger)
         assert (rec["outcome"], rec["reason"]) == ("missed", "no_target_session")
 
+    def test_session_without_db_warns_once(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="loom.autonomy.daemon"):
+            _daemon(types.SimpleNamespace(_db=None, _ledger_emitter=None, _memory=None))
+            _daemon(None)                     # autonomy status: no session, no warning
+        assert sum("trigger_history is off" in r.getMessage() for r in caplog.records) == 1
+
     async def test_daemon_without_session_still_fires(self):
         from loom.autonomy.daemon import AutonomyDaemon
         runs = []
@@ -326,10 +335,10 @@ class TestAnchorOutcomes:
 
 class TestEvaluatorGap:
     async def test_minutes_skipped_by_a_blocked_evaluator_are_reported(self):
-        missed: list[tuple[str, datetime]] = []
+        missed: list[tuple[str, datetime, datetime, int]] = []
 
-        async def on_missed(trigger, due_at):
-            missed.append((trigger.name, due_at))
+        async def on_missed(trigger, span):
+            missed.append((trigger.name, span.first, span.last, span.count))
 
         ev = TriggerEvaluator(on_missed=on_missed)
         ev.register(CronTrigger(name="half_past", intent="x", cron="30 8 * * *"))
@@ -338,12 +347,42 @@ class TestEvaluatorGap:
 
         await ev.evaluate_cron(day)                          # 08:00
         await ev.evaluate_cron(day + timedelta(minutes=47))  # blocked until 08:47
-        assert missed == [("half_past", day + timedelta(minutes=30))]
+        half_past = day + timedelta(minutes=30)
+        assert missed == [("half_past", half_past, half_past, 1)]
+
+    async def test_long_gap_fires_now_first_and_reports_one_span_per_trigger(self):
+        # A night asleep: one record per trigger, not one per missed minute,
+        # and the minute that is due now fires before any of them.
+        events: list[tuple] = []
+
+        async def on_fire(trigger, context):
+            events.append(("fire", trigger.name))
+
+        async def on_missed(trigger, span):
+            events.append(("missed", trigger.name, span.first, span.last, span.count))
+
+        ev = TriggerEvaluator(on_fire=on_fire, on_missed=on_missed)
+        ev.register(CronTrigger(name="every5", intent="x", cron="*/5 * * * *"))
+        ev.register(CronTrigger(name="every1", intent="x", cron="* * * * *"))
+        night = datetime(2026, 10, 29, 0, 0, tzinfo=UTC)
+        await ev.evaluate_cron(night)
+        events.clear()
+
+        morning = night + timedelta(hours=8)                 # 08:00
+        await ev.evaluate_cron(morning)
+
+        assert events[:2] == [("fire", "every5"), ("fire", "every1")]
+        assert sorted(events[2:]) == [
+            ("missed", "every1", night + timedelta(minutes=1),
+             morning - timedelta(minutes=1), 479),
+            ("missed", "every5", night + timedelta(minutes=5),
+             morning - timedelta(minutes=5), 95),
+        ]
 
     async def test_consecutive_minutes_report_nothing(self):
         missed = []
 
-        async def on_missed(trigger, due_at):
+        async def on_missed(trigger, span):
             missed.append(trigger.name)
 
         ev = TriggerEvaluator(on_missed=on_missed)
@@ -356,13 +395,33 @@ class TestEvaluatorGap:
     async def test_first_evaluation_reports_nothing(self):
         missed = []
 
-        async def on_missed(trigger, due_at):
+        async def on_missed(trigger, span):
             missed.append(trigger.name)
 
         ev = TriggerEvaluator(on_missed=on_missed)
         ev.register(CronTrigger(name="early", intent="x", cron="0 1 * * *"))
         await ev.evaluate_cron(datetime(2026, 10, 29, 8, 0, tzinfo=UTC))
         assert missed == []
+
+    @pytest.mark.parametrize("poll_interval, expect_report", [(60.0, True), (300.0, False)])
+    async def test_polling_slower_than_a_minute_reports_no_gaps(
+        self, poll_interval, expect_report,
+    ):
+        # --interval 300 skips four minutes by design; those aren't misses.
+        missed = []
+
+        async def on_missed(trigger, span):
+            missed.append(trigger.name)
+
+        ev = TriggerEvaluator(on_missed=on_missed)
+        ev.register(CronTrigger(name="every", intent="x", cron="* * * * *"))
+        runner = asyncio.create_task(ev.run_forever(poll_interval=poll_interval))
+        await asyncio.sleep(0.05)                            # first evaluation ran
+        runner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner
+        await ev.evaluate_cron(datetime.now(UTC) + timedelta(minutes=5))
+        assert bool(missed) is expect_report
 
     async def test_blocked_anchor_is_missed_in_ledger_and_phase_log(self, mem_db, ledger):
         deliveries = []
@@ -385,6 +444,8 @@ class TestEvaluatorGap:
         assert rec["name"] == "circadian:phase_dawn"
         assert (rec["outcome"], rec["reason"]) == ("missed", "evaluator_gap")
         assert rec["fired_at"] == (day + timedelta(minutes=30)).timestamp()
+        assert rec["missed_through"] == rec["fired_at"]
+        assert rec["missed_count"] == 1
         assert rec["started_at"] is None and rec["ended_at"] is None
         entry = CircadianState.load().phase_log[-1]
         assert (entry["phase"], entry["outcome"], entry["reason"]) == (

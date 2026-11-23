@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -30,7 +31,18 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 FireCallback = Callable[[TriggerDefinition, dict[str, Any]], Awaitable[None]]
-MissedCallback = Callable[[CronTrigger, datetime], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class MissedSpan:
+    """The due minutes of one cron trigger inside one evaluation gap."""
+
+    first: datetime
+    last: datetime
+    count: int
+
+
+MissedCallback = Callable[[CronTrigger, MissedSpan], Awaitable[None]]
 
 # How far back a late evaluation looks for cron minutes it skipped (#690 S5a).
 _MAX_GAP = timedelta(hours=24)
@@ -70,9 +82,13 @@ class TriggerEvaluator:
         self._history = history
         self._fired_this_minute: set[str] = set()
         self._last_minute: datetime | None = None
-        # Called once per cron trigger whose minute passed while nothing
-        # evaluated it: a reaction held the loop, or the host slept.
+        # Called once per cron trigger per evaluation gap, with the span of
+        # its due minutes that passed while nothing evaluated them: a
+        # reaction held the loop, or the host slept.
         self._on_missed = on_missed
+        # A gap means a miss only when polling is meant to see every minute;
+        # run_forever turns this off for a poll interval above 60 s.
+        self._detect_gaps = True
         # When wired, every trigger fire emits one env_observation event
         # under a fresh correlation_id (doc/53 §4.2 — env_observation is
         # one of the three event types that does not inherit the parent
@@ -107,11 +123,12 @@ class TriggerEvaluator:
             dt = datetime.now(UTC)
 
         minute = _minute(dt)
+        gap_since: datetime | None = None
         if minute != self._last_minute:
             previous, self._last_minute = self._last_minute, minute
             self._fired_this_minute = set()
             if previous is not None and minute - previous > timedelta(minutes=1):
-                await self._report_missed(previous, minute)
+                gap_since = previous
             # Restore from DB: any trigger that last fired in this exact minute
             # was already handled before the restart — skip it again.
             if self._history is not None:
@@ -140,25 +157,36 @@ class TriggerEvaluator:
                         pass
                 await self._fire(trigger, {"triggered_at": dt.isoformat(), "source": "cron"})
 
+        # Report the gap only after this minute's fires, so a long gap can't
+        # push them into the next minute.
+        if gap_since is not None:
+            await self._report_missed(gap_since, minute)
         return fired
 
     async def _report_missed(self, previous: datetime, current: datetime) -> None:
-        """Report cron minutes strictly between two evaluations.
+        """Report cron minutes strictly between two evaluations, one span
+        per trigger.
 
         Catch-up is not this layer's job (#668); this only makes the loss
         visible.
         """
-        if self._on_missed is None:
+        if self._on_missed is None or not self._detect_gaps:
             return
+        spans: dict[str, tuple[CronTrigger, MissedSpan]] = {}
+        triggers = [t for t in self.list() if isinstance(t, CronTrigger)]
         due = max(previous, current - _MAX_GAP) + timedelta(minutes=1)
         while due < current:
-            for trigger in self.list():
-                if isinstance(trigger, CronTrigger) and trigger.should_fire(due):
-                    try:
-                        await self._on_missed(trigger, due)
-                    except Exception:  # noqa: BLE001
-                        _log.exception("missed-fire report for %s failed", trigger.name)
+            for trigger in triggers:
+                if trigger.should_fire(due):
+                    seen = spans.get(trigger.name)
+                    first, count = (seen[1].first, seen[1].count) if seen else (due, 0)
+                    spans[trigger.name] = (trigger, MissedSpan(first, due, count + 1))
             due += timedelta(minutes=1)
+        for trigger, span in spans.values():
+            try:
+                await self._on_missed(trigger, span)
+            except Exception:  # noqa: BLE001
+                _log.exception("missed-fire report for %s failed", trigger.name)
 
     # ------------------------------------------------------------------
     # Event emission
@@ -266,6 +294,7 @@ class TriggerEvaluator:
         Checks cron triggers every `poll_interval` seconds (default 60s).
         Condition triggers are also polled each cycle.
         """
+        self._detect_gaps = poll_interval <= 60
         while True:
             now = datetime.now(UTC)
             await self.evaluate_cron(now)

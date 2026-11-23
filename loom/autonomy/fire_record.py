@@ -77,6 +77,8 @@ class FireLog:
         result: RunResult,
         started_at: datetime | None = None,
         ended_at: datetime | None = None,
+        missed_through: datetime | None = None,
+        missed_count: int | None = None,
     ) -> None:
         if self._emitter is None:
             return
@@ -93,6 +95,8 @@ class FireLog:
                     ended_at=_epoch(ended_at),
                     outcome=result.outcome.value,
                     reason=result.reason,
+                    missed_through=_epoch(missed_through),
+                    missed_count=missed_count,
                 ),
                 turn_id=DAEMON_TURN_ID,
                 # A trigger reaction runs under its fire's env_observation
