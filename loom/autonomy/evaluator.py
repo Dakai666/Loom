@@ -123,6 +123,10 @@ class TriggerEvaluator:
             dt = datetime.now(UTC)
 
         minute = _minute(dt)
+        # A wall clock stepped back (NTP, host resume) revisits minutes
+        # already evaluated: skip them, keep _last_minute, report nothing.
+        if self._last_minute is not None and minute < self._last_minute:
+            return []
         gap_since: datetime | None = None
         if minute != self._last_minute:
             previous, self._last_minute = self._last_minute, minute
