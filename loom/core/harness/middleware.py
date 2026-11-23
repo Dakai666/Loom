@@ -1556,6 +1556,18 @@ class LifecycleGateMiddleware(Middleware):
 _SKILL_PAYLOAD_TOOL_NAMES = frozenset({"load_skill", "unload_skill"})
 
 
+def _memorialize_reason(rec: "ActionRecord") -> str:
+    """The reason memorialize() was given: the END's outcome (#690 S3b).
+
+    "unknown" when the last transition is not MEMORIALIZED or carries no
+    reason, so a missing value is explicit rather than an empty outcome.
+    """
+    last = rec.state_history[-1] if rec.state_history else None
+    if last is None or last.to_state.value != "memorialized":
+        return "unknown"
+    return last.reason or "unknown"
+
+
 def _skill_id_from_call(call: "ToolCall") -> str | None:
     """Return the target skill name for load_skill / unload_skill calls.
 
@@ -1722,14 +1734,16 @@ class LifecycleMiddleware(Middleware):
                     "cancelled" if isinstance(exc, asyncio.CancelledError)
                     else "exception"
                 )
-                # Shielded so a second cancel cannot cut the END write short.
-                await asyncio.shield(self._emit_lifecycle_end(
-                    call, record, outcome=outcome,
+                # rec.result, not None: if a result already exists, keep its
+                # digest and summary. See _shielded_end for what shield does
+                # and does not protect.
+                await self._shielded_end(
+                    call, record, outcome=outcome, result=record.result,
                     error=(
                         f"{type(exc).__name__}: {exc}" if str(exc)
                         else type(exc).__name__
                     ),
-                ))
+                )
             raise
 
     async def _run(
@@ -2009,6 +2023,19 @@ class LifecycleMiddleware(Middleware):
                 exc=exc, tool_name=call.tool_name, tool_call_id=call.id,
             )
 
+    async def _shielded_end(
+        self, call: "ToolCall", rec: "ActionRecord", **kwargs: Any,
+    ) -> None:
+        """Write the END under ``asyncio.shield``.
+
+        shield protects the write, not the await. A cancel delivered while
+        we wait makes this await raise at once, and the write carries on as
+        a detached task: it lands as long as the event loop keeps running.
+        If the loop closes first (e.g. the CLI exits), that END is lost and
+        no ledger_gap is written for it.
+        """
+        await asyncio.shield(self._emit_lifecycle_end(call, rec, **kwargs))
+
     async def _emit_lifecycle_end(
         self,
         call: "ToolCall",
@@ -2020,9 +2047,9 @@ class LifecycleMiddleware(Middleware):
     ) -> None:
         """Emit tool_lifecycle phase=END. Failure never breaks the call.
 
-        ``result`` is None when the call ended without one (cancelled, or an
-        exception passed through process()); the END then carries no digest
-        or summary, only ``outcome`` and ``error``.
+        ``result`` is None when the call ended without one (cancelled at
+        confirm, say); the END then carries no digest or summary, only
+        ``outcome`` and ``error``.
         """
         from loom.core.ledger import ToolLifecyclePayload
 
@@ -2031,8 +2058,10 @@ class LifecycleMiddleware(Middleware):
         if result is not None and result.success:
             summary = output_text(result.output)[:200] or None
         elif result is not None:
-            error = result.error
-            summary = error[:200] if error else None
+            summary = result.error[:200] if result.error else None
+            # An explicit error (the exception that ended process()) wins
+            # over the result's own error text.
+            error = error or result.error
         try:
             await self._ledger_emitter.emit_tool_lifecycle(
                 payload=ToolLifecyclePayload(
@@ -2080,8 +2109,11 @@ class LifecycleMiddleware(Middleware):
             rolled_back = any(
                 t.to_state.value == "reverted" for t in rec.state_history
             )
-            await self._emit_lifecycle_end(
-                call, rec, outcome=rec.state_history[-1].reason, result=result,
+            # Shielded: a cancel landing mid-write (state is already
+            # MEMORIALIZED, so process() will not write a fallback END)
+            # must not drop this END.
+            await self._shielded_end(
+                call, rec, outcome=_memorialize_reason(rec), result=result,
             )
 
             # #334 — emit artifact_emit for known producer tools.

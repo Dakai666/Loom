@@ -150,6 +150,10 @@ class LedgerEmitter:
         writes the missing event itself, so no reader mistakes a guess for
         a record. If the gap cannot be written either, counts it in
         ``unrecorded_gaps``. Never raises.
+
+        Scope, deliberately limited in S3b: only tool_lifecycle BEGIN/END
+        call this. A failed turn_start / turn_end emit (session.py) is only
+        logged. Other event types are not covered either.
         """
         try:
             await self.emit(

@@ -3647,6 +3647,9 @@ class LoomSession:
         origin: str = "unknown",
         fired_at: datetime | None = None,
     ) -> None:
+        """Emit turn_start. The caller logs a failure and continues; it is
+        not routed to LedgerEmitter.record_gap, which S3b scopes to
+        tool_lifecycle BEGIN/END. Same for _emit_ledger_turn_end."""
         if self._ledger_emitter is None:
             return
         digest, components = self._prompt_stack_snapshot()
