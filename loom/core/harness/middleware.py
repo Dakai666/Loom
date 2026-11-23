@@ -450,7 +450,9 @@ class JITRetrievalMiddleware(Middleware):
             call_id=result.call_id,
             tool_name=result.tool_name,
             success=result.success,
-            output=placeholder,
+            # A failure keeps its output (#690 S3c): the model reads only its
+            # bounded tail, where the error is, plus the ref to the full text.
+            output=placeholder if result.success else result.output,
             error=result.error,
             failure_type=result.failure_type,
             duration_ms=result.duration_ms,
@@ -874,9 +876,10 @@ class BlastRadiusMiddleware(Middleware):
             call.tool_name, call.origin, verdict,
         )
         # A skip is not a deny (#690 S7 review): its own decision value keeps
-        # it out of deny rates. The reason string is unchanged for old readers.
+        # it out of deny rates, and its reason says skip (#690 S3c). Rows
+        # before S3c read "unattended-deny (...)" for the same thing.
         self._notify_lifecycle(
-            call, False, f"unattended-deny ({call.origin}, {verdict})", decision="skip",
+            call, False, f"unattended-skip ({call.origin}, {verdict})", decision="skip",
         )
         call.metadata["user_decision"] = False
 
@@ -1459,6 +1462,7 @@ class LifecycleGateMiddleware(Middleware):
                     success=False,
                     error=error_text,
                     failure_type="execution_error",
+                    metadata={"failure_stage": "guard"},
                 )
                 record.result = result
                 await ctx.memorialize("precondition_failed")
@@ -1479,6 +1483,7 @@ class LifecycleGateMiddleware(Middleware):
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error="Aborted before execution.",
                 failure_type="execution_error",
+                metadata={"failure_stage": "cancelled"},
             )
             record.result = result
             await ctx.memorialize("aborted")
@@ -1536,6 +1541,7 @@ class LifecycleGateMiddleware(Middleware):
                     call_id=call.id, tool_name=call.tool_name,
                     success=False, error="Execution aborted by signal.",
                     failure_type="execution_error",
+                    metadata={"failure_stage": "cancelled"},
                 )
                 record.result = result
                 await ctx.memorialize("aborted")
@@ -1743,7 +1749,14 @@ class LifecycleMiddleware(Middleware):
             await self._emit_lifecycle_begin(call, record)
 
         try:
-            return await self._run(call, next, ctx, record, tool_def)
+            result = await self._run(call, next, ctx, record, tool_def)
+            if self._ledger_emitter is not None:
+                # The END row's id, so the model can cite it (#690 S3c).
+                result.metadata = {
+                    **(result.metadata or {}),
+                    "ledger_event_id": f"evt_tool_end_{record.id[:12]}",
+                }
+            return result
         except BaseException as exc:
             # #690 S3b: cancelled (a preempting turn, CancelledError while
             # waiting at confirm) or an exception passed through before

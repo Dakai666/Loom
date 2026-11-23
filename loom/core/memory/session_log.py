@@ -132,6 +132,12 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
         r'(?i)(?:password|token|secret|api[_-]?key|credentials)'
         r'\\?"\s*:\s*\\?"((?:sk-|pk-|AKIA|ghp_|xoxb-)[A-Za-z0-9_\-]{20,})\\?"'
     ), r'[REDACTED]"'),
+    # The same prefixes unquoted, as they appear in error text and stderr
+    # (#690 S3c): "auth failed for token ghp_...".
+    (re.compile(
+        r'(?<![A-Za-z0-9_\-])(?:sk-|pk-|ak-|AKIA|ghp_|gho_|ghs_|github_pat_|'
+        r'xoxb-|xoxp-|xapp-)[A-Za-z0-9_\-]{20,}'
+    ), '[REDACTED]'),
 ]
 
 

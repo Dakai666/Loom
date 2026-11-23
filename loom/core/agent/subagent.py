@@ -95,7 +95,8 @@ async def run_subagent(
         ToolCall, ToolResult,
     )
     from loom.core.harness.validation import SchemaValidationMiddleware
-    from loom.core.harness.permissions import PermissionContext, TrustLevel
+    from loom.core.harness.failure import tool_result_text
+    from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
 
     agent_id = config.agent_id
     session_id = f"{parent_session_id}:{agent_id}"
@@ -161,12 +162,17 @@ async def run_subagent(
         # before confirm_fn is called. Deny as safety net.
         return False
 
+    # The parent's emitter (#690 S3c): child tool calls write tool_lifecycle
+    # and permission_decision rows (origin="subagent") under the parent turn.
     pipeline = MiddlewarePipeline([
-        LifecycleMiddleware(registry=child_registry),  # outer: lifecycle bookends
+        LifecycleMiddleware(  # outer: lifecycle bookends
+            registry=child_registry, ledger_emitter=ledger_emitter,
+        ),
         TraceMiddleware(),
         SchemaValidationMiddleware(registry=child_registry),
         BlastRadiusMiddleware(
             perm_ctx=perm, confirm_fn=_subagent_confirm, registry=child_registry,
+            ledger_emitter=ledger_emitter,
         ),
         LifecycleGateMiddleware(registry=child_registry),  # inner: lifecycle gating
     ])
@@ -334,7 +340,10 @@ async def run_subagent(
                     result = await pipeline.execute(call, tool_def.executor)
                     result.duration_ms = (time.monotonic() - ts) * 1000
 
-                tool_output = str(result.output) if result.success else (result.error or "")
+                tool_output = tool_result_text(
+                    result,
+                    capabilities=tool_def.capabilities if tool_def else ToolCapability.NONE,
+                )
                 await _log_child(child_turn, "tool", tool_output[:500], metadata={
                     "tool_call_id": tu.id,
                     "tool_name": tu.name,
