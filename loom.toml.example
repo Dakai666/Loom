@@ -637,15 +637,20 @@ backend = "none"   # "none" | "srt"
 #    Tools listed here are temporarily authorized for the duration of the
 #    schedule's execution, then revoked.
 #
-#    allowed_tools = ["write_file", "memorize", "run_bash"]
+#    allowed_tools = ["write_file", "memorize"]
+#
+#    A tool name never authorizes shell (issue #690 S7): listing run_bash
+#    here does nothing. Use an exec scope_grant below.
 #
 # 2. scope_grants — inject scope-level grants for scope-aware tools.
 #    Each grant specifies resource/action/selector. These are also temporary
-#    and revoked after execution.
+#    and revoked after execution. An exec selector is "workspace", "*", or a
+#    command shape: the words a command must start with. A shape never covers
+#    a chained or expanded command (; && || | & > < $ backticks, newline).
 #
 #    scope_grants = [
 #      { resource = "path", action = "write", selector = "news" },
-#      { resource = "exec", action = "execute", selector = "workspace" },
+#      { resource = "exec", action = "execute", selector = "python3 skills/news-aggregator/scripts/fetch_news.py" },
 #    ]
 #
 # 3. SAFE tools (read_file, list_dir, recall, load_skill, memory_prune,
@@ -759,7 +764,6 @@ session_prefix = "daily-life"   # thread name → daily-life-YYYY-MM-DD
 # trust_level   = "guarded"
 # notify        = true
 # notify_thread = 0
-# allowed_tools = ["run_bash"]
 # scope_grants  = [
 #   { resource = "exec", action = "execute", selector = "workspace" },
 # ]
