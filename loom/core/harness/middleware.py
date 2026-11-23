@@ -99,6 +99,16 @@ class ToolResult:
 ToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]
 
 
+def output_text(output: Any) -> str:
+    """The text form of a tool output: what the model reads.
+
+    Tools may return structured outputs (dicts, lists). Anything that
+    measures, digests or summarises an output goes through this one
+    serialization so the ledger describes the same text the model saw.
+    """
+    return "" if output is None else str(output)
+
+
 # Origins where no human is available to answer a confirmation prompt.
 # "chime" (issue #668 S1): a scheduled phase turn runs inside a live Discord
 # thread, but nobody is expected to be watching it. Prompting there held the
@@ -370,7 +380,7 @@ class JITRetrievalMiddleware(Middleware):
         if tool_def is not None and getattr(tool_def, "inline_only", False):
             return result
 
-        output_str = "" if result.output is None else str(result.output)
+        output_str = output_text(result.output)
         size = len(output_str)
         if size <= self.THRESHOLD_CHARS:
             return result
@@ -1911,7 +1921,7 @@ class LifecycleMiddleware(Middleware):
         if result is None:
             return None
         import hashlib
-        body = (result.output or "") + "|" + (result.error or "")
+        body = output_text(result.output) + "|" + (result.error or "")
         return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
     async def _maybe_emit_artifact(
@@ -1978,7 +1988,7 @@ class LifecycleMiddleware(Middleware):
                         args_digest=self._args_digest(call.args),
                         result_digest=self._result_digest(result),
                         result_summary=(
-                            (result.output[:200] if result and result.output else None)
+                            (output_text(result.output)[:200] or None)
                             if (result and result.success)
                             else (result.error[:200] if result and result.error else None)
                         ),
