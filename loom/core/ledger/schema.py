@@ -213,6 +213,25 @@ class EnvObservationPayload:
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
+@dataclass(kw_only=True)
+class TriggerFirePayload:
+    """One fire of a cron schedule, rhythm anchor or memory loop (#690 S5a).
+
+    Times are UTC epochs. ``started_at`` / ``ended_at`` are None when the
+    fire never ran (``outcome="missed"``). ``reason`` explains missed,
+    skipped and failed outcomes.
+    """
+
+    source: str          # cron | event | condition | memory_loop
+    name: str            # trigger name, or the memory loop's label
+    fired_at: float
+    started_at: float | None
+    ended_at: float | None
+    outcome: str         # loom.autonomy.fire_record.FireOutcome
+    reason: str | None = None
+    schema_version: int = CURRENT_SCHEMA_VERSION
+
+
 # ---------------------------------------------------------------------------
 # SQL DDL — §5.2 / §5.3
 # ---------------------------------------------------------------------------

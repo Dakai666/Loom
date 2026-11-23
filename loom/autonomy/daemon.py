@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable
 
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
+from loom.autonomy.fire_record import COMPLETED, FireLog, FireOutcome, RunResult
 from loom.autonomy.permission_fields import parse_permission_fields
 from loom.autonomy.permission_names import (
     NameCheck, classify_permission_names, collect_permission_uses, format_report,
@@ -213,7 +214,6 @@ class AutonomyDaemon:
         notify_router: NotificationRouter,
         confirm_flow: ConfirmFlow,
         loom_session=None,   # LoomSession for executing prompts
-        db=None,            # open aiosqlite.Connection for trigger_history persistence
         chime_delivery: ChimeDelivery | None = None,
     ) -> None:
         self._notify = notify_router
@@ -226,7 +226,10 @@ class AutonomyDaemon:
         # a direct handler it bypasses the LLM ActionPlanner entirely — used by
         # circadian lifecycle (dawn spawn / nightly close), where the action is
         # a fixed bookkeeping step, not a planned agent run (doc/57 §7 PR 1).
-        self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
+        self._direct_handlers: dict[str, Callable[..., Awaitable[RunResult | None]]] = {}
+        # Trigger name → what to do when its cron minute passed unevaluated
+        # (#690 S5a): circadian anchors write ``missed`` to phase_log.
+        self._missed_handlers: dict[str, Callable[[str], None]] = {}
         # Loop name → consecutive unexpected ends, for restart backoff.
         self._loop_failures: dict[str, int] = {}
         # #690 S4: loom.toml path from load_config, and the last
@@ -234,7 +237,13 @@ class AutonomyDaemon:
         self._config_path: Path | None = None
         self.permission_names_line = ""
 
-        history = TriggerHistory(db) if db is not None else None
+        # #690 S5a: the session's memory DB holds trigger_history (restart
+        # dedup) and its ledger takes the fire records. Taken from the
+        # session so no construction site can forget to pass them; a daemon
+        # without a session (``autonomy status``) never runs triggers.
+        db = getattr(loom_session, "_db", None)
+        emitter = getattr(loom_session, "_ledger_emitter", None)
+        self._fire_log = FireLog(emitter)
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
         # may be unset on test doubles or pre-start sessions — fall back
         # gracefully so autonomy continues to plan without context.
@@ -242,20 +251,34 @@ class AutonomyDaemon:
         self._planner = ActionPlanner(
             semantic_memory=_mem.semantic if _mem is not None else None,
         )
-        self._evaluator = TriggerEvaluator(on_fire=self._planner.handle, history=history)
+        self._evaluator = TriggerEvaluator(
+            on_fire=self._planner.handle,
+            history=TriggerHistory(db) if db is not None else None,
+            ledger_emitter=emitter,
+            on_missed=self._on_cron_missed,
+        )
         # Intercept planned actions
         self._planner_handle_orig = self._planner.handle
         self._evaluator._on_fire = self._on_trigger_fire
 
     def register_direct_handler(
-        self, name: str, handler: Callable[..., Awaitable[None]]
+        self,
+        name: str,
+        handler: Callable[..., Awaitable[RunResult | None]],
+        *,
+        on_missed: Callable[[str], None] | None = None,
     ) -> None:
         """Route fires of trigger ``name`` to ``handler`` instead of the planner.
 
-        The handler is invoked as ``await handler(trigger, context)``. Used for
-        deterministic triggers (circadian dawn/close) that must not be subject
-        to the planner's EXECUTE/SKIP/NOTIFY decision."""
+        The handler is invoked as ``await handler(trigger, context)`` and may
+        return a :class:`RunResult` for the fire record (None reads as
+        completed). ``on_missed(reason)`` runs when the trigger's cron minute
+        passed unevaluated. Used for deterministic triggers (circadian
+        dawn/close/anchors) that must not be subject to the planner's
+        EXECUTE/SKIP/NOTIFY decision."""
         self._direct_handlers[name] = handler
+        if on_missed is not None:
+            self._missed_handlers[name] = on_missed
 
     def unregister_direct_handler(self, name: str) -> None:
         """Drop the direct handler for trigger ``name`` (no-op if absent).
@@ -265,6 +288,21 @@ class AutonomyDaemon:
         anchor that disappeared from the table — so the handler map doesn't
         accumulate dead entries across renames."""
         self._direct_handlers.pop(name, None)
+        self._missed_handlers.pop(name, None)
+
+    async def _on_cron_missed(self, trigger, due_at: datetime) -> None:
+        reason = "evaluator_gap"
+        logger.warning(
+            "[autonomy] trigger=%s was due at %s but the evaluator never ran "
+            "that minute", trigger.name, due_at.isoformat(),
+        )
+        await self._fire_log.record(
+            source=trigger.kind.value, name=trigger.name, fired_at=due_at,
+            result=RunResult(FireOutcome.MISSED, reason),
+        )
+        on_missed = self._missed_handlers.get(trigger.name)
+        if on_missed is not None:
+            on_missed(reason)
 
     async def _on_trigger_fire(self, trigger, context):
         """Run one trigger's reaction in its own task and contain its failure.
@@ -277,37 +315,47 @@ class AutonomyDaemon:
         out of an MCP teardown during nightly close — and is logged, not
         propagated.  A cancel aimed at the evaluator (shutdown) still is.
         """
+        fired_at = (
+            datetime.fromtimestamp(context["fired_at"], UTC)
+            if context.get("fired_at") is not None else datetime.now(UTC)
+        )
+        started_at = datetime.now(UTC)
         reaction = asyncio.create_task(
             self._react(trigger, context), name=f"trigger:{trigger.name}"
         )
         try:
-            await reaction
+            result = await reaction or COMPLETED
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
-                raise
+                raise  # shutdown: the fire root stays without a record
             logger.error(
                 "[autonomy] reaction to trigger=%s was cancelled from inside "
                 "(not a shutdown); evaluator continues",
                 trigger.name,
             )
-        except Exception:
+            result = RunResult(FireOutcome.CANCELLED)
+        except Exception as exc:
             logger.exception(
                 "[autonomy] reaction to trigger=%s raised; evaluator continues",
                 trigger.name,
             )
+            result = RunResult(FireOutcome.FAILED, type(exc).__name__)
+        await self._fire_log.record(
+            source=trigger.kind.value, name=trigger.name, fired_at=fired_at,
+            started_at=started_at, ended_at=datetime.now(UTC), result=result,
+        )
 
-    async def _react(self, trigger, context) -> None:
+    async def _react(self, trigger, context) -> RunResult | None:
         handler = self._direct_handlers.get(trigger.name)
         if handler is not None:
-            await handler(trigger, context)
-            return
+            return await handler(trigger, context)
         plan = await self._planner.handle(trigger, context)
-        await self._execute_plan(plan)
+        return await self._execute_plan(plan)
 
-    async def _execute_plan(self, plan: PlannedAction) -> None:
+    async def _execute_plan(self, plan: PlannedAction) -> RunResult:
         if plan.decision == ActionDecision.SKIP:
-            return
+            return RunResult(FireOutcome.SKIPPED, "planner_skip")
 
         if plan.decision == ActionDecision.EXECUTE:
             # Chime mode: wake an existing session via the platform-supplied
@@ -316,7 +364,7 @@ class AutonomyDaemon:
             if plan.context.get("mode") == "chime":
                 accepted = await self._deliver_chime(plan)
                 if accepted:
-                    return
+                    return RunResult(FireOutcome.DELIVERED)
                 fallback = plan.context.get("target", {}).get("fallback", "skip")
                 if fallback != "independent":
                     logger.info(
@@ -324,13 +372,12 @@ class AutonomyDaemon:
                         "fallback=%s, skipping",
                         plan.trigger_name, fallback,
                     )
-                    return
+                    return RunResult(FireOutcome.MISSED, "no_target_session")
                 logger.info(
                     "[autonomy] chime trigger=%s — falling back to independent",
                     plan.trigger_name,
                 )
-            await self._run_agent(plan)
-            return
+            return await self._run_agent(plan)
 
         # NOTIFY or HOLD — send confirmation request
         notif = Notification(
@@ -346,8 +393,8 @@ class AutonomyDaemon:
 
         from loom.notify.types import ConfirmResult
         if result == ConfirmResult.APPROVED:
-            await self._run_agent(plan)
-        elif result == ConfirmResult.TIMEOUT and plan.decision == ActionDecision.NOTIFY:
+            return await self._run_agent(plan)
+        if result == ConfirmResult.TIMEOUT and plan.decision == ActionDecision.NOTIFY:
             # Guarded timeout → skip (do not downgrade to execute automatically)
             await self._notify.send(Notification(
                 type=NotificationType.INFO,
@@ -355,6 +402,7 @@ class AutonomyDaemon:
                 body="No response within timeout — action was skipped.",
                 trigger_name=plan.trigger_name,
             ))
+        return RunResult(FireOutcome.SKIPPED, f"confirm_{result.value}")
 
     async def deliver_chime(self, req: ChimeRequest) -> bool:
         """Route an already-built chime to the platform delivery callback.
@@ -400,9 +448,9 @@ class AutonomyDaemon:
         )
         return await self.deliver_chime(req)
 
-    async def _run_agent(self, plan: PlannedAction) -> None:
+    async def _run_agent(self, plan: PlannedAction) -> RunResult:
         if self._session is None:
-            return
+            return RunResult(FireOutcome.SKIPPED, "no_session")
 
         logger.info("[autonomy] trigger=%s — starting agent run", plan.trigger_name)
 
@@ -429,6 +477,7 @@ class AutonomyDaemon:
         # Record turn start before stream_turn so attachment resolution
         # can filter by mtime — files written during this turn only.
         turn_start = datetime.now(UTC)
+        result = COMPLETED
 
         # Collect text output from stream_turn with origin="autonomy".
         # BlastRadiusMiddleware will auto-deny any tool call that isn't
@@ -465,6 +514,7 @@ class AutonomyDaemon:
                     "[autonomy] trigger=%s — turn dropped (%d chars): %s",
                     plan.trigger_name, len(response), summary,
                 )
+                result = RunResult(FireOutcome.FAILED, "turn_dropped")
                 await self._notify.send(Notification(
                     type=NotificationType.ALERT,
                     title=f"Autonomy turn dropped: {plan.trigger_name}",
@@ -505,6 +555,7 @@ class AutonomyDaemon:
                 ))
         except Exception as exc:
             logger.error("[autonomy] trigger=%s — error: %s", plan.trigger_name, exc, exc_info=True)
+            result = RunResult(FireOutcome.FAILED, type(exc).__name__)
             await self._notify.send(Notification(
                 type=NotificationType.ALERT,
                 title=f"Autonomy error: {plan.trigger_name}",
@@ -519,6 +570,7 @@ class AutonomyDaemon:
             if _added_grant_count:
                 _src = f"autonomy:{plan.trigger_name}"
                 self._session.perm.revoke_matching(lambda g: g.source == _src)
+        return result
 
     # ------------------------------------------------------------------
     # Config loading
@@ -836,6 +888,7 @@ class AutonomyDaemon:
         loop = MaintenanceLoop(
             db=db,
             abort=self._abort,
+            fire_log=self._fire_log,
             interval_hours=float(cfg.get("interval_hours", 24.0)),
             threshold=float(
                 cfg.get("threshold", gov_cfg.get("semantic_decay_threshold", 0.1))
@@ -949,6 +1002,7 @@ class AutonomyDaemon:
             meta_key="distill_dream.last_run",
             check_interval_seconds=min(DEFAULT_CHECK_INTERVAL_SECONDS, interval_hours * 3600.0 / 4),
             label="distill-dream",
+            fire_log=self._fire_log,
         )
         logger.info(
             "[autonomy] distill dream loop started (interval=%.1fh, max_neighbourhoods=%d, "
@@ -1046,6 +1100,7 @@ class AutonomyDaemon:
             db=db,
             abort=self._abort,
             interval_days=float(cfg.get("interval_days", 7.0)),
+            fire_log=self._fire_log,
         )
         logger.info(
             "[autonomy] convergent dream loop started "

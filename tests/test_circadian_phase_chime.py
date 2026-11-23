@@ -363,7 +363,7 @@ class TestPhaseChimeFire:
              "outcome": "delivered"},
         ]
 
-    async def test_fire_logs_skipped_when_delivery_returns_false(self):
+    async def test_fire_logs_missed_when_delivery_returns_false(self):
         daemon, _, delivery_ref = _make_daemon()
         delivery_ref[0] = False  # platform rejects
         register_rhythm_anchors(daemon, CFG, [
@@ -386,7 +386,7 @@ class TestPhaseChimeFire:
         await daemon._on_trigger_fire(trig, {})
 
         reloaded = CircadianState.load()
-        assert reloaded.phase_log[-1]["outcome"] == "skipped"
+        assert reloaded.phase_log[-1]["outcome"] == "missed"
         assert reloaded.phase_log[-1]["reason"] == "no_today_session"
 
     async def test_fire_when_no_state_does_not_crash(self):

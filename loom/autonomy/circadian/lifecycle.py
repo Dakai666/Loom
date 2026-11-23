@@ -17,6 +17,7 @@ no new runtime (doc/57 §1.1, §6).
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,7 @@ from loom.autonomy.circadian.proposal import (
 from loom.autonomy.circadian.rhythm import Anchor, load_programs, load_rhythm
 from loom.autonomy.circadian.state import CircadianState, _today_str, state_lock
 from loom.autonomy.circadian.weave import describe_duplicates, load_weave
+from loom.autonomy.fire_record import COMPLETED, FireOutcome, RunResult
 from loom.autonomy.triggers import CronTrigger
 
 logger = logging.getLogger(__name__)
@@ -393,7 +395,7 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
     dawn_cron = local_hhmm_to_utc_cron(config.start, config.timezone)
     close_cron = local_hhmm_to_utc_cron(config.sleep, config.timezone)
 
-    async def _dawn_handler(_trigger: Any, _context: dict[str, Any]) -> None:
+    async def _dawn_handler(_trigger: Any, _context: dict[str, Any]) -> RunResult:
         # Re-read the rhythm table at the top of each day so edits made since
         # the daemon started take effect today without a restart (issue #477).
         # The Discord daemon is long-lived; without this, a changed rhythm.toml
@@ -403,9 +405,17 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
         # #690 S4: re-check granted tool names against the registry, so the
         # dawn chime reports today's tables rather than yesterday's.
         daemon.check_permission_names()
-        await ensure_today_session(
+        before = CircadianState.load()
+        today = await ensure_today_session(
             datetime.now(timezone.utc), platform, config, evaluator=evaluator
         )
+        # #690 S5a / #656: "spawned" means a session was created, never that
+        # a chime went out — the dawn anchor records its own delivery.
+        if today is None:
+            return RunResult(FireOutcome.MISSED, "no_session")
+        if before is None or before.session_id != today.session_id:
+            return RunResult(FireOutcome.SPAWNED)
+        return COMPLETED
 
     async def _close_handler(_trigger: Any, _context: dict[str, Any]) -> None:
         await close_today(platform, config, evaluator=evaluator)
@@ -441,8 +451,8 @@ def _make_phase_handler(
     anchor (the classic Python late-binding trap).
     """
 
-    async def _phase_handler(_trigger: Any, _context: dict[str, Any]) -> None:
-        await _deliver_phase_chime(daemon, config, anchor, peer_names)
+    async def _phase_handler(_trigger: Any, _context: dict[str, Any]) -> RunResult:
+        return await _deliver_phase_chime(daemon, config, anchor, peer_names)
 
     return _phase_handler
 
@@ -452,9 +462,10 @@ async def _deliver_phase_chime(
     config: CircadianConfig,
     anchor: Anchor,
     peer_names: tuple[str, ...] = (),
-) -> None:
+) -> RunResult:
     """Fire one phase chime: build the request, route via the daemon's chime
-    callback, append the outcome to ``phase_log``.
+    callback, append the outcome to ``phase_log``, and return it for the
+    daemon's fire record.
 
     Body composition (PR3 #461 adds the second layer):
       - ``anchor.meaning`` (rhythm.toml, stable) — *why* this phase exists
@@ -467,8 +478,9 @@ async def _deliver_phase_chime(
     works (PR2 acceptance preserved).
 
     When the bot can't deliver (no live thread, ``deliver_chime`` returns
-    False) we still log a ``skipped`` outcome so phase_log is a complete
-    audit trail.
+    False) we log ``missed`` with a reason, so phase_log tells "never reached
+    the agent" apart from "delivered" (#656). ``delivered`` means the target
+    session accepted the chime into its queue.
     """
     intent = _compose_chime_intent(
         anchor, config, peer_names, permission_names=daemon.permission_names_line,
@@ -492,9 +504,11 @@ async def _deliver_phase_chime(
         resets_tier=True,
     )
     delivered = await daemon.deliver_chime(req)
-    outcome = "delivered" if delivered else "skipped"
-    reason = None if delivered else "no_today_session"
-    _record_phase_outcome(anchor.name, outcome, reason, config.timezone)
+    result = (
+        RunResult(FireOutcome.DELIVERED) if delivered
+        else RunResult(FireOutcome.MISSED, "no_today_session")
+    )
+    _record_phase_outcome(anchor.name, result.outcome.value, result.reason, config.timezone)
 
     # Issue #472: when dawn fires and last night's weave_revise actually
     # applied, the revised plan starts driving behaviour *today* — that is the
@@ -518,12 +532,13 @@ async def _deliver_phase_chime(
                     "[circadian] weave_applied not emitted: latest revision "
                     "%s is unreadable", artifact,
                 )
-                return
+                return result
             await _emit(daemon.evaluator, "circadian:weave_applied", {
                 "date": _today_str(config.timezone),
                 "applied_from": latest.date,
                 "rationale": latest.rationale,
             })
+    return result
 
 
 def _compose_chime_intent(
@@ -788,6 +803,10 @@ def register_rhythm_anchors(
         daemon.register_direct_handler(
             anchor.trigger_name,
             _make_phase_handler(daemon, config, anchor, peer_names),
+            on_missed=functools.partial(
+                _record_phase_outcome, anchor.name, FireOutcome.MISSED.value,
+                tz=config.timezone,
+            ),
         )
     if anchors:
         logger.info(

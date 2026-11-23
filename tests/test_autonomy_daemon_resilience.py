@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom.autonomy.daemon import AutonomyDaemon
+from loom.autonomy.triggers import TriggerKind
 
 
 def _daemon() -> AutonomyDaemon:
@@ -31,7 +32,7 @@ def _daemon() -> AutonomyDaemon:
 
 
 def _trigger(name: str = "circadian:nightly_close") -> SimpleNamespace:
-    return SimpleNamespace(name=name)
+    return SimpleNamespace(name=name, kind=TriggerKind.CRON)
 
 
 class TestTriggerReactionIsolation:

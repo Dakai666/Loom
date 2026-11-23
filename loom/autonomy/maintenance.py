@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
+from loom.autonomy.fire_record import COMPLETED, FireLog, FireOutcome, RunResult
 from loom.core.infra import AbortController, wait_aborted
 from loom.core.memory.lifecycle import MemoryLifecycle
 
@@ -50,12 +51,14 @@ class MaintenanceLoop:
         interval_hours: float = 24.0,
         threshold: float = 0.1,
         min_gap_minutes: float = 30.0,
+        fire_log: FireLog | None = None,
     ) -> None:
         self._db = db
         self._abort = abort
         self._interval_seconds = max(60.0, interval_hours * 3600.0)
         self._threshold = threshold
         self._min_gap_minutes = min_gap_minutes
+        self._fire_log = fire_log or FireLog(None)
 
     async def run_forever(self) -> None:
         """Run a sweep ``_FIRST_SWEEP_DELAY_SECONDS`` after start, then every
@@ -76,22 +79,34 @@ class MaintenanceLoop:
                 return
             except asyncio.TimeoutError:
                 pass  # interval elapsed, run a cycle
+            await self.run_once()
 
-            try:
-                cycle = MemoryLifecycle(self._db, threshold=self._threshold)
-                result = await cycle.run(min_gap_minutes=self._min_gap_minutes)
-                if result.skipped:
-                    logger.debug("[maintenance] cycle skipped (throttle)")
-                elif result.total_archived or result.total_deleted:
-                    logger.info(
-                        "[maintenance] archived=%d deleted=%d "
-                        "(semantic %d/%d, relational %d/%d)",
-                        result.total_archived, result.total_deleted,
-                        result.semantic_archived, result.semantic_deleted,
-                        result.relational_archived, result.relational_deleted,
-                    )
-            except Exception as exc:  # never let maintenance crash the daemon
-                logger.warning("[maintenance] cycle failed: %s", exc)
+    async def run_once(self) -> None:
+        """One sweep, recorded as a ``memory_maintenance`` fire (#690 S5a).
+        Never raises: maintenance must not crash the daemon."""
+        started = datetime.now(UTC)
+        outcome = COMPLETED
+        try:
+            cycle = MemoryLifecycle(self._db, threshold=self._threshold)
+            result = await cycle.run(min_gap_minutes=self._min_gap_minutes)
+            if result.skipped:
+                logger.debug("[maintenance] cycle skipped (throttle)")
+                outcome = RunResult(FireOutcome.SKIPPED, "throttle")
+            elif result.total_archived or result.total_deleted:
+                logger.info(
+                    "[maintenance] archived=%d deleted=%d "
+                    "(semantic %d/%d, relational %d/%d)",
+                    result.total_archived, result.total_deleted,
+                    result.semantic_archived, result.semantic_deleted,
+                    result.relational_archived, result.relational_deleted,
+                )
+        except Exception as exc:
+            logger.warning("[maintenance] cycle failed: %s", exc)
+            outcome = RunResult(FireOutcome.FAILED, type(exc).__name__)
+        await self._fire_log.record(
+            source="memory_loop", name="memory_maintenance", fired_at=started,
+            started_at=started, ended_at=datetime.now(UTC), result=outcome,
+        )
 
 
 # How often to re-check due-ness. The cadence is enforced by the persisted
@@ -136,6 +151,7 @@ class ConvergentDreamLoop:
         meta_key: str = _META_KEY_LAST_RUN_DEFAULT,
         check_interval_seconds: float = DEFAULT_CHECK_INTERVAL_SECONDS,
         label: str = "consolidation",
+        fire_log: FireLog | None = None,
     ) -> None:
         self._dream_fn = dream_fn
         self._db = db
@@ -144,6 +160,7 @@ class ConvergentDreamLoop:
         self._meta_key = meta_key
         self._check_interval_seconds = check_interval_seconds
         self._label = label
+        self._fire_log = fire_log or FireLog(None)
 
     async def _last_run(self) -> datetime | None:
         cursor = await self._db.execute(
@@ -178,9 +195,21 @@ class ConvergentDreamLoop:
         last = await self._last_run()
         if last is not None and (now - last).total_seconds() < self._interval_seconds:
             return False
-        await self._dream_fn()       # may raise → last_run left unmarked
-        await self._mark_run(now)
+        started = datetime.now(UTC)
+        try:
+            await self._dream_fn()   # may raise → last_run left unmarked
+            await self._mark_run(now)
+        except Exception as exc:
+            await self._record(now, started, RunResult(FireOutcome.FAILED, type(exc).__name__))
+            raise
+        await self._record(now, started, COMPLETED)
         return True
+
+    async def _record(self, fired_at: datetime, started_at: datetime, result: RunResult) -> None:
+        await self._fire_log.record(
+            source="memory_loop", name=self._label, fired_at=fired_at,
+            started_at=started_at, ended_at=datetime.now(UTC), result=result,
+        )
 
     async def run_forever(self) -> None:
         """Check due-ness ``_FIRST_CHECK_DELAY_SECONDS`` after start, then every

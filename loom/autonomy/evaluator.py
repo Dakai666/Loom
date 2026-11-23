@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from .fire_record import DAEMON_TURN_ID
 from .history import TriggerHistory
 from .triggers import (
     TriggerDefinition, TriggerKind,
@@ -29,6 +30,14 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 FireCallback = Callable[[TriggerDefinition, dict[str, Any]], Awaitable[None]]
+MissedCallback = Callable[[CronTrigger, datetime], Awaitable[None]]
+
+# How far back a late evaluation looks for cron minutes it skipped (#690 S5a).
+_MAX_GAP = timedelta(hours=24)
+
+
+def _minute(dt: datetime) -> datetime:
+    return dt.replace(second=0, microsecond=0)
 
 
 # doc/53 §3.1 — env_observation subtypes mapped from autonomy trigger kinds.
@@ -37,15 +46,6 @@ _KIND_TO_OBSERVATION = {
     TriggerKind.EVENT: "external",
     TriggerKind.CONDITION: "anomaly",
 }
-
-# Synthetic turn_id for daemon-originated events (doc/53 §5.2 requires
-# turn_id NOT NULL). Uses a sub-classified bucket so future ledger
-# queries can isolate daemon events with a single prefix filter without
-# losing per-trigger granularity (the trigger name lives in
-# payload.detail.trigger_name). When the planner spawns a real
-# LoomSession in reaction to a fire, that session's turn carries its
-# own real turn_id; only the env_observation root uses this constant.
-_DAEMON_TURN_ID = "system:autonomy"
 
 
 class TriggerEvaluator:
@@ -63,12 +63,16 @@ class TriggerEvaluator:
         on_fire: FireCallback | None = None,
         history: TriggerHistory | None = None,
         ledger_emitter: "LedgerEmitter | None" = None,
+        on_missed: MissedCallback | None = None,
     ) -> None:
         self._triggers: dict[str, TriggerDefinition] = {}
         self._on_fire = on_fire
         self._history = history
         self._fired_this_minute: set[str] = set()
-        self._last_minute: int | None = None
+        self._last_minute: datetime | None = None
+        # Called once per cron trigger whose minute passed while nothing
+        # evaluated it: a reaction held the loop, or the host slept.
+        self._on_missed = on_missed
         # When wired, every trigger fire emits one env_observation event
         # under a fresh correlation_id (doc/53 §4.2 — env_observation is
         # one of the three event types that does not inherit the parent
@@ -102,25 +106,19 @@ class TriggerEvaluator:
         if dt is None:
             dt = datetime.now(UTC)
 
-        minute_key = dt.year * 100000 + dt.month * 10000 + dt.day * 100 + dt.hour * 60 + dt.minute
-        if minute_key != self._last_minute:
+        minute = _minute(dt)
+        if minute != self._last_minute:
+            previous, self._last_minute = self._last_minute, minute
             self._fired_this_minute = set()
-            self._last_minute = minute_key
+            if previous is not None and minute - previous > timedelta(minutes=1):
+                await self._report_missed(previous, minute)
             # Restore from DB: any trigger that last fired in this exact minute
             # was already handled before the restart — skip it again.
             if self._history is not None:
                 try:
                     for entry in await self._history.get_all():
-                        last_iso = entry["last_fire_iso"]
-                        last_dt = datetime.fromisoformat(last_iso)
-                        lk = (
-                            last_dt.year * 100000
-                            + last_dt.month * 10000
-                            + last_dt.day * 100
-                            + last_dt.hour * 60
-                            + last_dt.minute
-                        )
-                        if lk == minute_key:
+                        last_dt = datetime.fromisoformat(entry["last_fire_iso"])
+                        if _minute(last_dt) == minute:
                             self._fired_this_minute.add(entry["trigger_name"])
                 except Exception:
                     pass  # History read failure must never block cron evaluation
@@ -143,6 +141,24 @@ class TriggerEvaluator:
                 await self._fire(trigger, {"triggered_at": dt.isoformat(), "source": "cron"})
 
         return fired
+
+    async def _report_missed(self, previous: datetime, current: datetime) -> None:
+        """Report cron minutes strictly between two evaluations.
+
+        Catch-up is not this layer's job (#668); this only makes the loss
+        visible.
+        """
+        if self._on_missed is None:
+            return
+        due = max(previous, current - _MAX_GAP) + timedelta(minutes=1)
+        while due < current:
+            for trigger in self.list():
+                if isinstance(trigger, CronTrigger) and trigger.should_fire(due):
+                    try:
+                        await self._on_missed(trigger, due)
+                    except Exception:  # noqa: BLE001
+                        _log.exception("missed-fire report for %s failed", trigger.name)
+            due += timedelta(minutes=1)
 
     # ------------------------------------------------------------------
     # Event emission
@@ -218,7 +234,7 @@ class TriggerEvaluator:
 
         try:
             await self._ledger_emitter.emit_env_observation(
-                turn_id=_DAEMON_TURN_ID,
+                turn_id=DAEMON_TURN_ID,
                 correlation_id=new_corr,
                 payload=EnvObservationPayload(
                     observation_type=observation_type,
