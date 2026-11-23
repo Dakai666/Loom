@@ -232,7 +232,7 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
 
-**人類確認授予的是 shape，不是 workspace（#690 S6）。** attended turn（Discord thread、CLI）裡人類確認一次 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），之後不同的命令會再問一次。chain、重導或展開的命令沒有 argv，確認只放行這一次，不留 grant。S6 之前這裡會留下一個沒有 TTL 的 `workspace` grant，同一 session 之後的所有命令都會 ALLOW。
+**人類確認授予的是 shape，不是 workspace（#690 S6）。** attended turn（Discord thread、CLI）裡人類確認一次 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`cat clean.md` 確認過之後，`cat clean.md /etc/passwd` 仍會再問。routine 宣告的 shape 不帶這個 constraint，維持前綴匹配。chain、重導或展開的命令沒有 argv，確認只放行這一次，不留 grant。S6 之前這裡會留下一個沒有 TTL 的 `workspace` grant，同一 session 之後的所有命令都會 ALLOW。
 
 **shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6 分類器不會放行任何腳本執行，但既有的 shape grant 照舊放行。
 
@@ -244,15 +244,23 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 | 結果 | 情況 | 之後 |
 |---|---|---|
-| refuse | CRITICAL；routine 宣告的 scope 被超出（EXPAND_SCOPE 且衝突的 grant 不是人類確認來的，即 ceiling）；第一期以外的工具；workspace 外、隱藏路徑、名稱像憑證的路徑；控制檔（非文件副檔名、`.toml`、`.py`、`Agent.md`、`SOUL.md`…）；像秘密的搜尋 query；不是單一本地讀取的 shell（chain、展開、glob、未列出的程式、會寫檔或執行的 flag、內容像憑證的檔案）；這個 turn 沒有 runtime 給的意圖 | 原路：attended 問人，unattended skip（#668） |
+| refuse | CRITICAL；routine 宣告的 scope 被超出（EXPAND_SCOPE 且衝突的 grant 不是人類確認來的，即 ceiling）；第一期以外的工具；workspace 外、隱藏路徑、名稱像憑證的路徑；控制檔（非文件副檔名、`.toml`、`.py`、`Agent.md`、`SOUL.md`、任何 `SKILL.md`…）；像秘密的搜尋 query；不是單一本地讀取的 shell（chain、展開、glob、未列出的程式、會寫檔或執行的 flag、內容符合 S3c 遮罩 pattern 的檔案：`*_KEY=`、`TOKEN=`、`sk-`/`xai-` 等前綴、JWT、Discord bot token、PEM 私鑰）；這個 turn 沒有 runtime 給的意圖 | 原路：attended 問人，unattended skip（#668） |
 | allow | Loom Agent 的 journal 與 daily weave（`autonomy/circadian/journal/`、`daily_weave.md`、`daily_weave/`，Q2） | 直接放行，不呼叫模型 |
 | review | workspace 內一般文件寫入、本地讀取（`cat` `head` `tail` `wc` `grep`(不遞迴) `find`(不執行/刪除) `ls` `diff` …）、公開搜尋 | 交模型 |
 
 **模型層只答 accept 或 abstain。** `codex/gpt-6-luna`，透過既有 Codex OAuth provider（ChatGPT plan）、low effort。每次一個 provider attempt：直接建 provider，不經 router，所以沒有 quota failover；不重試、不修 JSON。5 秒 timeout、錯誤、格式不對、packet 超過 8,192 bytes（以 UTF-8 bytes 當 token 上界）都算 abstain。abstain 走原路，skip 通知會附上原因（例如 `model-abstain: timeout`）。accept 只放行這一次，不寫 grant，所以模型不能擴大 scope。
 
-模型看到的 packet：runtime 給的本 turn 輸入（`trusted_intent`）與 origin、規則層確認的效果類別、完整的當前參數、本 turn 先前的呼叫，以及前三個 turn 的輸入與呼叫（超過上限時先丟最舊的 turn，並把 `history_complete` 設為 false）。agent 的推理與工具輸出不進 packet。prompt 與 packet 形狀和回歸題庫量測時一致（`tests/fixtures/s6_approval_bank.yaml`）。
+模型看到的 packet：runtime 給的本 turn 意圖（`trusted_intent`）與 origin、規則層確認的效果類別、當前參數、本 turn 先前的呼叫，以及前三個 turn 的輸入與呼叫（超過上限時先丟最舊的 turn，並把 `history_complete` 設為 false）。agent 的推理與工具輸出不進 packet。
 
-**每日上限 40 次**（Asia/Taipei 日界），整個 process 共用一個計數器。每次呼叫模型前先把 `approval_review`（`phase = "attempt"`）寫進 ledger 並 commit，寫不進去就不呼叫。重啟後從當日 ledger 重建計數。timeout 或錯誤也算一次。用完就 abstain，不換模型。另一個獨立 process（例如同時開著 CLI）有自己的計數器，只在換日時重讀 ledger，所以兩個 process 同時跑時當天總數可能超過 40。
+phase chime 的意圖分兩塊：`rhythm.toml` 的 `meaning` 是靜態 program 描述，由 `ChimeRequest.program_intent` 帶進 `stream_turn`，只有它是 `trusted_intent`；整段 chime（含 agent 自己寫的今日織程）放在 `agent_authored_context`，標 `trusted: false`，prompt 寫明只能當背景，不能當授權依據。其他入口（Discord、CLI、schedule、room）的整段輸入就是意圖。
+
+**送出前遮罩與限長。** packet 裡每個字串都先過 S3c 的 `_redact_secrets`，再限長：一般字串 2000 字，`write_file` 的 `content` 1200 字，超過的送「頭段＋尾段＋總長度」。為什麼不另做白名單或摘要：Loom Agent 的主模型本來就走 ChatGPT plan（OpenAI），意圖、weave 與內容送到同一家的 Luna 沒有新的資料去向；要防的是 secret 與送出量。
+
+prompt 是回歸題庫量測時的版本（`tests/fixtures/s6_approval_bank.yaml`）加一段尚未實測的補充（weave 只能當背景；accept 前確認範圍與意圖一致）。
+
+**每日上限 40 次**（Asia/Taipei 日界）。每次呼叫模型前，先從 ledger 數當日的 `approval_review`（`phase = "attempt"`），未滿 40 才寫一筆並 commit，寫不進去就不呼叫。所以重啟或同 process 的其他 session 都看到同一個數。timeout 或錯誤也算一次。用完就 abstain，不換模型。已知限制：兩個 process（例如 Discord daemon 加 CLI）在同一瞬間各自數完再寫，可能超過 40；這次不做跨 process 鎖。
+
+**審查器冷卻。** 連續 3 次 provider error（例如 Codex OAuth token 過期）後停 1 小時：期間直接 abstain，不呼叫、不寫 attempt、不耗配額，skip 原因是 `model-abstain: reviewer_unavailable`，chime 的 ⏭ 通知多一行「審查器不可用」。成功或 abstain 會把連續錯誤歸零。
 
 **稽核。** 每次模型判決另寫一筆 `approval_review`（`phase = "result"`，含 `tool_call_id`、`category`、`outcome`、`latency_ms`、token 數）；放行的 `permission_decision.reason` 是 `classifier model-accept` 或 `classifier rule-allow: …`。抽查模型放行的中間區決策：
 
