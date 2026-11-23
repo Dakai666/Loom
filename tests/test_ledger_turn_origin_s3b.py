@@ -333,7 +333,12 @@ async def _execute(pipeline, tool: ToolDefinition, origin: str = "discord") -> T
 )
 async def test_permission_decision_carries_origin(origin, decision, ledger, emitter) -> None:
     """A human-confirmed grant in an attended turn and an unattended skip
-    must be distinguishable from the row alone."""
+    must be distinguishable from the row alone.
+
+    The "subagent" case runs this synthetic pipeline. In production,
+    run_subagent's child pipeline (subagent.py) is not wired to the ledger,
+    so no subagent row is written yet; wiring it is left for S3c.
+    """
     tool = _tool("guarded", _ok, TrustLevel.GUARDED)
     reg = ToolRegistry()
     reg.register(tool)
@@ -422,6 +427,124 @@ async def test_exception_through_process_records_exception_end(ledger, emitter) 
     assert end.payload["outcome"] == "exception"
     assert "RuntimeError: inner layer blew up" in end.payload["error"]
     assert end.payload["result_digest"] is None
+
+
+def _hold_tool_end(emitter: LedgerEmitter) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make the END write wait at a gate, so a cancel can land mid-write."""
+    real = emitter.emit_tool_lifecycle
+    writing, gate = asyncio.Event(), asyncio.Event()
+
+    async def emit_tool_lifecycle(*, payload, **kw):
+        if payload.phase == "END":
+            writing.set()
+            await gate.wait()
+        return await real(payload=payload, **kw)
+
+    emitter.emit_tool_lifecycle = emit_tool_lifecycle
+    return writing, gate
+
+
+@pytest.mark.parametrize(
+    ("confirm", "outcome"), [(True, "committed"), (False, "denied")],
+)
+async def test_cancel_during_end_write_still_leaves_one_end(
+    confirm, outcome, ledger, emitter
+) -> None:
+    """The turn is preempted while memorialize is writing the END (state is
+    already MEMORIALIZED). The END being written must still land, once,
+    with the outcome the call really had."""
+    writing, gate = _hold_tool_end(emitter)
+    tool = _tool("guarded", _ok, TrustLevel.GUARDED)
+    reg = ToolRegistry()
+    reg.register(tool)
+    task = asyncio.create_task(
+        _execute(_pipeline(reg, emitter, AsyncMock(return_value=confirm)), tool)
+    )
+    await writing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    await _drain()
+
+    ends = [r for r in await _rows(ledger, "tool_lifecycle") if r.payload["phase"] == "END"]
+    assert [e.payload["outcome"] for e in ends] == [outcome]
+    assert await _rows(ledger, "ledger_gap") == []
+
+
+async def test_denied_then_cancelled_keeps_the_denied_end(ledger, emitter) -> None:
+    """Denied and memorialized, then the turn is cancelled: no second END."""
+    tool = _tool("guarded", _ok, TrustLevel.GUARDED)
+    reg = ToolRegistry()
+    reg.register(tool)
+    started = asyncio.Event()
+
+    class _CancelAfterDeny(Middleware):
+        async def process(self, call, next):
+            result = await next(call)
+            started.set()
+            await asyncio.Event().wait()  # the turn is cancelled here
+            return result
+
+    # Outermost, so the denied call is fully memorialized before the cancel.
+    pipeline = _pipeline(reg, emitter, AsyncMock(return_value=False))
+    pipeline._middlewares.insert(0, _CancelAfterDeny())
+    task = asyncio.create_task(_execute(pipeline, tool))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ends = [r for r in await _rows(ledger, "tool_lifecycle") if r.payload["phase"] == "END"]
+    assert [e.payload["outcome"] for e in ends] == ["denied"]
+
+
+async def test_exception_after_a_result_keeps_its_digest(ledger, emitter) -> None:
+    """When the exception comes after the tool produced a result, the END
+    keeps that result's digest and summary instead of dropping them."""
+    from loom.core.harness.lifecycle import LIFECYCLE_CTX_KEY
+
+    class _ResultThenRaise(Middleware):
+        async def process(self, call, next):
+            result = await next(call)
+            call.metadata[LIFECYCLE_CTX_KEY].record.result = result
+            raise RuntimeError("post-processing blew up")
+
+    tool = _tool("probe", _ok)
+    reg = ToolRegistry()
+    reg.register(tool)
+    pipeline = _pipeline(reg, emitter, AsyncMock(return_value=True))
+    pipeline._middlewares.insert(-1, _ResultThenRaise())
+    with pytest.raises(RuntimeError):
+        await _execute(pipeline, tool)
+
+    (end,) = [r for r in await _rows(ledger, "tool_lifecycle") if r.payload["phase"] == "END"]
+    assert end.payload["outcome"] == "exception"
+    assert end.payload["result_summary"] == "ok"
+    assert end.payload["result_digest"] is not None
+    assert "RuntimeError: post-processing blew up" in end.payload["error"]
+
+
+async def test_end_outcome_is_unknown_when_memorialize_gave_no_reason(ledger, emitter) -> None:
+    from loom.core.harness.lifecycle import LIFECYCLE_CTX_KEY, ActionState
+
+    class _MemorializeWithoutReason(Middleware):
+        async def process(self, call, next):
+            ctx = call.metadata[LIFECYCLE_CTX_KEY]
+            await ctx.transition(ActionState.DENIED, reason="test")
+            await ctx.memorialize("")
+            return ToolResult(call.id, call.tool_name, False, error="x",
+                              failure_type="permission_denied")
+
+    tool = _tool("probe", _ok)
+    reg = ToolRegistry()
+    reg.register(tool)
+    pipeline = _pipeline(reg, emitter, AsyncMock(return_value=True))
+    pipeline._middlewares.insert(1, _MemorializeWithoutReason())
+    await _execute(pipeline, tool)
+
+    (end,) = [r for r in await _rows(ledger, "tool_lifecycle") if r.payload["phase"] == "END"]
+    assert end.payload["outcome"] == "unknown"
 
 
 async def test_normal_ends_name_their_outcome(ledger, emitter) -> None:
