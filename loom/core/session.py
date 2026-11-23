@@ -28,6 +28,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator
 from datetime import datetime, UTC
 from pathlib import Path
@@ -111,6 +112,9 @@ from loom.core.harness.middleware import (
     ToolResult,
     TraceMiddleware,
     UNATTENDED_ORIGINS,
+)
+from loom.core.harness.approval import (
+    ApprovalClassifier, ReviewContext, ReviewTurn, plan_model_chat,
 )
 from loom.core.harness.failure import tool_result_text
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
@@ -738,6 +742,9 @@ class LoomSession:
         self._governor: MemoryGovernor | None = None  # Issue #43
         self._turn_index: int = 0  # increments once per completed stream_turn()
         self._current_origin: str = "interactive"  # set per-turn by stream_turn()
+        # #690 S6: the approval classifier's view of recent turns: each
+        # turn's input as the entry point gave it, and the calls it made.
+        self._review_turns: deque[ReviewTurn] = deque(maxlen=4)
         self._last_think: str = ""  # accumulated <think>…</think> content from the last turn
         self._cancel_spinner_fn: "Callable[[], None] | None" = None  # injected by CLI run loop
         # Platform-swappable confirmation callback.  Defaults to CLI prompt.
@@ -1369,6 +1376,11 @@ class LoomSession:
                     exec_escape_fn=_exec_escape_fn,
                     registry=self.registry,
                     ledger_emitter=self._ledger_emitter,
+                    classifier=ApprovalClassifier(
+                        workspace=self.workspace, perm=self.perm,
+                        emitter=self._ledger_emitter, chat=plan_model_chat(),
+                        context=self._review_context,
+                    ),
                 ),
                 LifecycleGateMiddleware(
                     registry=self.registry,
@@ -1680,6 +1692,9 @@ class LoomSession:
         _stream_retry = 0
         try:
             self._current_origin = origin
+            self._review_turns.append(
+                ReviewTurn(intent=_input_text(user_input), origin=origin)
+            )
 
             # Issue #131: Reset abort signal from previous turn so the session
             # is not permanently stuck after a circuit-breaker trip.
@@ -3580,6 +3595,13 @@ class LoomSession:
             raw_json=raw_json,
         )
 
+    def _review_context(self) -> ReviewContext:
+        """The current turn and up to three before it (#690 S6)."""
+        turns = tuple(self._review_turns) or (
+            ReviewTurn(intent="", origin=self._current_origin),
+        )
+        return ReviewContext(current=turns[-1], previous=turns[:-1])
+
     def _model_tool_text(self, tool_name: str, result: ToolResult) -> str:
         """What the model reads for *result*: a failure carries the
         ``[tool_failure]`` contract (#690 S3c), a success its output."""
@@ -3609,6 +3631,8 @@ class LoomSession:
             abort_signal=self._abort.signal,
             origin=self._current_origin,
         )
+        if self._review_turns:
+            self._review_turns[-1].calls.append((call_id, tool_name, dict(args)))
         result = await self._pipeline.execute(call, tool_def.executor)
 
         # Step 5 cutover: capture per-call metadata that the ledger does
@@ -4524,6 +4548,16 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Vision: annotate user input with timestamp and optional path detection
 # ---------------------------------------------------------------------------
+
+def _input_text(user_input) -> str:
+    """The text of a turn input, without images (#690 S6 review packet)."""
+    if isinstance(user_input, str):
+        return user_input
+    return "\n".join(
+        b.get("text", "") for b in user_input
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+
 
 def _annotate_user_input(user_input, timestamp: str):
     """Return a fresh user-input value with a timestamp prefix.
