@@ -410,6 +410,25 @@ def create_single_rss_fetcher(url, name):
         return filter_items(fetch_rss_feed(url, name, limit), keyword)[:limit]
     return fetcher
 
+REPORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'reports')
+
+
+def resolve_outdir(outdir):
+    """Return *outdir* resolved, or raise ValueError when it leaves reports/.
+
+    An unattended phase may run this script through a command shape that
+    allows any extra argument (#690 S7), so ``--outdir`` must not become a
+    way to create directories or write files anywhere else. reports/ lives
+    inside the skill, so this also keeps the output inside the workspace.
+    Symlinks are resolved before the check.
+    """
+    root = os.path.realpath(REPORTS_DIR)
+    target = os.path.realpath(outdir)
+    if os.path.commonpath([root, target]) != root:
+        raise ValueError(f"--outdir must be inside {root}, got {target}")
+    return target
+
+
 def save_report(data, source_name, out_dir):
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -511,11 +530,17 @@ def main():
     parser.add_argument('--deep', action='store_true', help='Download article content for detailed summarization')
     parser.add_argument('--save', action='store_true', help='Save output to reports directory (JSON + MD)')
     parser.add_argument('--no-save', action='store_true', dest='no_save', help='Skip saving JSON files to disk')
-    parser.add_argument('--outdir', help='Custom output directory for saved reports')
+    parser.add_argument('--outdir', help='Custom output directory for saved reports (must be inside reports/)')
     parser.add_argument('--list-sources', action='store_true', help='List all available source keys')
     parser.add_argument('--all-tracks', action='store_true', help='Fetch all four tracks and output as JSON dict')
 
     args = parser.parse_args()
+    if args.outdir:
+        # Checked before any fetch, so a bad --outdir costs nothing (#690 S7).
+        try:
+            args.outdir = resolve_outdir(args.outdir)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.list_sources:
         print(f"{'Source Key':<30} | {'Source Name'}")
@@ -592,7 +617,7 @@ def main():
             out_dir = args.outdir
         else:
             today = datetime.now().strftime('%Y-%m-%d')
-            out_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'reports', today)
+            out_dir = os.path.join(REPORTS_DIR, today)
         save_report(results, args.source, out_dir)
         health = source_health_report()
         if health:
