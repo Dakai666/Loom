@@ -123,6 +123,10 @@ class TriggerEvaluator:
             dt = datetime.now(UTC)
 
         minute = _minute(dt)
+        # A wall clock stepped back (NTP, host resume) revisits minutes
+        # already evaluated: skip them, keep _last_minute, report nothing.
+        if self._last_minute is not None and minute < self._last_minute:
+            return []
         gap_since: datetime | None = None
         if minute != self._last_minute:
             previous, self._last_minute = self._last_minute, minute
@@ -293,10 +297,18 @@ class TriggerEvaluator:
         Run the evaluator as a background task.
         Checks cron triggers every `poll_interval` seconds (default 60s).
         Condition triggers are also polled each cycle.
+
+        At the default 60 s the sleep runs to the next minute boundary
+        instead: a fixed sleep(60) drifts later each cycle until a minute
+        goes unevaluated and is recorded as missed/evaluator_gap.
         """
         self._detect_gaps = poll_interval <= 60
         while True:
             now = datetime.now(UTC)
             await self.evaluate_cron(now)
             await self.poll_conditions()
-            await asyncio.sleep(poll_interval)
+            delay = poll_interval
+            if poll_interval == 60:
+                now = datetime.now(UTC)
+                delay = max(1.0, 60 - now.second - now.microsecond / 1e6)
+            await asyncio.sleep(delay)
