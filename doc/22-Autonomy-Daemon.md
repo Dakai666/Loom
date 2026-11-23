@@ -96,9 +96,20 @@ anchor 的三種狀態分開記（#656）：
 
 - `spawned`：dawn 建出當日 session。不代表有送 chime。
 - `delivered`：chime 被當日 session 收進佇列。
-- `missed`：沒送到 agent。`no_today_session` 是 chime 找不到當日 session；`evaluator_gap` 是 evaluator 那一分鐘根本沒跑（例如前一個反應卡住迴圈），evaluator 下次執行時補記，每個漏掉的 cron 分鐘一筆，最多回看 24 小時。
+- `missed`：沒送到 agent。`no_today_session` 是 chime 找不到當日 session；`evaluator_gap` 是 evaluator 那一分鐘根本沒跑（例如前一個反應卡住迴圈），evaluator 下次執行時補記，最多回看 24 小時（規則見下）。
 
 anchor 的 `missed` 同時寫進 `phase_log`（當日 state 存在時）。舊資料裡的 `skipped` 仍可讀，讀法等同未送達。這裡只記錄，不補送；補送屬於 #668。
+
+`evaluator_gap` 的規則：
+
+- 先觸發當前這一分鐘，再補記漏掉的分鐘，補記不會把當前分鐘擠到下一輪。
+- 同一個 trigger 在一段空白裡漏掉的分鐘收成一筆：`fired_at` 是第一個、`missed_through` 是最後一個、`missed_count` 是筆數。
+- `poll_interval` 大於 60 秒時不偵測：輪詢本來就會跳過分鐘，那不是漏。
+
+紀錄的邊界：
+
+- **停機期間不補記錄。** daemon 不在時沒有任何紀錄，重啟後也不回頭補。所以「某天沒有某個 trigger 的紀錄」可能是那天沒排程，也可能是 daemon 不在；要分辨，請對照 daemon 的啟動 log。
+- **`completed` 只代表反應跑到結束、沒有拋例外。** 獨立執行（`_run_agent`）時，只有 `TurnDropped`（例如 repeat_call_limit）會記 `failed/turn_dropped`；回合裡工具失敗、或模型沒做成事，仍記 `completed`。chime 只記到 `delivered`，對方 session 之後怎麼處理不在這筆紀錄裡。
 
 ---
 

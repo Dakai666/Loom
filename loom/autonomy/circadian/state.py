@@ -251,7 +251,13 @@ class CircadianState:
     def append_phase(
         self, phase: str, outcome: str, reason: str | None = None
     ) -> None:
-        """Record one phase-trigger outcome (delivered / skipped / spawned…).
+        """Record one phase-trigger outcome.
+
+        ``spawned``: dawn created today's session (no chime implied).
+        ``delivered``: the chime was accepted into the session's queue.
+        ``missed`` + reason: it never reached the agent (``no_today_session``,
+        ``evaluator_gap``). Rows from before #690 S5a may say ``skipped``,
+        which means the same as ``missed``.
 
         Mutates in place; the caller persists with ``save_atomic`` under lock.
         The log is the audit trail for the anti-heartbeat gate and the

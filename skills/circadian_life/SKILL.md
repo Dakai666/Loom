@@ -55,7 +55,13 @@ autonomy/circadian/          ← 我的生活 artifacts，這層才是「我能�
 └── *.example.*              範本（gitignored 的是我的版本，example 是 repo 帶的）
 
 ~/.loom/circadian_state.json ← 今天的 session 狀態（thread_id / date / phase_log）
-                                想看「今天現在處於哪個 phase」就讀這
+                                想看「今天現在處於哪個 phase」就讀這。
+                                phase_log 的 outcome：spawned＝dawn 建出當日 session
+                                （不代表有送 chime）；delivered＝chime 已進我的佇列；
+                                missed＋reason＝沒送到我這裡（no_today_session：
+                                當時沒有當日 session；evaluator_gap：排程那一分鐘
+                                沒被評估，例如前一個回合卡住）。舊紀錄的 skipped
+                                等同 missed。
 ```
 
 ---

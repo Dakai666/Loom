@@ -390,7 +390,8 @@ def _last_fired_phase(timezone: str) -> str | None:
 
     The tool is callable at any time (09:40 on 2026-09-17 was a dawn-hours
     fix), so a hardcoded ``evening_closure`` mislabelled the audit trail.
-    ``skipped`` fires never reached the agent, so they don't count."""
+    Only ``delivered`` counts: ``missed`` (``skipped`` in older rows) never
+    reached the agent, and ``spawned`` only created the session."""
     state = CircadianState.load()
     if state is None or not state.is_for_today(timezone):
         return None
