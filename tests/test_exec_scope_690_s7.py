@@ -14,6 +14,7 @@ resolver and a stub executor, so "not executed" means the executor never ran.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -28,7 +29,10 @@ from loom.platform.cli.tools import _make_run_bash_resolver
 PET = "python3 skills/pet-cat/pet.py"
 
 
-def _setup(tmp_path: Path, *, grants: list[ScopeGrant] = (), name_authorized=True):
+def _setup(
+    tmp_path: Path, *, grants: list[ScopeGrant] = (), name_authorized=True,
+    confirm_result=True, ledger_emitter=None,
+):
     ran: list[str] = []
 
     async def executor(call: ToolCall) -> ToolResult:
@@ -46,8 +50,10 @@ def _setup(tmp_path: Path, *, grants: list[ScopeGrant] = (), name_authorized=Tru
         perm.authorize("run_bash")  # what allowed_tools = ["run_bash"] does
     for g in grants:
         perm.grant(g)
-    confirm = AsyncMock(return_value=True)
-    blast = BlastRadiusMiddleware(perm_ctx=perm, registry=reg, confirm_fn=confirm)
+    confirm = AsyncMock(return_value=confirm_result)
+    blast = BlastRadiusMiddleware(
+        perm_ctx=perm, registry=reg, confirm_fn=confirm, ledger_emitter=ledger_emitter,
+    )
     return blast, executor, ran, confirm
 
 
@@ -247,3 +253,76 @@ class TestDenyAndCeilingsStillWin:
         result = await blast.process(_bash(f"{PET} status"), executor)
         assert ran == []
         assert result.error == "Permission denied by scope policy."
+
+
+class TestAbsolutePathAfterEquals:
+    """``--opt=/abs`` names an absolute path as much as ``--opt /abs`` does."""
+
+    @pytest.mark.parametrize("arg", ["--outdir=/tmp/x", "--out=/etc/passwd", "-o=/tmp/x"])
+    async def test_absolute_paths_deny_sees_a_path_after_equals(self, tmp_path, arg):
+        blast, executor, ran, _ = _setup(
+            tmp_path, grants=[_shape(PET, absolute_paths="deny")],
+        )
+        _assert_skipped(await blast.process(_bash(f"{PET} status {arg}"), executor), ran)
+
+    async def test_relative_value_after_equals_still_runs(self, tmp_path):
+        blast, executor, ran, _ = _setup(
+            tmp_path, grants=[_shape(PET, absolute_paths="deny")],
+        )
+        assert (await blast.process(_bash(f"{PET} journal --n=10"), executor)).success
+
+
+class TestSkipIsRecordedAsSkip:
+    """A skip is not a deny in the ledger (#690 S7 review).
+
+    ``permission_decision.decision`` reads ``skip`` and the END outcome reads
+    ``skipped``, so deny rates exclude calls nobody was there to approve.
+    """
+
+    async def _run(self, tmp_path, call, *, confirm):
+        from loom.core.harness.middleware import LifecycleMiddleware, MiddlewarePipeline
+        from loom.core.ledger import (
+            LedgerEmitter, LedgerStore, async_correlation_scope, async_turn_scope,
+        )
+
+        ledger = LedgerStore(db_path=tmp_path / "ledger.db", blob_dir=tmp_path / "blobs")
+        await ledger.open()
+        try:
+            emitter = LedgerEmitter(ledger, session_id="t")
+            blast, executor, ran, _ = _setup(
+                tmp_path, confirm_result=confirm, ledger_emitter=emitter,
+            )
+            pipeline = MiddlewarePipeline([
+                LifecycleMiddleware(registry=ToolRegistry(), ledger_emitter=emitter),
+                blast,
+            ])
+            async with async_turn_scope("turn"), async_correlation_scope("c"):
+                await pipeline.execute(call, executor)
+                for _ in range(50):  # the decision emit is fire-and-forget
+                    rows = await ledger.fetch_by_turn("turn")
+                    if any(r.event_type == "permission_decision" for r in rows):
+                        break
+                    await asyncio.sleep(0.01)
+            rows = await ledger.fetch_by_turn("turn")
+        finally:
+            await ledger.close()
+        decisions = [r.payload["decision"] for r in rows if r.event_type == "permission_decision"]
+        ends = [
+            r.payload["outcome"] for r in rows
+            if r.event_type == "tool_lifecycle" and r.payload["phase"] == "END"
+        ]
+        return decisions, ends, ran
+
+    async def test_unattended_skip_writes_skip_and_skipped(self, tmp_path):
+        decisions, ends, ran = await self._run(tmp_path, _bash("date"), confirm=True)
+        assert ran == []
+        assert decisions == ["skip"]
+        assert ends == ["skipped"]
+
+    async def test_a_human_deny_still_writes_deny_and_denied(self, tmp_path):
+        decisions, ends, ran = await self._run(
+            tmp_path, _bash("date", origin="discord"), confirm=False,
+        )
+        assert ran == []
+        assert decisions == ["deny"]
+        assert ends == ["denied"]

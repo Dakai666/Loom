@@ -137,7 +137,11 @@ class ToolLifecyclePayload:
 
 @dataclass(kw_only=True)
 class PermissionDecisionPayload:
-    decision: str  # "grant" / "deny" / "scope"
+    # "grant" / "deny" / "scope", or "skip" (#690 S7): an unattended call
+    # held back because no grant covered it and nobody was there to ask.
+    # Rows before S7 wrote such skips as "deny" with an "unattended-deny"
+    # reason.
+    decision: str
     tool_call_id: str
     trust_level: str
     scope_grant: dict | None = None

@@ -873,7 +873,11 @@ class BlastRadiusMiddleware(Middleware):
             "Denying %s (origin=%s, verdict=%s) — no human to confirm",
             call.tool_name, call.origin, verdict,
         )
-        self._notify_lifecycle(call, False, f"unattended-deny ({call.origin}, {verdict})")
+        # A skip is not a deny (#690 S7 review): its own decision value keeps
+        # it out of deny rates. The reason string is unchanged for old readers.
+        self._notify_lifecycle(
+            call, False, f"unattended-deny ({call.origin}, {verdict})", decision="skip",
+        )
         call.metadata["user_decision"] = False
 
         # Issue #168: when the trajectory_anomaly soft-guard tripped, the agent
@@ -912,7 +916,9 @@ class BlastRadiusMiddleware(Middleware):
             metadata={"unattended_skip": True, "origin": call.origin},
         )
 
-    def _notify_lifecycle(self, call: ToolCall, result: bool, reason: str) -> None:
+    def _notify_lifecycle(
+        self, call: ToolCall, result: bool, reason: str, *, decision: str | None = None,
+    ) -> None:
         """
         Write authorization decision to LifecycleContext (Issue #50).
 
@@ -935,7 +941,7 @@ class BlastRadiusMiddleware(Middleware):
         # schedule the async emit on the running loop. Failure is
         # swallowed — auth flow must never break on ledger.
         if self._ledger_emitter is not None:
-            self._schedule_permission_decision_emit(call, result, reason)
+            self._schedule_permission_decision_emit(call, result, reason, decision)
         # Issue #212: surface authorization decisions in middleware_trace
         # so an agent inspecting a denied result can see "BlastRadius said
         # X because Y" without cross-referencing the lifecycle ActionRecord.
@@ -955,7 +961,7 @@ class BlastRadiusMiddleware(Middleware):
                 pass
 
     def _schedule_permission_decision_emit(
-        self, call: ToolCall, result: bool, reason: str
+        self, call: ToolCall, result: bool, reason: str, decision: str | None = None,
     ) -> None:
         """Fire-and-forget permission_decision emit from a sync caller.
 
@@ -973,7 +979,9 @@ class BlastRadiusMiddleware(Middleware):
         async def _emit() -> None:
             from loom.core.ledger import PermissionDecisionPayload
 
-            decision = "grant" if result else "deny"
+            nonlocal decision
+            if decision is None:
+                decision = "grant" if result else "deny"
             scope_grant = call.metadata.get("scope_request") or call.metadata.get(
                 "scope_verdict"
             )
@@ -1793,7 +1801,11 @@ class LifecycleMiddleware(Middleware):
             if record.state in (ActionState.DECLARED, ActionState.AWAITING_CONFIRM):
                 await ctx.transition(ActionState.DENIED, reason=result.error)
                 record.result = result
-                await ctx.memorialize("denied")
+                # An unattended skip ends as "skipped", not "denied" (#690 S7
+                # review). The state machine still records DENIED: the call
+                # never ran either way.
+                skipped = result.metadata.get("unattended_skip")
+                await ctx.memorialize("skipped" if skipped else "denied")
                 return result
 
         if not result.success and result.failure_type == "tool_not_found":

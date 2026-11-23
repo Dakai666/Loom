@@ -363,10 +363,11 @@ def _make_run_bash_resolver(
                 metadata=metadata,
             )
 
-        # Check for absolute paths outside workspace
+        # Check for absolute paths outside workspace, also after "=" as in
+        # `--outdir=/tmp/x` (#690 S7 review).
         has_absolute = False
         for token in re.findall(
-            r'(?:^|(?<=\s))[/\\][^\s;|&>\'\"]*|[A-Za-z]:[/\\][^\s;|&>\'\"]*',
+            r'(?:^|(?<=[\s=]))[/\\][^\s;|&>\'\"]*|[A-Za-z]:[/\\][^\s;|&>\'\"]*',
             command,
         ):
             try:

@@ -329,7 +329,8 @@ async def _execute(pipeline, tool: ToolDefinition, origin: str = "discord") -> T
 
 @pytest.mark.parametrize(
     ("origin", "decision"),
-    [("discord", "grant"), ("cli", "grant"), ("chime", "deny"), ("subagent", "deny")],
+    # An unattended skip writes "skip", not "deny" (#690 S7 review).
+    [("discord", "grant"), ("cli", "grant"), ("chime", "skip"), ("subagent", "skip")],
 )
 async def test_permission_decision_carries_origin(origin, decision, ledger, emitter) -> None:
     """A human-confirmed grant in an attended turn and an unattended skip
