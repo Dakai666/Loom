@@ -132,12 +132,21 @@ _LABELS = {
 }
 
 
-def format_report(checks: list[NameCheck]) -> str:
-    """One line naming every non-registered name; ``""`` when all register."""
+def format_report(checks: list[NameCheck], limit: int | None = None) -> str:
+    """One line naming every non-registered name; ``""`` when all register.
+
+    With *limit*, at most that many names are listed and the rest become one
+    "另有 N 個" tail. The chime takes the capped line, the log the full one:
+    the line is longest exactly when something is broken (an empty registry
+    puts every granted name in it), and the chime repeats it every dawn.
+    """
     parts = []
     for status, label in _LABELS.items():
         for c in checks:
             if c.status is status:
                 why = f"; {c.reason}" if c.reason else ""
                 parts.append(f"{label}: {c.name} ({', '.join(c.sources)}{why})")
+    if limit is not None and len(parts) > limit:
+        hidden = len(parts) - limit
+        parts = [*parts[:limit], f"…另有 {hidden} 個（完整清單見 log）"]
     return " | ".join(parts)

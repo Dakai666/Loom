@@ -547,9 +547,10 @@ def _compose_chime_intent(
          phase.
       6. ``**課表菜單**`` — anchors flagged ``program_menu`` (#584). The
          agent's own ``[programs.*]``, shown where tomorrow is chosen.
-      7. ``**⚠️ 授權名稱對不上**`` — dawn-only (#690 S4). Granted tool
-         names that are unknown, off or still pending, from the daemon's
-         last registry check. Absent when every name registers.
+      7. ``**⚠️ 授權名稱對不上**`` — anchors flagged ``permission_report``
+         (#690 S4). Granted tool names that are unknown, off or still
+         pending, from the daemon's last registry check. Absent when every
+         name registers.
 
     When every layer is empty we fall back to a generic intent so the chime
     is never an empty string (agents handle that poorly). Each sub-heading
@@ -601,7 +602,7 @@ def _compose_chime_intent(
         if menu:
             parts.append(menu)
 
-    if anchor.name == "dawn" and permission_names:
+    if anchor.permission_report and permission_names:
         parts.append(
             "**⚠️ 授權名稱對不上**\n"
             f"{permission_names}\n"

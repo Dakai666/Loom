@@ -646,14 +646,32 @@ class AutonomyDaemon:
 
         return count
 
+    # Names listed in the chime line; the log line keeps them all.
+    _PERMISSION_REPORT_LIMIT = 8
+
     def check_permission_names(self) -> list[NameCheck]:
         """Compare every granted tool name with the session's registry (#690 S4).
 
-        Reads the grant lists from disk (schedules.toml, rhythm.toml,
-        room.toml) so an edit is reported at the next check even before a
-        restart loads it. Reports only: nothing granted is changed. Called at
-        startup once MCP has loaded, and again by the circadian dawn reload.
+        Reports only: nothing granted is changed. Called at startup once MCP
+        has loaded, and again by the circadian dawn reload. Never raises: a
+        failure is logged and leaves the previous report in place, so the
+        check can't stop the daemon from starting or break the dawn handler.
+
+        The report reads the tables **on disk**; the daemon runs the triggers
+        **already loaded**. After a table is edited and before it is reloaded
+        (schedules: restart; rhythm: next dawn), the two can differ — the
+        report then describes the edited file, not the grants in effect.
+        Paths match the loaders that use them: schedules.toml beside
+        loom.toml, rhythm.toml / room.toml relative to the working directory,
+        as circadian reads them.
         """
+        try:
+            return self._check_permission_names()
+        except Exception:  # noqa: BLE001 — a report must never take the daemon down
+            logger.exception("[autonomy] permission name check failed; keeping the last report")
+            return []
+
+    def _check_permission_names(self) -> list[NameCheck]:
         import tomllib
 
         from loom.autonomy.circadian.rhythm import load_rhythm
@@ -677,14 +695,16 @@ class AutonomyDaemon:
             uses,
             registered={t.name for t in session.registry.list()},
             mcp_configured={s.get("name") for s in mcp_servers if isinstance(s, dict)},
+            # A client whose connection has died stays in _mcp_clients; only
+            # live ones count, so its tools read "not connected" (off).
             mcp_connected=(
-                {c._cfg.name for c in session._mcp_clients}
+                {c._cfg.name for c in session._mcp_clients if c.is_connected}
                 if getattr(session, "_mcp_loaded", False) else None
             ),
         )
-        self.permission_names_line = format_report(checks)
+        self.permission_names_line = format_report(checks, self._PERMISSION_REPORT_LIMIT)
         if self.permission_names_line:
-            logger.warning("[autonomy] permission names: %s", self.permission_names_line)
+            logger.warning("[autonomy] permission names: %s", format_report(checks))
         else:
             logger.info("[autonomy] permission names: all %d registered", len(checks))
         return checks
