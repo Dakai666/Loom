@@ -30,9 +30,18 @@
 #     you want a phase to do something new, add the tool here and talk it over
 #     with DK. CRITICAL tools always re-confirm regardless — these fields never
 #     widen *that* floor. Pick the right one per tool:
-#       · ``allowed_tools = ["fetch_url", "web_search", "run_bash"]`` — a BLANKET
+#       · ``allowed_tools = ["fetch_url", "web_search"]`` — a BLANKET
 #         pre-authorisation by tool name. Use for read-only or already-narrow
-#         tools (web reads, the pet script) where the whole-tool grant is fine.
+#         tools (web reads) where the whole-tool grant is fine. It never
+#         covers shell (issue #690 S7): ``run_bash`` here authorises nothing.
+#       · Shell runs only through ``exec`` scope_grants. A selector other than
+#         ``workspace`` / ``*`` is a command SHAPE: the words a command must
+#         start with. ``selector = "python3 skills/pet-cat/pet.py status"``
+#         covers that command plus any extra arguments. It never covers a
+#         chain or an expansion (``;`` ``&&`` ``||`` ``|`` ``&`` ``>`` ``<``
+#         ``$`` backticks, a newline), so write ``python3 skills/pet-cat/pet.py
+#         status``, not ``cd skills/pet-cat && python3 pet.py status``.
+#         ``constraints = { max_calls = 2 }`` caps a shape per phase turn.
 #       · ``scope_grants = [{ resource = "path", action = "write",
 #         selector = "autonomy/circadian" }]`` — a BOUNDED grant. Use for a
 #         broad tool you want to fence (``write_file`` only under this prefix).
@@ -71,6 +80,14 @@ public  = true
 # Issue #690 S4: this chime lists granted tool names that no registered tool
 # matches — set it on the phase where the tables can still be fixed today.
 permission_report = true
+# Shell shapes for the dawn routine (issue #690 S7): the clock, the weather
+# outside, a look at the cat. Any other command is skipped with a notice.
+scope_grants = [
+  { resource = "exec", action = "execute", selector = 'date "+%Y-%m-%d %H:%M:%S %Z (%A)"' },
+  { resource = "exec", action = "execute", selector = "python3 skills/world-journey/journey.py now" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py status" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py watch" },
+]
 meaning = """
 醒來成為今天的絲絲。
 不是任務開始，是一天的人際開場——
@@ -95,9 +112,21 @@ meaning = """
 time    = ["10:00", "19:00"]
 name    = "pet"
 public  = true
-# Routine-safe tools for this phase (issue #525): the pet-care script runs via
-# run_bash without re-asking each day. Permissions ride along with both slots.
-allowed_tools = ["run_bash"]
+# The pet-care adapter's subcommands, one shape each (issue #690 S7), so the
+# phase runs them without re-asking each day; ``buy`` spends supplies, so it is
+# capped per turn. Permissions ride along with both slots.
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py status" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py watch" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py journal" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py inventory" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py shop" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py feed" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py play" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py clean" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py use" },
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py buy", constraints = { max_calls = 2 } },
+]
 meaning = """
 喵吉照顧時間。
 白天維持生活感與照顧關係，晚餐後再順手確認一次飽食、清潔。

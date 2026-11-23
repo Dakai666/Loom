@@ -360,7 +360,6 @@ intent        = "跑 smoke test 並回報結果"
 trust_level   = "guarded"
 notify        = true
 notify_thread = 1490024181994225744
-allowed_tools = ["run_bash"]
 scope_grants  = [
   { resource = "exec", action = "execute", selector = "workspace", constraints = { absolute_paths = "deny" } },
 ]
