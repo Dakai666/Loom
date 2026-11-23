@@ -102,6 +102,17 @@ def _isolate_backup_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_schedule_hash(tmp_path, monkeypatch):
+    """``AutonomyDaemon.load_config`` records the schedule-registry hash in
+    ``~/.loom/schedules.hash`` (#91 tamper detection). A test's registry
+    overwrote the live hash, so the real daemon's next start warned of a
+    change that never happened."""
+    import loom.autonomy.daemon as _daemon_module
+
+    monkeypatch.setattr(_daemon_module, "_CONFIG_HASH_PATH", tmp_path / "schedules.hash")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_distill_debug_dir(tmp_path, monkeypatch):
     """Unparseable distill replies are dumped to ``~/.loom/debug`` (#629)."""
     monkeypatch.setattr(_distillation_module, "DEFAULT_DEBUG_DIR", tmp_path / "debug")
