@@ -208,6 +208,33 @@ async def _run_agent(self, plan: PlannedAction) -> None:
         )
 ```
 
+### Shell 授權：exec scope 與 command shape（#690 S7）
+
+工具名稱永遠不授權 shell。`allowed_tools = ["run_bash"]` 不會放行任何命令，不論走 #525 的 bridge，還是 scope resolver 出錯後落到的 legacy path。unattended turn（chime / autonomy / subagent）只能用 `exec` scope grant 跑 shell：
+
+| selector | 涵蓋 |
+|---|---|
+| `"workspace"` | workspace 內的命令，含 chain；加 `absolute_paths = "deny"` 時擋 workspace 外的絕對路徑 |
+| `"*"` | 所有命令 |
+| 其他字串 | command shape：命令開頭必須是這些字，後面可接任意參數，例如 `"python3 skills/pet-cat/pet.py status"` |
+
+沒被任何 grant 涵蓋的命令會被 skip 並通知（#668）。ledger 的 `permission_decision.decision` 寫 `skip`，`tool_lifecycle` END 的 `outcome` 寫 `skipped`，不算進 deny。S7 之前的資料把 skip 記成 `decision = "deny"`，reason 以 `unattended-deny` 開頭。
+
+`absolute_paths = "deny"` 也會看 `=` 後面的路徑，例如 `--outdir=/tmp/x`。
+
+**`simple_argv` 是 fail-closed。** shape 只比對單一純命令。以下任一種都讓命令沒有 argv，因此沒有 shape 能涵蓋它：
+
+- 引號外的 `;` `&&` `||` `|` `&` `<` `>` `(` `)`；
+- 命令中任何位置的 `$`、反引號、換行；
+- **任何反斜線**，包括單引號裡完全合法的反斜線。
+
+代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
+
+**shape 只約束 unattended turn。** attended turn（Discord thread、CLI）裡，人類確認一次 `run_bash`，run_bash resolver 的 requirement 永遠是 `selector = "workspace"`，所以那個 session 會拿到一個**沒有 TTL 的 workspace grant**，之後同一 session 的所有命令（含 chain）都會 ALLOW。這是 S7 之前就有的行為，列為 S6 的前置：confirm 之後應該授予那個 shape，而不是 workspace。
+
+**shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。S6 前置：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。
+
+
 ---
 
 ## Chime mode — 喚醒既有 session（issue #369）
