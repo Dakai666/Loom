@@ -34,7 +34,7 @@ import httpx
 
 from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
-from loom.core.harness.scope import ScopeRequirement, ScopeRequest
+from loom.core.harness.scope import ScopeRequirement, ScopeRequest, simple_argv
 from loom.core.timezone import user_zone
 from loom.core.security.self_termination_guard import SelfTerminationGuard
 from loom.core.security.command_scanner import CommandScanner
@@ -376,12 +376,18 @@ def _make_run_bash_resolver(
                 has_absolute = True
                 break
 
+        constraints: dict[str, Any] = {"has_absolute_paths": has_absolute}
+        # A plain command carries its argv so an exec grant naming a command
+        # shape can match it (#690 S7). Chains and expansions get none.
+        argv = simple_argv(command)
+        if argv is not None:
+            constraints["argv"] = argv
         requirements = [
             ScopeRequirement(
                 resource="exec",
                 action="execute",
                 selector="workspace",
-                constraints={"has_absolute_paths": has_absolute},
+                constraints=constraints,
                 tool_name=call.tool_name,
                 capabilities=call.capabilities,
             ),

@@ -21,6 +21,7 @@ that those layers will build on.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import PurePosixPath
@@ -244,33 +245,69 @@ class NetworkMatcher:
         return grant.selector == requirement.selector
 
 
+# Characters that expand or continue a command even inside double quotes.
+# A command holding any of them never has a fixed argv.
+_EXPANDING_CHARS = frozenset("$`\\\n\r")
+_SHELL_OPERATOR_CHARS = frozenset(";&|<>()")
+
+
+def simple_argv(command: str) -> tuple[str, ...] | None:
+    """Return *command*'s argv when it is one plain command, else ``None``.
+
+    "Plain" means bash would run exactly these words as a single process: no
+    chaining (``;`` ``&&`` ``||`` ``|`` ``&``), no redirection or subshell
+    (``<`` ``>`` ``(`` ``)``), and no substitution, expansion or line
+    continuation (``$`` backtick ``\\`` newline). Quoting is allowed. A
+    quoted operator such as ``";"`` is also refused, since shlex cannot tell
+    it from a bare one. When in doubt the answer is ``None``.
+    """
+    if any(c in _EXPANDING_CHARS for c in command):
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        argv = tuple(lexer)
+    except ValueError:  # unbalanced quotes
+        return None
+    if not argv or any(set(tok) <= _SHELL_OPERATOR_CHARS for tok in argv):
+        return None
+    return argv
+
+
 class ExecMatcher:
     """
-    Workspace containment matcher for exec resources.
+    Matcher for exec resources.
 
-    A grant with selector="workspace" covers requirements that do not
-    contain absolute paths outside the workspace.  The requirement's
-    constraints["absolute_paths"] == "deny" from the grant is enforced:
-    if the grant forbids absolute paths and the requirement has them,
-    coverage fails.
+    Grant selectors:
+
+    - ``"workspace"`` covers workspace-confined commands. With the
+      ``absolute_paths = "deny"`` constraint it refuses commands that name an
+      absolute path outside the workspace.
+    - ``"*"`` covers every command.
+    - Anything else is a command shape (#690 S7): the argv prefix a command
+      must start with, e.g. ``"python3 skills/pet-cat/pet.py"``. It covers a
+      requirement only when the run_bash resolver parsed the command into a
+      plain argv (``constraints["argv"]``, see ``simple_argv``) and the
+      shape's words are its leading words. A chained, redirected or expanded
+      command has no argv, so no shape covers it. ``absolute_paths = "deny"``
+      applies here too.
     """
     def covers(self, grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
         if grant.action != requirement.action:
             return False
-        # Grant selector "workspace" covers requirement selector "workspace"
-        # or any sub-workspace selector.
-        if grant.selector == "workspace":
-            if requirement.selector not in ("workspace", ""):
-                return False
-            # Check absolute_paths constraint
-            if grant.constraints.get("absolute_paths") == "deny":
-                if requirement.constraints.get("has_absolute_paths"):
-                    return False
-            return True
-        # Wildcard grant covers everything
         if grant.selector == "*":
             return True
-        return grant.selector == requirement.selector
+        if (grant.constraints.get("absolute_paths") == "deny"
+                and requirement.constraints.get("has_absolute_paths")):
+            return False
+        if grant.selector == "workspace":
+            return requirement.selector in ("workspace", "")
+        shape = simple_argv(grant.selector)
+        argv = requirement.constraints.get("argv")
+        if shape is None or argv is None:
+            return False
+        return tuple(argv[:len(shape)]) == shape
 
 
 class AgentMatcher:

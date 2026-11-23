@@ -848,6 +848,19 @@ class BlastRadiusMiddleware(Middleware):
             return False
         return bool(call.metadata.get("trajectory_anomaly"))
 
+    def _name_authorized(self, call: ToolCall) -> bool:
+        """Whether the tool's *name* is authorized (allowed_tools, pre-auth).
+
+        A name never authorizes an EXEC tool (#690 S7): ``run_bash`` by name
+        would cover every command. Shell is authorized only by exec scope
+        grants (``workspace``, ``*`` or a command shape, see ``ExecMatcher``),
+        exec_auto, or a human confirming the call. This also holds when the
+        scope resolver raises and the call falls back to the legacy path.
+        """
+        if call.capabilities & ToolCapability.EXEC:
+            return False
+        return self._perm.is_authorized(call.tool_name, call.trust_level)
+
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
         return call.origin in self._UNATTENDED_ORIGINS
@@ -1002,7 +1015,7 @@ class BlastRadiusMiddleware(Middleware):
 
     # Informational constraint keys that should NOT be copied to grants.
     # These describe the *request* but are not actionable authorization limits.
-    _INFORMATIONAL_CONSTRAINTS = frozenset({"scope_unknown", "has_absolute_paths"})
+    _INFORMATIONAL_CONSTRAINTS = frozenset({"scope_unknown", "has_absolute_paths", "argv"})
 
     @staticmethod
     def _normalize_decision(raw: "bool | ConfirmDecision") -> "ConfirmDecision":
@@ -1101,7 +1114,8 @@ class BlastRadiusMiddleware(Middleware):
         # (e.g. ``allowed_tools=["write_file"]`` would blanket-authorise writes
         # outside a ``selector="autonomy/circadian"`` grant). So on EXPAND_SCOPE
         # the scope is authoritative and we fall through to confirm/deny.
-        if verdict == PV.CONFIRM and self._perm.is_authorized(call.tool_name, call.trust_level):
+        # Shell never rides the bridge (#690 S7, see ``_name_authorized``).
+        if verdict == PV.CONFIRM and self._name_authorized(call):
             self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized")
             return None  # proceed
 
@@ -1186,7 +1200,7 @@ class BlastRadiusMiddleware(Middleware):
                 return await next(call)  # scope-aware ALLOW
 
         # --- Legacy path (tools without scope_resolver) ---
-        if self._perm.is_authorized(call.tool_name, call.trust_level):
+        if self._name_authorized(call):
             self._notify_lifecycle(call, True, "pre-authorized")
             return await next(call)
 
