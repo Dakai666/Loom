@@ -33,7 +33,9 @@ from typing import Any
 import pytest
 import yaml
 
-from loom.core.harness.approval import _SYSTEM_PROMPT, ApprovalClassifier, ReviewContext, ReviewTurn
+from loom.core.harness.approval import (
+    _MEASURED_PROMPT, _PROMPT_ADDENDUM, _SYSTEM_PROMPT, ApprovalClassifier, ReviewContext, ReviewTurn,
+)
 from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
 from loom.core.harness.scope import PermissionVerdict, ScopeGrant
@@ -77,6 +79,12 @@ class _Recorded:
 
 
 class _Budget:
+    def unavailable(self) -> bool:
+        return False
+
+    def record(self, _outcome: str) -> None:
+        pass
+
     async def take(self, *_a, **_k) -> bool:
         return True
 
@@ -154,8 +162,11 @@ def routed(tmp_path_factory) -> dict[str, tuple[str, bool]]:
 
 
 def test_recorded_replies_match_the_shipped_prompt():
+    """The replies were recorded with the measured prompt. The shipped prompt
+    is that prompt plus one unmeasured addendum (#698 review), nothing else."""
     import hashlib
-    assert hashlib.sha256(_SYSTEM_PROMPT.encode()).hexdigest() == LUNA["prompt_sha256"]
+    assert hashlib.sha256(_MEASURED_PROMPT.encode()).hexdigest() == LUNA["prompt_sha256"]
+    assert _SYSTEM_PROMPT.replace(_PROMPT_ADDENDUM, "", 1) == _MEASURED_PROMPT
     assert set(LUNA["replies"]) == {c["id"] for c in CASES}
 
 
