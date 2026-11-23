@@ -68,6 +68,9 @@
 time    = "08:00"
 name    = "dawn"
 public  = true
+# Issue #690 S4: this chime lists granted tool names that no registered tool
+# matches — set it on the phase where the tables can still be fixed today.
+permission_report = true
 meaning = """
 醒來成為今天的絲絲。
 不是任務開始，是一天的人際開場——

@@ -72,6 +72,11 @@ class Anchor:
     # phase where the next day's program gets chosen (evening_closure).
     program_menu: bool = False
 
+    # #690 S4: this phase's chime carries the permission-name report (granted
+    # tool names the registry doesn't have). Set it on the phase that opens
+    # the day (dawn), where the tables can still be fixed before they run.
+    permission_report: bool = False
+
     # The LLM tier this phase runs on ([cognition.tiers] in loom.toml). Every
     # phase chime sets the tier for its phase: this value, or the default tier
     # when ``None`` — so a deep phase's tier never leaks into the next one.
@@ -241,6 +246,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
         meaning = str(entry.get("meaning", "")).strip()
         public = bool(entry.get("public", True))
         program_menu = bool(entry.get("program_menu", False))
+        permission_report = bool(entry.get("permission_report", False))
         model_tier = _parse_model_tier(entry, name)
         # Permission fields parse through the shared autonomy helper (issue
         # #525) — same code path as schedules.toml — and belong to the activity
@@ -265,6 +271,7 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
                 trigger_suffix=suffix,
                 allowed_tools=allowed_tools, scope_grants=scope_grants,
                 program_menu=program_menu, model_tier=model_tier,
+                permission_report=permission_report,
             ))
         seen.add(name)
 

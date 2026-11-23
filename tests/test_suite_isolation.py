@@ -38,3 +38,53 @@ def test_default_append_lands_in_tmp(tmp_path):
 def test_opt_out_marker_keeps_shipped_defaults():
     assert journal.DEFAULT_DREAMS_DIR == Path("autonomy/circadian/dreams")
     assert journal.DEFAULT_JOURNAL_DIR == Path("autonomy/circadian/journal")
+
+
+# ---------------------------------------------------------------------------
+# ~/.loom — the agent's live runtime dir (#690 S4 review)
+# ---------------------------------------------------------------------------
+
+import os
+import subprocess
+import sys
+
+import loom.autonomy.daemon as _daemon
+import loom.core.harness.skill_checks as _skill_checks
+from loom.core.ledger.store import LedgerStore
+
+_CHILD_ENV = "LOOM_SUITE_ISOLATION_CHILD"
+
+
+def test_import_bound_live_paths_redirected(tmp_path):
+    assert _daemon._CONFIG_HASH_PATH.is_relative_to(tmp_path)
+    assert _skill_checks._HASH_DIR.is_relative_to(tmp_path)
+
+
+def test_live_ledger_db_refused():
+    with pytest.raises(RuntimeError, match="live ledger DB"):
+        LedgerStore(Path.home() / ".loom" / "ledger.db")
+    with pytest.raises(RuntimeError, match="live ledger DB"):
+        LedgerStore()  # the default is the live ledger
+
+
+@pytest.mark.skipif(
+    os.environ.get(_CHILD_ENV) == "1", reason="this is the probed suite run itself",
+)
+def test_whole_suite_leaves_home_loom_untouched(tmp_path):
+    """Run the whole suite with ``HOME`` pointed at an empty dir: afterwards
+    ``$HOME/.loom`` must hold no file. Every per-test guard above covers one
+    path; this catches the next default that resolves under ``~/.loom``
+    (seen: schedules.hash, skill_hashes/, ledger.db)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), _CHILD_ENV: "1"}
+    repo = Path(__file__).resolve().parents[1]
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", "tests"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=900,
+    )
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    written = sorted(
+        str(p.relative_to(home)) for p in (home / ".loom").rglob("*") if p.is_file()
+    )
+    assert written == []

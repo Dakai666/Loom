@@ -319,6 +319,15 @@ class LoomMCPClient:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def is_connected(self) -> bool:
+        """True while the owner task holds an open session.
+
+        A transport that died ends the owner task, which clears the session;
+        the next tool call reconnects through ``_ensure_connected``."""
+        owner = self._owner
+        return self._session is not None and owner is not None and not owner.done()
+
     async def connect_and_list_tools(self) -> list:
         """
         Connect to the MCP server, list its tools, and return

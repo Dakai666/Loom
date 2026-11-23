@@ -400,6 +400,9 @@ def register_triggers(daemon: Any, platform: CircadianPlatform, config: Circadia
         # would never be picked up. Runs before spawning today's session so the
         # day opens with the current anchor set.
         reload_rhythm_anchors(daemon, config)
+        # #690 S4: re-check granted tool names against the registry, so the
+        # dawn chime reports today's tables rather than yesterday's.
+        daemon.check_permission_names()
         await ensure_today_session(
             datetime.now(timezone.utc), platform, config, evaluator=evaluator
         )
@@ -467,7 +470,9 @@ async def _deliver_phase_chime(
     False) we still log a ``skipped`` outcome so phase_log is a complete
     audit trail.
     """
-    intent = _compose_chime_intent(anchor, config, peer_names)
+    intent = _compose_chime_intent(
+        anchor, config, peer_names, permission_names=daemon.permission_names_line,
+    )
     req = ChimeRequest(
         schedule_name=anchor.trigger_name,
         intent=intent,
@@ -522,7 +527,10 @@ async def _deliver_phase_chime(
 
 
 def _compose_chime_intent(
-    anchor: Anchor, config: CircadianConfig, peer_names: tuple[str, ...] = ()
+    anchor: Anchor,
+    config: CircadianConfig,
+    peer_names: tuple[str, ...] = (),
+    permission_names: str = "",
 ) -> str:
     """Stitch rhythm meaning + today's weave section into the chime body.
 
@@ -539,6 +547,10 @@ def _compose_chime_intent(
          phase.
       6. ``**課表菜單**`` — anchors flagged ``program_menu`` (#584). The
          agent's own ``[programs.*]``, shown where tomorrow is chosen.
+      7. ``**⚠️ 授權名稱對不上**`` — anchors flagged ``permission_report``
+         (#690 S4). Granted tool names that are unknown, off or still
+         pending, from the daemon's last registry check. Absent when every
+         name registers.
 
     When every layer is empty we fall back to a generic intent so the chime
     is never an empty string (agents handle that poorly). Each sub-heading
@@ -589,6 +601,14 @@ def _compose_chime_intent(
         menu = _program_menu_layer(config.timezone)
         if menu:
             parts.append(menu)
+
+    if anchor.permission_report and permission_names:
+        parts.append(
+            "**⚠️ 授權名稱對不上**\n"
+            f"{permission_names}\n"
+            "只是回報：授權沒有被更動。unknown 是沒有這個工具，off 是工具存在但目前沒註冊，"
+            "pending 是 MCP 還沒載入完。"
+        )
 
     if not parts:
         return f"Circadian phase: {anchor.name}"
