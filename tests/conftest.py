@@ -75,6 +75,37 @@ def _forbid_live_memory_db(monkeypatch):
     monkeypatch.setattr(_store_module.SQLiteStore, "__init__", guarded)
 
 
+import loom.core.harness.skill_checks as _skill_checks_module
+import loom.core.ledger.store as _ledger_store_module
+
+
+@pytest.fixture(autouse=True)
+def _forbid_live_ledger_db(monkeypatch):
+    """No test may open the live ``~/.loom/ledger.db``.
+
+    Same guard as the memory DB. ``LedgerStore()`` defaults to the live
+    ledger, and ``LoomSession.start()`` and ``loom ledger`` build one with
+    no path: a test that reaches them and emits would write rows into the
+    agent's real ledger.
+    """
+    real_init = _ledger_store_module.LedgerStore.__init__
+
+    def guarded(self, db_path=None, blob_dir=None) -> None:
+        real_init(self, db_path, blob_dir)
+        resolved = self.db_path.expanduser().resolve()
+        if resolved == _LIVE_LOOM_DIR or _LIVE_LOOM_DIR in resolved.parents:
+            raise RuntimeError(f"test tried to open the live ledger DB: {resolved}")
+
+    monkeypatch.setattr(_ledger_store_module.LedgerStore, "__init__", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_hash_dir(tmp_path, monkeypatch):
+    """Skill check hashes default to ``~/.loom/skill_hashes`` (bound at
+    import); tests left ``test_resolve_*`` files in the live dir."""
+    monkeypatch.setattr(_skill_checks_module, "_HASH_DIR", tmp_path / "skill_hashes")
+
+
 # Every provider credential ``build_router`` can read from the process
 # environment as well as from .env (#661).
 PROVIDER_ENV = (
