@@ -747,6 +747,9 @@ class LoomSession:
         self._skill_outcome_tracker: "SkillOutcomeTracker | None" = None
 
         self._mcp_clients: list[Any] = []
+        # #690 S4: True once start() has tried every MCP server; until then a
+        # configured server's tool names are pending, not unknown.
+        self._mcp_loaded = False
 
         # HITL pause/resume — stream_turn() checks _pause_requested at each
         # tool-batch boundary.  The consumer calls pause() / resume() / cancel().
@@ -1323,6 +1326,7 @@ class LoomSession:
             self._set_system_section("mcp", render_mcp_instructions(self._mcp_clients))
         except Exception as exc:
             logger.warning("MCP servers failed to load: %s", exc)
+        self._mcp_loaded = True
 
         # Wire up LegitimacyGuardMiddleware before the rest of the pipeline.
         # Scope: write_file only (read-before-write contract, Issue #118).

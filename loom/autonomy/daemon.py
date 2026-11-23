@@ -25,6 +25,9 @@ from typing import Any, Awaitable, Callable
 from loom.autonomy.chime import ChimeRequest
 from loom.autonomy.evaluator import TriggerEvaluator
 from loom.autonomy.permission_fields import parse_permission_fields
+from loom.autonomy.permission_names import (
+    NameCheck, classify_permission_names, collect_permission_uses, format_report,
+)
 from loom.autonomy.history import TriggerHistory
 from loom.autonomy.maintenance import (
     DEFAULT_CHECK_INTERVAL_SECONDS, ConvergentDreamLoop, MaintenanceLoop,
@@ -226,6 +229,10 @@ class AutonomyDaemon:
         self._direct_handlers: dict[str, Callable[..., Awaitable[None]]] = {}
         # Loop name → consecutive unexpected ends, for restart backoff.
         self._loop_failures: dict[str, int] = {}
+        # #690 S4: loom.toml path from load_config, and the last
+        # permission-name report (one line; "" when every name registers).
+        self._config_path: Path | None = None
+        self.permission_names_line = ""
 
         history = TriggerHistory(db) if db is not None else None
         # Issue #147 Phase C.2: pull semantic via the facade. ``_memory``
@@ -529,6 +536,7 @@ class AutonomyDaemon:
         import tomllib
 
         path = Path(config_path)
+        self._config_path = path
         if not path.exists():
             return 0
 
@@ -637,6 +645,49 @@ class AutonomyDaemon:
             count += 1
 
         return count
+
+    def check_permission_names(self) -> list[NameCheck]:
+        """Compare every granted tool name with the session's registry (#690 S4).
+
+        Reads the grant lists from disk (schedules.toml, rhythm.toml,
+        room.toml) so an edit is reported at the next check even before a
+        restart loads it. Reports only: nothing granted is changed. Called at
+        startup once MCP has loaded, and again by the circadian dawn reload.
+        """
+        import tomllib
+
+        from loom.autonomy.circadian.rhythm import load_rhythm
+        from loom.autonomy.circadian.room import load_room
+
+        if self._session is None or self._config_path is None:
+            return []
+        base = self._config_path.resolve().parent
+        try:
+            with open(self._config_path, "rb") as f:
+                mcp_servers = tomllib.load(f).get("mcp", {}).get("servers", [])
+        except (OSError, tomllib.TOMLDecodeError):
+            mcp_servers = []
+        uses = collect_permission_uses(
+            load_schedules(base / DEFAULT_SCHEDULES_PATH),
+            load_rhythm(),
+            load_room().furniture,
+        )
+        session = self._session
+        checks = classify_permission_names(
+            uses,
+            registered={t.name for t in session.registry.list()},
+            mcp_configured={s.get("name") for s in mcp_servers if isinstance(s, dict)},
+            mcp_connected=(
+                {c._cfg.name for c in session._mcp_clients}
+                if getattr(session, "_mcp_loaded", False) else None
+            ),
+        )
+        self.permission_names_line = format_report(checks)
+        if self.permission_names_line:
+            logger.warning("[autonomy] permission names: %s", self.permission_names_line)
+        else:
+            logger.info("[autonomy] permission names: all %d registered", len(checks))
+        return checks
 
     # ------------------------------------------------------------------
     # Runtime

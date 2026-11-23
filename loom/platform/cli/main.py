@@ -2502,6 +2502,7 @@ async def _autonomy_start(config: str, model: str, db: str, interval: int) -> No
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
     n = daemon.load_config(config)
+    daemon.check_permission_names()  # #690 S4: session.start() loaded MCP
     console.print(
         Panel(
             f"[bold loom.accent]Loom Autonomy Daemon[/bold loom.accent]\n"
@@ -2891,6 +2892,9 @@ async def _discord_with_autonomy(
         # any leftover state, and catch-up-spawns if we came up inside active
         # hours. No-op unless [autonomy.circadian].enabled is true.
         await _setup_circadian_if_enabled(bot, daemon, config_path, notify_channel_id)
+        # #690 S4: the session has loaded MCP and every grant table is read —
+        # report granted tool names the registry doesn't have.
+        daemon.check_permission_names()
         console.print("[loom.muted]Autonomy daemon started.[/loom.muted]")
         _t = asyncio.create_task(
             daemon.start(poll_interval=float(interval)), name="autonomy-daemon"
