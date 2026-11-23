@@ -926,7 +926,8 @@ class BlastRadiusMiddleware(Middleware):
             success=False,
             error=error,
             failure_type="permission_denied",
-            metadata={"unattended_skip": True, "origin": call.origin},
+            metadata={"unattended_skip": True, "origin": call.origin,
+                      "skip_note": classifier_note or ""},
         )
 
     def _notify_lifecycle(
@@ -1058,22 +1059,23 @@ class BlastRadiusMiddleware(Middleware):
         import time
         now = time.time()
         for req in scope_request.requirements:
-            # A confirmed shell command grants its own shape, never the whole
-            # workspace (#690 S6 prerequisite): a later, different command
-            # asks again. A chain or expansion has no shape, so the human's
-            # yes covers this call only.
-            selector = req.selector
-            if req.resource == "exec" and selector == "workspace":
-                argv = req.constraints.get("argv")
-                if argv is None:
-                    continue
-                selector = shlex.join(argv)
             # Filter out informational constraints — only preserve actionable
             # ones (remaining_budget, max_calls, etc.)
             grant_constraints = {
                 k: v for k, v in req.constraints.items()
                 if k not in self._INFORMATIONAL_CONSTRAINTS
             }
+            # A confirmed shell command grants exactly that command, never
+            # the whole workspace (#690 S6): a later command with other or
+            # extra arguments asks again. A chain or expansion has no argv,
+            # so the human's yes covers this call only.
+            selector = req.selector
+            if req.resource == "exec" and selector == "workspace":
+                argv = req.constraints.get("argv")
+                if argv is None:
+                    continue
+                selector = shlex.join(argv)
+                grant_constraints["exact_argv"] = True
             self._perm.grant(ScopeGrant(
                 resource=req.resource,
                 action=req.action,

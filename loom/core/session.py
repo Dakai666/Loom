@@ -1597,6 +1597,7 @@ class LoomSession:
         abort_signal: "asyncio.Event | None" = None,
         origin: str = "interactive",
         fired_at: datetime | None = None,
+        program_intent: str | None = None,
     ) -> AsyncIterator[
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ModelThinkingStarted
@@ -1621,6 +1622,11 @@ class LoomSession:
         the triggering event happened (the message, the submit, the trigger
         fire); None when the entry point does not know. Both land on the
         ledger turn_start, whose timestamp is the handling start.
+
+        ``program_intent`` is the static program text an entry point vouches
+        for when the input also carries agent-written context (a phase
+        chime's weave). The approval classifier then treats only it as the
+        turn's intent and the input as untrusted context (#690 S6).
         """
         # Serialise turns on this session. If a prior turn is still
         # unwinding (e.g. caller fired ``task.cancel()`` but did not
@@ -1692,8 +1698,10 @@ class LoomSession:
         _stream_retry = 0
         try:
             self._current_origin = origin
+            text = _input_text(user_input)
             self._review_turns.append(
-                ReviewTurn(intent=_input_text(user_input), origin=origin)
+                ReviewTurn(intent=text, origin=origin) if program_intent is None
+                else ReviewTurn(intent=program_intent, origin=origin, context=text)
             )
 
             # Issue #131: Reset abort signal from previous turn so the session
@@ -2288,6 +2296,7 @@ class LoomSession:
                                 unattended_skip=bool(
                                     (result.metadata or {}).get("unattended_skip")
                                 ),
+                                skip_note=(result.metadata or {}).get("skip_note", ""),
                             )
                             _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(
@@ -2394,6 +2403,7 @@ class LoomSession:
                                 unattended_skip=bool(
                                     (result.metadata or {}).get("unattended_skip")
                                 ),
+                                skip_note=(result.metadata or {}).get("skip_note", ""),
                             )
                             _last_completed_tool_name = tu.name
                             self._telemetry_record_tool(

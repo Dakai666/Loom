@@ -291,7 +291,9 @@ class ExecMatcher:
       plain argv (``constraints["argv"]``, see ``simple_argv``) and the
       shape's words are its leading words. A chained, redirected or expanded
       command has no argv, so no shape covers it. ``absolute_paths = "deny"``
-      applies here too.
+      applies here too. With ``exact_argv = true`` (what a human confirm
+      grants, #690 S6) the command must be the shape exactly, with no
+      extra arguments.
     """
     def covers(self, grant: _HasScopeFields, requirement: _HasScopeFields) -> bool:
         if grant.action != requirement.action:
@@ -306,6 +308,8 @@ class ExecMatcher:
         shape = simple_argv(grant.selector)
         argv = requirement.constraints.get("argv")
         if shape is None or argv is None:
+            return False
+        if grant.constraints.get("exact_argv") and len(argv) != len(shape):
             return False
         return tuple(argv[:len(shape)]) == shape
 

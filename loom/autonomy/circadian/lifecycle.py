@@ -502,6 +502,7 @@ async def _deliver_phase_chime(
         # deep phase's tier doesn't carry into the phases after it.
         model_tier=anchor.model_tier,
         resets_tier=True,
+        program_intent=anchor.meaning.strip() or f"Circadian phase: {anchor.name}",
     )
     delivered = await daemon.deliver_chime(req)
     result = (

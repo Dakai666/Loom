@@ -76,6 +76,7 @@ except ImportError as exc:  # pragma: no cover
         "Install with:  pip install 'loom[discord]'"
     ) from exc
 
+from loom.core.harness.approval import REVIEWER_UNAVAILABLE
 from loom.core.harness.scope import ConfirmDecision
 from loom.core.timezone import user_zone
 from loom.core.cognition import vision as _vision
@@ -370,10 +371,14 @@ def _summarize_skipped_args(args: dict) -> str:
     return ""
 
 
-def _format_chime_skip_notice(req: ChimeRequest, skipped: list[tuple[str, dict]]) -> str:
+def _format_chime_skip_notice(
+    req: ChimeRequest, skipped: list[tuple[str, dict]], *, reviewer_unavailable: bool = False,
+) -> str:
     """Issue #668 S1: the one visible notice for calls a chime turn skipped.
 
     Skipped means *not executed and not denied* — nobody was there to ask.
+    ``reviewer_unavailable``: the approval classifier's model was cooling
+    down after repeated errors, so nothing was reviewed (#690 S6).
     """
     lines = [
         f"-# ⏭️ **Chime · {req.schedule_name}** 跳過 {len(skipped)} 個需授權的動作"
@@ -385,6 +390,8 @@ def _format_chime_skip_notice(req: ChimeRequest, skipped: list[tuple[str, dict]]
     extra = len(skipped) - _SKIP_NOTICE_MAX_ITEMS
     if extra > 0:
         lines.append(f"-# • …另外 {extra} 個")
+    if reviewer_unavailable:
+        lines.append("-# 審查器不可用（連續錯誤，冷卻中），這些動作沒有經過自動審查。")
     return "\n".join(lines)
 
 
@@ -1156,10 +1163,12 @@ class LoomDiscordBot:
             # attending this chime. Collected so DK gets ONE notice per turn.
             begun_args: dict[str, dict] = {}
             skipped: list[tuple[str, dict]] = []
+            reviewer_unavailable = False
             try:
                 async with channel.typing():
                     async for event in session.stream_turn(
                         content, origin="chime", fired_at=req.fired_at,
+                        program_intent=req.program_intent,
                     ):
                         if isinstance(event, TextChunk):
                             narration_buf += event.text
@@ -1169,6 +1178,9 @@ class LoomDiscordBot:
                             if event.unattended_skip:
                                 skipped.append(
                                     (event.name, begun_args.get(event.call_id, {}))
+                                )
+                                reviewer_unavailable |= (
+                                    REVIEWER_UNAVAILABLE in event.skip_note
                                 )
                         elif isinstance(event, TurnDropped):
                             detail = (
@@ -1186,7 +1198,8 @@ class LoomDiscordBot:
                     thread_id, req.schedule_name,
                 )
                 if skipped:
-                    await _safe_send(channel, _format_chime_skip_notice(req, skipped))
+                    await _safe_send(channel, _format_chime_skip_notice(
+                    req, skipped, reviewer_unavailable=reviewer_unavailable))
                 return
 
             final = narration_buf.strip()
@@ -1194,7 +1207,8 @@ class LoomDiscordBot:
                 payload = final if final.startswith("⬥") else f"⬥ {final}"
                 await _safe_send(channel, payload)
             if skipped:
-                await _safe_send(channel, _format_chime_skip_notice(req, skipped))
+                await _safe_send(channel, _format_chime_skip_notice(
+                    req, skipped, reviewer_unavailable=reviewer_unavailable))
         finally:
             # Revoke schedule grants as part of *this* task's unwind, so a
             # cancellation immediately yields the session back to a clean
