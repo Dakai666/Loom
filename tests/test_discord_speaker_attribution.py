@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import struct
 import zlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,7 +43,10 @@ def _bot_stub():
 
 
 def _message(author, attachments=()):
-    return SimpleNamespace(author=author, attachments=list(attachments), channel=MagicMock())
+    return SimpleNamespace(
+        author=author, attachments=list(attachments), channel=MagicMock(),
+        created_at=datetime(2026, 11, 23, 3, 45, tzinfo=UTC),
+    )
 
 
 def _png_1x1() -> bytes:
@@ -66,6 +70,8 @@ class TestHandleMessageAttribution:
         await bot._handle_message(msg, "今天天氣如何", is_thread=True)
         user_input = bot._run_turn.await_args.args[1]
         assert user_input == "[發話者：小明 (@ming)]\n今天天氣如何"
+        # #690 S3b: the turn's fired_at is the message's creation time.
+        assert bot._run_turn.await_args.kwargs["fired_at"] == msg.created_at
 
     async def test_vision_turn_keeps_speaker_in_text_block(self, tmp_path):
         bot = _bot_stub()

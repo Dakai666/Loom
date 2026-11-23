@@ -199,6 +199,9 @@ class TriggerEvaluator:
     async def _fire(
         self, trigger: TriggerDefinition, context: dict[str, Any]
     ) -> None:
+        # #690 S3b: every reaction learns when its trigger fired (UTC
+        # epoch), so a turn that runs later still records the fire time.
+        context = {**context, "fired_at": datetime.now(UTC).timestamp()}
         if self._ledger_emitter is None:
             if self._on_fire is not None:
                 await self._on_fire(trigger, context)

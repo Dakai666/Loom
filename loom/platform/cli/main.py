@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import time
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -415,7 +416,9 @@ async def _chat(
     # running" race that PR-A worked around with three-event coordination
     # simply cannot occur.
     _INTERRUPT_PREFIX = "\x00LOOM_INTERRUPT\x00"
-    input_queue: asyncio.Queue[str] = asyncio.Queue()
+    # Each entry is (text, submitted_at): the submit time is the turn's
+    # fired_at on the ledger (#690 S3b), even when it waits in the queue.
+    input_queue: asyncio.Queue[tuple[str, datetime]] = asyncio.Queue()
     current_turn_task: asyncio.Task | None = None
     shutdown = asyncio.Event()
 
@@ -426,6 +429,7 @@ async def _chat(
 
     async def _on_submit(text: str) -> None:
         nonlocal current_turn_task
+        submitted_at = datetime.now(UTC)
         stripped = text.strip()
         if not stripped:
             return
@@ -468,9 +472,9 @@ async def _chat(
                 pass
             except Exception:
                 pass
-            await input_queue.put(_INTERRUPT_PREFIX + stripped)
+            await input_queue.put((_INTERRUPT_PREFIX + stripped, submitted_at))
         else:
-            await input_queue.put(stripped)
+            await input_queue.put((stripped, submitted_at))
 
     app = build_loom_app(on_submit=_on_submit)
     app.footer.model = model
@@ -507,7 +511,9 @@ async def _chat(
         nonlocal current_turn_task
         while not shutdown.is_set():
             try:
-                text = await asyncio.wait_for(input_queue.get(), timeout=0.25)
+                text, submitted_at = await asyncio.wait_for(
+                    input_queue.get(), timeout=0.25,
+                )
             except asyncio.TimeoutError:
                 continue
 
@@ -567,7 +573,7 @@ async def _chat(
                 family=ActionFamily.THINK.value,
             )
             current_turn_task = asyncio.create_task(
-                _run_streaming_turn(session, text)
+                _run_streaming_turn(session, text, fired_at=submitted_at)
             )
             try:
                 await current_turn_task
@@ -1178,7 +1184,9 @@ def _start_tool_heartbeat(loom_app: Any, name: str, args: dict[str, Any]) -> Non
     loom_app.note_tool_engagement(action.family)
 
 
-async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
+async def _run_streaming_turn(
+    session: "LoomSession", user_input: str, *, fired_at: datetime | None = None,
+) -> None:
     """
     Execute one streaming agent turn with real character-by-character output.
 
@@ -1455,7 +1463,9 @@ async def _run_streaming_turn(session: "LoomSession", user_input: str) -> None:
             loom_app.stop_heartbeat(force=True)
 
     try:
-        async for event in session.stream_turn(user_input):
+        async for event in session.stream_turn(
+            user_input, origin="cli", fired_at=fired_at,
+        ):
             if isinstance(event, ModelThinkingStarted):
                 loom_app = getattr(session, "_loom_app", None)
                 if loom_app is not None:

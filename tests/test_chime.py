@@ -597,7 +597,7 @@ def _patch_channel_and_stream(bot, session, stream_impl=None):
     bot._client.get_channel = MagicMock(return_value=channel)
 
     if stream_impl is None:
-        async def _empty(content, *, origin):
+        async def _empty(content, *, origin, **_kw):
             if False:
                 yield  # pragma: no cover
         session.stream_turn = _empty
@@ -624,7 +624,7 @@ class TestChimePermissions:
 
         applied_during_turn: dict[str, list[str]] = {}
 
-        async def stream_capture(content, *, origin):
+        async def stream_capture(content, *, origin, **_kw):
             applied_during_turn["authorized"] = list(authorized)
             applied_during_turn["granted_count"] = len(granted)
             applied_during_turn["origin"] = origin
@@ -682,7 +682,7 @@ class TestChimePermissions:
 
         chime_started = asyncio.Event()
 
-        async def slow_stream(content, *, origin):
+        async def slow_stream(content, *, origin, **_kw):
             chime_started.set()
             # Park forever so we can cancel the chime task in mid-flight.
             await asyncio.sleep(60)
@@ -771,7 +771,7 @@ class TestChimeModelTier:
         bot._sessions[111] = session
         seen: dict = {}
 
-        async def stream_capture(content, *, origin):
+        async def stream_capture(content, *, origin, **_kw):
             seen["tier"] = session._active_tier()
             seen["model"] = session._active_model()
             if False:

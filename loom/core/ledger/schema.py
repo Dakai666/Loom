@@ -52,11 +52,33 @@ class LedgerEvent:
 # ---------------------------------------------------------------------------
 
 
+UNKNOWN_ORIGIN = "unknown"
+"""Origin of a row written before #690 S3b, or by a caller that did not say."""
+
+
+def origin_of(payload: dict[str, Any]) -> str:
+    """The origin a turn_start or permission_decision row records.
+
+    Rows from before #690 S3b carry no ``origin`` key; they read as
+    ``"unknown"``, never as a guessed value.
+    """
+    return payload.get("origin") or UNKNOWN_ORIGIN
+
+
 @dataclass(kw_only=True)
 class TurnStartPayload:
+    """The event timestamp is the handling start: the turn emits this once
+    it holds the session's turn lock and begins work."""
+
     prompt_stack_hash: str
     prompt_stack_components: dict[str, Any]
     full_text: str | None = None
+    # Set by the runtime entry point, never parsed from turn text (#690 S3b).
+    # "discord" / "cli" / "chime" / "autonomy" / ... — see stream_turn.
+    origin: str = UNKNOWN_ORIGIN
+    # UTC epoch of the triggering event: the Discord message, the CLI
+    # submit, the trigger fire. None when the entry point does not know it.
+    fired_at: float | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
@@ -65,6 +87,9 @@ class TurnEndPayload:
     outcome: str  # "clean" / "retry" / "abandoned" / "error"
     duration_ms: int
     token_usage: dict[str, int]
+    # Session total of ledger writes that failed and whose ledger_gap event
+    # also failed (#690 S3b). Cumulative, so a lost turn_end loses nothing.
+    unrecorded_ledger_gaps: int = 0
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
@@ -102,6 +127,11 @@ class ToolLifecyclePayload:
     # `skill_id` virtual column (doc/54 §5 P0-1) can index per-skill usage.
     # NULL for all other tools.
     skill_id: str | None = None
+    # END only (#690 S3b): how the call ended. The memorialize reason
+    # ("committed", "denied", "timed_out", "reverted", ...) or, when
+    # process() never reached memorialize, "cancelled" / "exception".
+    # Rows from before S3b have no outcome; read their state_history.
+    outcome: str | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
@@ -112,6 +142,26 @@ class PermissionDecisionPayload:
     trust_level: str
     scope_grant: dict | None = None
     reason: str | None = None
+    # The turn origin of the call (#690 S3b), so a grant confirmed by a
+    # human in an attended turn reads apart from a decision in an
+    # unattended one. Rows from before S3b read as unknown (origin_of).
+    origin: str = UNKNOWN_ORIGIN
+    schema_version: int = CURRENT_SCHEMA_VERSION
+
+
+@dataclass(kw_only=True)
+class LedgerGapPayload:
+    """A ledger write that failed (#690 S3b).
+
+    Records only what is known about the missing event; it never stands in
+    for the event itself.
+    """
+
+    missing_event_type: str
+    missing_event_id: str
+    error: str
+    tool_name: str | None = None
+    tool_call_id: str | None = None
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 

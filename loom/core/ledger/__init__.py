@@ -42,6 +42,7 @@ from loom.core.ledger.schema import (
     EnvObservationPayload,
     JudgeVerdictPayload,
     LedgerEvent,
+    LedgerGapPayload,
     MemoryOpPayload,
     ModelEventPayload,
     PermissionDecisionPayload,
@@ -50,6 +51,7 @@ from loom.core.ledger.schema import (
     ToolLifecyclePayload,
     TurnEndPayload,
     TurnStartPayload,
+    origin_of,
 )
 from loom.core.ledger.store import LedgerStore
 
@@ -66,6 +68,7 @@ __all__ = [
     "LedgerEmitter",
     "LedgerEnvelopeProjector",
     "LedgerEvent",
+    "LedgerGapPayload",
     "LedgerReplay",
     "LedgerStore",
     "LedgerSubscriber",
@@ -89,6 +92,7 @@ __all__ = [
     "current_correlation",
     "current_turn_id",
     "new_correlation_id",
+    "origin_of",
     "reset_correlation",
     "reset_turn_id",
     "set_correlation",

@@ -1579,6 +1579,7 @@ class LoomSession:
         *,
         abort_signal: "asyncio.Event | None" = None,
         origin: str = "interactive",
+        fired_at: datetime | None = None,
     ) -> AsyncIterator[
         TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
         | ModelThinkingStarted
@@ -1595,6 +1596,14 @@ class LoomSession:
         ToolBegin   — just before a tool call executes
         ToolEnd     — just after a tool call finishes
         TurnDone    — once all tool loops are resolved
+
+        ``origin`` and ``fired_at`` come from the entry point that started
+        the turn, never from the turn text (#690 S3b). ``origin`` names it:
+        "discord", "cli", "chime", "autonomy", or "interactive" when an
+        attended caller does not say which surface. ``fired_at`` is when
+        the triggering event happened (the message, the submit, the trigger
+        fire); None when the entry point does not know. Both land on the
+        ledger turn_start, whose timestamp is the handling start.
         """
         # Serialise turns on this session. If a prior turn is still
         # unwinding (e.g. caller fired ``task.cancel()`` but did not
@@ -1647,7 +1656,9 @@ class LoomSession:
             _ledger_turn_token = set_turn_id(_turn_id_v2)
             _ledger_corr_token = set_correlation(_turn_corr_id)
             try:
-                await self._emit_ledger_turn_start(_turn_id_v2)
+                await self._emit_ledger_turn_start(
+                    _turn_id_v2, origin=origin, fired_at=fired_at,
+                )
             except Exception:
                 logger.exception(
                     "ledger turn_start emit failed; continuing"
@@ -3629,7 +3640,16 @@ class LoomSession:
             "tool_catalog_size": tool_count,
         }
 
-    async def _emit_ledger_turn_start(self, turn_id: str) -> None:
+    async def _emit_ledger_turn_start(
+        self,
+        turn_id: str,
+        *,
+        origin: str = "unknown",
+        fired_at: datetime | None = None,
+    ) -> None:
+        """Emit turn_start. The caller logs a failure and continues; it is
+        not routed to LedgerEmitter.record_gap, which S3b scopes to
+        tool_lifecycle BEGIN/END. Same for _emit_ledger_turn_end."""
         if self._ledger_emitter is None:
             return
         digest, components = self._prompt_stack_snapshot()
@@ -3638,6 +3658,8 @@ class LoomSession:
             payload=TurnStartPayload(
                 prompt_stack_hash=digest,
                 prompt_stack_components=components,
+                origin=origin,
+                fired_at=fired_at.timestamp() if fired_at is not None else None,
             ),
             event_id=f"evt_turn_start_{turn_id[5:]}",
         )
