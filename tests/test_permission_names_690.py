@@ -193,6 +193,7 @@ RHYTHM = """
 time = "08:00"
 name = "dawn"
 meaning = "wake"
+permission_report = true
 allowed_tools = ["run_bash", "web_search"]
 
 [[anchors]]
@@ -222,14 +223,25 @@ def _tool(name: str) -> ToolDefinition:
     )
 
 
-def _session(*names: str, mcp_loaded: bool = True, connected: tuple[str, ...] = ()):
+def _client(name: str, alive: bool = True):
+    return SimpleNamespace(_cfg=SimpleNamespace(name=name), is_connected=alive)
+
+
+def _session(
+    *names: str,
+    mcp_loaded: bool = True,
+    connected: tuple[str, ...] = (),
+    dead: tuple[str, ...] = (),
+):
     registry = ToolRegistry()
     for n in names:
         registry.register(_tool(n))
     return SimpleNamespace(
         registry=registry,
         _mcp_loaded=mcp_loaded,
-        _mcp_clients=[SimpleNamespace(_cfg=SimpleNamespace(name=s)) for s in connected],
+        _mcp_clients=[
+            *(_client(s) for s in connected), *(_client(s, alive=False) for s in dead),
+        ],
     )
 
 
@@ -314,7 +326,7 @@ class TestDaemonCheck:
         # (startup after setup, or the dawn reload) sees them.
         session.registry.register(_tool("minimax_coding__web_search"))
         session._mcp_loaded = True
-        session._mcp_clients = [SimpleNamespace(_cfg=SimpleNamespace(name="minimax_coding"))]
+        session._mcp_clients = [_client("minimax_coding")]
         later = _by_name(daemon.check_permission_names())
         assert later["minimax_coding__web_search"].status is NameStatus.REGISTERED
         assert "minimax_coding__web_search" not in daemon.permission_names_line
@@ -359,7 +371,7 @@ class TestDawnChime:
         daemon.load_config("loom.toml")
         daemon.check_permission_names()
         anchors = [
-            Anchor(time="08:00", name="dawn", meaning="wake"),
+            Anchor(time="08:00", name="dawn", meaning="wake", permission_report=True),
             Anchor(time="11:00", name="curiosity", meaning="look around"),
         ]
         register_rhythm_anchors(daemon, CFG, anchors)
@@ -369,7 +381,7 @@ class TestDawnChime:
         dawn, curiosity = deliveries
         assert "async_jobs" in dawn.intent
         assert daemon.permission_names_line in dawn.intent
-        # Dawn only: other phases are not re-told the same thing.
+        # Only the flagged phase: the others are not re-told the same thing.
         assert "async_jobs" not in curiosity.intent
 
     async def test_dawn_reload_rechecks_the_edited_table(self):
@@ -399,3 +411,124 @@ allowed_tools = ["run_bash", "memorise"]
 """)
         await _fire(daemon, "circadian:dawn_spawn")
         assert "memorise" in daemon.permission_names_line
+
+
+class TestReviewRound:
+    """PR #693 review (薇拉 · Opencode): length cap, never raise, the flag,
+    dead MCP connections."""
+
+    def test_many_names_capped_in_chime_full_in_log(self, caplog):
+        _write("loom.toml", LOOM_TOML)
+        names = [f"tool_{i:02d}" for i in range(20)]
+        _write("autonomy/schedules.toml", f"""
+[[schedules]]
+name = "s"
+cron = "0 0 * * *"
+intent = "x"
+allowed_tools = {names!r}
+""".replace("'", '"'))
+        daemon = _daemon(_session())  # empty registry: every name is off-list
+        daemon.load_config("loom.toml")
+        with caplog.at_level(logging.WARNING, logger="loom.autonomy"):
+            checks = daemon.check_permission_names()
+
+        assert len(checks) == 20
+        line = daemon.permission_names_line
+        shown = [n for n in names if f"unknown: {n} " in line]
+        assert shown == names[:8]
+        assert "另有 12 個" in line
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert all(f"unknown: {n} " in logged for n in names)
+
+    def test_few_names_are_not_capped(self):
+        _write_all()
+        daemon = _daemon(_session("run_bash", "fetch_url", connected=("minimax_coding",)))
+        daemon.load_config("loom.toml")
+        daemon.check_permission_names()
+        assert "另有" not in daemon.permission_names_line
+
+    def test_check_failure_is_logged_not_raised(self, monkeypatch, caplog):
+        import loom.autonomy.daemon as daemon_module
+
+        _write_all()
+        daemon = _daemon(_session("run_bash"))
+        daemon.load_config("loom.toml")
+        daemon.check_permission_names()
+        before = daemon.permission_names_line
+
+        def boom(*_a, **_k):
+            raise RuntimeError("table exploded")
+
+        monkeypatch.setattr(daemon_module, "collect_permission_uses", boom)
+        with caplog.at_level(logging.ERROR, logger="loom.autonomy"):
+            assert daemon.check_permission_names() == []
+        assert daemon.permission_names_line == before
+        assert any("permission name check failed" in r.getMessage() for r in caplog.records)
+
+    async def test_dawn_handler_survives_a_failing_check(self, monkeypatch):
+        import loom.autonomy.daemon as daemon_module
+        from tests.test_circadian_phase_chime import FakePlatform
+
+        _write("loom.toml", LOOM_TOML)
+        _write("autonomy/schedules.toml", "")
+        daemon = _daemon(_session("run_bash"))
+        daemon.load_config("loom.toml")
+        platform = FakePlatform()
+        register_triggers(
+            daemon, platform,
+            CircadianConfig(enabled=True, timezone=TZ, start="00:00", sleep="00:00"),
+        )
+        monkeypatch.setattr(
+            daemon_module, "collect_permission_uses",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        await _fire(daemon, "circadian:dawn_spawn")
+        assert platform.spawns  # the day still opened
+
+    async def test_layer_follows_the_flag_not_the_name(self):
+        _write_all()
+        deliveries: list[ChimeRequest] = []
+        daemon = _daemon(_session("run_bash"), deliveries)
+        daemon.load_config("loom.toml")
+        daemon.check_permission_names()
+        assert daemon.permission_names_line
+        register_rhythm_anchors(daemon, CFG, [
+            Anchor(time="08:00", name="dawn", meaning="wake"),
+            Anchor(time="23:00", name="evening_closure", meaning="close",
+                   permission_report=True),
+        ])
+        await _fire(daemon, "circadian:phase_dawn")
+        await _fire(daemon, "circadian:phase_evening_closure")
+        dawn, closure = deliveries
+        assert "授權名稱對不上" not in dawn.intent
+        assert "授權名稱對不上" in closure.intent
+
+    def test_rhythm_table_parses_the_flag(self):
+        from loom.autonomy.circadian.rhythm import load_rhythm
+
+        _write("autonomy/circadian/rhythm.toml", RHYTHM)
+        flags = {a.name: a.permission_report for a in load_rhythm()}
+        assert flags == {"dawn": True, "curiosity": False}
+
+    def test_dead_mcp_connection_reads_off_not_unknown(self):
+        _write_all()
+        daemon = _daemon(_session("run_bash", dead=("minimax_coding",)))
+        daemon.load_config("loom.toml")
+        checks = _by_name(daemon.check_permission_names())
+        check = checks["minimax_coding__web_search"]
+        assert check.status is NameStatus.CONDITIONAL
+        assert "not connected" in check.reason
+
+
+class TestMcpClientConnected:
+    def test_is_connected_tracks_the_owner_task(self):
+        pytest.importorskip("mcp")
+        from loom.extensibility.mcp_client import LoomMCPClient, MCPServerConfig
+
+        client = LoomMCPClient(MCPServerConfig(name="x", command="true"))
+        assert client.is_connected is False
+        client._session = object()
+        client._owner = SimpleNamespace(done=lambda: False)
+        assert client.is_connected is True
+        client._owner = SimpleNamespace(done=lambda: True)  # owner ended: transport gone
+        assert client.is_connected is False
