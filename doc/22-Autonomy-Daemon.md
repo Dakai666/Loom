@@ -218,7 +218,7 @@ async def _run_agent(self, plan: PlannedAction) -> None:
 | `"*"` | 所有命令 |
 | 其他字串 | command shape：命令開頭必須是這些字，後面可接任意參數，例如 `"python3 skills/pet-cat/pet.py status"` |
 
-沒被任何 grant 涵蓋的命令會被 skip 並通知（#668）。ledger 的 `permission_decision.decision` 寫 `skip`，`tool_lifecycle` END 的 `outcome` 寫 `skipped`，不算進 deny。S7 之前的資料把 skip 記成 `decision = "deny"`，reason 以 `unattended-deny` 開頭。
+沒被任何 grant 涵蓋的命令會被 skip 並通知（#668）。ledger 的 `permission_decision.decision` 寫 `skip`，`tool_lifecycle` END 的 `outcome` 寫 `skipped`，不算進 deny。reason 以 `unattended-skip` 開頭。S7 之前的資料把 skip 記成 `decision = "deny"`；S3c 之前的 reason 以 `unattended-deny` 開頭。
 
 `absolute_paths = "deny"` 也會看 `=` 後面的路徑，例如 `--outdir=/tmp/x`。
 

@@ -135,7 +135,7 @@ minimax__text_to_image(
 ```
 
 > ⚠️ **為什麼不能用 `image_generate`**：它是 Loom 內建的計費工具，在 autonomy（無人值守）排程下
-> 不在既有 scope 內，權限判定會是 `deny: unattended-deny (autonomy, confirm)`，配圖這一步直接失敗。
+> 不在既有 scope 內，權限判定會是 `skip: unattended-skip (autonomy, confirm)`（2026-11 之前記成 `deny: unattended-deny`），配圖這一步不會執行。
 > **2026-10-25 08:00 實測**：五份 briefing 都產出成功，**唯一被擋的就是 `image_generate`**，
 > 結果晨報投遞時沒有配圖。minimax MCP 走 MCP server，不受 Loom scope 攔截。
 
