@@ -1002,6 +1002,7 @@ def make_run_bash_tool(
                 call_id=call.id, tool_name=call.tool_name,
                 success=False, error=str(exc),
                 failure_type="permission_denied",
+                metadata={"failure_stage": "sandbox"},
             )
         except ValueError as exc:
             return ToolResult(
@@ -1091,6 +1092,7 @@ def make_run_bash_tool(
                 call_id=call.id, tool_name=call.tool_name,
                 success=success, output=output,
                 error=None if success else f"Exit code {proc.returncode}",
+                failure_type=None if success else "execution_error",
                 metadata=metadata,
             )
         except Exception as exc:

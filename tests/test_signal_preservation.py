@@ -138,9 +138,12 @@ class TestToolResultErrorContext:
         pipeline = MiddlewarePipeline([jit])
         result = await pipeline.execute(_call("t"), handler)
 
-        # JIT replaced ``output`` with a placeholder …
-        assert result.output != big_out
-        # … but error_context survived intact.
+        # JIT spilled the output, and a failure keeps it (#690 S3c): the
+        # model reads its bounded tail, not a head preview …
+        assert result.metadata["jit_spilled"] is True
+        assert pad.store[result.metadata["jit_ref"]] == big_out
+        assert result.output == big_out
+        # … and error_context survived intact.
         assert result.error_context == "Traceback (...): ..."
 
 

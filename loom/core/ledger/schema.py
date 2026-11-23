@@ -139,8 +139,8 @@ class ToolLifecyclePayload:
 class PermissionDecisionPayload:
     # "grant" / "deny" / "scope", or "skip" (#690 S7): an unattended call
     # held back because no grant covered it and nobody was there to ask.
-    # Rows before S7 wrote such skips as "deny" with an "unattended-deny"
-    # reason.
+    # Its reason reads "unattended-skip (...)". Rows before S7 wrote such
+    # skips as "deny"; rows before S3c have an "unattended-deny" reason.
     decision: str
     tool_call_id: str
     trust_level: str

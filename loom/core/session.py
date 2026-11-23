@@ -112,7 +112,8 @@ from loom.core.harness.middleware import (
     TraceMiddleware,
     UNATTENDED_ORIGINS,
 )
-from loom.core.harness.permissions import PermissionContext, TrustLevel
+from loom.core.harness.failure import tool_result_text
+from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
 from loom.core.harness.registry import ToolRegistry
 from loom.core.harness.validation import SchemaValidationMiddleware
 from loom.core.infra import AbortController, wait_aborted
@@ -2289,9 +2290,10 @@ class LoomSession:
                             # tool_call_id, content). If a future provider
                             # changes that, _emit_turn / _tool_name MUST be
                             # preserved — they're the data basis of masking.
+                            _model_text = self._model_tool_text(tu.name, result)
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id,
-                                tool_output
+                                _model_text
                                 + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
@@ -2303,7 +2305,7 @@ class LoomSession:
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
                             asyncio.ensure_future(self._log_message(
-                                "tool", tool_output[:500],
+                                "tool", _model_text[:500],
                                 {
                                     "tool_call_id": tu.id,
                                     "tool_name": tu.name,
@@ -2388,9 +2390,10 @@ class LoomSession:
                             # Issue #106: Yield envelope update after each tool completes
                             yield EnvelopeUpdated(envelope=await self._build_envelope_view(_batch_t0))
                             # Issue #197 Phase 2: tag for observation masking.
+                            _model_text = self._model_tool_text(tu.name, result)
                             _tool_msg = self.router.format_tool_result(
                                 self.model, tu.id,
-                                tool_output
+                                _model_text
                                 + self._repeat_calls.observe(tu.name, tu.args, result),
                                 result.success,
                             )
@@ -2402,7 +2405,7 @@ class LoomSession:
                             _tool_msg["_tool_name"] = tu.name
                             self.messages.append(_tool_msg)
                             asyncio.ensure_future(self._log_message(
-                                "tool", tool_output[:500],
+                                "tool", _model_text[:500],
                                 {
                                     "tool_call_id": tu.id,
                                     "tool_name": tu.name,
@@ -3575,6 +3578,15 @@ class LoomSession:
         await self._session_log.log_message(
             self.session_id, ti, role, content, metadata,
             raw_json=raw_json,
+        )
+
+    def _model_tool_text(self, tool_name: str, result: ToolResult) -> str:
+        """What the model reads for *result*: a failure carries the
+        ``[tool_failure]`` contract (#690 S3c), a success its output."""
+        tool_def = self.registry.get(tool_name)
+        return tool_result_text(
+            result,
+            capabilities=tool_def.capabilities if tool_def else ToolCapability.NONE,
         )
 
     async def _dispatch(self, tool_name: str, args: dict, call_id: str) -> ToolResult:
