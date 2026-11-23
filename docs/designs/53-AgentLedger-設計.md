@@ -55,6 +55,7 @@ ActionRecord / ExecutionEnvelope / SessionLog / TaskList / MemoryWrite / JudgeVe
 | `judge_verdict` | — | Session |
 | `artifact_emit` | code / image / audio / 其他 | Session |
 | `env_observation` | external / timer / notification / contradiction / anomaly | AutonomyDaemon / MemoryPulse |
+| `trigger_fire` | outcome: `completed` / `failed` / `cancelled` / `skipped` / `spawned` / `delivered` / `missed`（#690 S5a，見 doc/22） | AutonomyDaemon / 記憶迴圈 |
 
 `tool_lifecycle` **取代既有 `ActionRecord`**，state_history 內嵌進事件 payload，不另存。
 
@@ -781,6 +782,7 @@ def parse_tool_lifecycle(event):
 | `judge_verdict` | (deferred) | — |
 | `artifact_emit` | (deferred) | — |
 | `env_observation` | observation_type ∈ {timer, external, anomaly}；notification/contradiction 暫無 emitter | — |
+| `trigger_fire` | 每次 cron / anchor / 記憶迴圈觸發一筆；`missed` 的 started_at / ended_at 為 null（#690 S5a，additive） | — |
 
 所有 v1 payload 帶 `schema_version: 1`。Phase 2 實作期間若 schema 演進，於本表追加 v2 行並標 breaking 點（§9.4 流程）。
 

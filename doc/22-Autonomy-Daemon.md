@@ -74,6 +74,34 @@ _run_agent(plan)                          _run_chime_turn(thread_id, req)
 
 ---
 
+## Fire 紀錄與重啟去重（#690 S5a）
+
+daemon 從自己的 `loom_session` 拿兩樣東西，建構處不必另外傳：
+
+- `session._db`（memory.db）裡的 `trigger_history`：cron 觸發後寫入，重啟後同一分鐘不會再觸發一次。這張表只負責去重，不是成敗紀錄。
+- `session._ledger_emitter`：evaluator 觸發時寫 `env_observation`（timer），反應結束後寫一筆 `trigger_fire`，兩者共用 correlation_id。
+
+cron 排程、rhythm anchor 和三個記憶迴圈（memory maintenance、distill dream、consolidation）各自排程，但共用同一種 `trigger_fire` 紀錄：
+
+| 欄位 | 意思 |
+|---|---|
+| `source` | `cron` / `event` / `condition` / `memory_loop` |
+| `name` | trigger 名稱，或記憶迴圈的 label |
+| `fired_at` | 到期或觸發的時間（UTC epoch） |
+| `started_at` / `ended_at` | 反應開始與結束；`missed` 時兩者為 null |
+| `outcome` | `completed` / `failed` / `cancelled` / `skipped` / `spawned` / `delivered` / `missed` |
+| `reason` | `failed` 記例外型別；`skipped`、`missed` 一定帶原因 |
+
+anchor 的三種狀態分開記（#656）：
+
+- `spawned`：dawn 建出當日 session。不代表有送 chime。
+- `delivered`：chime 被當日 session 收進佇列。
+- `missed`：沒送到 agent。`no_today_session` 是 chime 找不到當日 session；`evaluator_gap` 是 evaluator 那一分鐘根本沒跑（例如前一個反應卡住迴圈），evaluator 下次執行時補記，每個漏掉的 cron 分鐘一筆，最多回看 24 小時。
+
+anchor 的 `missed` 同時寫進 `phase_log`（當日 state 存在時）。舊資料裡的 `skipped` 仍可讀，讀法等同未送達。這裡只記錄，不補送；補送屬於 #668。
+
+---
+
 ## ActionPlanner.handle() — 完整實作邏輯
 
 ```python
