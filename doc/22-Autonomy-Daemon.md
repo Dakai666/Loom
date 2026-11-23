@@ -220,6 +220,8 @@ async def _run_agent(self, plan: PlannedAction) -> None:
 
 沒被任何 grant 涵蓋的命令會被 skip 並通知（#668）。ledger 的 `permission_decision.decision` 寫 `skip`，`tool_lifecycle` END 的 `outcome` 寫 `skipped`，不算進 deny。reason 以 `unattended-skip` 開頭。S7 之前的資料把 skip 記成 `decision = "deny"`；S3c 之前的 reason 以 `unattended-deny` 開頭。
 
+subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_decision`（`origin = "subagent"`），落在**發起它的那個 turn** 裡，例如 chime turn。按 turn 加總決策的報表要按 `(turn, origin)` 分組，否則會把 subagent 的決策算成 chime 的。
+
 `absolute_paths = "deny"` 也會看 `=` 後面的路徑，例如 `--outdir=/tmp/x`。
 
 **`simple_argv` 是 fail-closed。** shape 只比對單一純命令。以下任一種都讓命令沒有 argv，因此沒有 shape 能涵蓋它：

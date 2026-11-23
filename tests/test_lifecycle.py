@@ -819,12 +819,13 @@ class TestSemanticFailureSurfacing:
         assert result.metadata.get("verifier_signal") == "mismatch"
 
     @pytest.mark.asyncio
-    async def test_verifier_failure_preserves_original_output_in_error(self):
+    async def test_verifier_failure_keeps_original_output_visible(self):
         """Issue #298: when a verifier flags semantic_failure on a tool with
         no rollback (e.g. run_bash detecting a Python traceback in stdout),
         the captured output must remain visible to the agent — not just the
-        reason string. Session rendering only shows `error` on failure, so
-        the original output is appended there."""
+        reason string. Since #690 S3c the output stays in ``output`` and the
+        model reads its bounded tail; ``error`` is the reason alone."""
+        from loom.core.harness.failure import tool_result_text
 
         captured_output = (
             "shop ready\n"
@@ -863,9 +864,11 @@ class TestSemanticFailureSurfacing:
         assert result.failure_type == "semantic_failure"
         # Reason still surfaces.
         assert "Python traceback detected" in (result.error or "")
-        # And — the bug fix — original output is recoverable from `error`.
-        assert "ValueError: out of stock" in (result.error or "")
-        assert "out of stock" in (result.error or "")
+        # And — the bug fix — the agent still reads the original output.
+        assert result.output == captured_output
+        assert "ValueError: out of stock" in tool_result_text(result)
+        # Not copied into `error` as well (#690 S3c review: sent twice, unbounded).
+        assert "out of stock" not in (result.error or "")
         # Structured copy still in metadata for telemetry / programmatic use.
         assert result.metadata.get("verifier_signal") == "python_traceback"
         assert result.metadata.get("verifier_reason") == (

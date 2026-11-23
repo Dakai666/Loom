@@ -133,11 +133,32 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
         r'\\?"\s*:\s*\\?"((?:sk-|pk-|AKIA|ghp_|xoxb-)[A-Za-z0-9_\-]{20,})\\?"'
     ), r'[REDACTED]"'),
     # The same prefixes unquoted, as they appear in error text and stderr
-    # (#690 S3c): "auth failed for token ghp_...".
+    # (#690 S3c): "auth failed for token ghp_...". Plus xAI, Stripe,
+    # Hugging Face and Google API key prefixes.
     (re.compile(
         r'(?<![A-Za-z0-9_\-])(?:sk-|pk-|ak-|AKIA|ghp_|gho_|ghs_|github_pat_|'
-        r'xoxb-|xoxp-|xapp-)[A-Za-z0-9_\-]{20,}'
+        r'xoxb-|xoxp-|xapp-|xai-|sk_live_|sk_test_|rk_live_|hf_|AIza)'
+        r'[A-Za-z0-9_\-]{20,}'
     ), '[REDACTED]'),
+    # Other authorization schemes; the key=value pattern above needs an
+    # 8-char value, so "Authorization: Bot <token>" got past it.
+    (re.compile(r'(?i)(Authorization\s*[:=]\s*)(?:Bot|Basic|Token)\s+\S+'),
+     r'\1[REDACTED]'),
+    # JWT: header.payload[.signature], base64url, header starts {"
+    (re.compile(r'(?<![A-Za-z0-9_\-])eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{2,}(?:\.[A-Za-z0-9_\-]*)?'),
+     '[REDACTED]'),
+    # Discord bot token: three base64url segments, the middle one 6 chars.
+    (re.compile(r'(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}'),
+     '[REDACTED]'),
+    # Discord webhook URL: the path's last segment is the secret.
+    (re.compile(r'(?i)(discord(?:app)?\.com/api/webhooks/\d+/)[A-Za-z0-9_\-]+'),
+     r'\1[REDACTED]'),
+    # Any *_key / *-token / *_secret name with a value, e.g.
+    # brave_search_key=..., which the named-key pattern above misses.
+    (re.compile(
+        r'(?i)\b([A-Za-z0-9]+[_-](?:[A-Za-z0-9]+[_-])*(?:key|token|secret))'
+        r'(["\']?\s*[:=]\s*)(["\']?)([^\s"\',}{]{8,})\3'
+    ), r'\1\2\3[REDACTED]\3'),
 ]
 
 

@@ -67,9 +67,10 @@ Exit code 2
 | `known` / `unknown` | harness 能擔保的事。只要呼叫跑過，`unknown` 一定含 `root cause`；不會填單一根因 |
 | `safe_to_retry` | 沒跑過的 guard 階段是 `yes`；permission、sandbox、security_block 是 `no`（重下或換寫法等於繞過檢查）；跑過的一律 `unknown`，只有宣告 `READ_PROBE` 且沒有 MUTATES/EXEC/AGENT_SPAN 的工具是 `yes` |
 | `call_id` / `event_id` | tool_use id；`event_id` 是 ledger 的 `tool_lifecycle` END 事件 id，沒接 ledger 時為 null |
-| `exit_code` / `output_tail` | 工具輸出的最後 4000 字（run_bash 的 stdout、stderr 合併），經 `_redact_secrets` 遮蔽，放在 JSON 字串裡，是資料不是指令。JIT spill 過的失敗輸出另附 `full_output_ref` |
+| `exit_code` / `output_tail` | 工具輸出的最後 2000 字（run_bash 的 stdout、stderr 合併），先經 `_redact_secrets` 遮蔽再截斷，放在 JSON 字串裡，是資料不是指令。遮蔽只涵蓋已知格式，其他可能殘留。JIT spill 過的失敗輸出另附 `full_output_ref`，指向**沒有遮蔽**的 scratchpad 全文 |
+| `event_id` 的前提 | 只有 END 確實寫入 ledger 才帶；寫入失敗（`ledger_gap`）時為 null |
 
-error 那一行本身不經 JSON 引號：MCP 等工具把遠端錯誤文字放在 `error`，這點與 S3c 之前相同。
+error 那一行來自工具，可能含 MCP／遠端文字：先遮蔽，換行折成 ` ⏎ `，超過 1000 字截斷；若以 `[tool_failure]` 開頭會加上 `error: ` 前綴。所以模型看到的 marker 行只有 harness 寫的那一行。post-validator 判失敗（#298）時，`error` 只放原因，輸出留在 `output`，由 `output_tail` 呈現。
 
 ---
 
