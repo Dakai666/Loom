@@ -99,6 +99,12 @@ class ScopeGrant:
     filters out expired grants automatically.
     """
 
+    attended_only: bool = False
+    """
+    Granted by a human confirm in an attended turn (#690 S6b). It never
+    covers an unattended call (chime, autonomy), which keeps its own grants.
+    """
+
 
 @dataclass(frozen=True)
 class ScopeRequirement:

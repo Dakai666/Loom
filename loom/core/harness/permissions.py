@@ -135,6 +135,10 @@ class PermissionContext:
 
     # --- Legacy (pre-#45) authorization ---
     session_authorized: set[str] = field(default_factory=set)
+    # Tool names a human authorized in an attended turn (#690 S6b): never
+    # seen by an unattended call. ``exec_auto`` (the operator's /auto) is
+    # attended-only too.
+    attended_authorized: set[str] = field(default_factory=set)
     exec_auto: bool = False
 
     # --- Scope-aware authorization (Issue #45 Phase A) ---
@@ -147,11 +151,12 @@ class PermissionContext:
 
     # ── Legacy API (unchanged) ────────────────────────────────────
 
-    def authorize(self, tool_name: str) -> None:
-        self.session_authorized.add(tool_name)
+    def authorize(self, tool_name: str, *, attended_only: bool = False) -> None:
+        (self.attended_authorized if attended_only else self.session_authorized).add(tool_name)
 
     def revoke(self, tool_name: str) -> None:
         self.session_authorized.discard(tool_name)
+        self.attended_authorized.discard(tool_name)
 
     def enable_exec_auto(self) -> None:
         self.exec_auto = True
@@ -166,6 +171,7 @@ class PermissionContext:
             constraints={"absolute_paths": "deny"},
             source="exec_auto",
             granted_at=_time.time(),
+            attended_only=True,
         ))
 
     def disable_exec_auto(self) -> None:
@@ -173,11 +179,14 @@ class PermissionContext:
         # Phase D: revoke exec_auto grants
         self.revoke_matching(lambda g: g.source == "exec_auto")
 
-    def is_authorized(self, tool_name: str, trust_level: TrustLevel) -> bool:
+    def is_authorized(
+        self, tool_name: str, trust_level: TrustLevel, *, attended: bool = True,
+    ) -> bool:
         if trust_level == TrustLevel.SAFE:
             return True
         if trust_level == TrustLevel.GUARDED:
-            return tool_name in self.session_authorized
+            return tool_name in self.session_authorized or (
+                attended and tool_name in self.attended_authorized)
         # CRITICAL always requires fresh confirmation — never pre-authorized.
         return False
 
@@ -218,7 +227,7 @@ class PermissionContext:
         return before - len(self.grants)
 
     def evaluate(
-        self, request: ScopeRequest, trust_level: TrustLevel,
+        self, request: ScopeRequest, trust_level: TrustLevel, *, attended: bool = True,
     ) -> PermissionVerdict:
         """
         Evaluate a scope request against current grants.
@@ -228,11 +237,14 @@ class PermissionContext:
             CONFIRM      — first-time authorization needed
             EXPAND_SCOPE — existing grants don't cover the request scope
             DENY         — CRITICAL trust or policy block
+
+        ``attended=False`` (an unattended call) ignores grants a human gave
+        in an attended turn (``ScopeGrant.attended_only``, #690 S6b).
         """
         from .scope import PermissionVerdict as PV, DiffReason
 
         if trust_level == TrustLevel.CRITICAL:
-            diff = self.diff(request)
+            diff = self.diff(request, attended=attended)
             # CRITICAL always requires fresh confirmation, but we distinguish
             # between first-time and expansion for the UI layer.
             if diff.is_fully_covered:
@@ -243,7 +255,7 @@ class PermissionContext:
             return PV.ALLOW
 
         # GUARDED — check scope coverage
-        diff = self.diff(request)
+        diff = self.diff(request, attended=attended)
         if diff.is_fully_covered:
             # Consume budgets for covered requirements
             self._consume_budgets(request)
@@ -254,10 +266,12 @@ class PermissionContext:
 
         return PV.EXPAND_SCOPE
 
-    def diff(self, request: ScopeRequest) -> ScopeDiff:
+    def diff(self, request: ScopeRequest, *, attended: bool = True) -> ScopeDiff:
         """Compute the scope diff between request and current grants."""
         from .scope import compute_diff
         effective = self._effective_grants()
+        if not attended:
+            effective = [g for g in effective if not g.attended_only]
         return compute_diff(effective, request)
 
     def _effective_grants(self) -> list[ScopeGrant]:
@@ -294,6 +308,7 @@ class PermissionContext:
                 source=g.source,
                 granted_at=g.granted_at,
                 valid_until=g.valid_until,
+                attended_only=g.attended_only,
             ))
         return effective
 

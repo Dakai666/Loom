@@ -232,11 +232,11 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
 
-**人類確認授予的是 shape，不是 workspace（#690 S6）。** attended turn（Discord thread、CLI）裡人類確認一次 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`cat clean.md` 確認過之後，`cat clean.md /etc/passwd` 仍會再問。routine 宣告的 shape 不帶這個 constraint，維持前綴匹配。chain、重導或展開的命令沒有 argv，確認只放行這一次，不留 grant。S6 之前這裡會留下一個沒有 TTL 的 `workspace` grant，同一 session 之後的所有命令都會 ALLOW。
+**人類確認的 grant（#690 S6、S6b）。** attended turn（Discord thread、CLI）裡按「允許一次」確認 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`gh issue view 1` 確認過之後，`gh issue view 1 --comments` 仍會再問。chain、重導或展開的命令沒有 argv，允許一次不留 grant。按 **auto**（或 lease）授予整類（`workspace`），但同一 session 之後只涵蓋讀取與網路讀取（規則 allow，或 review 類別是 `network_read`／`public_search`，`approval.auto_may_cover`）；寫檔、刪除、發文、設定變更、憑證與 workspace 外的路徑每次都仍會問（S6b，DK 2026-11-24：「只有真正修改、不可逆或要發文才問我」）。人類確認的 grant、legacy 工具名授權（`attended_authorized`）與 `/auto`（`exec_auto`）都只在 attended 時有效，unattended 呼叫（chime、autonomy）看不到它們，只能靠自己的 routine grant。routine 宣告的 shape 不帶 `exact_argv`，維持前綴匹配。
 
-**shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6 分類器不會放行任何腳本執行，但既有的 shape grant 照舊放行。
+**shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6b 起規則不認得的程式（腳本、interpreter、wrapper）一律問人，既有的 shape grant 照舊放行。
 
-### 自動核准分類器（#690 S6）
+### 自動核准分類器（#690 S6、S6b）
 
 `loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有 name bridge 放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。
 
@@ -244,9 +244,9 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 | 結果 | 情況 | 之後 |
 |---|---|---|
-| refuse | CRITICAL；routine 宣告的 scope 被超出（EXPAND_SCOPE 且衝突的 grant 不是人類確認來的，即 ceiling）；第一期以外的工具；workspace 外、隱藏路徑、名稱像憑證的路徑；控制檔（非文件副檔名、`.toml`、`.py`、`Agent.md`、`SOUL.md`、任何 `SKILL.md`…）；像秘密的搜尋 query；不是單一本地讀取的 shell（chain、展開、glob、未列出的程式、會寫檔或執行的 flag、內容符合 S3c 遮罩 pattern 的檔案：`*_KEY=`、`TOKEN=`、`sk-`/`xai-` 等前綴、JWT、Discord bot token、PEM 私鑰）；這個 turn 沒有 runtime 給的意圖 | 原路：attended 問人，unattended skip（#668） |
-| allow | Loom Agent 的 journal 與 daily weave（`autonomy/circadian/journal/`、`daily_weave.md`、`daily_weave/`，Q2） | 直接放行，不呼叫模型 |
-| review | workspace 內一般文件寫入、本地讀取（`cat` `head` `tail` `wc` `grep`(不遞迴) `find`(不執行/刪除) `ls` `diff` …）、公開搜尋 | 交模型 |
+| refuse | CRITICAL；routine 宣告的 scope 被超出（EXPAND_SCOPE 且衝突的 grant 不是人類確認來的，即 ceiling）；規則不認得的工具；workspace 外、隱藏路徑、名稱像憑證的路徑；控制檔（非文件副檔名、`.toml`、`.py`、`Agent.md`、`SOUL.md`、任何 `SKILL.md`…）；像秘密的搜尋 query；會修改、刪除、送出的 shell（任何一段：`>`/`>>` 寫檔（`/dev/null` 除外）、`tee`、`rm` `mv` `cp` `chmod` `kill`…、`sed -i`、`find -delete/-exec`、非唯讀的 `sqlite3`、`git push/reset/commit/checkout`…、`gh issue comment`/`pr merge`/`api -X POST`/`-f`、`ssh`、`| sh`）；**規則不認得的程式**（`python3`、`node`、`sed`、`awk`、`sort`、`uniq`、wrapper 如 `command`/`nice`/`time`/`timeout`/`env`、`FOO=1` 前綴）；`git -c/-C/--exec-path`、`git cat-file`、`git log -p`、沒有 `--stat`/`--name-only` 的 `git show`（歷史裡的 secret 看不到）；`find -L`；從 stdin 讀指令的 `sqlite3`；寫檔、送憑證或非 http(s) 的 `curl`（`-o` `-D` `--trace` `-b` `-u` `-H Authorization` `-d`、非 GET 的 `-X`、`file://`）；`$`、反引號、子 shell、heredoc、背景 `&` 這類執行期才知道的內容；內容符合 S3c 遮罩 pattern 的檔案（`*_KEY=`、`TOKEN=`、`sk-`/`xai-` 等前綴、JWT、Discord bot token、PEM 私鑰）；這個 turn 沒有 runtime 給的意圖 | 原路：attended 問人，unattended skip（#668） |
+| allow | Loom Agent 的 journal 與 daily weave（`autonomy/circadian/journal/`、`daily_weave.md`、`daily_weave/`，Q2）；**唯讀 shell**（S6b）：每一段都只在 workspace 內讀取，pipeline 與 `&&` `;` 串接都可以：`cat` `head` `tail` `wc` `grep`(不遞迴) `rg`(指定檔案) `find`(不執行/刪除) `ls` `stat` `diff`、`git log/diff/status/remote -v/blame…`、`git show --stat`、`sqlite3 -readonly`（或 `mode=ro`）、`2>/dev/null`。`*`/`?` glob 會先展開，每個結果都要過路徑與內容檢查（`ls`/`stat`/`find` 只列名稱，不檢查名稱與內容是否像憑證） | 直接放行，不呼叫模型 |
+| review | workspace 內一般文件寫入；網路讀取（`gh issue/pr view`、GET 的 `gh api`、純 GET 的 http(s) `curl`；packet 的 `known_effects.known` 為 false，伺服器端效果規則看不到）；公開搜尋，含 MCP 的 `*__web_search` | 交模型 |
 
 **模型層只答 accept 或 abstain。** `codex/gpt-6-luna`，透過既有 Codex OAuth provider（ChatGPT plan）、low effort。每次一個 provider attempt：直接建 provider，不經 router，所以沒有 quota failover；不重試、不修 JSON。5 秒 timeout、錯誤、格式不對、整個請求（含 prompt）超過 16,384 bytes 都算 abstain。abstain 走原路，skip 通知會附上原因（例如 `model-abstain: timeout`）。accept 只放行這一次，不寫 grant，所以模型不能擴大 scope。
 
@@ -284,7 +284,8 @@ FROM events WHERE event_type = 'approval_review'
   AND json_extract(payload,'$.outcome') = 'accept';
 ```
 
-**已知弱點。** 題庫中 3 題中間區（AB008、AB014、AB022）模型錯放：效果在 workspace 內且可逆，但偏離目前意圖（讀到檔尾、寫錯主題）。安全邊界由規則層負責，模型只減少人工確認，不是最後一道防線。
+**已知弱點。** 題庫中 2 題中間區（AB014、AB022）模型錯放：效果在 workspace 內且可逆，但偏離目前意圖（寫錯主題）。S6b 起唯讀 shell 由規則直接放行，不看意圖是否相符：題庫裡 12 題「讀對檔案、但不是目前要做的事」（含原本的 AB008）因此放行，這是 DK 的取捨（讀取沒有要復原的效果）。`sort | uniq -c`（AB047）因為 sort／uniq 能寫檔而改成問人。安全邊界由規則層負責，模型只減少人工確認，不是最後一道防線。
+
 
 
 ---
