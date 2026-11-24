@@ -10,10 +10,12 @@ Two layers:
 1. Rules decide what they can without a model. ``REFUSE`` keeps the existing
    path (human prompt when attended, #668 skip when not): CRITICAL tools,
    declared scope ceilings, control files, credential-looking paths, file
-   contents or queries, anything outside the workspace, any shell command
-   that is not one plain local read, and a turn with no runtime-given intent.
-   ``ALLOW`` passes clearly safe categories (Loom Agent's journal and daily
-   weave, Q2). Everything else is ``REVIEW``.
+   contents or queries, anything outside the workspace, shell that writes,
+   deletes, posts or sends (#690 S6b), and a turn with no runtime-given
+   intent. ``ALLOW`` passes clearly safe categories: Loom Agent's journal
+   and daily weave (Q2), and shell whose every part only reads inside the
+   workspace (S6b). Everything else is ``REVIEW``, MCP public search
+   included.
 2. The model sees only ``REVIEW`` calls and answers ``accept`` or ``abstain``.
    One attempt on ``codex/gpt-6-luna`` (ChatGPT plan, low effort): no retry,
    no router failover, no JSON repair. A timeout, an error, an invalid reply,
@@ -26,6 +28,7 @@ widen a scope or outlive the call it judged.
 from __future__ import annotations
 
 import asyncio
+import glob as _glob
 import json
 import logging
 import re
@@ -33,7 +36,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import Enum, IntEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -41,7 +44,7 @@ from zoneinfo import ZoneInfo
 from loom.core.memory.session_log import _redact_secrets
 
 from .permissions import TrustLevel
-from .scope import PermissionVerdict, ScopeRequest, simple_argv
+from .scope import PermissionVerdict, ScopeRequest
 
 _log = logging.getLogger(__name__)
 
@@ -100,19 +103,6 @@ _PERSONAL_CONTENT = (
     PurePosixPath("autonomy/circadian/daily_weave"),
     PurePosixPath("autonomy/circadian/daily_weave.md"),
 )
-# Shell programs whose only effect is printing local content, with the flags
-# that would give them another effect. A program not listed has unknown
-# effect and is refused (python, sed, awk, sort -o, rg --pre, jq env ...).
-_LOCAL_READ_PROGRAMS: dict[str, frozenset[str]] = {
-    "cat": frozenset(), "head": frozenset(), "tail": frozenset(), "wc": frozenset(),
-    "nl": frozenset(), "cut": frozenset(), "ls": frozenset(), "stat": frozenset(),
-    "du": frozenset(), "diff": frozenset(), "comm": frozenset(), "pwd": frozenset(),
-    "date": frozenset({"-s", "--set"}),
-    # Recursion would read hidden files (.env) the path check never sees.
-    "grep": frozenset({"-r", "-R", "--recursive", "--dereference-recursive", "-d", "--directories"}),
-    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
-                       "-fprint0", "-fprintf", "-fls"}),
-}
 # Globs, brace and tilde expansion let bash reach files the literal token
 # does not name (hidden, home, or one whose content was never checked).
 _EXPANSION_CHARS = frozenset("*?{}[]~")
@@ -140,17 +130,27 @@ def _workspace_relative(raw: str, workspace: Path) -> PurePosixPath | None:
         return None
 
 
-def _path_refusal(raw: str, workspace: Path) -> str | None:
-    if any(c in _EXPANSION_CHARS for c in raw):
-        return "path_expansion"
+def _location_refusal(raw: str, workspace: Path, *, allow: tuple[str, ...] = ()) -> str | None:
+    """Whether the literal path *raw* is outside the workspace, hidden or
+    credential-named. *allow* drops words from the credential check
+    (``.db`` for a database sqlite3 opens read-only)."""
     rel = _workspace_relative(raw, workspace)
     if rel is None:
         return "outside_workspace"
     if any(part.startswith(".") for part in rel.parts):
         return "hidden_path"
-    if _secret_like(str(rel)):
+    name = str(rel).lower()
+    for word in allow:
+        name = name.replace(word, "")
+    if _secret_like(name):
         return "credential_path"
     return None
+
+
+def _path_refusal(raw: str, workspace: Path) -> str | None:
+    if any(c in _EXPANSION_CHARS for c in raw):
+        return "path_expansion"
+    return _location_refusal(raw, workspace)
 
 
 def _holds_secret(raw: str, workspace: Path) -> bool:
@@ -194,34 +194,439 @@ def _search_rule(call: Any, workspace: Path) -> RuleDecision:
     return RuleDecision(RuleOutcome.REVIEW, "public_search")
 
 
+# ---------------------------------------------------------------------------
+# Shell (#690 S6b): DK's rule. Read-only shell never asks him; only real
+# modifications, irreversible actions and posting/sending ask.
+# ---------------------------------------------------------------------------
+
+
+class Effect(IntEnum):
+    """What one part of a shell command does. A command is its worst part."""
+    READ = 0     # only reads inside the workspace: allowed by rule
+    REVIEW = 1   # anything else not clearly harmful: the model decides
+    ASK = 2      # writes, destroys, posts, or crosses a hard rule: DK decides
+
+
+@dataclass(frozen=True)
+class Word:
+    text: str           # after quote removal
+    glob: bool = False  # an unquoted * or ? (bash expands it)
+    expands: bool = False  # unquoted { } [ ] or a leading ~
+
+
+@dataclass
+class Segment:
+    """One simple command of a pipeline or chain, with its redirections."""
+    words: list[Word] = field(default_factory=list)
+    redirects: list[tuple[str, Word | None]] = field(default_factory=list)
+
+
+def parse_shell(command: str) -> list[Segment] | None:
+    """*command* split on ``|`` ``||`` ``&&`` ``;`` and newlines, or None
+    when bash would compute part of it at run time: ``$``, backticks,
+    backslashes, subshells, heredocs or background ``&`` outside single
+    quotes. Single quotes are literal, so a quoted jq filter is fine."""
+    segments = [Segment()]
+    buf: list[str] | None = None
+    glob = expands = False
+    quote: str | None = None
+    pending: str | None = None  # a redirection waiting for its target
+
+    def end_word() -> None:
+        nonlocal buf, glob, expands, pending
+        if buf is None:
+            return
+        word = Word("".join(buf), glob, expands)
+        if pending:
+            segments[-1].redirects.append((pending, word))
+            pending = None
+        else:
+            segments[-1].words.append(word)
+        buf, glob, expands = None, False, False
+
+    def next_segment() -> bool:
+        end_word()
+        if pending:
+            return False
+        segments.append(Segment())
+        return True
+
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        nxt = command[i + 1] if i + 1 < n else ""
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                buf.append(c)
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            elif c in "$`\\":
+                return None
+            else:
+                buf.append(c)
+        elif c in "'\"":
+            quote = c
+            buf = [] if buf is None else buf
+        elif c in " \t":
+            end_word()
+        elif c in "$`\\()":
+            return None
+        elif c in ";\n":
+            if not next_segment():
+                return None
+        elif c == "|":
+            if nxt == "&":
+                return None
+            i += nxt == "|"
+            if not next_segment():
+                return None
+        elif c == "&":
+            if nxt == "&":
+                i += 1
+                if not next_segment():
+                    return None
+            elif nxt == ">" and not pending:
+                end_word()
+                i += 1
+                pending = ">>" if command[i + 1:i + 2] == ">" else ">"
+                i += pending == ">>"
+            else:
+                return None  # background job
+        elif c in "<>":
+            if pending:
+                return None
+            if buf is not None and "".join(buf).isdigit() and not glob:
+                buf = None  # a file descriptor: 2>, 1>>
+            else:
+                end_word()
+            if nxt == c == "<" or (c == "<" and nxt in ">&"):
+                return None  # heredoc, <>, <&
+            if nxt == "&":  # >&2, 2>&1
+                j = i + 2
+                while j < n and (command[j].isdigit() or command[j] == "-"):
+                    j += 1
+                if j == i + 2:
+                    return None
+                segments[-1].redirects.append((">&", None))
+                i = j
+                continue
+            pending = ">>" if (c == ">" and nxt == ">") else c
+            i += pending == ">>"
+        else:
+            if buf is None:
+                buf = []
+            if c in "*?":
+                glob = True
+            elif c in "{}[]" or (c == "~" and not buf):
+                expands = True
+            buf.append(c)
+        i += 1
+    if quote:
+        return None
+    end_word()
+    if pending:
+        return None
+    return [s for s in segments if s.words or s.redirects]
+
+
+def _word_refusal(word: Word, workspace: Path, *, allow: tuple[str, ...] = (),
+                  names_only: bool = False) -> str | None:
+    """Hard-rule check on a word bash may open as a file: the word itself
+    and, for a glob, every workspace file it expands to. ``names_only``: the
+    program lists names and never opens the file (ls, stat), so a
+    credential-looking name or content is not a read of it."""
+    if word.expands:
+        return "path_expansion"
+    targets = [word.text]
+    if word.glob:
+        root = workspace.resolve()
+        targets += [str(root / m) for m in _glob.glob(word.text, root_dir=root)]
+    for target in targets:
+        refusal = _location_refusal(target, workspace, allow=allow)
+        if refusal and not (names_only and refusal == "credential_path"):
+            return refusal
+        if not names_only and _holds_secret(target, workspace):
+            return "credential_content"
+    return None
+
+
+def _flags(args: list[Word]) -> tuple[list[str], list[Word]]:
+    """Option words and operand words. ``--flag=value`` contributes its
+    value as an operand too, so a path behind ``=`` is still checked."""
+    flags, operands = [], []
+    for w in args:
+        if w.text.startswith("-") and w.text != "-":
+            flags.append(w.text)
+            _, eq, value = w.text.partition("=")
+            if eq and value:
+                operands.append(Word(value, w.glob, w.expands))
+        else:
+            operands.append(w)
+    return flags, operands
+
+
+def _has_flag(flags: list[str], names: frozenset[str]) -> bool:
+    """Whether a flag (or a short-option cluster such as ``-rn``) names one."""
+    for f in flags:
+        base = f.partition("=")[0]
+        if base in names:
+            return True
+        if not base.startswith("--") and any(f"-{c}" in names for c in base[1:]):
+            return True
+    return False
+
+
+Verdict = tuple[Effect, str]
+_READ: Verdict = (Effect.READ, "read_only_shell")
+
+
+def _reader(ask: frozenset[str] = frozenset(), *, files_only: bool = False,
+            names_only: bool = False):
+    """A program whose only effect is printing local content, unless one
+    of the *ask* flags is given. Every operand is checked as a path, so a
+    grep for "token" asks like a file named so. ``files_only``: an operand
+    that is a directory (or none at all) means a recursive read the path
+    check never saw, so the model reviews it. ``names_only``: see
+    ``_word_refusal``."""
+    def rule(args: list[Word], workspace: Path) -> Verdict:
+        flags, operands = _flags(args)
+        if _has_flag(flags, ask):
+            return Effect.ASK, "effectful_flag"
+        for w in operands:
+            if refusal := _word_refusal(w, workspace, names_only=names_only):
+                return Effect.ASK, refusal
+        if files_only and (len(operands) < 2 or any(
+                (workspace / w.text).is_dir() for w in operands)):
+            return Effect.REVIEW, "local_read"
+        return _READ
+    return rule
+
+
+def _git(args: list[Word], workspace: Path) -> Verdict:
+    if not args or args[0].text.startswith("-"):
+        return Effect.REVIEW, "workspace_shell"  # -C, -c: another repo or config
+    sub, rest = args[0].text, args[1:]
+    flags, operands = _flags(rest)
+    if sub in _GIT_WRITES:
+        return Effect.ASK, "modifies"
+    if sub not in _GIT_READS:
+        return Effect.REVIEW, "workspace_shell"
+    if any(f.startswith("--output") for f in flags):
+        return Effect.ASK, "writes"
+    if sub in ("branch", "tag") and (operands or _has_flag(flags, _GIT_REF_EDITS)):
+        return Effect.ASK, "modifies"
+    if sub == "remote" and operands:
+        return (Effect.ASK, "modifies") if operands[0].text in _GIT_REMOTE_EDITS \
+            else (Effect.REVIEW, "network_read")
+    if sub == "reflog" and operands and operands[0].text in ("expire", "delete"):
+        return Effect.ASK, "modifies"
+    for w in operands:
+        # HEAD:.env reads a file from history: check the part after ":".
+        path = Word(w.text.rpartition(":")[2] or w.text, w.glob, w.expands)
+        if refusal := _word_refusal(path, workspace):
+            return Effect.ASK, refusal
+    return _READ
+
+
+def _gh(args: list[Word], workspace: Path) -> Verdict:
+    words = [w.text for w in args]
+    if not words:
+        return Effect.ASK, "external"
+    if words[0] == "api":
+        for i, word in enumerate(words):
+            base, _, value = word.partition("=")
+            if base in ("-X", "--method"):
+                method = value or (words[i + 1] if i + 1 < len(words) else "")
+            elif word.startswith("-X"):
+                method = word[2:]
+            else:
+                continue
+            if method.upper() != "GET":
+                return Effect.ASK, "external"
+        if _has_flag(_flags(args[1:])[0], _GH_API_SENDS):
+            return Effect.ASK, "external"
+        return Effect.REVIEW, "network_read"
+    action = words[1] if len(words) > 1 else ""
+    if words[0] == "search" or action in _GH_READS.get(words[0], ()):
+        return Effect.REVIEW, "network_read"
+    return Effect.ASK, "external"
+
+
+def _curl(args: list[Word], workspace: Path) -> Verdict:
+    flags, _ = _flags(args)
+    if _has_flag(flags, _CURL_SENDS):
+        return Effect.ASK, "external"
+    return Effect.REVIEW, "network_read"
+
+
+def _sqlite3(args: list[Word], workspace: Path) -> Verdict:
+    readonly = False
+    db: Word | None = None
+    sql: list[str] = []
+    for w in args:
+        if w.text in ("-readonly", "--readonly"):
+            readonly = True
+        elif w.text in ("-cmd", "--cmd", "-init", "--init"):
+            return Effect.ASK, "effectful_flag"
+        elif w.text.startswith("-"):
+            continue
+        elif db is None:
+            db = w
+        else:
+            sql.append(w.text)
+    if db is None:
+        return Effect.REVIEW, "local_read"
+    path, _, query = db.text.removeprefix("file:").partition("?")
+    if db.text.startswith("file:") and ("mode=ro" in query or "immutable=1" in query):
+        readonly = True
+    if not readonly:
+        return Effect.ASK, "sqlite_writable"
+    if refusal := _word_refusal(Word(path, db.glob, db.expands), workspace, allow=(".db", ".sqlite")):
+        return Effect.ASK, refusal
+    if not sql:
+        return Effect.REVIEW, "local_read"  # SQL from stdin, unseen
+    if any(s.lstrip().startswith(".") or _SQLITE_EFFECTS.search(s) for s in sql):
+        return Effect.ASK, "effectful_sql"
+    return _READ
+
+
+def _editor(args: list[Word], workspace: Path) -> Verdict:
+    """sed / perl / awk: -i edits in place; anything else is reviewed."""
+    flags, _ = _flags(args)
+    if any(f.startswith("--in-place") or (not f.startswith("--") and "i" in f[1:]) for f in flags):
+        return Effect.ASK, "writes"
+    return _other(args, workspace)
+
+
+def _other(args: list[Word], workspace: Path) -> Verdict:
+    """A program with no rule of its own: the model reviews it, but a word
+    that names a path still obeys the hard rules."""
+    for w in args:
+        t = w.text
+        if w.expands or t.startswith(("/", "~", ".")) or "/" in t or (workspace / t).exists():
+            if refusal := _word_refusal(w, workspace):
+                return Effect.ASK, refusal
+    return Effect.REVIEW, "workspace_shell"
+
+
+_GIT_READS = frozenset({
+    "log", "show", "diff", "status", "remote", "branch", "tag", "rev-parse", "blame",
+    "ls-files", "shortlog", "describe", "reflog", "rev-list", "cat-file", "ls-tree",
+    "show-ref", "merge-base",
+})
+_GIT_WRITES = frozenset({
+    "push", "reset", "commit", "checkout", "switch", "restore", "clean", "rebase", "merge",
+    "cherry-pick", "revert", "stash", "add", "rm", "mv", "config", "init", "clone", "pull",
+    "fetch", "am", "apply", "gc", "prune", "worktree", "submodule", "update-ref", "notes",
+    "filter-branch", "replace", "bisect",
+})
+_GIT_REF_EDITS = frozenset({"-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move",
+                            "--copy", "--force", "--set-upstream-to", "--unset-upstream",
+                            "--edit-description"})
+_GIT_REMOTE_EDITS = frozenset({"add", "remove", "rm", "rename", "set-url", "set-head",
+                               "set-branches", "prune", "update"})
+_GH_READS = {
+    "issue": ("view", "list", "status"), "pr": ("view", "list", "diff", "checks", "status"),
+    "repo": ("view",), "run": ("view", "list"), "release": ("view", "list"),
+    "workflow": ("view", "list"), "label": ("list",),
+}
+_GH_API_SENDS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+_CURL_SENDS = frozenset({"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+                         "--json", "-F", "--form", "-T", "--upload-file", "-X", "--request",
+                         "-o", "-O", "--output", "--remote-name", "-K", "--config", "-c",
+                         "--cookie-jar"})
+_SQLITE_EFFECTS = re.compile(r"writefile|readfile|load_extension|edit\s*\(|fts3_tokenizer|attach",
+                             re.IGNORECASE)
+
+# Programs that modify, destroy, send, run other code, or print the
+# environment: always DK's call (skipped when unattended).
+_ASK_PROGRAMS = frozenset({
+    "rm", "rmdir", "unlink", "mv", "cp", "ln", "install", "chmod", "chown", "chgrp", "chflags",
+    "touch", "mkdir", "mkfifo", "truncate", "shred", "srm", "dd", "tee", "kill", "pkill",
+    "killall", "sudo", "su", "doas", "shutdown", "reboot", "halt", "launchctl", "crontab",
+    "at", "brew", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "gem", "defaults", "security",
+    "osascript", "open", "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "eval",
+    "exec", "source", ".", "xargs", "nohup", "env", "printenv", "export", "set", "wget",
+    "scp", "sftp", "ftp", "rsync", "ssh", "nc", "ncat", "netcat", "telnet", "mail",
+    "sendmail", "mutt",
+})
+
+_SHELL_RULES: dict[str, Callable[[list[Word], Path], Verdict]] = {
+    **{p: _reader() for p in ("cat", "head", "tail", "wc", "nl", "cut", "comm", "file")},
+    **{p: _reader(names_only=True) for p in ("ls", "stat", "du")},
+    "pwd": lambda args, ws: _READ,
+    "echo": lambda args, ws: _READ,
+    "diff": _reader(frozenset({"-r", "--recursive"})),
+    "date": _reader(frozenset({"-s", "--set"})),
+    # Recursion would read hidden files (.env) the path check never sees.
+    "grep": _reader(frozenset({"-r", "-R", "--recursive", "--dereference-recursive",
+                               "-d", "--directories"})),
+    "rg": _reader(frozenset({"--hidden", "-.", "-u", "--unrestricted", "--no-ignore",
+                             "--pre", "--pre-glob", "-L", "--follow"}), files_only=True),
+    "find": _reader(frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
+                               "-fprint0", "-fprintf", "-fls"}), names_only=True),
+    "git": _git,
+    "gh": _gh,
+    "curl": _curl,
+    "sqlite3": _sqlite3,
+    **{p: _editor for p in ("sed", "gsed", "perl", "ruby", "awk", "gawk")},
+}
+
+
+def classify_shell(command: str, workspace: Path) -> Verdict:
+    """The worst effect over every part of *command*."""
+    segments = parse_shell(command)
+    if segments is None:
+        return Effect.ASK, "dynamic"
+    worst: Verdict = _READ
+    cwd = workspace  # `cd` moves where later relative paths resolve
+    for seg in segments:
+        words = [w.text for w in seg.words]
+        if words[:1] == ["cd"] and len(words) == 2 and not seg.redirects:
+            if refusal := _word_refusal(seg.words[1], cwd, names_only=True):
+                return Effect.ASK, refusal
+            cwd = (cwd / words[1]).resolve()
+            continue
+        verdict = _segment(seg, cwd)
+        if verdict[0] > worst[0] or (verdict[0] == worst[0] == Effect.REVIEW
+                                     and verdict[1] == "network_read"):
+            worst = verdict
+    return worst
+
+
+def _segment(seg: Segment, workspace: Path) -> Verdict:
+    for op, target in seg.redirects:
+        if op in (">", ">>") and target is not None and target.text != "/dev/null":
+            return Effect.ASK, "writes"
+        if op == "<" and target is not None and (refusal := _word_refusal(target, workspace)):
+            return Effect.ASK, refusal
+    if not seg.words:
+        return _READ
+    head, args = seg.words[0], seg.words[1:]
+    if head.glob or head.expands:
+        return Effect.ASK, "path_expansion"
+    program = PurePosixPath(head.text).name
+    if program in _ASK_PROGRAMS:
+        return Effect.ASK, "modifies_or_external"
+    rule = _SHELL_RULES.get(program)
+    if rule is None or "/" in head.text:
+        return _other(seg.words, workspace)
+    return rule(args, workspace)
+
+
 def _bash_rule(call: Any, workspace: Path) -> RuleDecision:
     command = call.args.get("command")
-    if not isinstance(command, str):
+    if not isinstance(command, str) or not command.strip():
         return _refuse("no_command")
-    argv = simple_argv(command)
-    if argv is None:
-        return _refuse("compound_or_dynamic")
-    program, args = argv[0], argv[1:]
-    forbidden = _LOCAL_READ_PROGRAMS.get(program)
-    if forbidden is None:
-        return _refuse("unknown_effect")
-    for arg in args:
-        flag, _, value = arg.partition("=")
-        if arg.startswith("-"):
-            # A short-option cluster such as -rn (or -dskip) carries -r (-d).
-            if flag in forbidden or (
-                    not arg.startswith("--") and any(f"-{c}" in forbidden for c in arg[1:])):
-                return _refuse("effectful_flag")
-            if not value:
-                continue
-            arg = value
-        # Every word is checked as a path inside the workspace, patterns
-        # included: a grep for "token" is refused like a file named so.
-        if refusal := _path_refusal(arg, workspace):
-            return _refuse(refusal)
-        if _holds_secret(arg, workspace):
-            return _refuse("credential_content")
-    return RuleDecision(RuleOutcome.REVIEW, "local_read")
+    effect, reason = classify_shell(command, workspace)
+    if effect is Effect.READ:
+        return RuleDecision(RuleOutcome.ALLOW, reason)
+    if effect is Effect.ASK:
+        return _refuse(reason)
+    return RuleDecision(RuleOutcome.REVIEW, reason)
 
 
 # tool name → (resource its scope requirement names, rule)
@@ -230,12 +635,43 @@ _TOOL_RULES: dict[str, tuple[str, Callable[[Any, Path], RuleDecision]]] = {
     "web_search": ("network", _search_rule),
     "run_bash": ("exec", _bash_rule),
 }
+# MCP public search (``minimax_coding__web_search``) is native search by
+# another name (#690 S6b).
+_MCP_SEARCH_SUFFIX = "__web_search"
+
+
+def _tool_rule(tool_name: str) -> tuple[str, Callable[[Any, Path], RuleDecision]] | None:
+    if tool_name.endswith(_MCP_SEARCH_SUFFIX):
+        return _TOOL_RULES["web_search"]
+    return _TOOL_RULES.get(tool_name)
+
+
+# Refusals that hold even inside a session-wide grant DK gave with "auto"
+# (#690 S6b): his auto covers a kind of call, never a credential or a path
+# outside the workspace.
+HARD_LIMITS = frozenset({
+    "credential_path", "credential_content", "hidden_path", "outside_workspace",
+    "path_expansion", "sensitive_query",
+})
+
+
+def hard_limit(call: Any, workspace: Path) -> str | None:
+    """The hard rule *call* crosses, if any, whatever grants exist."""
+    entry = _tool_rule(call.tool_name)
+    if entry is None:
+        return None
+    decision = entry[1](call, workspace)
+    if decision.outcome is RuleOutcome.REFUSE and decision.reason in HARD_LIMITS:
+        return decision.reason
+    return None
 
 # What the rules established about a REVIEW call, per category, in the
 # packet vocabulary of the regression bank: the effect class the rule
 # verified, and the ceiling it verified it against.
 _CATEGORY_EFFECTS = {
     "local_read": ("workspace_content", "local_content_read"),
+    "network_read": ("public_read", "external_read_no_publish"),
+    "workspace_shell": ("workspace_command", "no_listed_write_delete_or_send"),
     "workspace_document": ("workspace_content", "workspace_content_write"),
     "public_search": ("public_query", "existing_public_search"),
 }
@@ -243,17 +679,20 @@ _CEILING = "僅已准/workspace內容與既准公開搜尋"
 
 
 def classify_rules(
-    call: Any, request: ScopeRequest, verdict: PermissionVerdict, perm: Any, workspace: Path,
+    call: Any, request: ScopeRequest | None, verdict: PermissionVerdict, perm: Any,
+    workspace: Path,
 ) -> RuleDecision:
     """The rule layer: refuse, allow, or send to the model."""
     if verdict not in (PermissionVerdict.CONFIRM, PermissionVerdict.EXPAND_SCOPE):
         return _refuse(f"verdict_{verdict.value}")
     if call.trust_level == TrustLevel.CRITICAL:
         return _refuse("critical")
-    entry = _TOOL_RULES.get(call.tool_name)
+    entry = _tool_rule(call.tool_name)
     if entry is None:
         return _refuse("not_covered")
     resource, rule = entry
+    if request is None:  # a tool without a scope resolver (MCP search)
+        return rule(call, workspace)
     missing = perm.diff(request).missing
     if any(req.resource != resource for req in missing):
         return _refuse("other_resource")
@@ -563,19 +1002,27 @@ class ApprovalClassifier:
         self._context = context
         self._budget = budget
 
+    def covers(self, call: Any) -> bool:
+        """Whether the rules know *call*'s tool at all."""
+        return _tool_rule(call.tool_name) is not None
+
+    def hard_limit(self, call: Any) -> str | None:
+        return hard_limit(call, self._workspace)
+
     async def decide(
-        self, call: Any, request: ScopeRequest, verdict: PermissionVerdict,
+        self, call: Any, request: ScopeRequest | None, verdict: PermissionVerdict,
     ) -> ApprovalDecision:
         rule = classify_rules(call, request, verdict, self._perm, self._workspace)
         if rule.outcome is RuleOutcome.REFUSE:
             return ApprovalDecision(False, f"rule-refuse: {rule.reason}")
-        if rule.outcome is RuleOutcome.ALLOW:
-            return ApprovalDecision(True, f"rule-allow: {rule.reason}")
         context = self._context()
-        # Without a runtime-given intent there is nothing to judge the call
-        # against; text in data or tool output never stands in for one.
+        # Without a runtime-given intent nothing is approved automatically,
+        # not even a plain read; text in data or tool output never stands in
+        # for one.
         if not context.current.intent.strip():
             return ApprovalDecision(False, "rule-refuse: no_trusted_intent")
+        if rule.outcome is RuleOutcome.ALLOW:
+            return ApprovalDecision(True, f"rule-allow: {rule.reason}")
         return await self._review(call, rule.reason, context)
 
     async def _review(self, call: Any, category: str, context: ReviewContext) -> ApprovalDecision:

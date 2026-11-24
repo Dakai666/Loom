@@ -1065,12 +1065,12 @@ class BlastRadiusMiddleware(Middleware):
                 k: v for k, v in req.constraints.items()
                 if k not in self._INFORMATIONAL_CONSTRAINTS
             }
-            # A confirmed shell command grants exactly that command, never
-            # the whole workspace (#690 S6): a later command with other or
-            # extra arguments asks again. A chain or expansion has no argv,
-            # so the human's yes covers this call only.
+            # "Allow once" on a shell command grants exactly that command
+            # (#690 S6): other or extra arguments ask again, and a chain or
+            # expansion (no argv) gets no grant. "Auto" and a lease keep the
+            # whole kind for the session, as DK chose (#690 S6b).
             selector = req.selector
-            if req.resource == "exec" and selector == "workspace":
+            if source == "manual_confirm" and req.resource == "exec" and selector == "workspace":
                 argv = req.constraints.get("argv")
                 if argv is None:
                     continue
@@ -1084,6 +1084,7 @@ class BlastRadiusMiddleware(Middleware):
                 source=source,
                 granted_at=now,
                 valid_until=valid_until,
+                attended_only=True,  # only an attended turn reaches a confirm
             ))
 
     # Sentinel to signal "resolver failed, use legacy path"
@@ -1115,13 +1116,22 @@ class BlastRadiusMiddleware(Middleware):
             )
             return self._FALLBACK_TO_LEGACY
 
-        diff = self._perm.diff(scope_request)
-        verdict = self._perm.evaluate(scope_request, call.trust_level)
+        attended = not self._is_unattended(call)
+        diff = self._perm.diff(scope_request, attended=attended)
+        verdict = self._perm.evaluate(scope_request, call.trust_level, attended=attended)
         self._write_scope_metadata(call, scope_request, diff, verdict)
 
         if verdict == PV.ALLOW:
-            self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}")
-            return None  # proceed
+            # DK's session-wide auto covers a kind of call, never a hard
+            # limit such as a credential read (#690 S6b): that asks again.
+            hard = None
+            if (self._classifier is not None
+                    and not self._perm.diff(scope_request, attended=False).is_fully_covered):
+                hard = self._classifier.hard_limit(call)
+            if hard is None:
+                self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}")
+                return None  # proceed
+            verdict = PV.CONFIRM
 
         if verdict == PV.DENY:
             self._notify_lifecycle(call, False, "scope-deny")
@@ -1258,11 +1268,28 @@ class BlastRadiusMiddleware(Middleware):
             self._notify_lifecycle(call, True, "exec_auto")
             return await next(call)
 
+        # #690 S6b: MCP public search goes through the approval classifier
+        # like native search; other legacy tools are refused by its rules.
+        note = None
+        if self._classifier is not None and self._classifier.covers(call):
+            from .scope import PermissionVerdict as PV
+            try:
+                approval = await self._classifier.decide(call, None, PV.CONFIRM)
+            except Exception:
+                _log.exception("approval classifier failed; not approving")
+                note = "error"
+            else:
+                if approval.approved:
+                    self._notify_lifecycle(call, True, f"classifier {approval.reason}")
+                    return await next(call)
+                note = approval.reason
+
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):
             return self._deny_unattended(
                 call, "legacy-not-authorized",
                 probe_would_authorize=self._exec_auto_blocked_only_by_probe(call),
+                classifier_note=note,
             )
 
         await self._enter_awaiting_confirm(call)

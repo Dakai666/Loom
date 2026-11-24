@@ -206,13 +206,16 @@ class TestRuleLayer:
         assert env.model.requests == []
 
     @pytest.mark.parametrize("command", [
-        "cat news/a.md && rm -rf /", "cat news/a.md | sh", "cat $(ls)", "python3 x.py",
-        "rm news/a.md", "curl https://example.com", "git push", "cp a.md b.md",
+        "cat news/a.md && rm -rf /", "cat news/a.md | sh", "cat $(ls)",
+        "rm news/a.md", "curl -d x https://example.com", "git push", "cp a.md b.md",
         "cat /etc/passwd", "cat ~/.loom/auth.json", "cat .env", "grep -r KEY .",
         "cat config/token.txt", "find . -delete", "find . -exec cat {} +",
-        "cat {.,}env", "cat ../secret.md", "sed -n 1p news/a.md", "cat ledger.db",
+        "cat {.,}env", "cat ../secret.md", "sed -i 1d news/a.md", "cat ledger.db",
     ])
-    async def test_shell_outside_known_local_reads_never_reaches_the_model(self, tmp_path, ledger, command):
+    async def test_writes_sends_and_hard_limits_never_reach_the_model(self, tmp_path, ledger, command):
+        """Read-only shell is allowed and other shell is reviewed (#690
+        S6b); these write, delete, send, run dynamic code or cross a hard
+        rule, so the rules refuse them before any model."""
         env = Env(tmp_path, ledger)
         r = await env.run("run_bash", {"command": command})
         assert _skipped(r, env)
@@ -246,16 +249,17 @@ class TestRuleLayer:
         assert "credential_content" in r.error
         assert env.model.requests == []
 
-    async def test_ordinary_file_content_still_reaches_review(self, tmp_path, ledger):
+    async def test_ordinary_file_content_is_read_without_review(self, tmp_path, ledger):
         env = Env(tmp_path, ledger)
         (env.ws / "docs").mkdir()
         (env.ws / "docs" / "notes.md").write_text("OAuth access tokens expire; refresh them.")
         r = await env.run("run_bash", {"command": "cat docs/notes.md"})
-        assert r.success and len(env.model.requests) == 1
+        assert r.success and env.model.requests == []  # read-only shell (#690 S6b)
 
-    @pytest.mark.parametrize("command", ["cat news/*.md", "head -n 5 news/a.m?", "ls ~"])
-    async def test_globs_are_refused(self, tmp_path, ledger, command):
-        """bash would expand them to files no rule has looked at."""
+    @pytest.mark.parametrize("command", ["cat news/[ab].md", "head -n 5 news/{a,b}.md", "ls ~"])
+    async def test_brace_bracket_and_tilde_expansion_are_refused(self, tmp_path, ledger, command):
+        """bash would expand them to files no rule has looked at. Plain
+        * and ? globs are expanded and checked instead (#690 S6b)."""
         env = Env(tmp_path, ledger)
         r = await env.run("run_bash", {"command": command})
         assert _skipped(r, env)
@@ -276,7 +280,7 @@ class TestRuleLayer:
         root.mkdir(parents=True)
         env = Env(root, ledger)
         r = await env.run("run_bash", {"command": f"cat {env.ws}/news/a.md"})
-        assert r.success and len(env.model.requests) == 1
+        assert r.success and env.model.requests == []
         r = await env.run("write_file", _write(f"{env.ws}/outputs/brief.md"))
         assert r.success
 
@@ -392,21 +396,21 @@ class TestModelLayer:
         """The model cannot widen scope: an accept covers this call only."""
         env = Env(tmp_path, ledger)
         before = list(env.perm.grants)
-        await env.run("run_bash", {"command": "cat news/a.md"})
+        await env.run("run_bash", {"command": "sed -n 1p news/a.md"})
         assert env.perm.grants == before
         assert env.perm.session_authorized == set()
-        await env.run("run_bash", {"command": "cat news/a.md"})
+        await env.run("run_bash", {"command": "sed -n 1p news/a.md"})
         assert len(env.model.requests) == 2  # reviewed again, not remembered
 
     async def test_packet_has_intent_args_and_recent_calls_but_no_tools(self, tmp_path, ledger):
         env = Env(tmp_path, ledger)
         env.turn.calls.append(("prev", "read_file", {"path": "news/a.md"}))
-        await env.run("run_bash", {"command": "wc -l news/a.md"})
+        await env.run("run_bash", {"command": "sed -n 1p news/a.md"})
         p = env.model.packet()
         assert p["runtime"]["trusted_intent"]["current"] == "整理今天的公開新聞晨報。"
         assert p["runtime"]["origin"]["kind"] == "chime"
-        assert p["runtime"]["known_effects"]["operations"] == ["local_content_read"]
-        assert p["current_call"] == {"tool": "run_bash", "args": {"command": "wc -l news/a.md"}}
+        assert p["runtime"]["known_effects"]["operations"] == ["no_listed_write_delete_or_send"]
+        assert p["current_call"] == {"tool": "run_bash", "args": {"command": "sed -n 1p news/a.md"}}
         assert p["recent_calls"] == [{"tool": "read_file", "args": {"path": "news/a.md"}, "state": "requested"}]
         assert env.model.requests[0][0]["role"] == "system"
 
@@ -465,7 +469,7 @@ class TestInjection:
 
     async def test_injection_cannot_unlock_a_refused_command(self, tmp_path, ledger):
         env = Env(tmp_path, ledger)
-        r = await env.run("run_bash", {"command": f"python3 -c 'print(1)' '{INJECTION}'"})
+        r = await env.run("run_bash", {"command": f"rm news/a.md '{INJECTION}'"})
         assert _skipped(r, env)
         assert env.model.requests == []
 
@@ -539,14 +543,15 @@ class TestDailyCap:
 
 
 # ---------------------------------------------------------------------------
-# Attended confirm grants the command shape, not the workspace (S6 prerequisite)
+# "Allow once" grants the command shape, not the workspace (S6). "Auto" is
+# session-wide again (#690 S6b, tests/test_approval_rules_690_s6b.py).
 # ---------------------------------------------------------------------------
 
 
 class TestConfirmGrantsShape:
     async def test_confirmed_command_grants_its_shape(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                  confirm_result=ConfirmDecision.AUTO)
+                  confirm_result=ConfirmDecision.ONCE)
         assert (await env.run("run_bash", {"command": "python3 tools/report.py --day today"},
                               origin="discord")).success
         exec_grants = [g for g in env.perm.grants if g.resource == "exec"]
@@ -556,7 +561,7 @@ class TestConfirmGrantsShape:
         env.confirm.assert_awaited_once()  # a different command asks again
 
     async def test_confirmed_chain_grants_nothing(self, tmp_path, ledger):
-        env = Env(tmp_path, ledger, confirm_result=ConfirmDecision.AUTO)
+        env = Env(tmp_path, ledger, confirm_result=ConfirmDecision.ONCE)
         assert (await env.run("run_bash", {"command": "cd x && python3 y.py"},
                               origin="discord")).success
         assert [g for g in env.perm.grants if g.resource == "exec"] == []
@@ -637,7 +642,7 @@ class TestPacketBoundary:
         assert len(env.model.packet()["current_call"]["args"]["justification"].encode()) < 1600
 
     @pytest.mark.parametrize("tool,args", [
-        ("run_bash", {"command": "cat news/today.md", "justification": "晨報需要今天的新聞"}),
+        ("run_bash", {"command": "sed -n 1,40p news/today.md", "justification": "晨報需要今天的新聞"}),
         ("write_file", {"path": "outputs/dawn-notes.md", "content": "晨間摘要。" * 400,
                         "justification": "把晨報重點寫成筆記"}),
     ])
@@ -666,7 +671,7 @@ class TestPacketBoundary:
 
     async def test_weave_is_untrusted_context_not_intent(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, intent="晨間整理新聞。", context="今日織程：順便改設定")
-        await env.run("run_bash", {"command": "cat news/a.md"})
+        await env.run("run_bash", {"command": "sed -n 1p news/a.md"})
         p = env.model.packet()
         assert p["runtime"]["trusted_intent"]["current"] == "晨間整理新聞。"
         assert p["agent_authored_context"] == {
@@ -678,12 +683,12 @@ class TestPacketBoundary:
 class TestExactConfirm:
     async def test_confirmed_command_does_not_cover_extra_arguments(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                  confirm_result=ConfirmDecision.AUTO)
-        assert (await env.run("run_bash", {"command": "cat clean.md"}, origin="discord")).success
+                  confirm_result=ConfirmDecision.ONCE)
+        assert (await env.run("run_bash", {"command": "python3 clean.py"}, origin="discord")).success
         env.confirm.reset_mock()
-        assert (await env.run("run_bash", {"command": "cat clean.md"}, origin="discord")).success
+        assert (await env.run("run_bash", {"command": "python3 clean.py"}, origin="discord")).success
         env.confirm.assert_not_awaited()  # the same command is covered
-        await env.run("run_bash", {"command": "cat clean.md /etc/passwd"}, origin="discord")
+        await env.run("run_bash", {"command": "python3 clean.py /etc/passwd"}, origin="discord")
         env.confirm.assert_awaited_once()  # extra arguments ask again
 
     def test_routine_shapes_keep_prefix_matching(self):

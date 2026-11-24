@@ -240,7 +240,7 @@ class TestDenyAndCeilingsStillWin:
         from loom.core.harness.scope import PermissionVerdict
 
         class _PolicyDeny(PermissionContext):
-            def evaluate(self, request, trust_level):
+            def evaluate(self, request, trust_level, **_kw):
                 return PermissionVerdict.DENY
 
         blast, executor, ran, _ = _setup(tmp_path)
