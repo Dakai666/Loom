@@ -11,11 +11,12 @@ Two layers:
    path (human prompt when attended, #668 skip when not): CRITICAL tools,
    declared scope ceilings, control files, credential-looking paths, file
    contents or queries, anything outside the workspace, shell that writes,
-   deletes, posts or sends (#690 S6b), and a turn with no runtime-given
-   intent. ``ALLOW`` passes clearly safe categories: Loom Agent's journal
-   and daily weave (Q2), and shell whose every part only reads inside the
-   workspace (S6b). Everything else is ``REVIEW``, MCP public search
-   included.
+   deletes, posts or sends or runs a program the rules do not know (#690
+   S6b), and a turn with no runtime-given intent. ``ALLOW`` passes clearly
+   safe categories: Loom Agent's journal and daily weave (Q2), and shell
+   whose every part only reads inside the workspace (S6b). ``REVIEW`` is
+   left for workspace document writes, public search (MCP included) and
+   shell network reads (``gh`` reads, plain http(s) GET ``curl``).
 2. The model sees only ``REVIEW`` calls and answers ``accept`` or ``abstain``.
    One attempt on ``codex/gpt-6-luna`` (ChatGPT plan, low effort): no retry,
    no router failover, no JSON repair. A timeout, an error, an invalid reply,
