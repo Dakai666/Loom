@@ -135,6 +135,10 @@ class PermissionContext:
 
     # --- Legacy (pre-#45) authorization ---
     session_authorized: set[str] = field(default_factory=set)
+    # Tool names a human authorized in an attended turn (#690 S6b): never
+    # seen by an unattended call. ``exec_auto`` (the operator's /auto) is
+    # attended-only too.
+    attended_authorized: set[str] = field(default_factory=set)
     exec_auto: bool = False
 
     # --- Scope-aware authorization (Issue #45 Phase A) ---
@@ -147,11 +151,12 @@ class PermissionContext:
 
     # ── Legacy API (unchanged) ────────────────────────────────────
 
-    def authorize(self, tool_name: str) -> None:
-        self.session_authorized.add(tool_name)
+    def authorize(self, tool_name: str, *, attended_only: bool = False) -> None:
+        (self.attended_authorized if attended_only else self.session_authorized).add(tool_name)
 
     def revoke(self, tool_name: str) -> None:
         self.session_authorized.discard(tool_name)
+        self.attended_authorized.discard(tool_name)
 
     def enable_exec_auto(self) -> None:
         self.exec_auto = True
@@ -166,6 +171,7 @@ class PermissionContext:
             constraints={"absolute_paths": "deny"},
             source="exec_auto",
             granted_at=_time.time(),
+            attended_only=True,
         ))
 
     def disable_exec_auto(self) -> None:
@@ -173,11 +179,14 @@ class PermissionContext:
         # Phase D: revoke exec_auto grants
         self.revoke_matching(lambda g: g.source == "exec_auto")
 
-    def is_authorized(self, tool_name: str, trust_level: TrustLevel) -> bool:
+    def is_authorized(
+        self, tool_name: str, trust_level: TrustLevel, *, attended: bool = True,
+    ) -> bool:
         if trust_level == TrustLevel.SAFE:
             return True
         if trust_level == TrustLevel.GUARDED:
-            return tool_name in self.session_authorized
+            return tool_name in self.session_authorized or (
+                attended and tool_name in self.attended_authorized)
         # CRITICAL always requires fresh confirmation — never pre-authorized.
         return False
 

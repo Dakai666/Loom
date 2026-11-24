@@ -163,27 +163,69 @@ class TestHardRulesStillWin:
 
 
 # ---------------------------------------------------------------------------
-# Middle ground: the model reviews
+# Review is only for network reads (#699 review): anything else asks
 # ---------------------------------------------------------------------------
 
 
-class TestModelReviewsTheRest:
+class TestOnlyNetworkReadsAreReviewed:
     @pytest.mark.parametrize("command", [
         "gh issue view 650 --json comments --jq '.comments[-6:][] | \"\\(.author.login)\"'",
         "git remote -v; gh issue view 650 --json number,title",
         "gh api repos/Dakai666/Loom/issues/comments/1 --jq '{html_url,body}'",
-        "python3 skills/report.py --day today",
         "curl -s https://example.com",
+        "curl -sS -X GET -H 'Accept: application/json' https://example.com/a",
     ])
-    async def test_reviewed_and_accepted_without_dk(self, tmp_path, ledger, command):
+    async def test_network_read_reviewed_and_accepted_without_dk(self, tmp_path, ledger, command):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
         assert not await _ask(env, command)
         assert len(env.model.requests) == 1 and len(env.ran) == 1
+        assert env.model.packet()["runtime"]["known_effects"]["known"] is False
 
     async def test_abstain_still_asks_dk(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'))
-        assert await _ask(env, "python3 skills/report.py")
+        assert await _ask(env, "gh issue view 650")
 
+    @pytest.mark.parametrize("command", [
+        # unknown programs and interpreters
+        "python3 skills/report.py --day today", "unknown-prog --out=/tmp/x",
+        "python3 -c 'import os; os.system(\"rm -rf .\")'", "node -e 'x'",
+        "perl -e 'system(1)'", "ruby -e 'x'", "awk 'BEGIN{system(\"rm x\")}'",
+        "sed -n 1p news/a.md", "sh -c 'rm x'",
+        # wrappers and env prefixes
+        "command rm -rf news", "nice rm news/a.md", "time rm news/a.md", "builtin rm x",
+        "stdbuf -o0 rm x", "caffeinate rm x", "timeout 5 rm x", "watch rm x",
+        "parallel rm ::: x", "env rm x", "FOO=1 rm -rf news", "FOO=1 cat news/a.md",
+        # file-writing flags
+        "sort -o out.txt news/a.md", "uniq news/a.md out.txt", "plutil -o out.plist x",
+        # git global flags and history content
+        "git -c core.pager=sh log", "git --exec-path=/tmp log", "git -C /Users/x show",
+        "git cat-file -p HEAD:a.md", "git log -p", "git show HEAD", "git show abc123",
+        # sqlite3 reading commands from stdin
+        "sqlite3 -readonly news/x.db < news/cmds.sql",
+        "cat news/cmds.sql | sqlite3 -readonly news/x.db",
+        # curl that writes, sends credentials, or leaves http(s)
+        "curl -D /tmp/h https://example.com", "curl --trace t.log https://example.com",
+        "curl -o x https://example.com", "curl -b c=1 https://example.com",
+        "curl -u a:b https://example.com", "curl -H 'Authorization: Bearer x' https://e.com",
+        "curl -d x https://example.com", "curl -X POST https://example.com",
+        "curl file:///etc/passwd", "curl https://user:pw@example.com",
+        # symlink-following find
+        "find -L news -name x",
+    ])
+    async def test_everything_else_asks_without_the_model(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
+        assert await _ask(env, command)
+        assert env.model.requests == []
+
+    @pytest.mark.parametrize("command", [
+        "git show --stat HEAD", "git log --oneline -5", "git diff HEAD~1 -- news",
+    ])
+    async def test_history_summaries_stay_read_only(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger)
+        assert not await _ask(env, command)
+
+
+class TestMcpSearch:
     async def test_mcp_public_search_is_reviewed_like_native_search(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
         ran: list[str] = []
@@ -218,49 +260,119 @@ class TestModelReviewsTheRest:
 
 
 # ---------------------------------------------------------------------------
-# Attended auto lasts the session; unattended never rides it
+# Attended auto lasts the session for reads only; unattended never rides it
 # ---------------------------------------------------------------------------
 
 
-class TestAttendedAutoIsSessionWide:
-    async def test_auto_covers_later_commands_in_the_session(self, tmp_path, ledger):
+class TestAttendedAuto:
+    async def test_auto_on_a_network_read_lasts_the_session(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "python3 tools/report.py --day today")
-        assert not await _ask(env, "python3 tools/other.py")
-        assert not await _ask(env, "gh issue comment 690 --body-file x.md")
+        assert await _ask(env, "gh issue view 650")
+        assert not await _ask(env, "gh issue view 690 --json comments")
+        assert not await _ask(env, "git remote -v; gh pr view 684")
         assert len(env.ran) == 3
 
-    async def test_auto_on_a_chain_lasts_the_session(self, tmp_path, ledger):
+    async def test_auto_never_covers_a_post_or_a_delete(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "cd x && python3 y.py")
-        assert not await _ask(env, "python3 z.py")
-
-    async def test_allow_once_still_covers_only_that_command(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.ONCE)
+        assert await _ask(env, "gh issue view 650")
+        assert await _ask(env, "gh issue comment 690 --body-file x.md")
+        assert await _ask(env, "gh issue comment 690 --body-file x.md")  # every time
+        assert await _ask(env, "rm news/a.md")
+        assert await _ask(env, "rm news/a.md")
         assert await _ask(env, "python3 tools/report.py")
-        assert not await _ask(env, "python3 tools/report.py")
-        assert await _ask(env, "python3 tools/report.py --extra")
+
+    async def test_auto_never_covers_a_write(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
+                   confirm_result=ConfirmDecision.AUTO)
+
+        async def write() -> bool:
+            env.confirm.reset_mock()
+            await env.run("write_file", {"path": "outputs/a.md", "content": "x"}, origin="discord")
+            return env.confirm.await_count > 0
+
+        assert await write()
+        assert await write()
 
     async def test_credential_rules_beat_a_session_auto(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "python3 tools/report.py")
+        assert await _ask(env, "gh issue view 650")
         assert await _ask(env, "cat .env")
         assert await _ask(env, "cat config/token.txt")
+        assert await _ask(env, "curl file:///etc/passwd")
+
+    async def test_allow_once_still_covers_only_that_command(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
+                   confirm_result=ConfirmDecision.ONCE)
+        assert await _ask(env, "gh issue view 650")
+        assert not await _ask(env, "gh issue view 650")
+        assert await _ask(env, "gh issue view 650 --comments")
 
     async def test_unattended_never_rides_a_session_auto(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "python3 tools/report.py")
-        r = await env.run("run_bash", {"command": "python3 tools/report.py"}, origin="chime")
+        assert await _ask(env, "gh issue view 650")
+        r = await env.run("run_bash", {"command": "gh issue view 650"}, origin="chime")
         assert not r.success and r.metadata.get("unattended_skip") is True
         assert len(env.ran) == 1  # only DK's attended run
 
     async def test_unattended_accept_writes_no_grant(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
         before = list(env.perm.grants)
-        r = await env.run("run_bash", {"command": "python3 tools/report.py"}, origin="chime")
+        r = await env.run("run_bash", {"command": "gh issue view 650"}, origin="chime")
         assert r.success and env.perm.grants == before
+
+
+# ---------------------------------------------------------------------------
+# Legacy name authorization and exec_auto are attended-only too
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyAttendedGate:
+    def test_human_name_authorization_is_invisible_unattended(self):
+        from loom.core.harness.permissions import PermissionContext
+        perm = PermissionContext(session_id="t")
+        perm.authorize(MCP_SEARCH, attended_only=True)
+        perm.authorize("read_discord_forum")  # a routine's allowed_tools
+        assert perm.is_authorized(MCP_SEARCH, TrustLevel.GUARDED)
+        assert not perm.is_authorized(MCP_SEARCH, TrustLevel.GUARDED, attended=False)
+        assert perm.is_authorized("read_discord_forum", TrustLevel.GUARDED, attended=False)
+
+    async def test_legacy_auto_does_not_reach_a_chime(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
+                   confirm_result=ConfirmDecision.AUTO)
+        name = "legacy_tool"
+
+        async def executor(call: ToolCall) -> ToolResult:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output="ok")
+
+        env.blast._registry.register(ToolDefinition(
+            name=name, description="", input_schema={}, executor=executor,
+            trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.NETWORK))
+
+        async def run(origin: str) -> ToolResult:
+            call = ToolCall(tool_name=name, args={}, trust_level=TrustLevel.GUARDED,
+                            capabilities=ToolCapability.NETWORK, session_id="t", origin=origin)
+            with turn_scope("turn_test"):
+                return await env.blast.process(call, executor)
+
+        assert (await run("discord")).success
+        env.confirm.assert_awaited_once()
+        assert (await run("discord")).success
+        env.confirm.assert_awaited_once()  # session-wide when attended
+        r = await run("chime")
+        assert not r.success and r.metadata.get("unattended_skip") is True
+
+    async def test_exec_auto_is_attended_only(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger)
+        env.perm.exec_auto = True
+        call = ToolCall(tool_name="run_bash", args={"command": "python3 x.py"},
+                        trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.EXEC,
+                        session_id="t", origin="chime")
+        assert not env.blast._exec_auto_approved(call)
+        call.origin = "discord"
+        assert env.blast._exec_auto_approved(call)
+        env.perm.enable_exec_auto()
+        assert all(g.attended_only for g in env.perm.grants if g.source == "exec_auto")

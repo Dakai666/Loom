@@ -386,36 +386,40 @@ _READ: Verdict = (Effect.READ, "read_only_shell")
 def _reader(ask: frozenset[str] = frozenset(), *, files_only: bool = False,
             names_only: bool = False):
     """A program whose only effect is printing local content, unless one
-    of the *ask* flags is given. Every operand is checked as a path, so a
-    grep for "token" asks like a file named so. ``files_only``: an operand
-    that is a directory (or none at all) means a recursive read the path
-    check never saw, so the model reviews it. ``names_only``: see
+    of the *ask* flags (or any ``--out…`` flag) is given. Every operand is
+    checked as a path, so a grep for "token" asks like a file named so.
+    ``files_only``: an operand that is a directory (or none at all) means
+    a recursive read the path check never saw. ``names_only``: see
     ``_word_refusal``."""
     def rule(args: list[Word], workspace: Path) -> Verdict:
         flags, operands = _flags(args)
-        if _has_flag(flags, ask):
+        if _has_flag(flags, ask) or any(f.startswith("--out") for f in flags):
             return Effect.ASK, "effectful_flag"
         for w in operands:
             if refusal := _word_refusal(w, workspace, names_only=names_only):
                 return Effect.ASK, refusal
         if files_only and (len(operands) < 2 or any(
                 (workspace / w.text).is_dir() for w in operands)):
-            return Effect.REVIEW, "local_read"
+            return Effect.ASK, "recursive_read"
         return _READ
     return rule
 
 
 def _git(args: list[Word], workspace: Path) -> Verdict:
     if not args or args[0].text.startswith("-"):
-        return Effect.REVIEW, "workspace_shell"  # -C, -c: another repo or config
+        return Effect.ASK, "git_global_flag"  # -c, -C, --exec-path: config, repo, binary
     sub, rest = args[0].text, args[1:]
     flags, operands = _flags(rest)
-    if sub in _GIT_WRITES:
-        return Effect.ASK, "modifies"
     if sub not in _GIT_READS:
-        return Effect.REVIEW, "workspace_shell"
+        return Effect.ASK, "modifies"
     if any(f.startswith("--output") for f in flags):
         return Effect.ASK, "writes"
+    # Patches and blobs print history, where a removed secret still lives;
+    # no path check sees that.
+    if sub == "cat-file" or (sub in ("log", "show") and _has_flag(flags, _GIT_PATCH)):
+        return Effect.ASK, "history_content"
+    if sub == "show" and not _has_flag(flags, _GIT_NO_PATCH):
+        return Effect.ASK, "history_content"
     if sub in ("branch", "tag") and (operands or _has_flag(flags, _GIT_REF_EDITS)):
         return Effect.ASK, "modifies"
     if sub == "remote" and operands:
@@ -456,8 +460,25 @@ def _gh(args: list[Word], workspace: Path) -> Verdict:
 
 
 def _curl(args: list[Word], workspace: Path) -> Verdict:
-    flags, _ = _flags(args)
-    if _has_flag(flags, _CURL_SENDS):
+    """A plain http(s) GET is a network read; anything that writes a file,
+    sends data or a credential, or uses another scheme asks."""
+    words = [w.text for w in args]
+    for i, word in enumerate(words):
+        nxt = words[i + 1] if i + 1 < len(words) else ""
+        base, _, value = word.partition("=")
+        if base in ("-X", "--request") or (word.startswith("-X") and len(word) > 2):
+            method = value or (word[2:] if word.startswith("-X") and len(word) > 2 else nxt)
+            if method.upper() not in ("GET", "HEAD"):
+                return Effect.ASK, "external"
+        elif base in ("-H", "--header") or (word.startswith("-H") and len(word) > 2):
+            header = value or (word[2:] if word.startswith("-H") and len(word) > 2 else nxt)
+            if _CURL_SECRET_HEADER.search(header):
+                return Effect.ASK, "credential_send"
+        elif "://" in word or word.lower().startswith("file:"):
+            scheme, _, rest = word.partition("://")
+            if scheme.lower() not in ("http", "https") or "@" in rest.split("/", 1)[0]:
+                return Effect.ASK, "external"
+    if _has_flag(_flags(args)[0], _CURL_SENDS):
         return Effect.ASK, "external"
     return Effect.REVIEW, "network_read"
 
@@ -478,7 +499,7 @@ def _sqlite3(args: list[Word], workspace: Path) -> Verdict:
         else:
             sql.append(w.text)
     if db is None:
-        return Effect.REVIEW, "local_read"
+        return Effect.ASK, "sqlite_stdin"
     path, _, query = db.text.removeprefix("file:").partition("?")
     if db.text.startswith("file:") and ("mode=ro" in query or "immutable=1" in query):
         readonly = True
@@ -487,29 +508,10 @@ def _sqlite3(args: list[Word], workspace: Path) -> Verdict:
     if refusal := _word_refusal(Word(path, db.glob, db.expands), workspace, allow=(".db", ".sqlite")):
         return Effect.ASK, refusal
     if not sql:
-        return Effect.REVIEW, "local_read"  # SQL from stdin, unseen
+        return Effect.ASK, "sqlite_stdin"  # dot commands (.shell) from stdin, unseen
     if any(s.lstrip().startswith(".") or _SQLITE_EFFECTS.search(s) for s in sql):
         return Effect.ASK, "effectful_sql"
     return _READ
-
-
-def _editor(args: list[Word], workspace: Path) -> Verdict:
-    """sed / perl / awk: -i edits in place; anything else is reviewed."""
-    flags, _ = _flags(args)
-    if any(f.startswith("--in-place") or (not f.startswith("--") and "i" in f[1:]) for f in flags):
-        return Effect.ASK, "writes"
-    return _other(args, workspace)
-
-
-def _other(args: list[Word], workspace: Path) -> Verdict:
-    """A program with no rule of its own: the model reviews it, but a word
-    that names a path still obeys the hard rules."""
-    for w in args:
-        t = w.text
-        if w.expands or t.startswith(("/", "~", ".")) or "/" in t or (workspace / t).exists():
-            if refusal := _word_refusal(w, workspace):
-                return Effect.ASK, refusal
-    return Effect.REVIEW, "workspace_shell"
 
 
 _GIT_READS = frozenset({
@@ -517,12 +519,11 @@ _GIT_READS = frozenset({
     "ls-files", "shortlog", "describe", "reflog", "rev-list", "cat-file", "ls-tree",
     "show-ref", "merge-base",
 })
-_GIT_WRITES = frozenset({
-    "push", "reset", "commit", "checkout", "switch", "restore", "clean", "rebase", "merge",
-    "cherry-pick", "revert", "stash", "add", "rm", "mv", "config", "init", "clone", "pull",
-    "fetch", "am", "apply", "gc", "prune", "worktree", "submodule", "update-ref", "notes",
-    "filter-branch", "replace", "bisect",
-})
+# cat-file is listed so it reaches its own history_content rule.
+_GIT_PATCH = frozenset({"-p", "-u", "--patch", "--patch-with-stat", "--patch-with-raw",
+                        "-L", "--textconv", "--ext-diff"})
+_GIT_NO_PATCH = frozenset({"--stat", "--shortstat", "--numstat", "--name-only",
+                           "--name-status", "--no-patch", "-s", "--summary"})
 _GIT_REF_EDITS = frozenset({"-d", "-D", "-m", "-M", "-c", "-C", "-f", "-u", "--delete", "--move",
                             "--copy", "--force", "--set-upstream-to", "--unset-upstream",
                             "--edit-description"})
@@ -534,15 +535,26 @@ _GH_READS = {
     "workflow": ("view", "list"), "label": ("list",),
 }
 _GH_API_SENDS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
-_CURL_SENDS = frozenset({"-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-                         "--json", "-F", "--form", "-T", "--upload-file", "-X", "--request",
-                         "-o", "-O", "--output", "--remote-name", "-K", "--config", "-c",
-                         "--cookie-jar"})
+_CURL_SENDS = frozenset({
+    # send data
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii",
+    "--json", "-F", "--form", "--form-string", "-T", "--upload-file",
+    # write files
+    "-o", "-O", "--output", "--remote-name", "--remote-name-all", "-D", "--dump-header",
+    "--trace", "--trace-ascii", "--etag-save", "--hsts", "--alt-svc", "--libcurl",
+    "-c", "--cookie-jar", "--create-dirs", "--output-dir",
+    # send credentials or read local config
+    "-b", "--cookie", "-u", "--user", "-n", "--netrc", "--netrc-file", "--netrc-optional",
+    "-E", "--cert", "--key", "--oauth2-bearer", "--aws-sigv4", "-K", "--config", "-q",
+})
+_CURL_SECRET_HEADER = re.compile(r"authorization|cookie|token|api[-_]?key|secret", re.IGNORECASE)
 _SQLITE_EFFECTS = re.compile(r"writefile|readfile|load_extension|edit\s*\(|fts3_tokenizer|attach",
                              re.IGNORECASE)
 
 # Programs that modify, destroy, send, run other code, or print the
-# environment: always DK's call (skipped when unattended).
+# environment: always DK's call (skipped when unattended). Any program
+# without a rule asks too (interpreters, wrappers such as `command` or
+# `timeout`, `FOO=1` prefixes, `sort -o`); this list only names the reason.
 _ASK_PROGRAMS = frozenset({
     "rm", "rmdir", "unlink", "mv", "cp", "ln", "install", "chmod", "chown", "chgrp", "chflags",
     "touch", "mkdir", "mkfifo", "truncate", "shred", "srm", "dd", "tee", "kill", "pkill",
@@ -567,12 +579,12 @@ _SHELL_RULES: dict[str, Callable[[list[Word], Path], Verdict]] = {
     "rg": _reader(frozenset({"--hidden", "-.", "-u", "--unrestricted", "--no-ignore",
                              "--pre", "--pre-glob", "-L", "--follow"}), files_only=True),
     "find": _reader(frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
-                               "-fprint0", "-fprintf", "-fls"}), names_only=True),
+                               "-fprint0", "-fprintf", "-fls", "-L", "-follow"}),
+                    names_only=True),
     "git": _git,
     "gh": _gh,
     "curl": _curl,
     "sqlite3": _sqlite3,
-    **{p: _editor for p in ("sed", "gsed", "perl", "ruby", "awk", "gawk")},
 }
 
 
@@ -613,7 +625,9 @@ def _segment(seg: Segment, workspace: Path) -> Verdict:
         return Effect.ASK, "modifies_or_external"
     rule = _SHELL_RULES.get(program)
     if rule is None or "/" in head.text:
-        return _other(seg.words, workspace)
+        return Effect.ASK, "unknown_program"
+    if program == "sqlite3" and any(op == "<" for op, _ in seg.redirects):
+        return Effect.ASK, "sqlite_stdin"
     return rule(args, workspace)
 
 
@@ -646,34 +660,30 @@ def _tool_rule(tool_name: str) -> tuple[str, Callable[[Any, Path], RuleDecision]
     return _TOOL_RULES.get(tool_name)
 
 
-# Refusals that hold even inside a session-wide grant DK gave with "auto"
-# (#690 S6b): his auto covers a kind of call, never a credential or a path
-# outside the workspace.
-HARD_LIMITS = frozenset({
-    "credential_path", "credential_content", "hidden_path", "outside_workspace",
-    "path_expansion", "sensitive_query",
-})
+# What a session-wide "auto" from DK may cover (#690 S6b): reads and network
+# reads. A write, a delete, a post or a hard rule asks every time.
+_AUTO_REVIEW_CATEGORIES = frozenset({"network_read", "public_search"})
 
 
-def hard_limit(call: Any, workspace: Path) -> str | None:
-    """The hard rule *call* crosses, if any, whatever grants exist."""
+def auto_may_cover(call: Any, workspace: Path) -> bool:
+    """Whether a grant DK gave with "auto" may cover *call*. A tool the
+    rules do not know keeps the grant's word."""
     entry = _tool_rule(call.tool_name)
     if entry is None:
-        return None
+        return True
     decision = entry[1](call, workspace)
-    if decision.outcome is RuleOutcome.REFUSE and decision.reason in HARD_LIMITS:
-        return decision.reason
-    return None
+    return decision.outcome is RuleOutcome.ALLOW or (
+        decision.outcome is RuleOutcome.REVIEW and decision.reason in _AUTO_REVIEW_CATEGORIES)
 
 # What the rules established about a REVIEW call, per category, in the
 # packet vocabulary of the regression bank: the effect class the rule
 # verified, and the ceiling it verified it against.
+# ``known``: whether the rules established the whole effect. A network read
+# was checked for send and write flags, but what the server does is unknown.
 _CATEGORY_EFFECTS = {
-    "local_read": ("workspace_content", "local_content_read"),
-    "network_read": ("public_read", "external_read_no_publish"),
-    "workspace_shell": ("workspace_command", "no_listed_write_delete_or_send"),
-    "workspace_document": ("workspace_content", "workspace_content_write"),
-    "public_search": ("public_query", "existing_public_search"),
+    "network_read": ("public_read", "external_read_no_publish", False),
+    "workspace_document": ("workspace_content", "workspace_content_write", True),
+    "public_search": ("public_query", "existing_public_search", True),
 }
 _CEILING = "僅已准/workspace內容與既准公開搜尋"
 
@@ -787,14 +797,14 @@ def build_packet(call: Any, ctx: ReviewContext, category: str) -> dict[str, Any]
     earliest calls are dropped (``history_complete`` turns false); the
     current call and its intent are never cut.
     """
-    classification, operation = _CATEGORY_EFFECTS[category]
+    classification, operation, known = _CATEGORY_EFFECTS[category]
     runtime: dict[str, Any] = {
         "trusted_intent": {"source": "runtime", "current": _clip(ctx.current.intent, INTENT_BYTES)},
         "origin": {"kind": call.origin, "trusted": True, "provenance": "runtime"},
         "authority": {"ref": "model-mediated-autonomy-policy-v1", "version": 1, "parent": None},
         "scope": {"covered": True, "explicit_deny": False, "revoked": False, "ceiling": _CEILING},
         "known_effects": {
-            "known": True, "classification": classification, "operations": [operation],
+            "known": known, "classification": classification, "operations": [operation],
             "resources": [], "external_publish": False, "deletion": False,
             "policy_change": False, "new_spend": False, "contains_secret": False,
         },
@@ -1006,8 +1016,8 @@ class ApprovalClassifier:
         """Whether the rules know *call*'s tool at all."""
         return _tool_rule(call.tool_name) is not None
 
-    def hard_limit(self, call: Any) -> str | None:
-        return hard_limit(call, self._workspace)
+    def auto_may_cover(self, call: Any) -> bool:
+        return auto_may_cover(call, self._workspace)
 
     async def decide(
         self, call: Any, request: ScopeRequest | None, verdict: PermissionVerdict,

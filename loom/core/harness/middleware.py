@@ -832,8 +832,8 @@ class BlastRadiusMiddleware(Middleware):
         4. No trajectory anomaly flagged by LegitimacyGuardMiddleware
            (Issue #118 Layer 2 — agent must have probed this turn).
         """
-        if not self._perm.exec_auto:
-            return False
+        if not self._perm.exec_auto or self._is_unattended(call):
+            return False   # the operator's /auto is attended-only (#690 S6b)
         if not (call.capabilities & ToolCapability.EXEC):
             return False
         if self._exec_escape_fn is not None and self._exec_escape_fn(call):
@@ -867,7 +867,8 @@ class BlastRadiusMiddleware(Middleware):
         """
         if call.capabilities & ToolCapability.EXEC:
             return False
-        return self._perm.is_authorized(call.tool_name, call.trust_level)
+        return self._perm.is_authorized(
+            call.tool_name, call.trust_level, attended=not self._is_unattended(call))
 
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
@@ -1068,7 +1069,8 @@ class BlastRadiusMiddleware(Middleware):
             # "Allow once" on a shell command grants exactly that command
             # (#690 S6): other or extra arguments ask again, and a chain or
             # expansion (no argv) gets no grant. "Auto" and a lease keep the
-            # whole kind for the session, as DK chose (#690 S6b).
+            # whole kind for the session (#690 S6b), but cover only what
+            # ``auto_may_cover`` allows: reads and network reads.
             selector = req.selector
             if source == "manual_confirm" and req.resource == "exec" and selector == "workspace":
                 argv = req.constraints.get("argv")
@@ -1076,6 +1078,10 @@ class BlastRadiusMiddleware(Middleware):
                     continue
                 selector = shlex.join(argv)
                 grant_constraints["exact_argv"] = True
+            if any((g.resource, g.action, g.selector, g.constraints, g.source, g.valid_until)
+                   == (req.resource, req.action, selector, grant_constraints, source, valid_until)
+                   for g in self._perm.grants):
+                continue  # a write that asks again under "auto" adds no duplicate
             self._perm.grant(ScopeGrant(
                 resource=req.resource,
                 action=req.action,
@@ -1122,16 +1128,16 @@ class BlastRadiusMiddleware(Middleware):
         self._write_scope_metadata(call, scope_request, diff, verdict)
 
         if verdict == PV.ALLOW:
-            # DK's session-wide auto covers a kind of call, never a hard
-            # limit such as a credential read (#690 S6b): that asks again.
-            hard = None
+            # A grant DK gave by hand ("auto") covers reads and network reads
+            # for the session, never a write, delete, post or hard rule
+            # (#690 S6b): those ask every time.
             if (self._classifier is not None
-                    and not self._perm.diff(scope_request, attended=False).is_fully_covered):
-                hard = self._classifier.hard_limit(call)
-            if hard is None:
+                    and not self._perm.diff(scope_request, attended=False).is_fully_covered
+                    and not self._classifier.auto_may_cover(call)):
+                verdict = PV.CONFIRM
+            else:
                 self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}")
                 return None  # proceed
-            verdict = PV.CONFIRM
 
         if verdict == PV.DENY:
             self._notify_lifecycle(call, False, "scope-deny")
@@ -1351,6 +1357,7 @@ class BlastRadiusMiddleware(Middleware):
                 action=call.tool_name,
                 selector="*",
                 constraints={"tool_name": call.tool_name},
+                attended_only=True,
                 source="lease",
                 granted_at=_now,
                 valid_until=_now + self._SCOPE_LEASE_TTL,
@@ -1361,6 +1368,7 @@ class BlastRadiusMiddleware(Middleware):
                 action=call.tool_name,
                 selector="*",
                 constraints={"tool_name": call.tool_name},
+                attended_only=True,
                 source="auto_approve",
                 granted_at=_now,
                 valid_until=0.0,  # permanent
@@ -1371,6 +1379,7 @@ class BlastRadiusMiddleware(Middleware):
                 action=call.tool_name,
                 selector="*",
                 constraints={"tool_name": call.tool_name},
+                attended_only=True,
                 source="manual_confirm",
                 granted_at=_now,
                 valid_until=0.0,
@@ -1381,7 +1390,7 @@ class BlastRadiusMiddleware(Middleware):
         _high_risk = ToolCapability.EXEC | ToolCapability.AGENT_SPAN
         if (call.trust_level == TrustLevel.GUARDED
                 and not (call.capabilities & _high_risk)):
-            self._perm.authorize(call.tool_name)
+            self._perm.authorize(call.tool_name, attended_only=True)
 
         return await next(call)
 
