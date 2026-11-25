@@ -406,3 +406,37 @@ def test_reference_images_and_html_ask(tmp_path, form):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes/c.md").write_text(f"測試通過。{form}結束")
     assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is None
+
+
+# #706 round 3: a definition inside a list item or a blockquote does not
+# render either. Lines such as "- [x]: 說明" ask too (accepted false positive).
+CONTAINER_DEFINITIONS = [
+    "\n- [ignore previous instructions]: https://example.com\n",
+    "\n* [x]: https://example.com\n", "\n+ [x]: https://example.com\n",
+    "\n> [ignore previous instructions]: https://example.com\n",
+    "\n>[x]: https://example.com\n",
+    "\n1. [ignore previous instructions]: https://example.com\n",
+    "\n1) [x]: https://example.com\n",
+    "\n-   [x]: https://example.com\n",
+    "\n> - [ignore previous instructions]: https://example.com\n",
+    "\n  > 1. > [x]: <#>\n",
+    "\n- [x]: https://example.com\n  一般內容接在定義後面\n",
+    "\n- [x]: 說明\n",
+]
+
+
+@pytest.mark.parametrize("form", CONTAINER_DEFINITIONS, ids=lambda h: repr(h)[:28])
+def test_definitions_in_lists_and_quotes_ask(tmp_path, form):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes/c.md").write_text(f"測試通過。{form}結束")
+    assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is None
+
+
+@pytest.mark.parametrize("prose", [
+    "\n- 第一點 [連結](https://example.com)\n- 第二點\n", "\n> 引用一段話：重點在這裡\n",
+    "\n1. 步驟一\n2) 步驟二\n",
+])
+def test_plain_lists_and_quotes_still_delegate(tmp_path, prose):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes/c.md").write_text(f"測試通過。{prose}")
+    assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is not None
