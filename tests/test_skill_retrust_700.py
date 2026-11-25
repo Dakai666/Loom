@@ -100,7 +100,7 @@ class Env:
 
         self.perm = PermissionContext(session_id="t")
         for n in name_authorized:
-            self.perm.authorize(n)
+            self.perm.declare("test:boundary", [n])
         self.emitter = LedgerEmitter(ledger, session_id="t")
         self.ledger = ledger
         self.confirm = confirm if confirm is not None else showing()
@@ -282,15 +282,15 @@ async def test_model_accepted_write_is_not_trusted(tmp_path, ledger):
     await _assert_not_trusted(env)
 
 
-async def test_unattended_bridged_write_is_not_trusted(tmp_path, ledger):
-    # The autonomy daemon's allowed_tools bridge lets the write run with no
-    # human attending.
+async def test_unattended_declared_write_is_not_trusted(tmp_path, ledger):
+    # A routine that declares write_file still cannot write a skill's guard
+    # unattended: checks.py is a hard guardrail (#704 S3; the old name
+    # bridge let this write run).
     env = Env(tmp_path, ledger, name_authorized=("write_file",))
     r = await env.write(origin="autonomy")
-    assert r.success
-    assert (env.skill_dir / "checks.py").read_text() == NEW
+    assert not r.success and r.metadata.get("unattended_skip") is True
+    assert (env.skill_dir / "checks.py").read_text() != NEW  # never written
     env.confirm_mock.assert_not_awaited()
-    await _assert_not_trusted(env)
 
 
 async def test_bytes_that_differ_from_the_approved_write_are_not_trusted(tmp_path, ledger):

@@ -69,29 +69,28 @@ class TestTrustLevel:
 # ---------------------------------------------------------------------------
 
 class TestPermissionContext:
-    def test_safe_always_authorized(self):
-        ctx = PermissionContext(session_id="s1")
-        assert ctx.is_authorized("any_tool", TrustLevel.SAFE) is True
+    """#704 S3: no name-level authorization; a SAFE tool or a declared
+    GUARDED one runs unasked (``runs_unasked``), never CRITICAL."""
 
-    def test_guarded_not_authorized_by_default(self):
+    def test_safe_always_runs_unasked(self):
         ctx = PermissionContext(session_id="s1")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED) is False
+        assert ctx.runs_unasked("any_tool", TrustLevel.SAFE) is True
 
-    def test_guarded_authorized_after_authorize(self):
+    def test_guarded_not_unasked_by_default(self):
         ctx = PermissionContext(session_id="s1")
-        ctx.authorize("write_file")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED) is True
+        assert ctx.runs_unasked("write_file", TrustLevel.GUARDED) is False
 
-    def test_guarded_revoked_after_revoke(self):
+    def test_guarded_declared(self):
         ctx = PermissionContext(session_id="s1")
-        ctx.authorize("write_file")
-        ctx.revoke("write_file")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED) is False
+        ctx.declare("test", ["write_file"])
+        assert ctx.runs_unasked("write_file", TrustLevel.GUARDED) is True
+        ctx.withdraw("test")
+        assert ctx.runs_unasked("write_file", TrustLevel.GUARDED) is False
 
-    def test_critical_never_pre_authorized(self):
+    def test_critical_never_unasked(self):
         ctx = PermissionContext(session_id="s1")
-        ctx.authorize("danger_tool")   # even if explicitly authorized
-        assert ctx.is_authorized("danger_tool", TrustLevel.CRITICAL) is False
+        ctx.declare("test", ["danger_tool"])
+        assert ctx.runs_unasked("danger_tool", TrustLevel.CRITICAL) is False
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +245,7 @@ class TestBlastRadiusMiddleware:
             confirm_called.append(True)
             return True
 
-        ctx = PermissionContext("s1")
-        ctx.authorize("safe_tool")   # SAFE tools are pre-authorized in session
+        ctx = PermissionContext("s1")   # SAFE tools need no authorization
 
         pipeline = MiddlewarePipeline([
             BlastRadiusMiddleware(perm_ctx=ctx, confirm_fn=confirm)
@@ -291,7 +289,7 @@ class TestBlastRadiusMiddleware:
         assert "denied" in result.error.lower()
 
     @pytest.mark.asyncio
-    async def test_guarded_authorized_after_first_confirm(self):
+    async def test_guarded_confirm_covers_one_call(self):
         confirm_count = [0]
         async def confirm(call):
             confirm_count[0] += 1
@@ -303,8 +301,9 @@ class TestBlastRadiusMiddleware:
         ])
         call = make_call("write_file", TrustLevel.GUARDED)
         await pipeline.execute(call, ok_handler)
-        await pipeline.execute(call, ok_handler)   # second call — should not prompt again
-        assert confirm_count[0] == 1   # confirmed only once
+        await pipeline.execute(call, ok_handler)
+        # #704 S3: a confirm covers its own call only
+        assert confirm_count[0] == 2
 
     @pytest.mark.asyncio
     async def test_critical_always_triggers_confirm(self):
@@ -314,7 +313,7 @@ class TestBlastRadiusMiddleware:
             return True
 
         ctx = PermissionContext("s1")
-        ctx.authorize("nuke")   # even explicitly authorized…
+        ctx.declare("test", ["nuke"])   # even when declared…
         pipeline = MiddlewarePipeline([
             BlastRadiusMiddleware(perm_ctx=ctx, confirm_fn=confirm)
         ])

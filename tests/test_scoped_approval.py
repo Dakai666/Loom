@@ -422,18 +422,15 @@ class TestScopeCommandHandler:
         assert len(session.perm.grants) == 1
         assert session.perm.grants[0].source == "system"
 
-    def test_clear_preserves_exec_auto(self):
+    def test_clear_preserves_system(self):
         from loom.platform.cli.main import _handle_scope_command
         session = self._make_session(grants=[
             ScopeGrant(resource="path", action="write", selector="/doc", source="lease"),
-            ScopeGrant(resource="exec", action="execute", selector="workspace", source="exec_auto"),
             ScopeGrant(resource="exec", action="execute", selector="workspace", source="system"),
         ])
         console = MagicMock()
         _handle_scope_command(session, "clear", console)
-        assert len(session.perm.grants) == 2
-        sources = {g.source for g in session.perm.grants}
-        assert sources == {"system", "exec_auto"}
+        assert {g.source for g in session.perm.grants} == {"system"}
 
     def test_purge_expired_on_list(self):
         from loom.platform.cli.main import _handle_scope_command

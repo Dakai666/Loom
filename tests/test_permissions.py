@@ -113,68 +113,9 @@ class TestToolCapability:
 # PermissionContext — legacy API
 # ===========================================================================
 
-class TestPermissionContextLegacy:
-    def test_new_context_has_no_authorizations(self):
-        ctx = PermissionContext(session_id="s1")
-        assert ctx.session_authorized == set()
-        assert ctx.exec_auto is False
+# The name-level API (authorize / is_authorized / exec_auto) was retired in
+# #704 S3; declarations are tested in tests/test_single_decision_704_s3.py.
 
-    def test_authorize_adds_tool(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.authorize("write_file")
-        assert "write_file" in ctx.session_authorized
-
-    def test_revoke_removes_tool(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.authorize("write_file")
-        ctx.revoke("write_file")
-        assert "write_file" not in ctx.session_authorized
-
-    def test_revoke_missing_is_noop(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.revoke("nonexistent")
-
-    def test_is_authorized_safe_always_true(self):
-        ctx = PermissionContext(session_id="s1")
-        assert ctx.is_authorized("any_tool", TrustLevel.SAFE) is True
-
-    def test_is_authorized_guarded_requires_auth(self):
-        ctx = PermissionContext(session_id="s1")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED) is False
-        ctx.authorize("write_file")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED) is True
-
-    def test_is_authorized_critical_never_pre_authorized(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.authorize("dangerous_tool")
-        assert ctx.is_authorized("dangerous_tool", TrustLevel.CRITICAL) is False
-
-    def test_enable_exec_auto(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.enable_exec_auto()
-        assert ctx.exec_auto is True
-        assert any(g.source == "exec_auto" for g in ctx.grants)
-
-    def test_disable_exec_auto(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.enable_exec_auto()
-        ctx.disable_exec_auto()
-        assert ctx.exec_auto is False
-        assert not any(g.source == "exec_auto" for g in ctx.grants)
-
-    def test_multiple_authorizations(self):
-        ctx = PermissionContext(session_id="s1")
-        ctx.authorize("a")
-        ctx.authorize("b")
-        ctx.authorize("c")
-        assert ctx.session_authorized == {"a", "b", "c"}
-        ctx.revoke("b")
-        assert ctx.session_authorized == {"a", "c"}
-
-
-# ===========================================================================
-# PermissionContext — scope-aware API
-# ===========================================================================
 
 class TestPermissionContextScope:
     def test_grant_adds_to_list(self):

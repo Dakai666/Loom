@@ -709,12 +709,8 @@ class LoomSession:
         for tool in _fs_tools:
             self.registry.register(tool)
 
-        # Permission context (SAFE tools pre-authorized)
+        # Permission context. SAFE tools need no authorization (#704 S3).
         self.perm = PermissionContext(session_id=self.session_id)
-        # run_bash is GUARDED — no pre-auth
-        for tool in _fs_tools:
-            if tool.trust_level == TrustLevel.SAFE:
-                self.perm.authorize(tool.name)
 
         # Context budget — sized to the active model's window and re-synced
         # before every LLM call (tiers can switch to a different window).
@@ -1046,7 +1042,6 @@ class LoomSession:
         from loom.platform.cli.tools import (
             make_agent_health_tool,
             make_probe_file_tool,
-            make_exec_escape_fn,
             make_fetch_url_tool,
             make_openai_image_generation_tool,
             make_xai_tts_tool,
@@ -1346,12 +1341,6 @@ class LoomSession:
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
-        # Wire escape detector only when strict_sandbox is on — that's the
-        # only case where /auto pre-authorizes EXEC tools within workspace.
-        _exec_escape_fn = (
-            make_exec_escape_fn(self.workspace) if self._strict_sandbox else None
-        )
-
         # Issue #197: JIT must wrap LifecycleMiddleware on the outside so
         # post_validators still see the full output for heuristic checks
         # (run_bash traceback detection, etc.). JIT only mutates what
@@ -1374,7 +1363,6 @@ class LoomSession:
                 BlastRadiusMiddleware(
                     perm_ctx=self.perm,
                     confirm_fn=self._confirm_tool_cli,
-                    exec_escape_fn=_exec_escape_fn,
                     registry=self.registry,
                     ledger_emitter=self._ledger_emitter,
                     workspace=self.workspace,
@@ -4303,18 +4291,18 @@ class LoomSession:
 
     def _all_authorized(self, tool_uses: list) -> bool:
         """
-        Return True only if every tool in the list is pre-authorized for
+        Return True only if every tool in the list is expected to run unasked for
         immediate execution (no interactive confirmation required).
 
         SAFE tools are always authorized.
-        GUARDED tools are authorized once the user has confirmed them this session.
+        GUARDED tools run unasked only when a boundary declares them (#704 S3).
         CRITICAL tools always require a fresh confirmation — never parallelizable.
         """
         for tu in tool_uses:
             tool_def = self.registry.get(tu.name)
             if tool_def is None:
                 continue  # unknown tools fail at dispatch; don't block parallel
-            if not self.perm.is_authorized(tu.name, tool_def.trust_level):
+            if not self.perm.runs_unasked(tu.name, tool_def.trust_level):
                 return False
         return True
 

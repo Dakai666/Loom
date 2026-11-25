@@ -440,3 +440,52 @@ def test_plain_lists_and_quotes_still_delegate(tmp_path, prose):
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes/c.md").write_text(f"測試通過。{prose}")
     assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is not None
+
+
+# #707 replay: Loom Agent passes --repo for her own repository while DK
+# names only "#702". The workspace's own repo counts as the bare target.
+def _ws_with_origin(tmp_path, url="git@github.com:Dakai666/Loom.git"):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/config").write_text(f'[remote "origin"]\n\turl = {url}\n')
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes/c.md").write_text("補充。\n")
+    return tmp_path
+
+
+@pytest.mark.parametrize("url", ["git@github.com:Dakai666/Loom.git", "https://github.com/Dakai666/Loom",
+                                 "https://github.com/dakai666/loom.git"])
+def test_repo_flag_for_the_workspace_repo_counts_as_bare(tmp_path, url):
+    ws = _ws_with_origin(tmp_path, url)
+    post = delegated_post("gh issue comment 702 --repo Dakai666/Loom --body-file notes/c.md",
+                          "把這些補充回#702內，後續我看怎麼處理。", ws)
+    assert post is not None and post.number == 702
+
+
+@pytest.mark.parametrize("intent,command", [
+    ("把這些補充回#702內", "gh issue comment 702 --repo other/repo --body-file notes/c.md"),
+    ("在 other/repo 的 #702 留言", "gh issue comment 702 --repo Dakai666/Loom --body-file notes/c.md"),
+    ("把這些補充回#703內", "gh issue comment 702 --repo Dakai666/Loom --body-file notes/c.md"),
+])
+def test_other_repos_still_need_naming(tmp_path, intent, command):
+    assert delegated_post(command, intent, _ws_with_origin(tmp_path)) is None
+
+
+def test_issue_create_in_the_workspace_repo_when_no_repo_is_named(tmp_path):
+    ws = _ws_with_origin(tmp_path)
+    cmd = "gh issue create --repo Dakai666/Loom --title 'pet-cat 信任雜湊未同步' --body-file notes/c.md"
+    assert delegated_post(cmd, "有必要就發 issue 來處理。", ws) is not None
+    assert delegated_post(cmd.replace("Dakai666/Loom", "other/repo"), "有必要就發 issue 來處理。", ws) is None
+    assert delegated_post(cmd, "在 other/repo 發 issue", ws) is None
+
+
+@pytest.mark.parametrize("stamp", [
+    "[[2026-11-25 15:05 Asia/Taipei]] [發話者：DK (@dakai3716)]\n",
+    "[2026-11-25 15:05 Asia/Taipei]\n[發話者：DK (@dakai3716)]\n",
+])
+def test_runtime_stamps_are_not_a_repo(tmp_path, stamp):
+    """The timestamp Loom prepends names a time zone, not a repository
+    (#707 replay: "Asia/Taipei" made every bare #N ask)."""
+    ws = _ws_with_origin(tmp_path)
+    intent = stamp + "把這些補充回#702內，後續我看怎麼處理。"
+    assert delegated_post("gh issue comment 702 --body-file notes/c.md", intent, ws) is not None
+    assert delegated_post("gh issue comment 702 --repo Dakai666/Loom --body-file notes/c.md", intent, ws) is not None

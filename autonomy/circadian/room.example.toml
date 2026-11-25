@@ -37,9 +37,14 @@ label = "喵吉"
 command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]
 default_priority = "normal"
 allowed_tools = ["run_bash"]   # so a wake can be answered with pet.py
-# ⚠️ allowed_tools are pre-authorized for the whole chime turn, and signal
-# text reaches that turn verbatim. Fine for local furniture like 喵吉; for
-# furniture that relays outside text (weather, calendar, web) leave it empty.
+# A declaration never covers shell (#704 S3): the exec grant below is what
+# lets the wake run pet.py — the shape allows exactly that script.
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py" },
+]
+# ⚠️ signal text reaches the chime turn verbatim. Fine for local furniture
+# like 喵吉; for furniture that relays outside text (weather, calendar, web)
+# leave allowed_tools and scope_grants empty.
 
 [furniture.priorities]
 feel_sick = "urgent"

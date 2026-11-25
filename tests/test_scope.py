@@ -463,34 +463,8 @@ class TestGrantManagement:
 # 12. Legacy API backward compat
 # =====================================================================
 
-class TestLegacyCompat:
-    def test_legacy_authorize_still_works(self):
-        ctx = PermissionContext(session_id="test")
-        ctx.authorize("write_file")
-        assert ctx.is_authorized("write_file", TrustLevel.GUARDED)
-        assert not ctx.is_authorized("run_bash", TrustLevel.GUARDED)
+# TestLegacyCompat (name-level authorize, exec_auto) retired with them in #704 S3.
 
-    def test_legacy_exec_auto(self):
-        ctx = PermissionContext(session_id="test")
-        assert not ctx.exec_auto
-        ctx.enable_exec_auto()
-        assert ctx.exec_auto
-        ctx.disable_exec_auto()
-        assert not ctx.exec_auto
-
-    def test_safe_always_authorized(self):
-        ctx = PermissionContext(session_id="test")
-        assert ctx.is_authorized("any_tool", TrustLevel.SAFE)
-
-    def test_critical_never_preauthorized(self):
-        ctx = PermissionContext(session_id="test")
-        ctx.authorize("dangerous_tool")
-        assert not ctx.is_authorized("dangerous_tool", TrustLevel.CRITICAL)
-
-
-# =====================================================================
-# 13. ToolDefinition new fields
-# =====================================================================
 
 class TestToolDefinitionScopeFields:
     def test_default_values(self):

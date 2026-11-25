@@ -85,7 +85,7 @@ class ScopeGrant:
     constraints: dict[str, Any] = field(default_factory=dict)
 
     source: str = "manual_confirm"
-    """Origin of this grant: manual_confirm, lease, auto, exec_auto, system."""
+    """Origin of this grant: manual_confirm, lease, auto_approve, autonomy:<name>, system."""
 
     granted_at: float = 0.0
     """time.time() when granted."""

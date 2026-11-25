@@ -169,84 +169,16 @@ async def test_session_trust_skips_probe_on_subsequent_turns(handler):
     assert res2.success, "session-trusted write_file must not require re-probe on new turn"
 
 
+# Layer 2 (trajectory anomaly) only downgraded /auto, retired in #704 S3.
 @pytest.mark.asyncio
-async def test_trajectory_anomaly_flagged_for_exec_without_probe(handler):
-    """Layer 2: EXEC tool without prior probe gets trajectory_anomaly flag."""
+async def test_exec_without_probe_is_not_flagged(handler):
     guard = LegitimacyGuardMiddleware()
     call_bash = make_call(
         "run_bash", TrustLevel.GUARDED, {"command": "ls"},
         capabilities=ToolCapability.EXEC,
     )
     res = await guard.process(call_bash, handler)
-    assert res.success, "run_bash must not be hard-blocked"
-    assert call_bash.metadata.get("trajectory_anomaly") is True
-
-
-@pytest.mark.asyncio
-async def test_trajectory_anomaly_not_set_after_probe(handler):
-    """Layer 2: EXEC tool after probe should NOT get trajectory_anomaly flag."""
-    guard = LegitimacyGuardMiddleware()
-
-    # Probe first
-    await guard.process(make_call("list_dir", TrustLevel.SAFE, {"path": "."}), handler)
-    assert guard.has_probed
-
-    # Now run_bash — should pass without anomaly flag
-    call_bash = make_call(
-        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
-        capabilities=ToolCapability.EXEC,
-    )
-    res = await guard.process(call_bash, handler)
-    assert res.success
-    assert "trajectory_anomaly" not in call_bash.metadata
-
-
-@pytest.mark.asyncio
-async def test_trajectory_anomaly_emits_warning_log(handler, caplog):
-    """Issue #168: tripping the soft guard must emit a structured warning so
-    operators can distinguish a soft-guard demotion from a generic auth deny."""
-    import logging
-    guard = LegitimacyGuardMiddleware()
-    call_bash = make_call(
-        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
-        capabilities=ToolCapability.EXEC,
-    )
-    with caplog.at_level(logging.WARNING, logger="loom.core.harness.middleware"):
-        await guard.process(call_bash, handler)
-    assert any("Trajectory anomaly" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_unattended_trajectory_anomaly_returns_specific_error(perm_ctx, registry, handler):
-    """Issue #168: unattended autonomy origin hitting trajectory_anomaly must
-    fail fast with a probe-first explanation, not the generic 'no scope' deny.
-
-    The probe hint only applies where it can help: exec_auto is on and the
-    missing probe is what downgraded it (#668 / PR #673 review). Without
-    exec_auto, probing can't authorize the call — see
-    tests/test_chime_unattended_668.py::TestProbeHintOnlyWhenItCouldHelp."""
-    perm_ctx.exec_auto = True
-
-    async def never_called(call):
-        raise AssertionError("confirm_fn must not be called for unattended origin")
-
-    bmw = BlastRadiusMiddleware(
-        perm_ctx=perm_ctx,
-        confirm_fn=never_called,
-        registry=registry,
-    )
-    call = make_call(
-        "run_bash", TrustLevel.GUARDED, {"command": "ls"},
-        capabilities=ToolCapability.EXEC,
-    )
-    call.origin = "autonomy"
-    call.metadata["trajectory_anomaly"] = True
-
-    res = await bmw.process(call, handler)
-    assert not res.success
-    assert res.failure_type == "permission_denied"
-    assert "probe" in res.error.lower()
-    assert "autonomy" in res.error
+    assert res.success and "trajectory_anomaly" not in call_bash.metadata
 
 
 @pytest.mark.asyncio

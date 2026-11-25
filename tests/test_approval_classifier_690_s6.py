@@ -114,7 +114,7 @@ class Env:
         self.executor = executor
         self.perm = PermissionContext(session_id="t")
         for n in name_authorized:
-            self.perm.authorize(n)
+            self.perm.declare("test:boundary", [n])
         for g in grants:
             self.perm.grant(g)
         self.model = model if model is not None else FakeModel()
@@ -398,7 +398,7 @@ class TestModelLayer:
         before = list(env.perm.grants)
         await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         assert env.perm.grants == before
-        assert env.perm.session_authorized == set()
+        assert env.perm.boundaries == {}
         await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         assert len(env.model.requests) == 2  # reviewed again, not remembered
 

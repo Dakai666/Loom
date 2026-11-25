@@ -177,7 +177,7 @@ class LifecycleContext:
     authorization_result: bool | None = None
     """
     Set by BlastRadiusMiddleware:
-      True  → tool was authorized (pre-auth, exec_auto, or user confirmed)
+      True  → tool was authorized (safe tool, grant, declaration, mode, classifier, or user confirmed)
       False → user denied execution
       None  → not yet decided (default)
     """

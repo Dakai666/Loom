@@ -190,80 +190,8 @@ class TestFormatScopePanel:
 # 2. Phase D — exec_auto grant injection
 # =====================================================================
 
-class TestExecAutoGrantInjection:
-    def test_enable_injects_grant(self):
-        perm = PermissionContext(session_id="test")
-        assert len(perm.grants) == 0
-        perm.enable_exec_auto()
-        assert perm.exec_auto is True
-        assert len(perm.grants) == 1
-        g = perm.grants[0]
-        assert g.resource == "exec"
-        assert g.action == "execute"
-        assert g.selector == "workspace"
-        assert g.constraints.get("absolute_paths") == "deny"
-        assert g.source == "exec_auto"
+# TestExecAutoGrantInjection retired with /auto (#704 S3).
 
-    def test_disable_revokes_grant(self):
-        perm = PermissionContext(session_id="test")
-        perm.enable_exec_auto()
-        assert len(perm.grants) == 1
-        perm.disable_exec_auto()
-        assert perm.exec_auto is False
-        assert len(perm.grants) == 0
-
-    def test_disable_only_revokes_exec_auto(self):
-        perm = PermissionContext(session_id="test")
-        # Add a manual grant first
-        perm.grant(ScopeGrant(
-            resource="path", action="write", selector="/tmp/doc",
-            source="manual_confirm",
-        ))
-        perm.enable_exec_auto()
-        assert len(perm.grants) == 2
-        perm.disable_exec_auto()
-        # Only the exec_auto grant should be removed
-        assert len(perm.grants) == 1
-        assert perm.grants[0].resource == "path"
-
-    async def test_exec_auto_grant_allows_workspace_commands(self):
-        """exec_auto grant should allow workspace-confined commands via scope-aware path."""
-        perm = PermissionContext(session_id="test")
-        perm.enable_exec_auto()
-
-        reg = _make_registry(_tool_def(
-            "run_bash", caps=ToolCapability.EXEC,
-            scope_resolver=_make_run_bash_resolver(_WORKSPACE),
-        ))
-        call = _call("run_bash", {"command": "pytest tests/"}, caps=ToolCapability.EXEC)
-        result, confirm_fn, handler = await _run_middleware(perm, call, registry=reg)
-
-        assert result.success
-        confirm_fn.assert_not_called()  # auto-approved via exec_auto grant
-        handler.assert_called_once()
-
-    async def test_exec_auto_denies_absolute_path_commands(self):
-        """exec_auto grant has absolute_paths=deny — commands with abs paths need confirm."""
-        perm = PermissionContext(session_id="test")
-        perm.enable_exec_auto()
-
-        reg = _make_registry(_tool_def(
-            "run_bash", caps=ToolCapability.EXEC,
-            scope_resolver=_make_run_bash_resolver(_WORKSPACE),
-        ))
-        call = _call("run_bash", {"command": "cat /etc/passwd"}, caps=ToolCapability.EXEC)
-        result, confirm_fn, handler = await _run_middleware(
-            perm, call, confirm_result=True, registry=reg,
-        )
-
-        assert result.success
-        # Should need confirmation because absolute path escapes workspace
-        confirm_fn.assert_called_once()
-
-
-# =====================================================================
-# 3. Phase D — Informational constraint filtering
-# =====================================================================
 
 class TestInformationalConstraintFiltering:
     async def test_scope_unknown_not_copied_to_grant(self):
@@ -396,17 +324,17 @@ class TestImpactScopeRename:
 
 
 # =====================================================================
-# 6. ExecMatcher + exec_auto grant integration
+# 6. ExecMatcher + workspace exec grant
 # =====================================================================
 
-class TestExecMatcherWithExecAutoGrant:
-    """Verify ExecMatcher correctly handles exec_auto grants."""
+class TestExecMatcherWithWorkspaceGrant:
+    """Verify ExecMatcher handles a workspace exec grant."""
 
     def test_workspace_grant_covers_workspace_req(self):
         matcher = ExecMatcher()
         grant = ScopeGrant(
             resource="exec", action="execute", selector="workspace",
-            constraints={"absolute_paths": "deny"}, source="exec_auto",
+            constraints={"absolute_paths": "deny"}, source="autonomy:test",
         )
         req = ScopeRequirement(
             resource="exec", action="execute", selector="workspace",
@@ -418,7 +346,7 @@ class TestExecMatcherWithExecAutoGrant:
         matcher = ExecMatcher()
         grant = ScopeGrant(
             resource="exec", action="execute", selector="workspace",
-            constraints={"absolute_paths": "deny"}, source="exec_auto",
+            constraints={"absolute_paths": "deny"}, source="autonomy:test",
         )
         req = ScopeRequirement(
             resource="exec", action="execute", selector="workspace",

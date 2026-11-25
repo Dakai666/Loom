@@ -156,9 +156,10 @@ async def handle(self, trigger, fire_context) -> PlannedAction:
 
 ```python
 async def _run_agent(self, plan: PlannedAction) -> None:
-    # Pre-authorize
-    for tool_name in plan.context.get("allowed_tools", []):
-        self._session.perm.authorize(tool_name)
+    # Program boundary (#704 S3): declare the schedule's tools for its own
+    # unattended calls; scope grants are its ceilings.
+    self._session.perm.declare(f"autonomy:{plan.trigger_name}",
+                               plan.context.get("allowed_tools", []), unattended_only=True)
 
     for g in plan.context.get("scope_grants", []):
         self._session.perm.grant(ScopeGrant(
@@ -210,7 +211,7 @@ async def _run_agent(self, plan: PlannedAction) -> None:
 
 ### Shell 授權：exec scope 與 command shape（#690 S7）
 
-工具名稱永遠不授權 shell。`allowed_tools = ["run_bash"]` 不會放行任何命令，不論走 #525 的 bridge，還是 scope resolver 出錯後落到的 legacy path。unattended turn（chime / autonomy / subagent）只能用 `exec` scope grant 跑 shell：
+工具名稱永遠不授權 shell。`allowed_tools = ["run_bash"]` 不會放行任何命令（#704 S3 起宣告不涵蓋 EXEC；scope resolver 出錯後落到的路徑也一樣）。unattended turn（chime / autonomy / subagent）只能用 `exec` scope grant 跑 shell：
 
 | selector | 涵蓋 |
 |---|---|
@@ -232,7 +233,7 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
 
-**人類確認的 grant（#690 S6、S6b）。** attended turn（Discord thread、CLI）裡按「允許一次」確認 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`gh issue view 1` 確認過之後，`gh issue view 1 --comments` 仍會再問。chain、重導或展開的命令沒有 argv，允許一次不留 grant。按 **auto**（或 lease）授予整類（`workspace`），但同一 session 之後只涵蓋讀取與網路讀取（規則 allow，或 review 類別是 `network_read`／`public_search`，`approval.auto_may_cover`）；寫檔、刪除、發文、設定變更、憑證與 workspace 外的路徑每次都仍會問（S6b，DK 2026-11-24：「只有真正修改、不可逆或要發文才問我」）。人類確認的 grant、legacy 工具名授權（`attended_authorized`）與 `/auto`（`exec_auto`）都只在 attended 時有效，unattended 呼叫（chime、autonomy）看不到它們，只能靠自己的 routine grant。routine 宣告的 shape 不帶 `exact_argv`，維持前綴匹配。
+**人類確認的 grant（#690 S6、S6b）。** attended turn（Discord thread、CLI）裡按「允許一次」確認 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`gh issue view 1` 確認過之後，`gh issue view 1 --comments` 仍會再問。chain、重導或展開的命令沒有 argv，允許一次不留 grant。按 **auto**（或 lease）授予整類（`workspace`），但同一 session 之後只涵蓋讀取與網路讀取（規則 allow，或 review 類別是 `network_read`／`public_search`，`approval.auto_may_cover`）；寫檔、刪除、發文、設定變更、憑證與 workspace 外的路徑每次都仍會問（S6b，DK 2026-11-24：「只有真正修改、不可逆或要發文才問我」）。人類確認的 grant 只在 attended 時有效，unattended 呼叫（chime、autonomy）看不到它們，只能靠自己的 routine grant。工具名授權（`attended_authorized`）與 `/auto`（`exec_auto`）已在 #704 S3 退役。routine 宣告的 shape 不帶 `exact_argv`，維持前綴匹配。
 
 **shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6b 起規則不認得的程式（腳本、interpreter、wrapper）一律問人，既有的 shape grant 照舊放行。
 
@@ -264,9 +265,48 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 **權限事件。** `permission_decision` 多三個欄位，連同 `tool_call_id`：`mode`（`safe`/`self`/`yolo`）、`decision_source`（`grant`、`rule`、`luna`、`mode`、`operator`、`policy`、`unattended`）、`reason_code`（例如 `read_only_shell`、`accept`、`yolo`、`once`、`delete_root`）。#704 之前的列這三欄是空字串。
 
+### 宣告取代工具名授權（#704 S3）
+
+工具名稱本身不再授權任何呼叫，所有判斷都走授權模式的同一個決策點（`BlastRadiusMiddleware._auto_decide`）。`/auto`（exec_auto）、legacy name bridge（`allowed_tools` 在 CONFIRM 時直接放行）、confirm 後的整 session 工具名授權（`attended_authorized`）一併退役；LegitimacyGuard 只為 `/auto` 降級而設的 trajectory anomaly（Layer 2）也拿掉。
+
+| 以前 | 現在 |
+|---|---|
+| SAFE 工具在 session 開始時 `authorize` | SAFE 工具直接執行（`decision_source = trust`） |
+| Discord 平台工具（`send_discord_file`、`send_discord_embed`、`send_discord_select`、`add_discord_reaction`、`read_discord_forum`）`authorize` | `declare("platform:discord", …)`，attended 與 unattended 都看得到 |
+| routine 的 `allowed_tools` → `authorize`，結束後 `revoke` | `declare("autonomy:<name>", …, unattended_only=True)`，結束後 `withdraw`；同 session 插隊的 attended turn 看不到 |
+| 子代理把 child registry 的工具全部 `authorize` | 只宣告父代理也宣告過的工具，模型給的白名單只能在其中挑 |
+| 人工確認一般 GUARDED 工具後，整個 session 不再問 | 只涵蓋這一次呼叫 |
+| `/auto` | 退役，提示改用 `/mode` |
+
+**宣告是邊界，不是通行證。** 決策點對宣告過的工具：不涵蓋 EXEC（shell 只認 exec scope grant）與 CRITICAL；program 對同一資源宣告了 scope grant 而這次呼叫超出（EXPAND_SCOPE）時不放行，這是 program 的 ceiling；仍過 `hard_boundary`（例如寫 `.env`、`loom.toml`、`skills/*/checks.py`、workspace 外的路徑，含秘密的搜尋 query），只是不因「沒有 resolver 宣告效果」而擋，因為 boundary 本身就是操作者的宣告。三種模式都一樣（安全模式也算「已經精確授權」）。放行寫 `permission_decision`：`decision_source = program`、`reason_code = <boundary>`、reason `declared by <boundary>`。
+
+**沒宣告的工具。** 無人值守時照舊 skip（沒有人能問）；有人值守時進入授權模式（安全／自理走規則與 Luna，YOLO 走硬護欄），否則問 DK。
+
+### 自理：日常工具與未知操作（#704 S3 第二部分）
+
+**日常工具由規則放行（自理、有人值守）。** `memorize`（她自己的記憶，`reason_code = own_memory`）、`image_generate` 與 `*__understand_image`（`media`）不問 DK、不呼叫 Luna，前提是過硬護欄，且沒有超出 routine 宣告的花費／資源 ceiling（routine 對同一資源宣告的 grant 不涵蓋這次呼叫時，規則不放行）。硬護欄會掃這些工具的每個字串參數，跟 web_search 的 query 一樣：內容符合 S3c 遮罩 pattern（例如 prompt 裡夾帶 `sk-proj-…`）、或像路徑卻指到 workspace 外、隱藏或像憑證（`/etc/passwd`、`~/.ssh/id_rsa`、`.env`，含空白的路徑如 `~/Library/Application Support/…` 也算），都問 DK；確認畫面寫出是哪一條硬護欄。安全模式照舊問。
+
+**未知操作交 Luna（自理、有人值守）。** 規則判為「不認得」（`not_covered` 的工具、`unknown_program` 的 shell）而且沒碰硬護欄的呼叫，交 Luna 對照可信意圖判斷（category `unknown_operation`，`known_effects.known = false`），accept 只放行這一次，abstain 才問 DK。shell 只有「單純的未知程式執行檔案」才算：程式必須是 PATH 上或 workspace 內真正的執行檔（shell builtin 與找不到的名字不算）；`uv run python|python3 <workspace 內的檔案>`（interpreter 模式）視同執行那個檔案，但檔案裡不能有 `# /// script` 區塊；不帶 interpreter 的 `uv run <檔案>` 是 script 模式，會安裝 PEP 723 宣告的依賴，照 runner 處理；開頭的 `cd <workspace 內的目錄> &&` 不會讓命令變成要問，後面的部分以那個目錄判斷；wrapper 與 runner（`nice`、`timeout`、`env`、`xargs`、`uv`、`poetry`、`make`、`docker`、`kubectl`、`terraform`、`java`、`go`、`cargo`、`npx`…，它們跑的東西在專案檔或 image 裡，argv 看不到）、任何位置的 interpreter 加 inline code 旗標（`python3 -c`、`uv run python -c`、`node -e`、`awk '…'`）、`FOO=1` 前綴、任何字面上出現規則認得的危險程式（`rm` 等）、輸出旗標（`-o`、`--out…`）都照舊問。**cd 的 cwd 模型**（規則層、硬護欄、未知 shell 共用一份）：`cd` 的目標必須是 workspace 內已存在的目錄（不是檔案、不是 `cd -`、不是隱藏目錄，project-config allowlist 除外），而且只有接 `&&` 才把新目錄帶給後面；`cd` 之後接 `;`、換行、`|`、`||`，或 `cd` 本身在 pipeline 或 `||` 之後，一律問。規則放行的讀取在執行前也會再過一次硬護欄。會延後或改變執行的 shell builtin（`trap`、`alias`、`shopt`、`builtin`、`command`、`declare`…）在三種模式都是硬護欄：`trap 'touch /tmp/x' EXIT` 實測會在 shell 結束時執行。寫檔、刪除、發文這類規則認得的效果不算未知，照舊問（或走委託）。
+
+**委託的目的地（#707 重播）。** `--repo` 等於 workspace 自己的 origin repo（讀 `.git/config`）時，視同不帶 repo 的目的地：DK 只說「#702」、Loom Agent 帶了 `--repo Dakai666/Loom` 也算點名。開新 issue 到 workspace 自己的 repo，意圖沒提到其他 repo 時不必點名 repo（Luna 仍要判斷意圖有沒有要求開 issue）。比對前先去掉 runtime 加在訊息前的時間戳與發話者標記，因為時間戳裡的 `Asia/Taipei` 看起來像 owner/repo。
+
+**無人值守不走 Luna。** program 沒宣告的工具在它的邊界外，一律 skip，Luna 不能放寬這個 ceiling；宣告過的照前一節由 program 放行。
+
+**Luna 量測。** prompt 多一段 unknown_operation 的說明（所有 addendum 都只在對應的 packet 欄位出現時適用）。`tests/fixtures/s3_unknown_ops_bank.yaml` 13 題交 Luna（6 accept／7 abstain）加 4 題結構上就不交 Luna 的（`trap`、`uv run python -c`、`docker run`、`make deploy`），`codex/gpt-6-luna` 每題一次：第一次錄 13/14（U02 誤 abstain），收緊後重錄 **13/13**；同一個 prompt 單次結果會變動。prompt 改了，S2 的委託題庫也重錄：**17/18**（D04 誤 abstain；D18 這次也 abstain）。
+
+**房間家具的 grant。** `room.toml` 的 `[[furniture]]` 可以寫 `scope_grants`（格式同 schedule），wake 時跟 `allowed_tools` 一起帶進 chime。喵吉要回應 wake 跑 `pet.py`，需要 exec shape：
+
+```toml
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py" },
+]
+```
+
+宣告了 EXEC 工具（例如 `allowed_tools = ["run_bash"]`）卻沒有任何 exec grant 時，chime 與 autonomy run 開始時寫一則 warning，因為宣告不涵蓋 shell，這些呼叫一定 skip。
+
 ### 自動核准分類器（#690 S6、S6b、S6c）
 
-`loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有 name bridge 放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。
+`loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有宣告放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。
 
 **規則層先判**，不呼叫模型：
 
@@ -396,7 +436,7 @@ cron          = "0 1 * * *"            # 01:00 UTC = 09:00 Asia/Taipei
 intent        = "向 user 主動道早安，提一兩件今天值得留意的事"
 trust_level   = "safe"
 mode          = "chime"
-allowed_tools = ["memorize"]           # chime turn 期間生效，結束後 revoke
+allowed_tools = ["memorize"]           # 宣告給 chime 自己的呼叫，結束後撤回
 
   [autonomy.schedules.target]
   type     = "discord_thread"

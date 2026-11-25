@@ -35,7 +35,9 @@ class TriggerDefinition:
     enabled: bool = True
     notify_thread_id: int = 0         # Discord thread ID for result delivery (0 = default channel)
     allowed_tools: list[str] = field(default_factory=list)
-    """GUARDED tools the daemon pre-authorizes before running the agent."""
+    """Tools the schedule declares for its own run (#704 S3). A declaration
+    still meets the decision point: never shell, never past a scope grant
+    or a hard guardrail."""
     scope_grants: list[dict[str, Any]] = field(default_factory=list)
     """Scope grants (resource/action/selector dicts) injected for this trigger."""
     attach_outputs: list[str] = field(default_factory=list)

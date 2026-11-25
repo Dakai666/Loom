@@ -90,8 +90,8 @@ class HarnessChannel:
     def flash(self, message: str) -> None:  # noqa: ARG002 — accept for API stability
         """Footer flash for green-light events.
 
-        PR-C: **no-op**. Green-light auth (``pre-authorized`` /
-        ``exec_auto`` / ``scope-allow``) intentionally produces no
+        PR-C: **no-op**. Green-light auth (``safe tool`` /
+        ``declared by …`` / ``scope-allow``) intentionally produces no
         output during this PR. The footer arrives in PR-D and the
         flash will manifest there.
 

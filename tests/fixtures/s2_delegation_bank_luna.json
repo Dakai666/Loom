@@ -1,7 +1,7 @@
 {
   "model": "codex/gpt-6-luna",
-  "prompt_sha256": "4eeac3e0897d1519fd2db51308530b4e19042c9231f4f7e7f6cb8c61caf7b56c",
-  "recorded_at": "2026-11-25T11:53:27+00:00",
+  "prompt_sha256": "013f168d3fcb9215a58eaecf5c5ccf9a11776de94f237da1f71a3c176e8eba5f",
+  "recorded_at": "2026-11-25T13:35:32+00:00",
   "attempts": 1,
   "replies": {
     "D01": "{\"verdict\":\"accept\"}",
@@ -19,7 +19,7 @@
     "D15": "{\"verdict\":\"abstain\"}",
     "D16": "{\"verdict\":\"abstain\"}",
     "D17": "{\"verdict\":\"abstain\"}",
-    "D18": "{\"verdict\":\"accept\"}",
+    "D18": "{\"verdict\":\"abstain\"}",
     "D19": "{\"verdict\":\"abstain\"}",
     "D20": "{\"verdict\":\"abstain\"}"
   }

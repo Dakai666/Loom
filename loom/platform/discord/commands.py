@@ -225,7 +225,7 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
     # ── /loom-auto ────────────────────────────────────────────────────
     @tree.command(
         name="loom-auto",
-        description="Toggle run_bash auto-approve (requires strict_sandbox).",
+        description="Retired (#704): use /mode safe | self | yolo.",
     )
     async def loom_auto(interaction: discord.Interaction) -> None:
         session = await _require_session(bot, interaction)

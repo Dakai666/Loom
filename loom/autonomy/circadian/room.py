@@ -100,6 +100,10 @@ class Furniture:
     priorities: dict[str, str] = field(default_factory=dict)
     default_priority: str = "normal"
     allowed_tools: tuple[str, ...] = ()
+    # #704 S3: grants for this furniture's wake, the same shape as a
+    # schedule's (e.g. miji's exec shape for pet.py). A declaration never
+    # covers shell; an exec grant does.
+    scope_grants: tuple[dict[str, Any], ...] = ()
 
     def priority_for(self, signal_id: str) -> str:
         return self.priorities.get(signal_id, self.default_priority)
@@ -138,6 +142,14 @@ def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
     if not _is_str_list(tools):
         logger.warning("[room] furniture %r allowed_tools must be a list; skipped", name)
         return None
+    from loom.autonomy.permission_fields import parse_permission_fields
+    grants = parse_permission_fields(entry, f"room:{name}")["scope_grants"]
+    # #707 re-review: say so at load if the furniture declares shell with
+    # no exec grant; a declaration never covers shell, so its wake would
+    # skip silently.
+    from loom.autonomy.permission_fields import report_exec_without_grant
+    report_exec_without_grant(f"room furniture {name!r}", tools, grants,
+                              is_exec=lambda t: t == "run_bash")
     return Furniture(
         name=name,
         label=str(entry.get("label", name)),
@@ -145,7 +157,20 @@ def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
         priorities={str(k): v for k, v in raw_prios.items()},
         default_priority=default,
         allowed_tools=tuple(tools),
+        scope_grants=tuple(grants),
     )
+
+
+def wake_permissions(
+    furniture: "tuple[Furniture, ...] | list[Furniture]", sources: set[Any],
+) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...]]:
+    """The declared tools and scope grants of the furniture that woke."""
+    woke = [f for f in furniture if f.name in sources]
+    tools = tuple(dict.fromkeys(t for f in woke for t in f.allowed_tools))
+    grants: list[dict[str, Any]] = []
+    for f in woke:
+        grants.extend(g for g in f.scope_grants if g not in grants)
+    return tools, tuple(grants)
 
 
 def load_room(path: Path | None = None) -> RoomConfig:
@@ -561,9 +586,7 @@ async def room_tick(
             labels = {f.name: f.label for f in cfg.furniture}
             merged = list(state.queue)
             sources = {s.get("source") for s in woken} | {s.get("source") for s in merged}
-            tools = tuple(dict.fromkeys(
-                t for f in cfg.furniture if f.name in sources for t in f.allowed_tools
-            ))
+            tools, grants = wake_permissions(cfg.furniture, sources)
             # Unique per wake: the bot dedupes pending chimes by name
             # (latest wins), which would silently swallow an earlier room
             # wake still waiting behind a user turn.
@@ -574,6 +597,7 @@ async def room_tick(
                 fired_at=now,
                 target={"type": "circadian_today", "fallback": "skip"},
                 allowed_tools=tools,
+                scope_grants=grants,
             )
             try:
                 delivered = bool(await daemon.deliver_chime(req))

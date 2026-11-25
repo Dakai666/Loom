@@ -74,7 +74,6 @@ def _fake_session(
     session.hitl_mode = False
     session.perm = MagicMock()
     session.perm.grants = grants or []
-    session.perm.exec_auto = False
     session.perm._usage = {}
     session.perm.revoke_matching = MagicMock()
     session._tier_models = {
@@ -99,7 +98,7 @@ def test_help_text_lists_every_command():
     text = bot._cmd_help()
     for cmd in (
         "/new", "/sessions", "/title", "/model", "/personality", "/think",
-        "/compact", "/auto", "/pause", "/stop", "/budget", "/scope",
+        "/compact", "/mode", "/pause", "/stop", "/budget", "/scope",
         "/summary", "/tier", "/name", "/help",
     ):
         assert cmd in text
@@ -155,18 +154,12 @@ def test_personality_unknown_lists_available():
     assert "adversarial" in out  # available list surfaced
 
 
-def test_auto_blocked_without_strict_sandbox():
+def test_auto_is_retired():
+    """#704 S3: /auto (exec_auto) is retired; it points at /mode."""
     bot = _bot()
-    out = bot._cmd_auto(_fake_session(strict_sandbox=False))
-    assert "strict_sandbox" in out
-
-
-def test_auto_toggles_when_sandboxed():
-    bot = _bot()
-    sess = _fake_session(strict_sandbox=True)
-    out = bot._cmd_auto(sess)
-    assert sess.perm.exec_auto is True
-    assert "on" in out
+    for sandboxed in (False, True):
+        out = bot._cmd_auto(_fake_session(strict_sandbox=sandboxed))
+        assert "retired" in out and "/mode" in out
 
 
 def test_pause_toggles_state():

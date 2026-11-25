@@ -47,12 +47,13 @@ def _setup(
     ))
     perm = PermissionContext(session_id="t")
     if name_authorized:
-        perm.authorize("run_bash")  # what allowed_tools = ["run_bash"] does
+        perm.declare("test:boundary", ["run_bash"])  # what allowed_tools = ["run_bash"] does
     for g in grants:
         perm.grant(g)
     confirm = AsyncMock(return_value=confirm_result)
     blast = BlastRadiusMiddleware(
         perm_ctx=perm, registry=reg, confirm_fn=confirm, ledger_emitter=ledger_emitter,
+        workspace=tmp_path,
     )
     return blast, executor, ran, confirm
 
@@ -131,8 +132,9 @@ class TestNameGrantNoLongerCoversShell:
             scope_resolver=resolver,
         ))
         perm = PermissionContext(session_id="t")
-        perm.authorize("web_search")
-        blast = BlastRadiusMiddleware(perm_ctx=perm, registry=reg, confirm_fn=AsyncMock())
+        perm.declare("test:boundary", ["web_search"])
+        blast = BlastRadiusMiddleware(perm_ctx=perm, registry=reg, confirm_fn=AsyncMock(),
+                                      workspace=tmp_path)
         call = ToolCall(
             tool_name="web_search", args={}, trust_level=TrustLevel.GUARDED,
             capabilities=ToolCapability.NETWORK, session_id="t", origin="chime",
@@ -245,7 +247,7 @@ class TestDenyAndCeilingsStillWin:
 
         blast, executor, ran, _ = _setup(tmp_path)
         perm = _PolicyDeny(session_id="t")
-        perm.authorize("run_bash")
+        perm.declare("test:boundary", ["run_bash"])
         perm.grant(_shape(PET))
         blast = BlastRadiusMiddleware(
             perm_ctx=perm, registry=blast._registry, confirm_fn=AsyncMock(),

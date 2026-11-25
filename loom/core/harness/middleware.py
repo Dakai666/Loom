@@ -503,14 +503,8 @@ class LegitimacyGuardMiddleware(Middleware):
     ``run_bash`` and MCP tools are intentionally excluded from hard-guard:
     exec authorization belongs to ``BlastRadiusMiddleware``.
 
-    **Layer 2 — Soft guard (Trajectory Anomaly, Issue #118)**
-
-    When the agent calls a tool with ``EXEC`` capability (e.g. ``run_bash``)
-    and has *not* probed this turn, ``call.metadata["trajectory_anomaly"]``
-    is set to ``True``.  ``BlastRadiusMiddleware._exec_auto_approved()``
-    reads this flag and **downgrades** exec_auto pre-authorization to
-    require human confirmation.  This is a *soft* guard: the call is not
-    blocked, just stripped of its fast-pass.
+    (Layer 2, the trajectory-anomaly downgrade of ``/auto``, retired with
+    ``/auto`` in #704 S3.)
 
     **What counts as a probe (Issue #167)**
 
@@ -555,9 +549,7 @@ class LegitimacyGuardMiddleware(Middleware):
         # those non-file-scoped probes.
         self._probed_files: set[str] = set()
         self._unscoped_probed: bool = False
-        # Per-turn flag, kept ONLY for trajectory_anomaly Layer 2 — that
-        # check wants to know "did the agent do any probing this turn"
-        # before an EXEC call, not session-level history.
+        # Per-turn flag: "did the agent do any probing this turn".
         self._probed_this_turn: bool = False
         # Only file-writing tools belong here.  exec tools (run_bash) and MCP
         # generative tools are handled by BlastRadiusMiddleware.
@@ -567,15 +559,6 @@ class LegitimacyGuardMiddleware(Middleware):
         # Tools that have successfully executed once this session; probe
         # requirement is waived for these on subsequent turns (Issue #118).
         self._session_trusted: set[str] = set()
-        # Optional UI callback fired when a trajectory anomaly is flagged.
-        # Wired by the platform layer so the warning can route through
-        # the harness channel (``⚙ harness ›``) instead of the bare
-        # logging path that landed unstyled in scrollback. Signature:
-        # ``(tool_name: str, origin: str) -> None``. Failures inside
-        # the callback are swallowed
-        self._on_trajectory_anomaly: (
-            Callable[[str, str], None] | None
-        ) = None
 
     @property
     def has_probed(self) -> bool:
@@ -630,8 +613,7 @@ class LegitimacyGuardMiddleware(Middleware):
                       file identity is unknown (READ_PROBE-flagged tools,
                       unparseable bash, etc.)
 
-        Returning ``(set(), False)`` means "not a probe" — falls through
-        to the trajectory_anomaly path.
+        Returning ``(set(), False)`` means "not a probe".
         """
         # Read-only bash with extractable path → per-file; otherwise unscoped.
         if call.tool_name == "run_bash" and self._is_readonly_bash(call):
@@ -723,38 +705,6 @@ class LegitimacyGuardMiddleware(Middleware):
                     failure_type="permission_denied"
                 )
 
-        # --- Layer 2: Trajectory Anomaly (soft guard for EXEC tools) ---
-        # When EXEC tools run without any prior probe this turn, flag the call
-        # so BlastRadiusMiddleware can downgrade exec_auto to require confirm.
-        if not is_strict and not self._probed_this_turn:
-            if call.capabilities & ToolCapability.EXEC:
-                call.metadata["trajectory_anomaly"] = True
-                # Issue #168: surface the soft-guard trip so operators (and log
-                # readers) can see why an EXEC call lost its exec_auto fast-pass.
-                # Without this, autonomous runs that get blocked by the soft
-                # guard look indistinguishable from a generic permission denial.
-                # When a UI callback is wired (interactive CLI), demote the
-                # log to DEBUG — the styled harness inline already covers
-                # operator-facing surfacing and the bare log just leaked
-                # unstyled into scrollback. Headless paths (autonomy daemon,
-                # tests) still get the WARNING for forensics
-                if self._on_trajectory_anomaly is not None:
-                    _log.debug(
-                        "Trajectory anomaly: %s (origin=%s); exec_auto revoked.",
-                        call.tool_name, call.origin,
-                    )
-                    try:
-                        self._on_trajectory_anomaly(call.tool_name, call.origin)
-                    except Exception:
-                        pass
-                else:
-                    _log.warning(
-                        "Trajectory anomaly: %s called with EXEC capability before "
-                        "any probe this turn (origin=%s); exec_auto fast-pass will "
-                        "be revoked downstream.",
-                        call.tool_name, call.origin,
-                    )
-
         result = await next(call)
 
         # On successful execution, promote to session-trusted so future turns
@@ -777,12 +727,6 @@ class BlastRadiusMiddleware(Middleware):
     `confirm_fn` is injected by the platform layer so the middleware
     stays platform-agnostic (CLI prompt vs. webhook vs. Telegram).
 
-    `exec_escape_fn` is an optional callable injected by the platform layer
-    when strict_sandbox is enabled.  It receives a ToolCall and returns True
-    if the command would escape the workspace via absolute paths.  When it
-    returns True, exec_auto pre-authorization is bypassed and the user is
-    prompted even in auto mode.
-
     `registry` is an optional ToolRegistry used to look up ``scope_resolver``
     per tool.  When absent, all tools take the legacy path.
     """
@@ -791,7 +735,6 @@ class BlastRadiusMiddleware(Middleware):
         self,
         perm_ctx: Any,
         confirm_fn: "Callable[[ToolCall], Awaitable[bool | ConfirmDecision]]",
-        exec_escape_fn: Callable[[ToolCall], bool] | None = None,
         registry: Any | None = None,
         ledger_emitter: Any = None,
         classifier: Any = None,
@@ -806,7 +749,6 @@ class BlastRadiusMiddleware(Middleware):
         # classifier (sub-agents, tests of the bare middleware).
         self._classifier = classifier
         self._confirm = confirm_fn
-        self._exec_escape_fn = exec_escape_fn
         self._registry = registry
         # PR-C: optional platform-side hook fired on every authorisation
         # decision. Lets the CLI route green-light events to the footer
@@ -820,69 +762,26 @@ class BlastRadiusMiddleware(Middleware):
         # emits one permission_decision event when wired (doc/53 §11.1).
         self._ledger_emitter = ledger_emitter
 
-    def _exec_auto_approved(self, call: ToolCall) -> bool:
-        """
-        Return True if exec_auto mode can skip confirmation for this call.
-
-        .. deprecated:: Phase D (Issue #45)
-            ``enable_exec_auto()`` now injects a scope grant, so tools with
-            a ``scope_resolver`` are handled by the scope-aware path.  This
-            method only fires for legacy tools (no resolver) with EXEC
-            capability.  Remove once all EXEC tools have scope resolvers.
-
-        Conditions (all must hold):
-        1. User has toggled exec_auto on this session.
-        2. The tool has EXEC capability (currently: run_bash).
-        3. Either no escape-detector is wired, OR the command does not escape
-           the workspace via absolute paths.
-        4. No trajectory anomaly flagged by LegitimacyGuardMiddleware
-           (Issue #118 Layer 2 — agent must have probed this turn).
-        """
-        if not self._perm.exec_auto or self._is_unattended(call):
-            return False   # the operator's /auto is attended-only (#690 S6b)
-        if not (call.capabilities & ToolCapability.EXEC):
-            return False
-        if self._exec_escape_fn is not None and self._exec_escape_fn(call):
-            return False   # escape detected — fall through to confirmation
-        if call.metadata.get("trajectory_anomaly"):
-            return False   # no probe this turn — downgrade to confirmation
-        return True
-
     # Origins where no human is available to answer confirmation prompts.
     _UNATTENDED_ORIGINS = UNATTENDED_ORIGINS
 
-    def _exec_auto_blocked_only_by_probe(self, call: ToolCall) -> bool:
-        """True when exec_auto would approve this call but for the
-        trajectory-anomaly downgrade — i.e. probing first would authorize it."""
-        if not self._perm.exec_auto:
-            return False
-        if not (call.capabilities & ToolCapability.EXEC):
-            return False
-        if self._exec_escape_fn is not None and self._exec_escape_fn(call):
-            return False
-        return bool(call.metadata.get("trajectory_anomaly"))
-
-    def _name_authorized(self, call: ToolCall) -> bool:
-        """Whether the tool's *name* is authorized (allowed_tools, pre-auth).
-
-        A name never authorizes an EXEC tool (#690 S7): ``run_bash`` by name
-        would cover every command. Shell is authorized only by exec scope
-        grants (``workspace``, ``*`` or a command shape, see ``ExecMatcher``),
-        exec_auto, or a human confirming the call. This also holds when the
-        scope resolver raises and the call falls back to the legacy path.
-        """
-        if call.capabilities & ToolCapability.EXEC:
-            return False
-        return self._perm.is_authorized(
-            call.tool_name, call.trust_level, attended=not self._is_unattended(call))
+    def _declared(self, call: ToolCall) -> str | None:
+        """The boundary that declares this call's tool (#704 S3), or None.
+        A declaration never covers EXEC (#690 S7: shell is authorized only
+        by exec scope grants) and never CRITICAL."""
+        if call.capabilities & ToolCapability.EXEC or call.trust_level == TrustLevel.CRITICAL:
+            return None
+        declared_by = getattr(self._perm, "declared_by", None)
+        if declared_by is None:
+            return None
+        return declared_by(call.tool_name, attended=not self._is_unattended(call))
 
     def _is_unattended(self, call: ToolCall) -> bool:
         """Return True if no human is available to answer prompts."""
         return call.origin in self._UNATTENDED_ORIGINS
 
     def _deny_unattended(
-        self, call: ToolCall, verdict: str, *, probe_would_authorize: bool = False,
-        classifier_note: str | None = None,
+        self, call: ToolCall, verdict: str, *, classifier_note: str | None = None,
     ) -> ToolResult:
         """Return a denial ToolResult for unattended calls that need confirmation."""
         _log.info(
@@ -900,36 +799,20 @@ class BlastRadiusMiddleware(Middleware):
         )
         call.metadata["user_decision"] = False
 
-        # Issue #168: when the trajectory_anomaly soft-guard tripped, the agent
-        # called an EXEC tool without probing first this turn. Tell it that
-        # explicitly so it can self-correct (probe, then retry) instead of
-        # looping on a generic "no permission" message — but only when the
-        # missing probe is the *sole* blocker (exec_auto would otherwise
-        # approve). Without that, probing can't authorize the call and the
-        # hint just invites a pointless retry (#673 review).
-        if probe_would_authorize and call.metadata.get("trajectory_anomaly"):
-            error = (
-                f"Permission denied: {call.tool_name} requires a probe tool "
-                f"(read_file, list_dir, search_files, ...) to run earlier in "
-                f"this turn before the auto-approval path will fire. Origin "
-                f"'{call.origin}' cannot prompt a human, so the call was failed "
-                f"fast. Probe the relevant context first, then re-issue."
-            )
-        else:
-            # Issue #668: say what actually happened. Nobody denied this —
-            # nobody was there to ask. The call was skipped, not refused, and
-            # routing around it (another tool, a rewritten command) would
-            # launder the very authorization the skip is holding back.
-            error = (
-                f"Skipped (not executed): {call.tool_name} needs authorization "
-                f"beyond this '{call.origin}' turn's grants, and no human is "
-                f"attending to approve it. This is not a denial. Do not retry it "
-                f"or reach the same effect through another tool or command. "
-                f"Note what was skipped, continue with the parts that don't "
-                f"depend on it, and don't treat its result as done."
-            )
-            if classifier_note:
-                error += f" (The approval classifier did not approve it: {classifier_note}.)"
+        # Issue #668: say what actually happened. Nobody denied this —
+        # nobody was there to ask. The call was skipped, not refused, and
+        # routing around it (another tool, a rewritten command) would
+        # launder the very authorization the skip is holding back.
+        error = (
+            f"Skipped (not executed): {call.tool_name} needs authorization "
+            f"beyond this '{call.origin}' turn's grants, and no human is "
+            f"attending to approve it. This is not a denial. Do not retry it "
+            f"or reach the same effect through another tool or command. "
+            f"Note what was skipped, continue with the parts that don't "
+            f"depend on it, and don't treat its result as done."
+        )
+        if classifier_note:
+            error += f" (The approval classifier did not approve it: {classifier_note}.)"
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=False,
@@ -1190,26 +1073,9 @@ class BlastRadiusMiddleware(Middleware):
                 failure_type="permission_denied",
             )
 
-        # CONFIRM or EXPAND_SCOPE — prompt user (or deny if unattended).
-        #
-        # Legacy bridge (refined in #525): honour a name-level pre-authorization
-        # (e.g. the autonomy daemon's allowed_tools) ONLY on CONFIRM — i.e. when
-        # NO scope_grant was declared for this resource, so allowed_tools is the
-        # only stated authorization and the original bridge intent holds (an
-        # autonomy trigger shouldn't be denied despite explicit allowed_tools).
-        #
-        # EXPAND_SCOPE means the caller DID declare a scope_grant for this
-        # resource and this call exceeds its selector. Honouring the tool-name
-        # bypass there would silently void the very boundary the grant promised
-        # (e.g. ``allowed_tools=["write_file"]`` would blanket-authorise writes
-        # outside a ``selector="autonomy/circadian"`` grant). So on EXPAND_SCOPE
-        # the scope is authoritative and we fall through to confirm/deny.
-        # Shell never rides the bridge (#690 S7, see ``_name_authorized``).
-        if verdict == PV.CONFIRM and self._name_authorized(call):
-            self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized",
-                                   source="grant", code="name_bridge")
-            return None  # proceed
-
+        # CONFIRM or EXPAND_SCOPE: the permission-mode decision point, then
+        # a human (attended) or a skip (unattended). There is no name
+        # bridge (#704 S3): a declared tool is decided in ``_auto_decide``.
         # #704 YOLO: within the hard guardrails, run without Luna and
         # without asking. #690 S6 (安全, 自理): before asking a human or
         # skipping, the approval classifier may approve this one call. It
@@ -1300,12 +1166,23 @@ class BlastRadiusMiddleware(Middleware):
         says why not (a classifier reason, ``hard: …``, or "" when nothing
         looked at the call)."""
         mode = self._mode(call)
+        # #704 S3: a tool its boundary declares (a routine's allowed_tools,
+        # the Discord platform's tools) runs in every mode, unless the call
+        # crosses a declared scope (EXPAND_SCOPE: the program's ceiling) or
+        # a hard guardrail. This replaces the name bridge.
+        from .scope import PermissionVerdict as PV
+        source = self._declared(call)
+        if source is not None and verdict != PV.EXPAND_SCOPE:
+            if hard := self._hard_boundary(call, scope_request, verdict, declared=True):
+                return f"hard: {hard}"
+            self._notify_lifecycle(call, True, f"declared by {source}", source="program", code=source)
+            return None
         if mode is PermissionMode.YOLO:
             if hard := self._hard_boundary(call, scope_request, verdict):
                 return f"hard: {hard}"
             self._notify_lifecycle(call, True, "mode yolo", source="mode", code="yolo")
             return None
-        if self._classifier is None or (scope_request is None and not self._classifier.covers(call)):
+        if self._classifier is None:
             return ""
         try:
             approval = await self._classifier.decide(call, scope_request, verdict, mode)
@@ -1318,8 +1195,10 @@ class BlastRadiusMiddleware(Middleware):
         # a document whose content is a token, which Luna only sees
         # redacted) still goes to DK. A rule allow already cleared stricter
         # checks.
+        # ``declared``: an unknown tool Luna judged against the intent
+        # (#704 S3) is not re-refused for having no resolver.
         if (approval.reason.startswith("model-accept") and self._workspace is not None
-                and (hard := self._hard_boundary(call, scope_request, verdict))):
+                and (hard := self._hard_boundary(call, scope_request, verdict, declared=True))):
             return f"hard: {hard}"
         if argv := getattr(approval, "argv", None):
             # A delegated post runs the argv Luna reviewed, without a shell
@@ -1333,14 +1212,16 @@ class BlastRadiusMiddleware(Middleware):
         self._notify_lifecycle(call, True, f"classifier {approval.reason}", source=source, code=code)
         return None
 
-    def _hard_boundary(self, call: ToolCall, scope_request: Any, verdict: Any) -> str | None:
+    def _hard_boundary(self, call: ToolCall, scope_request: Any, verdict: Any, *,
+                       declared: bool = False) -> str | None:
         """The hard guardrail *call* crosses (``approval.hard_boundary``),
         failing closed when it cannot be checked."""
         if self._workspace is None:
             return "no_workspace"
         from .approval import hard_boundary
         try:
-            return hard_boundary(call, scope_request, verdict, self._perm, self._workspace)
+            return hard_boundary(call, scope_request, verdict, self._perm, self._workspace,
+                                 declared=declared)
         except Exception:
             _log.exception("hard guardrail check failed; not approving")
             return "check_failed"
@@ -1416,19 +1297,13 @@ class BlastRadiusMiddleware(Middleware):
                 await self._retrust_approved_skill_write(call, result)
                 return result
 
-        # --- Legacy path (tools without scope_resolver) ---
-        if self._name_authorized(call):
-            self._notify_lifecycle(call, True, "pre-authorized", source="grant", code="pre_authorized")
+        # --- Tools without a scope_resolver ---
+        # A SAFE tool is read-only and local by its own declaration. Every
+        # other call goes to the decision point: a declaration, YOLO, or
+        # (#690 S6b) the classifier for MCP public search.
+        if call.trust_level == TrustLevel.SAFE:
+            self._notify_lifecycle(call, True, "safe tool", source="trust", code="safe")
             return await next(call)
-
-        # exec_auto: session-level pre-authorization for sandboxed shell commands
-        if self._exec_auto_approved(call):
-            self._notify_lifecycle(call, True, "exec_auto", source="grant", code="exec_auto")
-            return await next(call)
-
-        # #704 YOLO, else #690 S6b: MCP public search goes through the
-        # approval classifier like native search; other legacy tools are
-        # refused by its rules.
         from .scope import PermissionVerdict as PV
         note = await self._auto_decide(call, None, PV.CONFIRM)
         if note is None:
@@ -1436,11 +1311,7 @@ class BlastRadiusMiddleware(Middleware):
 
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):
-            return self._deny_unattended(
-                call, "legacy-not-authorized",
-                probe_would_authorize=self._exec_auto_blocked_only_by_probe(call),
-                classifier_note=note,
-            )
+            return self._deny_unattended(call, "legacy-not-authorized", classifier_note=note)
 
         if note:
             call.metadata["classifier_note"] = note
@@ -1533,13 +1404,8 @@ class BlastRadiusMiddleware(Middleware):
                 valid_until=0.0,
             ))
 
-        # EXEC and AGENT_SPAN tools re-confirm on every call (like CRITICAL).
-        # Other GUARDED tools are pre-authorized for the rest of this session.
-        _high_risk = ToolCapability.EXEC | ToolCapability.AGENT_SPAN
-        if (call.trust_level == TrustLevel.GUARDED
-                and not (call.capabilities & _high_risk)):
-            self._perm.authorize(call.tool_name, attended_only=True)
-
+        # A human's answer covers this call only (#704 S3): the next call
+        # of the same tool is decided again.
         return await next(call)
 
 

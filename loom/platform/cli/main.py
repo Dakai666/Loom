@@ -245,7 +245,7 @@ async def _chat(
     # PR-C3: route BlastRadiusMiddleware authorisation decisions through
     # the harness channel. Red-light events留底 inline so the user can
     # forensically trace why a tool was blocked. Green-light events stay
-    # silent — pre-authorized / exec_auto / scope-allow are routine
+    # silent — safe tool / declared / scope-allow are routine
     # successes, not events worth announcing. PR-D will reassess whether
     # any *specific* green-light kind (e.g. "new scope grant just issued")
     # deserves a footer flash, but blanket flashing every approval would
@@ -260,24 +260,6 @@ async def _chat(
     for _mw in session._pipeline._middlewares:
         if isinstance(_mw, BlastRadiusMiddleware):
             _mw._on_lifecycle_event = _on_lifecycle
-            break
-
-    # Route LegitimacyGuardMiddleware's trajectory-anomaly warning
-    # through the harness channel too. Before this, the message
-    # landed via the stdlib logger and printed unstyled into scrollback,
-    # looking like it belonged to the surrounding tool args (the user
-    # could not tell it was a separate harness signal).
-    def _on_trajectory_anomaly(tool_name: str, origin: str) -> None:
-        harness.inline(
-            f"trajectory anomaly: {tool_name} ran EXEC without a prior "
-            f"probe (origin={origin}); exec_auto fast-pass revoked.",
-            level="warning",
-        )
-
-    from loom.core.harness.middleware import LegitimacyGuardMiddleware
-    for _mw in session._pipeline._middlewares:
-        if isinstance(_mw, LegitimacyGuardMiddleware):
-            _mw._on_trajectory_anomaly = _on_trajectory_anomaly
             break
 
     # PR-C4: surface history sanitize repairs and governor rejections.
@@ -697,9 +679,8 @@ def _format_ttl(g: Any) -> str:
     return f"{remaining:.0f}s"
 
 
-# Sources protected from /scope clear — system grants and exec_auto
-# (which backs /auto mode and must not be silently removed).
-_CLEAR_PROTECTED_SOURCES = frozenset({"system", "exec_auto"})
+# Sources protected from /scope clear — system grants.
+_CLEAR_PROTECTED_SOURCES = frozenset({"system"})
 
 
 def _scope_command_core(
@@ -768,7 +749,7 @@ def _handle_scope_command(session: "LoomSession", args: str, console: Any) -> No
 
     /scope          — list active grants (Rich Table)
     /scope revoke N — revoke grant #N
-    /scope clear    — revoke all non-system/exec_auto grants
+    /scope clear    — revoke all non-system grants
     """
     from rich.table import Table
 
@@ -1095,23 +1076,11 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         console.print(f"[loom.muted]{escape(reply)}[/loom.muted]")
 
     elif command == "/auto":
-        if not session._strict_sandbox:
-            console.print(
-                "[loom.warning]  /auto requires strict_sandbox = true in loom.toml.[/loom.warning]\n"
-                "[loom.muted]  Without workspace confinement, auto-approving run_bash "
-                "would grant unrestricted shell access.[/loom.muted]"
-            )
-        else:
-            session.perm.exec_auto = not session.perm.exec_auto
-            state = "on" if session.perm.exec_auto else "off"
-            if session.perm.exec_auto:
-                console.print(
-                    f"[loom.muted]Exec auto-approve: [loom.success]{state}[/loom.success] — "
-                    "run_bash pre-authorized within workspace. "
-                    "Absolute paths that escape the workspace still require confirmation.[/loom.muted]"
-                )
-            else:
-                console.print(f"[loom.muted]Exec auto-approve: [loom.warning]{state}[/loom.warning] — run_bash will confirm every call.[/loom.muted]")
+        # #704 S3: /auto (exec_auto) is retired; the permission mode decides.
+        console.print(
+            "[loom.muted]  /auto is retired (#704). Use [loom.accent]/mode[/loom.accent] "
+            "safe | self | yolo.[/loom.muted]"
+        )
 
     elif command.startswith("/scope"):
         _scope_args = command[len("/scope"):].strip()
@@ -1160,7 +1129,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/tier[/loom.warning] [loom.muted]<N>[/loom.muted]                 Switch tier (1 = daily · 2 = deep reasoning)\n"
                 "  [loom.warning]/think[/loom.warning]                     View last turn's reasoning chain\n"
                 "  [loom.warning]/compact[/loom.warning]                   Compress older context\n"
-                "  [loom.warning]/auto[/loom.warning]                      Toggle run_bash auto-approve (requires strict_sandbox)\n"
+                "  [loom.warning]/mode[/loom.warning]                      Show or switch the permission mode (safe / self / yolo)\n"
                 "  [loom.warning]/scope[/loom.warning]                     List active scope grants (leases)\n"
                 "  [loom.warning]/scope revoke <N>[/loom.warning]          Revoke a specific grant\n"
                 "  [loom.warning]/scope clear[/loom.warning]               Revoke all non-system grants\n"

@@ -256,7 +256,7 @@ class TestHappyPath:
 class TestAuthorizedGate:
     @pytest.mark.asyncio
     async def test_authorized_from_blast_radius_pre_auth(self):
-        """SAFE tools get AUTHORIZED with 'pre-authorized' reason."""
+        """SAFE tools get AUTHORIZED with the 'safe tool' reason (#704 S3)."""
         states = []
 
         async def track(record, old, new):
@@ -274,7 +274,7 @@ class TestAuthorizedGate:
         call = _make_call("safe_tool")
 
         await pipeline.execute(call, _echo_handler)
-        assert states == ["pre-authorized"]
+        assert states == ["safe tool"]
 
     @pytest.mark.asyncio
     async def test_denied_fires_from_blast_radius(self):
