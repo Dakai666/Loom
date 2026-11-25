@@ -144,6 +144,12 @@ def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
         return None
     from loom.autonomy.permission_fields import parse_permission_fields
     grants = parse_permission_fields(entry, f"room:{name}")["scope_grants"]
+    # #707 re-review: say so at load if the furniture declares shell with
+    # no exec grant; a declaration never covers shell, so its wake would
+    # skip silently.
+    from loom.autonomy.permission_fields import report_exec_without_grant
+    report_exec_without_grant(f"room furniture {name!r}", tools, grants,
+                              is_exec=lambda t: t == "run_bash")
     return Furniture(
         name=name,
         label=str(entry.get("label", name)),

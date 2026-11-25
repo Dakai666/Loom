@@ -1,16 +1,20 @@
-"""Replay the last 30 days of permission decisions for Loom Agent's everyday
-tools (memorize, image_generate, *__understand_image) through the #704 S3
-decision point in 自理, and show who would decide each one.
+"""Replay 30 days of attended GUARDED permission decisions through the
+#704 S3 decision point in 自理 and report who would decide each one.
 
-Reads ``~/.loom/ledger.db`` read-only. The ledger keeps no call args, so
-each row is replayed with representative args for its tool (an image into
-``outputs/``); the decision for these tools does not depend on the text.
-A row is treated as attended unless its origin says chime/autonomy/subagent;
-rows from before origin was recorded (#690 S3b) count as attended, the
-conservative reading. No model is called: a replay that would reach Luna
-is reported as such.
+Reads ``~/.loom/ledger.db`` (decisions) and ``~/.loom/memory.db`` (the
+session log, for each call's arguments) read-only. The workspace path
+checks run against the live checkout given as the first argument
+(default: the current directory). Nothing is executed and no model is
+called: a call that would reach Luna is counted as "Luna", and the report
+gives both the worst case (Luna abstains on all of them → DK is asked)
+and an estimate from the measured false-abstain rate.
 
-    uv run python scripts/replay_attended_704_s3.py
+Attended means origin discord/cli, or a pre-origin row (#690 S3b) that a
+human answered ("user confirmed/denied"); other pre-origin rows are
+reported apart, as their attendance is unknown. Scope grants a human gave
+during those sessions (leases) are not replayed: worst case.
+
+    uv run python scripts/replay_attended_704_s3.py [/path/to/live/workspace]
 """
 
 from __future__ import annotations
@@ -21,7 +25,6 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -33,99 +36,176 @@ from loom.core.harness.middleware import BlastRadiusMiddleware, ToolCall, ToolRe
 from loom.core.harness.mode import PermissionMode  # noqa: E402
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel  # noqa: E402
 from loom.core.harness.registry import ToolDefinition, ToolRegistry  # noqa: E402
-from loom.platform.cli.tools import _make_openai_image_scope_resolver  # noqa: E402
+from loom.platform.cli import tools as T  # noqa: E402
 
-TOOLS = ("memorize", "image_generate", "minimax_coding__understand_image")
-ARGS = {
-    "memorize": {"key": "k", "value": "v"},
-    "image_generate": {"prompt": "x", "output_path": "outputs/x.png"},
-    "minimax_coding__understand_image": {"image_source": "outputs/x.png", "prompt": "這是什麼"},
-}
-# What the 30-day rows' routines declare (autonomy/circadian/rhythm.toml).
-DECLARED_BY_ROUTINES = {"memorize"}
+DAYS = 30
+ATTENDED_ORIGINS = {"discord", "cli", "interactive", "tui"}
+PLATFORM_TOOLS = ["send_discord_file", "send_discord_embed", "send_discord_select",
+                  "add_discord_reaction", "read_discord_forum"]
 
 
-def rows(days: int = 30):
-    db = sqlite3.connect(f"file:{os.path.expanduser('~/.loom/ledger.db')}?mode=ro", uri=True)
+def resolvers(ws: Path) -> dict:
+    return {
+        "write_file": T._make_write_file_resolver(ws),
+        "run_bash": T._make_run_bash_resolver(ws),
+        "web_search": T._web_search_resolver,
+        "fetch_url": T._fetch_url_resolver,
+        "spawn_agent": T._spawn_agent_resolver,
+        "image_generate": T._make_openai_image_scope_resolver(ws),
+        "pursuit_write": T._make_pursuit_write_resolver(),
+    }
+
+
+def caps(name: str) -> ToolCapability:
+    if name == "run_bash":
+        return ToolCapability.EXEC
+    if name == "spawn_agent":
+        return ToolCapability.AGENT_SPAN
+    return ToolCapability.NETWORK | ToolCapability.MUTATES
+
+
+def load(days: int = DAYS):
     since = time.time() - days * 86400
-    names = dict(db.execute(
+    led = sqlite3.connect(f"file:{os.path.expanduser('~/.loom/ledger.db')}?mode=ro", uri=True)
+    names = dict(led.execute(
         "SELECT json_extract(payload,'$.tool_call_id'), json_extract(payload,'$.tool_name') "
         "FROM events WHERE event_type='tool_lifecycle' AND timestamp > ?", (since - 3600,)))
-    for (p,) in db.execute("SELECT payload FROM events WHERE event_type='permission_decision' "
-                           "AND timestamp > ?", (since,)):
+    rows = []
+    for p, turn in led.execute("SELECT payload, turn_id FROM events WHERE "
+                               "event_type='permission_decision' AND timestamp > ?", (since,)):
         d = json.loads(p)
         d["tool"] = names.get(d.get("tool_call_id"))
-        if d["tool"] in TOOLS:
-            yield d
+        d["turn_id"] = turn
+        rows.append(d)
+    mem = sqlite3.connect(f"file:{os.path.expanduser('~/.loom/memory.db')}?mode=ro", uri=True)
+    args = {}
+    for (raw,) in mem.execute("SELECT raw_json FROM session_log WHERE role='assistant' "
+                              "AND raw_json LIKE '%tool_calls%' AND created_at > datetime('now', ?)",
+                              (f"-{days + 1} days",)):
+        try:
+            for tc in json.loads(raw).get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                args[tc.get("id")] = json.loads(fn.get("arguments") or "{}")
+        except (ValueError, AttributeError):
+            continue
+    # The turn's real input (#690 S3b stamps ledger_turn_id on messages).
+    intents = {}
+    for content, meta in mem.execute(
+            "SELECT content, metadata FROM session_log WHERE role='user' AND metadata LIKE "
+            "'%ledger_turn_id%' AND created_at > datetime('now', ?)", (f"-{days + 1} days",)):
+        try:
+            intents[json.loads(meta)["ledger_turn_id"]] = content
+        except (ValueError, KeyError, TypeError):
+            continue
+    return rows, args, intents
 
 
-async def replay(tool: str, origin: str, ws: Path, *, declared: bool) -> str:
-    asked: list[str] = []
-    decided: list[str] = []
+def attendance(d: dict) -> str:
+    origin = d.get("origin") or ""
+    reason = d.get("reason") or ""
+    if origin in ATTENDED_ORIGINS:
+        return "attended"
+    if not origin and reason.startswith(("user confirmed", "user denied")):
+        return "attended"
+    return "unattended" if origin else "unknown"
 
-    async def confirm(_call):
-        asked.append("DK")
+
+async def replay(d: dict, call_args: dict, ws: Path, res: dict, intent: str) -> str:
+    events: list[str] = []
+    luna_called: list[bool] = []
+
+    async def confirm(_c):
+        events.append("DK")
         return True
 
-    async def luna(_messages):
-        asked.append("Luna")
+    async def luna(_m):
+        luna_called.append(True)
 
         class R:
             text = '{"verdict":"abstain"}'
         return R()
 
-    async def executor(call):
-        return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output="ok")
+    async def executor(c):
+        return ToolResult(call_id=c.id, tool_name=c.tool_name, success=True, output="ok")
 
+    name = d["tool"]
     reg = ToolRegistry()
-    caps = ToolCapability.NETWORK | (ToolCapability.MUTATES if tool != "minimax_coding__understand_image" else ToolCapability.NONE)
-    reg.register(ToolDefinition(
-        name=tool, description="", input_schema={}, executor=executor, trust_level=TrustLevel.GUARDED,
-        capabilities=caps,
-        scope_resolver=_make_openai_image_scope_resolver(ws) if tool == "image_generate" else None))
+    reg.register(ToolDefinition(name=name, description="", input_schema={}, executor=executor,
+                                trust_level=TrustLevel.GUARDED, capabilities=caps(name),
+                                scope_resolver=res.get(name)))
     perm = PermissionContext(session_id="replay", mode=PermissionMode.SELF)
-    if origin != "attended" and declared and tool in DECLARED_BY_ROUTINES:
-        perm.declare("autonomy:routine", [tool], unattended_only=True)
-    turn = ReviewTurn(intent="（重播）", origin=origin)
+    perm.declare("platform:discord", PLATFORM_TOOLS)
 
-    class _Budget:
+    class Budget:
         def unavailable(self): return False
         def record(self, _o): pass
         async def take(self, *_a, **_k): return True
 
-    classifier = ApprovalClassifier(workspace=ws, perm=perm, emitter=object(), budget=_Budget(),
-                                    chat=luna, context=lambda: ReviewContext(current=turn, previous=()))
+    turn = ReviewTurn(intent=intent, origin="discord")
+    class Emitter:
+        async def emit(self, *_a, **_k): return None
+
+    clf = ApprovalClassifier(workspace=ws, perm=perm, emitter=Emitter(), budget=Budget(), chat=luna,
+                             context=lambda: ReviewContext(current=turn, previous=()))
     blast = BlastRadiusMiddleware(perm_ctx=perm, confirm_fn=confirm, registry=reg,
-                                  classifier=classifier, workspace=ws)
-    blast._on_lifecycle_event = lambda _c, _ok, reason: decided.append(reason)
-    call = ToolCall(tool_name=tool, args=dict(ARGS[tool]), trust_level=TrustLevel.GUARDED,
-                    capabilities=caps, session_id="replay",
-                    origin="discord" if origin == "attended" else origin)
-    result = await blast.process(call, executor)
-    if asked:
-        return "+".join(asked)
-    if result.metadata.get("unattended_skip"):
-        return "skip"
-    return f"不問：{decided[-1]}"
+                                  classifier=clf, workspace=ws)
+    reasons: list[str] = []
+    blast._on_lifecycle_event = lambda _c, _ok, r: reasons.append(r)
+    call = ToolCall(tool_name=name, args=dict(call_args), trust_level=TrustLevel.GUARDED,
+                    capabilities=caps(name), session_id="replay", origin="discord")
+    await blast.process(call, executor)
+    note = call.metadata.get("classifier_note") or ""
+    if events and not luna_called and os.environ.get("REPLAY_DETAIL"):
+        print("ASK", name, note, str(call_args.get("command") or call_args.get("path") or "")[:90],
+              "|| INTENT:", intent.replace("\n", " ")[:160])
+    if luna_called:
+        return "Luna"
+    if events:
+        return "asks DK (hard guardrail)" if note.startswith("hard") else "asks DK"
+    return "no ask"
 
 
 async def main() -> None:
-    table = collections.Counter()
-    with tempfile.TemporaryDirectory() as tmp:
-        ws = Path(tmp)
-        for d in rows():
-            origin = d.get("origin") or ""
-            then = d.get("reason") or ""
-            kind = origin if origin in ("chime", "autonomy", "subagent") else "attended"
-            if kind == "attended" and then.startswith("unattended-"):
-                kind = then.split("(", 1)[1].split(",", 1)[0]  # a row from before S3b
-            # A row that was skipped had no declaration then; replay it so.
-            now = await replay(d["tool"], kind, ws, declared=not then.startswith("unattended-"))
-            table[(d["tool"], kind, then, now)] += 1
-    print("| 工具 | 來源 | 當時 | 次數 | S3 之後（自理） |")
-    print("|---|---|---|---:|---|")
-    for (tool, kind, then, now), n in sorted(table.items()):
-        print(f"| `{tool}` | {kind} | {then} | {n} | {now} |")
+    ws = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+    rows, args, intents = load()
+    res = resolvers(ws)
+    table: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    before_after: collections.Counter = collections.Counter()
+    skipped = collections.Counter()
+    for d in rows:
+        if d.get("trust_level") != "guarded" or not d.get("tool"):
+            continue
+        who = attendance(d)
+        if who != "attended":
+            skipped[who] += 1
+            continue
+        a = args.get(d.get("tool_call_id"))
+        if a is None:
+            table[d["tool"]]["no args in session log"] += 1
+            continue
+        intent = intents.get(d.get("turn_id"))
+        if intent is None:
+            table[d["tool"]]["no intent recorded"] += 1
+            intent = ""
+        outcome = await replay(d, a, ws, res, intent)
+        table[d["tool"]][outcome] += 1
+        then = "asked DK then" if (d.get("reason") or "").startswith(("user confirmed", "user denied")) \
+            else "no ask then"
+        before_after[(then, outcome.split(" (")[0])] += 1
+    cols = ["no ask", "Luna", "asks DK", "asks DK (hard guardrail)", "no args in session log",
+            "no intent recorded"]
+    print("| 工具 | " + " | ".join(cols) + " |")
+    print("|---|" + "---:|" * len(cols))
+    total = collections.Counter()
+    for tool in sorted(table):
+        total.update(table[tool])
+        print(f"| `{tool}` | " + " | ".join(str(table[tool][c]) for c in cols) + " |")
+    print("| **合計** | " + " | ".join(f"**{total[c]}**" for c in cols) + " |")
+    print(f"\nnot replayed: {dict(skipped)} (unattended, or pre-origin rows nobody answered)")
+    print("\n| 當時 | S3 之後 | 次數 |\n|---|---|---:|")
+    for (then, now), n in sorted(before_after.items()):
+        print(f"| {then} | {now} | {n} |")
+    print(f"Luna worst case (abstain on all): DK asked {total['Luna'] + total['asks DK'] + total['asks DK (hard guardrail)']} times")
 
 
 if __name__ == "__main__":

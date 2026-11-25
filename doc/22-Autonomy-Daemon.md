@@ -284,13 +284,15 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 ### 自理：日常工具與未知操作（#704 S3 第二部分）
 
-**日常工具由規則放行（自理、有人值守）。** `memorize`（她自己的記憶，`reason_code = own_memory`）、`image_generate` 與 `*__understand_image`（`media`）不問 DK、不呼叫 Luna，前提是過硬護欄（例如圖片寫到 workspace 外仍問），且沒有超出 routine 宣告的花費／資源 ceiling（routine 對同一資源宣告的 grant 不涵蓋這次呼叫時，規則不放行）。安全模式照舊問。
+**日常工具由規則放行（自理、有人值守）。** `memorize`（她自己的記憶，`reason_code = own_memory`）、`image_generate` 與 `*__understand_image`（`media`）不問 DK、不呼叫 Luna，前提是過硬護欄，且沒有超出 routine 宣告的花費／資源 ceiling（routine 對同一資源宣告的 grant 不涵蓋這次呼叫時，規則不放行）。硬護欄會掃這些工具的每個字串參數，跟 web_search 的 query 一樣：內容符合 S3c 遮罩 pattern（例如 prompt 裡夾帶 `sk-proj-…`）、或像路徑卻指到 workspace 外、隱藏或像憑證（`/etc/passwd`、`~/.ssh/id_rsa`、`.env`），都問 DK；確認畫面寫出是哪一條硬護欄。安全模式照舊問。
 
-**未知操作交 Luna（自理、有人值守）。** 規則判為「不認得」（`not_covered` 的工具、`unknown_program` 的 shell）而且沒碰硬護欄的呼叫，交 Luna 對照可信意圖判斷（category `unknown_operation`，`known_effects.known = false`），accept 只放行這一次，abstain 才問 DK。shell 只有「單純的未知程式執行檔案」才算：wrapper（`nice`、`timeout`、`env`、`xargs`…）、inline code（`python3 -c`、`node -e`、`awk '…'`）、`FOO=1` 前綴、任何字面上出現規則認得的危險程式（`rm` 等）、輸出旗標（`-o`、`--out…`）都照舊問。寫檔、刪除、發文這類規則認得的效果不算未知，照舊問（或走委託）。
+**未知操作交 Luna（自理、有人值守）。** 規則判為「不認得」（`not_covered` 的工具、`unknown_program` 的 shell）而且沒碰硬護欄的呼叫，交 Luna 對照可信意圖判斷（category `unknown_operation`，`known_effects.known = false`），accept 只放行這一次，abstain 才問 DK。shell 只有「單純的未知程式執行檔案」才算：程式必須是 PATH 上或 workspace 內真正的執行檔（shell builtin 與找不到的名字不算）；wrapper 與 runner（`nice`、`timeout`、`env`、`xargs`、`uv`、`poetry`、`make`、`docker`、`kubectl`、`terraform`、`java`、`go`、`cargo`、`npx`…，它們跑的東西在專案檔或 image 裡，argv 看不到）、任何位置的 interpreter 加 inline code 旗標（`python3 -c`、`uv run python -c`、`node -e`、`awk '…'`）、`FOO=1` 前綴、任何字面上出現規則認得的危險程式（`rm` 等）、輸出旗標（`-o`、`--out…`）都照舊問。會延後或改變執行的 shell builtin（`trap`、`alias`、`shopt`、`builtin`、`command`、`declare`…）在三種模式都是硬護欄：`trap 'touch /tmp/x' EXIT` 實測會在 shell 結束時執行。寫檔、刪除、發文這類規則認得的效果不算未知，照舊問（或走委託）。
+
+**委託的目的地（#707 重播）。** `--repo` 等於 workspace 自己的 origin repo（讀 `.git/config`）時，視同不帶 repo 的目的地：DK 只說「#702」、Loom Agent 帶了 `--repo Dakai666/Loom` 也算點名。開新 issue 到 workspace 自己的 repo，意圖沒提到其他 repo 時不必點名 repo（Luna 仍要判斷意圖有沒有要求開 issue）。比對前先去掉 runtime 加在訊息前的時間戳與發話者標記，因為時間戳裡的 `Asia/Taipei` 看起來像 owner/repo。
 
 **無人值守不走 Luna。** program 沒宣告的工具在它的邊界外，一律 skip，Luna 不能放寬這個 ceiling；宣告過的照前一節由 program 放行。
 
-**Luna 量測。** prompt 多一段 unknown_operation 的說明（所有 addendum 都只在對應的 packet 欄位出現時適用）。`tests/fixtures/s3_unknown_ops_bank.yaml` 14 題（6 accept／8 abstain），`codex/gpt-6-luna` 每題一次：**13/14**，唯一錯的 U02（相符的新增備忘錄）是誤 abstain，結果是多問 DK。prompt 改了，S2 的委託題庫也重錄：**17/18**（D04 誤 abstain；D18 這次也 abstain）。
+**Luna 量測。** prompt 多一段 unknown_operation 的說明（所有 addendum 都只在對應的 packet 欄位出現時適用）。`tests/fixtures/s3_unknown_ops_bank.yaml` 13 題交 Luna（6 accept／7 abstain）加 4 題結構上就不交 Luna 的（`trap`、`uv run python -c`、`docker run`、`make deploy`），`codex/gpt-6-luna` 每題一次：第一次錄 13/14（U02 誤 abstain），收緊後重錄 **13/13**；同一個 prompt 單次結果會變動。prompt 改了，S2 的委託題庫也重錄：**17/18**（D04 誤 abstain；D18 這次也 abstain）。
 
 **房間家具的 grant。** `room.toml` 的 `[[furniture]]` 可以寫 `scope_grants`（格式同 schedule），wake 時跟 `allowed_tools` 一起帶進 chime。喵吉要回應 wake 跑 `pet.py`，需要 exec shape：
 

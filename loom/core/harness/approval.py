@@ -39,8 +39,10 @@ import glob as _glob
 import json
 import logging
 import html
+import os
 import re
 import shlex
+import shutil
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -856,6 +858,13 @@ _WRAPPERS = frozenset({
     "nice", "time", "timeout", "stdbuf", "caffeinate", "watch", "parallel", "builtin",
     "command", "nohup", "env", "xargs", "sudo", "doas", "exec", "eval", "script", "unbuffer",
     "chroot", "flock", "setsid", "ionice", "taskset", "strace", "dtruss", "lldb", "gdb",
+    # Runners: what they run lives in a project file or an image the argv
+    # does not show (#707 re-review).
+    "uv", "uvx", "poetry", "pdm", "pipx", "hatch", "rye", "conda", "mamba", "make", "gmake",
+    "just", "task", "docker", "podman", "nerdctl", "kubectl", "helm", "terraform", "tofu",
+    "pulumi", "ansible", "ansible-playbook", "systemctl", "service", "java", "go", "cargo",
+    "dotnet", "gradle", "gradlew", "mvn", "mvnw", "npx", "bunx", "pnpx", "npm", "pnpm",
+    "yarn", "bundle", "rake", "deno", "bun", "tox", "nox", "invoke", "fab", "vagrant",
 })
 _INLINE_CODE = frozenset({
     "awk", "gawk", "mawk", "nawk", "perl", "ruby", "node", "deno", "bun", "php", "lua",
@@ -884,15 +893,33 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
         program = PurePosixPath(head).name
         if "=" in head or program in risky or program in _SHELL_RULES:
             return False
+        if not _resolves_executable(head, workspace):
+            return False  # a builtin or a name with no executable behind it
         args = [w.text for w in seg.words[1:]]
         if program in _INLINE_CODE and (
-                program.endswith("awk") or any(a in _INLINE_FLAGS for a in args)
-                or not args or args[0].startswith("-")):
+                program.endswith("awk") or not args or args[0].startswith("-")):
             return False
+        names = [program] + [PurePosixPath(a).name for a in args]
+        # An interpreter with an inline-code flag anywhere after it
+        # (`foo python -c '…'`) runs code the argv only hints at.
+        for i, name in enumerate(names):
+            if name in _INLINE_CODE and any(a in _INLINE_FLAGS for a in names[i + 1:]):
+                return False
         for a in args:
             if PurePosixPath(a).name in risky or a.startswith(("-o", "--o")):
                 return False
     return True
+
+
+def _resolves_executable(head: str, workspace: Path) -> bool:
+    """Whether *head* names a real executable: a file in the workspace
+    (``./tools/run.sh``) or a program on PATH. A shell builtin or an
+    unknown name has nothing to run as a file."""
+    if "/" in head:
+        target = (workspace / head).resolve()
+        return (_workspace_relative(str(target), workspace) is not None
+                and target.is_file() and os.access(target, os.X_OK))
+    return shutil.which(head) is not None
 
 
 def _everyday_tool(tool_name: str) -> str | None:
@@ -996,6 +1023,15 @@ _REPO_ARG = re.compile(_REPO, re.ASCII)
 _REPO_TOKEN = re.compile(rf"(?<![\w./-])({_REPO})(?:#(\d+))?(?![\w./-])", re.ASCII)
 
 
+# What the runtime prepends to a message: the timestamp (whose time zone,
+# "Asia/Taipei", reads like owner/repo) and the Discord speaker tag.
+_RUNTIME_STAMPS = re.compile(r"\[\[?\d{4}-\d{2}-\d{2} [^\]\n]*\]\]?|\[發話者：[^\]\n]*\]")
+
+
+def _operator_text(intent: str) -> str:
+    return _RUNTIME_STAMPS.sub(" ", intent)
+
+
 def _names_destination(intent: str, number: int, repo: str | None) -> bool:
     """Whether the operator's intent names exactly this issue or PR (#705
     review): its GitHub URL, ``owner/repo#N``, or the one repo it names
@@ -1003,6 +1039,7 @@ def _names_destination(intent: str, number: int, repo: str | None) -> bool:
     workspace's repository, so it matches only an intent that names no
     repository at all."""
     n = str(number)
+    intent = _operator_text(intent)
     urls = {(m.group(1).lower(), m.group(2)) for m in _GITHUB_TARGET.finditer(intent)}
     tokens = {(m.group(1).lower(), m.group(2)) for m in _REPO_TOKEN.finditer(intent)}
     repos = {r for r, _ in urls | tokens}
@@ -1016,12 +1053,32 @@ def _names_destination(intent: str, number: int, repo: str | None) -> bool:
     return repos == {repo} and (repo, None) in tokens and named
 
 
+_ORIGIN_URL = re.compile(
+    r'\[remote "origin"\][^\[]*?url\s*=\s*\S*github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s*$',
+    re.MULTILINE)
+
+
+def _workspace_repo(workspace: Path) -> str | None:
+    """The workspace's own GitHub repository (its ``origin`` remote), or
+    None. Read from ``.git/config``; nothing is executed."""
+    try:
+        text = (workspace / ".git" / "config").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = _ORIGIN_URL.search(text)
+    return m.group(1) if m else None
+
+
+def _repos_named(intent: str) -> set[str]:
+    intent = _operator_text(intent)
+    return ({m.group(1).lower() for m in _GITHUB_TARGET.finditer(intent)}
+            | {m.group(1).lower() for m in _REPO_TOKEN.finditer(intent)})
+
+
 def _names_repo(intent: str, repo: str) -> bool:
     """Whether *repo* is the one repository the intent names (as a token
     or in a GitHub URL), for a new issue there (#704 S2)."""
-    repos = ({m.group(1).lower() for m in _GITHUB_TARGET.finditer(intent)}
-             | {m.group(1).lower() for m in _REPO_TOKEN.finditer(intent)})
-    return repos == {repo.lower()}
+    return _repos_named(intent) == {repo.lower()}
 
 
 # Markup a reader of the rendered issue may not see (#706 re-review).
@@ -1160,7 +1217,11 @@ def delegated_post(command: str, intent: str, workspace: Path) -> DelegatedPost 
         title = values.get("title")
         if targets or not title or not title.strip() or repo is None:
             return None
-        if not _names_repo(intent, repo):
+        own = _workspace_repo(workspace)
+        is_own = own is not None and repo.lower() == own.lower()
+        # A new issue in the workspace's own repository needs no repo name
+        # when the intent names no other repository (#707 replay).
+        if not (_names_repo(intent, repo) or (is_own and not _repos_named(intent))):
             return None
     else:
         if len(targets) != 1:
@@ -1174,7 +1235,13 @@ def delegated_post(command: str, intent: str, workspace: Path) -> DelegatedPost 
             repo, number = m.group(1), int(m.group(2))
         else:
             return None
-        if not _names_destination(intent, number, repo):
+        own = _workspace_repo(workspace)
+        is_own = repo is not None and own is not None and repo.lower() == own.lower()
+        # Loom Agent often passes --repo for her own repository while DK
+        # names only "#702" (#707 replay): the workspace's repo is what a
+        # bare target means, so either naming counts.
+        if not (_names_destination(intent, number, repo)
+                or (is_own and _names_destination(intent, number, None))):
             return None
     if "body" in values:
         body = values["body"]
@@ -1210,6 +1277,11 @@ _HARD_PROGRAMS = frozenset({
     "osascript", "ssh", "scp", "sftp", "env", "printenv", "export", "set", "eval", "exec",
     "source", ".", "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "xargs",
     "nohup", "kill", "pkill", "killall", "chown", "chgrp", "chflags", "defaults",
+}) | frozenset({
+    # Shell builtins that run code later or change how the shell runs it
+    # (#707 re-review: `trap 'touch /tmp/x' EXIT` ran its payload).
+    "trap", "alias", "unalias", "shopt", "builtin", "command", "enable", "coproc",
+    "declare", "typeset", "readonly", "local", "let", "fc", "hash", "ulimit", "umask",
 })
 _DELETE_PROGRAMS = frozenset({"rm", "rmdir", "unlink", "shred", "srm", "truncate"})
 _GH_HARD = frozenset({"auth", "secret", "ssh-key", "gpg-key", "variable", "config"})
@@ -1409,6 +1481,35 @@ def _gh_api_writes(args: list[Word]) -> bool:
     return False
 
 
+def _string_args_hard(value: Any, workspace: Path) -> str | None:
+    """The hard guardrail a tool's string arguments cross: secret content,
+    or a path outside the workspace, hidden or credential-named. A URL is
+    not a path; prose is a path only when it looks like one (no spaces,
+    starts with ``/``, ``~``, ``./`` or ``../``, or contains ``/``)."""
+    if isinstance(value, dict):
+        for v in value.values():
+            if reason := _string_args_hard(v, workspace):
+                return reason
+        return None
+    if isinstance(value, (list, tuple)):
+        for v in value:
+            if reason := _string_args_hard(v, workspace):
+                return reason
+        return None
+    if not isinstance(value, str):
+        return None
+    if _redact_secrets(value) != value:
+        return "credential_content"
+    text = value.strip()
+    if not text or "://" in text or any(c.isspace() for c in text):
+        return None
+    if text.startswith("~"):
+        return "path_expansion"
+    if text.startswith(("/", "./", "../", ".")) or "/" in text:
+        return _location_refusal(text, workspace, hidden_ok=True)
+    return None
+
+
 def hard_boundary(
     call: Any, request: ScopeRequest | None, verdict: PermissionVerdict, perm: Any,
     workspace: Path, *, declared: bool = False,
@@ -1453,6 +1554,12 @@ def hard_boundary(
         if not isinstance(command, str) or not command.strip():
             return "no_command"
         return _shell_hard(command, workspace)
+    elif reason := _string_args_hard(call.args, workspace):
+        # Any other tool (#707 re-review): a secret in any argument, or an
+        # argument that names a path outside the workspace, hidden or
+        # credential-like, is a hard stop — the same check web_search's
+        # query gets.
+        return reason
     elif not declared and (request is None or any(
             req.resource not in _DECLARED_RESOURCES for req in request.requirements)):
         # Nothing declares what this tool does (an MCP tool, mail, a
@@ -1828,9 +1935,12 @@ class ApprovalClassifier:
         # Unattended, a tool its program does not declare is outside the
         # program's boundary: neither this rule nor Luna widens it.
         if mode is PermissionMode.SELF and attended and (code := _everyday_tool(call.tool_name)):
-            if not self._past_routine_ceiling(request, verdict) and hard_boundary(
-                    call, request, verdict, self._perm, self._workspace, declared=True) is None:
-                return ApprovalDecision(True, f"rule-allow: {code}")
+            if self._past_routine_ceiling(request, verdict):
+                return ApprovalDecision(False, "rule-refuse: scope_ceiling")
+            if hard := hard_boundary(call, request, verdict, self._perm, self._workspace,
+                                     declared=True):
+                return ApprovalDecision(False, f"hard: {hard}")
+            return ApprovalDecision(True, f"rule-allow: {code}")
         rule = classify_rules(call, request, verdict, self._perm, self._workspace)
         if (rule.outcome is RuleOutcome.REFUSE and mode is PermissionMode.SELF and attended
                 and rule.reason in _UNKNOWN_REASONS
