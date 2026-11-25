@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from loom.core.cognition.router import LLMRouter
@@ -360,6 +361,16 @@ def _build_jobs_inject_message(jobstore: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def classifier_line(call: "ToolCall") -> str | None:
+    """Why the approval classifier left this call to DK (#690 S6c), or
+    None when it did not look at it."""
+    note = call.metadata.get("classifier_note")
+    if not note:
+        return None
+    from loom.core.harness.approval import describe_note
+    return f"自動核准未放行：{describe_note(note)}"
+
+
 def _format_scope_panel(call: "ToolCall") -> str:
     """
     Build a Rich-formatted string describing scope verdict + diff.
@@ -386,6 +397,8 @@ def _format_scope_panel(call: "ToolCall") -> str:
             else:
                 arg_lines.append(f"  [cyan]{k}[/cyan]: {v!r}")
         args_display = "\n".join(arg_lines) if arg_lines else "  (no args)"
+        if line := classifier_line(call):
+            args_display += f"\n[dim]{escape(line)}[/dim]"
         return (
             f"[#c8a464]{call.tool_name}[/#c8a464]  {call.trust_level.label}\n"
             f"{args_display}"
@@ -433,6 +446,8 @@ def _format_scope_panel(call: "ToolCall") -> str:
             missing_selectors = ", ".join(r.selector for r in diff.missing)
             lines.append(f"[yellow]● new:[/yellow] {missing_selectors}")
 
+    if line := classifier_line(call):
+        lines.append(f"[dim]{escape(line)}[/dim]")
     return "\n".join(lines)
 
 
@@ -458,6 +473,8 @@ def _format_scope_summary_plain(call: "ToolCall") -> str:
                 arg_lines.append(f"  {k}: {display}")
             else:
                 arg_lines.append(f"  {k}: {v!r}")
+        if line := classifier_line(call):
+            arg_lines.append(line)
         return "\n".join(arg_lines) if arg_lines else "(no args)"
 
     _REASON_LABELS: dict[DiffReason, str] = {
@@ -484,6 +501,8 @@ def _format_scope_summary_plain(call: "ToolCall") -> str:
             lines.append(
                 "  ● new: " + ", ".join(r.selector for r in diff.missing)
             )
+    if line := classifier_line(call):
+        lines.append(line)
     return "\n".join(lines)
 
 

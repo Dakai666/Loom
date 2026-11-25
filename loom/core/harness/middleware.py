@@ -1192,6 +1192,10 @@ class BlastRadiusMiddleware(Middleware):
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value, classifier_note=note)
 
+        # #690 S6c: the confirm prompt says why the classifier did not
+        # approve, so DK sees it ran.
+        if note:
+            call.metadata["classifier_note"] = note
         offer = self._skill_trust_offer(call)
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
@@ -1362,6 +1366,8 @@ class BlastRadiusMiddleware(Middleware):
                 classifier_note=note,
             )
 
+        if note:
+            call.metadata["classifier_note"] = note
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
         decision = self._normalize_decision(raw)

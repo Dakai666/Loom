@@ -13,10 +13,11 @@ Two layers:
    contents or queries, anything outside the workspace, shell that writes,
    deletes, posts or sends or runs a program the rules do not know (#690
    S6b), and a turn with no runtime-given intent. ``ALLOW`` passes clearly
-   safe categories: Loom Agent's journal and daily weave (Q2), and shell
-   whose every part only reads inside the workspace (S6b). ``REVIEW`` is
-   left for workspace document writes, public search (MCP included) and
-   shell network reads (``gh`` reads, plain http(s) GET ``curl``).
+   safe categories: Loom Agent's journal and daily weave (Q2), shell whose
+   every part only reads inside the workspace (S6b), and ``gh`` reads
+   (S6c). ``REVIEW`` is left for workspace document writes, public search
+   (MCP included) and other shell network reads (plain http(s) GET
+   ``curl``, ``git remote show``).
 2. The model sees only ``REVIEW`` calls and answers ``accept`` or ``abstain``.
    One attempt on ``codex/gpt-6-luna`` (ChatGPT plan, low effort): no retry,
    no router failover, no JSON repair. A timeout, an error, an invalid reply,
@@ -131,14 +132,18 @@ def _workspace_relative(raw: str, workspace: Path) -> PurePosixPath | None:
         return None
 
 
-def _location_refusal(raw: str, workspace: Path, *, allow: tuple[str, ...] = ()) -> str | None:
+def _location_refusal(raw: str, workspace: Path, *, allow: tuple[str, ...] = (),
+                      hidden_ok: bool = False) -> str | None:
     """Whether the literal path *raw* is outside the workspace, hidden or
     credential-named. *allow* drops words from the credential check
-    (``.db`` for a database sqlite3 opens read-only)."""
+    (``.db`` for a database sqlite3 opens read-only). ``hidden_ok``: a
+    hidden path such as ``.github/`` is fine, except inside ``.git``
+    (its config can carry a remote's token)."""
     rel = _workspace_relative(raw, workspace)
     if rel is None:
         return "outside_workspace"
-    if any(part.startswith(".") for part in rel.parts):
+    if any(part.startswith(".") for part in rel.parts) and not (
+            hidden_ok and ".git" not in (part.lower() for part in rel.parts)):
         return "hidden_path"
     name = str(rel).lower()
     for word in allow:
@@ -337,8 +342,11 @@ def _word_refusal(word: Word, workspace: Path, *, allow: tuple[str, ...] = (),
                   names_only: bool = False) -> str | None:
     """Hard-rule check on a word bash may open as a file: the word itself
     and, for a glob, every workspace file it expands to. ``names_only``: the
-    program lists names and never opens the file (ls, stat), so a
-    credential-looking name or content is not a read of it."""
+    program lists names and never opens the file (ls, stat, git ls-files),
+    so a hidden or credential-looking name, or its content, is not a read
+    of it; only the workspace boundary holds. A program that reads content
+    may read a hidden workspace file (``.github/``) whose name and content
+    pass the credential checks (#690 S6c)."""
     if word.expands:
         return "path_expansion"
     targets = [word.text]
@@ -346,8 +354,8 @@ def _word_refusal(word: Word, workspace: Path, *, allow: tuple[str, ...] = (),
         root = workspace.resolve()
         targets += [str(root / m) for m in _glob.glob(word.text, root_dir=root)]
     for target in targets:
-        refusal = _location_refusal(target, workspace, allow=allow)
-        if refusal and not (names_only and refusal == "credential_path"):
+        refusal = _location_refusal(target, workspace, allow=allow, hidden_ok=True)
+        if refusal and not (names_only and refusal in ("credential_path", "hidden_path")):
             return refusal
         if not names_only and _holds_secret(target, workspace):
             return "credential_content"
@@ -431,15 +439,34 @@ def _git(args: list[Word], workspace: Path) -> Verdict:
     for w in operands:
         # HEAD:.env reads a file from history: check the part after ":".
         path = Word(w.text.rpartition(":")[2] or w.text, w.glob, w.expands)
-        if refusal := _word_refusal(path, workspace):
+        if refusal := _word_refusal(path, workspace, names_only=sub in _GIT_NAMES_ONLY):
             return Effect.ASK, refusal
     return _READ
 
 
+def _jq_env(filter_text: str) -> bool:
+    """Whether a jq filter reads the environment (``env``, ``$ENV``),
+    where a token may live, or loads a module or data file from outside
+    the operands (``import``, ``include``)."""
+    return bool(_JQ_ENV.search(filter_text))
+
+
 def _gh(args: list[Word], workspace: Path) -> Verdict:
+    """A gh read (view, list, search, ``api`` GET) is read-only by rule
+    (#690 S6c): it only prints what GitHub returns, and posting, editing,
+    a non-GET method or sent fields still ask."""
     words = [w.text for w in args]
     if not words:
         return Effect.ASK, "external"
+    flags = _flags(args[1:])[0]
+    if _has_flag(flags, _GH_BROWSER):
+        return Effect.ASK, "external"
+    for i, word in enumerate(words):
+        base, eq, value = word.partition("=")
+        if base in ("-q", "--jq", "-t", "--template"):
+            text = value if eq else (words[i + 1] if i + 1 < len(words) else "")
+            if _jq_env(text):
+                return Effect.ASK, "environment"
     if words[0] == "api":
         for i, word in enumerate(words):
             base, _, value = word.partition("=")
@@ -451,13 +478,86 @@ def _gh(args: list[Word], workspace: Path) -> Verdict:
                 continue
             if method.upper() != "GET":
                 return Effect.ASK, "external"
-        if _has_flag(_flags(args[1:])[0], _GH_API_SENDS):
+        if _has_flag(flags, _GH_API_SENDS):
             return Effect.ASK, "external"
-        return Effect.REVIEW, "network_read"
+        return _GH_READ
     action = words[1] if len(words) > 1 else ""
     if words[0] == "search" or action in _GH_READS.get(words[0], ()):
-        return Effect.REVIEW, "network_read"
+        return _GH_READ
     return Effect.ASK, "external"
+
+
+def _test(args: list[Word], workspace: Path) -> Verdict:
+    """``test`` / ``[``: only looks at names (exists, size, type) and
+    compares strings."""
+    for w in args:
+        if w.text in _TEST_OPERATORS or w.text.startswith("-"):
+            continue
+        if refusal := _word_refusal(w, workspace, names_only=True):
+            return Effect.ASK, refusal
+    return _READ
+
+
+def _bracket(args: list[Word], workspace: Path) -> Verdict:
+    if not args or args[-1].text != "]":
+        return Effect.ASK, "unknown_program"
+    return _test(args[:-1], workspace)
+
+
+def _command(args: list[Word], workspace: Path) -> Verdict:
+    """``command -v name`` looks a name up; any other use runs a program."""
+    if args and args[0].text in ("-v", "-V"):
+        return _READ
+    return Effect.ASK, "unknown_program"
+
+
+def _sed(args: list[Word], workspace: Path) -> Verdict:
+    """``sed -n 10,40p file``: a print-only script reads like ``head``.
+    In-place edits, script files and every other sed command ask."""
+    flags, operands = _flags(args)
+    if any(f not in _SED_FLAGS for f in flags):
+        return Effect.ASK, "effectful_flag"
+    if not operands or not _SED_PRINT.fullmatch(operands[0].text):
+        return Effect.ASK, "sed_script"
+    return _reader()(operands[1:], workspace)
+
+
+def _jq(args: list[Word], workspace: Path) -> Verdict:
+    """jq prints JSON: the first operand is the filter, the rest are files."""
+    words = [w.text for w in args]
+    operands: list[Word] = []
+    i = 0
+    while i < len(args):
+        word = words[i]
+        if word in _JQ_ASK or (word.startswith("-") and not word.startswith("--")
+                                and any(c in "fL" for c in word[1:])):
+            return Effect.ASK, "effectful_flag"
+        if word in ("--arg", "--argjson"):
+            i += 3
+            continue
+        if word == "--indent":
+            i += 2
+            continue
+        if word in ("--args", "--jsonargs"):
+            break  # the rest are values, not files
+        if not word.startswith("-") or word == "-":
+            operands.append(args[i])
+        i += 1
+    if not operands:
+        return Effect.ASK, "jq_no_filter"
+    if _jq_env(operands[0].text):
+        return Effect.ASK, "environment"
+    for w in operands[1:]:
+        if refusal := _word_refusal(w, workspace):
+            return Effect.ASK, refusal
+    return _READ
+
+
+def _uniq(args: list[Word], workspace: Path) -> Verdict:
+    """``uniq in out`` writes *out*."""
+    if len(_flags(args)[1]) > 1:
+        return Effect.ASK, "writes"
+    return _reader(frozenset({"--output"}))(args, workspace)
 
 
 def _curl(args: list[Word], workspace: Path) -> Verdict:
@@ -536,6 +636,17 @@ _GH_READS = {
     "workflow": ("view", "list"), "label": ("list",),
 }
 _GH_API_SENDS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+_GH_BROWSER = frozenset({"-w", "--web"})
+_GH_READ: Verdict = (Effect.READ, "gh_read")
+# Names-only git subcommands list paths and never print a file's content.
+_GIT_NAMES_ONLY = frozenset({"ls-files", "ls-tree", "status"})
+_JQ_ENV = re.compile(r"\$ENV\b|\benv\b|\bimport\b|\binclude\b")
+_JQ_ASK = frozenset({"-f", "--from-file", "--rawfile", "--slurpfile", "-L"})
+_SED_FLAGS = frozenset({"-n", "-E", "-r", "--quiet", "--silent", "-u", "--posix"})
+# Line addresses followed by p, e.g. "1,40p", "$p", "5p;20,30p".
+_SED_PRINT = re.compile(
+    r"\s*(?:(?:\d+|\$)(?:,(?:\d+|\$))?)?\s*p(?:\s*;\s*(?:(?:\d+|\$)(?:,(?:\d+|\$))?)?\s*p)*\s*;?\s*")
+_TEST_OPERATORS = frozenset({"!", "=", "==", "!="})
 _CURL_SENDS = frozenset({
     # send data
     "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii",
@@ -570,8 +681,20 @@ _ASK_PROGRAMS = frozenset({
 _SHELL_RULES: dict[str, Callable[[list[Word], Path], Verdict]] = {
     **{p: _reader() for p in ("cat", "head", "tail", "wc", "nl", "cut", "comm", "file")},
     **{p: _reader(names_only=True) for p in ("ls", "stat", "du")},
-    "pwd": lambda args, ws: _READ,
-    "echo": lambda args, ws: _READ,
+    **{p: _reader(names_only=True) for p in ("realpath", "readlink")},
+    # Print their arguments or a fact about the system; open no file.
+    **{p: (lambda args, ws: _READ) for p in (
+        "pwd", "echo", "printf", "true", "false", "which", "type", "uname", "whoami", "tr",
+        "basename", "dirname")},
+    "test": _test,
+    "[": _bracket,
+    "command": _command,
+    "sed": _sed,
+    "jq": _jq,
+    "uniq": _uniq,
+    "sort": _reader(frozenset({"-o", "--output", "--compress-program", "--files0-from",
+                               "-T", "--temporary-directory"})),
+    "tree": _reader(frozenset({"-o", "--fromfile", "-R"}), names_only=True),
     "diff": _reader(frozenset({"-r", "--recursive"})),
     "date": _reader(frozenset({"-s", "--set"})),
     # Recursion would read hidden files (.env) the path check never sees.
@@ -599,7 +722,9 @@ def classify_shell(command: str, workspace: Path) -> Verdict:
     for seg in segments:
         words = [w.text for w in seg.words]
         if words[:1] == ["cd"] and len(words) == 2 and not seg.redirects:
-            if refusal := _word_refusal(seg.words[1], cwd, names_only=True):
+            # Strict: later parts check paths relative to the new cwd, so
+            # `cd .git && cat config` must not get past the hidden rule.
+            if refusal := _path_refusal(words[1], cwd):
                 return Effect.ASK, refusal
             cwd = (cwd / words[1]).resolve()
             continue
@@ -619,7 +744,7 @@ def _segment(seg: Segment, workspace: Path) -> Verdict:
     if not seg.words:
         return _READ
     head, args = seg.words[0], seg.words[1:]
-    if head.glob or head.expands:
+    if (head.glob or head.expands) and head.text != "[":
         return Effect.ASK, "path_expansion"
     program = PurePosixPath(head.text).name
     if program in _ASK_PROGRAMS:
@@ -993,6 +1118,19 @@ def plan_model_chat() -> ChatFn:
     async def chat(messages: list[dict[str, Any]]) -> Any:
         return await provider.chat(messages=messages, tools=None, max_tokens=128)
     return chat
+
+
+def describe_note(note: str) -> str:
+    """The classifier's reason in words DK reads on a confirm prompt, e.g.
+    ``Luna abstained`` or ``rule: unknown_program``."""
+    kind, _, reason = note.partition(": ")
+    if kind == "model-abstain":
+        return "Luna abstained" if reason in ("", "abstain") else f"Luna abstained: {reason}"
+    if kind == "rule-refuse":
+        return f"rule: {reason}"
+    if note == "error":
+        return "classifier error"
+    return note
 
 
 @dataclass(frozen=True)
