@@ -213,3 +213,118 @@ class TestLedgerQuery:
         r = await self._run(tmp_path, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n "
                                       "WHERE i < 1000) SELECT i FROM n", limit=5)
         assert r.success and r.output.count("\n") <= 7
+
+
+# ---------------------------------------------------------------------------
+# #709 review (Vera): ledger_query bounds, deadline, redaction, scope
+# ---------------------------------------------------------------------------
+
+
+def _rich_ledger(tmp_path: Path) -> Path:
+    db = tmp_path / "ledger.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE events (event_id TEXT, event_type TEXT, timestamp REAL, payload TEXT)")
+    rows = [("e1", "permission_decision", 1.0, json.dumps({
+                "reason": "scope-allow", "password": "hunter2", "auth": "abc",
+                "nested": {"api_key": "xyz", "note": "ok"}, "input_tokens": 120,
+                "text": "key sk-proj-abcdefghijklmnopqrstuvwxyz"}))]
+    rows += [(f"b{i}", "bulk", float(i), json.dumps({"n": i, "pad": "x" * 500})) for i in range(3000)]
+    con.executemany("INSERT INTO events VALUES (?, ?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    return db
+
+
+async def _ledger(db: Path, sql: str, **kw):
+    from loom.core.harness.middleware import ToolCall
+    from loom.platform.cli.tools import make_ledger_query_tool
+    tool = make_ledger_query_tool(db)
+    call = ToolCall(tool_name="ledger_query", args={"sql": sql, **kw}, trust_level=TrustLevel.SAFE,
+                    session_id="s")
+    return await tool.executor(call)
+
+
+class TestLedgerQueryBounds:
+    @pytest.mark.parametrize("sql", [
+        "SELECT group_concat(payload) FROM events",
+        "SELECT hex(zeroblob(10000000))",
+        "SELECT payload FROM events",
+    ])
+    async def test_output_is_bounded(self, tmp_path, sql):
+        r = await _ledger(_rich_ledger(tmp_path), sql, limit=200)
+        text = r.output if r.success else (r.error or "")
+        assert len(text.encode()) <= 26_000
+
+    async def test_each_cell_is_capped(self, tmp_path):
+        r = await _ledger(_rich_ledger(tmp_path), "SELECT payload FROM events WHERE event_type='bulk'", limit=3)
+        assert r.success
+        for line in r.output.splitlines()[1:4]:
+            assert len(line.encode()) <= 2_100
+
+    async def test_long_query_is_cut_off(self, tmp_path):
+        import time
+        started = time.monotonic()
+        r = await _ledger(_rich_ledger(tmp_path),
+                          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n) "
+                          "SELECT count(*) FROM n")
+        assert not r.success and "time" in r.error.lower()
+        assert time.monotonic() - started < 8
+
+
+class TestLedgerQueryRedaction:
+    @pytest.mark.parametrize("sql", [
+        "SELECT json_extract(payload,'$.password') FROM events WHERE event_id='e1'",
+        "SELECT json_extract(payload,'$.auth') FROM events WHERE event_id='e1'",
+        "SELECT json_extract(payload,'$.nested.api_key') FROM events WHERE event_id='e1'",
+        "SELECT json_extract(payload,'$.' || 'pass' || 'word') FROM events WHERE event_id='e1'",
+        "SELECT payload ->> '$.password' FROM events WHERE event_id='e1'",
+        "SELECT value FROM events, json_each(events.payload) WHERE event_id='e1' AND key='password'",
+        "SELECT payload FROM events WHERE event_id='e1'",
+    ])
+    async def test_secret_named_fields_come_back_masked(self, tmp_path, sql):
+        r = await _ledger(_rich_ledger(tmp_path), sql)
+        assert r.success, r.error
+        for secret in ("hunter2", "\\tabc", "xyz", "sk-proj-abcdefghij"):
+            assert secret not in r.output, (sql, r.output)
+
+    async def test_numbers_and_ordinary_fields_stay(self, tmp_path):
+        r = await _ledger(_rich_ledger(tmp_path),
+                          "SELECT json_extract(payload,'$.input_tokens'), json_extract(payload,'$.nested.note') "
+                          "FROM events WHERE event_id='e1'")
+        assert r.success and "120" in r.output and "ok" in r.output
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT * FROM pragma_table_info('events')", "PRAGMA table_list",
+        "SELECT * FROM sqlite_master",
+    ])
+    async def test_nothing_outside_the_redacted_view(self, tmp_path, sql):
+        r = await _ledger(_rich_ledger(tmp_path), sql)
+        assert not r.success or "hunter2" not in r.output
+
+
+class TestLedgerQuerySql:
+    @pytest.mark.parametrize("sql", [
+        "SELECT event_id AS \"update\" FROM events LIMIT 1",
+        "SELECT event_id FROM events WHERE payload LIKE '%update%' LIMIT 1",
+        "SELECT 'a;b'",
+        "EXPLAIN SELECT event_id FROM events",
+    ])
+    async def test_ordinary_reads_are_not_blocked(self, tmp_path, sql):
+        r = await _ledger(_rich_ledger(tmp_path), sql)
+        assert r.success, r.error
+
+    async def test_path_with_spaces(self, tmp_path):
+        d = tmp_path / "dir with space #1"
+        d.mkdir()
+        db = _rich_ledger(d)
+        r = await _ledger(db, "SELECT count(*) FROM events")
+        assert r.success and "3001" in r.output
+
+
+def test_subagents_never_get_ledger_query():
+    from loom.core.agent import subagent as sa
+    from loom.platform.cli.tools import make_ledger_query_tool
+    tool = make_ledger_query_tool(Path("/nonexistent/ledger.db"))
+    assert "main_session_only" in (tool.tags or [])
+    src = Path(sa.__file__).read_text(encoding="utf-8")
+    assert "main_session_only" in src
