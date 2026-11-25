@@ -1908,18 +1908,38 @@ _LEDGER_MAYBE_SECRET = re.compile(
 _LEDGER_FUNCTIONS_DENIED = frozenset({"load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"})
 
 
-def _redact_ledger_json(value: Any) -> Any:
-    """A payload as ledger_query shows it: string values under a
-    secret-named key masked, every other string through the S3c patterns."""
+def _redact_ledger_json(value: Any, *, under_secret: bool = False) -> Any:
+    """A payload as ledger_query shows it: every scalar under a
+    secret-named key masked, whatever its type and however deep (the
+    object or list keeps its shape), every other string through the S3c
+    patterns. A null stays null: it holds nothing."""
     from loom.core.memory.session_log import _redact_secrets
     if isinstance(value, dict):
-        return {k: ("[REDACTED]" if isinstance(v, str) and _LEDGER_SECRET_KEY.fullmatch(str(k))
-                    else _redact_ledger_json(v)) for k, v in value.items()}
+        return {k: _redact_ledger_json(
+                    v, under_secret=under_secret or bool(_LEDGER_SECRET_KEY.fullmatch(str(k))))
+                for k, v in value.items()}
     if isinstance(value, list):
-        return [_redact_ledger_json(v) for v in value]
+        return [_redact_ledger_json(v, under_secret=under_secret) for v in value]
+    if value is None:
+        return None
+    if under_secret:
+        return "[REDACTED]"
     if isinstance(value, str):
         return _redact_secrets(value)
     return value
+
+
+class _LedgerValueTooBig(Exception):
+    """A value in the result is over ledger_query's 1 MB cap."""
+
+    def __init__(self, row: int) -> None:
+        where = (f"result row {row}" if row > 1 else
+                 "the first result row (or a row read while sorting or grouping)")
+        super().__init__(
+            f"{where} holds a value over ledger_query's "
+            f"{_LEDGER_MAX_VALUE_BYTES // 1_000_000} MB cap per value (sqlite length limit); "
+            "select the fields you need with json_extract(payload, '$.field') or "
+            "substr(payload, 1, 2000) instead of the whole payload")
 
 
 def _redact_ledger_payload(text: Any) -> Any:
@@ -2005,9 +2025,20 @@ def make_ledger_query_tool(db_path: Path) -> ToolDefinition:
             con.set_authorizer(authorize)
             deadline = time.monotonic() + _LEDGER_DEADLINE_SECONDS
             con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
-            cur = con.execute(sql)
-            names = [d[0] for d in cur.description or ()]
-            rows = cur.fetchmany(limit + 1)
+            rows: list[tuple] = []
+            failing_row = 1  # sqlite3 steps one row ahead of what fetchone returns
+            try:
+                cur = con.execute(sql)
+                names = [d[0] for d in cur.description or ()]
+                while len(rows) <= limit:
+                    failing_row = len(rows) + 2
+                    if (row := cur.fetchone()) is None:
+                        break
+                    rows.append(row)
+            except sqlite3.DataError as exc:
+                if "too big" not in str(exc):
+                    raise
+                raise _LedgerValueTooBig(failing_row) from exc
         finally:
             con.close()
         lines = ["\t".join(names)]
@@ -2037,6 +2068,9 @@ def make_ledger_query_tool(db_path: Path) -> ToolDefinition:
                               error="ledger_query needs one SQL query.", failure_type="validation_error")
         try:
             output = await asyncio.to_thread(_query, sql, limit)
+        except _LedgerValueTooBig as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error=str(exc), failure_type="execution_error")
         except sqlite3.OperationalError as exc:
             msg = str(exc)
             if "interrupted" in msg:
@@ -2061,9 +2095,12 @@ def make_ledger_query_tool(db_path: Path) -> ToolDefinition:
             "Payload string values under secret-named keys come back masked and secret-shaped "
             "text is redacted by pattern (not a guarantee for every secret). Output is "
             "tab-separated, at most `limit` rows (default 50, max 200), 2 KB per cell, 24 KB in "
-            "all, 5 s per query: filter by event_type or timestamp before reading payload, since "
-            "a scan of every payload can exceed the limit. Use this instead of "
-            "`sqlite3 ~/.loom/ledger.db` in the shell."
+            "all, 1 MB per value, 5 s per query. Indexed: event_id; event_type with timestamp; "
+            "timestamp (a narrow window, or ORDER BY timestamp DESC LIMIT n for the latest "
+            "rows); session_id and tool_name together with branch_id = 'main'. Filter on those; "
+            "a query that filters or sorts on anything else scans and redacts every payload "
+            "and can hit the time limit. Use this instead of `sqlite3 ~/.loom/ledger.db` in "
+            "the shell."
         ),
         trust_level=TrustLevel.SAFE,
         capabilities=ToolCapability.READ_PROBE,

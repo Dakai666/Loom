@@ -311,10 +311,12 @@ class TestLedgerQueryTooBig:
         ])
         con.commit()
         con.close()
-        r = await _ledger(db, "SELECT event_id, payload FROM events ORDER BY timestamp")
+        r = await _ledger(db, "SELECT event_id, payload FROM events")
         assert not r.success
         assert "1 MB" in r.error and "row 3" in r.error, r.error
         assert "substr" in r.error or "json_extract" in r.error
+        sorted_ = await _ledger(db, "SELECT event_id, payload FROM events ORDER BY event_id")
+        assert not sorted_.success and "1 MB" in sorted_.error and "sorting" in sorted_.error
 
 
 class TestLedgerQueryRedaction:
