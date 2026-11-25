@@ -184,8 +184,9 @@ class TestOnlyNetworkReadsAreReviewed:
         assert await _ask(env, "curl -s https://example.com/650")
 
     @pytest.mark.parametrize("command", [
-        # unknown programs and interpreters
-        "python3 skills/report.py --day today", "unknown-prog --out=/tmp/x",
+        # unknown programs and interpreters (a plain unknown program running a
+        # workspace file goes to Luna in 自理 since #704 S3: test_unknown_ops_704_s3b)
+        "unknown-prog --out=/tmp/x",
         "python3 -c 'import os; os.system(\"rm -rf .\")'", "node -e 'x'",
         "perl -e 'system(1)'", "ruby -e 'x'", "awk 'BEGIN{system(\"rm x\")}'",
         "sed -n 1w/tmp/x news/a.md", "sh -c 'rm x'",

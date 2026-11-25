@@ -82,3 +82,24 @@ def parse_permission_fields(data: dict[str, Any], source_name: str) -> dict[str,
         "allowed_tools": allowed_tools,
         "scope_grants": scope_grants,
     }
+
+
+def report_exec_without_grant(
+    source: str, tools: "list[str] | tuple[str, ...]", grants: "list[dict] | tuple[dict, ...]",
+    *, is_exec: "Any",
+) -> list[str]:
+    """Warn when a boundary declares a shell (EXEC) tool but grants no exec
+    scope (#704 S3, #707 review). A declaration never covers shell, so
+    such a routine's shell calls are skipped; say so instead of letting
+    ``allowed_tools = ["run_bash"]`` look like an authorization."""
+    if any(g.get("resource") == "exec" for g in grants):
+        return []
+    missing = [t for t in tools if is_exec(t)]
+    if missing:
+        logger.warning(
+            "[autonomy] %s declares %s but has no exec scope grant; a declaration "
+            "never covers shell, so these calls will be skipped. Add an exec "
+            "scope_grant (a command shape) if the routine needs them.",
+            source, ", ".join(missing),
+        )
+    return missing

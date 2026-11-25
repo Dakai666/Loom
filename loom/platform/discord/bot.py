@@ -1056,6 +1056,12 @@ class LoomDiscordBot:
                   if (added or req.scope_grants) else None)
         if added:
             session.perm.declare(source, added, unattended_only=True)
+            from loom.autonomy.permission_fields import report_exec_without_grant
+            from loom.core.harness.permissions import ToolCapability
+            report_exec_without_grant(
+                source, added, req.scope_grants,
+                is_exec=lambda n: bool(getattr(session.registry.get(n), "capabilities",
+                                               ToolCapability.NONE) & ToolCapability.EXEC))
         for g in req.scope_grants:
             session.perm.grant(ScopeGrant(
                 resource=g["resource"],

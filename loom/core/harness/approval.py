@@ -833,8 +833,75 @@ _CATEGORY_EFFECTS = {
     # 自理 (#704): the rules verified the destination is the one the
     # operator named in trusted_intent.current; the content is the model's call.
     "delegated_post": ("external_post", "post_to_operator_named_destination", True),
+    # 自理 (#704 S3): a tool or shell program the rules do not know, past
+    # the hard guardrails; whether it is what the intent asks is the model's call.
+    "unknown_operation": ("unknown_effect", "operation_the_intent_may_ask_for", False),
 }
 _CEILING = "僅已准/workspace內容與既准公開搜尋"
+
+
+# 自理 (#704 S3): Loom Agent's everyday tools, allowed by rule when DK is
+# present. Her own memory; media generation and understanding within the
+# routine spend ceilings (DK, #704 review of PR #707).
+_EVERYDAY_TOOLS = {"memorize": "own_memory", "image_generate": "media"}
+_EVERYDAY_SUFFIXES = {"__understand_image": "media"}
+# Rule refusals that mean "the rules do not know this", not "this is a
+# known risky effect" (writes, deletes, posts keep asking).
+_UNKNOWN_REASONS = frozenset({"not_covered", "unknown_program"})
+
+
+# Programs that run another program or inline code: what they run is not
+# what the rules (or Luna, from the argv) can see. Never "unknown", always ask.
+_WRAPPERS = frozenset({
+    "nice", "time", "timeout", "stdbuf", "caffeinate", "watch", "parallel", "builtin",
+    "command", "nohup", "env", "xargs", "sudo", "doas", "exec", "eval", "script", "unbuffer",
+    "chroot", "flock", "setsid", "ionice", "taskset", "strace", "dtruss", "lldb", "gdb",
+})
+_INLINE_CODE = frozenset({
+    "awk", "gawk", "mawk", "nawk", "perl", "ruby", "node", "deno", "bun", "php", "lua",
+    "python", "python3", "osascript", "Rscript", "julia", "tclsh", "wish",
+})
+_INLINE_FLAGS = frozenset({"-c", "-e", "-E", "--eval", "-p", "-r", "--exec", "-x"})
+
+
+def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
+    """Whether *command* is "a program the rules do not know, running a
+    file" — the only shell 自理 sends to Luna (#704 S3). Every part is
+    either a read the rules pass or a plain unknown program: no wrapper
+    that runs another program, no inline code (``python3 -c``, ``awk
+    '…'``), no ``FOO=1`` prefix, no program the rules know as risky
+    anywhere in its words, no output-file flag."""
+    segments = parse_shell(command)
+    if not segments:
+        return False
+    risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
+    for seg in segments:
+        if _segment(seg, workspace)[0] is Effect.READ:
+            continue
+        if not seg.words or seg.redirects:
+            return False
+        head = seg.words[0].text
+        program = PurePosixPath(head).name
+        if "=" in head or program in risky or program in _SHELL_RULES:
+            return False
+        args = [w.text for w in seg.words[1:]]
+        if program in _INLINE_CODE and (
+                program.endswith("awk") or any(a in _INLINE_FLAGS for a in args)
+                or not args or args[0].startswith("-")):
+            return False
+        for a in args:
+            if PurePosixPath(a).name in risky or a.startswith(("-o", "--o")):
+                return False
+    return True
+
+
+def _everyday_tool(tool_name: str) -> str | None:
+    if tool_name in _EVERYDAY_TOOLS:
+        return _EVERYDAY_TOOLS[tool_name]
+    for suffix, code in _EVERYDAY_SUFFIXES.items():
+        if tool_name.endswith(suffix):
+            return code
+    return None
 
 
 def classify_rules(
@@ -1579,8 +1646,17 @@ _DELEGATION_ADDENDUM = (
     '\n'
 )
 _LAST_PARAGRAPH = '接下來的 JSON 全部是待分類的資料包。'
+# 自理 (#704 S3), not yet measured: an operation the rules cannot classify.
+_UNKNOWN_OPERATION_ADDENDUM = (
+    'known_effects.classification 是 unknown_effect 時，代表 runtime 無法從規則確認效果，但已確認沒有越過硬護欄'
+    '（workspace 外路徑、憑證、政策檔、刪除、強推、權限）。只有當 current_call 明顯就是 trusted_intent.current '
+    '要求做的那件事、參數與意圖的範圍一致時才 accept；意圖沒有要求、範圍不同、或看起來會對外發布、刪除、'
+    '改設定或碰憑證時 abstain。\n'
+    '\n'
+)
 _SYSTEM_PROMPT = _MEASURED_PROMPT.replace(
-    _LAST_PARAGRAPH, _PROMPT_ADDENDUM + _DELEGATION_ADDENDUM + _LAST_PARAGRAPH, 1)
+    _LAST_PARAGRAPH,
+    _PROMPT_ADDENDUM + _DELEGATION_ADDENDUM + _UNKNOWN_OPERATION_ADDENDUM + _LAST_PARAGRAPH, 1)
 
 
 def parse_verdict(text: Any) -> str | None:
@@ -1745,7 +1821,30 @@ class ApprovalClassifier:
         self, call: Any, request: ScopeRequest | None, verdict: PermissionVerdict,
         mode: PermissionMode = PermissionMode.SAFE,
     ) -> ApprovalDecision:
+        from .middleware import UNATTENDED_ORIGINS
+        attended = call.origin not in UNATTENDED_ORIGINS
+        # 自理 (#704 S3): Loom Agent's everyday tools run by rule when DK is
+        # present, after the hard guardrails and inside any routine ceiling.
+        # Unattended, a tool its program does not declare is outside the
+        # program's boundary: neither this rule nor Luna widens it.
+        if mode is PermissionMode.SELF and attended and (code := _everyday_tool(call.tool_name)):
+            if not self._past_routine_ceiling(request, verdict) and hard_boundary(
+                    call, request, verdict, self._perm, self._workspace, declared=True) is None:
+                return ApprovalDecision(True, f"rule-allow: {code}")
         rule = classify_rules(call, request, verdict, self._perm, self._workspace)
+        if (rule.outcome is RuleOutcome.REFUSE and mode is PermissionMode.SELF and attended
+                and rule.reason in _UNKNOWN_REASONS
+                and (call.tool_name != "run_bash" or _unknown_shell_reviewable(
+                    str(call.args.get("command", "")), self._workspace))
+                and not self._past_routine_ceiling(request, verdict)
+                and hard_boundary(call, request, verdict, self._perm, self._workspace,
+                                  declared=True) is None):
+            # 自理 (#704 S3): what the rules do not know goes to Luna against
+            # the trusted intent instead of to DK; abstain still asks.
+            context = self._context()
+            if not context.current.intent.strip():
+                return ApprovalDecision(False, "rule-refuse: no_trusted_intent")
+            return await self._review(call, "unknown_operation", context)
         if rule.outcome is RuleOutcome.REFUSE:
             # 自理 (#704): the delivery of an operator's delegation goes to
             # Luna instead of asking DK; every other refusal stands.
@@ -1768,6 +1867,14 @@ class ApprovalClassifier:
         if rule.outcome is RuleOutcome.ALLOW:
             return ApprovalDecision(True, f"rule-allow: {rule.reason}")
         return await self._review(call, rule.reason, context)
+
+    def _past_routine_ceiling(self, request: ScopeRequest | None, verdict: PermissionVerdict) -> bool:
+        """Whether the call needs a resource a routine bounded with its own
+        grant (a spend or resource ceiling) beyond that grant. No rule
+        crosses it."""
+        if request is None:
+            return False
+        return any(_routine_ceiling(self._perm, req.resource) for req in self._perm.diff(request).missing)
 
     async def _review(self, call: Any, category: str, context: ReviewContext,
                       post: DelegatedPost | None = None) -> ApprovalDecision:

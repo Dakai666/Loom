@@ -25,6 +25,7 @@ from __future__ import annotations
 import pytest
 
 from loom.core.harness.approval import describe_note
+from loom.core.harness.mode import PermissionMode
 from loom.core.harness.scope import ConfirmDecision
 
 from tests.test_approval_classifier_690_s6 import (  # noqa: F401  (fixtures)
@@ -221,6 +222,7 @@ class TestConfirmShowsClassifier:
 
     async def test_rule_refusal_is_on_the_confirm(self, tmp_path, ledger):
         env = _env(tmp_path, ledger)
+        env.perm.mode = PermissionMode.SAFE  # 自理 sends this one to Luna (#704 S3)
         assert await _ask(env, "python3 tools/report.py")
         call = env.confirm.await_args.args[0]
         assert call.metadata["classifier_note"] == "rule-refuse: unknown_program"

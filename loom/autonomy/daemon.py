@@ -472,6 +472,13 @@ class AutonomyDaemon:
         _added_tools: list[str] = list(plan.context.get("allowed_tools", []))
         if _added_tools:
             self._session.perm.declare(_boundary, _added_tools, unattended_only=True)
+            from loom.autonomy.permission_fields import report_exec_without_grant
+            from loom.core.harness.permissions import ToolCapability
+            _reg = getattr(self._session, "registry", None)
+            report_exec_without_grant(
+                _boundary, _added_tools, plan.context.get("scope_grants", []),
+                is_exec=lambda n: bool(_reg is not None and getattr(
+                    _reg.get(n), "capabilities", ToolCapability.NONE) & ToolCapability.EXEC))
         _added_grant_count = 0
         for g in plan.context.get("scope_grants", []):
             self._session.perm.grant(ScopeGrant(

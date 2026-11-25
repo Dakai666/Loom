@@ -188,3 +188,25 @@ def test_exec_declared_without_grant_is_reported(caplog, grants, warned):
         report_exec_without_grant("autonomy:evening_closure", ["memorize", "run_bash"], grants,
                                   is_exec=lambda name: name == "run_bash")
     assert any("run_bash" in r.message and "exec" in r.message for r in caplog.records) is warned
+
+
+@pytest.mark.parametrize("with_grant", [True, False])
+async def test_miji_wake_runs_pet_py_only_with_its_grant(tmp_path, ledger, with_grant):
+    """End to end over the harness: the room's furniture grants become the
+    chime's scope grants (as the bot applies them), so a wake can run
+    pet.py; the declaration alone cannot (#707 review)."""
+    import tomllib
+    from pathlib import Path as _P
+    from loom.autonomy.circadian.room import _parse_furniture, wake_permissions
+    entry = tomllib.loads((_P(__file__).parent.parent / "autonomy/circadian/room.example.toml")
+                          .read_text())["furniture"][0]
+    if not with_grant:
+        entry.pop("scope_grants")
+    tools, grants = wake_permissions([_parse_furniture(entry, 0)], {"miji"})
+    env = _env(tmp_path, ledger, mode=PermissionMode.SELF, grants=[
+        ScopeGrant(resource=g["resource"], action=g["action"], selector=g["selector"],
+                   source="autonomy:room@0900") for g in grants])
+    env.perm.declare("autonomy:room@0900", tools, unattended_only=True)
+    r = await _call(env, "run_bash", {"command": "python3 skills/pet-cat/pet.py feed"},
+                    origin="chime", caps=ToolCapability.EXEC)
+    assert r.success is with_grant

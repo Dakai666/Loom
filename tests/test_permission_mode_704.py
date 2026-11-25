@@ -401,7 +401,7 @@ class TestPermissionEvents:
     async def test_every_decision_carries_the_four_fields(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
         await _bash(env, "cat notes/c702.md")          # rule allow
-        await _bash(env, "python3 scripts/tool.py")    # DK confirms
+        await _bash(env, "rm build/out.txt")           # DK confirms
         await _bash(env, POST)                         # Luna accepts
         rows = await _decisions(ledger)
         assert [(r["decision_source"], r["reason_code"]) for r in rows] == [

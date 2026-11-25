@@ -282,6 +282,26 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 **沒宣告的工具。** 無人值守時照舊 skip（沒有人能問）；有人值守時進入授權模式（安全／自理走規則與 Luna，YOLO 走硬護欄），否則問 DK。
 
+### 自理：日常工具與未知操作（#704 S3 第二部分）
+
+**日常工具由規則放行（自理、有人值守）。** `memorize`（她自己的記憶，`reason_code = own_memory`）、`image_generate` 與 `*__understand_image`（`media`）不問 DK、不呼叫 Luna，前提是過硬護欄（例如圖片寫到 workspace 外仍問），且沒有超出 routine 宣告的花費／資源 ceiling（routine 對同一資源宣告的 grant 不涵蓋這次呼叫時，規則不放行）。安全模式照舊問。
+
+**未知操作交 Luna（自理、有人值守）。** 規則判為「不認得」（`not_covered` 的工具、`unknown_program` 的 shell）而且沒碰硬護欄的呼叫，交 Luna 對照可信意圖判斷（category `unknown_operation`，`known_effects.known = false`），accept 只放行這一次，abstain 才問 DK。shell 只有「單純的未知程式執行檔案」才算：wrapper（`nice`、`timeout`、`env`、`xargs`…）、inline code（`python3 -c`、`node -e`、`awk '…'`）、`FOO=1` 前綴、任何字面上出現規則認得的危險程式（`rm` 等）、輸出旗標（`-o`、`--out…`）都照舊問。寫檔、刪除、發文這類規則認得的效果不算未知，照舊問（或走委託）。
+
+**無人值守不走 Luna。** program 沒宣告的工具在它的邊界外，一律 skip，Luna 不能放寬這個 ceiling；宣告過的照前一節由 program 放行。
+
+**Luna 量測。** prompt 多一段 unknown_operation 的說明（所有 addendum 都只在對應的 packet 欄位出現時適用）。`tests/fixtures/s3_unknown_ops_bank.yaml` 14 題（6 accept／8 abstain），`codex/gpt-6-luna` 每題一次：**13/14**，唯一錯的 U02（相符的新增備忘錄）是誤 abstain，結果是多問 DK。prompt 改了，S2 的委託題庫也重錄：**17/18**（D04 誤 abstain；D18 這次也 abstain）。
+
+**房間家具的 grant。** `room.toml` 的 `[[furniture]]` 可以寫 `scope_grants`（格式同 schedule），wake 時跟 `allowed_tools` 一起帶進 chime。喵吉要回應 wake 跑 `pet.py`，需要 exec shape：
+
+```toml
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py" },
+]
+```
+
+宣告了 EXEC 工具（例如 `allowed_tools = ["run_bash"]`）卻沒有任何 exec grant 時，chime 與 autonomy run 開始時寫一則 warning，因為宣告不涵蓋 shell，這些呼叫一定 skip。
+
 ### 自動核准分類器（#690 S6、S6b、S6c）
 
 `loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有宣告放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。

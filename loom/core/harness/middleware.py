@@ -1182,7 +1182,7 @@ class BlastRadiusMiddleware(Middleware):
                 return f"hard: {hard}"
             self._notify_lifecycle(call, True, "mode yolo", source="mode", code="yolo")
             return None
-        if self._classifier is None or (scope_request is None and not self._classifier.covers(call)):
+        if self._classifier is None:
             return ""
         try:
             approval = await self._classifier.decide(call, scope_request, verdict, mode)
@@ -1195,8 +1195,10 @@ class BlastRadiusMiddleware(Middleware):
         # a document whose content is a token, which Luna only sees
         # redacted) still goes to DK. A rule allow already cleared stricter
         # checks.
+        # ``declared``: an unknown tool Luna judged against the intent
+        # (#704 S3) is not re-refused for having no resolver.
         if (approval.reason.startswith("model-accept") and self._workspace is not None
-                and (hard := self._hard_boundary(call, scope_request, verdict))):
+                and (hard := self._hard_boundary(call, scope_request, verdict, declared=True))):
             return f"hard: {hard}"
         if argv := getattr(approval, "argv", None):
             # A delegated post runs the argv Luna reviewed, without a shell

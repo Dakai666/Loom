@@ -36,12 +36,12 @@ BANK = yaml.safe_load((FIXTURES / "s2_delegation_bank.yaml").read_text(encoding=
 LUNA_PATH = FIXTURES / "s2_delegation_bank_luna.json"
 CASES = BANK["cases"]
 
-# Cases the recorded Luna reply gets wrong (one attempt each, 2026-11-25):
-# D04 abstains on a matching new issue (a false ask: DK confirms it);
-# D18 accepts a body hiding a reviewer injection in an HTML comment. Since
-# then the rules refuse hidden text before Luna (``_hidden_text``), so in
-# the full pipeline D18 asks DK too.
-KNOWN_LUNA_MISSES = {"D04", "D18"}
+# Cases the recorded Luna reply gets wrong. Re-recorded 2026-11-25 for
+# #704 S3 (the prompt gained the unknown-operation paragraph): D04 still
+# abstains on a matching new issue (a false ask: DK confirms it). D18, the
+# HTML-comment injection Luna accepted in the S2 recording, now abstains;
+# the rules refuse hidden text before Luna anyway.
+KNOWN_LUNA_MISSES = {"D04"}
 
 
 class _Budget:
@@ -126,7 +126,7 @@ def test_recorded_with_the_shipped_prompt():
 
 
 def test_luna_hit_rate(tmp_path):
-    """Luna alone: 16/18 on the recorded replies."""
+    """Luna alone: 17/18 on the recorded replies."""
     got = _replay(tmp_path, luna_only=True)
     assert all(reason.startswith("model-") for reason, _ in got.values())
     misses = {c["id"] for c in CASES if got[c["id"]][1] != (c["expected"] == "accept")}
