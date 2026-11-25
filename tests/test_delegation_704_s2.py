@@ -476,3 +476,16 @@ def test_issue_create_in_the_workspace_repo_when_no_repo_is_named(tmp_path):
     assert delegated_post(cmd, "有必要就發 issue 來處理。", ws) is not None
     assert delegated_post(cmd.replace("Dakai666/Loom", "other/repo"), "有必要就發 issue 來處理。", ws) is None
     assert delegated_post(cmd, "在 other/repo 發 issue", ws) is None
+
+
+@pytest.mark.parametrize("stamp", [
+    "[[2026-11-25 15:05 Asia/Taipei]] [發話者：DK (@dakai3716)]\n",
+    "[2026-11-25 15:05 Asia/Taipei]\n[發話者：DK (@dakai3716)]\n",
+])
+def test_runtime_stamps_are_not_a_repo(tmp_path, stamp):
+    """The timestamp Loom prepends names a time zone, not a repository
+    (#707 replay: "Asia/Taipei" made every bare #N ask)."""
+    ws = _ws_with_origin(tmp_path)
+    intent = stamp + "把這些補充回#702內，後續我看怎麼處理。"
+    assert delegated_post("gh issue comment 702 --body-file notes/c.md", intent, ws) is not None
+    assert delegated_post("gh issue comment 702 --repo Dakai666/Loom --body-file notes/c.md", intent, ws) is not None
