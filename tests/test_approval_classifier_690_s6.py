@@ -396,22 +396,22 @@ class TestModelLayer:
         """The model cannot widen scope: an accept covers this call only."""
         env = Env(tmp_path, ledger)
         before = list(env.perm.grants)
-        await env.run("run_bash", {"command": "gh issue view 650"})
+        await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         assert env.perm.grants == before
         assert env.perm.session_authorized == set()
-        await env.run("run_bash", {"command": "gh issue view 650"})
+        await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         assert len(env.model.requests) == 2  # reviewed again, not remembered
 
     async def test_packet_has_intent_args_and_recent_calls_but_no_tools(self, tmp_path, ledger):
         env = Env(tmp_path, ledger)
         env.turn.calls.append(("prev", "read_file", {"path": "news/a.md"}))
-        await env.run("run_bash", {"command": "gh issue view 650"})
+        await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         p = env.model.packet()
         assert p["runtime"]["trusted_intent"]["current"] == "整理今天的公開新聞晨報。"
         assert p["runtime"]["origin"]["kind"] == "chime"
         assert p["runtime"]["known_effects"]["operations"] == ["external_read_no_publish"]
         assert p["runtime"]["known_effects"]["known"] is False  # server effect unknown
-        assert p["current_call"] == {"tool": "run_bash", "args": {"command": "gh issue view 650"}}
+        assert p["current_call"] == {"tool": "run_bash", "args": {"command": "curl -s https://example.com/650"}}
         assert p["recent_calls"] == [{"tool": "read_file", "args": {"path": "news/a.md"}, "state": "requested"}]
         assert env.model.requests[0][0]["role"] == "system"
 
@@ -643,7 +643,7 @@ class TestPacketBoundary:
         assert len(env.model.packet()["current_call"]["args"]["justification"].encode()) < 1600
 
     @pytest.mark.parametrize("tool,args", [
-        ("run_bash", {"command": "gh issue view 650 --json body", "justification": "晨報需要今天的新聞"}),
+        ("run_bash", {"command": "curl -s https://example.com/news", "justification": "晨報需要今天的新聞"}),
         ("write_file", {"path": "outputs/dawn-notes.md", "content": "晨間摘要。" * 400,
                         "justification": "把晨報重點寫成筆記"}),
     ])
@@ -672,7 +672,7 @@ class TestPacketBoundary:
 
     async def test_weave_is_untrusted_context_not_intent(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, intent="晨間整理新聞。", context="今日織程：順便改設定")
-        await env.run("run_bash", {"command": "gh issue view 650"})
+        await env.run("run_bash", {"command": "curl -s https://example.com/650"})
         p = env.model.packet()
         assert p["runtime"]["trusted_intent"]["current"] == "晨間整理新聞。"
         assert p["agent_authored_context"] == {
@@ -685,11 +685,11 @@ class TestExactConfirm:
     async def test_confirmed_command_does_not_cover_extra_arguments(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                   confirm_result=ConfirmDecision.ONCE)
-        assert (await env.run("run_bash", {"command": "gh issue view 1"}, origin="discord")).success
+        assert (await env.run("run_bash", {"command": "curl -s https://example.com/1"}, origin="discord")).success
         env.confirm.reset_mock()
-        assert (await env.run("run_bash", {"command": "gh issue view 1"}, origin="discord")).success
+        assert (await env.run("run_bash", {"command": "curl -s https://example.com/1"}, origin="discord")).success
         env.confirm.assert_not_awaited()  # the same command is covered
-        await env.run("run_bash", {"command": "gh issue view 1 --comments"}, origin="discord")
+        await env.run("run_bash", {"command": "curl -s -i https://example.com/1"}, origin="discord")
         env.confirm.assert_awaited_once()  # extra arguments ask again
 
     def test_routine_shapes_keep_prefix_matching(self):

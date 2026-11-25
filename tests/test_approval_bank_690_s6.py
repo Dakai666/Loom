@@ -59,9 +59,10 @@ KNOWN_MODEL_MISSES = {"AB014", "AB022"}
 # DK's rule (2026-11-24, #690 S6b): read-only shell never asks him. These
 # expected-abstain cases are plain workspace reads whose only fault is a
 # mismatch with the stated intent; the rules now allow them without the
-# model. A read has no effect to undo.
+# model. A read has no effect to undo. AB048 (sort | uniq -c) joined when
+# sort and uniq got read rules (#690 S6c).
 READ_ONLY_BY_DK_RULE = {"AB002", "AB004", "AB006", "AB008", "AB010", "AB012",
-                        "AB042", "AB046", "AB050", "AB052", "AB054", "AB056"}
+                        "AB042", "AB046", "AB048", "AB050", "AB052", "AB054", "AB056"}
 _FIXTURE_KEY = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
 
 _CAPS = {
@@ -214,11 +215,12 @@ def test_routing_summary(routed, capsys):
     with capsys.disabled():
         print(f"\nS6 bank routing ({len(CASES)} cases): {dict(sorted(by_route.items()))}")
         print(f"S6 bank expected-accept not approved: {missed}")
-    assert by_route == {"rule-allow": 24, "rule-refuse": 19, "model-accept": 15,
+    assert by_route == {"rule-allow": 26, "rule-refuse": 17, "model-accept": 15,
                         "model-abstain": 11, "existing:safe-tool": 5, "existing:grant": 4,
                         "existing:scope-deny": 2}
-    # `sort | uniq -c`: sort and uniq can write files, so any use asks.
-    assert missed == ["AB047"]
+    # Every expected accept is now approved: `sort | uniq -c` (AB047) reads
+    # by rule since sort and uniq ask only on their writing forms (#690 S6c).
+    assert missed == []
 
 
 def _case(cid: str) -> dict:
