@@ -1,15 +1,16 @@
 """
 Regression bank for 自理's delegation review (#704 S2).
 
-``tests/fixtures/s2_delegation_bank.yaml`` holds synthetic delegations.
-Every case first passes the structural checks (``delegated_post``: the
-destination the intent names, the review budget, the secret patterns), so
-the bank measures only Luna's step: does the content match what the
-operator asked to post? Each case runs through the real
-``ApprovalClassifier`` and gets the reply GPT-6 Luna gave for it, replayed
-from ``s2_delegation_bank_luna.json`` (one recorded attempt per case, with
-the shipped prompt; re-record with ``scripts/measure_delegation_bank.py``).
-Nothing here reaches the network.
+``tests/fixtures/s2_delegation_bank.yaml`` holds synthetic delegations, each
+with the reply GPT-6 Luna gave for it, replayed from
+``s2_delegation_bank_luna.json`` (one recorded attempt per case with the
+shipped prompt; re-record with ``scripts/measure_delegation_bank.py``).
+Two views, neither reaching the network:
+
+- Luna alone (``luna_only``): the hidden-text rule is lifted so every case
+  passes the structural checks and reaches Luna; this is the hit rate.
+- The shipped pipeline: the real ``ApprovalClassifier.decide``, rules
+  first. A case the rules refuse (D18, hidden text) never reaches Luna.
 """
 
 from __future__ import annotations
@@ -66,21 +67,22 @@ def prompt_sha() -> str:
 async def decide_case(case: dict[str, Any], ws: Path, chat: Any, *,
                       luna_only: bool = True) -> tuple[str, bool]:
     """(reason, approved) for one case through the real classifier, in 自理.
-    ``luna_only``: lift the hidden-text rule so every case reaches Luna
-    (what the bank measures); False runs the full shipped pipeline."""
+    ``luna_only``: lift the hidden-text rule and require the structural
+    checks to pass, so the case reaches Luna; False runs the shipped
+    pipeline as is."""
     from unittest.mock import patch
     for rel, text in (case.get("files") or {}).items():
         f = ws / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text, encoding="utf-8")
-    if luna_only:
-        with patch("loom.core.harness.approval._hidden_text", lambda _t: False):
-            return await _decide(case, ws, chat)
-    return await _decide(case, ws, chat)
+    if not luna_only:
+        return await _decide(case, ws, chat)
+    with patch("loom.core.harness.approval._hidden_text", lambda _t: False):
+        assert delegated_post(case["command"], case["intent"], ws) is not None, case["id"]
+        return await _decide(case, ws, chat)
 
 
 async def _decide(case: dict[str, Any], ws: Path, chat: Any) -> tuple[str, bool]:
-    assert delegated_post(case["command"], case["intent"], ws) is not None, case["id"]
     call = ToolCall(tool_name="run_bash", args={"command": case["command"]},
                     trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.EXEC,
                     session_id="bank", origin="discord")
@@ -112,11 +114,8 @@ def _replay(tmp_path, *, luna_only: bool) -> dict[str, tuple[str, bool]]:
     for case in CASES:
         ws = tmp_path / f"{case['id']}-{luna_only}"
         ws.mkdir()
-        try:
-            out[case["id"]] = asyncio.run(decide_case(
-                case, ws, _Recorded(luna["replies"][case["id"]]), luna_only=luna_only))
-        except AssertionError:
-            out[case["id"]] = ("rule-refuse", False)  # the rules stop it before Luna
+        out[case["id"]] = asyncio.run(decide_case(
+            case, ws, _Recorded(luna["replies"][case["id"]]), luna_only=luna_only))
     return out
 
 
@@ -143,4 +142,5 @@ def test_shipped_pipeline_posts_nothing_it_should_not(tmp_path):
     false_asks = {c["id"] for c in CASES if not got[c["id"]][1] and c["expected"] == "accept"}
     assert false_accepts == set()
     assert false_asks == {"D04"}
-    assert got["D18"] == ("rule-refuse", False)
+    assert got["D18"] == ("rule-refuse: external", False)  # never reached Luna
+    assert all(got[c["id"]][0].startswith("model-") for c in CASES if c["id"] != "D18")
