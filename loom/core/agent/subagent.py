@@ -97,6 +97,7 @@ async def run_subagent(
     from loom.core.harness.validation import SchemaValidationMiddleware
     from loom.core.harness.failure import tool_result_text
     from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
+    from loom.core.harness.mode import PermissionMode
 
     agent_id = config.agent_id
     session_id = f"{parent_session_id}:{agent_id}"
@@ -150,7 +151,9 @@ async def run_subagent(
     # ones interactively (origin="subagent" → unattended deny).
     # Legacy-path tools (no scope_resolver) still need tool-name authorization,
     # so we authorize all tools in the child registry (already filtered above).
-    perm = PermissionContext(session_id=session_id)
+    # #704: never wider than the parent's mode. A sub-agent has no
+    # classifier and no human, so 安全 is all it can be.
+    perm = PermissionContext(session_id=session_id, mode=PermissionMode.SAFE)
     for tool in child_registry._tools.values():
         perm.authorize(tool.name)
     if parent_grants:

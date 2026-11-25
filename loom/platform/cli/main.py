@@ -134,13 +134,16 @@ def cli() -> None:
 @click.option("--session", "resume_id", default=None, metavar="ID", help="Resume a specific session by ID.")
 @click.option("--name", "name", default=None, metavar="TITLE",
               help="Set a title on the new (or resumed) session for easier identification.")
+@click.option("--mode", "mode", default=None,
+              type=click.Choice(["safe", "self", "yolo", "安全", "自理"], case_sensitive=False),
+              help="Permission mode (#704): safe (安全), self (自理, default) or yolo.")
 def chat(model: str, db: str, resume: bool, resume_id: str | None,
-         name: str | None) -> None:
+         name: str | None, mode: str | None) -> None:
     # ==============================================================
     # SECTION 2 — CHAT (chat, _chat)
     # ==============================================================
     """Start an interactive agent session."""
-    asyncio.run(_resolve_and_chat(model, db, resume, resume_id, name))
+    asyncio.run(_resolve_and_chat(model, db, resume, resume_id, name, mode))
 
 
 async def _resolve_and_chat(
@@ -149,6 +152,7 @@ async def _resolve_and_chat(
     resume: bool,
     resume_id: str | None,
     name: str | None = None,
+    mode: str | None = None,
 ) -> None:
     """Resolve --resume / --session flags, then launch the CLI chat loop."""
     if model is None:
@@ -180,6 +184,7 @@ async def _resolve_and_chat(
             model, db,
             resume_session_id=next_target,
             init_title=init_title,
+            init_mode=mode,
         )
         # ``--name`` is intentionally a one-shot: it labels the session
         # the user just opened, not every session they might subsequently
@@ -199,6 +204,7 @@ async def _chat(
     db: str,
     resume_session_id: str | None = None,
     init_title: str | None = None,
+    init_mode: str | None = None,
 ) -> str | None:
     """Run one chat session. Returns:
 
@@ -208,6 +214,14 @@ async def _chat(
     """
     session = LoomSession(model=model, db_path=db, resume_session_id=resume_session_id)
     await session.start()
+
+    # #704: ``--mode`` is the operator's own flag on the local CLI; each
+    # session this process opens (``/sessions``, ``/new``) starts in it.
+    if init_mode:
+        from loom.core.harness.mode import parse_mode
+        _mode = parse_mode(init_mode)
+        if _mode is not None and _mode is not session.perm.mode:
+            await session.set_permission_mode(_mode, operator="cli", entry="cli --mode")
 
     # Issue #260: apply ``--name`` (or the title set by ``/name``) so the
     # session shows up in the picker / ``loom sessions list`` with the
@@ -1072,6 +1086,13 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
             "[loom.muted]  /stop interrupts a running turn.  "
             "In CLI mode, press [loom.warning]Ctrl+C[/loom.warning] while the agent is responding.[/loom.muted]"
         )
+
+    elif command == "/mode":
+        # #704: the local CLI user is the operator.
+        from rich.markup import escape
+        from loom.core.harness.mode import mode_command
+        reply = await mode_command(session, arg, operator="cli", entry="cli /mode")
+        console.print(f"[loom.muted]{escape(reply)}[/loom.muted]")
 
     elif command == "/auto":
         if not session._strict_sandbox:

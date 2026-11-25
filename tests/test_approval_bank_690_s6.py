@@ -34,7 +34,8 @@ import pytest
 import yaml
 
 from loom.core.harness.approval import (
-    _MEASURED_PROMPT, _PROMPT_ADDENDUM, _SYSTEM_PROMPT, ApprovalClassifier, ReviewContext, ReviewTurn,
+    _DELEGATION_ADDENDUM, _MEASURED_PROMPT, _PROMPT_ADDENDUM, _SYSTEM_PROMPT,
+    ApprovalClassifier, ReviewContext, ReviewTurn,
 )
 from loom.core.harness.middleware import ToolCall
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
@@ -170,10 +171,13 @@ def routed(tmp_path_factory) -> dict[str, tuple[str, bool]]:
 
 def test_recorded_replies_match_the_shipped_prompt():
     """The replies were recorded with the measured prompt. The shipped prompt
-    is that prompt plus one unmeasured addendum (#698 review), nothing else."""
+    is that prompt plus two unmeasured addenda (#698 review; #704 自理
+    delegation, which only speaks to packets with ``runtime.delegation``),
+    nothing else."""
     import hashlib
     assert hashlib.sha256(_MEASURED_PROMPT.encode()).hexdigest() == LUNA["prompt_sha256"]
-    assert _SYSTEM_PROMPT.replace(_PROMPT_ADDENDUM, "", 1) == _MEASURED_PROMPT
+    assert (_SYSTEM_PROMPT.replace(_PROMPT_ADDENDUM, "", 1)
+            .replace(_DELEGATION_ADDENDUM, "", 1)) == _MEASURED_PROMPT
     assert set(LUNA["replies"]) == {c["id"] for c in CASES}
 
 

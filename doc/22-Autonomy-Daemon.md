@@ -236,6 +236,24 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 **shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6b 起規則不認得的程式（腳本、interpreter、wrapper）一律問人，既有的 shape grant 照舊放行。
 
+### 授權模式：安全／自理／YOLO（#704 S1）
+
+`loom/core/harness/mode.py`。每個 session 一個 `permission_mode`，所有入口（CLI、Discord、circadian、autonomy）預設**自理**。「硬停／Loom 判斷／問 DK」是每次判斷的結果，不是另外的模式。
+
+| 模式 | 規則／分類器沒放行的一般操作 | 什麼時候問 DK |
+|---|---|---|
+| 安全（`safe`） | 與 #704 之前相同：規則層與 Luna | 其餘都問；無人值守 skip |
+| 自理（`self`） | 安全的全部，加上**委託的交付**：本 turn 的可信意圖點名了 issue／PR（`#702`、`issue 702`，或含 repo 的 GitHub URL），`gh issue|pr comment <該號> --body … / --body-file <workspace 檔>` 交給 Luna 核對內容，不再因「對外寫入」問 DK | Luna abstain、目的地沒被點名、其他旗標（`--edit-last`、`--web`）、chain、redirect、stdin、body 含秘密 |
+| YOLO（`yolo`） | 硬護欄內直接執行，不跑 Luna，也不因效果未知或沒有 grant 發問 | 只有碰到硬護欄 |
+
+**委託不是 session 通行證。** 目的地只從本 turn 的 `trusted_intent` 讀；accept 只放行這一次，不寫 grant。下一個 turn 沒點名就再問。準備步驟照原規則：`gh issue view` 由規則放行，workspace 內的 `.md` 正文由 Luna 審。Luna 的 packet 多 `runtime.delegation` 與 `current_call.body`（`--body-file` 讀出的正文，遮罩後限 2,000 bytes）；prompt 多一段未實測的補充。
+
+**硬護欄（三模式都成立，`approval.hard_boundary`）。** CRITICAL 工具；超出 routine 宣告的 scope（ceiling）；scope 的 path 需求在 workspace 外；`write_file` 的路徑在 workspace 外、隱藏、像憑證、glob，或是 `.toml` 政策檔，或內容符合 S3c 遮罩 pattern；含秘密的搜尋 query；shell 中執行期才決定的內容（`$`、反引號、子 shell）、`sudo`/`ssh`/`env`/`printenv`/`bash -c`/`eval`/`xargs`/`kill` 等、不明確或越界的刪除（`rm -rf .`、glob、workspace 外）、`git push --force`／`+ref`、`gh auth|secret|ssh-key|config`、帶憑證的 `curl`、讀 env 的 jq、任何引數裡的 workspace 外／隱藏／憑證路徑、`.toml` 政策檔或像秘密的字串。規則層判為唯讀的片段已通過更嚴的路徑檢查，不再重查（讀 `loom.toml` 不算改它）。安全、自理下，Luna accept 之後也再過一次硬護欄（Luna 看到的是遮罩後的內容）；規則放行不用。字串檢查擋得住明顯的越界，擋不住任意腳本本身做的事，這不是隔離。
+
+**切換。** 只有 runtime 驗證過的操作者：CLI 的 `loom chat --mode yolo` 或 `/mode yolo`（本機使用者），Discord 的 `/mode yolo`（必須在 `allowed_user_ids` 內；沒有 allowlist 時只能看不能切）。沒有任何工具能改，模型、skill、文件與工具輸出都改不了。每次切換寫一筆 `permission_mode_change`（`from`、`to`、`operator`、`entry`）。BlastRadius 每個呼叫只讀一次模式，所以從下一次 dispatch 生效。子代理固定在安全，不會比父代理寬。確認訊息寫出模式：「自動核准未放行（自理）：Luna abstained」。
+
+**權限事件。** `permission_decision` 多三個欄位，連同 `tool_call_id`：`mode`（`safe`/`self`/`yolo`）、`decision_source`（`grant`、`rule`、`luna`、`mode`、`operator`、`policy`、`unattended`）、`reason_code`（例如 `read_only_shell`、`accept`、`yolo`、`once`、`delete_root`）。#704 之前的列這三欄是空字串。
+
 ### 自動核准分類器（#690 S6、S6b、S6c）
 
 `loom/core/harness/approval.py`。只在 BlastRadius 原本要問人或 skip 的地方執行：GUARDED 呼叫的 verdict 是 CONFIRM 或 EXPAND_SCOPE，而且沒有 grant、也沒有 name bridge 放行。scope DENY 在它之前就回傳，它看不到。subagent 的 pipeline 沒有接分類器。

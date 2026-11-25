@@ -150,6 +150,14 @@ class PermissionDecisionPayload:
     # human in an attended turn reads apart from a decision in an
     # unattended one. Rows from before S3b read as unknown (origin_of).
     origin: str = UNKNOWN_ORIGIN
+    # #704: the session's permission mode when the call was decided
+    # ("safe" / "self" / "yolo"), who decided it ("grant", "rule", "luna",
+    # "mode", "operator", "policy", "unattended") and a
+    # short code for why. With ``tool_call_id`` these are the four fields
+    # every permission event carries. Rows before #704 leave them empty.
+    mode: str = ""
+    decision_source: str = ""
+    reason_code: str = ""
     schema_version: int = CURRENT_SCHEMA_VERSION
 
 
