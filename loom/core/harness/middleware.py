@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any, Awaitable, Callable, ClassVar
 
+from .mode import PermissionMode
 from .permissions import ToolCapability, TrustLevel
 
 # ---------------------------------------------------------------------------
@@ -892,8 +893,10 @@ class BlastRadiusMiddleware(Middleware):
         # it out of deny rates, and its reason says skip (#690 S3c). Rows
         # before S3c read "unattended-deny (...)" for the same thing.
         detail = f"; classifier {classifier_note}" if classifier_note else ""
+        _, code = self._note_source(classifier_note)
         self._notify_lifecycle(
             call, False, f"unattended-skip ({call.origin}, {verdict}{detail})", decision="skip",
+            source="unattended", code=code if classifier_note else verdict,
         )
         call.metadata["user_decision"] = False
 
@@ -936,8 +939,33 @@ class BlastRadiusMiddleware(Middleware):
                       "skip_note": classifier_note or ""},
         )
 
+    def _mode(self, call: ToolCall) -> PermissionMode:
+        """The session's permission mode, read once per call (#704): a
+        switch applies from the next dispatch, never halfway through one.
+        A context without a mode (a test double) is treated as 安全."""
+        mode = getattr(self._perm, "mode", None)
+        if not isinstance(mode, PermissionMode):
+            mode = PermissionMode.SAFE
+        call.metadata.setdefault("permission_mode", mode.value)
+        return PermissionMode(call.metadata["permission_mode"])
+
+    @staticmethod
+    def _note_source(note: str | None) -> tuple[str, str]:
+        """(decision_source, reason_code) for a classifier or guardrail note."""
+        if not note:
+            return "policy", "no_grant"
+        kind, _, reason = note.partition(": ")
+        if kind in ("rule-allow", "rule-refuse"):
+            return "rule", reason
+        if kind in ("model-accept", "model-abstain"):
+            return "luna", reason or kind.removeprefix("model-")
+        if kind == "hard":
+            return "hard_guardrail", reason
+        return "classifier", note
+
     def _notify_lifecycle(
         self, call: ToolCall, result: bool, reason: str, *, decision: str | None = None,
+        source: str = "policy", code: str = "",
     ) -> None:
         """
         Write authorization decision to LifecycleContext (Issue #50).
@@ -961,7 +989,8 @@ class BlastRadiusMiddleware(Middleware):
         # schedule the async emit on the running loop. Failure is
         # swallowed — auth flow must never break on ledger.
         if self._ledger_emitter is not None:
-            self._schedule_permission_decision_emit(call, result, reason, decision)
+            self._schedule_permission_decision_emit(
+                call, result, reason, decision, source=source, code=code)
         # Issue #212: surface authorization decisions in middleware_trace
         # so an agent inspecting a denied result can see "BlastRadius said
         # X because Y" without cross-referencing the lifecycle ActionRecord.
@@ -982,6 +1011,7 @@ class BlastRadiusMiddleware(Middleware):
 
     def _schedule_permission_decision_emit(
         self, call: ToolCall, result: bool, reason: str, decision: str | None = None,
+        *, source: str = "policy", code: str = "",
     ) -> None:
         """Fire-and-forget permission_decision emit from a sync caller.
 
@@ -995,6 +1025,8 @@ class BlastRadiusMiddleware(Middleware):
         except RuntimeError:
             _log.debug("no running loop — skipping ledger permission_decision emit")
             return
+
+        mode = self._mode(call).value
 
         async def _emit() -> None:
             from loom.core.ledger import PermissionDecisionPayload
@@ -1016,6 +1048,9 @@ class BlastRadiusMiddleware(Middleware):
                         scope_grant=scope_grant if isinstance(scope_grant, dict) else None,
                         reason=reason,
                         origin=call.origin,
+                        mode=mode,
+                        decision_source=source,
+                        reason_code=code,
                     ),
                 )
             except Exception:
@@ -1141,11 +1176,12 @@ class BlastRadiusMiddleware(Middleware):
                     and not self._classifier.auto_may_cover(call)):
                 verdict = PV.CONFIRM
             else:
-                self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}")
+                self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}",
+                                       source="grant", code=diff.reason.value)
                 return None  # proceed
 
         if verdict == PV.DENY:
-            self._notify_lifecycle(call, False, "scope-deny")
+            self._notify_lifecycle(call, False, "scope-deny", source="policy", code="scope_deny")
             call.metadata["user_decision"] = False
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -1170,24 +1206,18 @@ class BlastRadiusMiddleware(Middleware):
         # the scope is authoritative and we fall through to confirm/deny.
         # Shell never rides the bridge (#690 S7, see ``_name_authorized``).
         if verdict == PV.CONFIRM and self._name_authorized(call):
-            self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized")
+            self._notify_lifecycle(call, True, "scope-confirm-legacy-authorized",
+                                   source="grant", code="name_bridge")
             return None  # proceed
 
-        # #690 S6: before asking a human or skipping, the approval
-        # classifier may approve this one call. It grants nothing, so a
-        # refusal or an abstain leaves exactly the path below.
-        note = None
-        if self._classifier is not None:
-            try:
-                approval = await self._classifier.decide(call, scope_request, verdict)
-            except Exception:
-                _log.exception("approval classifier failed; not approving")
-                note = "error"
-            else:
-                if approval.approved:
-                    self._notify_lifecycle(call, True, f"classifier {approval.reason}")
-                    return None  # proceed
-                note = approval.reason
+        # #704 YOLO: within the hard guardrails, run without Luna and
+        # without asking. #690 S6 (安全, 自理): before asking a human or
+        # skipping, the approval classifier may approve this one call. It
+        # grants nothing, so a refusal or an abstain leaves exactly the
+        # path below.
+        note = await self._auto_decide(call, scope_request, verdict)
+        if note is None:
+            return None  # proceed
 
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value, classifier_note=note)
@@ -1205,7 +1235,8 @@ class BlastRadiusMiddleware(Middleware):
         if decision == ConfirmDecision.DENY:
             self._perm.recent_denies += 1
             if self._perm.recent_denies >= 3:
-                self._notify_lifecycle(call, False, f"user denied ({verdict.value}) - CIRCUIT BREAKER TRIPPED")
+                self._notify_lifecycle(call, False, f"user denied ({verdict.value}) - CIRCUIT BREAKER TRIPPED",
+                                       source="operator", code="circuit_breaker")
                 call.metadata["user_decision"] = False
                 call.metadata["circuit_breaker"] = True
                 if call.abort_signal is not None:
@@ -1221,7 +1252,8 @@ class BlastRadiusMiddleware(Middleware):
                     failure_type="permission_denied",
                 )
                 
-            self._notify_lifecycle(call, False, f"user denied ({verdict.value})")
+            self._notify_lifecycle(call, False, f"user denied ({verdict.value})",
+                                   source="operator", code="deny")
             call.metadata["user_decision"] = False
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -1235,7 +1267,8 @@ class BlastRadiusMiddleware(Middleware):
             )
 
         self._perm.recent_denies = 0
-        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})")
+        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})",
+                               source="operator", code=decision.value)
         call.metadata["user_decision"] = True
         call.metadata["confirm_decision"] = decision.value
         # #700: trust needs DK to have seen the diff and allowed this one
@@ -1260,6 +1293,53 @@ class BlastRadiusMiddleware(Middleware):
             self._request_to_grants(scope_request, source="auto_approve")
 
         return None  # proceed
+
+    async def _auto_decide(self, call: ToolCall, scope_request: Any, verdict: Any) -> str | None:
+        """Approve *call* without a human, per the permission mode (#704).
+        Returns None when approved (already recorded), else the note that
+        says why not (a classifier reason, ``hard: …``, or "" when nothing
+        looked at the call)."""
+        mode = self._mode(call)
+        if mode is PermissionMode.YOLO:
+            if hard := self._hard_boundary(call, scope_request, verdict):
+                return f"hard: {hard}"
+            self._notify_lifecycle(call, True, "mode yolo", source="mode", code="yolo")
+            return None
+        if self._classifier is None or (scope_request is None and not self._classifier.covers(call)):
+            return ""
+        try:
+            approval = await self._classifier.decide(call, scope_request, verdict, mode)
+        except Exception:
+            _log.exception("approval classifier failed; not approving")
+            return "error"
+        if not approval.approved:
+            return approval.reason
+        # The hard guardrails hold in every mode: what Luna would pass (e.g.
+        # a document whose content is a token, which Luna only sees
+        # redacted) still goes to DK. A rule allow already cleared stricter
+        # checks.
+        if (approval.reason.startswith("model-accept") and self._workspace is not None
+                and (hard := self._hard_boundary(call, scope_request, verdict))):
+            return f"hard: {hard}"
+        if rewrite := getattr(approval, "args", None):
+            # A delegated post runs the text Luna reviewed (#705 review).
+            call.args.update(rewrite)
+            call.metadata["approved_args_rewritten"] = sorted(rewrite)
+        source, code = self._note_source(approval.reason)
+        self._notify_lifecycle(call, True, f"classifier {approval.reason}", source=source, code=code)
+        return None
+
+    def _hard_boundary(self, call: ToolCall, scope_request: Any, verdict: Any) -> str | None:
+        """The hard guardrail *call* crosses (``approval.hard_boundary``),
+        failing closed when it cannot be checked."""
+        if self._workspace is None:
+            return "no_workspace"
+        from .approval import hard_boundary
+        try:
+            return hard_boundary(call, scope_request, verdict, self._perm, self._workspace)
+        except Exception:
+            _log.exception("hard guardrail check failed; not approving")
+            return "check_failed"
 
     def _skill_trust_offer(self, call: ToolCall) -> Any:
         """#700: before DK confirms a write that replaces a trusted skill
@@ -1334,29 +1414,21 @@ class BlastRadiusMiddleware(Middleware):
 
         # --- Legacy path (tools without scope_resolver) ---
         if self._name_authorized(call):
-            self._notify_lifecycle(call, True, "pre-authorized")
+            self._notify_lifecycle(call, True, "pre-authorized", source="grant", code="pre_authorized")
             return await next(call)
 
         # exec_auto: session-level pre-authorization for sandboxed shell commands
         if self._exec_auto_approved(call):
-            self._notify_lifecycle(call, True, "exec_auto")
+            self._notify_lifecycle(call, True, "exec_auto", source="grant", code="exec_auto")
             return await next(call)
 
-        # #690 S6b: MCP public search goes through the approval classifier
-        # like native search; other legacy tools are refused by its rules.
-        note = None
-        if self._classifier is not None and self._classifier.covers(call):
-            from .scope import PermissionVerdict as PV
-            try:
-                approval = await self._classifier.decide(call, None, PV.CONFIRM)
-            except Exception:
-                _log.exception("approval classifier failed; not approving")
-                note = "error"
-            else:
-                if approval.approved:
-                    self._notify_lifecycle(call, True, f"classifier {approval.reason}")
-                    return await next(call)
-                note = approval.reason
+        # #704 YOLO, else #690 S6b: MCP public search goes through the
+        # approval classifier like native search; other legacy tools are
+        # refused by its rules.
+        from .scope import PermissionVerdict as PV
+        note = await self._auto_decide(call, None, PV.CONFIRM)
+        if note is None:
+            return await next(call)
 
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):
@@ -1376,7 +1448,8 @@ class BlastRadiusMiddleware(Middleware):
         if decision == ConfirmDecision.DENY:
             self._perm.recent_denies += 1
             if self._perm.recent_denies >= 3:
-                self._notify_lifecycle(call, False, "user denied - CIRCUIT BREAKER TRIPPED")
+                self._notify_lifecycle(call, False, "user denied - CIRCUIT BREAKER TRIPPED",
+                                       source="operator", code="circuit_breaker")
                 call.metadata["user_decision"] = False
                 call.metadata["circuit_breaker"] = True
                 if call.abort_signal is not None:
@@ -1392,7 +1465,7 @@ class BlastRadiusMiddleware(Middleware):
                     failure_type="permission_denied",
                 )
 
-            self._notify_lifecycle(call, False, "user denied")
+            self._notify_lifecycle(call, False, "user denied", source="operator", code="deny")
             return ToolResult(
                 call_id=call.id,
                 tool_name=call.tool_name,
@@ -1406,7 +1479,8 @@ class BlastRadiusMiddleware(Middleware):
             )
 
         self._perm.recent_denies = 0
-        self._notify_lifecycle(call, True, f"user confirmed ({decision.value})")
+        self._notify_lifecycle(call, True, f"user confirmed ({decision.value})",
+                               source="operator", code=decision.value)
         call.metadata["confirm_decision"] = decision.value
 
         # Legacy path: SCOPE/AUTO degrade to session-level grant (no scope_resolver).

@@ -368,7 +368,12 @@ def classifier_line(call: "ToolCall") -> str | None:
     if not note:
         return None
     from loom.core.harness.approval import describe_note
-    return f"自動核准未放行：{describe_note(note)}"
+    from loom.core.harness.mode import PermissionMode
+    try:
+        mode = f"（{PermissionMode(call.metadata.get('permission_mode')).label}）"
+    except ValueError:
+        mode = ""
+    return f"自動核准未放行{mode}：{describe_note(note)}"
 
 
 def _format_scope_panel(call: "ToolCall") -> str:

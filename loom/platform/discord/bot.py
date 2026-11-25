@@ -1244,7 +1244,7 @@ class LoomDiscordBot:
     _SLASH_NEEDS_SESSION = frozenset({
         "/think", "/compact", "/pause", "/stop", "/budget",
         "/auto", "/scope", "/summary", "/title", "/sessions",
-        "/name", "/model", "/personality", "/tier",
+        "/name", "/model", "/personality", "/tier", "/mode",
     })
 
     HELP_TEXT = (
@@ -1258,6 +1258,7 @@ class LoomDiscordBot:
         "`/personality [name]` — Switch cognitive persona\n"
         "`/personality off` — Remove active persona\n"
         "`/tier` — Show active LLM tier\n"
+        "`/mode [safe|self|yolo]` — Show or switch the permission mode (安全 / 自理 / YOLO)\n"
         "`/tier <N>` — Switch tier (1 = daily · 2 = deep reasoning)\n"
         "`/think` — View last turn's reasoning chain\n"
         "`/compact` — Compress older context\n"
@@ -1530,6 +1531,21 @@ class LoomDiscordBot:
                 await _safe_send(message.channel,
                     "Send any message here to start a new session thread."
                 )
+            return
+
+        if command == "/mode":
+            # #704: only a runtime-verified operator switches the mode. On
+            # Discord that is a user in allowed_user_ids; without the
+            # allowlist anyone could post, so the mode only shows.
+            assert session is not None
+            from loom.core.harness.mode import mode_command
+            if arg and message.author.id not in self._allowed_users:
+                await _safe_send(message.channel,
+                    "🔒 Only the operator (a user in `allowed_user_ids`) can switch the mode.")
+                return
+            reply = await mode_command(
+                session, arg, operator=f"discord:{message.author.id}", entry="discord /mode")
+            await _safe_send(message.channel, reply)
             return
 
         if command == "/compact":

@@ -214,7 +214,8 @@ class TestConfirmShowsClassifier:
         assert await _ask(env, "curl -s https://example.com/a")
         call = env.confirm.await_args.args[0]
         assert call.metadata["classifier_note"] == "model-abstain: abstain"
-        assert classifier_line(call) == "自動核准未放行：Luna abstained"
+        # #704: the line names the mode the call was decided in.
+        assert classifier_line(call) == "自動核准未放行（自理）：Luna abstained"
         assert "Luna abstained" in _format_scope_summary_plain(call)
         assert "Luna abstained" in _format_scope_panel(call)
 

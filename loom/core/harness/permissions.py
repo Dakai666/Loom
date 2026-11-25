@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
 from typing import Any, Callable, TYPE_CHECKING
 
+from .mode import DEFAULT_MODE, PermissionMode
+
 if TYPE_CHECKING:
     from .scope import (
         ScopeDiff, ScopeGrant, ScopeRequest, PermissionVerdict,
@@ -148,6 +150,11 @@ class PermissionContext:
 
     # --- Penalty Box (Issue #47 Phase 2) ---
     recent_denies: int = 0
+
+    # --- Permission mode (#704) ---
+    # 自理 by default on every entry point. Only the operator's /mode or
+    # --mode changes it (``LoomSession.set_permission_mode``); no tool does.
+    mode: PermissionMode = DEFAULT_MODE
 
     # ── Legacy API (unchanged) ────────────────────────────────────
 

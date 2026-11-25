@@ -113,6 +113,7 @@ from loom.core.harness.middleware import (
     TraceMiddleware,
     UNATTENDED_ORIGINS,
 )
+from loom.core.harness.mode import PermissionMode
 from loom.core.harness.approval import (
     ApprovalClassifier, ReviewContext, ReviewTurn, plan_model_chat,
 )
@@ -3605,6 +3606,24 @@ class LoomSession:
             self.session_id, ti, role, content, metadata,
             raw_json=raw_json,
         )
+
+    async def set_permission_mode(
+        self, mode: PermissionMode, *, operator: str, entry: str,
+    ) -> PermissionMode:
+        """Switch this session's permission mode (#704) and record it.
+
+        Only platform command handlers call this, after verifying the
+        operator at runtime (the local CLI user, or an allowlisted Discord
+        user). No tool reaches it, so the model, a skill, a document or
+        tool output cannot change the mode. BlastRadius reads the mode once
+        per call, so the switch applies from the next dispatch. Returns the
+        previous mode."""
+        from loom.core.harness.mode import record_mode_change
+        old = self.perm.mode
+        self.perm.mode = mode
+        await record_mode_change(self._ledger_emitter, old=old, new=mode,
+                                 operator=operator, entry=entry)
+        return old
 
     def _review_context(self) -> ReviewContext:
         """The current turn and up to three before it (#690 S6)."""
