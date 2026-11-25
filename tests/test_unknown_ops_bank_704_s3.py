@@ -46,7 +46,7 @@ async def decide_case(case: dict[str, Any], ws: Path, chat: Any) -> tuple[str, b
     real = approval._resolves_executable
     on_path = set(case.get("on_path") or ())
     with patch.object(approval, "_resolves_executable",
-                      lambda head, w: head in on_path or real(head, w)):
+                      lambda head, c, w: head in on_path or real(head, c, w)):
         return await _decide_case(case, ws, chat)
 
 

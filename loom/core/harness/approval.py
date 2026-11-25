@@ -884,16 +884,34 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
     if not segments:
         return False
     risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
+    cwd = workspace
     for seg in segments:
-        if _segment(seg, workspace)[0] is Effect.READ:
+        words = [w.text for w in seg.words]
+        if words[:1] == ["cd"]:
+            # `cd <dir in the workspace> && …` is judged by the rest
+            # (#707 round 3); a cd out of it, or into a hidden dir, asks.
+            if (len(words) != 2 or seg.redirects
+                    or _path_refusal(words[1], cwd, hidden_ok=True)
+                    or _workspace_relative(str((cwd / words[1]).resolve()), workspace) is None):
+                return False
+            cwd = (cwd / words[1]).resolve()
+            continue
+        if _segment(seg, cwd)[0] is Effect.READ:
             continue
         if not seg.words or seg.redirects:
             return False
         head = seg.words[0].text
         program = PurePosixPath(head).name
+        texts = [w.text for w in seg.words]
+        if texts[:2] == ["uv", "run"]:
+            # `uv run <workspace file>` runs that file (#707 round 3); any
+            # other uv use (flags, packages, tools, `python -c`) is a runner.
+            if not _uv_runs_workspace_file(texts[2:], cwd, workspace):
+                return False
+            continue
         if "=" in head or program in risky or program in _SHELL_RULES:
             return False
-        if not _resolves_executable(head, workspace):
+        if not _resolves_executable(head, cwd, workspace):
             return False  # a builtin or a name with no executable behind it
         args = [w.text for w in seg.words[1:]]
         if program in _INLINE_CODE and (
@@ -911,12 +929,28 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
     return True
 
 
-def _resolves_executable(head: str, workspace: Path) -> bool:
+def _uv_runs_workspace_file(rest: list[str], cwd: Path, workspace: Path) -> bool:
+    """``uv run [python|python3] <file in the workspace> [args]`` with no
+    uv flags, no inline code and no risky words in the script's args."""
+    if rest[:1] and rest[0] in ("python", "python3"):
+        rest = rest[1:]
+    if not rest or rest[0].startswith("-"):
+        return False
+    target = (cwd / rest[0]).resolve()
+    if _workspace_relative(str(target), workspace) is None or not target.is_file():
+        return False
+    risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
+    names = [PurePosixPath(a).name for a in rest[1:]]
+    return not any(n in risky or n in _INLINE_CODE or n in _INLINE_FLAGS
+                   or n.startswith(("-o", "--o")) for n in names)
+
+
+def _resolves_executable(head: str, cwd: Path, workspace: Path) -> bool:
     """Whether *head* names a real executable: a file in the workspace
     (``./tools/run.sh``) or a program on PATH. A shell builtin or an
     unknown name has nothing to run as a file."""
     if "/" in head:
-        target = (workspace / head).resolve()
+        target = (cwd / head).resolve()
         return (_workspace_relative(str(target), workspace) is not None
                 and target.is_file() and os.access(target, os.X_OK))
     return shutil.which(head) is not None
@@ -1501,13 +1535,26 @@ def _string_args_hard(value: Any, workspace: Path) -> str | None:
     if _redact_secrets(value) != value:
         return "credential_content"
     text = value.strip()
-    if not text or "://" in text or any(c.isspace() for c in text):
+    if not text or "://" in text:
         return None
+    # Path prefixes first: a path may contain spaces ("~/Library/Application
+    # Support/…", "/tmp/secret image.png"; #707 round 3).
     if text.startswith("~"):
         return "path_expansion"
-    if text.startswith(("/", "./", "../", ".")) or "/" in text:
+    if text.startswith(("/", "./", "../", ".")) or _exists_in(workspace, text):
+        return _location_refusal(text, workspace, hidden_ok=True)
+    if any(c.isspace() for c in text):
+        return None  # prose
+    if "/" in text:
         return _location_refusal(text, workspace, hidden_ok=True)
     return None
+
+
+def _exists_in(workspace: Path, text: str) -> bool:
+    try:
+        return len(text) < 1024 and (workspace / text).exists()
+    except (OSError, ValueError):
+        return False
 
 
 def hard_boundary(

@@ -189,8 +189,11 @@ async def main() -> None:
             intent = ""
         outcome = await replay(d, a, ws, res, intent)
         table[d["tool"]][outcome] += 1
+        # A row nobody was asked about then ran on a grant (a lease or an
+        # "auto" a human gave earlier in that session); the replay starts
+        # with no grants, so its "asks DK" is the grant not replayed.
         then = "asked DK then" if (d.get("reason") or "").startswith(("user confirmed", "user denied")) \
-            else "no ask then"
+            else "grant then (not replayed)"
         before_after[(then, outcome.split(" (")[0])] += 1
     cols = ["no ask", "Luna", "asks DK", "asks DK (hard guardrail)", "no args in session log",
             "no intent recorded"]
