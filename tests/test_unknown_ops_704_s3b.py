@@ -372,3 +372,85 @@ class TestEverydayShellForms:
         (env.ws / ".git").mkdir(exist_ok=True)
         await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
         assert env.confirm.await_count == 1 and env.model.requests == []
+
+
+# ---------------------------------------------------------------------------
+# #707 round 4 (Vera): uv script mode, one cwd model, hard check on reads
+# ---------------------------------------------------------------------------
+
+
+def _token_ws(env):
+    (env.ws / "x.txt").write_text("OPENAI=sk-proj-abcdefghijklmnopqrstuvwxyz\n")
+    (env.ws / "notes").mkdir(exist_ok=True)
+    (env.ws / "notes/a.md").write_text("筆記\n")
+    (env.ws / "notes/x.txt").write_text("無害\n")
+    (env.ws / "scripts").mkdir(exist_ok=True)
+    (env.ws / "scripts/report.py").write_text("print(1)\n")
+    (env.ws / "scripts/deps.py").write_text(
+        "# /// script\n# dependencies = [\"requests\"]\n# ///\nprint(1)\n")
+
+
+CD_TRICKS = [
+    "cd missing; cat x.txt", "cd missing || cat x.txt", "cd notes | cat x.txt",
+    "cd x.txt; cat x.txt", "cd x.txt && cat x.txt", "cd notes && cd - && cat x.txt",
+    "cd notes; cat x.txt", "cd notes\ncat x.txt",
+]
+
+
+class TestOneCwdModel:
+    @pytest.mark.parametrize("mode", list(PermissionMode))
+    @pytest.mark.parametrize("command", CD_TRICKS)
+    async def test_cd_tricks_ask(self, tmp_path, ledger, command, mode):
+        env = _env(tmp_path, ledger, mode=mode)
+        _token_ws(env)
+        await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    @pytest.mark.parametrize("command", ["cd notes && cat a.md", "cd notes && cat x.txt",
+                                         "cd ./notes && wc -l a.md"])
+    async def test_cd_and_then_read_runs(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _token_ws(env)
+        r = await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert r.success and env.confirm.await_count == 0 and env.model.requests == []
+
+    def test_classify_shell_and_shell_hard_agree(self, tmp_path):
+        from loom.core.harness.approval import Effect, _shell_hard, classify_shell
+        ws = tmp_path
+        (ws / "x.txt").write_text("OPENAI=sk-proj-abcdefghijklmnopqrstuvwxyz\n")
+        (ws / "notes").mkdir()
+        for command in CD_TRICKS:
+            assert classify_shell(command, ws)[0] is Effect.ASK, command
+            assert _shell_hard(command, ws) is not None, command
+
+
+class TestUvScriptMode:
+    @pytest.mark.parametrize("command", [
+        "uv run scripts/report.py", "uv run scripts/report.py --day today",
+        "uv run python scripts/deps.py", "uv run python3 scripts/deps.py",
+    ])
+    async def test_script_mode_or_inline_deps_ask(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _token_ws(env)
+        await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    @pytest.mark.parametrize("command", ["uv run python scripts/report.py",
+                                         "uv run python3 scripts/report.py --day today"])
+    async def test_interpreter_mode_goes_to_luna(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="跑 scripts/report.py")
+        _token_ws(env)
+        r = await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert r.success and len(env.model.requests) == 1
+
+
+async def test_every_rule_allow_meets_the_hard_boundary(tmp_path, ledger, monkeypatch):
+    """Even if a read rule were wrong, the hard boundary runs before any
+    rule-allowed call (#707 round 4)."""
+    import loom.core.harness.approval as approval
+    env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+    _token_ws(env)
+    monkeypatch.setattr(approval, "classify_shell", lambda command, ws: (approval.Effect.READ, "read_only_shell"))
+    monkeypatch.setattr(approval, "_shell_hard", lambda command, ws: "credential_content")
+    await _call(env, "run_bash", {"command": "cat x.txt"}, origin="discord", caps=ToolCapability.EXEC)
+    assert env.confirm.await_count == 1
