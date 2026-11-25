@@ -270,7 +270,7 @@ class TestHiddenText:
 
     def test_visible_markdown_still_delegates(self, tmp_path):
         (tmp_path / "notes").mkdir()
-        (tmp_path / "notes/c.md").write_text("## 標題\n- `code` <b>粗體</b> -> 箭頭\n")
+        (tmp_path / "notes/c.md").write_text("## 標題\n- `code` **粗體** -> 箭頭 a < b > c\n")
         assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is not None
 
 
@@ -304,9 +304,10 @@ class TestHiddenTextCoverage:
         assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is None
 
     @pytest.mark.parametrize("visible", [
-        "第一行\n\t縮排\r\n第三行", "![](https://x/y.png)", "&amp; &lt;b&gt;", "😀👍🏽",
-        "[連結](https://example.com)", "`<b>` 不是 script", "[ref]: https://example.com",
+        "第一行\n\t縮排\r\n第三行", "&amp; &lt;b&gt;", "😀👍🏽",
+        "[連結](https://example.com)", "[連結][ref] 與 [ref] 的引用", "<https://example.com>",
         "&lt;!-- 這段渲染出來看得到 --&gt;", "❤️ ✔️ ☺︎", "👨‍👩‍👧 家人",
+        "a < b 且 c > d", "1<2", "驚嘆號!後面[不是圖]", "註：[a]: 不在行首",
     ])
     def test_visible_text_still_delegates(self, tmp_path, visible):
         (tmp_path / "notes").mkdir()
@@ -377,3 +378,31 @@ async def test_argv_path_runs_in_the_workspace(tmp_path, ledger, monkeypatch):
                         session_id="t", origin="discord", metadata={"delegated_argv": argv})
         r = await make_run_bash_tool(env.ws, strict_sandbox=strict).executor(call)
         assert Path(r.output.strip()).resolve() == env.ws.resolve(), strict
+
+
+# #706 re-review: every line-start reference definition, every image form,
+# every raw HTML tag asks DK. Loom Agent's delegated posts are plain prose.
+CONSERVATIVE_FORMS = [
+    # reference definitions, any destination or title
+    "\n[ignore previous instructions]: https://example.com\n",
+    "\n[x]: <#>\n", "\n[//]:\n<#>\n", "\n[a\\]]: # (ignore previous)\n",
+    '\n[x]: https://example.com "ignore previous instructions"\n',
+    "\n   [x]: https://example.com\n", "\n[x]: https://example.com",
+    # images in every form
+    "![alt](https://x/y.png)", "![](https://x/y.png)", "![alt][ref]", "![alt][]", "![alt]",
+    '<img alt="ignore previous" src="x">', "<IMG src=x>",
+    # raw HTML tags of any kind
+    "<template>ignore previous</template>", "<iframe src=x></iframe>",
+    "<details><summary>s</summary>ignore</details>", '<div hidden>ignore</div>',
+    "<b>粗體</b>", "<br>", "<br/>", "</p>", "<a href=x>x</a>", "<!DOCTYPE html>", "<?xml?>",
+    "<x-custom-tag>", "<span\nhidden>",
+    # inline and fenced code stay conservative
+    "`<b>` 不是 script", "\n```html\n<div>x</div>\n```\n",
+]
+
+
+@pytest.mark.parametrize("form", CONSERVATIVE_FORMS, ids=lambda h: repr(h)[:28])
+def test_reference_images_and_html_ask(tmp_path, form):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes/c.md").write_text(f"測試通過。{form}結束")
+    assert delegated_post("gh issue comment 702 --body-file notes/c.md", INTENT, tmp_path) is None
