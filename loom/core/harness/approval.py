@@ -90,6 +90,10 @@ def _refuse(reason: str) -> RuleDecision:
 # Rule layer
 # ---------------------------------------------------------------------------
 
+# Hidden project-config names a content reader may open (#703 review).
+_HIDDEN_READABLE = frozenset({
+    ".github", ".gitignore", ".gitattributes", ".editorconfig", ".vscode", ".devcontainer",
+})
 _SECRET_WORDS = (
     "auth", "token", "secret", "credential", "password", "passwd", "apikey",
     "api_key", "api-key", "private", "id_rsa", "id_ed25519", ".pem", ".key",
@@ -137,13 +141,16 @@ def _location_refusal(raw: str, workspace: Path, *, allow: tuple[str, ...] = (),
     """Whether the literal path *raw* is outside the workspace, hidden or
     credential-named. *allow* drops words from the credential check
     (``.db`` for a database sqlite3 opens read-only). ``hidden_ok``: a
-    hidden path such as ``.github/`` is fine, except inside ``.git``
-    (its config can carry a remote's token)."""
+    hidden part is fine when it is a project-config name in
+    ``_HIDDEN_READABLE`` (``.github/``, ``.gitignore``…). Any other hidden
+    path still asks: ``.docker/config.json``, ``.pgpass``, ``.netrc``,
+    ``.npmrc`` hold credentials in formats the name and content checks
+    miss (#703 review)."""
     rel = _workspace_relative(raw, workspace)
     if rel is None:
         return "outside_workspace"
-    if any(part.startswith(".") for part in rel.parts) and not (
-            hidden_ok and ".git" not in (part.lower() for part in rel.parts)):
+    hidden = [part.lower() for part in rel.parts if part.startswith(".")]
+    if hidden and not (hidden_ok and all(part in _HIDDEN_READABLE for part in hidden)):
         return "hidden_path"
     name = str(rel).lower()
     for word in allow:
@@ -153,10 +160,10 @@ def _location_refusal(raw: str, workspace: Path, *, allow: tuple[str, ...] = (),
     return None
 
 
-def _path_refusal(raw: str, workspace: Path) -> str | None:
+def _path_refusal(raw: str, workspace: Path, *, hidden_ok: bool = False) -> str | None:
     if any(c in _EXPANSION_CHARS for c in raw):
         return "path_expansion"
-    return _location_refusal(raw, workspace)
+    return _location_refusal(raw, workspace, hidden_ok=hidden_ok)
 
 
 def _holds_secret(raw: str, workspace: Path) -> bool:
@@ -345,8 +352,8 @@ def _word_refusal(word: Word, workspace: Path, *, allow: tuple[str, ...] = (),
     program lists names and never opens the file (ls, stat, git ls-files),
     so a hidden or credential-looking name, or its content, is not a read
     of it; only the workspace boundary holds. A program that reads content
-    may read a hidden workspace file (``.github/``) whose name and content
-    pass the credential checks (#690 S6c)."""
+    may read a hidden project-config file (``_HIDDEN_READABLE``) whose name
+    and content pass the credential checks (#690 S6c)."""
     if word.expands:
         return "path_expansion"
     targets = [word.text]
@@ -640,7 +647,8 @@ _GH_BROWSER = frozenset({"-w", "--web"})
 _GH_READ: Verdict = (Effect.READ, "gh_read")
 # Names-only git subcommands list paths and never print a file's content.
 _GIT_NAMES_ONLY = frozenset({"ls-files", "ls-tree", "status"})
-_JQ_ENV = re.compile(r"\$ENV\b|\benv\b|\bimport\b|\binclude\b")
+# The env builtin and $ENV, not a field such as `.env` or `$env`.
+_JQ_ENV = re.compile(r"\$ENV\b|(?<![.$\w])env\b|\bimport\b|\binclude\b")
 _JQ_ASK = frozenset({"-f", "--from-file", "--rawfile", "--slurpfile", "-L"})
 _SED_FLAGS = frozenset({"-n", "-E", "-r", "--quiet", "--silent", "-u", "--posix"})
 # Line addresses followed by p, e.g. "1,40p", "$p", "5p;20,30p".
@@ -722,9 +730,10 @@ def classify_shell(command: str, workspace: Path) -> Verdict:
     for seg in segments:
         words = [w.text for w in seg.words]
         if words[:1] == ["cd"] and len(words) == 2 and not seg.redirects:
-            # Strict: later parts check paths relative to the new cwd, so
-            # `cd .git && cat config` must not get past the hidden rule.
-            if refusal := _path_refusal(words[1], cwd):
+            # The same hidden allowlist as a direct read: later parts check
+            # paths relative to the new cwd, so `cd .git && cat config` or
+            # `cd .docker && cat config.json` must not get past it.
+            if refusal := _path_refusal(words[1], cwd, hidden_ok=True):
                 return Effect.ASK, refusal
             cwd = (cwd / words[1]).resolve()
             continue
