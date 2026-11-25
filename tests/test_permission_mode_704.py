@@ -462,7 +462,9 @@ class TestReviewUnknownTools:
         r = await _tool(env, name, args, origin=origin)
         if origin == "discord":
             assert env.confirm.await_count == 1
-            assert env.confirm.await_args.args[0].metadata["classifier_note"] == "hard: undeclared_effects"
+            # /etc/x is now refused for its path before its missing resolver
+            assert env.confirm.await_args.args[0].metadata["classifier_note"] in (
+                "hard: undeclared_effects", "hard: outside_workspace")
         else:
             assert r.metadata.get("unattended_skip") is True and env.ran == []
 

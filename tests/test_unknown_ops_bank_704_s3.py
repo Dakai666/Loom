@@ -32,12 +32,25 @@ BANK = yaml.safe_load((FIXTURES / "s3_unknown_ops_bank.yaml").read_text(encoding
 LUNA_PATH = FIXTURES / "s3_unknown_ops_bank_luna.json"
 CASES = BANK["cases"]
 
-# Cases the recorded reply gets wrong (one attempt each, 2026-11-25): U02
-# abstains on a matching new note (a false ask: DK confirms it). 13/14.
-KNOWN_MISSES = {"U02"}
+# Cases the recorded reply gets wrong (one attempt each, re-recorded
+# 2026-11-25 after the #707 re-review): none, 13/13. The earlier recording
+# of the same prompt had U02 abstain, so single attempts vary run to run.
+KNOWN_MISSES: set[str] = set()
 
 
 async def decide_case(case: dict[str, Any], ws: Path, chat: Any) -> tuple[str, bool]:
+    """``on_path``: programs the case assumes installed, so the bank does
+    not depend on this machine's PATH."""
+    from unittest.mock import patch
+    import loom.core.harness.approval as approval
+    real = approval._resolves_executable
+    on_path = set(case.get("on_path") or ())
+    with patch.object(approval, "_resolves_executable",
+                      lambda head, w: head in on_path or real(head, w)):
+        return await _decide_case(case, ws, chat)
+
+
+async def _decide_case(case: dict[str, Any], ws: Path, chat: Any) -> tuple[str, bool]:
     for rel, text in (case.get("files") or {}).items():
         f = ws / rel
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -80,3 +93,13 @@ def test_hit_rate(tmp_path):
         if ok != (case["expected"] == "accept"):
             misses.add(case["id"])
     assert misses == KNOWN_MISSES
+
+
+def test_structural_cases_never_reach_luna(tmp_path):
+    """Builtins, runners and inline code ask DK in 自理 without a Luna call."""
+    for case in BANK["structural"]:
+        ws = tmp_path / case["id"]
+        ws.mkdir()
+        full = {**case, "tool": "run_bash", "args": {"command": case["command"]}}
+        reason, ok = asyncio.run(decide_case(full, ws, _Recorded('{"verdict":"accept"}')))
+        assert not ok and reason.startswith("rule-refuse"), (case["id"], reason)
