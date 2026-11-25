@@ -794,8 +794,12 @@ class BlastRadiusMiddleware(Middleware):
         registry: Any | None = None,
         ledger_emitter: Any = None,
         classifier: Any = None,
+        workspace: Path | None = None,
     ) -> None:
         self._perm = perm_ctx
+        # #700: where skills/<name>/ check modules live. None = a write
+        # never offers trust (sub-agents, tests of the bare middleware).
+        self._workspace = workspace
         # #690 S6: consulted where a call would otherwise go to a human or
         # be skipped (see ``loom.core.harness.approval``). None = no
         # classifier (sub-agents, tests of the bare middleware).
@@ -1188,6 +1192,7 @@ class BlastRadiusMiddleware(Middleware):
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value, classifier_note=note)
 
+        offer = self._skill_trust_offer(call)
         await self._enter_awaiting_confirm(call)
         raw = await self._confirm(call)
         decision = self._normalize_decision(raw)
@@ -1229,6 +1234,11 @@ class BlastRadiusMiddleware(Middleware):
         self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})")
         call.metadata["user_decision"] = True
         call.metadata["confirm_decision"] = decision.value
+        # #700: trust needs DK to have seen the diff and allowed this one
+        # call. A lease or auto covers later writes DK never sees.
+        if (offer is not None and decision == ConfirmDecision.ONCE
+                and call.metadata.get("skill_trust_diff_shown") is True):
+            call.metadata["approved_with_diff"] = True
 
         # Convert request → grants based on user's decision.
         import time as _time
@@ -1247,28 +1257,47 @@ class BlastRadiusMiddleware(Middleware):
 
         return None  # proceed
 
+    def _skill_trust_offer(self, call: ToolCall) -> Any:
+        """#700: before DK confirms a write that replaces a trusted skill
+        check module, put the diff against the trusted version where the
+        platform confirm shows it. The platform sets
+        ``skill_trust_diff_shown`` once DK can see it."""
+        content = call.args.get("content")
+        raw = call.args.get("path")
+        if (self._workspace is None or call.tool_name != "write_file"
+                or not isinstance(content, str) or not isinstance(raw, str)):
+            return None
+        from .skill_checks import trust_offer_for_write
+        try:
+            offer = trust_offer_for_write(self._workspace, raw, content)
+        except Exception:
+            _log.exception("skill trust offer failed; asking without one")
+            return None
+        if offer is not None:
+            call.metadata["skill_trust_offer"] = offer
+            call.metadata["skill_trust_diff"] = offer.diff
+        return offer
+
     async def _retrust_approved_skill_write(self, call: ToolCall, result: ToolResult) -> None:
-        """#700: DK confirming a write to a skill check module by hand is the
-        review the integrity check asks for, so the written bytes become the
-        trusted ones. Only this call's human confirm counts: a model accept,
-        a grant, a bridge or an unattended turn never sets ``user_decision``."""
-        if (call.tool_name != "write_file" or not result.success
-                or call.metadata.get("user_decision") is not True
-                or self._is_unattended(call)):
-            return
-        path, content = result.metadata.get("_resolved_path"), call.args.get("content")
-        if not isinstance(path, str) or not isinstance(content, str):
+        """#700: DK allowed this write after seeing its diff against the
+        trusted version, so the written bytes become the trusted ones.
+        Only ``approved_with_diff`` counts: a model accept, a grant, a
+        lease or auto, a bridge or an unattended turn never sets it."""
+        offer = call.metadata.get("skill_trust_offer")
+        if (call.metadata.get("approved_with_diff") is not True or offer is None
+                or not result.success or self._is_unattended(call)
+                or result.metadata.get("_resolved_path") != str(offer.module)):
             return
         from .skill_checks import retrust_approved_write
         try:
-            changed = retrust_approved_write(Path(path), content)
+            changed = retrust_approved_write(offer)
         except Exception:
             _log.exception("skill trust update after approved write failed")
             return
         if changed is None:
             return
         payload = {
-            "skill": Path(path).parent.name, "file": path,
+            "skill": offer.module.parent.name, "file": str(offer.module),
             "old_hash": changed[0][:12], "new_hash": changed[1][:12], "call_id": call.id,
         }
         if self._ledger_emitter is not None:

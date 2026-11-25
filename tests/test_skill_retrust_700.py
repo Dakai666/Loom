@@ -388,3 +388,11 @@ async def test_discord_confirm_attaches_a_long_diff(monkeypatch):
     assert attached.fp.read().decode() == diff
     assert len(sent.args[0]) <= 2000
     assert call.metadata["skill_trust_diff_shown"] is True
+
+
+async def test_discord_confirm_attaches_a_diff_holding_a_fence(monkeypatch):
+    diff = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+s = '```'\n"
+    channel, call = await _discord_confirm(monkeypatch, diff)
+    [sent] = channel.send.await_args_list
+    assert sent.kwargs["file"].fp.read().decode() == diff
+    assert "```diff" not in sent.args[0]

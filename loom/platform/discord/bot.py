@@ -57,6 +57,7 @@ showing the TTL or grant scope.
 from __future__ import annotations
 
 import asyncio
+import io
 import contextlib
 import logging
 import json
@@ -2098,15 +2099,34 @@ class LoomDiscordBot:
             view = _ConfirmView()  # no auto-deny — waits for your decision
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
-
-            msg = await _safe_send(channel,
+            text = (
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"{just_text}"
-                f"*Waiting for your decision — no timeout.*",
-                view=view,
+                f"*Waiting for your decision — no timeout.*"
             )
+            # #700: a write that replaces a trusted skill check module shows
+            # DK the diff against the trusted version; Allow (y) also trusts
+            # it. Inline when it fits one message and holds no fence, else attached.
+            extra: dict = {}
+            trust_diff = call.metadata.get("skill_trust_diff")
+            if trust_diff:
+                note = "\n**Skill check diff** — Allow (y) also trusts it"
+                inline = f"{text}{note}:\n```diff\n{trust_diff}\n```"
+                # A fence inside the diff would end the code block early.
+                if len(inline) <= _MAX_CHARS and "```" not in trust_diff:
+                    text = inline
+                else:
+                    text += f"{note} (attached)."
+                    extra["file"] = discord.File(
+                        io.BytesIO(trust_diff.encode("utf-8")), filename="skill_check.diff",
+                    )
+
+            msg = await _safe_send(channel, text, view=view, **extra)
+            # One message carried the diff (or its file) and the buttons.
+            if trust_diff and msg is not None and len(text) <= _MAX_CHARS:
+                call.metadata["skill_trust_diff_shown"] = True
             self._active_confirmations[thread_id] = msg
             try:
                 decision = await view.wait_decision()

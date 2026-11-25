@@ -1376,6 +1376,7 @@ class LoomSession:
                     exec_escape_fn=_exec_escape_fn,
                     registry=self.registry,
                     ledger_emitter=self._ledger_emitter,
+                    workspace=self.workspace,
                     classifier=ApprovalClassifier(
                         workspace=self.workspace, perm=self.perm,
                         emitter=self._ledger_emitter, chat=plan_model_chat(),
@@ -4203,6 +4204,18 @@ class LoomSession:
             sys.stdout.flush()
 
         verdict = call.metadata.get("scope_verdict")
+
+        # #700: a write that replaces a trusted skill check module shows DK
+        # the diff against the trusted version, so allowing this one call
+        # can also trust the new bytes.
+        trust_diff = call.metadata.get("skill_trust_diff")
+        if trust_diff:
+            console.print(
+                f"[skill check] diff against the trusted version — "
+                f"「允許這次」 also trusts it:\n{trust_diff}",
+                markup=False, highlight=False,
+            )
+            call.metadata["skill_trust_diff_shown"] = True
 
         widget_title = (
             f"Loom 想執行 [{call.tool_name}]  ·  信任度 {call.trust_level.plain}"
