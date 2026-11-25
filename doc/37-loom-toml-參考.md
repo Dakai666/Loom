@@ -214,7 +214,7 @@ require_audit_log   = true
 | 等級 | 行為 |
 |------|------|
 | `safe` | 直接執行，無需確認 |
-| `guarded` | 首次需確認，session 內後續自動允許；`exec_auto=true` 時支援工作區範圍內工具的白名單免確認 |
+| `guarded` | 由授權模式決策點判斷（#704）；問人時只涵蓋這一次呼叫 |
 | `critical` | 每次都需確認 |
 
 ---

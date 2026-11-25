@@ -463,15 +463,15 @@ class AutonomyDaemon:
 
         logger.info("[autonomy] trigger=%s — starting agent run", plan.trigger_name)
 
-        # Pre-authorize tools and scope grants declared in the schedule.
-        # These are revoked after the turn completes so triggers don't
-        # accumulate cross-schedule permissions.
+        # The schedule's program boundary: its allowed_tools as a
+        # declaration for its own unattended calls (#704 S3), its scope
+        # grants as ceilings. Both are withdrawn after the run so triggers
+        # don't accumulate cross-schedule permissions.
         from loom.core.harness.scope import ScopeGrant
-        _added_tools: list[str] = []
-        for tool_name in plan.context.get("allowed_tools", []):
-            if tool_name not in self._session.perm.session_authorized:
-                self._session.perm.authorize(tool_name)
-                _added_tools.append(tool_name)
+        _boundary = f"autonomy:{plan.trigger_name}"
+        _added_tools: list[str] = list(plan.context.get("allowed_tools", []))
+        if _added_tools:
+            self._session.perm.declare(_boundary, _added_tools, unattended_only=True)
         _added_grant_count = 0
         for g in plan.context.get("scope_grants", []):
             self._session.perm.grant(ScopeGrant(
@@ -574,8 +574,8 @@ class AutonomyDaemon:
             ))
         finally:
             # Revoke temporary grants so schedules don't leak permissions.
-            for tool_name in _added_tools:
-                self._session.perm.revoke(tool_name)
+            if _added_tools:
+                self._session.perm.withdraw(_boundary)
             if _added_grant_count:
                 _src = f"autonomy:{plan.trigger_name}"
                 self._session.perm.revoke_matching(lambda g: g.source == _src)

@@ -201,7 +201,8 @@ async def test_child_first_write_keeps_memorize_tier_and_provenance(memory, tmp_
             return {"role": "tool", "tool_call_id": cid, "content": content}
     await run_subagent(SubAgentConfig(task="remember", model="test", agent_id="child", allowed_tools=["memorize"]),
         router=Router(), episodic=mem.episodic, semantic=mem.semantic, procedural=mem.procedural,
-        tool_registry=registry, parent_session_id="parent", workspace=tmp_path)
+        tool_registry=registry, parent_session_id="parent", workspace=tmp_path,
+        parent_declared={"memorize"})  # #704 S3: the parent declares memorize
     assert writes == [("memorize", {"agent_id": "child", "parent_session_id": "parent"})]
     entry = await mem.semantic.get("child:fact")
     assert entry.source == "memorize" and entry.confidence == 0.85

@@ -74,8 +74,11 @@ def _make_registry(*tool_defs):
 async def _run_middleware(perm, call, confirm_result=True, registry=None):
     confirm_fn = AsyncMock(return_value=confirm_result)
     handler = AsyncMock(return_value=_ok_result(call))
+    import tempfile
+    from pathlib import Path
     mw = BlastRadiusMiddleware(
         perm_ctx=perm, confirm_fn=confirm_fn, registry=registry,
+        workspace=Path(tempfile.mkdtemp()),
     )
     result = await mw.process(call, handler)
     return result, confirm_fn, handler
@@ -130,7 +133,7 @@ class TestOriginAwareDeny:
     async def test_autonomy_with_grant_allowed(self):
         """origin='autonomy' + matching grant → ALLOW (no confirm needed)."""
         perm = PermissionContext(session_id="test")
-        perm.authorize("write_file")
+        perm.declare("test:boundary", ["write_file"])
         call = _call("write_file", {"path": "x.py"}, origin="autonomy")
         result, confirm_fn, handler = await _run_middleware(perm, call)
 
@@ -141,7 +144,7 @@ class TestOriginAwareDeny:
     async def test_subagent_with_grant_allowed(self):
         """origin='subagent' + matching grant → ALLOW."""
         perm = PermissionContext(session_id="test")
-        perm.authorize("write_file")
+        perm.declare("test:boundary", ["write_file"])
         call = _call("write_file", {"path": "x.py"}, origin="subagent")
         result, confirm_fn, handler = await _run_middleware(perm, call)
 

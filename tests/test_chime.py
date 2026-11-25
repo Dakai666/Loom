@@ -215,9 +215,8 @@ class TestChimeExecution:
 
         session = MagicMock()
         session.stream_turn = fake_stream
-        session.perm.session_authorized = set()
-        session.perm.authorize = MagicMock()
-        session.perm.revoke = MagicMock()
+        session.perm.declare = MagicMock()
+        session.perm.withdraw = MagicMock()
         session.perm.revoke_matching = MagicMock()
         session.workspace = "/tmp"
 
@@ -558,27 +557,34 @@ class TestChimeDispatcherEdgeCases:
 
 
 def _make_chime_session_stub(authorized_list, granted_list, revoked_list, revoke_matching_list):
-    """Build a session mock where perm.* mutations are recorded."""
+    """A session whose perm is a real PermissionContext, with declarations,
+    grants and withdrawals recorded (#704 S3: allowed_tools is a
+    declaration for the chime's own unattended calls, not a name grant)."""
+    from loom.core.harness.permissions import PermissionContext
     session = MagicMock()
-    session.perm.session_authorized = set()
+    perm = PermissionContext(session_id="chime-test")
+    real_declare, real_withdraw = perm.declare, perm.withdraw
+    real_grant, real_revoke_matching = perm.grant, perm.revoke_matching
 
-    def _authorize(name):
-        authorized_list.append(name)
-        session.perm.session_authorized.add(name)
+    def _declare(source, tools, **kw):
+        authorized_list.extend(tools)
+        real_declare(source, tools, **kw)
 
-    def _revoke(name):
-        revoked_list.append(name)
+    def _withdraw(source):
+        revoked_list.extend(sorted(perm.boundaries[source].tools) if source in perm.boundaries else [])
+        real_withdraw(source)
 
     def _grant(g):
         granted_list.append(g)
+        real_grant(g)
 
     def _revoke_matching(pred):
         revoke_matching_list.append(pred)
+        return real_revoke_matching(pred)
 
-    session.perm.authorize = MagicMock(side_effect=_authorize)
-    session.perm.revoke = MagicMock(side_effect=_revoke)
-    session.perm.grant = MagicMock(side_effect=_grant)
-    session.perm.revoke_matching = MagicMock(side_effect=_revoke_matching)
+    perm.declare, perm.withdraw = _declare, _withdraw
+    perm.grant, perm.revoke_matching = _grant, _revoke_matching
+    session.perm = perm
     return session
 
 
@@ -626,6 +632,8 @@ class TestChimePermissions:
 
         async def stream_capture(content, *, origin, **_kw):
             applied_during_turn["authorized"] = list(authorized)
+            applied_during_turn["unattended"] = session.perm.declared_by("memorize", attended=False)
+            applied_during_turn["attended"] = session.perm.declared_by("memorize", attended=True)
             applied_during_turn["granted_count"] = len(granted)
             applied_during_turn["origin"] = origin
             if False:
@@ -649,8 +657,11 @@ class TestChimePermissions:
                 break
             await asyncio.sleep(0)
 
-        # Authorized during the turn, revoked after.
+        # Declared during the turn for the chime's own calls only, withdrawn after.
         assert applied_during_turn["authorized"] == ["write_file", "memorize"]
+        assert applied_during_turn["unattended"] == "autonomy:morning"
+        assert applied_during_turn["attended"] is None
+        assert session.perm.boundaries == {}
         assert applied_during_turn["granted_count"] == 1
         assert applied_during_turn["origin"] == "chime"
         assert sorted(revoked) == ["memorize", "write_file"]
@@ -704,7 +715,7 @@ class TestChimePermissions:
 
         # Wait until the chime is mid-stream and grants are live.
         await chime_started.wait()
-        assert "write_file" in session.perm.session_authorized
+        assert session.perm.declared_by("write_file", attended=False) == "autonomy:morning"
 
         # Cancel the chime task (this is what on_message's cancel-and-replace
         # path does). The chime task's own finally must revoke before any
@@ -724,9 +735,10 @@ class TestChimePermissions:
         # are no longer on session.perm — a replacement user turn scheduled
         # next would start with a clean slate.
         assert sorted(revoked) == ["write_file"], (
-            f"revoke must run as part of cancelled chime's cleanup; "
+            f"withdraw must run as part of cancelled chime's cleanup; "
             f"observed revoked={revoked}"
         )
+        assert session.perm.boundaries == {}
         assert len(revoke_matching_calls) == 1
 
 

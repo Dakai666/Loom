@@ -100,7 +100,7 @@ LifecycleMiddleware（最外層）
 class LifecycleContext:
     record: ActionRecord              # 正在追蹤的 ActionRecord（引用）
     authorization_result: bool | None # BlastRadius 寫入（True/False/None）
-    authorization_reason: str | None  # 授權原因（"pre-authorized"/"user confirmed"等）
+    authorization_reason: str | None  # 授權原因（"safe tool"/"declared by …"/"user confirmed"等）
     _on_state_change: ...             # 狀態變更 callback（UI 用）
     _on_lifecycle: ...                # MEMORIALIZED callback（記憶層用）
 ```
@@ -128,13 +128,13 @@ class LifecycleContext:
 **通過的常規情況：**
 ```
 SAFE 工具（read_file、recall）
-  → is_authorized() = True → 自動通過，reason = "pre-authorized"
+  → 自動通過，reason = "safe tool"
 
-GUARDED 工具，session 內已授權（write_file 第二次）
-  → is_authorized() = True → 通過，reason = "pre-authorized"
+GUARDED 工具，boundary 宣告過（routine 的 allowed_tools、Discord 平台工具，#704 S3）
+  → 決策點：未越過 scope ceiling 與硬護欄 → 通過，reason = "declared by <source>"
 
-GUARDED 工具，exec_auto 模式下的 run_bash（workspace 範圍內）
-  → exec_auto_approved() = True → 通過，reason = "exec_auto"
+GUARDED 工具，授權模式放行（規則、Luna、YOLO）
+  → reason = "classifier …" / "mode yolo"
 
 GUARDED 工具，用戶確認
   → confirm_fn() = True → 通過，reason = "user confirmed"
@@ -147,8 +147,8 @@ GUARDED 工具，用戶點擊「否」
   → BlastRadius 立刻回傳 permission_denied ToolResult
   → LifecycleGateMiddleware 從未執行
 
-GUARDED 工具，exec_auto 但絕對路徑逃逸 workspace
-  → exec_escape_fn() = True → 跳過 exec_auto，要求確認
+GUARDED 工具碰到硬護欄（例如 workspace 外的絕對路徑）
+  → 要求確認（無人值守則 skip）
   → 用戶拒絕 → DENIED
 ```
 

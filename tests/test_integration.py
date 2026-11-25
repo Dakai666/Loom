@@ -296,7 +296,6 @@ class TestFullPipeline:
             return True
 
         ctx = PermissionContext("full-test")
-        ctx.authorize("read_file")
 
         pipeline = MiddlewarePipeline([
             TraceMiddleware(on_trace=on_trace),

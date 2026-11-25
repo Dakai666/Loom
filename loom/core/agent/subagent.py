@@ -14,6 +14,8 @@ Design principles:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import time
 import uuid
@@ -59,6 +61,13 @@ class SubAgentResult:
     error: str | None = None
 
 
+def subagent_declarations(child_tools: list[str], parent_declared: Any) -> list[str]:
+    """The child tools a sub-agent may declare: only those a parent
+    boundary declares (#704 S3)."""
+    parent = set(parent_declared)
+    return [name for name in child_tools if name in parent]
+
+
 async def run_subagent(
     config: SubAgentConfig,
     *,
@@ -70,6 +79,7 @@ async def run_subagent(
     parent_session_id: str,
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
+    parent_declared: "frozenset[str] | set[str] | None" = None,
     # parent session's LedgerEmitter (#334). The subagent inherits the
     # parent's ``turn_id`` via contextvar, so its ``model_event`` events
     # file under the parent turn during replay. Caveat (#334 review S2):
@@ -146,16 +156,17 @@ async def run_subagent(
             tags=_orig_memorize.tags,
         ))
 
-    # ── Permission context: inherit parent's scope grants ─────────────────────
-    # Sub-agents can only "spend" existing grants — they cannot request new
-    # ones interactively (origin="subagent" → unattended deny).
-    # Legacy-path tools (no scope_resolver) still need tool-name authorization,
-    # so we authorize all tools in the child registry (already filtered above).
+    # ── Permission context: inherit the parent's grants and declarations ─────
+    # Sub-agents can only "spend" what the parent has — they cannot request
+    # new authority interactively (origin="subagent" → unattended skip).
     # #704: never wider than the parent's mode. A sub-agent has no
-    # classifier and no human, so 安全 is all it can be.
+    # classifier and no human, so 安全 is all it can be. #704 S3: a child
+    # tool is declared only when a parent boundary declares it; the
+    # model's whitelist picks among them, it never adds one.
     perm = PermissionContext(session_id=session_id, mode=PermissionMode.SAFE)
-    for tool in child_registry._tools.values():
-        perm.authorize(tool.name)
+    declared = subagent_declarations(list(child_registry._tools), parent_declared or ())
+    if declared:
+        perm.declare("subagent", declared, unattended_only=True)
     if parent_grants:
         for g in parent_grants:
             perm.grant(g)
@@ -175,7 +186,7 @@ async def run_subagent(
         SchemaValidationMiddleware(registry=child_registry),
         BlastRadiusMiddleware(
             perm_ctx=perm, confirm_fn=_subagent_confirm, registry=child_registry,
-            ledger_emitter=ledger_emitter,
+            ledger_emitter=ledger_emitter, workspace=Path(workspace),
         ),
         LifecycleGateMiddleware(registry=child_registry),  # inner: lifecycle gating
     ])

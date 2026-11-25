@@ -3,7 +3,7 @@ Automatic approval classifier (#690 S6, phase 1).
 
 Runs only where BlastRadiusMiddleware would otherwise ask a human or skip an
 unattended call: a GUARDED call on CONFIRM / EXPAND_SCOPE that no grant and no
-name bridge covered. It never sees a call the scope policy denied.
+declaration covered. It never sees a call the scope policy denied.
 
 Two layers:
 
@@ -75,10 +75,10 @@ REVIEW_DAY_TZ = ZoneInfo("Asia/Taipei")
 # a CJK character is three of them.
 MAX_PACKET_BYTES = 16384
 
-# Grant sources that record a human's (or the operator's /auto) approval.
+# Grant sources that record a human's approval.
 # Any other source on a non-covering grant was declared by a routine or by
 # config, and marks a ceiling the classifier must not cross.
-_HUMAN_GRANT_SOURCES = frozenset({"manual_confirm", "lease", "auto_approve", "exec_auto"})
+_HUMAN_GRANT_SOURCES = frozenset({"manual_confirm", "lease", "auto_approve"})
 
 
 class RuleOutcome(Enum):
@@ -1344,7 +1344,7 @@ def _gh_api_writes(args: list[Word]) -> bool:
 
 def hard_boundary(
     call: Any, request: ScopeRequest | None, verdict: PermissionVerdict, perm: Any,
-    workspace: Path,
+    workspace: Path, *, declared: bool = False,
 ) -> str | None:
     """The hard guardrail *call* crosses, or None. YOLO runs everything
     else without asking (#704); a call that crosses one, or whose boundary
@@ -1386,12 +1386,13 @@ def hard_boundary(
         if not isinstance(command, str) or not command.strip():
             return "no_command"
         return _shell_hard(command, workspace)
-    elif request is None or any(req.resource not in _DECLARED_RESOURCES
-                                for req in request.requirements):
+    elif not declared and (request is None or any(
+            req.resource not in _DECLARED_RESOURCES for req in request.requirements)):
         # Nothing declares what this tool does (an MCP tool, mail, a
         # calendar): its boundary cannot be confirmed, so it is not run
         # unasked (#705 review). A tool whose scope resolver declares its
-        # effects is checked above.
+        # effects is checked above; one a boundary declares (a routine's
+        # allowed_tools, #704 S3) has its operator's declaration.
         return "undeclared_effects"
     return None
 

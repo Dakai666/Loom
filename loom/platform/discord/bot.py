@@ -746,16 +746,17 @@ class LoomDiscordBot:
                 last_user_message_lookup=self._last_user_msg.get,
             )
         )
-        session.perm.authorize("send_discord_file")
-        session.perm.authorize("send_discord_embed")
-        session.perm.authorize("send_discord_select")
-        session.perm.authorize("add_discord_reaction")
+        # #704 S3: the Discord platform declares the tools that talk back
+        # into this thread. A declaration is not a pass: each call still
+        # meets the decision point and its hard guardrails.
+        _platform_tools = ["send_discord_file", "send_discord_embed",
+                           "send_discord_select", "add_discord_reaction"]
 
         # Forum publish + read (issue: thread-session 絲絲 also needs to post to
         # and verify the news forum, not just the autonomy daemon). Gated on
         # DISCORD_NEWS_FORUM_ID being configured. The read tool is SAFE and
-        # pre-authorized like the other read-ish Discord tools; the publish
-        # tool stays GUARDED and is *not* pre-authorized — creating a public
+        # declared like the other read-ish Discord tools; the publish
+        # tool stays GUARDED and is *not* declared — creating a public
         # forum post warrants the human confirm button, unlike sending a file
         # into the current thread.
         _forum_id = resolve_news_forum_id()
@@ -768,7 +769,8 @@ class LoomDiscordBot:
             session.registry.register(
                 make_read_discord_forum_tool(self._client, default_forum_id=_forum_id)
             )
-            session.perm.authorize("read_discord_forum")
+            _platform_tools.append("read_discord_forum")
+        session.perm.declare("platform:discord", _platform_tools)
 
         confirm_fn = self._make_confirm_fn(thread_id)
         for mw in session._pipeline._middlewares:
@@ -1038,22 +1040,22 @@ class LoomDiscordBot:
         req: ChimeRequest,
         session: "LoomSession | None",
     ) -> tuple[list[str], str | None]:
-        """Pre-authorize tools + scope grants declared on the schedule.
+        """Apply the schedule's program boundary: its ``allowed_tools`` as
+        a declaration that covers only the chime's own unattended calls
+        (#704 S3), and its scope grants as ceilings.
 
-        Returns ``(added_tools, grant_source)`` to be passed to
+        Returns ``(declared_tools, grant_source)`` to be passed to
         ``_revoke_chime_permissions`` after the chime turn.
         """
         if session is None:
             return [], None
         from loom.core.harness.scope import ScopeGrant
 
-        added: list[str] = []
-        for tool_name in req.allowed_tools:
-            if tool_name not in session.perm.session_authorized:
-                session.perm.authorize(tool_name)
-                added.append(tool_name)
-
-        source = f"autonomy:{req.schedule_name}" if req.scope_grants else None
+        added: list[str] = list(req.allowed_tools)
+        source = (f"autonomy:{req.schedule_name}"
+                  if (added or req.scope_grants) else None)
+        if added:
+            session.perm.declare(source, added, unattended_only=True)
         for g in req.scope_grants:
             session.perm.grant(ScopeGrant(
                 resource=g["resource"],
@@ -1107,11 +1109,11 @@ class LoomDiscordBot:
     ) -> None:
         if session is None:
             return
-        for tool_name in added_tools:
+        if grant_source:
             try:
-                session.perm.revoke(tool_name)
+                session.perm.withdraw(grant_source)
             except Exception:
-                logger.debug("chime revoke tool %s failed", tool_name, exc_info=True)
+                logger.debug("chime withdraw declaration failed", exc_info=True)
         if grant_source:
             try:
                 session.perm.revoke_matching(lambda g, s=grant_source: g.source == s)
@@ -1262,7 +1264,6 @@ class LoomDiscordBot:
         "`/tier <N>` — Switch tier (1 = daily · 2 = deep reasoning)\n"
         "`/think` — View last turn's reasoning chain\n"
         "`/compact` — Compress older context\n"
-        "`/auto` — Toggle run_bash auto-approve (requires strict_sandbox)\n"
         "`/pause` — Toggle HITL auto-pause after each tool batch\n"
         "`/stop` — Immediately cancel the current running turn\n"
         "`/budget` — Show context token usage\n"
@@ -1343,20 +1344,8 @@ class LoomDiscordBot:
         )
 
     def _cmd_auto(self, session: "LoomSession") -> str:
-        if not session._strict_sandbox:
-            return (
-                "❌ `/auto` requires `strict_sandbox = true` in `loom.toml`.\n"
-                "Without workspace confinement, auto-approving `run_bash` "
-                "would grant unrestricted shell access."
-            )
-        session.perm.exec_auto = not session.perm.exec_auto
-        state = "on" if session.perm.exec_auto else "off"
-        if session.perm.exec_auto:
-            return (
-                f"✅ Exec auto-approve: **{state}** — `run_bash` pre-authorized within workspace.\n"
-                "Absolute paths that escape the workspace still require confirmation."
-            )
-        return f"🔒 Exec auto-approve: **{state}** — `run_bash` will confirm every call."
+        # #704 S3: /auto (exec_auto) is retired; the permission mode decides.
+        return "`/auto` is retired (#704). Use `/mode safe | self | yolo`."
 
     def _cmd_pause(self, session: "LoomSession") -> str:
         session.hitl_mode = not session.hitl_mode

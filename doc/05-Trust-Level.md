@@ -128,90 +128,31 @@ strict_sandbox = true   # 預設 false
 
 ---
 
-## /auto — session 內 EXEC 自動批准（v0.2.3.4+）
+## 授權模式取代 /auto 與工具名授權（#704）
 
-`/auto` 是一個 in-session 切換指令，讓使用者在 session 生命週期內臨時放寬 `run_bash` 的確認需求。
+`/auto`（exec_auto）在 #704 S3 退役，改用單一的授權模式 `/mode safe | self | yolo`（預設自理，見 doc/22「授權模式」）。輸入 `/auto` 只會提示改用 `/mode`。
 
-### 前提條件
+工具名稱本身不再授權任何呼叫：
 
-`/auto` **必須搭配 `strict_sandbox = true`** 才能啟用：
-
-```
-/auto   →  ⚠️  需要 strict_sandbox = true in loom.toml
-```
-
-這個設計是刻意的：沒有 workspace 沙箱的情況下，pre-authorize `run_bash` 等於把整台機器交給 agent，不應該允許。
-
-### 啟用後的行為
-
-```
-/auto on  （strict_sandbox = true）
-
-workspace 內的命令（相對路徑或無路徑）：
-  Agent 請求 run_bash → BlastRadiusMiddleware →
-    exec_auto=true + 無逃逸路徑 → 直接執行（無確認）
-
-逃逸 workspace 的命令（絕對路徑）：
-  Agent 請求 run_bash "cat /etc/passwd" → BlastRadiusMiddleware →
-    exec_auto=true + 偵測到逃逸路徑 → ⚠️ 強制確認
-```
-
-### 逃逸偵測邏輯
-
-`make_exec_escape_fn(workspace)` 掃描命令字串中所有看起來像路徑的 token（`/` 或 `C:\` 開頭），對每個 token 做 `Path.resolve().relative_to(workspace)` 驗證：
-
-```
-cat /etc/passwd         → /etc/passwd 不在 workspace 內 → 逃逸 → 確認
-rm -rf /tmp/foo         → /tmp/foo 不在 workspace 內 → 逃逸 → 確認
-python test.py          → 無絕對路徑 → 安全 → 自動批准
-cd src && ls            → 無絕對路徑 → 安全 → 自動批准
-pip install numpy       → 無絕對路徑 → 安全 → 自動批准
-```
-
-### 推薦使用場景
-
-```toml
-# loom.toml
-[harness]
-strict_sandbox = true
-```
-
-Session 開始後：
-```
-/auto          ← 開啟，之後連續 shell 操作不再逐一確認
-...工作中...
-/auto          ← 關閉（或 session 結束自動重置）
-```
-
-### 行為矩陣
-
-| strict_sandbox | /auto | 行為 |
-|---------------|-------|------|
-| `false` | off | 每次確認 |
-| `false` | on | ❌ 不允許（警告提示） |
-| `true` | off | 每次確認 |
-| `true` | on | workspace 內自動批准；偵測到逃逸絕對路徑仍強制確認 |
-
----
+- **SAFE 工具**本來就是唯讀、本機、可逆，直接執行。
+- **宣告（boundary）**：Discord 平台宣告回應本 thread 的工具（`send_discord_file` 等）；routine 的 `allowed_tools` 宣告該 program 自己的無人值守呼叫會用到的工具（有人值守的插隊 turn 看不到）；子代理只能宣告父代理已宣告的工具。宣告過的工具仍要經過授權模式的決策點：不涵蓋 EXEC 與 CRITICAL、不能越過 program 宣告的 scope（ceiling）、不能越過硬護欄（例如寫 `.env`、`loom.toml`、skill 的 `checks.py`）。
+- **人工確認**只涵蓋這一次呼叫；下一次同一個工具照樣重新判斷。
 
 ## PermissionContext
-
-`PermissionContext` 是 Trust Level 在 session 內的運行時授權狀態：
 
 ```python
 @dataclass
 class PermissionContext:
     session_id: str
-    session_authorized: set[str]   # 本 session 已授權的工具名稱
+    boundaries: dict[str, Boundary]   # 宣告：來源 → 工具名（#704 S3）
+    grants: list[ScopeGrant]          # 資源層級的 scope grant
+    mode: PermissionMode              # 安全 / 自理 / YOLO
 
-    def authorize(self, tool_name: str) -> None: ...
-    def revoke(self, tool_name: str) -> None: ...
-    def is_authorized(self, tool_name: str, trust_level: TrustLevel) -> bool: ...
+    def declare(self, source: str, tools, *, unattended_only: bool = False) -> None: ...
+    def withdraw(self, source: str) -> None: ...
+    def declared_by(self, tool_name: str, *, attended: bool) -> str | None: ...
+    def runs_unasked(self, tool_name: str, trust_level: TrustLevel) -> bool: ...  # 平行 dispatch 用
 ```
-
-`BlastRadiusMiddleware` 在用戶確認後：
-- 一般 GUARDED 工具 → 呼叫 `perm.authorize(tool_name)`，session 內不再詢問
-- EXEC / AGENT_SPAN 工具 → **不呼叫 authorize**，下次仍會重新詢問
 
 ---
 
@@ -257,14 +198,6 @@ A: GUARDED 表示「有副作用，需要確認」。CRITICAL 表示「不可逆
 
 A: 不能。它只是設定子程序的起始目錄（`cwd`）。指令仍然可以使用絕對路徑（如 `cat /etc/passwd`）。若需要完整隔離，請使用 Docker 或 OS 沙箱。
 
-**Q: GUARDED 有 session 內免確認，CRITICAL / EXEC 沒有，為什麼？**
+**Q: 確認過一次的 GUARDED 工具，同一個 session 還會再問嗎？**
 
-A: GUARDED 的典型場景是「連續寫入多個檔案」，每次詢問會造成操作中斷。EXEC 和 AGENT_SPAN 的影響範圍依命令而異，無法在首次確認時預判後續呼叫的風險。
-
-**Q: 我有 `strict_sandbox = true` + `/auto`，agent 連續跑了 6 個 run_bash 都沒問我，這正常嗎？**
-
-A: 正常，這正是設計目標。只要這 6 個命令都沒有使用 workspace 外的絕對路徑，`exec_auto` 就會讓它們靜默通過。若其中有任何一個命令像 `cat /etc/passwd`，那一個會被攔下來確認。
-
-**Q: `/auto` session 結束後會保留嗎？**
-
-A: 不會。`exec_auto` 是 `PermissionContext` 上的 in-memory 旗標，session 結束後重置。下次 session 開始預設為 off，需要重新 `/auto`。
+A: 會（#704 S3 起）。人工確認只涵蓋那一次呼叫；要少問，靠的是授權模式（自理下規則與 Luna、YOLO 下硬護欄內直接執行）與明確的宣告，不是記住工具名稱。

@@ -80,7 +80,6 @@ from loom.platform.command_catalog import personality_command_entries
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/mode [safe|self|yolo]",      "show or switch the permission mode (安全 / 自理 / YOLO)"),
-    ("/auto",                       "toggle run_bash auto-approve (requires strict_sandbox)"),
     ("/compact",                    "compress older context (smart compaction)"),
     ("/help",                       "show command reference"),
     ("/model",                      "show current model + registered providers"),

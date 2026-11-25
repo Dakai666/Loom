@@ -3,7 +3,7 @@ Regression for the legacy-bypass / scope-grant interaction (issue #525,
 Codex review of PR #527).
 
 The bug: a tool pre-authorised by *name* (via the autonomy ``allowed_tools``
-bridge → ``perm.authorize(tool)``) used to bypass scope evaluation on BOTH
+bridge → ``perm.declare("test:boundary", [tool])``) used to bypass scope evaluation on BOTH
 ``CONFIRM`` and ``EXPAND_SCOPE``. So a phase that declared
 ``allowed_tools = ["write_file"]`` *and* a bounding
 ``scope_grants = [{path, write, "autonomy/circadian"}]`` got a BLANKET
@@ -65,7 +65,7 @@ def _make_setup():
     # A bounding grant: write_file may touch only autonomy/circadian …
     perm.grant(ScopeGrant(resource="path", action="write", selector="autonomy/circadian"))
     # … AND the tool is pre-authorised by name, simulating allowed_tools.
-    perm.authorize("write_file")
+    perm.declare("test:boundary", ["write_file"])
 
     blast = BlastRadiusMiddleware(
         perm_ctx=perm, registry=reg, confirm_fn=AsyncMock(return_value=True),

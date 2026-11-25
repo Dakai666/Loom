@@ -460,8 +460,8 @@ class TestBlastRadiusLegacyFallback:
 
         assert result.success
         confirm_fn.assert_called_once()
-        # Legacy path: tool should be pre-authorized now
-        assert perm.is_authorized("custom_tool", TrustLevel.GUARDED)
+        # #704 S3: the confirm covered that call only; nothing is remembered
+        assert perm.boundaries == {}
         # No scope metadata
         assert "scope_request" not in call.metadata
 
@@ -552,5 +552,5 @@ class TestResolverErrorFallback:
         # Should succeed via legacy path
         assert result.success
         confirm_fn.assert_called_once()
-        # Legacy pre-authorization (MUTATES but not EXEC/AGENT_SPAN)
-        assert perm.is_authorized("write_file", TrustLevel.GUARDED)
+        # #704 S3: no name is remembered after the confirm
+        assert perm.boundaries == {}

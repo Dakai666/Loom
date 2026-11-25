@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum, Flag, auto
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, Iterable, TYPE_CHECKING
 
 from .mode import DEFAULT_MODE, PermissionMode
 
@@ -21,8 +21,8 @@ class ToolCapability(Flag):
     *what* a GUARDED tool actually does, beyond the single tier label.
 
     Use-cases:
-    - EXEC and AGENT_SPAN tools are never session-pre-authorized — they always
-      re-confirm (like CRITICAL) even when their trust level is GUARDED.
+    - A declaration (#704 S3) never covers an EXEC tool: shell is authorized
+      only by exec scope grants.
     - The confirm UI can display a more specific warning message per capability.
     - Future: capability-level rate-limiting, audit tagging, policy overrides.
     """
@@ -123,25 +123,33 @@ class TrustLevel(Enum):
         return self.label
 
 
+@dataclass(frozen=True)
+class Boundary:
+    """Tools one boundary declares (#704 S3)."""
+    source: str                 # e.g. "platform:discord", "autonomy:dawn", "subagent"
+    tools: frozenset[str]
+    unattended_only: bool = False
+
+
 @dataclass
 class PermissionContext:
     """
     Holds runtime authorization state for a single session.
 
-    Phase A (Issue #45) adds scope-aware grants alongside the legacy
-    tool-name authorization.  Tools with a scope_resolver use the
-    scope-aware path; tools without one fall back to legacy behavior.
+    Scope grants (Issue #45) authorize resources; boundaries (#704 S3)
+    declare tools. Neither is a name-level pass: BlastRadius decides every
+    call at the permission-mode decision point.
     """
 
     session_id: str
 
-    # --- Legacy (pre-#45) authorization ---
-    session_authorized: set[str] = field(default_factory=set)
-    # Tool names a human authorized in an attended turn (#690 S6b): never
-    # seen by an unattended call. ``exec_auto`` (the operator's /auto) is
-    # attended-only too.
-    attended_authorized: set[str] = field(default_factory=set)
-    exec_auto: bool = False
+    # --- Declared tools (#704 S3) ---
+    # A tool name never authorizes by itself. A boundary (the Discord
+    # platform, a routine's ``allowed_tools``, a sub-agent's whitelist)
+    # declares which tools it uses; BlastRadius still decides each call at
+    # the permission-mode decision point, where the hard guardrails and the
+    # declared scope ceilings hold.
+    boundaries: dict[str, "Boundary"] = field(default_factory=dict)
 
     # --- Scope-aware authorization (Issue #45 Phase A) ---
     grants: list[ScopeGrant] = field(default_factory=list)
@@ -156,46 +164,36 @@ class PermissionContext:
     # --mode changes it (``LoomSession.set_permission_mode``); no tool does.
     mode: PermissionMode = DEFAULT_MODE
 
-    # ── Legacy API (unchanged) ────────────────────────────────────
+    # ── Declarations (#704 S3) ────────────────────────────────────
 
-    def authorize(self, tool_name: str, *, attended_only: bool = False) -> None:
-        (self.attended_authorized if attended_only else self.session_authorized).add(tool_name)
+    def declare(self, source: str, tools: "Iterable[str]", *, unattended_only: bool = False) -> None:
+        """Declare the tools a boundary uses. ``unattended_only``: a
+        program's declaration covers only its own unattended calls, never
+        an attended turn in the same session. Declaring again replaces."""
+        self.boundaries[source] = Boundary(source, frozenset(tools), unattended_only)
 
-    def revoke(self, tool_name: str) -> None:
-        self.session_authorized.discard(tool_name)
-        self.attended_authorized.discard(tool_name)
+    def withdraw(self, source: str) -> None:
+        self.boundaries.pop(source, None)
 
-    def enable_exec_auto(self) -> None:
-        self.exec_auto = True
-        # Phase D (Issue #45): inject a scope grant so scope-aware tools
-        # can auto-approve workspace-confined exec without the legacy path.
-        from .scope import ScopeGrant
-        import time as _time
-        self.grant(ScopeGrant(
-            resource="exec",
-            action="execute",
-            selector="workspace",
-            constraints={"absolute_paths": "deny"},
-            source="exec_auto",
-            granted_at=_time.time(),
-            attended_only=True,
-        ))
+    def declared_by(self, tool_name: str, *, attended: bool) -> str | None:
+        """The first boundary that declares *tool_name* for a call that is
+        (or is not) attended, or None."""
+        for b in self.boundaries.values():
+            if tool_name in b.tools and not (attended and b.unattended_only):
+                return b.source
+        return None
 
-    def disable_exec_auto(self) -> None:
-        self.exec_auto = False
-        # Phase D: revoke exec_auto grants
-        self.revoke_matching(lambda g: g.source == "exec_auto")
+    def declared_tools(self) -> frozenset[str]:
+        return frozenset().union(*(b.tools for b in self.boundaries.values()))
 
-    def is_authorized(
-        self, tool_name: str, trust_level: TrustLevel, *, attended: bool = True,
-    ) -> bool:
+    def runs_unasked(self, tool_name: str, trust_level: TrustLevel, *, attended: bool = True) -> bool:
+        """Whether a call can be expected to run without a prompt (parallel
+        dispatch): a SAFE tool, or a GUARDED one a boundary declares. The
+        decision point still checks each call."""
         if trust_level == TrustLevel.SAFE:
             return True
-        if trust_level == TrustLevel.GUARDED:
-            return tool_name in self.session_authorized or (
-                attended and tool_name in self.attended_authorized)
-        # CRITICAL always requires fresh confirmation — never pre-authorized.
-        return False
+        return trust_level == TrustLevel.GUARDED and self.declared_by(
+            tool_name, attended=attended) is not None
 
     # ── Scope-aware API (Issue #45 Phase A) ───────────────────────
 

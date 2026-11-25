@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from loom.core.harness.permissions import PermissionContext
+
 import json
 from pathlib import Path
 
@@ -122,6 +124,7 @@ class TestSubAgentMemorize:
                 allowed_tools=["memorize"],
                 agent_id="sub-123",
             ),
+            parent_declared={"memorize"},  # #704 S3: never wider than the parent
             router=router,
             episodic=episodic,
             semantic=semantic,
@@ -497,7 +500,7 @@ def _spawn_parent(tmp_path):
     from types import SimpleNamespace
     return SimpleNamespace(
         model="test", router=object(), registry=ToolRegistry(), session_id="parent",
-        workspace=tmp_path, perm=SimpleNamespace(grants=[]),
+        workspace=tmp_path, perm=PermissionContext(session_id="parent"),
         _memory=SimpleNamespace(episodic=object(), semantic=object(),
                                 procedural=object(), session_log=None),
     )

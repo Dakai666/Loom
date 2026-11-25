@@ -329,14 +329,14 @@ class TestAttendedAuto:
 
 
 class TestLegacyAttendedGate:
-    def test_human_name_authorization_is_invisible_unattended(self):
+    def test_program_declaration_is_invisible_attended(self):
         from loom.core.harness.permissions import PermissionContext
         perm = PermissionContext(session_id="t")
-        perm.authorize(MCP_SEARCH, attended_only=True)
-        perm.authorize("read_discord_forum")  # a routine's allowed_tools
-        assert perm.is_authorized(MCP_SEARCH, TrustLevel.GUARDED)
-        assert not perm.is_authorized(MCP_SEARCH, TrustLevel.GUARDED, attended=False)
-        assert perm.is_authorized("read_discord_forum", TrustLevel.GUARDED, attended=False)
+        perm.declare("autonomy:x", [MCP_SEARCH], unattended_only=True)
+        perm.declare("platform:discord", ["read_discord_forum"])
+        assert perm.declared_by(MCP_SEARCH, attended=False) == "autonomy:x"
+        assert perm.declared_by(MCP_SEARCH, attended=True) is None
+        assert perm.declared_by("read_discord_forum", attended=False) == "platform:discord"
 
     async def test_legacy_auto_does_not_reach_a_chime(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
@@ -359,18 +359,6 @@ class TestLegacyAttendedGate:
         assert (await run("discord")).success
         env.confirm.assert_awaited_once()
         assert (await run("discord")).success
-        env.confirm.assert_awaited_once()  # session-wide when attended
+        assert env.confirm.await_count == 2  # #704 S3: a confirm covers one call
         r = await run("chime")
         assert not r.success and r.metadata.get("unattended_skip") is True
-
-    async def test_exec_auto_is_attended_only(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger)
-        env.perm.exec_auto = True
-        call = ToolCall(tool_name="run_bash", args={"command": "python3 x.py"},
-                        trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.EXEC,
-                        session_id="t", origin="chime")
-        assert not env.blast._exec_auto_approved(call)
-        call.origin = "discord"
-        assert env.blast._exec_auto_approved(call)
-        env.perm.enable_exec_auto()
-        assert all(g.attended_only for g in env.perm.grants if g.source == "exec_auto")

@@ -89,7 +89,7 @@ Middleware_1 → Middleware_2 → ... → Middleware_N → 實際工具執行
 | `LogMiddleware` | 外層 | Rich 格式化輸出每次工具調用與結果到終端 |
 | `TraceMiddleware` | 外層 | 計時 + 每次 tool call/write 寫入 EpisodicMemory |
 | `SchemaValidationMiddleware` | 中層 | 工具參數 JSON Schema 驗證；string→int/float/bool 安全強制轉換 |
-| `BlastRadiusMiddleware` | 中層 | Trust Level 判斷 + 人類確認請求（含 `exec_auto` 模式）；寫入 `LifecycleContext.authorization_result` |
+| `BlastRadiusMiddleware` | 中層 | 授權模式決策點（安全／自理／YOLO，#704）+ 人類確認請求；寫入 `LifecycleContext.authorization_result` |
 | `LifecycleGateMiddleware` | 最內層 | AUTHORIZED → PREPARED（precondition_checks）→ EXECUTING（abort racing）→ OBSERVED |
 
 ### SchemaValidationMiddleware（v0.2.5.2）
@@ -179,11 +179,11 @@ Platform CLI ──依賴──▶ ToolRegistry（輸出可用工具列表）
 
 | 等級 | 定義 | 行為 |
 |------|------|------|
-| **SAFE** | 唯讀、本地、可逆 | 自動執行，session 開始時預授權 |
-| **GUARDED** | 寫入、網路、有副作用 | 首次需確認，session 內授權後免再詢問；`exec_auto=true` 時支援白名單免確認 |
-| **CRITICAL** | 破壞性、跨系統、不可逆 | 每次強制確認，不可 session 授權 |
+| **SAFE** | 唯讀、本地、可逆 | 自動執行 |
+| **GUARDED** | 寫入、網路、有副作用 | 由授權模式決策點判斷（scope grant、宣告、規則、Luna、YOLO）；問人時只涵蓋這一次呼叫 |
+| **CRITICAL** | 破壞性、跨系統、不可逆 | 每次強制確認，不可宣告或授權 |
 
-`BlastRadiusMiddleware` 在 `exec_auto` 模式（v0.2.5.1）下，攜帶 `EXEC` capability 且工作區範圍內的工具跳過逐次確認。
+`/auto`（exec_auto）與工具名授權在 #704 S3 退役，見 doc/22「授權模式」。
 
 詳細說明：請參閱 [05-Trust-Level.md](05-Trust-Level.md)
 

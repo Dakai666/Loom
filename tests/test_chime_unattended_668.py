@@ -21,8 +21,8 @@ Contract (PR #673 review added 5-7):
      unattended turn never prompts for it; the checks just aren't mounted.
   6. A thread left in /pause (hitl_mode) must not park an unattended turn on
      TurnPaused — nobody would resume it. Interactive turns still pause.
-  7. The "probe, then re-issue" hint appears only when probing could
-     actually authorize the call (exec_auto on); otherwise it is a skip.
+  7. An unauthorized exec call is a skip, never a "probe, then re-issue"
+     hint (/auto, the only thing probing could unlock, is retired: #704 S3).
 """
 
 from __future__ import annotations
@@ -71,7 +71,10 @@ def _setup(*, scoped: bool):
     ))
     perm = PermissionContext(session_id="t")
     confirm = AsyncMock(return_value=True)
-    blast = BlastRadiusMiddleware(perm_ctx=perm, registry=reg, confirm_fn=confirm)
+    import tempfile
+    from pathlib import Path
+    blast = BlastRadiusMiddleware(perm_ctx=perm, registry=reg, confirm_fn=confirm,
+                                  workspace=Path(tempfile.mkdtemp()))
     return blast, handler, perm, confirm, ran
 
 
@@ -122,7 +125,7 @@ class TestChimeIsUnattended:
 
     async def test_allowed_tools_name_bridge_still_runs(self):
         blast, handler, perm, confirm, ran = _setup(scoped=False)
-        perm.authorize("write_file")
+        perm.declare("test:boundary", ["write_file"])
         result = await blast.process(_call("chime"), handler)
         assert result.success
         assert ran == ["write_file"]
@@ -236,7 +239,7 @@ class TestChimeSkipNotice:
 # ---------------------------------------------------------------------------
 
 
-def _exec_setup(*, exec_auto: bool):
+def _exec_setup():
     async def handler(call: ToolCall) -> ToolResult:
         return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output="ok")
 
@@ -246,8 +249,6 @@ def _exec_setup(*, exec_auto: bool):
         trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.EXEC,
     ))
     perm = PermissionContext(session_id="t")
-    if exec_auto:
-        perm.exec_auto = True
     blast = BlastRadiusMiddleware(
         perm_ctx=perm, registry=reg, confirm_fn=AsyncMock(return_value=True),
     )
@@ -261,17 +262,11 @@ def _exec_setup(*, exec_auto: bool):
 
 class TestProbeHintOnlyWhenItCouldHelp:
     async def test_unauthorized_exec_gets_skip_not_retry_hint(self):
-        blast, handler, call = _exec_setup(exec_auto=False)
+        blast, handler, call = _exec_setup()
         result = await blast.process(call, handler)
         assert result.metadata.get("unattended_skip") is True
         assert "re-issue" not in result.error
         assert "Do not retry" in result.error
-
-    async def test_exec_auto_blocked_only_by_missing_probe_keeps_hint(self):
-        blast, handler, call = _exec_setup(exec_auto=True)
-        result = await blast.process(call, handler)
-        assert not result.success
-        assert "re-issue" in result.error
 
 
 # ---------------------------------------------------------------------------

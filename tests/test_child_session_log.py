@@ -4,6 +4,8 @@ All sources, credentials and homes are synthetic. Episodic remains enabled.
 """
 from __future__ import annotations
 
+from loom.core.harness.permissions import PermissionContext
+
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
@@ -232,7 +234,7 @@ async def test_spawn_agent_injects_the_instance_session_log(tmp_path, monkeypatc
     handle = object()
     parent = SimpleNamespace(
         model="test", router=object(), registry=ToolRegistry(), session_id="parent",
-        workspace=tmp_path, perm=SimpleNamespace(grants=[]),
+        workspace=tmp_path, perm=PermissionContext(session_id="parent"),
         _memory=SimpleNamespace(episodic=object(), semantic=object(), procedural=object(), session_log=handle),
     )
     result = await make_spawn_agent_tool(parent).executor(
