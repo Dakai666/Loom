@@ -1321,6 +1321,10 @@ class BlastRadiusMiddleware(Middleware):
         if (approval.reason.startswith("model-accept") and self._workspace is not None
                 and (hard := self._hard_boundary(call, scope_request, verdict))):
             return f"hard: {hard}"
+        if rewrite := getattr(approval, "args", None):
+            # A delegated post runs the text Luna reviewed (#705 review).
+            call.args.update(rewrite)
+            call.metadata["approved_args_rewritten"] = sorted(rewrite)
         source, code = self._note_source(approval.reason)
         self._notify_lifecycle(call, True, f"classifier {approval.reason}", source=source, code=code)
         return None
