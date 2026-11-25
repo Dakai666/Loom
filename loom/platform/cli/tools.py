@@ -17,6 +17,7 @@ The actual registration happens in main.py via ToolRegistry.
 from __future__ import annotations
 
 import asyncio
+import shlex
 import base64
 import json
 import mimetypes
@@ -941,9 +942,62 @@ def make_run_bash_tool(
                 workspace,
             )
         return _srt_wrap_command(cmd, settings_path), profile_name
+    async def _run_delegated_argv(call: ToolCall, argv: list[str]) -> ToolResult:
+        """#704 S2: an approved delegated post (``gh issue|pr comment``,
+        ``gh issue create``) runs as the argv BlastRadius reviewed, with no
+        shell. The body is one argument: posted byte for byte, nothing in
+        it runs, and the shell scanners have no shell to guard. Under the
+        srt sandbox the argv is quoted into the wrapped command instead."""
+        timeout = call.args.get("timeout", 30)
+        cwd = str(workspace) if strict_sandbox else None
+        try:
+            if _sandbox_active and _sandbox_settings_path is not None:
+                wrapped, _ = _maybe_wrap(shlex.join(argv), call)
+                proc = await asyncio.create_subprocess_shell(
+                    wrapped, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, cwd=cwd, start_new_session=True)
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, cwd=cwd, start_new_session=True)
+        except (OSError, PermissionError, ValueError) as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                              success=False, error=str(exc))
+        try:
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return ToolResult(call_id=call.id, tool_name=call.tool_name,
+                                  success=False, error=f"Command timed out after {timeout}s",
+                                  failure_type="timeout")
+        finally:
+            await _terminate_proc_group(proc)
+        output = stdout.decode("utf-8", errors="replace")
+        success = proc.returncode == 0
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name,
+            success=success, output=output,
+            error=None if success else f"Exit code {proc.returncode}",
+            failure_type=None if success else "execution_error",
+            metadata={"exit_code": proc.returncode, "delegated_argv": True},
+        )
+
     async def _run_bash(call: ToolCall) -> ToolResult:
         command = call.args.get("command", "")
         async_mode = bool(call.args.get("async_mode", False))
+
+        # #704 S2: set only by BlastRadius after a delegated post was
+        # approved; a model's args cannot select this path.
+        argv = call.metadata.get("delegated_argv")
+        if argv is not None:
+            if (not isinstance(argv, list) or not all(isinstance(a, str) for a in argv)
+                    or argv[:1] != ["gh"] or shlex.join(argv) != command):
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=False,
+                    error="[Security] delegated argv does not match the approved gh post",
+                    failure_type="security_block",
+                )
+            return await _run_delegated_argv(call, argv)
 
         # Issue #98: self-termination guard — before ANY other processing
         verdict = _self_term_guard.check(command)

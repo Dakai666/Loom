@@ -1321,10 +1321,14 @@ class BlastRadiusMiddleware(Middleware):
         if (approval.reason.startswith("model-accept") and self._workspace is not None
                 and (hard := self._hard_boundary(call, scope_request, verdict))):
             return f"hard: {hard}"
-        if rewrite := getattr(approval, "args", None):
-            # A delegated post runs the text Luna reviewed (#705 review).
-            call.args.update(rewrite)
-            call.metadata["approved_args_rewritten"] = sorted(rewrite)
+        if argv := getattr(approval, "argv", None):
+            # A delegated post runs the argv Luna reviewed, without a shell
+            # (#705 review, #704 S2). Only this metadata, never the model's
+            # args, selects run_bash's no-shell path.
+            call.args["command"] = shlex.join(argv)
+            call.args.pop("async_mode", None)
+            call.metadata["delegated_argv"] = list(argv)
+            call.metadata["approved_args_rewritten"] = ["command"]
         source, code = self._note_source(approval.reason)
         self._notify_lifecycle(call, True, f"classifier {approval.reason}", source=source, code=code)
         return None

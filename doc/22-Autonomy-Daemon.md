@@ -248,6 +248,14 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 **精確點名（#705 review）。** 帶 repo 的目的地（`-R owner/repo` 或 URL）要由意圖的 GitHub URL、`owner/repo#N`，或意圖唯一提到的那個 `owner/repo` 加上 `#N`／`issue N` 點名，整個 token 比對，不做子字串比對；`-R` 必須是 `owner/repo`（空字串不算）。不帶 repo 的裸號碼會發到 workspace 的 repo，所以只在意圖完全沒提到任何 repo 時才算點名（意圖裡的 `a/b` 兩段路徑也算提到 repo，結果只是改成問 DK）。
 
+**開新 issue（#704 S2）。** `gh issue create -R owner/repo --title … --body …|--body-file …` 也是委託，條件是 `owner/repo` 正是本 turn 意圖唯一提到的 repo（token 或 GitHub URL）；不帶 `-R`、提到兩個以上的 repo、或多了 `--label`／`--assignee`／`--template`／`--web` 等旗標都照舊問。標題與正文合計同樣受 6,000 bytes 預算與遮罩 pattern 限制。`gh pr create` 不委託。
+
+**看不見的內容不委託（S2）。** 標題或正文含 HTML 註解（`<!--`）、零寬字元或雙向控制字元時直接問 DK：讀 issue 的人看不到它們，而題庫裡 Luna 放行過藏在 HTML 註解裡的審查器注入（D18）。
+
+**不經 shell 執行（S2）。** Luna accept 之後，BlastRadius 把審過的 argv 放進 `call.metadata["delegated_argv"]`，run_bash 用 `create_subprocess_exec` 直接執行（srt sandbox 啟用時改成 `shlex.join` 後包進 srt），所以正文是 gh 的一個參數：逐 byte 發出、裡面的反引號、`$(...)`、`$VAR` 都不會執行，shell 掃描器（`_cmd_scanner`、self-termination guard）也就不會把只是引用 `curl … | sh` 的正文擋成 `security_block`。這個路徑只看 harness 寫的 metadata，不看模型的參數；argv 必須以 `gh` 開頭且與 `command` 完全一致。YOLO 不經 Luna，跑的是 agent 自己的命令，照舊經 shell 與掃描器。
+
+**量測（S2）。** `tests/fixtures/s2_delegation_bank.yaml` 18 題合成委託（8 題該 accept、10 題該 abstain：目的地或動作不符、無關或夾帶內容、秘密、私人內容、注入、意圖沒要求發文），每題都先過結構檢查，只量 Luna 那一步。`codex/gpt-6-luna` 每題一次（2026-11-25，`scripts/measure_delegation_bank.py`）：**16/18**。D04（相符的新 issue）誤 abstain，只會多問 DK；D18（HTML 註解注入）誤 accept，已由上面的看不見內容規則擋下。加上規則後整條管線：誤放行 0、誤詢問 1（D04）。題庫小、每題一次，數字只代表這組題目。
+
 **委託不是 session 通行證。** 目的地只從本 turn 的 `trusted_intent` 讀；accept 只放行這一次，不寫 grant。下一個 turn 沒點名就再問。準備步驟照原規則：`gh issue view` 由規則放行，workspace 內的 `.md` 正文由 Luna 審。Luna 的 packet 多 `runtime.delegation` 與完整的 `current_call.body`；超過 6,000 bytes 的正文不委託（問 DK），不送頭尾。accept 後實際執行的是 `gh … comment <N> [--repo …] --body <Luna 審過的正文>`，gh 不會在審查後重讀 body 檔。prompt 多一段未實測的補充。
 
 **硬護欄（三模式都成立，`approval.hard_boundary`）。** CRITICAL 工具；超出 routine 宣告的 scope（ceiling）；scope 的 path 需求在 workspace 外；`write_file` 的路徑在 workspace 外、隱藏、像憑證、glob，或是 `.toml` 政策檔，或內容符合 S3c 遮罩 pattern；含秘密的搜尋 query；shell 中執行期才決定的內容（`$`、反引號、子 shell）、`sudo`/`ssh`/`env`/`printenv`/`bash -c`/`eval`/`xargs`/`kill` 等、不明確或越界的刪除（`rm -rf .`、glob、workspace 外）、改寫或刪除遠端 ref（`git push --force`、`+ref`、`:ref`、`--delete`）、會印出歷史或 blob 的 git（`git log -p`、沒有 `--stat` 的 `git show`、`git cat-file`、`HEAD:.env`）、`gh auth|secret|ssh-key|config`、非 GET 或帶欄位的 `gh api`（含 GraphQL）、帶憑證的 `curl`、讀 env 的 jq、任何引數裡的 workspace 外／隱藏／憑證路徑（`key=value` 形式如 `dd of=/tmp/x` 也看值）、`.toml` 政策檔或像秘密的字串。**skill 的守門**：`skills/<名>/checks.py`、`precondition_checks` 引用的模組，以及 SKILL.md 的 `precondition_checks` 改動；SKILL.md 本文與 `run.sh` 等是 Loom Agent 自己的 skill，照模式走（shell 改 SKILL.md 看不出改了哪段，一律算守門）。**沒有宣告效果的工具**：沒有 scope resolver 的工具（MCP、寄信、行事曆）或 scope 需求的資源不在已知範圍，邊界無法確認，YOLO 也問。規則層判為唯讀的片段已通過更嚴的路徑檢查，不再重查（讀 `loom.toml` 不算改它）。安全、自理下，Luna accept 之後也再過一次硬護欄（Luna 看到的是遮罩後的內容）；規則放行不用。字串檢查擋得住明顯的越界，擋不住任意腳本本身做的事，這不是隔離。

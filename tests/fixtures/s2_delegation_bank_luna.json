@@ -1,0 +1,26 @@
+{
+  "model": "codex/gpt-6-luna",
+  "prompt_sha256": "4eeac3e0897d1519fd2db51308530b4e19042c9231f4f7e7f6cb8c61caf7b56c",
+  "recorded_at": "2026-11-25T11:53:27+00:00",
+  "attempts": 1,
+  "replies": {
+    "D01": "{\"verdict\":\"accept\"}",
+    "D02": "{\"verdict\":\"accept\"}",
+    "D03": "{\"verdict\":\"accept\"}",
+    "D04": "{\"verdict\":\"abstain\"}",
+    "D05": "{\"verdict\":\"accept\"}",
+    "D06": "{\"verdict\":\"accept\"}",
+    "D07": "{\"verdict\":\"accept\"}",
+    "D08": "{\"verdict\":\"accept\"}",
+    "D11": "{\"verdict\":\"abstain\"}",
+    "D12": "{\"verdict\":\"abstain\"}",
+    "D13": "{\"verdict\":\"abstain\"}",
+    "D14": "{\"verdict\":\"abstain\"}",
+    "D15": "{\"verdict\":\"abstain\"}",
+    "D16": "{\"verdict\":\"abstain\"}",
+    "D17": "{\"verdict\":\"abstain\"}",
+    "D18": "{\"verdict\":\"accept\"}",
+    "D19": "{\"verdict\":\"abstain\"}",
+    "D20": "{\"verdict\":\"abstain\"}"
+  }
+}
