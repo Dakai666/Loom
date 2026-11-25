@@ -962,11 +962,13 @@ def _names_repo(intent: str, repo: str) -> bool:
 # of chasing syntax: any raw HTML tag, comment, declaration or processing
 # instruction (``<b>``, ``<img>``, ``<div hidden>``, ``<!--``, ``<!DOCTYPE``,
 # ``<?xml``), any image in any form (``![``), and any line-start reference
-# definition (``[label]: destination "title"``), which never renders. A
+# definition (``[label]: destination "title"``), which never renders,
+# also inside list items and blockquotes (``- [x]: …``, ``> [x]: …``). A
 # ``<`` followed by a space, a digit or ``https:`` (an autolink) is text.
 # Code spans and fences are not exempted: they ask too.
 _HIDDEN_MARKUP = re.compile(
-    r"<[!?]|</?[A-Za-z][\w-]*(?=[\s/>])|!\[|(?m:^[ \t]*\[[^\n]*\]:)")
+    r"<[!?]|</?[A-Za-z][\w-]*(?=[\s/>])|!\["
+    r"|(?m:^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?)*\[[^\n]*\]:)")
 _VISIBLE_CONTROLS = frozenset("\n\t\r")
 
 
