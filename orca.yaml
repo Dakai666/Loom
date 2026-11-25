@@ -1,0 +1,3 @@
+scripts:
+  setup: |
+    bash scripts/orca_worktree_setup.sh
