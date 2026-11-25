@@ -245,6 +245,10 @@ class Segment:
     """One simple command of a pipeline or chain, with its redirections."""
     words: list[Word] = field(default_factory=list)
     redirects: list[tuple[str, Word | None]] = field(default_factory=list)
+    # The operator that joins this part to the one before it: "" for the
+    # first part, else ";", "\n", "|", "||" or "&&" (#707 round 4: only
+    # "&&" carries a cd's directory to what follows).
+    sep: str = ""
 
 
 def parse_shell(command: str) -> list[Segment] | None:
@@ -270,11 +274,11 @@ def parse_shell(command: str) -> list[Segment] | None:
             segments[-1].words.append(word)
         buf, glob, expands = None, False, False
 
-    def next_segment() -> bool:
+    def next_segment(sep: str) -> bool:
         end_word()
         if pending:
             return False
-        segments.append(Segment())
+        segments.append(Segment(sep=sep))
         return True
 
     i, n = 0, len(command)
@@ -301,18 +305,18 @@ def parse_shell(command: str) -> list[Segment] | None:
         elif c in "$`\\()":
             return None
         elif c in ";\n":
-            if not next_segment():
+            if not next_segment(c):
                 return None
         elif c == "|":
             if nxt == "&":
                 return None
             i += nxt == "|"
-            if not next_segment():
+            if not next_segment("||" if nxt == "|" else "|"):
                 return None
         elif c == "&":
             if nxt == "&":
                 i += 1
-                if not next_segment():
+                if not next_segment("&&"):
                     return None
             elif nxt == ">" and not pending:
                 end_word()
@@ -733,6 +737,34 @@ _SHELL_RULES: dict[str, Callable[[list[Word], Path], Verdict]] = {
 }
 
 
+def _cd_step(segments: list[Segment], i: int, cwd: Path, workspace: Path) -> Path | str:
+    """One cwd model for every shell check (#707 round 4). ``segments[i]``
+    is a ``cd``: the new directory, or why the command must ask. The target
+    must be a directory that exists inside the workspace, not hidden (but
+    the project-config allowlist), named literally (no ``cd -``, no bare
+    ``cd``). The cd must run in this shell (not in a pipeline or after
+    ``||``) and hand its directory only through ``&&``: after ``;`` or
+    ``||`` the next part may run where the cd failed, and in a pipeline the
+    cd changes nothing."""
+    seg = segments[i]
+    words = seg.words
+    if (len(words) != 2 or seg.redirects or words[1].glob or words[1].expands
+            or words[1].text in ("-", "~")):
+        return "unclear_cd"
+    if seg.sep in ("|", "||"):
+        return "unclear_cd"
+    if i + 1 < len(segments) and segments[i + 1].sep != "&&":
+        return "unclear_cd"
+    if refusal := _path_refusal(words[1].text, cwd, hidden_ok=True):
+        return refusal
+    target = (cwd / words[1].text).resolve()
+    if _workspace_relative(str(target), workspace) is None:
+        return "outside_workspace"
+    if not target.is_dir():
+        return "unclear_cd"
+    return target
+
+
 def classify_shell(command: str, workspace: Path) -> Verdict:
     """The worst effect over every part of *command*."""
     segments = parse_shell(command)
@@ -740,15 +772,15 @@ def classify_shell(command: str, workspace: Path) -> Verdict:
         return Effect.ASK, "dynamic"
     worst: Verdict = _READ
     cwd = workspace  # `cd` moves where later relative paths resolve
-    for seg in segments:
-        words = [w.text for w in seg.words]
-        if words[:1] == ["cd"] and len(words) == 2 and not seg.redirects:
+    for i, seg in enumerate(segments):
+        if seg.words[:1] and seg.words[0].text == "cd":
             # The same hidden allowlist as a direct read: later parts check
             # paths relative to the new cwd, so `cd .git && cat config` or
             # `cd .docker && cat config.json` must not get past it.
-            if refusal := _path_refusal(words[1], cwd, hidden_ok=True):
-                return Effect.ASK, refusal
-            cwd = (cwd / words[1]).resolve()
+            step = _cd_step(segments, i, cwd, workspace)
+            if isinstance(step, str):
+                return Effect.ASK, step
+            cwd = step
             continue
         verdict = _segment(seg, cwd)
         if verdict[0] > worst[0] or (verdict[0] == worst[0] == Effect.REVIEW
@@ -885,16 +917,15 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
         return False
     risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
     cwd = workspace
-    for seg in segments:
+    for i, seg in enumerate(segments):
         words = [w.text for w in seg.words]
         if words[:1] == ["cd"]:
             # `cd <dir in the workspace> && …` is judged by the rest
-            # (#707 round 3); a cd out of it, or into a hidden dir, asks.
-            if (len(words) != 2 or seg.redirects
-                    or _path_refusal(words[1], cwd, hidden_ok=True)
-                    or _workspace_relative(str((cwd / words[1]).resolve()), workspace) is None):
+            # (#707 round 3), with the shared cwd model (round 4).
+            step = _cd_step(segments, i, cwd, workspace)
+            if isinstance(step, str):
                 return False
-            cwd = (cwd / words[1]).resolve()
+            cwd = step
             continue
         if _segment(seg, cwd)[0] is Effect.READ:
             continue
@@ -930,14 +961,23 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
 
 
 def _uv_runs_workspace_file(rest: list[str], cwd: Path, workspace: Path) -> bool:
-    """``uv run [python|python3] <file in the workspace> [args]`` with no
-    uv flags, no inline code and no risky words in the script's args."""
-    if rest[:1] and rest[0] in ("python", "python3"):
-        rest = rest[1:]
+    """``uv run python|python3 <file in the workspace> [args]`` with no uv
+    flags, no inline code, no risky words in the script's args, and no
+    ``# /// script`` block in the file."""
+    # Interpreter mode only (#707 round 4): bare `uv run <file>` is script
+    # mode, which installs the file's PEP 723 dependencies unseen.
+    if rest[:1] not in (["python"], ["python3"]):
+        return False
+    rest = rest[1:]
     if not rest or rest[0].startswith("-"):
         return False
     target = (cwd / rest[0]).resolve()
     if _workspace_relative(str(target), workspace) is None or not target.is_file():
+        return False
+    try:
+        if "# /// script" in target.read_text(encoding="utf-8", errors="replace")[:65536]:
+            return False  # inline script metadata: uv may install from it
+    except OSError:
         return False
     risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
     names = [PurePosixPath(a).name for a in rest[1:]]
@@ -1425,12 +1465,13 @@ def _shell_hard(command: str, workspace: Path) -> str | None:
     if segments is None:
         return "dynamic"  # computed at run time: the boundary cannot be checked
     cwd = workspace
-    for seg in segments:
+    for i, seg in enumerate(segments):
         words = [w.text for w in seg.words]
-        if words[:1] == ["cd"] and len(words) == 2 and not seg.redirects:
-            if reason := _hard_word(seg.words[1], cwd, workspace):
-                return reason
-            cwd = (cwd / words[1]).resolve()
+        if words[:1] == ["cd"]:
+            step = _cd_step(segments, i, cwd, workspace)
+            if isinstance(step, str):
+                return step
+            cwd = step
             continue
         # A part the read rules pass already cleared stricter path checks
         # (workspace, hidden, credential name and content); reading a
@@ -2022,6 +2063,10 @@ class ApprovalClassifier:
         if not context.current.intent.strip():
             return ApprovalDecision(False, "rule-refuse: no_trusted_intent")
         if rule.outcome is RuleOutcome.ALLOW:
+            # Every rule allow, reads included, meets the hard boundary
+            # before it runs (#707 round 4).
+            if hard := hard_boundary(call, request, verdict, self._perm, self._workspace):
+                return ApprovalDecision(False, f"hard: {hard}")
             return ApprovalDecision(True, f"rule-allow: {rule.reason}")
         return await self._review(call, rule.reason, context)
 

@@ -332,8 +332,8 @@ class TestPathsWithSpaces:
 
 class TestEverydayShellForms:
     @pytest.mark.parametrize("command", [
-        "uv run scripts/report.py --day today", "uv run python scripts/report.py",
-        "uv run python3 scripts/report.py",
+        # bare `uv run <file>` is script mode and asks since round 4
+        "uv run python scripts/report.py", "uv run python3 scripts/report.py",
     ])
     async def test_uv_run_of_a_workspace_file_goes_to_luna(self, tmp_path, ledger, command):
         env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="跑 scripts/report.py")
