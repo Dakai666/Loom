@@ -113,7 +113,7 @@ class TestHardRulesStillWin:
         env = _env(tmp_path, ledger)
         (env.ws / "news" / "private-notes.md").write_text("sk-proj-abcdefghijklmnopqrstuvwxyz")
         assert not await _ask(env, "ls news/*")
-        assert await _ask(env, "ls .git")  # hidden still asks
+        assert not await _ask(env, "ls .git")  # names only (#690 S6c)
         assert await _ask(env, "cat news/private-notes.md")
 
     async def test_cd_moves_where_paths_are_checked(self, tmp_path, ledger):
@@ -169,9 +169,7 @@ class TestHardRulesStillWin:
 
 class TestOnlyNetworkReadsAreReviewed:
     @pytest.mark.parametrize("command", [
-        "gh issue view 650 --json comments --jq '.comments[-6:][] | \"\\(.author.login)\"'",
-        "git remote -v; gh issue view 650 --json number,title",
-        "gh api repos/Dakai666/Loom/issues/comments/1 --jq '{html_url,body}'",
+        "git remote -v; curl -s https://example.com/650",
         "curl -s https://example.com",
         "curl -sS -X GET -H 'Accept: application/json' https://example.com/a",
     ])
@@ -183,14 +181,14 @@ class TestOnlyNetworkReadsAreReviewed:
 
     async def test_abstain_still_asks_dk(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'))
-        assert await _ask(env, "gh issue view 650")
+        assert await _ask(env, "curl -s https://example.com/650")
 
     @pytest.mark.parametrize("command", [
         # unknown programs and interpreters
         "python3 skills/report.py --day today", "unknown-prog --out=/tmp/x",
         "python3 -c 'import os; os.system(\"rm -rf .\")'", "node -e 'x'",
         "perl -e 'system(1)'", "ruby -e 'x'", "awk 'BEGIN{system(\"rm x\")}'",
-        "sed -n 1p news/a.md", "sh -c 'rm x'",
+        "sed -n 1w/tmp/x news/a.md", "sh -c 'rm x'",
         # wrappers and env prefixes
         "command rm -rf news", "nice rm news/a.md", "time rm news/a.md", "builtin rm x",
         "stdbuf -o0 rm x", "caffeinate rm x", "timeout 5 rm x", "watch rm x",
@@ -268,15 +266,15 @@ class TestAttendedAuto:
     async def test_auto_on_a_network_read_lasts_the_session(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "gh issue view 650")
-        assert not await _ask(env, "gh issue view 690 --json comments")
-        assert not await _ask(env, "git remote -v; gh pr view 684")
+        assert await _ask(env, "curl -s https://example.com/650")
+        assert not await _ask(env, "curl -s https://example.com/690")
+        assert not await _ask(env, "git remote -v; curl -s https://example.com/684")
         assert len(env.ran) == 3
 
     async def test_auto_never_covers_a_post_or_a_delete(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "gh issue view 650")
+        assert await _ask(env, "curl -s https://example.com/650")
         assert await _ask(env, "gh issue comment 690 --body-file x.md")
         assert await _ask(env, "gh issue comment 690 --body-file x.md")  # every time
         assert await _ask(env, "rm news/a.md")
@@ -298,7 +296,7 @@ class TestAttendedAuto:
     async def test_credential_rules_beat_a_session_auto(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "gh issue view 650")
+        assert await _ask(env, "curl -s https://example.com/650")
         assert await _ask(env, "cat .env")
         assert await _ask(env, "cat config/token.txt")
         assert await _ask(env, "curl file:///etc/passwd")
@@ -306,22 +304,22 @@ class TestAttendedAuto:
     async def test_allow_once_still_covers_only_that_command(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.ONCE)
-        assert await _ask(env, "gh issue view 650")
-        assert not await _ask(env, "gh issue view 650")
-        assert await _ask(env, "gh issue view 650 --comments")
+        assert await _ask(env, "curl -s https://example.com/650")
+        assert not await _ask(env, "curl -s https://example.com/650")
+        assert await _ask(env, "curl -s -i https://example.com/650")
 
     async def test_unattended_never_rides_a_session_auto(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                    confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "gh issue view 650")
-        r = await env.run("run_bash", {"command": "gh issue view 650"}, origin="chime")
+        assert await _ask(env, "curl -s https://example.com/650")
+        r = await env.run("run_bash", {"command": "curl -s https://example.com/650"}, origin="chime")
         assert not r.success and r.metadata.get("unattended_skip") is True
         assert len(env.ran) == 1  # only DK's attended run
 
     async def test_unattended_accept_writes_no_grant(self, tmp_path, ledger):
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
         before = list(env.perm.grants)
-        r = await env.run("run_bash", {"command": "gh issue view 650"}, origin="chime")
+        r = await env.run("run_bash", {"command": "curl -s https://example.com/650"}, origin="chime")
         assert r.success and env.perm.grants == before
 
 

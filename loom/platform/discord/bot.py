@@ -79,6 +79,7 @@ except ImportError as exc:  # pragma: no cover
 
 from loom.core.harness.approval import REVIEWER_UNAVAILABLE
 from loom.core.harness.scope import ConfirmDecision
+from loom.core.session_support import classifier_line
 from loom.core.timezone import user_zone
 from loom.core.cognition import vision as _vision
 from loom.core.events import (
@@ -2099,11 +2100,15 @@ class LoomDiscordBot:
             view = _ConfirmView()  # no auto-deny — waits for your decision
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
+            # #690 S6c: why the approval classifier left this one to DK.
+            classifier = classifier_line(call)
+            classifier_text = f"-# {classifier}\n" if classifier else ""
             text = (
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"
                 f"```\n{args_preview}\n```\n"
                 f"{just_text}"
+                f"{classifier_text}"
                 f"*Waiting for your decision — no timeout.*"
             )
             # #700: a write that replaces a trusted skill check module shows
