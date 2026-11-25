@@ -35,6 +35,19 @@ from tests.test_approval_classifier_690_s6 import (  # noqa: F401  (fixtures)
 )
 
 
+# Credentials in formats the name and content checks miss: base64 ``auth``,
+# colon-separated passwords, short netrc passwords (#703 review).
+CREDENTIAL_DOTFILES = {
+    ".docker/config.json": '{"auths":{"r.io":{"auth":"dXNlcjpwYXNzd29yZA=="}}}\n',
+    ".dockercfg": '{"r.io":{"auth":"dXNlcjpwYXNzd29yZA==","email":"a@b.c"}}\n',
+    ".pgpass": "db.io:5432:app:admin:s3cr3t-p4ssw0rd\n",
+    ".kube/config": "users:\n- name: a\n  user:\n    client-key-data: TFMwdExTMUNSVWRKVGlCU1UwRQ==\n",
+    ".netrc": "machine api.example.com login me password hunter2\n",
+    ".npmrc": "_auth=dXNlcjpwYXNzd29yZA==\n",
+    ".yarnrc.yml": "npmAuthIdent: user:pass\n",
+}
+
+
 def _env(tmp_path, ledger, **kw) -> Env:
     env = Env(tmp_path, ledger, **kw)
     for rel, text in {
@@ -44,6 +57,9 @@ def _env(tmp_path, ledger, **kw) -> Env:
         ".github/workflows/ci.yml": "on: push\n",
         ".git/config": "[remote]\n",
         ".env": "OPENAI=sk-proj-abcdefghijklmnopqrstuvwxyz\n",
+        ".gitignore": "*.pyc\n",
+        ".editorconfig": "root = true\n",
+        **CREDENTIAL_DOTFILES,
     }.items():
         f = env.ws / rel
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +125,8 @@ class TestWiderReads:
         "sort news/a.md", "sort news/a.md | uniq -c", "uniq news/a.md", "tr a-z A-Z",
         "tree news", "realpath news/a.md", "basename news/a.md", "dirname news/a.md",
         "printf '%s\\n' hi", "true", "cat .github/workflows/ci.yml",
+        "cd .github && cat workflows/ci.yml", "cat .gitignore", "head .editorconfig",
+        "jq .env data/x.json", "jq '.a.env' data/x.json", "gh issue view 1 --jq .body.env",
         "ls -la .git", "ls .env", "git ls-files .env", "git status --short .github",
         "find . -name '*.md'", "cd news && cat a.md",
     ])
@@ -147,6 +165,39 @@ class TestStillAsks:
         env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
         assert await _ask(env, command), command
         assert env.model.requests == []
+
+
+class TestCredentialDotfiles:
+    """Master asked for these; S6c's first cut let content readers open any
+    non-.git hidden file and these slipped past both checks (#703 review).
+    Only the project-config allowlist opens for content now."""
+
+    @pytest.mark.parametrize("path", sorted(CREDENTIAL_DOTFILES))
+    @pytest.mark.parametrize("reader", ["cat {}", "head -n 5 {}", "sed -n 1p {}", "sort {}"])
+    async def test_attended_read_asks(self, tmp_path, ledger, path, reader):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
+        assert await _ask(env, reader.format(path))
+        assert env.model.requests == []
+
+    @pytest.mark.parametrize("path", sorted(CREDENTIAL_DOTFILES))
+    async def test_unattended_read_is_skipped(self, tmp_path, ledger, path):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
+        r = await env.run("run_bash", {"command": f"cat {path}"}, origin="chime")
+        assert not r.success and r.metadata.get("unattended_skip") is True
+        assert env.ran == [] and env.model.requests == []
+
+    @pytest.mark.parametrize("command", [
+        "cd .docker && cat config.json", "cd .kube && head config",
+        "cat .github/../.pgpass", "cat .vscode/.env",
+    ])
+    async def test_no_way_around_the_allowlist(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
+        assert await _ask(env, command)
+
+    @pytest.mark.parametrize("command", ["ls -la .docker", "test -f .pgpass", "git ls-files .npmrc"])
+    async def test_listing_their_names_still_does_not_ask(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger)
+        assert not await _ask(env, command)
 
 
 # ---------------------------------------------------------------------------
