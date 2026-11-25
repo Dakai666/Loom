@@ -27,6 +27,7 @@ import pytest
 
 from loom.core.harness.mode import PermissionMode
 from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
+from loom.core.harness.registry import ToolDefinition
 from loom.core.harness.scope import ConfirmDecision
 
 from tests.test_approval_classifier_690_s6 import (  # noqa: F401  (fixtures)
@@ -227,7 +228,11 @@ def _rich_ledger(tmp_path: Path) -> Path:
     rows = [("e1", "permission_decision", 1.0, json.dumps({
                 "reason": "scope-allow", "password": "hunter2", "auth": "abc",
                 "nested": {"api_key": "xyz", "note": "ok"}, "input_tokens": 120,
-                "text": "key sk-proj-abcdefghijklmnopqrstuvwxyz"}))]
+                "text": "key sk-proj-abcdefghijklmnopqrstuvwxyz"})),
+            ("e2", "permission_decision", 2.0, json.dumps({
+                "api_key": 12345678, "session_key": 3.14159, "token": True,
+                "credentials": {"user": "dk", "value": "s3cr3tvalue", "pin": 4321},
+                "auth": ["listsecret", 8675309], "input_tokens": 77}))]
     rows += [(f"b{i}", "bulk", float(i), json.dumps({"n": i, "pad": "x" * 500})) for i in range(3000)]
     con.executemany("INSERT INTO events VALUES (?, ?, ?, ?)", rows)
     con.commit()
@@ -271,6 +276,47 @@ class TestLedgerQueryBounds:
         assert time.monotonic() - started < 8
 
 
+class TestLedgerQueryIndexedPaths:
+    """#709 review: the access paths the description recommends are
+    indexed, so "the last N rows" finishes far inside the deadline."""
+
+    def test_ledger_schema_indexes_time_and_event_type(self, tmp_path):
+        from loom.core.ledger.schema import CREATE_EVENTS_TABLE, CREATE_INDEXES
+        con = sqlite3.connect(tmp_path / "l.db")
+        con.execute(CREATE_EVENTS_TABLE)
+        for stmt in CREATE_INDEXES:
+            con.execute(stmt)
+        for q in ("SELECT payload FROM events ORDER BY timestamp DESC LIMIT 20",
+                  "SELECT payload FROM events WHERE event_type='x' ORDER BY timestamp DESC LIMIT 20",
+                  "SELECT payload FROM events WHERE timestamp > 5 ORDER BY timestamp DESC"):
+            plan = " ".join(str(r[3]) for r in con.execute("EXPLAIN QUERY PLAN " + q))
+            assert "USING INDEX" in plan and "TEMP B-TREE" not in plan, (q, plan)
+
+    def test_description_points_at_indexed_columns(self):
+        from loom.platform.cli.tools import make_ledger_query_tool
+        d = make_ledger_query_tool(Path("/nonexistent/ledger.db")).description
+        assert "event_id" in d and "indexed" in d.lower()
+        assert "filter by event_type or timestamp before reading payload" not in d
+
+
+class TestLedgerQueryTooBig:
+    async def test_value_over_the_cap_names_the_limit_and_the_row(self, tmp_path):
+        db = tmp_path / "ledger.db"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE events (event_id TEXT, event_type TEXT, timestamp REAL, payload TEXT)")
+        con.executemany("INSERT INTO events VALUES (?, ?, ?, ?)", [
+            ("s1", "x", 1.0, json.dumps({"n": 1})),
+            ("s2", "x", 2.0, json.dumps({"n": 2})),
+            ("big", "x", 3.0, json.dumps({"blob": "y" * 1_500_000})),
+        ])
+        con.commit()
+        con.close()
+        r = await _ledger(db, "SELECT event_id, payload FROM events ORDER BY timestamp")
+        assert not r.success
+        assert "1 MB" in r.error and "row 3" in r.error, r.error
+        assert "substr" in r.error or "json_extract" in r.error
+
+
 class TestLedgerQueryRedaction:
     @pytest.mark.parametrize("sql", [
         "SELECT json_extract(payload,'$.password') FROM events WHERE event_id='e1'",
@@ -286,6 +332,32 @@ class TestLedgerQueryRedaction:
         assert r.success, r.error
         for secret in ("hunter2", "\\tabc", "xyz", "sk-proj-abcdefghij"):
             assert secret not in r.output, (sql, r.output)
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT json_extract(payload,'$.api_key') FROM events WHERE event_id='e2'",
+        "SELECT json_extract(payload,'$.session_key') FROM events WHERE event_id='e2'",
+        "SELECT json_extract(payload,'$.token') FROM events WHERE event_id='e2'",
+        "SELECT value FROM events, json_each(events.payload) WHERE event_id='e2'",
+        "SELECT value FROM events, json_tree(events.payload) WHERE event_id='e2'",
+        "SELECT json_extract(payload,'$.credentials.value'), json_extract(payload,'$.credentials.pin') "
+        "FROM events WHERE event_id='e2'",
+        "SELECT json_extract(payload,'$.auth[1]') FROM events WHERE event_id='e2'",
+        "SELECT payload FROM events WHERE event_id='e2'",
+    ])
+    async def test_every_scalar_under_a_secret_key_is_masked(self, tmp_path, sql):
+        """#709 review: a number, bool, or a value nested in an object or
+        list under a secret-named key is a secret too."""
+        r = await _ledger(_rich_ledger(tmp_path), sql)
+        assert r.success, r.error
+        for secret in ("12345678", "3.14159", "4321", "s3cr3tvalue", "listsecret", "8675309"):
+            assert secret not in r.output, (sql, r.output)
+        if "json_extract(payload,'$.token')" in sql:
+            assert "1" not in r.output.splitlines()[1]
+
+    async def test_null_under_a_secret_key_and_other_numbers_stay(self, tmp_path):
+        r = await _ledger(_rich_ledger(tmp_path),
+                          "SELECT json_extract(payload,'$.input_tokens') FROM events WHERE event_id='e2'")
+        assert r.success and "77" in r.output
 
     async def test_numbers_and_ordinary_fields_stay(self, tmp_path):
         r = await _ledger(_rich_ledger(tmp_path),
@@ -318,16 +390,24 @@ class TestLedgerQuerySql:
         d.mkdir()
         db = _rich_ledger(d)
         r = await _ledger(db, "SELECT count(*) FROM events")
-        assert r.success and "3001" in r.output
+        assert r.success and "3002" in r.output
 
 
 def test_subagents_never_get_ledger_query():
-    from loom.core.agent import subagent as sa
+    """Not even when the spawn names it in allowed_tools."""
+    from loom.core.agent.subagent import subagent_may_inherit
     from loom.platform.cli.tools import make_ledger_query_tool
     tool = make_ledger_query_tool(Path("/nonexistent/ledger.db"))
-    assert "main_session_only" in (tool.tags or [])
-    src = Path(sa.__file__).read_text(encoding="utf-8")
-    assert "main_session_only" in src
+    assert not subagent_may_inherit(tool, allowed_tools=None)
+    assert not subagent_may_inherit(tool, allowed_tools=["ledger_query"])
+
+
+def test_subagents_still_get_ordinary_safe_tools():
+    from loom.core.agent.subagent import subagent_may_inherit
+    tool = ToolDefinition(name="read_file", description="", input_schema={}, executor=None,
+                          trust_level=TrustLevel.SAFE)
+    assert subagent_may_inherit(tool, allowed_tools=None)
+    assert not subagent_may_inherit(tool, allowed_tools=["write_file"])
 
 
 @pytest.mark.parametrize("key,masked", [
