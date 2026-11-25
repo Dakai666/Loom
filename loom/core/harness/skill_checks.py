@@ -16,10 +16,13 @@ Design:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import importlib.util
 import logging
+import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
@@ -48,35 +51,121 @@ def _compute_file_hash(path: Path) -> str:
 
 
 def _hash_path_for(skill_dir: Path, module_name: str) -> Path:
-    """Return the path where we store the known hash for a skill module."""
+    """The legacy record, keyed by the skill directory's name only. Two
+    directories with the same name shared it; it is read once, to migrate."""
     return _HASH_DIR / f"{skill_dir.name}_{module_name}.sha256"
+
+
+def _record_path(module_path: Path) -> Path:
+    """The trust record for one module, keyed by its resolved absolute path
+    (#700): a same-name copy elsewhere has a record of its own."""
+    resolved = module_path.resolve()
+    key = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return _HASH_DIR / f"{resolved.parent.name}_{resolved.stem}.{key}.sha256"
+
+
+def _trust_record(module_path: Path) -> Path | None:
+    """The record that holds *module_path*'s trusted hash: its own, else the
+    legacy one, else None (never loaded)."""
+    record = _record_path(module_path)
+    if record.is_file():
+        return record
+    legacy = _hash_path_for(module_path.parent, module_path.stem)
+    return legacy if legacy.is_file() else None
 
 
 def _verify_or_record_hash(module_path: Path, skill_dir: Path, module_name: str) -> bool:
     """
     On first load: compute hash and store it.  Return True.
     On subsequent loads: compare.  Return True if match, False if mismatch.
+    A matching legacy record is copied to the module's own record.
 
     Fail-open on I/O errors (log warning, return True) so first-time
     setup is never blocked.
     """
     try:
         current_hash = _compute_file_hash(module_path)
-        hash_file = _hash_path_for(skill_dir, module_name)
-
-        if hash_file.exists():
-            stored_hash = hash_file.read_text().strip()
-            if stored_hash != current_hash:
-                return False  # MISMATCH
-            return True  # match
-
-        # First load — record the hash
-        _HASH_DIR.mkdir(parents=True, exist_ok=True)
-        hash_file.write_text(current_hash)
+        record = _trust_record(module_path)
+        if record is not None and record.read_text().strip() != current_hash:
+            return False  # MISMATCH
+        own = _record_path(module_path)
+        if record != own:  # first load, or a legacy record to migrate
+            _HASH_DIR.mkdir(parents=True, exist_ok=True)
+            own.write_text(current_hash)
         return True
     except Exception:
         _log.warning("Could not verify hash for %s", module_path)
         return True  # fail-open on I/O errors
+
+
+@dataclass(frozen=True)
+class TrustOffer:
+    """A write that would replace a trusted skill check module (#700).
+
+    The platform confirm shows DK ``diff``; if DK allows this one call after
+    seeing it, ``retrust_approved_write`` may record ``new_hash``."""
+    module: Path     # resolved, exactly <workspace>/skills/<name>/<module>.py
+    old_hash: str    # the trusted hash the diff starts from
+    new_hash: str    # the approved content's hash
+    diff: str
+
+
+def trust_offer_for_write(workspace: Path, raw: str, content: str) -> TrustOffer | None:
+    """A ``TrustOffer`` when writing *content* to *raw* replaces a trusted
+    check module, else None. The requested path must be the module itself
+    (no symlink alias), sit at ``skills/<name>/<module>.py`` in the
+    workspace next to a ``SKILL.md``, and still hold its trusted bytes, so
+    the diff starts from what DK trusted before."""
+    ws = workspace.resolve()
+    literal = Path(os.path.normpath(Path(raw) if Path(raw).is_absolute() else ws / raw))
+    if literal.resolve() != literal:
+        return None
+    try:
+        rel = literal.relative_to(ws)
+    except ValueError:
+        return None
+    if len(rel.parts) != 3 or rel.parts[0] != "skills" or rel.suffix != ".py":
+        return None
+    if not (literal.parent / "SKILL.md").is_file() or not literal.is_file():
+        return None
+    record = _trust_record(literal)
+    if record is None:
+        return None
+    old_hash = record.read_text().strip()
+    if _compute_file_hash(literal) != old_hash:
+        return None
+    try:
+        old = literal.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(keepends=True), content.splitlines(keepends=True),
+        f"a/{rel.as_posix()}", f"b/{rel.as_posix()}",
+    ))
+    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return TrustOffer(literal, old_hash, new_hash, diff)
+
+
+def retrust_approved_write(offer: TrustOffer) -> tuple[str, str] | None:
+    """Record ``offer.new_hash`` after DK allowed the write having seen the
+    diff. Only the caller knows that; this checks the files. The module must
+    still be itself (not a symlink), its record still ``offer.old_hash`` and
+    its bytes exactly the approved ones. The previous value goes to
+    ``_HASH_DIR/backups``. Returns ``(old, new)`` when the record changed."""
+    module = offer.module
+    if module.resolve() != module or offer.old_hash == offer.new_hash:
+        return None
+    record = _trust_record(module)
+    if record is None or record.read_text().strip() != offer.old_hash:
+        return None
+    if _compute_file_hash(module) != offer.new_hash:
+        return None  # changed after the approved write
+    own = _record_path(module)
+    backup = _HASH_DIR / "backups" / f"{own.name}.{datetime.now():%Y%m%dT%H%M%S%f}"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(offer.old_hash)
+    own.write_text(offer.new_hash)
+    return offer.old_hash, offer.new_hash
 
 
 @dataclass
@@ -296,7 +385,7 @@ class SkillCheckManager:
 
         # Issue #90: verify code integrity before exec_module
         if not _verify_or_record_hash(module_path, skill_dir, module_name):
-            hash_file = _hash_path_for(skill_dir, module_name)
+            hash_file = _trust_record(module_path)
             raise SkillIntegrityError(
                 f"Integrity check failed for {module_path}: file hash does not "
                 f"match the recorded hash in {hash_file}. If this change is "
@@ -333,9 +422,8 @@ class SkillCheckManager:
         if not module_path.is_file():
             raise FileNotFoundError(f"Module not found: {module_path}")
         current_hash = _compute_file_hash(module_path)
-        hash_file = _hash_path_for(skill_dir, module_name)
         _HASH_DIR.mkdir(parents=True, exist_ok=True)
-        hash_file.write_text(current_hash)
+        _record_path(module_path).write_text(current_hash)
 
     @classmethod
     def resolve_all(
