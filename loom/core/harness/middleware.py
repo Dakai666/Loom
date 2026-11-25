@@ -17,6 +17,7 @@ import shlex
 import time
 import traceback
 import uuid
+from pathlib import Path
 
 _log = logging.getLogger(__name__)
 from abc import ABC, abstractmethod
@@ -1246,6 +1247,38 @@ class BlastRadiusMiddleware(Middleware):
 
         return None  # proceed
 
+    async def _retrust_approved_skill_write(self, call: ToolCall, result: ToolResult) -> None:
+        """#700: DK confirming a write to a skill check module by hand is the
+        review the integrity check asks for, so the written bytes become the
+        trusted ones. Only this call's human confirm counts: a model accept,
+        a grant, a bridge or an unattended turn never sets ``user_decision``."""
+        if (call.tool_name != "write_file" or not result.success
+                or call.metadata.get("user_decision") is not True
+                or self._is_unattended(call)):
+            return
+        path, content = result.metadata.get("_resolved_path"), call.args.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            return
+        from .skill_checks import retrust_approved_write
+        try:
+            changed = retrust_approved_write(Path(path), content)
+        except Exception:
+            _log.exception("skill trust update after approved write failed")
+            return
+        if changed is None:
+            return
+        payload = {
+            "skill": Path(path).parent.name, "file": path,
+            "old_hash": changed[0][:12], "new_hash": changed[1][:12], "call_id": call.id,
+        }
+        if self._ledger_emitter is not None:
+            try:
+                await self._ledger_emitter.emit("skill_trust_update", payload)
+                return
+            except Exception:
+                _log.exception("ledger skill_trust_update emit failed")
+        _log.warning("skill trust updated after DK-approved write: %s", payload)
+
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         # --- Scope-aware path (Issue #45 Phase B) ---
         # If registry is available and tool has a scope_resolver, use it.
@@ -1262,7 +1295,9 @@ class BlastRadiusMiddleware(Middleware):
             elif result is not None:
                 return result  # short-circuited (denied)
             else:
-                return await next(call)  # scope-aware ALLOW
+                result = await next(call)  # scope-aware ALLOW
+                await self._retrust_approved_skill_write(call, result)
+                return result
 
         # --- Legacy path (tools without scope_resolver) ---
         if self._name_authorized(call):

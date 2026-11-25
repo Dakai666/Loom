@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
@@ -77,6 +78,33 @@ def _verify_or_record_hash(module_path: Path, skill_dir: Path, module_name: str)
     except Exception:
         _log.warning("Could not verify hash for %s", module_path)
         return True  # fail-open on I/O errors
+
+
+def retrust_approved_write(path: Path, approved: str) -> tuple[str, str] | None:
+    """Trust *path* after DK approved writing *approved* to it (#700).
+
+    Only the caller knows a human confirmed the write in an attended turn;
+    this function only checks the file. It acts on a skill check module that
+    already has a trust record, and only when the bytes on disk are exactly
+    the approved text. The previous value goes to ``_HASH_DIR/backups``.
+    Returns ``(old, new)`` when the record changed, else None.
+    """
+    if path.suffix != ".py" or not (path.parent / "SKILL.md").is_file():
+        return None
+    hash_file = _hash_path_for(path.parent, path.stem)
+    if not hash_file.is_file():
+        return None  # not covered yet; the first load records it
+    new = hashlib.sha256(approved.encode("utf-8")).hexdigest()
+    if _compute_file_hash(path) != new:
+        return None  # changed after the approved write
+    old = hash_file.read_text().strip()
+    if old == new:
+        return None
+    backup = _HASH_DIR / "backups" / f"{hash_file.name}.{datetime.now():%Y%m%dT%H%M%S%f}"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(old)
+    hash_file.write_text(new)
+    return old, new
 
 
 @dataclass
