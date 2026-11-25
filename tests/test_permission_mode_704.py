@@ -407,3 +407,191 @@ class TestPermissionEvents:
         assert [(r["decision_source"], r["reason_code"]) for r in rows] == [
             ("rule", "read_only_shell"), ("operator", "once"), ("luna", "accept")]
         assert all(r["mode"] == "self" and r["tool_call_id"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# #705 review (Vera): regressions she reproduced
+# ---------------------------------------------------------------------------
+
+
+async def _tool(env: Env, name: str, args: dict, *, resolver=None, origin="discord"):
+    """Run a tool the Env does not register (MCP, mail, calendar…)."""
+    from loom.core.harness.middleware import ToolCall
+    from loom.core.harness.permissions import ToolCapability
+    from loom.core.harness.registry import ToolDefinition
+    env.blast._registry.register(ToolDefinition(
+        name=name, description="", input_schema={}, executor=env.executor,
+        trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.NETWORK,
+        scope_resolver=resolver,
+    ))
+    call = ToolCall(tool_name=name, args=args, trust_level=TrustLevel.GUARDED,
+                    capabilities=ToolCapability.NETWORK, session_id="t", origin=origin)
+    env.confirm.reset_mock()
+    from loom.core.ledger.correlation import turn_scope
+    with turn_scope("turn_test"):
+        result = await env.blast.process(call, env.executor)
+        await asyncio.sleep(0)
+    return result
+
+
+class TestReviewHistorySecrets:
+    """Must-fix 1: git history and blobs can print a removed secret."""
+
+    @pytest.mark.parametrize("command", [
+        "git log -p", "git log -p -- .env", "git show HEAD:.env", "git show HEAD",
+        "git cat-file -p HEAD:.env", "git show --stat HEAD:.env",
+    ])
+    @pytest.mark.parametrize("mode", list(PermissionMode))
+    async def test_history_content_is_hard_in_every_mode(self, tmp_path, ledger, command, mode):
+        env = _env(tmp_path, ledger, mode=mode)
+        await _bash(env, command)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+
+class TestReviewUnknownTools:
+    """Must-fix 2: a tool whose effects nothing declares cannot be bounded."""
+
+    @pytest.mark.parametrize("name,args", [
+        ("apple-mail__send-email", {"to": "a@b.c", "body": "hi"}),
+        ("apple-calendar__delete-event", {"id": "1"}),
+        ("mcp__filesystem__write_file", {"path": "/etc/x", "content": "x"}),
+    ])
+    @pytest.mark.parametrize("origin", ["discord", "chime"])
+    async def test_undeclared_tools_ask_in_yolo(self, tmp_path, ledger, name, args, origin):
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        r = await _tool(env, name, args, origin=origin)
+        if origin == "discord":
+            assert env.confirm.await_count == 1
+            assert env.confirm.await_args.args[0].metadata["classifier_note"] == "hard: undeclared_effects"
+        else:
+            assert r.metadata.get("unattended_skip") is True and env.ran == []
+
+    async def test_a_tool_that_declares_its_effects_runs(self, tmp_path, ledger):
+        from loom.platform.cli.tools import _fetch_url_resolver
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        r = await _tool(env, "fetch_url", {"url": "https://example.com/a"},
+                        resolver=_fetch_url_resolver)
+        assert r.success and env.confirm.await_count == 0
+
+
+class TestReviewDestination:
+    """Must-fix 3: the destination matches exactly."""
+
+    @pytest.mark.parametrize("intent,command", [
+        # a bare number posts to the workspace repo, not the repo named
+        ("在 other/repo 的 issue 702 留言", "gh issue comment 702 --body hi"),
+        ("在 https://github.com/other/repo/issues/702 留言", "gh issue comment 702 --body hi"),
+        # substring of the named repo
+        ("在 Dakai666/Loom#702 留言", "gh issue comment 702 -R Dakai666/Loo --body hi"),
+        ("在 Dakai666/Loom 的 #702 留言", "gh issue comment 702 -R Dakai666/Loo --body hi"),
+        # empty repo
+        ("在 Dakai666/Loom 的 #702 留言", "gh issue comment 702 --repo= --body hi"),
+        # the repo is named, but with another number
+        ("在 Dakai666/Loom#703 留言，也看看 #702", "gh issue comment 702 -R Dakai666/Loom --body hi"),
+    ])
+    def test_not_named(self, tmp_path, intent, command):
+        assert delegated_post(command, intent, tmp_path) is None
+
+    @pytest.mark.parametrize("intent,command", [
+        ("在 Dakai666/Loom#702 留言", "gh issue comment 702 -R Dakai666/Loom --body hi"),
+        ("在 dakai666/loom 的 #702 留言", "gh issue comment 702 -R Dakai666/Loom --body hi"),
+        ("在 https://github.com/Dakai666/Loom/issues/702 留言",
+         "gh issue comment https://github.com/Dakai666/Loom/issues/702 --body hi"),
+        ("把 notes/c702.md 的內容留言到 #702", "gh issue comment 702 --body hi"),
+    ])
+    def test_named(self, tmp_path, intent, command):
+        assert delegated_post(command, intent, tmp_path) is not None
+
+
+class TestReviewBodyBudget:
+    """Must-fix 4: what is posted is exactly what Luna reviewed."""
+
+    async def test_body_file_is_posted_as_the_reviewed_text(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger)
+        r = await _bash(env, POST)
+        assert r.success
+        reviewed = env.model.packet()["current_call"]["body"]
+        ran = env.ran[-1].args["command"]
+        assert "--body-file" not in ran
+        assert delegated_post(ran, INTENT, env.ws).body == reviewed == BODY
+        # Changing the file after review does not change the post.
+        (env.ws / "notes/c702.md").write_text("改過的內容\n")
+        assert delegated_post(ran, INTENT, env.ws).body == BODY
+
+    async def test_body_over_the_review_budget_asks(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger)
+        (env.ws / "notes/c702.md").write_text("段落\n" + "長" * 3000 + "\nMIDDLE-INJECTION\n" + "尾" * 3000)
+        await _bash(env, POST)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+
+class TestReviewSkillGuards:
+    """5: a skill's guard is hard in every mode; the rest of her skill is hers."""
+
+    SKILL = "---\nname: pet\nprecondition_checks:\n  - ref: checks.require_x\n---\n# Pet\n本文。\n"
+
+    def _skill(self, env):
+        d = env.ws / "skills/pet-cat"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(self.SKILL)
+        (d / "checks.py").write_text("async def require_x(call):\n    return True\n")
+        (d / "run.sh").write_text("echo hi\n")
+
+    @pytest.mark.parametrize("path,content", [
+        ("skills/pet-cat/checks.py", "async def require_x(call):\n    return True\n# x\n"),
+        ("skills/pet-cat/SKILL.md", SKILL.replace("  - ref: checks.require_x\n", "")),
+        ("skills/new-skill/SKILL.md", "---\nname: n\nprecondition_checks:\n  - ref: checks.a\n---\n"),
+    ])
+    @pytest.mark.parametrize("mode", list(PermissionMode))
+    async def test_guard_edits_are_hard(self, tmp_path, ledger, path, content, mode):
+        env = _env(tmp_path, ledger, mode=mode)
+        self._skill(env)
+        await env.run("write_file", {"path": path, "content": content}, origin="discord")
+        assert env.confirm.await_count == 1
+        if mode is PermissionMode.YOLO:
+            assert env.confirm.await_args.args[0].metadata["classifier_note"] == "hard: skill_guard"
+
+    @pytest.mark.parametrize("command", [
+        "sed -i s/x/y/ skills/pet-cat/checks.py", "cp /dev/null skills/pet-cat/SKILL.md",
+    ])
+    async def test_guard_edits_by_shell_are_hard_in_yolo(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        self._skill(env)
+        await _bash(env, command)
+        assert env.confirm.await_count == 1
+
+    @pytest.mark.parametrize("path,content", [
+        ("skills/pet-cat/SKILL.md", SKILL.replace("本文。", "新的本文。")),
+        ("skills/pet-cat/run.sh", "echo bye\n"),
+    ])
+    async def test_her_own_skill_follows_the_mode(self, tmp_path, ledger, path, content):
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        self._skill(env)
+        r = await env.run("write_file", {"path": path, "content": content}, origin="discord")
+        assert r.success and env.confirm.await_count == 0
+
+
+class TestReviewRemoteTwins:
+    """6 and 7: destructive twins of what is already hard."""
+
+    @pytest.mark.parametrize("command", [
+        "gh api -X DELETE repos/Dakai666/Loom",
+        "gh api --method PATCH repos/Dakai666/Loom -f private=false",
+        "gh api -XPUT repos/Dakai666/Loom/topics",
+        "gh api -X POST repos/Dakai666/Loom/forks",
+        "gh api graphql -f query='mutation{deleteRepository(input:{}){clientMutationId}}'",
+        "gh api repos/Dakai666/Loom/issues -f title=x",
+        "git push origin :main", "git push origin --delete main", "git push origin -d main",
+        "dd if=/dev/zero of=/tmp/x", "dd if=/dev/zero of=~/x", "dd if=/etc/passwd of=out.txt",
+    ])
+    async def test_hard_in_yolo(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        await _bash(env, command)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    @pytest.mark.parametrize("command", ["gh api repos/Dakai666/Loom", "dd if=build/out.txt of=build/copy.txt",
+                                         "git push origin main"])
+    async def test_reads_and_ordinary_twins_run(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        r = await _bash(env, command)
+        assert r.success and env.confirm.await_count == 0
