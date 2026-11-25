@@ -233,7 +233,9 @@ subagent 的工具呼叫從 S3c 起也會寫 `tool_lifecycle` 與 `permission_de
 
 代價是有些正常命令會被 skip。這是刻意的：判斷錯時寧可 skip，不可多放行。
 
-**人類確認的 grant（#690 S6、S6b）。** attended turn（Discord thread、CLI）裡按「允許一次」確認 `run_bash`，grant 的 selector 是這條命令自己的 argv（`shlex.join`），並帶 `exact_argv = true`：只涵蓋一模一樣的命令，`gh issue view 1` 確認過之後，`gh issue view 1 --comments` 仍會再問。chain、重導或展開的命令沒有 argv，允許一次不留 grant。按 **auto**（或 lease）授予整類（`workspace`），但同一 session 之後只涵蓋讀取與網路讀取（規則 allow，或 review 類別是 `network_read`／`public_search`，`approval.auto_may_cover`）；寫檔、刪除、發文、設定變更、憑證與 workspace 外的路徑每次都仍會問（S6b，DK 2026-11-24：「只有真正修改、不可逆或要發文才問我」）。人類確認的 grant 只在 attended 時有效，unattended 呼叫（chime、autonomy）看不到它們，只能靠自己的 routine grant。工具名授權（`attended_authorized`）與 `/auto`（`exec_auto`）已在 #704 S3 退役。routine 宣告的 shape 不帶 `exact_argv`，維持前綴匹配。
+**人工確認：只有「允許這次」（#704 S4）。** attended turn（Discord thread、CLI）的確認只剩「允許這次」與「拒絕」。允許只涵蓋那一次呼叫，不留任何 grant：同一條命令（即使 argv 完全相同）、同一個目錄的下一次寫入，都會重新判斷。#690 S6 的 exact-argv grant、S6b 的 auto 與 30 分鐘 lease、`auto_may_cover` 一併退役。要跨呼叫擴大邊界，是改 policy（routine 的 scope grant、授權模式），不是按鈕。工具名授權（`attended_authorized`）與 `/auto`（`exec_auto`）已在 S3 退役。HITL 的每批暫停（`/pause`）退役；需要人回答的工具（例如 `send_discord_select`）照舊，無人值守時 skip。同一 turn 連續三次拒絕會結束 turn（`TurnDropped(stop_reason="operator_denials")`），跟重複呼叫上限一樣是 run 的停止條件，不再是 harness 的「penalty box」。routine 宣告的 shape 不帶 `exact_argv`，維持前綴匹配。
+
+**查 ledger 用 `ledger_query`（S4）。** SAFE 的唯讀工具：以 `mode=ro` 加 `query_only` 開 Loom 自己的 ledger，只接受一個 SELECT／WITH，限制列數，輸出經 S3c 遮罩。取代 shell 裡的 `sqlite3 ~/.loom/ledger.db`（workspace 外的隱藏路徑，lease 退役後每次都會問 DK）。
 
 **shape 的強度等於腳本的強度。** shape 允許任意額外參數，所以實際授權的是那支腳本的整個 argv 介面。例如 `fetch_news.py --outdir` 因此只接受 `reports/` 底下的路徑。shape 也綁在檔案路徑上，而 routine 腳本住在 agent 可寫的 workspace 裡。這條仍未處理：執行前比對 hash（skill_hashes），或把 routine 腳本移出可寫的目錄樹。S6b 起規則不認得的程式（腳本、interpreter、wrapper）一律問人，既有的 shape grant 照舊放行。
 

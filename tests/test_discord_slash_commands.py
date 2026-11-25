@@ -71,7 +71,6 @@ def _fake_session(
     session.router = SimpleNamespace(providers=["anthropic", "minimax"])
     session._last_think = last_think
     session._strict_sandbox = strict_sandbox
-    session.hitl_mode = False
     session.perm = MagicMock()
     session.perm.grants = grants or []
     session.perm._usage = {}
@@ -98,7 +97,7 @@ def test_help_text_lists_every_command():
     text = bot._cmd_help()
     for cmd in (
         "/new", "/sessions", "/title", "/model", "/personality", "/think",
-        "/compact", "/mode", "/pause", "/stop", "/budget", "/scope",
+        "/compact", "/mode", "/stop", "/budget", "/scope",
         "/summary", "/tier", "/name", "/help",
     ):
         assert cmd in text
@@ -162,13 +161,12 @@ def test_auto_is_retired():
         assert "retired" in out and "/mode" in out
 
 
-def test_pause_toggles_state():
+def test_pause_is_retired():
+    """#704 S4: the per-batch HITL pause is retired."""
     bot = _bot()
     sess = _fake_session()
-    sess.hitl_mode = False
     out = bot._cmd_pause(sess)
-    assert sess.hitl_mode is True
-    assert "on" in out
+    assert "retired" in out
 
 
 def test_stop_reports_no_running_turn():

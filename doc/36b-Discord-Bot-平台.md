@@ -156,14 +156,12 @@ stall 判斷邏輯與 CLI footer heartbeat 共用 `loom/platform/interaction_lan
 
 ### _ConfirmView
 
-Discord 的確認不走 stdin，而是用 4 個 button：
+Discord 的確認不走 stdin，而是用 2 個 button（#704 S4 起，Lease 與 Auto 退役）：
 
 ```python
 class _ConfirmView(View):
-    # ✅ Allow (y)   → ConfirmDecision.ONCE（單次批准）
-    # ⏱️ Lease (s)   → ConfirmDecision.SCOPE（scope lease）
-    # ⚡ Auto (a)    → ConfirmDecision.AUTO（自動批准）
-    # ❌ Deny (N)    → ConfirmDecision.DENY（拒絕）
+    # ✅ Allow once (y) → ConfirmDecision.ONCE（只允許這一次呼叫，不留授權）
+    # ❌ Deny (N)       → ConfirmDecision.DENY（拒絕）
 ```
 
 BlastRadiusMiddleware 的 `_confirm_fn` 被 patch 成這個 Discord view。**不設逾時、不 auto-deny**——按鈕一直亮著，confirm 阻塞直到你做決定（對齊 CLI 同樣阻塞等操作者）。理由：Circadian Autonomy 下絲絲可能在你睡覺/忙碌時自主行動，逾時 auto-deny 會餵給她一個「假性拒絕」，她可能據此繞路；寧可等你授權。`on_timeout`→DENY 仍保留為防禦性 fallback（只有顯式傳入有限 timeout 時才會觸發）。

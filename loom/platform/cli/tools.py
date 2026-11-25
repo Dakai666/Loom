@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import sqlite3
 import base64
 import json
 import mimetypes
@@ -1877,6 +1878,78 @@ def make_memory_health_tool(
         executor=_memory_health,
         tags=["memory", "health", "diagnostic"],
         impact_scope="memory",
+    )
+
+
+_LEDGER_READ = re.compile(r"\s*(select|with)\b", re.IGNORECASE)
+_LEDGER_FORBIDDEN = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|replace|attach|detach|vacuum|reindex|pragma"
+    r"|writefile|readfile|load_extension|edit|fts3_tokenizer)\b", re.IGNORECASE)
+
+
+def make_ledger_query_tool(db_path: Path) -> ToolDefinition:
+    """A SAFE, read-only SQL view of Loom's own ledger (#704 S4).
+
+    Loom Agent checks her ledger when verifying her own behaviour. Through
+    the shell that is ``sqlite3 ~/.loom/ledger.db …``: a hidden path outside
+    the workspace, which asks DK every time once leases are gone. This tool
+    opens the ledger read-only (``mode=ro`` and ``query_only``), takes one
+    SELECT / WITH statement, caps the rows, and redacts the output with the
+    S3c secret patterns."""
+    from loom.core.memory.session_log import _redact_secrets
+
+    def _query(sql: str, limit: int) -> str:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            con.execute("PRAGMA query_only = ON")
+            cur = con.execute(sql)
+            cols = [d[0] for d in cur.description or ()]
+            rows = cur.fetchmany(limit + 1)
+        finally:
+            con.close()
+        lines = ["\t".join(cols)] + [
+            "\t".join("" if v is None else str(v) for v in row) for row in rows[:limit]]
+        if len(rows) > limit:
+            lines.append(f"… more rows; raise limit (max 200) or narrow the query")
+        return _redact_secrets("\n".join(lines))
+
+    async def _exec(call: "ToolCall") -> ToolResult:
+        sql = str(call.args.get("sql") or "").strip().rstrip(";").strip()
+        try:
+            limit = max(1, min(int(call.args.get("limit", 50)), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        if (not _LEDGER_READ.match(sql) or ";" in sql or _LEDGER_FORBIDDEN.search(sql)):
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error="ledger_query takes one SELECT or WITH statement, read-only.",
+                              failure_type="validation_error")
+        try:
+            output = await asyncio.to_thread(_query, sql, limit)
+        except sqlite3.Error as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error=f"sqlite: {exc}", failure_type="execution_error")
+        return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output=output)
+
+    return ToolDefinition(
+        name="ledger_query",
+        description=(
+            "Read-only SQL over Loom's own ledger (events: event_id, session_id, turn_id, "
+            "event_type, timestamp, payload JSON). One SELECT/WITH statement; json_extract "
+            "works. Output is tab-separated, capped at `limit` rows (default 50, max 200), "
+            "secrets redacted. Use this instead of `sqlite3 ~/.loom/ledger.db` in the shell."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.READ_PROBE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "One SELECT or WITH statement."},
+                "limit": {"type": "integer", "description": "Max rows (default 50, max 200)."},
+            },
+            "required": ["sql"],
+        },
+        executor=_exec,
+        tags=["ledger", "introspection"],
     )
 
 

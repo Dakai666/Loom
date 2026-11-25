@@ -1087,18 +1087,11 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
         _handle_scope_command(session, _scope_args, console)
 
     elif command == "/pause":
-        # Toggle HITL mode (auto-pause after every tool batch)
-        session.hitl_mode = not session.hitl_mode
-        state = "on" if session.hitl_mode else "off"
+        # #704 S4: the per-batch HITL pause is retired.
         console.print(
-            f"[loom.muted]HITL pause mode: [{'yellow' if session.hitl_mode else 'green'}]{state}"
-            f"[/{'yellow' if session.hitl_mode else 'green'}][/loom.muted]"
+            "[loom.muted]  /pause is retired (#704). Use [loom.accent]/mode safe[/loom.accent] "
+            "to be asked before each guarded call, or Ctrl+C to stop a turn.[/loom.muted]"
         )
-        if session.hitl_mode:
-            console.print(
-                "[loom.muted]  The agent will pause after each tool batch for your input.[/loom.muted]\n"
-                "[loom.muted]  At pause> :  r(esume) · c(ancel) · <message>(redirect)[/loom.muted]"
-            )
 
     elif command == "/help":
         console.print(
@@ -1133,7 +1126,6 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/scope[/loom.warning]                     List active scope grants (leases)\n"
                 "  [loom.warning]/scope revoke <N>[/loom.warning]          Revoke a specific grant\n"
                 "  [loom.warning]/scope clear[/loom.warning]               Revoke all non-system grants\n"
-                "  [loom.warning]/pause[/loom.warning]                     Toggle HITL pause after each tool batch\n"
                 "  [loom.warning]/stop[/loom.warning]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
                 "  [loom.warning]/help[/loom.warning]                      Show this message\n\n"
                 "[bold]Keyboard shortcuts[/bold]\n\n"

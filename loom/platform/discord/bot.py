@@ -116,11 +116,12 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Confirm view (y / s / a / N buttons)
+# Confirm view (y / N buttons)
 # ---------------------------------------------------------------------------
 
 class _ConfirmView(View):
-    """Discord UI view with Allow / Lease / Auto / Deny buttons for tool confirmation."""
+    """Discord UI view with Allow (this once) / Deny buttons for tool
+    confirmation. The Lease and Auto buttons were retired in #704 S4."""
 
     def __init__(self, timeout: float | None = None) -> None:
         # Default ``None`` = no auto-deny: the buttons stay live and the
@@ -132,28 +133,12 @@ class _ConfirmView(View):
         self._decision: ConfirmDecision | None = None
         self._done = asyncio.Event()
 
-    @discord.ui.button(label="Allow (y)", style=ButtonStyle.green, emoji="✅")
+    @discord.ui.button(label="Allow once (y)", style=ButtonStyle.green, emoji="✅")
     async def allow_button(self, interaction: Interaction, button: Button) -> None:
         self._decision = ConfirmDecision.ONCE
         self._done.set()
         await interaction.response.edit_message(
             content="✅ **Allowed** — executing tool…", view=None
-        )
-
-    @discord.ui.button(label="Lease (s)", style=ButtonStyle.blurple, emoji="⏱️")
-    async def lease_button(self, interaction: Interaction, button: Button) -> None:
-        self._decision = ConfirmDecision.SCOPE
-        self._done.set()
-        await interaction.response.edit_message(
-            content="⏱️ **Lease granted** — executing tool…", view=None
-        )
-
-    @discord.ui.button(label="Auto (a)", style=ButtonStyle.grey, emoji="⚡")
-    async def auto_button(self, interaction: Interaction, button: Button) -> None:
-        self._decision = ConfirmDecision.AUTO
-        self._done.set()
-        await interaction.response.edit_message(
-            content="⚡ **Auto-approve granted** — executing tool…", view=None
         )
 
     @discord.ui.button(label="Deny (N)", style=ButtonStyle.red, emoji="❌")
@@ -1270,7 +1255,6 @@ class LoomDiscordBot:
         "`/tier <N>` — Switch tier (1 = daily · 2 = deep reasoning)\n"
         "`/think` — View last turn's reasoning chain\n"
         "`/compact` — Compress older context\n"
-        "`/pause` — Toggle HITL auto-pause after each tool batch\n"
         "`/stop` — Immediately cancel the current running turn\n"
         "`/budget` — Show context token usage\n"
         "`/scope` — Manage scope grants: `list` \xb7 `revoke <id>` \xb7 `clear`\n"
@@ -1354,14 +1338,9 @@ class LoomDiscordBot:
         return "`/auto` is retired (#704). Use `/mode safe | self | yolo`."
 
     def _cmd_pause(self, session: "LoomSession") -> str:
-        session.hitl_mode = not session.hitl_mode
-        state = "on" if session.hitl_mode else "off"
-        extra = (
-            "\nAgent will pause after each tool batch — reply `r` to resume, "
-            "`c` to cancel, or send a redirect message."
-            if session.hitl_mode else ""
-        )
-        return f"HITL pause mode: **{state}**{extra}"
+        # #704 S4: the per-batch HITL pause is retired.
+        return ("`/pause` is retired (#704). Use `/mode safe` to be asked before each "
+                "guarded call, or `/stop` to end a turn.")
 
     def _cmd_stop(self, channel_id: int) -> str:
         task = self._running_turns.get(channel_id)
@@ -2093,7 +2072,6 @@ class LoomDiscordBot:
 
     def _make_confirm_fn(self, thread_id: int):
         client = self._client
-        _LEASE_TTL_MIN = 30  # matches BlastRadiusMiddleware._SCOPE_LEASE_TTL
 
         async def _confirm(call: "ToolCall") -> ConfirmDecision:
             channel = client.get_channel(thread_id)
@@ -2148,17 +2126,6 @@ class LoomDiscordBot:
                 decision = await view.wait_decision()
             finally:
                 self._active_confirmations.pop(thread_id, None)
-
-            if decision == ConfirmDecision.SCOPE:
-                await _safe_send(channel, 
-                    f"⏱️ **Scope lease granted** for `{call.tool_name}` — "
-                    f"auto-approved for this scope for the next **{_LEASE_TTL_MIN} minutes**."
-                )
-            elif decision == ConfirmDecision.AUTO:
-                await _safe_send(channel, 
-                    f"⚡ **Permanent auto-approve granted** for `{call.tool_name}` — "
-                    f"all future calls of this tool class will be approved automatically."
-                )
 
             return decision
 

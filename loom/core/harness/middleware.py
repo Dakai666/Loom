@@ -959,10 +959,6 @@ class BlastRadiusMiddleware(Middleware):
         call.metadata["scope_diff"] = diff
         call.metadata["scope_verdict"] = verdict
 
-    # Informational constraint keys that should NOT be copied to grants.
-    # These describe the *request* but are not actionable authorization limits.
-    _INFORMATIONAL_CONSTRAINTS = frozenset({"scope_unknown", "has_absolute_paths", "argv"})
-
     @staticmethod
     def _normalize_decision(raw: "bool | ConfirmDecision") -> "ConfirmDecision":
         """Convert legacy bool confirm result to ConfirmDecision."""
@@ -970,51 +966,6 @@ class BlastRadiusMiddleware(Middleware):
         if isinstance(raw, ConfirmDecision):
             return raw
         return ConfirmDecision.ONCE if raw else ConfirmDecision.DENY
-
-    # Default session-level lease TTL: 30 minutes.
-    _SCOPE_LEASE_TTL = 30 * 60
-
-    def _request_to_grants(
-        self, scope_request: Any, source: str = "manual_confirm",
-        valid_until: float = 0.0,
-    ) -> None:
-        """Convert a scope request's requirements into grants on the PermissionContext."""
-        from .scope import ScopeGrant
-        import time
-        now = time.time()
-        for req in scope_request.requirements:
-            # Filter out informational constraints — only preserve actionable
-            # ones (remaining_budget, max_calls, etc.)
-            grant_constraints = {
-                k: v for k, v in req.constraints.items()
-                if k not in self._INFORMATIONAL_CONSTRAINTS
-            }
-            # "Allow once" on a shell command grants exactly that command
-            # (#690 S6): other or extra arguments ask again, and a chain or
-            # expansion (no argv) gets no grant. "Auto" and a lease keep the
-            # whole kind for the session (#690 S6b), but cover only what
-            # ``auto_may_cover`` allows: reads and network reads.
-            selector = req.selector
-            if source == "manual_confirm" and req.resource == "exec" and selector == "workspace":
-                argv = req.constraints.get("argv")
-                if argv is None:
-                    continue
-                selector = shlex.join(argv)
-                grant_constraints["exact_argv"] = True
-            if any((g.resource, g.action, g.selector, g.constraints, g.source, g.valid_until)
-                   == (req.resource, req.action, selector, grant_constraints, source, valid_until)
-                   for g in self._perm.grants):
-                continue  # a write that asks again under "auto" adds no duplicate
-            self._perm.grant(ScopeGrant(
-                resource=req.resource,
-                action=req.action,
-                selector=selector,
-                constraints=grant_constraints,
-                source=source,
-                granted_at=now,
-                valid_until=valid_until,
-                attended_only=True,  # only an attended turn reaches a confirm
-            ))
 
     # Sentinel to signal "resolver failed, use legacy path"
     _FALLBACK_TO_LEGACY = object()
@@ -1051,17 +1002,11 @@ class BlastRadiusMiddleware(Middleware):
         self._write_scope_metadata(call, scope_request, diff, verdict)
 
         if verdict == PV.ALLOW:
-            # A grant DK gave by hand ("auto") covers reads and network reads
-            # for the session, never a write, delete, post or hard rule
-            # (#690 S6b): those ask every time.
-            if (self._classifier is not None
-                    and not self._perm.diff(scope_request, attended=False).is_fully_covered
-                    and not self._classifier.auto_may_cover(call)):
-                verdict = PV.CONFIRM
-            else:
-                self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}",
-                                       source="grant", code=diff.reason.value)
-                return None  # proceed
+            # Only routine / system grants exist since #704 S4: a human's
+            # "allow once" leaves none behind.
+            self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}",
+                                   source="grant", code=diff.reason.value)
+            return None  # proceed
 
         if verdict == PV.DENY:
             self._notify_lifecycle(call, False, "scope-deny", source="policy", code="scope_deny")
@@ -1093,33 +1038,27 @@ class BlastRadiusMiddleware(Middleware):
         if note:
             call.metadata["classifier_note"] = note
         offer = self._skill_trust_offer(call)
-        await self._enter_awaiting_confirm(call)
-        raw = await self._confirm(call)
-        decision = self._normalize_decision(raw)
+        denied = await self._ask_human(call, f" ({verdict.value})")
+        if denied is not None:
+            return denied
+        # #700: trust needs DK to have seen the diff and allowed this one call.
+        if offer is not None and call.metadata.get("skill_trust_diff_shown") is True:
+            call.metadata["approved_with_diff"] = True
+        return None  # proceed
 
+    async def _ask_human(self, call: ToolCall, label: str) -> ToolResult | None:
+        """Ask DK about this one call (#704 S4): "allow this once" or deny.
+        Allowing leaves no grant, lease or remembered name behind, so the
+        next call is decided again. A deny is counted in
+        ``perm.recent_denies``; three in a row end the turn as a run stop
+        condition in the session loop, not here. Returns the denial result,
+        or None when allowed."""
         from .scope import ConfirmDecision
-        if decision == ConfirmDecision.DENY:
+        await self._enter_awaiting_confirm(call)
+        decision = self._normalize_decision(await self._confirm(call))
+        if decision != ConfirmDecision.ONCE:
             self._perm.recent_denies += 1
-            if self._perm.recent_denies >= 3:
-                self._notify_lifecycle(call, False, f"user denied ({verdict.value}) - CIRCUIT BREAKER TRIPPED",
-                                       source="operator", code="circuit_breaker")
-                call.metadata["user_decision"] = False
-                call.metadata["circuit_breaker"] = True
-                if call.abort_signal is not None:
-                    call.abort_signal.set()
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False,
-                    error=(
-                        "USER ACTION: DENIED (Penalty Box activated). You have accumulated too many "
-                        "rejections from the human. Your autonomy is paused/terminated to prevent loop pollution. "
-                        "Stop execution immediately."
-                    ),
-                    failure_type="permission_denied",
-                )
-                
-            self._notify_lifecycle(call, False, f"user denied ({verdict.value})",
-                                   source="operator", code="deny")
+            self._notify_lifecycle(call, False, f"user denied{label}", source="operator", code="deny")
             call.metadata["user_decision"] = False
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
@@ -1130,35 +1069,15 @@ class BlastRadiusMiddleware(Middleware):
                     "in this turn. Acknowledge and proceed with other tasks or wait for input."
                 ),
                 failure_type="permission_denied",
+                metadata={"operator_denied": True},
             )
-
         self._perm.recent_denies = 0
-        self._notify_lifecycle(call, True, f"user confirmed ({verdict.value}, {decision.value})",
-                               source="operator", code=decision.value)
+        self._notify_lifecycle(call, True, f"user confirmed{label[:-1] + ', once)' if label else ' (once)'}",
+                               source="operator", code="once")
         call.metadata["user_decision"] = True
-        call.metadata["confirm_decision"] = decision.value
-        # #700: trust needs DK to have seen the diff and allowed this one
-        # call. A lease or auto covers later writes DK never sees.
-        if (offer is not None and decision == ConfirmDecision.ONCE
-                and call.metadata.get("skill_trust_diff_shown") is True):
-            call.metadata["approved_with_diff"] = True
-
-        # Convert request → grants based on user's decision.
-        import time as _time
-        if decision == ConfirmDecision.ONCE:
-            call.metadata["once_authorized"] = True
-            self._request_to_grants(scope_request, source="manual_confirm")
-        elif decision == ConfirmDecision.SCOPE:
-            # Session-scoped lease: grant with TTL
-            self._request_to_grants(
-                scope_request, source="lease",
-                valid_until=_time.time() + self._SCOPE_LEASE_TTL,
-            )
-        elif decision == ConfirmDecision.AUTO:
-            # Permanent grant: same scope as SCOPE but no TTL (never expires)
-            self._request_to_grants(scope_request, source="auto_approve")
-
-        return None  # proceed
+        call.metadata["confirm_decision"] = "once"
+        call.metadata["once_authorized"] = True
+        return None
 
     async def _auto_decide(self, call: ToolCall, scope_request: Any, verdict: Any) -> str | None:
         """Approve *call* without a human, per the permission mode (#704).
@@ -1315,95 +1234,9 @@ class BlastRadiusMiddleware(Middleware):
 
         if note:
             call.metadata["classifier_note"] = note
-        await self._enter_awaiting_confirm(call)
-        raw = await self._confirm(call)
-        decision = self._normalize_decision(raw)
-
-        from .scope import ConfirmDecision
-        if decision == ConfirmDecision.DENY:
-            self._perm.recent_denies += 1
-            if self._perm.recent_denies >= 3:
-                self._notify_lifecycle(call, False, "user denied - CIRCUIT BREAKER TRIPPED",
-                                       source="operator", code="circuit_breaker")
-                call.metadata["user_decision"] = False
-                call.metadata["circuit_breaker"] = True
-                if call.abort_signal is not None:
-                    call.abort_signal.set()
-                return ToolResult(
-                    call_id=call.id, tool_name=call.tool_name,
-                    success=False,
-                    error=(
-                        "USER ACTION: DENIED (Penalty Box activated). You have accumulated too many "
-                        "rejections from the human. Your autonomy is paused/terminated to prevent loop pollution. "
-                        "Stop execution immediately."
-                    ),
-                    failure_type="permission_denied",
-                )
-
-            self._notify_lifecycle(call, False, "user denied", source="operator", code="deny")
-            return ToolResult(
-                call_id=call.id,
-                tool_name=call.tool_name,
-                success=False,
-                error=(
-                    "USER ACTION: DENIED. This tool call was explicitly rejected by the "
-                    "human user. Do not retry this action or equivalent substitutions "
-                    "in this turn. Acknowledge and proceed with other tasks or wait for input."
-                ),
-                failure_type="permission_denied",
-            )
-
-        self._perm.recent_denies = 0
-        self._notify_lifecycle(call, True, f"user confirmed ({decision.value})",
-                               source="operator", code=decision.value)
-        call.metadata["confirm_decision"] = decision.value
-
-        # Legacy path: SCOPE/AUTO degrade to session-level grant (no scope_resolver).
-        # Set a flag so callers can detect this fallback without inspecting grant source.
-        from .scope import ConfirmDecision as _CD
-        if decision in (_CD.SCOPE, _CD.AUTO):
-            call.metadata["legacy_decision_fallback"] = True
-
-        # Legacy path: create a ScopeGrant so the UI can display grant info
-        # (#112). Without a scope_resolver the grant is tool-name-based.
-        from .scope import ConfirmDecision as _CD, ScopeGrant
-        import time as _time
-        _now = _time.time()
-
-        if decision == _CD.SCOPE:
-            self._perm.grant(ScopeGrant(
-                resource="tool",
-                action=call.tool_name,
-                selector="*",
-                constraints={"tool_name": call.tool_name},
-                attended_only=True,
-                source="lease",
-                granted_at=_now,
-                valid_until=_now + self._SCOPE_LEASE_TTL,
-            ))
-        elif decision == _CD.AUTO:
-            self._perm.grant(ScopeGrant(
-                resource="tool",
-                action=call.tool_name,
-                selector="*",
-                constraints={"tool_name": call.tool_name},
-                attended_only=True,
-                source="auto_approve",
-                granted_at=_now,
-                valid_until=0.0,  # permanent
-            ))
-        elif decision == _CD.ONCE:
-            self._perm.grant(ScopeGrant(
-                resource="tool",
-                action=call.tool_name,
-                selector="*",
-                constraints={"tool_name": call.tool_name},
-                attended_only=True,
-                source="manual_confirm",
-                granted_at=_now,
-                valid_until=0.0,
-            ))
-
+        denied = await self._ask_human(call, "")
+        if denied is not None:
+            return denied
         # A human's answer covers this call only (#704 S3): the next call
         # of the same tool is decided again.
         return await next(call)

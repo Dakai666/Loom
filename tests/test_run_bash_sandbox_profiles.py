@@ -129,8 +129,8 @@ async def test_run_bash_wraps_detected_profile_after_once_authorization(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decision", [ConfirmDecision.SCOPE, ConfirmDecision.AUTO])
-async def test_run_bash_applies_profile_on_scope_or_auto_first_call(
+@pytest.mark.parametrize("decision", [ConfirmDecision.ONCE])  # #704 S4: the only allow
+async def test_run_bash_applies_profile_on_allow_once(
     tmp_path, srt_fakes, decision,
 ):
     written, _wrapped, launched = srt_fakes

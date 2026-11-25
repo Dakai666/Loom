@@ -258,7 +258,7 @@ allowed_domains = ["api.github.com", "github.com"]
 **macOS 特別注意**：`/tmp` 是 `/private/tmp` 的 symlink，要寫 temp file 請列 `/private/tmp`。
 **Fail-closed**：`backend = "srt"` 但找不到 binary 時 session 啟動會失敗並提示安裝指令，避免 silent downgrade。
 
-**CLI profiles**：profile 只是描述可要求的額外沙箱能力，不是永久授權。`run_bash` 可用 command root 自動選擇，或在參數中傳 `sandbox_profile = "github"` 明確指定；實際使用時仍走現有 permission prompt，可選本次 / 30 分鐘 lease / 本 session / deny，重開 session 後需要重新授權。
+**CLI profiles**：profile 只是描述可要求的額外沙箱能力，不是永久授權。`run_bash` 可用 command root 自動選擇，或在參數中傳 `sandbox_profile = "github"` 明確指定；實際使用時仍走現有 permission prompt：允許這次或拒絕（#704 S4 起沒有 lease 與 session 授權）。
 
 ---
 

@@ -236,7 +236,7 @@ def register_slash_commands(bot: "LoomDiscordBot") -> None:
     # ── /loom-pause ───────────────────────────────────────────────────
     @tree.command(
         name="loom-pause",
-        description="Toggle HITL auto-pause after each tool batch.",
+        description="Retired (#704): use /mode safe or /stop.",
     )
     async def loom_pause(interaction: discord.Interaction) -> None:
         session = await _require_session(bot, interaction)

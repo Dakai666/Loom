@@ -169,19 +169,17 @@ class PermissionVerdict(Enum):
 
 class ConfirmDecision(Enum):
     """
-    User's response to a confirmation prompt (#88).
+    The operator's answer to a confirmation prompt (#88, #704 S4).
 
-    Replaces the previous bool return from confirm_fn.
+    DENY — reject this call
+    ONCE — allow this one call; nothing is remembered
 
-    DENY        — reject this call
-    ONCE        — approve this call only (legacy y/N behavior)
-    SCOPE       — approve and grant a session-scoped lease for this scope
-    AUTO        — approve and grant a broad auto-approval for this tool class
+    The lease (SCOPE) and blanket (AUTO) answers were retired in #704 S4:
+    widening a boundary across calls is a policy change (a routine's scope
+    grants, the permission mode), not a button.
     """
     DENY = "deny"
     ONCE = "once"
-    SCOPE = "scope"
-    AUTO = "auto"
 
 
 # ---------------------------------------------------------------------------

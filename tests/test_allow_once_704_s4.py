@@ -55,7 +55,8 @@ class TestOnlyAllowOnce:
         async def request_confirm(**kw):
             seen.update(kw)
             return ConfirmDecision.ONCE
-        fake = SimpleNamespace(_loom_app=SimpleNamespace(request_confirm=request_confirm))
+        fake = SimpleNamespace(_loom_app=SimpleNamespace(request_confirm=request_confirm),
+                               _cancel_spinner_fn=None)
         from loom.core.harness.middleware import ToolCall
         call = ToolCall(tool_name="write_file", args={"path": "x.md"}, trust_level=TrustLevel.GUARDED,
                         session_id="s", capabilities=ToolCapability.MUTATES)
@@ -63,7 +64,7 @@ class TestOnlyAllowOnce:
         assert [o[1] for o in seen["options"]] == [ConfirmDecision.ONCE, ConfirmDecision.DENY]
 
     @pytest.mark.parametrize("tool,args,caps", [
-        ("write_file", {"path": "notes/x.md", "content": "x"}, ToolCapability.MUTATES),
+        ("write_file", {"path": "notes/x.py", "content": "x"}, ToolCapability.MUTATES),
         ("run_bash", {"command": "python3 scripts/tool.py"}, ToolCapability.EXEC),
         ("memorize", {"key": "k", "value": "v"}, ToolCapability.MUTATES),
     ])

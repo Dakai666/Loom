@@ -114,6 +114,9 @@ from loom.core.harness.middleware import (
     UNATTENDED_ORIGINS,
 )
 from loom.core.harness.mode import PermissionMode
+
+# #704 S4: operator denials in a row that end a turn (a run stop condition).
+OPERATOR_DENIAL_LIMIT = 3
 from loom.core.harness.approval import (
     ApprovalClassifier, ReviewContext, ReviewTurn, plan_model_chat,
 )
@@ -762,7 +765,6 @@ class LoomSession:
         self._cancel_requested: bool = False
         self._resume_event: asyncio.Event = asyncio.Event()
         # When True, stream_turn() auto-pauses after every tool batch.
-        self.hitl_mode: bool = False
         # Abort controller for cancellation of in-flight LLM streaming calls.
         self._abort = AbortController()
 
@@ -934,6 +936,10 @@ class LoomSession:
             try:
                 self._ledger_store = LedgerStore()
                 await self._ledger_store.open()
+                # #704 S4: a read-only view of the ledger, so checking it
+                # does not take a shell command that asks DK each time.
+                from loom.platform.cli.tools import make_ledger_query_tool
+                self.registry.register(make_ledger_query_tool(self._ledger_store.db_path))
                 self._ledger_emitter = LedgerEmitter(
                     self._ledger_store, session_id=self.session_id
                 )
@@ -1699,8 +1705,8 @@ class LoomSession:
             self._abort.reset()
             self._cancel_requested = False
 
-            # Issue #131: Reset per-turn deny counter so timeouts from a previous
-            # turn don't carry over and immediately trip the circuit breaker.
+            # Issue #131: Reset per-turn deny counter so denials from a previous
+            # turn don't carry over and immediately end this one (#704 S4).
             self.perm.recent_denies = 0
 
             if hasattr(self, "_legitimacy_guard"):
@@ -2460,6 +2466,20 @@ class LoomSession:
                         except Exception as exc:
                             logger.debug("Telemetry flush deferred: %s", exc)
 
+                    # #704 S4: three operator denials in a row end the turn,
+                    # a run stop condition like the repeat-call limit below
+                    # (it used to be the harness's "penalty box").
+                    if self.perm.recent_denies >= OPERATOR_DENIAL_LIMIT:
+                        logger.warning("stream_turn: %d operator denials — ending turn",
+                                       self.perm.recent_denies)
+                        detail = (f"{self.perm.recent_denies} tool calls in a row were "
+                                  "denied by the operator")
+                        yield TurnDropped(stop_reason="operator_denials", tool_count=tool_count,
+                                          provider_error_detail=detail)
+                        _stop_reason = "operator_denials"
+                        self._pause_requested = False
+                        break
+
                     # #654: hard stop for an identical-call loop. Checked after
                     # the whole batch so every tool call already has its result.
                     if self._repeat_calls.limit_hit is not None:
@@ -2496,8 +2516,6 @@ class LoomSession:
                     # hold every later event (#668, PR #673 review). A pending
                     # pause request is left for the next attended turn.
                     _attended = origin not in UNATTENDED_ORIGINS
-                    if self.hitl_mode and _attended:
-                        self._pause_requested = True
                     if self._pause_requested and _attended:
                         self._pause_requested = False
                         self._resume_event.clear()
@@ -4241,13 +4259,12 @@ class LoomSession:
             return await loom_app.request_confirm(
                 title=widget_title,
                 body=_format_scope_summary_plain(call),
+                # #704 S4: allow this once, or deny. Nothing is remembered.
                 options=[
                     ("允許這次",                        ConfirmDecision.ONCE,   "y"),
-                    ("允許並記住 30 分鐘 (lease)",      ConfirmDecision.SCOPE,  "s"),
-                    ("允許並永久授權此 scope",          ConfirmDecision.AUTO,   "a"),
                     ("拒絕",                            ConfirmDecision.DENY,   "n"),
                 ],
-                default_index=3,  # cursor on DENY for safety
+                default_index=1,  # cursor on DENY for safety
                 cancel_value=ConfirmDecision.DENY,
             )
 
@@ -4271,8 +4288,6 @@ class LoomSession:
         )
         options = [
             SelectOption(label="允許這次",                   value=ConfirmDecision.ONCE,  shortcut="y"),
-            SelectOption(label="允許並記住 30 分鐘 (lease)", value=ConfirmDecision.SCOPE, shortcut="s"),
-            SelectOption(label="允許並永久授權此 scope",     value=ConfirmDecision.AUTO,  shortcut="a"),
             SelectOption(label="拒絕",                       value=ConfirmDecision.DENY,  shortcut="n"),
         ]
 
@@ -4280,7 +4295,7 @@ class LoomSession:
             return await select_prompt(
                 title=widget_title,
                 options=options,
-                default_index=3,
+                default_index=1,
                 cancel_value=ConfirmDecision.DENY,
             )
 

@@ -317,35 +317,22 @@ class TestBlastRadiusScopeAware:
         handler.assert_not_called()
         assert call.metadata.get("user_decision") is False
 
-    async def test_grants_created_after_confirm(self):
+    async def test_no_grant_after_confirm(self):
         perm, reg = self._setup()
         call = _call("write_file", {"path": "doc/test.md"}, caps=ToolCapability.MUTATES)
-        await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
-        )
+        await _run_middleware(perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg)
+        assert perm.grants == []  # #704 S4
 
-        # After confirmation, a grant should have been added
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.resource == "path"
-        assert g.action == "write"
-        assert g.source == "lease"
-
-    async def test_second_call_same_scope_auto_allowed(self):
+    async def test_second_call_same_scope_asks_again(self):
         perm, reg = self._setup()
-
-        # First call — needs confirmation
         call1 = _call("write_file", {"path": "doc/a.md"}, caps=ToolCapability.MUTATES)
         _, confirm1, _ = await _run_middleware(
-            perm, call1, confirm_result=ConfirmDecision.SCOPE, registry=reg,
+            perm, call1, confirm_result=ConfirmDecision.ONCE, registry=reg,
         )
         confirm1.assert_called_once()
-
-        # Second call — same scope, should be auto-allowed
         call2 = _call("write_file", {"path": "doc/b.md"}, caps=ToolCapability.MUTATES)
-        _, confirm2, handler2 = await _run_middleware(perm, call2, registry=reg)
-        confirm2.assert_not_called()
-        handler2.assert_called_once()
+        _, confirm2, _ = await _run_middleware(perm, call2, registry=reg)
+        confirm2.assert_called_once()
 
 
 class TestScopeConfirmDurations:
@@ -368,10 +355,7 @@ class TestScopeConfirmDurations:
         assert result.success
         confirm_fn.assert_called_once()
         handler.assert_called_once()
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.source == "manual_confirm"
-        assert g.valid_until == 0.0
+        assert perm.grants == []  # #704 S4: allow once leaves nothing behind
         assert call.metadata["confirm_decision"] == "once"
 
     async def test_once_confirmation_does_not_grant_fetch_url_network_scope(self):
@@ -393,54 +377,8 @@ class TestScopeConfirmDurations:
         assert result.success
         confirm_fn.assert_called_once()
         handler.assert_called_once()
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.source == "manual_confirm"
-        assert g.valid_until == 0.0
+        assert perm.grants == []  # #704 S4: allow once leaves nothing behind
         assert call.metadata["confirm_decision"] == "once"
-
-    async def test_scope_confirmation_creates_ttl_grant(self):
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "write_file",
-            caps=ToolCapability.MUTATES,
-            scope_resolver=_make_write_file_resolver(_WORKSPACE),
-        ))
-        call = _call(
-            "write_file", {"path": "doc/lease.md"},
-            caps=ToolCapability.MUTATES,
-        )
-
-        result, _confirm_fn, _handler = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
-        )
-
-        assert result.success
-        assert len(perm.grants) == 1
-        assert perm.grants[0].source == "lease"
-        assert perm.grants[0].valid_until > 0
-
-    async def test_auto_confirmation_creates_session_grant(self):
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "write_file",
-            caps=ToolCapability.MUTATES,
-            scope_resolver=_make_write_file_resolver(_WORKSPACE),
-        ))
-        call = _call(
-            "write_file", {"path": "doc/session.md"},
-            caps=ToolCapability.MUTATES,
-        )
-
-        result, _confirm_fn, _handler = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.AUTO, registry=reg,
-        )
-
-        assert result.success
-        assert len(perm.grants) == 1
-        assert perm.grants[0].source == "auto_approve"
-        assert perm.grants[0].valid_until == 0
-
 
 # =====================================================================
 # 3. Legacy fallback

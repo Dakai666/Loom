@@ -104,7 +104,7 @@ hi
 - `match_commands = ["gh"]` 會讓 `gh pr view 387` 自動要求 `github` profile。
 - `run_bash` 也可明確傳 `sandbox_profile = "github"`，適合 wrapper 或 command root 不易判斷的 CLI。
 - profile 只是一份 additive overlay；它不會自己授權。
-- 實際使用仍走 scope-aware permission prompt：本次 / 30 分鐘 lease / 本 session / deny。
+- 實際使用仍走 scope-aware permission prompt：允許這次或拒絕（#704 S4）。
 - 授權只存在 runtime。重開 session 或重啟後，要重新授權。
 
 Profile 被授權後，該次 `run_bash` 會用 base sandbox settings 加上 profile overlay 產生有效 srt 設定；未授權就 fail closed，不會偷用 profile 的額外路徑或 domain。
@@ -159,7 +159,7 @@ make_run_bash_tool(sandbox=...)   ← loom/platform/cli/tools.py
         │
         ├─ srt_available() check → 缺失就 raise RuntimeError
         ├─ scope_resolver()       → 需要時加入 sandbox_profile requirement
-        ├─ permission prompt      → once / lease / session / deny
+        ├─ permission prompt      → once / deny
         │
         ├─ write_settings_file()  → base 或 profile-merged JSON 到 $TMPDIR
         │

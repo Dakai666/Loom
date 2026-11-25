@@ -67,7 +67,7 @@ class ConfirmResult(Enum):
 行為差異：
 - CONFIRM + TIMEOUT → `ActionPlanner` 保守跳過（不下放 EXECUTE）
 - HOLD + TIMEOUT → 不執行
-- CONFIRM + DENIED → 明確不執行， PenaltyBox 計數 +1
+- CONFIRM + DENIED → 明確不執行，同一 turn 連續拒絕三次會結束 turn（#704 S4）
 
 ---
 

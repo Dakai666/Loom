@@ -122,13 +122,13 @@ audio bytes 不會在回傳裡攜帶（只寫到指定檔案）。
 
 ---
 
-## 對話中 HITL 命令
+## 對話中命令
 
 在 `loom chat` 的輸入框中即時輸入：
 
 | 命令 | 功能 |
 |------|------|
-| `/pause` | 切換 HITL 模式：agent 在每批工具執行完畢後暫停，等候人類決策再繼續下一個 LLM 回合 |
+| `/mode [safe\|self\|yolo]` | 查看或切換授權模式（安全／自理／YOLO，#704）。`/pause`（每批暫停）與 `/auto` 已退役 |
 | `/stop` | 立即取消當前 turn，不等候邊界；部分輸出保留（相當於 Esc）|
 | `/new` | 結束當前 session，開始全新 session |
 | `/think` | 開啟上一回覆的完整推理鏈（ThinkModal）|
@@ -139,10 +139,7 @@ audio bytes 不會在回傳裡攜帶（只寫到指定檔案）。
 | `/verbose` | Toggle 工具輸出詳細度 |
 | `/help` | 顯示所有命令與快捷鍵的 HelpModal |
 
-> `/pause` 模式下的操作：
-> - `r` + Enter — 直接恢復，不改變
-> - `c` — 取消其餘回合
-> - 任意文字 — 注入為重導向訊息並恢復
+> 確認提示只有「允許這次」與「拒絕」（#704 S4）：允許只涵蓋那一次呼叫，不留任何授權；同一個 turn 連續拒絕三次，turn 會結束。
 
 ---
 
@@ -305,7 +302,7 @@ loom discord start \
 loom discord start --token "$DISCORD_BOT_TOKEN" --channel 123456789
 ```
 
-Discord Bot 的 slash commands 與 CLI 對話命令完全對應：`/new` `/sessions` `/think` `/compact` `/personality` `/verbose` `/pause` `/stop` `/budget` `/help`。
+Discord Bot 的 slash commands 與 CLI 對話命令完全對應：`/new` `/sessions` `/think` `/compact` `/personality` `/verbose` `/mode` `/stop` `/budget` `/help`。
 
 GUARDED/CRITICAL 工具的確認透過 Discord Button（Allow/Deny）處理，60 秒超時。
 
@@ -395,7 +392,6 @@ loom tool info read_file    # 查看 read_file 詳細資訊
 | 命令 | 功能 |
 |------|------|
 | `loom chat` | 互動式 CLI 聊天 |
-| `/pause` | HITL 模式：批次工具執行後暫停等候確認 |
 | `/stop` | 立即取消當前 turn |
 | `/new` | 開始全新 session |
 | `/think` | 顯示推理鏈 |
