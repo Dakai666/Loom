@@ -191,8 +191,8 @@ class TestConfirmDecisionEnum:
     def test_all_values_exist(self):
         assert ConfirmDecision.DENY.value == "deny"
         assert ConfirmDecision.ONCE.value == "once"
-        assert ConfirmDecision.SCOPE.value == "scope"
-        assert ConfirmDecision.AUTO.value == "auto"
+        # SCOPE and AUTO were retired in #704 S4
+        assert {d.name for d in ConfirmDecision} == {"DENY", "ONCE"}
 
 
 class TestNormalizeDecision:
@@ -224,7 +224,7 @@ class TestScopeAwareDecisionRouting:
             ],
         )
 
-    async def test_once_creates_grant_no_ttl(self):
+    async def test_once_creates_no_grant(self):
         perm = PermissionContext(session_id="test")
         reg = _make_registry(_tool_def(
             "write_file", caps=ToolCapability.MUTATES,
@@ -235,43 +235,7 @@ class TestScopeAwareDecisionRouting:
             perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg,
         )
         assert result.success
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.source == "manual_confirm"
-        assert g.valid_until == 0.0  # no TTL
-
-    async def test_scope_creates_lease_with_ttl(self):
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "write_file", caps=ToolCapability.MUTATES,
-            scope_resolver=self._path_resolver,
-        ))
-        call = _call("write_file", {"path": "doc/x.md"}, caps=ToolCapability.MUTATES)
-        result, _, _ = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
-        )
-        assert result.success
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.source == "lease"
-        assert g.valid_until > 0  # has TTL
-        assert g.valid_until > time.time()  # in the future
-
-    async def test_auto_creates_grant_no_ttl_auto_source(self):
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "write_file", caps=ToolCapability.MUTATES,
-            scope_resolver=self._path_resolver,
-        ))
-        call = _call("write_file", {"path": "doc/x.md"}, caps=ToolCapability.MUTATES)
-        result, _, _ = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.AUTO, registry=reg,
-        )
-        assert result.success
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.source == "auto_approve"
-        assert g.valid_until == 0.0  # no TTL for auto
+        assert perm.grants == []  # #704 S4: allow once leaves nothing behind
 
     async def test_deny_blocks_execution(self):
         perm = PermissionContext(session_id="test")
@@ -295,9 +259,9 @@ class TestScopeAwareDecisionRouting:
         ))
         call = _call("write_file", {"path": "doc/x.md"}, caps=ToolCapability.MUTATES)
         await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.SCOPE, registry=reg,
+            perm, call, confirm_result=ConfirmDecision.ONCE, registry=reg,
         )
-        assert call.metadata.get("confirm_decision") == "scope"
+        assert call.metadata.get("confirm_decision") == "once"
 
 
 class TestLegacyPathDecision:
@@ -325,25 +289,6 @@ class TestLegacyPathDecision:
         )
         assert not result.success
         handler.assert_not_called()
-
-    async def test_scope_decision_on_legacy_sets_fallback_metadata(self):
-        """SCOPE/AUTO on legacy path records legacy_decision_fallback in metadata."""
-        perm = PermissionContext(session_id="test")
-        call = _call("write_file", {"path": "x.py"})
-        result, _, _ = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.SCOPE,
-        )
-        assert result.success
-        assert call.metadata.get("legacy_decision_fallback") is True
-
-    async def test_auto_decision_on_legacy_sets_fallback_metadata(self):
-        perm = PermissionContext(session_id="test")
-        call = _call("write_file", {"path": "x.py"})
-        result, _, _ = await _run_middleware(
-            perm, call, confirm_result=ConfirmDecision.AUTO,
-        )
-        assert result.success
-        assert call.metadata.get("legacy_decision_fallback") is True
 
     async def test_once_decision_on_legacy_no_fallback_metadata(self):
         perm = PermissionContext(session_id="test")

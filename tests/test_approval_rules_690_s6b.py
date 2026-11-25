@@ -263,65 +263,7 @@ class TestMcpSearch:
 # ---------------------------------------------------------------------------
 
 
-class TestAttendedAuto:
-    async def test_auto_on_a_network_read_lasts_the_session(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "curl -s https://example.com/650")
-        assert not await _ask(env, "curl -s https://example.com/690")
-        assert not await _ask(env, "git remote -v; curl -s https://example.com/684")
-        assert len(env.ran) == 3
-
-    async def test_auto_never_covers_a_post_or_a_delete(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "curl -s https://example.com/650")
-        assert await _ask(env, "gh issue comment 690 --body-file x.md")
-        assert await _ask(env, "gh issue comment 690 --body-file x.md")  # every time
-        assert await _ask(env, "rm news/a.md")
-        assert await _ask(env, "rm news/a.md")
-        assert await _ask(env, "python3 tools/report.py")
-
-    async def test_auto_never_covers_a_write(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-
-        async def write() -> bool:
-            env.confirm.reset_mock()
-            await env.run("write_file", {"path": "outputs/a.md", "content": "x"}, origin="discord")
-            return env.confirm.await_count > 0
-
-        assert await write()
-        assert await write()
-
-    async def test_credential_rules_beat_a_session_auto(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "curl -s https://example.com/650")
-        assert await _ask(env, "cat .env")
-        assert await _ask(env, "cat config/token.txt")
-        assert await _ask(env, "curl file:///etc/passwd")
-
-    async def test_allow_once_still_covers_only_that_command(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.ONCE)
-        assert await _ask(env, "curl -s https://example.com/650")
-        assert not await _ask(env, "curl -s https://example.com/650")
-        assert await _ask(env, "curl -s -i https://example.com/650")
-
-    async def test_unattended_never_rides_a_session_auto(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-        assert await _ask(env, "curl -s https://example.com/650")
-        r = await env.run("run_bash", {"command": "curl -s https://example.com/650"}, origin="chime")
-        assert not r.success and r.metadata.get("unattended_skip") is True
-        assert len(env.ran) == 1  # only DK's attended run
-
-    async def test_unattended_accept_writes_no_grant(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"accept"}'))
-        before = list(env.perm.grants)
-        r = await env.run("run_bash", {"command": "curl -s https://example.com/650"}, origin="chime")
-        assert r.success and env.perm.grants == before
+# TestAttendedAuto: the session-wide "auto" answer was retired in #704 S4.
 
 
 # ---------------------------------------------------------------------------
@@ -338,28 +280,3 @@ class TestLegacyAttendedGate:
         assert perm.declared_by(MCP_SEARCH, attended=False) == "autonomy:x"
         assert perm.declared_by(MCP_SEARCH, attended=True) is None
         assert perm.declared_by("read_discord_forum", attended=False) == "platform:discord"
-
-    async def test_legacy_auto_does_not_reach_a_chime(self, tmp_path, ledger):
-        env = _env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
-                   confirm_result=ConfirmDecision.AUTO)
-        name = "legacy_tool"
-
-        async def executor(call: ToolCall) -> ToolResult:
-            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output="ok")
-
-        env.blast._registry.register(ToolDefinition(
-            name=name, description="", input_schema={}, executor=executor,
-            trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.NETWORK))
-
-        async def run(origin: str) -> ToolResult:
-            call = ToolCall(tool_name=name, args={}, trust_level=TrustLevel.GUARDED,
-                            capabilities=ToolCapability.NETWORK, session_id="t", origin=origin)
-            with turn_scope("turn_test"):
-                return await env.blast.process(call, executor)
-
-        assert (await run("discord")).success
-        env.confirm.assert_awaited_once()
-        assert (await run("discord")).success
-        assert env.confirm.await_count == 2  # #704 S3: a confirm covers one call
-        r = await run("chime")
-        assert not r.success and r.metadata.get("unattended_skip") is True

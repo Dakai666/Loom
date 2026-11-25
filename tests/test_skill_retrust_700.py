@@ -188,23 +188,8 @@ async def test_confirm_that_did_not_show_the_diff_is_not_trusted(tmp_path, ledge
     await _assert_not_trusted(env)
 
 
-@pytest.mark.parametrize("decision", [ConfirmDecision.AUTO, ConfirmDecision.SCOPE])
-async def test_auto_or_lease_decision_is_not_trusted(tmp_path, ledger, decision):
-    env = Env(tmp_path, ledger, confirm=showing(decision))
-    r = await env.write()
-    assert r.success
-    await _assert_not_trusted(env)
-
-
-async def test_write_covered_by_an_earlier_auto_is_not_trusted(tmp_path, ledger):
-    env = Env(tmp_path, ledger, confirm=showing(ConfirmDecision.AUTO))
-    await env.write("# first\n")
-    env.confirm = showing()
-    env.confirm_mock.side_effect = env.confirm
-    r = await env.write()
-    assert r.success
-    assert env.call.metadata.get("approved_with_diff") is not True
-    assert env.trusted() == _sha(OLD)
+# The lease and auto answers that could cover a later write were retired in
+# #704 S4; "allow once" is tested above.
 
 
 # ---------------------------------------------------------------------------

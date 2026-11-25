@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import sqlite3
 import base64
 import json
 import mimetypes
@@ -1877,6 +1878,242 @@ def make_memory_health_tool(
         executor=_memory_health,
         tags=["memory", "health", "diagnostic"],
         impact_scope="memory",
+    )
+
+
+# ledger_query (#704 S4, #709 review)
+_LEDGER_CELL_BYTES = 2_000
+_LEDGER_OUTPUT_BYTES = 24_000
+_LEDGER_DEADLINE_SECONDS = 5.0
+_LEDGER_MAX_VALUE_BYTES = 1_000_000  # SQLITE_LIMIT_LENGTH: no 20 MB strings in memory
+# A JSON key whose string value is masked wherever the payload is read.
+# A JSON key whose string value is masked wherever the payload is read:
+# the whole key is a secret word, optionally after a prefix ("password",
+# "auth_token", "api-key"); "input_tokens" or "authorization_reason" are not.
+_LEDGER_SECRET_WORDS = (r"(?:pass(?:word|wd)?|secret|token|auth|authorization|api[_-]?key|apikey"
+                        r"|credentials?|cookie|private[_-]?key|bearer|session[_-]?key|access[_-]?key)")
+_LEDGER_SECRET_KEY = re.compile(rf"(?:[\w-]*[_-])?{_LEDGER_SECRET_WORDS}", re.IGNORECASE)
+_LEDGER_SECRET_KEY_IN_TEXT = re.compile(rf'"(?:[\w-]*[_-])?{_LEDGER_SECRET_WORDS}"\s*:', re.IGNORECASE)
+# A cheap superset of what the S3c patterns can match (a secret-ish key
+# followed by = or :, Bearer, the token prefixes, JWT, PEM, Discord
+# tokens and webhooks). A payload with none of these is returned as is, so
+# a full-ledger scan stays inside the deadline.
+_LEDGER_MAYBE_SECRET = re.compile(
+    r"(?i)(?:api[_-]?key|token|password|passwd|secret|authorization|bearer|credentials"
+    r"|private[_-]?key|access[_-]?key)\\?[\"']?\s*[:=]|bearer\s|authorization\s*[:=]"
+    r"|[_-](?:key|token|secret)\\?[\"']?\s*[:=]"
+    r"|(?<![A-Za-z0-9_\-])(?:sk-|pk-|ak-|akia|gh[pos]_|github_pat_|xox[bp]-|xapp-|xai-"
+    r"|[sr]k_(?:live|test)_|hf_|aiza)|eyj[A-Za-z0-9_\-]{8,}\.|-----begin"
+    r"|discord(?:app)?\.com/api/webhooks|(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{24,}+\.[A-Za-z0-9_\-]{6}\.")
+_LEDGER_FUNCTIONS_DENIED = frozenset({"load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"})
+
+
+def _redact_ledger_json(value: Any, *, under_secret: bool = False) -> Any:
+    """A payload as ledger_query shows it: every scalar under a
+    secret-named key masked, whatever its type and however deep (the
+    object or list keeps its shape), every other string through the S3c
+    patterns. A null stays null: it holds nothing."""
+    from loom.core.memory.session_log import _redact_secrets
+    if isinstance(value, dict):
+        return {k: _redact_ledger_json(
+                    v, under_secret=under_secret or bool(_LEDGER_SECRET_KEY.fullmatch(str(k))))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_ledger_json(v, under_secret=under_secret) for v in value]
+    if value is None:
+        return None
+    if under_secret:
+        return "[REDACTED]"
+    if isinstance(value, str):
+        return _redact_secrets(value)
+    return value
+
+
+class _LedgerValueTooBig(Exception):
+    """A value in the result is over ledger_query's 1 MB cap."""
+
+    def __init__(self, row: int) -> None:
+        where = (f"result row {row}" if row > 1 else
+                 "the first result row (or a row read while sorting or grouping)")
+        super().__init__(
+            f"{where} holds a value over ledger_query's "
+            f"{_LEDGER_MAX_VALUE_BYTES // 1_000_000} MB cap per value (sqlite length limit); "
+            "select the fields you need with json_extract(payload, '$.field') or "
+            "substr(payload, 1, 2000) instead of the whole payload")
+
+
+def _redact_ledger_payload(text: Any) -> Any:
+    from loom.core.memory.session_log import _redact_secrets
+    if not isinstance(text, str):
+        return text
+    # Fast path: no secret-named key anywhere, so only the patterns apply
+    # (a full-ledger scan stays inside the deadline).
+    # A redaction inside raw JSON text can break its quoting, so anything
+    # to redact is redacted value by value on the parsed payload.
+    if not _LEDGER_SECRET_KEY_IN_TEXT.search(text) and not _LEDGER_MAYBE_SECRET.search(text):
+        return text
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return _redact_secrets(text)
+    return json.dumps(_redact_ledger_json(parsed), ensure_ascii=False)
+
+
+def _clip_bytes(text: str, limit: int) -> str:
+    raw = text.encode()
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode(errors="ignore") + f"…[{len(raw)} bytes]"
+
+
+def make_ledger_query_tool(db_path: Path) -> ToolDefinition:
+    """A SAFE, read-only SQL view of Loom's own ledger (#704 S4).
+
+    Loom Agent checks her ledger when verifying her own behaviour. Through
+    the shell that is ``sqlite3 ~/.loom/ledger.db …``: a hidden path outside
+    the workspace, which asks DK every time. This tool answers one query
+    over ``events`` with these bounds (#709 review):
+
+    - the query sees only a temp view of ``events`` whose ``payload`` is
+      redacted (string values under secret-named keys masked, the rest
+      through the S3c patterns), so ``json_extract``, ``->>`` and
+      ``json_each`` read redacted JSON; an authorizer denies every other
+      table, schema, pragma, write and attach;
+    - the ledger is attached read-only and the connection is query-only;
+    - a progress-handler deadline stops a long query; values longer than
+      1 MB are refused; each cell is cut to 2 KB and the output to 24 KB;
+    - every output cell goes through the S3c patterns again.
+
+    Main session only: a sub-agent never gets it (tag ``main_session_only``).
+    """
+    from loom.core.memory.session_log import _redact_secrets
+    source_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+
+    def _query(sql: str, limit: int) -> str:
+        con = sqlite3.connect(":memory:", uri=True)
+        try:
+            con.create_function("loom_redact_payload", 1, _redact_ledger_payload, deterministic=True)
+            con.execute("ATTACH DATABASE ? AS ledger_src", (source_uri,))
+            cols = [r[1] for r in con.execute("SELECT * FROM pragma_table_xinfo('events', 'ledger_src')")]
+            if not cols:
+                raise sqlite3.OperationalError("no events table in the ledger")
+            select = ", ".join(
+                "loom_redact_payload(payload) AS payload" if c == "payload" else f'"{c}"'
+                for c in cols)
+            con.execute(f"CREATE TEMP VIEW events AS SELECT {select} FROM ledger_src.events")
+            con.execute("PRAGMA query_only = ON")
+            if hasattr(con, "setlimit"):
+                con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _LEDGER_MAX_VALUE_BYTES)
+
+            def authorize(action, arg1, arg2, db_name, source):
+                if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE):
+                    return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_FUNCTION:
+                    return sqlite3.SQLITE_DENY if (arg2 or "").lower() in _LEDGER_FUNCTIONS_DENIED \
+                        else sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_READ:
+                    # A CTE or subquery (no database), the redacted view,
+                    # the ledger only through that view, or json_each/tree.
+                    if (db_name in (None, "temp")
+                            or (db_name == "ledger_src" and source == "events")
+                            # count(*) touches the table with no column: no data
+                            or (db_name == "ledger_src" and arg1 == "events" and arg2 == "")
+                            or (db_name == "main" and arg1 in ("json_each", "json_tree"))):
+                        return sqlite3.SQLITE_OK
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_DENY
+            con.set_authorizer(authorize)
+            deadline = time.monotonic() + _LEDGER_DEADLINE_SECONDS
+            con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+            rows: list[tuple] = []
+            failing_row = 1  # sqlite3 steps one row ahead of what fetchone returns
+            try:
+                cur = con.execute(sql)
+                names = [d[0] for d in cur.description or ()]
+                while len(rows) <= limit:
+                    failing_row = len(rows) + 2
+                    if (row := cur.fetchone()) is None:
+                        break
+                    rows.append(row)
+            except sqlite3.DataError as exc:
+                if "too big" not in str(exc):
+                    raise
+                raise _LedgerValueTooBig(failing_row) from exc
+        finally:
+            con.close()
+        lines = ["\t".join(names)]
+        used = len(lines[0].encode())
+        for row in rows[:limit]:
+            cells = ["" if v is None else _clip_bytes(_redact_secrets(
+                v.hex() if isinstance(v, bytes) else str(v)), _LEDGER_CELL_BYTES) for v in row]
+            line = "\t".join(c.replace("\n", "\\n") for c in cells)
+            if used + len(line.encode()) > _LEDGER_OUTPUT_BYTES:
+                lines.append("… output cut at 24 KB; narrow the query")
+                break
+            lines.append(line)
+            used += len(line.encode()) + 1
+        else:
+            if len(rows) > limit:
+                lines.append("… more rows; raise limit (max 200) or narrow the query")
+        return "\n".join(lines)
+
+    async def _exec(call: "ToolCall") -> ToolResult:
+        sql = str(call.args.get("sql") or "").strip()
+        try:
+            limit = max(1, min(int(call.args.get("limit", 50)), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        if not sql:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error="ledger_query needs one SQL query.", failure_type="validation_error")
+        try:
+            output = await asyncio.to_thread(_query, sql, limit)
+        except _LedgerValueTooBig as exc:
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error=str(exc), failure_type="execution_error")
+        except sqlite3.OperationalError as exc:
+            msg = str(exc)
+            if "interrupted" in msg:
+                msg = f"query stopped at the {_LEDGER_DEADLINE_SECONDS:.0f}s time limit; narrow it"
+            elif "not authorized" in msg:
+                msg = "not allowed: ledger_query reads the events view only (one read-only query)"
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error=f"sqlite: {_clip_bytes(msg, 500)}", failure_type="execution_error")
+        except (sqlite3.Error, ValueError) as exc:
+            msg = str(exc)
+            if "not authorized" in msg:
+                msg = "not allowed: ledger_query reads the events view only (one read-only query)"
+            return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False,
+                              error=f"sqlite: {_clip_bytes(msg, 500)}", failure_type="execution_error")
+        return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output=output)
+
+    return ToolDefinition(
+        name="ledger_query",
+        description=(
+            "Read-only SQL over Loom's own ledger: one query on `events` (event_id, session_id, "
+            "turn_id, event_type, timestamp, payload JSON; json_extract / ->> / json_each work). "
+            "Payload string values under secret-named keys come back masked and secret-shaped "
+            "text is redacted by pattern (not a guarantee for every secret). Output is "
+            "tab-separated, at most `limit` rows (default 50, max 200), 2 KB per cell, 24 KB in "
+            "all, 1 MB per value, 5 s per query. Indexed: event_id; event_type with timestamp; "
+            "timestamp (a narrow window, or ORDER BY timestamp DESC LIMIT n for the latest "
+            "rows); session_id and tool_name together with branch_id = 'main'. Filter on those; "
+            "a query that filters or sorts on anything else scans and redacts every payload "
+            "and can hit the time limit. Use this instead of `sqlite3 ~/.loom/ledger.db` in "
+            "the shell."
+        ),
+        trust_level=TrustLevel.SAFE,
+        capabilities=ToolCapability.READ_PROBE,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "One read-only SQL query over events."},
+                "limit": {"type": "integer", "description": "Max rows (default 50, max 200)."},
+            },
+            "required": ["sql"],
+        },
+        executor=_exec,
+        tags=["ledger", "introspection", "main_session_only"],
     )
 
 

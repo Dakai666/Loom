@@ -19,7 +19,7 @@ Contract (PR #673 review added 5-7):
      was skipped, including real policy / guard denials.
   5. load_skill's precondition-check approval is a confirm too: an
      unattended turn never prompts for it; the checks just aren't mounted.
-  6. A thread left in /pause (hitl_mode) must not park an unattended turn on
+  6. A pending pause request must not park an unattended turn on
      TurnPaused — nobody would resume it. Interactive turns still pause.
   7. An unauthorized exec call is a skip, never a "probe, then re-issue"
      hint (/auto, the only thing probing could unlock, is retired: #704 S3).
@@ -364,7 +364,7 @@ def _isolate_default_registry():
 
 
 async def _hitl_session(monkeypatch, tmp_path: Path):
-    """A started session in /pause (hitl_mode) whose model makes one SAFE
+    """A started session with a pause requested whose model makes one SAFE
     tool call, then ends the turn."""
     from loom.core import session as session_module
     from loom.core.cognition.providers import LLMResponse, ToolUse
@@ -418,7 +418,7 @@ async def _hitl_session(monkeypatch, tmp_path: Path):
         },
     )
     session._judge_mode = "off"
-    session.hitl_mode = True
+    session.pause()  # #704 S4: the per-batch /pause is retired; a pause request remains
     return session
 
 
@@ -432,7 +432,7 @@ class TestHitlPauseUnattended:
             events = await asyncio.wait_for(run(), timeout=5)
             assert not any(isinstance(e, TurnPaused) for e in events)
             assert any(isinstance(e, TurnDone) for e in events)
-            assert session.hitl_mode is True  # DK's /pause setting untouched
+            assert session._pause_requested is True  # left for the next attended turn
         finally:
             await session.stop()
 

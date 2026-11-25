@@ -15,6 +15,9 @@ reported apart, as their attendance is unknown. Scope grants a human gave
 during those sessions (leases) are not replayed: worst case.
 
     uv run python scripts/replay_attended_704_s3.py [/path/to/live/workspace]
+
+``REPLAY_REASON_PREFIX=scope-allow`` replays only the rows that ran on a
+grant (#704 S4: what the retired leases used to cover).
 """
 
 from __future__ import annotations
@@ -174,6 +177,9 @@ async def main() -> None:
     skipped = collections.Counter()
     for d in rows:
         if d.get("trust_level") != "guarded" or not d.get("tool"):
+            continue
+        only = os.environ.get("REPLAY_REASON_PREFIX")
+        if only and not (d.get("reason") or "").startswith(only):
             continue
         who = attendance(d)
         if who != "attended":

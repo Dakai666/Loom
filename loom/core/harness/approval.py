@@ -749,8 +749,8 @@ def _cd_step(segments: list[Segment], i: int, cwd: Path, workspace: Path) -> Pat
     seg = segments[i]
     words = seg.words
     if (len(words) != 2 or seg.redirects or words[1].glob or words[1].expands
-            or words[1].text in ("-", "~")):
-        return "unclear_cd"
+            or words[1].text.startswith(("-", "~"))):
+        return "unclear_cd"  # `cd -`, `cd -L`/`-P` (#704 S4), `cd ~`
     if seg.sep in ("|", "||"):
         return "unclear_cd"
     if i + 1 < len(segments) and segments[i + 1].sep != "&&":
@@ -839,21 +839,6 @@ def _tool_rule(tool_name: str) -> tuple[str, Callable[[Any, Path], RuleDecision]
         return _TOOL_RULES["web_search"]
     return _TOOL_RULES.get(tool_name)
 
-
-# What a session-wide "auto" from DK may cover (#690 S6b): reads and network
-# reads. A write, a delete, a post or a hard rule asks every time.
-_AUTO_REVIEW_CATEGORIES = frozenset({"network_read", "public_search"})
-
-
-def auto_may_cover(call: Any, workspace: Path) -> bool:
-    """Whether a grant DK gave with "auto" may cover *call*. A tool the
-    rules do not know keeps the grant's word."""
-    entry = _tool_rule(call.tool_name)
-    if entry is None:
-        return True
-    decision = entry[1](call, workspace)
-    return decision.outcome is RuleOutcome.ALLOW or (
-        decision.outcome is RuleOutcome.REVIEW and decision.reason in _AUTO_REVIEW_CATEGORIES)
 
 # What the rules established about a REVIEW call, per category, in the
 # packet vocabulary of the regression bank: the effect class the rule
@@ -949,15 +934,28 @@ def _unknown_shell_reviewable(command: str, workspace: Path) -> bool:
                 program.endswith("awk") or not args or args[0].startswith("-")):
             return False
         names = [program] + [PurePosixPath(a).name for a in args]
-        # An interpreter with an inline-code flag anywhere after it
-        # (`foo python -c '…'`) runs code the argv only hints at.
+        # An interpreter with an inline-code flag after it and before its
+        # script (`foo python -c '…'`) runs code the argv only hints at.
+        # A flag after the script file is the script's own argument
+        # (`python3 report.py -c config.toml`, #704 S4).
         for i, name in enumerate(names):
-            if name in _INLINE_CODE and any(a in _INLINE_FLAGS for a in names[i + 1:]):
+            if name in _INLINE_CODE and _inline_before_script(names[i + 1:]):
                 return False
         for a in args:
             if PurePosixPath(a).name in risky or a.startswith(("-o", "--o")):
                 return False
     return True
+
+
+def _inline_before_script(args: list[str]) -> bool:
+    """Whether an inline-code flag comes before the first operand (the
+    script) in an interpreter's arguments."""
+    for a in args:
+        if a in _INLINE_FLAGS:
+            return True
+        if not a.startswith("-"):
+            return False
+    return False
 
 
 def _uv_runs_workspace_file(rest: list[str], cwd: Path, workspace: Path) -> bool:
@@ -981,7 +979,8 @@ def _uv_runs_workspace_file(rest: list[str], cwd: Path, workspace: Path) -> bool
         return False
     risky = _ASK_PROGRAMS | _HARD_PROGRAMS | _DELETE_PROGRAMS | _WRAPPERS
     names = [PurePosixPath(a).name for a in rest[1:]]
-    return not any(n in risky or n in _INLINE_CODE or n in _INLINE_FLAGS
+    # Flags after the file are the script's own (`-c config.toml`, #704 S4).
+    return not any(n in risky or n in _INLINE_CODE
                    or n.startswith(("-o", "--o")) for n in names)
 
 
@@ -2008,9 +2007,6 @@ class ApprovalClassifier:
     def covers(self, call: Any) -> bool:
         """Whether the rules know *call*'s tool at all."""
         return _tool_rule(call.tool_name) is not None
-
-    def auto_may_cover(self, call: Any) -> bool:
-        return auto_may_cover(call, self._workspace)
 
     async def decide(
         self, call: Any, request: ScopeRequest | None, verdict: PermissionVerdict,

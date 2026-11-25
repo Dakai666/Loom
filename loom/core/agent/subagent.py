@@ -68,6 +68,30 @@ def subagent_declarations(child_tools: list[str], parent_declared: Any) -> list[
     return [name for name in child_tools if name in parent]
 
 
+def subagent_may_inherit(tool: Any, *, allowed_tools: list[str] | None) -> bool:
+    """Whether a parent tool goes into a sub-agent's registry."""
+    from loom.core.harness.permissions import TrustLevel
+    tags = tool.tags or []
+    # CRITICAL tools are always blocked in sub-agents
+    if tool.trust_level == TrustLevel.CRITICAL:
+        return False
+    # MCP tools (stdio_client subprocess) must be excluded — they are
+    # not safe to run in a sub-agent's event-loop context (Issue #124+,
+    # async generator cleanup race with stdio_client).
+    # See: "an error occurred during closing of async generator stdio_client"
+    if "mcp" in tags:
+        return False
+    # #709 review: the main session's own history (ledger_query) is not
+    # a sub-agent's, SAFE or named in allowed_tools or not.
+    if "main_session_only" in tags:
+        return False
+    # If a whitelist is given, only include tools on it
+    if allowed_tools is not None:
+        return tool.name in allowed_tools
+    # Default: SAFE only (no whitelist = restrict to SAFE)
+    return tool.trust_level == TrustLevel.SAFE
+
+
 async def run_subagent(
     config: SubAgentConfig,
     *,
@@ -116,22 +140,8 @@ async def run_subagent(
     child_registry = ToolRegistry()
 
     for tool in tool_registry._tools.values():
-        # CRITICAL tools are always blocked in sub-agents
-        if tool.trust_level == TrustLevel.CRITICAL:
-            continue
-        # MCP tools (stdio_client subprocess) must be excluded — they are
-        # not safe to run in a sub-agent's event-loop context (Issue #124+,
-        # async generator cleanup race with stdio_client).
-        # See: "an error occurred during closing of async generator stdio_client"
-        if "mcp" in (tool.tags or []):
-            continue
-        # If a whitelist is given, only include tools on it
-        if config.allowed_tools is not None and tool.name not in config.allowed_tools:
-            continue
-        # Default: SAFE only (no whitelist = restrict to SAFE)
-        if config.allowed_tools is None and tool.trust_level != TrustLevel.SAFE:
-            continue
-        child_registry.register(tool)
+        if subagent_may_inherit(tool, allowed_tools=config.allowed_tools):
+            child_registry.register(tool)
 
     # Wrap memorize so writes are tagged with this agent's provenance
     _orig_memorize = child_registry.get("memorize")

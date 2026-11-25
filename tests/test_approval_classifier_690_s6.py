@@ -550,16 +550,16 @@ class TestDailyCap:
 
 
 class TestConfirmGrantsShape:
-    async def test_confirmed_command_grants_its_shape(self, tmp_path, ledger):
+    async def test_confirmed_command_grants_nothing(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                   confirm_result=ConfirmDecision.ONCE)
         assert (await env.run("run_bash", {"command": "python3 tools/report.py --day today"},
                               origin="discord")).success
-        exec_grants = [g for g in env.perm.grants if g.resource == "exec"]
-        assert [g.selector for g in exec_grants] == ["python3 tools/report.py --day today"]
+        # #704 S4: "allow once" leaves no grant; any later command asks again
+        assert [g for g in env.perm.grants if g.resource == "exec"] == []
         env.confirm.reset_mock()
-        await env.run("run_bash", {"command": "python3 tools/other.py"}, origin="discord")
-        env.confirm.assert_awaited_once()  # a different command asks again
+        await env.run("run_bash", {"command": "python3 tools/report.py --day today"}, origin="discord")
+        env.confirm.assert_awaited_once()
 
     async def test_confirmed_chain_grants_nothing(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, confirm_result=ConfirmDecision.ONCE)
@@ -682,15 +682,14 @@ class TestPacketBoundary:
 
 
 class TestExactConfirm:
-    async def test_confirmed_command_does_not_cover_extra_arguments(self, tmp_path, ledger):
+    async def test_confirmed_command_covers_only_that_call(self, tmp_path, ledger):
         env = Env(tmp_path, ledger, model=FakeModel('{"verdict":"abstain"}'),
                   confirm_result=ConfirmDecision.ONCE)
         assert (await env.run("run_bash", {"command": "curl -s https://example.com/1"}, origin="discord")).success
         env.confirm.reset_mock()
+        # #704 S4: the identical command asks again too (nothing is remembered)
         assert (await env.run("run_bash", {"command": "curl -s https://example.com/1"}, origin="discord")).success
-        env.confirm.assert_not_awaited()  # the same command is covered
-        await env.run("run_bash", {"command": "curl -s -i https://example.com/1"}, origin="discord")
-        env.confirm.assert_awaited_once()  # extra arguments ask again
+        env.confirm.assert_awaited_once()
 
     def test_routine_shapes_keep_prefix_matching(self):
         from loom.core.harness.scope import ScopeRequirement, covers

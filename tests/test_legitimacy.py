@@ -182,41 +182,20 @@ async def test_exec_without_probe_is_not_flagged(handler):
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_trips_after_3_denies(perm_ctx, registry, handler):
-    deny_count = 0
+async def test_denials_are_counted_not_punished(perm_ctx, registry, handler):
+    """#704 S4: the harness counts denials; three in a row end the turn in
+    the session loop (a run stop condition), not a "penalty box" here."""
     async def always_deny(call) -> ConfirmDecision:
-        nonlocal deny_count
-        deny_count += 1
         return ConfirmDecision.DENY
 
-    bmw = BlastRadiusMiddleware(
-        perm_ctx=perm_ctx,
-        confirm_fn=always_deny,
-        registry=registry,
-    )
-    
+    bmw = BlastRadiusMiddleware(perm_ctx=perm_ctx, confirm_fn=always_deny, registry=registry)
     call = make_call("write_file", TrustLevel.GUARDED)
     call.abort_signal = asyncio.Event()
-    
-    # Deny 1
-    res1 = await bmw.process(call, handler)
-    assert not res1.success
-    assert perm_ctx.recent_denies == 1
-    assert not call.metadata.get("circuit_breaker")
-    
-    # Deny 2
-    res2 = await bmw.process(call, handler)
-    assert not res2.success
-    assert perm_ctx.recent_denies == 2
-    assert not call.metadata.get("circuit_breaker")
-    
-    # Deny 3 -> Circuit Breaker trips
-    res3 = await bmw.process(call, handler)
-    assert not res3.success
-    assert perm_ctx.recent_denies == 3
-    assert call.metadata.get("circuit_breaker") is True
-    assert "Penalty Box activated" in res3.error
-    assert call.abort_signal.is_set()
+    for n in (1, 2, 3):
+        res = await bmw.process(call, handler)
+        assert not res.success and "Penalty" not in res.error
+        assert perm_ctx.recent_denies == n
+    assert not call.metadata.get("circuit_breaker") and not call.abort_signal.is_set()
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_resets_on_allow(perm_ctx, registry, handler):

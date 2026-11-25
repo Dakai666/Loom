@@ -280,4 +280,8 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_skill          ON events (branch_id, skill_id, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_parent         ON events (parent_event_id)",
     "CREATE INDEX IF NOT EXISTS idx_predecessor    ON events (predecessor_memory_id)",
+    # ledger_query (#704 S4) reads without branch_id: the latest rows, a
+    # time window, one event_type.
+    "CREATE INDEX IF NOT EXISTS idx_time           ON events (timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_type_time      ON events (event_type, timestamp)",
 ]

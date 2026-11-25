@@ -146,8 +146,9 @@ class TurnPaused:
         session.cancel()         — abandon the rest of this turn
 
     Producers:
-        LoomSession.stream_turn() — emitted when hitl_mode is on, after each
-        tool batch completes, before the next LLM call.
+        LoomSession.stream_turn() — emitted after a tool batch when
+        ``LoomSession.pause()`` was requested. The per-batch HITL mode that
+        requested it on every batch (/pause) was retired in #704 S4.
 
     Consumers:
         CLI     ✓  blocks on input(), calls session.resume() / cancel()

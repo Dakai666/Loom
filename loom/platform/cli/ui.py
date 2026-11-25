@@ -88,7 +88,6 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/model MiniMax-M3.1-Flash", "switch to MiniMax-M3.1-Flash (default)"),
     ("/name",                       "rename the current session"),
     ("/new",                        "start a fresh session"),
-    ("/pause",                      "toggle HITL pause after each tool batch"),
     *personality_command_entries(),
     ("/scope",                      "list active scope grants"),
     ("/scope clear",                "revoke all non-system grants"),

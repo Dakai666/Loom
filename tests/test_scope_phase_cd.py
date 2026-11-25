@@ -193,67 +193,7 @@ class TestFormatScopePanel:
 # TestExecAutoGrantInjection retired with /auto (#704 S3).
 
 
-class TestInformationalConstraintFiltering:
-    async def test_scope_unknown_not_copied_to_grant(self):
-        """scope_unknown is informational — should not be in grants."""
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "run_bash", caps=ToolCapability.EXEC,
-            scope_resolver=_make_run_bash_resolver(_WORKSPACE),
-        ))
-        call = _call("run_bash", {"command": "ls | grep foo"}, caps=ToolCapability.EXEC)
-        await _run_middleware(perm, call, confirm_result=True, registry=reg)
-
-        # A chain has no command shape, so the confirm covers this call only
-        # and leaves no grant to copy scope_unknown into (#690 S6).
-        assert perm.grants == []
-
-    async def test_has_absolute_paths_not_copied_to_grant(self):
-        """has_absolute_paths is informational — should not be in grants."""
-        perm = PermissionContext(session_id="test")
-        reg = _make_registry(_tool_def(
-            "run_bash", caps=ToolCapability.EXEC,
-            scope_resolver=_make_run_bash_resolver(_WORKSPACE),
-        ))
-        call = _call("run_bash", {"command": "cat /etc/passwd"}, caps=ToolCapability.EXEC)
-        await _run_middleware(perm, call, confirm_result=True, registry=reg)
-
-        for g in perm.grants:
-            assert "has_absolute_paths" not in g.constraints
-
-    async def test_actionable_constraints_preserved(self):
-        """remaining_budget and max_calls should be preserved in grants."""
-        perm = PermissionContext(session_id="test")
-
-        def _budget_resolver(call):
-            return ScopeRequest(
-                tool_name=call.tool_name,
-                capabilities=call.capabilities,
-                requirements=[
-                    ScopeRequirement(
-                        resource="agent", action="spawn", selector="default",
-                        constraints={
-                            "spawn_count": 1,
-                            "remaining_budget": 3,
-                            "scope_unknown": True,  # should be filtered
-                        },
-                        tool_name=call.tool_name, capabilities=call.capabilities,
-                    ),
-                ],
-            )
-
-        reg = _make_registry(_tool_def(
-            "spawn_agent", caps=ToolCapability.AGENT_SPAN,
-            scope_resolver=_budget_resolver,
-        ))
-        call = _call("spawn_agent", {"task": "x"}, caps=ToolCapability.AGENT_SPAN)
-        await _run_middleware(perm, call, confirm_result=True, registry=reg)
-
-        assert len(perm.grants) >= 1
-        g = perm.grants[-1]
-        assert g.constraints.get("remaining_budget") == 3
-        assert g.constraints.get("spawn_count") == 1
-        assert "scope_unknown" not in g.constraints
+# TestInformationalConstraintFiltering: confirms create no grants since #704 S4.
 
 
 # =====================================================================

@@ -52,14 +52,6 @@ class _ConfirmView:
         await interaction.response.defer()
         self._set_decision(ConfirmDecision.ONCE)
 
-    async def lease_button(self, interaction, _button) -> None:
-        await interaction.response.defer()
-        self._set_decision(ConfirmDecision.SCOPE)
-
-    async def auto_button(self, interaction, _button) -> None:
-        await interaction.response.defer()
-        self._set_decision(ConfirmDecision.AUTO)
-
     async def deny_button(self, interaction, _button) -> None:
         await interaction.response.defer()
         self._set_decision(ConfirmDecision.DENY)
@@ -95,19 +87,11 @@ async def _make_confirm_fn(
                 f"🔐 **{call.tool_name.upper()}** needs confirmation\n"
                 f"Trust: `{call.trust_level.plain}`\n"
                 f"Args: `{call.args}`\n\n"
-                f"y = Once | s = Scope (30 min) | a = Auto | N = Deny"
+                f"y = Allow once | N = Deny"
             )
             await channel.send(prompt_text, view=view)
             decision = await view.wait_decision()
 
-            if decision == ConfirmDecision.SCOPE:
-                await channel.send(
-                    f"✅ Granted **{call.tool_name}** for 30 minutes (scoped)."
-                )
-            elif decision == ConfirmDecision.AUTO:
-                await channel.send(
-                    f"✅ Auto-approved **{call.tool_name}** (permanent grant)."
-                )
             return decision
         finally:
             active_confirmations.pop(thread_id, None)
@@ -138,16 +122,6 @@ class TestConfirmView:
         view = _ConfirmView(timeout=60.0)
         await view.allow_button(AsyncMock(), MagicMock())
         assert await view.wait_decision() == ConfirmDecision.ONCE
-
-    async def test_lease_button_returns_scope(self):
-        view = _ConfirmView(timeout=60.0)
-        await view.lease_button(AsyncMock(), MagicMock())
-        assert await view.wait_decision() == ConfirmDecision.SCOPE
-
-    async def test_auto_button_returns_auto(self):
-        view = _ConfirmView(timeout=60.0)
-        await view.auto_button(AsyncMock(), MagicMock())
-        assert await view.wait_decision() == ConfirmDecision.AUTO
 
     async def test_deny_button_returns_deny(self):
         view = _ConfirmView(timeout=60.0)
@@ -224,40 +198,6 @@ class TestMakeConfirmFn:
         assert result == ConfirmDecision.DENY
         assert channel.send.call_count == 1
         assert 42 not in active
-
-    async def test_scope_decision_posts_ttl_followup(self):
-        channel = MagicMock(send=AsyncMock())
-        active: dict = {}
-
-        with patch.object(_ConfirmView, "wait_decision", return_value=ConfirmDecision.SCOPE):
-            confirm_fn = await _make_confirm_fn(
-                get_channel=lambda tid: channel,
-                thread_id=42,
-                active_confirmations=active,
-            )
-            result = await confirm_fn(_make_call())
-
-        assert result == ConfirmDecision.SCOPE
-        assert channel.send.call_count == 2
-        followup_text: str = channel.send.call_args_list[1][0][0]
-        assert "30 minutes" in followup_text
-
-    async def test_auto_decision_posts_permanent_grant_followup(self):
-        channel = MagicMock(send=AsyncMock())
-        active: dict = {}
-
-        with patch.object(_ConfirmView, "wait_decision", return_value=ConfirmDecision.AUTO):
-            confirm_fn = await _make_confirm_fn(
-                get_channel=lambda tid: channel,
-                thread_id=42,
-                active_confirmations=active,
-            )
-            result = await confirm_fn(_make_call())
-
-        assert result == ConfirmDecision.AUTO
-        assert channel.send.call_count == 2
-        followup_text: str = channel.send.call_args_list[1][0][0]
-        assert "auto" in followup_text.lower() or "permanent" in followup_text.lower()
 
     async def test_active_confirmations_cleared_after_decision(self):
         channel = MagicMock(send=AsyncMock())
