@@ -1,0 +1,190 @@
+"""
+Contract: #704 S3 part 2 — in 自理, what the rules do not know goes to Luna,
+and Loom Agent's everyday tools do not ask DK.
+
+- 自理, attended: ``memorize`` (her own memory), ``image_generate`` and
+  ``*__understand_image`` (media, within any routine spend ceiling) are
+  allowed by rule, after the hard guardrails. 安全 still asks.
+- 自理, attended: a tool or shell program the rules do not know, that
+  crosses no hard guardrail, is reviewed by Luna against the trusted intent
+  (category ``unknown_operation``); abstain asks DK.
+- Unattended: an undeclared tool is outside the program's boundary, a
+  ceiling Luna never widens: it skips without a Luna call.
+- Room furniture can declare scope grants (miji's exec shape), and a
+  declaration of an EXEC tool with no exec grant is reported.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import pytest
+
+from loom.core.harness.mode import PermissionMode
+from loom.core.harness.permissions import ToolCapability, TrustLevel
+from loom.core.harness.scope import ScopeGrant
+from loom.platform.cli.tools import _make_openai_image_scope_resolver
+
+from tests.test_approval_classifier_690_s6 import (  # noqa: F401  (fixtures)
+    FakeModel,
+    _no_network,
+    ledger,
+)
+from tests.test_permission_mode_704 import _decisions, _env
+from tests.test_single_decision_704_s3 import _call, _register, _skipped
+
+
+def _everyday(env):
+    _register(env, "memorize", caps=ToolCapability.MUTATES)
+    _register(env, "image_generate", resolver=_make_openai_image_scope_resolver(env.ws),
+              caps=ToolCapability.NETWORK | ToolCapability.MUTATES)
+    _register(env, "minimax_coding__understand_image")
+
+
+EVERYDAY = [
+    ("memorize", {"key": "k", "value": "v"}, ToolCapability.MUTATES, "own_memory"),
+    ("image_generate", {"prompt": "喵吉", "output_path": "outputs/cat.png"},
+     ToolCapability.NETWORK | ToolCapability.MUTATES, "media"),
+    ("minimax_coding__understand_image", {"image_source": "outputs/cat.png", "prompt": "這是什麼"},
+     ToolCapability.NETWORK, "media"),
+]
+
+
+class TestEverydayTools:
+    @pytest.mark.parametrize("name,args,caps,code", EVERYDAY)
+    async def test_self_attended_runs_without_dk_or_luna(self, tmp_path, ledger, name, args, caps, code):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _everyday(env)
+        r = await _call(env, name, args, origin="discord", caps=caps)
+        assert r.success and env.confirm.await_count == 0 and env.model.requests == []
+        last = (await _decisions(ledger))[-1]
+        assert (last["mode"], last["decision_source"], last["reason_code"]) == ("self", "rule", code)
+
+    @pytest.mark.parametrize("name,args,caps,code", EVERYDAY)
+    async def test_safe_still_asks(self, tmp_path, ledger, name, args, caps, code):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SAFE)
+        _everyday(env)
+        await _call(env, name, args, origin="discord", caps=caps)
+        assert env.confirm.await_count == 1
+
+    @pytest.mark.parametrize("name,args,caps,code", EVERYDAY)
+    async def test_unattended_undeclared_skips_without_luna(self, tmp_path, ledger, name, args, caps, code):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _everyday(env)
+        r = await _call(env, name, args, origin="chime", caps=caps)
+        assert _skipped(r) and env.model.requests == []
+
+    async def test_image_outside_the_workspace_asks(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _everyday(env)
+        await _call(env, "image_generate", {"prompt": "x", "output_path": "/tmp/cat.png"},
+                    origin="discord", caps=ToolCapability.NETWORK | ToolCapability.MUTATES)
+        assert env.confirm.await_count == 1
+
+    async def test_image_past_a_routine_spend_ceiling_asks(self, tmp_path, ledger):
+        """A routine-declared network grant for another host is the
+        ceiling; the everyday rule does not cross it."""
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, grants=[ScopeGrant(
+            resource="network", action="connect", selector="api.minimax.io", source="autonomy:x")])
+        _everyday(env)
+        await _call(env, "image_generate", {"prompt": "x", "output_path": "outputs/cat.png"},
+                    origin="discord", caps=ToolCapability.NETWORK | ToolCapability.MUTATES)
+        assert env.confirm.await_count == 1
+
+
+class TestUnknownOperations:
+    async def test_unknown_tool_goes_to_luna(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="幫我把這週的筆記寄給自己備份。")
+        _register(env, "apple-mail__send-email")
+        r = await _call(env, "apple-mail__send-email", {"to": "me", "body": "筆記"}, origin="discord")
+        assert r.success and env.confirm.await_count == 0
+        packet = env.model.packet()
+        assert packet["runtime"]["known_effects"]["known"] is False
+        assert packet["runtime"]["known_effects"]["classification"] == "unknown_effect"
+        last = (await _decisions(ledger))[-1]
+        assert (last["decision_source"], last["reason_code"]) == ("luna", "accept")
+
+    async def test_unknown_shell_program_goes_to_luna(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="跑一下 scripts/tool.py 看輸出。")
+        r = await _call(env, "run_bash", {"command": "python3 scripts/tool.py"},
+                        origin="discord", caps=ToolCapability.EXEC)
+        assert r.success and env.confirm.await_count == 0 and len(env.model.requests) == 1
+
+    async def test_luna_abstain_asks_dk(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, model=FakeModel('{"verdict":"abstain"}'))
+        _register(env, "apple-mail__send-email")
+        await _call(env, "apple-mail__send-email", {"to": "x"}, origin="discord")
+        assert env.confirm.await_count == 1
+
+    @pytest.mark.parametrize("command", [
+        "python3 /etc/x.py", "python3 scripts/tool.py > ../out.txt", "bash -c 'ls'", "env",
+    ])
+    async def test_hard_guardrails_stop_before_luna(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    async def test_known_risky_effects_are_not_unknown(self, tmp_path, ledger):
+        """A write, delete or post the rules recognise is not an unknown
+        operation: it keeps asking (or its own delegation path)."""
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        await _call(env, "run_bash", {"command": "rm build/out.txt"}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    @pytest.mark.parametrize("origin", ["chime", "autonomy"])
+    async def test_unattended_never_reaches_luna(self, tmp_path, ledger, origin):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _register(env, "apple-mail__send-email")
+        assert _skipped(await _call(env, "apple-mail__send-email", {"to": "x"}, origin=origin))
+        assert _skipped(await _call(env, "run_bash", {"command": "python3 scripts/tool.py"},
+                                    origin=origin, caps=ToolCapability.EXEC))
+        assert env.model.requests == []
+
+    async def test_safe_mode_asks_without_luna(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SAFE)
+        _register(env, "apple-mail__send-email")
+        await _call(env, "apple-mail__send-email", {"to": "x"}, origin="discord")
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+
+# ---------------------------------------------------------------------------
+# Room furniture and EXEC declarations
+# ---------------------------------------------------------------------------
+
+
+def test_furniture_scope_grants_are_parsed():
+    from loom.autonomy.circadian.room import _parse_furniture
+    f = _parse_furniture({
+        "name": "miji", "command": ["python3", "skills/pet-cat/pet.py", "peek", "--json"],
+        "allowed_tools": ["run_bash"],
+        "scope_grants": [{"resource": "exec", "action": "execute",
+                          "selector": "python3 skills/pet-cat/pet.py"}, {"bad": 1}],
+    }, 0)
+    assert f.scope_grants == ({"resource": "exec", "action": "execute",
+                               "selector": "python3 skills/pet-cat/pet.py"},)
+
+
+def test_room_wake_carries_furniture_grants():
+    from loom.autonomy.circadian.room import Furniture, wake_permissions
+    cfg = [
+        Furniture(name="miji", label="喵吉", command=("x",), allowed_tools=("run_bash",),
+                  scope_grants=({"resource": "exec", "action": "execute", "selector": "python3 a.py"},)),
+        Furniture(name="weather", label="天氣", command=("y",)),
+    ]
+    tools, grants = wake_permissions(cfg, {"miji"})
+    assert tools == ("run_bash",)
+    assert grants == ({"resource": "exec", "action": "execute", "selector": "python3 a.py"},)
+    assert wake_permissions(cfg, {"weather"}) == ((), ())
+
+
+@pytest.mark.parametrize("grants,warned", [
+    ((), True),
+    (({"resource": "exec", "action": "execute", "selector": "python3 a.py"},), False),
+])
+def test_exec_declared_without_grant_is_reported(caplog, grants, warned):
+    from loom.autonomy.permission_fields import report_exec_without_grant
+    with caplog.at_level(logging.WARNING):
+        report_exec_without_grant("autonomy:evening_closure", ["memorize", "run_bash"], grants,
+                                  is_exec=lambda name: name == "run_bash")
+    assert any("run_bash" in r.message and "exec" in r.message for r in caplog.records) is warned
