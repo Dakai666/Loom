@@ -301,3 +301,74 @@ def test_room_load_reports_miji_without_grant(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         load_room(p)
     assert any("miji" in r.message and "exec" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #707 round 3 (Vera)
+# ---------------------------------------------------------------------------
+
+
+class TestPathsWithSpaces:
+    @pytest.mark.parametrize("source", [
+        "/tmp/secret image.png", "~/Desktop/Screen Shot 2026-11-25 at 10.00.00.png",
+        "~/Library/Application Support/x/y.png", "../other dir/a.png", ".hidden dir/a.png",
+    ])
+    async def test_outside_or_hidden_with_spaces_asks(self, tmp_path, ledger, source):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _everyday(env)
+        await _call(env, "minimax_coding__understand_image", {"image_source": source, "prompt": "x"},
+                    origin="discord")
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    async def test_workspace_file_with_spaces_runs(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _everyday(env)
+        (env.ws / "outputs").mkdir(exist_ok=True)
+        (env.ws / "outputs/my image.png").write_bytes(b"png")
+        r = await _call(env, "minimax_coding__understand_image",
+                        {"image_source": "outputs/my image.png", "prompt": "這張圖裡有什麼？"}, origin="discord")
+        assert r.success and env.confirm.await_count == 0
+
+
+class TestEverydayShellForms:
+    @pytest.mark.parametrize("command", [
+        "uv run scripts/report.py --day today", "uv run python scripts/report.py",
+        "uv run python3 scripts/report.py",
+    ])
+    async def test_uv_run_of_a_workspace_file_goes_to_luna(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="跑 scripts/report.py")
+        (env.ws / "scripts").mkdir(exist_ok=True)
+        (env.ws / "scripts/report.py").write_text("print(1)\n")
+        r = await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert r.success and len(env.model.requests) == 1
+
+    @pytest.mark.parametrize("command", [
+        "uv run python -c 'import os'", "uv run --with requests scripts/report.py",
+        "uv run missing.py", "uv run pytest", "uv pip install x", "uv run ../outside.py",
+    ])
+    async def test_other_uv_forms_still_ask(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        (env.ws / "scripts").mkdir(exist_ok=True)
+        (env.ws / "scripts/report.py").write_text("print(1)\n")
+        await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
+
+    @pytest.mark.parametrize("prefix", ["cd outputs && ", "cd ./outputs && ", "cd {ws} && "])
+    async def test_cd_into_the_workspace_does_not_ask_by_itself(self, tmp_path, ledger, prefix):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF, intent="跑 run.py")
+        (env.ws / "outputs").mkdir(exist_ok=True)
+        (env.ws / "outputs/run.py").write_text("print(1)\n")
+        command = prefix.format(ws=env.ws) + "python3 run.py"
+        r = await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert r.success and len(env.model.requests) == 1
+
+    @pytest.mark.parametrize("command", [
+        "cd .. && python3 run.py", "cd /tmp && python3 run.py", "cd .git && python3 run.py",
+        "cd outputs && rm run.py",
+    ])
+    async def test_cd_elsewhere_or_risky_rest_still_asks(self, tmp_path, ledger, command):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        (env.ws / "outputs").mkdir(exist_ok=True)
+        (env.ws / ".git").mkdir(exist_ok=True)
+        await _call(env, "run_bash", {"command": command}, origin="discord", caps=ToolCapability.EXEC)
+        assert env.confirm.await_count == 1 and env.model.requests == []
