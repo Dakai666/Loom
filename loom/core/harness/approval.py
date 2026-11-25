@@ -957,12 +957,16 @@ def _names_repo(intent: str, repo: str) -> bool:
     return repos == {repo.lower()}
 
 
-# Markup a reader of the rendered issue does not see: an HTML comment,
-# blocks GitHub's sanitizer strips, a markdown "comment" (a reference
-# definition pointing at #), and image alt text (#706 review).
+# Markup a reader of the rendered issue may not see (#706 re-review).
+# Delegated posts are plain prose, so the rule is wide on purpose instead
+# of chasing syntax: any raw HTML tag, comment, declaration or processing
+# instruction (``<b>``, ``<img>``, ``<div hidden>``, ``<!--``, ``<!DOCTYPE``,
+# ``<?xml``), any image in any form (``![``), and any line-start reference
+# definition (``[label]: destination "title"``), which never renders. A
+# ``<`` followed by a space, a digit or ``https:`` (an autolink) is text.
+# Code spans and fences are not exempted: they ask too.
 _HIDDEN_MARKUP = re.compile(
-    r"<!--|<\s*(?:script|style)\b|(?m:^[ \t]*\[[^\]\n]*\]:[ \t]*(?:#|<>))|!\[[^\]\n]*\S[^\]\n]*\]\(",
-    re.IGNORECASE)
+    r"<[!?]|</?[A-Za-z][\w-]*(?=[\s/>])|!\[|(?m:^[ \t]*\[[^\n]*\]:)")
 _VISIBLE_CONTROLS = frozenset("\n\t\r")
 
 
