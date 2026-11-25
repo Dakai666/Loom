@@ -44,14 +44,14 @@ Streaming strategy
 
 Confirm flow
 ------------
-BlastRadiusMiddleware.confirm_fn is patched to send a four-button message
-(Allow / Lease / Auto / Deny) in the thread and await the button interaction.
+BlastRadiusMiddleware.confirm_fn is patched to send a two-button message
+(Allow once / Deny; Lease and Auto were retired in #704 S4) in the thread and
+await the button interaction.
 The confirm waits indefinitely for a human decision (no auto-deny on timeout)
 — under Circadian Autonomy the agent may act while the operator is asleep or
 away, and a timeout→deny would feed it a phantom refusal it then tries to
 route around. Waiting is the safer default (and mirrors the CLI, which also
-blocks on the operator). Lease and Auto decisions post a follow-up message
-showing the TTL or grant scope.
+blocks on the operator).
 """
 
 from __future__ import annotations

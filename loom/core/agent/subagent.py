@@ -125,6 +125,10 @@ async def run_subagent(
         # See: "an error occurred during closing of async generator stdio_client"
         if "mcp" in (tool.tags or []):
             continue
+        # #709 review: the main session's own history (ledger_query) is not
+        # a sub-agent's, SAFE or not.
+        if "main_session_only" in (tool.tags or []):
+            continue
         # If a whitelist is given, only include tools on it
         if config.allowed_tools is not None and tool.name not in config.allowed_tools:
             continue

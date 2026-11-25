@@ -328,3 +328,14 @@ def test_subagents_never_get_ledger_query():
     assert "main_session_only" in (tool.tags or [])
     src = Path(sa.__file__).read_text(encoding="utf-8")
     assert "main_session_only" in src
+
+
+@pytest.mark.parametrize("key,masked", [
+    ("password", True), ("auth", True), ("auth_token", True), ("api-key", True),
+    ("client_secret", True), ("authorization", True),
+    ("input_tokens", False), ("authorization_reason", False), ("author", False), ("note", False),
+])
+def test_ledger_key_masking(key, masked):
+    from loom.platform.cli.tools import _redact_ledger_payload
+    out = json.loads(_redact_ledger_payload(json.dumps({key: "plainvalue"})))
+    assert (out[key] == "[REDACTED]") is masked

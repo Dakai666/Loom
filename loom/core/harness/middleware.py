@@ -123,7 +123,7 @@ def output_text(output: Any) -> str:
 # thread, but nobody is expected to be watching it. Prompting there held the
 # session's turn lock for hours and queued every later life event behind it.
 # Every human-in-the-loop wait — BlastRadius confirms, load_skill check
-# approval, HITL auto-pause — must consult this set and not wait.
+# approval, a requested pause — must consult this set and not wait.
 UNATTENDED_ORIGINS = frozenset({"autonomy", "subagent", "chime"})
 
 

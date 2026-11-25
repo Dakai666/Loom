@@ -2510,7 +2510,8 @@ class LoomSession:
 
                     # ── HITL check point ─────────────────────────────────────
                     # Fires after every tool batch, before the next LLM call.
-                    # pause() sets _pause_requested; hitl_mode auto-sets it each batch.
+                    # pause() sets _pause_requested (the per-batch /pause mode
+                    # that set it every batch was retired in #704 S4).
                     # Unattended turns (chime / autonomy / subagent) never park
                     # here: nobody would resume them, and the turn lock would
                     # hold every later event (#668, PR #673 review). A pending
@@ -4207,16 +4208,13 @@ class LoomSession:
         Phase C (Issue #45): scope metadata → verdict + diff info.
         Phase B (Issue #88): returns ConfirmDecision (y/s/a/N) instead of bool.
         PR-A3 (#236): replaces single-key stdin prompt with arrow-key
-        :func:`select_prompt`. Single-letter shortcuts (y/s/a/N) preserved
-        for muscle memory.
+        :func:`select_prompt`. Shortcuts y / N.
 
         Returns
         -------
         ConfirmDecision
             DENY  — Esc, Ctrl+C, or "N" shortcut
-            ONCE  — "y" shortcut (approve this call only)
-            SCOPE — "s" shortcut (30-min session lease)
-            AUTO  — "a" shortcut (permanent grant for this scope)
+            ONCE  — "y" shortcut (allow this one call; nothing is remembered)
         """
         from loom.core.harness.scope import ConfirmDecision, PermissionVerdict
         from loom.platform.cli.ui import SelectOption, select_prompt

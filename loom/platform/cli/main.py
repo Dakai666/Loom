@@ -1123,7 +1123,7 @@ async def _handle_slash(cmd: str, session: "LoomSession") -> None:
                 "  [loom.warning]/think[/loom.warning]                     View last turn's reasoning chain\n"
                 "  [loom.warning]/compact[/loom.warning]                   Compress older context\n"
                 "  [loom.warning]/mode[/loom.warning]                      Show or switch the permission mode (safe / self / yolo)\n"
-                "  [loom.warning]/scope[/loom.warning]                     List active scope grants (leases)\n"
+                "  [loom.warning]/scope[/loom.warning]                     List active scope grants\n"
                 "  [loom.warning]/scope revoke <N>[/loom.warning]          Revoke a specific grant\n"
                 "  [loom.warning]/scope clear[/loom.warning]               Revoke all non-system grants\n"
                 "  [loom.warning]/stop[/loom.warning]                      Immediately cancel a running turn (CLI: use Ctrl+C)\n"
