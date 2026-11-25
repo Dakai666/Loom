@@ -38,9 +38,11 @@ import asyncio
 import glob as _glob
 import json
 import logging
+import html
 import re
 import shlex
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -955,13 +957,75 @@ def _names_repo(intent: str, repo: str) -> bool:
     return repos == {repo.lower()}
 
 
-_HIDDEN_TEXT = re.compile("<!--|[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+# Markup a reader of the rendered issue does not see: an HTML comment,
+# blocks GitHub's sanitizer strips, a markdown "comment" (a reference
+# definition pointing at #), and image alt text (#706 review).
+_HIDDEN_MARKUP = re.compile(
+    r"<!--|<\s*(?:script|style)\b|(?m:^[ \t]*\[[^\]\n]*\]:[ \t]*(?:#|<>))|!\[[^\]\n]*\S[^\]\n]*\]\(",
+    re.IGNORECASE)
+_VISIBLE_CONTROLS = frozenset("\n\t\r")
+
+
+def approved_post_argv(argv: Any) -> bool:
+    """Whether *argv* has one of the two shapes ``DelegatedPost.argv``
+    produces: ``gh issue|pr comment <N> [--repo R] --body B`` or
+    ``gh issue create --repo R --title T --body B``. run_bash's no-shell
+    path runs nothing else, whatever the metadata says (#706 review)."""
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return False
+    if argv[:1] != ["gh"] or len(argv) < 4:
+        return False
+    kind, action = argv[1], argv[2]
+    if action == "comment" and kind in _POST_KINDS:
+        rest = argv[4:]
+        if not argv[3].isdigit():
+            return False
+        if len(rest) == 4 and rest[0] == "--repo" and rest[2] == "--body":
+            return bool(_REPO_ARG.fullmatch(rest[1]))
+        return len(rest) == 2 and rest[0] == "--body"
+    if action == "create" and kind == "issue":
+        rest = argv[3:]
+        return (len(rest) == 6 and rest[0] == "--repo" and bool(_REPO_ARG.fullmatch(rest[1]))
+                and rest[2] == "--title" and bool(rest[3].strip()) and rest[4] == "--body")
+    return False
+
+
+def _invisible_char(ch: str) -> bool:
+    """A format or control character (bidi, zero-width, soft hyphen, tag
+    characters…) or a variation selector, but not newline, tab or CR."""
+    if ch in _VISIBLE_CONTROLS:
+        return False
+    cp = ord(ch)
+    return (unicodedata.category(ch) in ("Cf", "Cc")
+            or 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF)
+
+
+def _emoji(ch: str) -> bool:
+    return unicodedata.category(ch) == "So"
 
 
 def _hidden_text(text: str) -> bool:
     """Whether *text* holds content a reader of the rendered issue would
-    not see: an HTML comment, or zero-width / bidi control characters."""
-    return bool(_HIDDEN_TEXT.search(text))
+    not see. Markup is checked as written (``&lt;!--`` renders visibly);
+    characters after ``html.unescape``, since ``&#x202e;`` renders as the
+    bidi control itself. The emoji presentation selectors (U+FE0E/FE0F)
+    right after an emoji, and a zero-width joiner between two emoji (❤️,
+    👨‍👩‍👧), are part of what the reader sees."""
+    if _HIDDEN_MARKUP.search(text):
+        return True
+    chars = html.unescape(text)
+    for i, ch in enumerate(chars):
+        if not _invisible_char(ch):
+            continue
+        prev = chars[i - 1] if i else ""
+        nxt = chars[i + 1] if i + 1 < len(chars) else ""
+        if ch in "\ufe0e\ufe0f" and prev and _emoji(prev):
+            continue
+        if ch == "\u200d" and prev and nxt and _emoji(nxt) and (
+                _emoji(prev) or prev in "\ufe0f" or unicodedata.category(prev) == "Sk"):
+            continue
+        return True
+    return False
 
 
 def delegated_post(command: str, intent: str, workspace: Path) -> DelegatedPost | None:

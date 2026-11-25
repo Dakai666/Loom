@@ -949,7 +949,9 @@ def make_run_bash_tool(
         it runs, and the shell scanners have no shell to guard. Under the
         srt sandbox the argv is quoted into the wrapped command instead."""
         timeout = call.args.get("timeout", 30)
-        cwd = str(workspace) if strict_sandbox else None
+        # The review spoke of the workspace's repository: a bare
+        # `gh issue comment N` resolves it from cwd (#706 review).
+        cwd = str(workspace)
         try:
             if _sandbox_active and _sandbox_settings_path is not None:
                 wrapped, _ = _maybe_wrap(shlex.join(argv), call)
@@ -990,8 +992,8 @@ def make_run_bash_tool(
         # approved; a model's args cannot select this path.
         argv = call.metadata.get("delegated_argv")
         if argv is not None:
-            if (not isinstance(argv, list) or not all(isinstance(a, str) for a in argv)
-                    or argv[:1] != ["gh"] or shlex.join(argv) != command):
+            from loom.core.harness.approval import approved_post_argv
+            if not approved_post_argv(argv) or shlex.join(argv) != command:
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name, success=False,
                     error="[Security] delegated argv does not match the approved gh post",
