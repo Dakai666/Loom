@@ -274,7 +274,7 @@ class TestSetModel:
         initial_router.switch_model.return_value = False
         codex_router = MagicMock()
         codex_router.switch_model.return_value = True
-        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: codex_router)
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None, **kwargs: codex_router)
 
         session = LoomSession.__new__(LoomSession)
         session.router = initial_router
@@ -298,7 +298,7 @@ class TestSetModel:
         initial_router.switch_model.return_value = False
         xai_router = MagicMock()
         xai_router.switch_model.return_value = True
-        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: xai_router)
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None, **kwargs: xai_router)
 
         session = LoomSession.__new__(LoomSession)
         session.router = initial_router
@@ -321,7 +321,7 @@ class TestSetModel:
         original.switch_model.return_value = False
         rebuilt = MagicMock()
         rebuilt.switch_model.return_value = False  # retry also fails
-        monkeypatch.setattr(session_module, "build_router", lambda active_model=None: rebuilt)
+        monkeypatch.setattr(session_module, "build_router", lambda active_model=None, **kwargs: rebuilt)
 
         session = LoomSession.__new__(LoomSession)
         session.router = original

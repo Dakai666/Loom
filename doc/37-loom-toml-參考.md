@@ -79,6 +79,7 @@ max_tokens    = 8096
 | `default_model` | string | `"MiniMax-M2.7"` | `loom autonomy start` / `loom discord start` 使用的模型；CLI 優先用 `--model` flag |
 | `max_tokens` | integer | `8096` | LLM 每次呼叫的最大輸出 token |
 | `fallback_model` | string | （未設定） | 額度備援（opt-in）：主模型回報方案額度／用量上限耗盡時改由此模型服務，冷卻期照 `Retry-After`（上限 6h）或 30 分鐘；一般 rate limit、5xx、逾時、登入失效不觸發。詳見 `loom.toml.example` |
+| `review_model` | string | `"codex/gpt-6-luna"` | 自動核准分類器（Luna）的模型（#712）：未設定時行為不變；設 `opencode-go/<model-id>` 時走 OpenCode Go（`OPENCODE_API_KEY`）。每日上限、5 秒 timeout、abstain 處理不變 |
 
 **模型前綴路由：**
 
@@ -86,6 +87,7 @@ max_tokens    = 8096
 |------|----------|----------------|
 | `MiniMax-*` | MiniMax | `MINIMAX_API_KEY` |
 | `claude-*` | Anthropic | `ANTHROPIC_API_KEY` |
+| `opencode-go/<model>`（canonical；短別名 `opencode/<model>` 亦可） | OpenCode Go（OpenCode Console 訂閱閘道，model id 直接透傳） | `OPENCODE_API_KEY` |
 
 ---
 
@@ -402,6 +404,99 @@ trust_level = "safe"
 
 ---
 
+## [providers.opencode_go]（v0.5.2.0）
+
+OpenCode Go — DK 的 OpenCode Console 訂閱閘道：一個 OpenAI 相容 endpoint
+（`https://opencode.ai/inference/go/openai/v1`）轉發 DeepSeek / GLM / Qwen /
+Kimi / MiniMax / LongCat / MiMo 等開源模型，一把 personal API key 打全部。
+provider id 是 `opencode-go`，Loom 這邊的 model 名稱一律帶 `opencode/` 前綴
+（例如 `opencode/glm-5.3`），`/` 後面的 model id 直接透傳給 endpoint，程式不
+寫死模型清單；可用 id 清單見 `GET https://opencode.ai/inference/go/v1/models`
+（文件上的例子：`deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3`、
+`glm-5.3-flash`、`qwen3.8-flash`、`qwen3.8-max`、`kimi-k3`、
+`minimax-m3.1-flash`、`longcat-2.0`、`mimo-v2.6-flash`、`gpt-6-luna`）。
+
+```toml
+# [providers.opencode_go]
+# base_url      = "https://opencode.ai/inference/go/openai/v1"  # 通常不用改
+# default_model = "deepseek-v4.1-flash"   # 裸 model id — 不帶 "opencode/" 前綴
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `base_url` | string | OpenCode Go endpoint | 不需覆寫；留給測試／代理用 |
+| `default_model` | string | `deepseek-v4.1-flash` | 只有在 `[cognition]default_model` 不是 `opencode/…` 時用到；只是建議值，可自由換成清單內任何 id |
+
+額度與注意事項：
+
+- **共用額度**：所有 Go 模型共用同一份 allowance（5 小時 = 月額度 20%／每週
+  50%（週一 00:00 UTC 重置）／每月），而且**與 OpenCode 本身共用**。額度用完
+  常見 429，Loom 會給出可讀訊息並指向用量查詢
+  `GET https://opencode.ai/inference/go/v1/usage`。
+- **錯誤碼**：401 = key 無效；403 = 訂閱不涵蓋該模型（EntitlementError）。
+- **隱私 retention**（寫進風險評估用）：DeepSeek／GLM／Kimi／Qwen／MiniMax
+  為 0 天；`gpt-6-luna` 30 天；Gemini 系 55 天。DeepSeek V4.1 Flash／V4 Pro
+  需先在 Console 的隱私設定選 **Global regions** 才可用。
+- **用戶端要求**：每個請求送 coding-agent 的 `User-Agent: loom-agent/<版本>`
+  與穩定的 `x-opencode-session`（Loom 的 session id）供路由與 prompt caching。
+
+### 建議用法（DK 2026-11-26 決定）
+
+**一般對話 turn 走 OpenCode Go。** Luna（自動核准分類器）的模型現在也可設定
+（`[cognition]review_model`，預設仍是 `codex/gpt-6-luna`、行為不變）——DK 的
+決策規則是「零誤放行才切」；三個題庫以 `opencode-go/deepseek-v4.1-flash`
+實測的模型層級 false accept 都是 0（題庫數字見 PR #712），所以片段包含
+Luna 的切換，但 deepseek 是 thinking 模型，128-token 回覆上限常被推理吃光
+（abstain 率約為 recorded Luna 的 1.1–1.4 倍，低於 2 倍門檻），多問不誤放行，
+介意可先不設 `review_model` 留在預設。
+
+**live 設定有 `[cognition.tiers]`（`1 = "chatgpt/gpt-6.1-terra"`、
+`default_tier = 1`）——tier 有設定時 `default_model` 不會生效**，所以
+`tiers.1` 也要一起改。以下是「修改既有 key」的形式（live 已有
+`[cognition]`，不要整段新增一個 `[cognition]` 區塊，TOML 會 duplicate
+table）：
+
+```toml
+# 修改 live 既有的行（不要新增 [cognition] 區塊）
+default_model = "opencode-go/deepseek-v4.1-flash"   # 原本 chatgpt/gpt-6.1-terra
+review_model  = "opencode-go/deepseek-v4.1-flash"   # Luna 分類器；預設 codex/gpt-6-luna
+
+[cognition.tiers]
+1 = "opencode-go/deepseek-v4.1-flash"               # 原本 chatgpt/gpt-6.1-terra（會蓋過 default_model）
+
+# fallback_model 維持 live 現有的 "deepseek-flash"，不用改：
+# Go 的 429（typed entitlement_or_quota，含 Retry-After）會觸發 Loom 既有
+# quota fallback 機制，冷卻後自動恢復。deepseek-flash 是跨 provider 的
+# 額度備援，tier 2（chatgpt/gpt-6.1-sol）也因此維持跨 provider 備援不變。
+
+# 新增（live 沒有）
+[providers.opencode_go]
+base_url      = "https://opencode.ai/inference/go/openai/v1"
+default_model = "deepseek-v4.1-flash"               # 裸 model id，不帶 opencode-go/ 前綴
+```
+
+為什麼用既有 fallback 機制而不是「手動切回」：Loom 的 quota fallback 會自動
+切換、冷卻後自動恢復，autonomy／Discord 會各通知一次（failover / restored），
+不需要人盯著；手動 `/model` 適合臨時換。**怎麼切回去**：
+
+- 自動：冷卻期過後 Loom 會 probe 主模型，成功即恢復並通知；
+- 手動：`/model chatgpt/gpt-6.1-terra`（切回 ChatGPT plan）或
+  `/model opencode-go/deepseek-v4.1-flash`（再切回 Go）。
+
+額度恢復後若想把 fallback 改回 ChatGPT plan：把
+`fallback_model = "deepseek-flash"` 改成 `"chatgpt/gpt-6.1-terra"`。但注意：
+那樣 fallback 與 tier 2（`chatgpt/gpt-6.1-sol`）就同屬 ChatGPT plan，
+**沒有跨 provider 的額度備援**（Go 與 ChatGPT plan 一起掛時沒有第三條路）。
+用 `deepseek-flash` 當 fallback 時，tier 2 的額度備援維持不變。
+
+提醒：`fallback_model` 指到 `chatgpt/<slug>` 時 chatgpt provider 必須能註冊
+（default 不是 `chatgpt/` 開頭就要 `[providers.chatgpt] enabled = true`；
+live 已符合）。Go 的 429 額度是 5 小時／每週／每月共用，並與 OpenCode 本身
+共用；DeepSeek V4.1 Flash／V4 Pro 需 Console 隱私設定選 Global regions
+（DK 端已符合）。
+
+---
+
 ## .env 環境變數
 
 API key 一律放 `.env`，不放 `loom.toml`。
@@ -410,6 +505,7 @@ API key 一律放 `.env`，不放 `loom.toml`。
 # LLM Providers
 MINIMAX_API_KEY=your_key_here
 ANTHROPIC_API_KEY=your_key_here       # optional
+OPENCODE_API_KEY=your_key_here        # optional — OpenCode Go（opencode/<model>）
 
 # Discord bot (loom discord start)
 DISCORD_BOT_TOKEN=your_bot_token

@@ -12,6 +12,10 @@ CodexResponsesProvider — chatgpt.com/backend-api/codex/responses (Codex OAuth)
 XAIResponsesProvider — api.x.ai/v1/responses (xAI OAuth)
 AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
 OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
+OpenCodeGoProvider — opencode.ai/inference/go/openai/v1 (OpenCode Console
+                     subscription gateway, provider id "opencode-go"; fronts
+                     DeepSeek / GLM / Qwen / Kimi / MiniMax / … behind one
+                     personal API key, model ids passed through verbatim)
 DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
                      (registered as AnthropicProvider with name="deepseek",
                       base_url="https://api.deepseek.com/anthropic")
@@ -42,6 +46,7 @@ from typing import Any
 
 from .forensics import get_forensics
 from . import vision as _vision
+from .responses_sse import QUOTA_FAILURE_TYPE, ResponsesProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -823,6 +828,11 @@ class _OpenAICompatibleBase(LLMProvider):
             api_key=api_key,
             base_url=self._base_url,
             timeout=self._timeout,
+            # Explicit (equals the SDK default of 2, so every existing
+            # provider's retry behaviour is unchanged); OpenCodeGoProvider
+            # overrides with 0 — a 429 must reach the router's quota
+            # fallback immediately, not be retried in place for minutes.
+            max_retries=self._max_retries,
         )
 
     def _api_model(self) -> str:
@@ -1052,6 +1062,201 @@ class OpenAIProvider(_OpenAICompatibleBase):
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_TIMEOUT = 180.0
     MAX_TOKENS_PARAM = "max_completion_tokens"
+
+
+class OpenCodeGoProvider(_OpenAICompatibleBase):
+    """
+    OpenCode Go — the OpenCode Console coding-agent subscription gateway.
+
+    An OpenAI-compatible endpoint fronting many open-weight vendors
+    (DeepSeek, GLM, Qwen, Kimi, MiniMax, LongCat, MiMo, …) with a single
+    personal API key. All text models (including tool-call models) ride the
+    same chat-completions path — the Console translates per vendor — so the
+    model id is passed through verbatim and no model list is hard-coded
+    here. Loom only strips its own ``opencode-go/`` routing prefix before
+    the wire call.
+
+    Routing prefix: ``opencode-go/`` (canonical; short alias ``opencode/``)
+    Default base URL: ``https://opencode.ai/inference/go/openai/v1``
+
+    Usage::
+
+        /model opencode-go/glm-5.3
+        /model opencode-go/deepseek-v4.1-flash
+        /model opencode/glm-5.3          # short alias, same provider
+
+    Configure in ``.env``::
+
+        OPENCODE_API_KEY=...    # OpenCode Console personal API key
+
+    Optionally in ``loom.toml``::
+
+        [providers.opencode_go]
+        base_url      = "https://opencode.ai/inference/go/openai/v1"
+        default_model = "deepseek-v4.1-flash"   # bare id — no "opencode-go/" prefix here
+
+    Client requirements from the OpenCode Go docs:
+
+    * a coding-agent ``User-Agent`` (never the generic SDK / HTTP-library
+      name) — Loom sends ``loom-agent/<version>``;
+    * a stable ``x-opencode-session`` header per conversation (used for
+      routing and prompt caching) — Loom sends its own session id, falling
+      back to a per-provider-instance generated id when none is given.
+
+    Quota note: every Go model draws from one shared allowance (5-hour /
+    weekly / monthly), which is also shared with OpenCode itself. The SDK's
+    built-in retries are disabled for this provider (``max_retries=0``): a
+    429 is a typed quota error the router turns into an immediate failover,
+    not something to sleep out in place. 429 is translated into a readable
+    message pointing at the usage endpoint; 401 / 403 likewise, without
+    ever echoing the API key.
+    """
+
+    name = "opencode-go"
+    ROUTING_PREFIX = "opencode-go/"
+    DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+    DEFAULT_MODEL = "deepseek-v4.1-flash"
+    DEFAULT_TIMEOUT = 180.0
+
+    # Canonical Loom name: ``opencode-go/<model-id>`` (provider id + model id).
+    # The short ``opencode/<model-id>`` spelling keeps working as an alias.
+    _LOOM_PREFIXES = ("opencode-go/", "opencode/")
+
+    def __init__(
+        self,
+        base_url: str = "",
+        model: str = "",
+        api_key: str = "",
+        timeout: float = 0.0,
+        max_retries: int = 0,
+        session_id: str | None = None,
+        http_client: Any = None,
+    ) -> None:
+        key = (api_key or "").strip()
+        if not key:
+            # Never send an empty key or silently fall back to another
+            # provider — surface the missing configuration instead.
+            raise RuntimeError(
+                "OpenCode Go provider needs an OpenCode Console personal API "
+                "key. Set OPENCODE_API_KEY in .env (create one in the OpenCode "
+                "Console). Refusing to send requests without credentials."
+            )
+        self._api_key = key  # kept only to redact it from error details
+        self._base_url = base_url or self.DEFAULT_BASE_URL
+        self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
+        self._timeout = timeout or self.DEFAULT_TIMEOUT
+        self._max_retries = max_retries
+        # Stable per-conversation session header (routing + prompt caching).
+        # Callers pass Loom's session id; without one, generate an id that is
+        # stable for this provider instance's lifetime.
+        self.session_header = session_id or f"loom-{uuid.uuid4().hex[:8]}"
+        import loom as _loom_pkg
+
+        from openai import AsyncOpenAI
+        self._async_client = AsyncOpenAI(
+            api_key=key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+            # Default 0 on purpose: a 429 (Retry-After ≤120s) must NOT be
+            # retried in place by the SDK — it is a typed quota error that
+            # the router turns into an immediate failover to
+            # [cognition]fallback_model. SDK retries would sleep out the
+            # Retry-After twice (~240s) before the router ever sees it.
+            max_retries=max_retries,
+            http_client=http_client,
+            default_headers={
+                # Docs: a coding-agent User-Agent, never a generic SDK one.
+                "User-Agent": f"loom-agent/{getattr(_loom_pkg, '__version__', 'dev')}",
+                "x-opencode-session": self.session_header,
+            },
+        )
+
+    def _api_model(self) -> str:
+        """Strip Loom's routing prefix (either spelling) before the wire call."""
+        model = self.model
+        for prefix in self._LOOM_PREFIXES:
+            if model.startswith(prefix):
+                return model.removeprefix(prefix)
+        return model
+
+    def _translate_status_error(self, exc: BaseException) -> BaseException:
+        """Map OpenCode Go HTTP status errors to readable messages.
+
+        Never includes the API key — the key is redacted from any server
+        detail before the message is built. Non-status errors (connection
+        failures, timeouts) pass through unchanged, matching the behaviour
+        of the other OpenAI-compatible providers.
+        """
+        import openai
+
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            return exc
+        detail = str(exc).replace(self._api_key, "<redacted>")
+        if status == 401:
+            return RuntimeError(
+                f"OpenCode Go rejected the API key (HTTP 401): {detail}. "
+                "Check that OPENCODE_API_KEY holds a valid OpenCode Console "
+                "personal API key."
+            )
+        if status == 403:
+            return RuntimeError(
+                f"OpenCode Go refused this request (HTTP 403): {detail}. "
+                "Your OpenCode subscription does not cover this model "
+                "(EntitlementError) — choose a model your plan includes or "
+                "check the subscription in the OpenCode Console."
+            )
+        if status == 429:
+            # Typed quota failure: the router's quota fallback acts only on
+            # ``failure_type=entitlement_or_quota``, so a Go allowance
+            # exhaustion can automatically serve [cognition]fallback_model.
+            headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+            raw_retry_after = headers.get("retry-after")
+            retry_after: float | None = None
+            if raw_retry_after:
+                try:
+                    retry_after = float(raw_retry_after)
+                except (TypeError, ValueError):
+                    retry_after = None
+            return ResponsesProviderError(
+                provider=self.name,
+                model=self._api_model(),
+                failure_type=QUOTA_FAILURE_TYPE,
+                phase="headers_received",
+                detail=(
+                    f"OpenCode Go allowance exhausted (HTTP 429): {detail}. "
+                    "All Go models share one 5-hour / weekly / monthly "
+                    "allowance, and it is shared with OpenCode itself. "
+                    "Remaining quota: GET https://opencode.ai/inference/go/v1/usage."
+                ),
+                retry_after_seconds=retry_after,
+            )
+        return exc
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        # Same streaming machinery as every OpenAI-compatible provider; only
+        # the status-error translation is provider-specific.
+        stream = super().stream_chat(
+            messages=messages, tools=tools, max_tokens=max_tokens,
+            abort_signal=abort_signal,
+        )
+        try:
+            async for item in stream:
+                yield item
+        except BaseException as exc:
+            translated = self._translate_status_error(exc)
+            if translated is not exc:
+                # ``from None``: the original openai error (potentially an
+                # unredacted response body) must not ride along as __cause__.
+                raise translated from None
+            raise
 
 
 

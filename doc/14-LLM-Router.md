@@ -24,6 +24,8 @@ _ROUTING: list[tuple[str, str]] = [
     ("claude-",    "anthropic"),  # Anthropic claude-3.5-sonnet 等
     ("gpt-",       "openai"),     # GPT-5.5、GPT-5.5-pro 等
     ("openai/",    "openai"),     # 明確指定 OpenAI provider
+    ("opencode-go/","opencode-go"),# OpenCode Go（Console 訂閱閘道；canonical，id 透傳）
+    ("opencode/",  "opencode-go"), # OpenCode Go 短別名
     ("ollama/",    "ollama"),     # 本地 Ollama 模型
     ("lmstudio/",  "lmstudio"),   # 本地 LM Studio 模型
 ]
@@ -97,7 +99,17 @@ router.register(OpenAIProvider(api_key=..., model="gpt-5.5"))
 router.register(CodexResponsesProvider(model="codex/gpt-5.5"), fallback=False)
 router.register(XAIResponsesProvider(model="xai/grok-4.3"), fallback=False)
 router.register(OllamaProvider(base_url="http://localhost:11434"))
+router.register(OpenCodeGoProvider(api_key=..., model="opencode-go/deepseek-v4.1-flash", session_id=...))
 ```
+
+`OpenCodeGoProvider`（provider id `opencode-go`）是 OpenCode Console 訂閱的
+OpenAI 相容閘道（`https://opencode.ai/inference/go/openai/v1`）：key 只從
+`OPENCODE_API_KEY` 讀，model id 在 `opencode-go/`（或短別名 `opencode/`）
+前綴之後直接透傳、不寫死清單；每個請求帶 `User-Agent: loom-agent/<版本>` 與
+穩定的 `x-opencode-session`（Loom 的 session id，`build_router(session_id=...)`
+傳入）。401／403 轉成可讀錯誤訊息（不洩漏 key）；429 以 typed
+`ResponsesProviderError`（`entitlement_or_quota`，含 Retry-After）拋出，router
+的 quota fallback 可自動服務 `fallback_model` 並在冷卻後自動恢復。
 
 Codex/xAI Responses OAuth providers expose `first_event_timeout` and
 `idle_event_timeout` through `loom.toml` (`[providers.codex]` /

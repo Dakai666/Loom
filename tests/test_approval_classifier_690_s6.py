@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -604,6 +605,287 @@ class TestWiring:
         chat = plan_model_chat()
         await chat([{"role": "user", "content": "x"}])
         assert seen == [("codex/gpt-6-luna", "low", None, [{"role": "user", "content": "x"}])]
+
+
+class TestReviewModelConfig:
+    """#712: the classifier model is configurable via ``[cognition]review_model``;
+    unset, behaviour is exactly what it was (codex/gpt-6-luna)."""
+
+    def test_default_is_unchanged_without_config(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {})
+        assert approval.review_model() == approval.REVIEW_MODEL
+
+    def test_reads_cognition_review_model(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        assert approval.review_model() == "opencode-go/deepseek-v4.1-flash"
+
+    def test_blank_or_missing_falls_back_to_default(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "   "},
+        })
+        assert approval.review_model() == approval.REVIEW_MODEL
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {})
+        assert approval.review_model() == approval.REVIEW_MODEL
+
+    async def test_plan_model_chat_builds_go_provider_for_opencode_model(
+        self, monkeypatch,
+    ):
+        import loom.core.config as config_mod
+        import loom.core.cognition.providers as providers_mod
+        import loom.core.session_support as session_support_mod
+        from loom.core.harness import approval
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        monkeypatch.setattr(
+            session_support_mod, "_load_env",
+            lambda project_root=None: {"OPENCODE_API_KEY": "sk-test-opencode-fake"},
+        )
+
+        stubs = []
+
+        class _GoStub:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                stubs.append(self)
+
+            async def chat(self, messages=None, tools=None, max_tokens=0):
+                self.seen = (messages, tools, max_tokens)
+
+                class _R:
+                    text = '{"verdict":"abstain"}'
+                return _R()
+
+        monkeypatch.setattr(providers_mod, "OpenCodeGoProvider", _GoStub)
+
+        chat = approval.plan_model_chat()
+        assert len(stubs) == 1
+        assert stubs[0].kwargs["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert stubs[0].kwargs["api_key"] == "sk-test-opencode-fake"
+        messages = [{"role": "user", "content": "x"}]
+        await chat(messages)
+        assert stubs[0].seen == (messages, None, 128)
+
+    async def test_review_meta_records_the_configured_model(self, tmp_path, ledger, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness.approval import REVIEW_MODEL
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        env = Env(tmp_path, ledger)
+        await env.run("write_file", _write("outputs/brief.md"))
+        await asyncio.sleep(0.05)
+        rows = await ledger.execute_sql(
+            "SELECT payload FROM events WHERE event_type='approval_review' "
+            "AND json_extract(payload,'$.phase')='result'"
+        )
+        result = [json.loads(p) for (p,) in rows]
+        assert result and result[0]["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert REVIEW_MODEL == "codex/gpt-6-luna"  # built-in default untouched
+
+
+_GO = "opencode-go/deepseek-v4.1-flash"
+_FAKE_KEY = "sk-test-opencode-fake"
+
+
+def _unavailable_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == "loom.core.harness.approval"
+            and r.levelno == logging.WARNING and "unavailable" in r.getMessage()]
+
+
+class TestReviewModelFailClosed:
+    """#712 review round 2: a review model that cannot be built never keeps a
+    session from starting. plan_model_chat() warns once and hands back a
+    chat whose every call raises, so each review ends outcome=error →
+    abstain and DK is asked (fail closed)."""
+
+    @staticmethod
+    def _config(monkeypatch, cfg: dict, env: dict) -> None:
+        import loom.core.config as config_mod
+        import loom.core.session_support as session_support_mod
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: cfg)
+        monkeypatch.setattr(session_support_mod, "_load_env", lambda project_root=None: env)
+        monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+
+    async def test_missing_go_key_warns_once_and_every_call_fails(self, monkeypatch, caplog):
+        from loom.core.harness import approval
+
+        self._config(monkeypatch, {"cognition": {"review_model": _GO}}, {})
+        with caplog.at_level(logging.WARNING, logger="loom.core.harness.approval"):
+            chat = approval.plan_model_chat()  # must not raise
+            for _ in range(3):
+                with pytest.raises(RuntimeError):
+                    await chat([{"role": "user", "content": "x"}])
+        warnings = _unavailable_warnings(caplog)
+        assert len(warnings) == 1
+        assert _GO in warnings[0] and "OPENCODE_API_KEY" in warnings[0]
+        assert chat.model == _GO
+
+    async def test_session_starts_without_key_and_classifier_abstains(
+        self, monkeypatch, tmp_path, ledger, caplog,
+    ):
+        """The real startup path: LoomSession.start() wires the classifier
+        with the broken review model and still succeeds; that classifier's
+        chat makes a review end outcome=error and DK is asked."""
+        from unittest.mock import MagicMock
+
+        from loom.core import session as session_module
+        from loom.core.harness.middleware import BlastRadiusMiddleware
+        from loom.core.session import LoomSession
+
+        cfg = {"cognition": {"review_model": _GO}}
+        self._config(monkeypatch, cfg, {})
+        ws = tmp_path / "workspace"
+        ws.mkdir()
+        (tmp_path / "home").mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(session_module, "build_router", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(session_module, "_load_loom_config", lambda: cfg)
+        monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
+        monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
+        from rich.prompt import Confirm
+        monkeypatch.setattr(Confirm, "ask", lambda *a, **k: True)
+
+        with caplog.at_level(logging.WARNING, logger="loom.core.harness.approval"):
+            session = LoomSession(model="gpt-test", db_path=str(tmp_path / "loom.db"),
+                                  workspace=ws)
+            await session.start()  # must not raise
+            try:
+                blast = next(m for m in session._pipeline._middlewares
+                             if isinstance(m, BlastRadiusMiddleware))
+                chat = blast._classifier._chat
+                assert blast._classifier._model == _GO
+            finally:
+                await session.stop()
+
+            env = Env(tmp_path, ledger, model=chat)
+            unattended = await env.run("write_file", _write("outputs/brief.md"))
+            attended = await env.run("write_file", _write("outputs/notes.md"),
+                                     origin="user")
+        await asyncio.sleep(0.05)
+        rows = await ledger.execute_sql(
+            "SELECT json_extract(payload,'$.outcome') FROM events "
+            "WHERE event_type='approval_review' "
+            "AND json_extract(payload,'$.phase')='result'")
+        assert [r[0] for r in rows][:1] == ["error"]
+        # Fail closed: the unattended call is skipped, never auto-run; the
+        # attended one waits on DK's confirm.
+        assert not unattended.success
+        assert unattended.metadata.get("unattended_skip") is True
+        assert unattended.metadata.get("skip_note") == "model-abstain: error"
+        assert env.confirm.await_count == 1 and attended.success
+        assert [c.args["path"] for c in env.ran] == ["outputs/notes.md"]
+        assert len(_unavailable_warnings(caplog)) == 1
+
+    async def test_review_provider_uses_the_configured_base_url(self, monkeypatch):
+        import loom.core.cognition.providers as providers_mod
+        from loom.core.harness import approval
+
+        self._config(monkeypatch, {
+            "cognition": {"review_model": _GO},
+            "providers": {"opencode_go": {"base_url": "http://127.0.0.1:9/openai/v1"}},
+        }, {"OPENCODE_API_KEY": _FAKE_KEY})
+        seen = []
+
+        class _GoStub:
+            def __init__(self, **kwargs):
+                seen.append(kwargs)
+
+        monkeypatch.setattr(providers_mod, "OpenCodeGoProvider", _GoStub)
+        approval.plan_model_chat()
+        assert seen and seen[0]["base_url"] == "http://127.0.0.1:9/openai/v1"
+
+    @pytest.mark.parametrize("model", ["deepseek-flash", "chatgpt/gpt-6.1-terra", "gpt-6-luna"])
+    async def test_unrecognized_prefix_warns_and_abstains(self, monkeypatch, caplog, model):
+        from loom.core.cognition.codex_responses_provider import CodexResponsesProvider
+        from loom.core.harness import approval
+
+        self._config(monkeypatch, {"cognition": {"review_model": model}}, {})
+
+        def _must_not_build(*_a, **_k):
+            raise AssertionError("must not build a provider for an unknown prefix")
+
+        monkeypatch.setattr(CodexResponsesProvider, "__init__", _must_not_build)
+        with caplog.at_level(logging.WARNING, logger="loom.core.harness.approval"):
+            chat = approval.plan_model_chat()
+        with pytest.raises(RuntimeError):
+            await chat([{"role": "user", "content": "x"}])
+        warnings = _unavailable_warnings(caplog)
+        assert len(warnings) == 1
+        assert model in warnings[0] and "codex/" in warnings[0]
+
+    async def test_provider_error_never_logs_the_key(self, monkeypatch, caplog):
+        import loom.core.cognition.providers as providers_mod
+        from loom.core.harness import approval
+
+        self._config(monkeypatch, {"cognition": {"review_model": _GO}},
+                     {"OPENCODE_API_KEY": _FAKE_KEY})
+
+        class _Boom:
+            def __init__(self, **kwargs):
+                raise ValueError("bad base_url")
+
+        monkeypatch.setattr(providers_mod, "OpenCodeGoProvider", _Boom)
+        with caplog.at_level(logging.DEBUG):
+            chat = approval.plan_model_chat()
+            with pytest.raises(RuntimeError) as exc_info:
+                await chat([{"role": "user", "content": "x"}])
+        assert len(_unavailable_warnings(caplog)) == 1
+        assert _FAKE_KEY not in caplog.text
+        assert _FAKE_KEY not in str(exc_info.value)
+
+    async def test_ledger_model_is_captured_at_construction(
+        self, tmp_path, ledger, monkeypatch,
+    ):
+        import loom.core.cognition.providers as providers_mod
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+
+        self._config(monkeypatch, {"cognition": {"review_model": _GO}},
+                     {"OPENCODE_API_KEY": _FAKE_KEY})
+
+        class _GoStub:
+            def __init__(self, **kwargs):
+                pass
+
+            async def chat(self, messages=None, tools=None, max_tokens=0):
+                class _R:
+                    text = '{"verdict":"accept"}'
+                return _R()
+
+        monkeypatch.setattr(providers_mod, "OpenCodeGoProvider", _GoStub)
+        chat = approval.plan_model_chat()
+        assert chat.model == _GO
+        env = Env(tmp_path, ledger, model=chat)
+        await env.run("write_file", _write("outputs/a.md"))
+        # A mid-session loom.toml edit must not relabel what this chat serves.
+        calls = []
+
+        def _reread():
+            calls.append(1)
+            return {"cognition": {"review_model": "opencode-go/glm-5.3"}}
+
+        monkeypatch.setattr(config_mod, "load_loom_config", _reread)
+        await env.run("write_file", _write("outputs/b.md"))
+        await asyncio.sleep(0.05)
+        rows = await ledger.execute_sql(
+            "SELECT json_extract(payload,'$.model') FROM events "
+            "WHERE event_type='approval_review' "
+            "AND json_extract(payload,'$.phase')='result'")
+        assert [r[0] for r in rows] == [_GO, _GO]
+        assert calls == []  # the review path never re-reads loom.toml
 
 
 # ---------------------------------------------------------------------------

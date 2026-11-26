@@ -244,7 +244,7 @@ class TestSessionEffort:
         # Original router lacks the minimax provider → set_model must rebuild.
         s.router = LLMRouter()
         fresh = _router_with(_provider("minimax-m2.7"))
-        monkeypatch.setattr("loom.core.session.build_router", lambda active_model=None: fresh)
+        monkeypatch.setattr("loom.core.session.build_router", lambda active_model=None, **kwargs: fresh)
         assert s.set_model(M31)
         assert s.router is fresh
         assert _mm(s).effort == "medium"
