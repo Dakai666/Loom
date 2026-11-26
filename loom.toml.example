@@ -37,6 +37,9 @@ personality = ""
 #   codex/<model>           → Codex OAuth backend (e.g. codex/gpt-6.1-sol)     (`codex login`)
 #   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
 #   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
+#   opencode/<model>        → OpenCode Go subscription gateway (e.g. opencode/glm-5.3;   (OPENCODE_API_KEY in .env)
+#                             model id passed through verbatim — see
+#                             GET https://opencode.ai/inference/go/v1/models
 #   ollama/<name>           → local Ollama server  (enable [providers.ollama] below)
 #   lmstudio/<name>         → local LM Studio      (enable [providers.lmstudio] below)
 
@@ -142,6 +145,22 @@ reminder_after_turns = 10
 # [providers.openai]
 # base_url      = "https://api.openai.com/v1"
 # default_model = "gpt-5.5"
+
+# [providers.opencode_go]
+# OpenCode Go — OpenCode Console 訂閱閘道，一把 personal API key（OPENCODE_API_KEY
+# in .env）轉發 DeepSeek / GLM / Qwen / Kimi / MiniMax / LongCat / MiMo 等模型。
+# 所有 Go 模型共用同一份 5 小時／每週／每月 allowance（與 OpenCode 本身共用）；
+# 額度用完常見 429，可用 GET https://opencode.ai/inference/go/v1/usage 查用量。
+# 隱私 retention 各模型不同（DeepSeek/GLM/Kimi/Qwen/MiniMax 0 天、gpt-6-luna
+# 30 天、Gemini 55 天）；DeepSeek V4.1 Flash / V4 Pro 需先在 Console 隱私設定
+# 選 Global regions 才可用。
+# base_url      = "https://opencode.ai/inference/go/openai/v1"
+# default_model = "deepseek-v4.1-flash"  # 裸 model id — 不帶 "opencode/" 前綴；
+#                                        # 建議值，可換清單內任何 id
+# 接法（皆 opt-in，不改現有預設）：
+#   主模型     [cognition] default_model = "opencode/glm-5.3"
+#   備援       [cognition] fallback_model = "opencode/deepseek-v4.1-flash"
+#   指定用途   [cognition.tiers] 2 = "opencode/deepseek-v4-pro"
 
 # The official ChatGPT plan integration uses separate Loom credentials:
 #   loom auth chatgpt login

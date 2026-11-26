@@ -86,6 +86,7 @@ max_tokens    = 8096
 |------|----------|----------------|
 | `MiniMax-*` | MiniMax | `MINIMAX_API_KEY` |
 | `claude-*` | Anthropic | `ANTHROPIC_API_KEY` |
+| `opencode/<model>` | OpenCode Go（OpenCode Console 訂閱閘道，model id 直接透傳） | `OPENCODE_API_KEY` |
 
 ---
 
@@ -402,6 +403,52 @@ trust_level = "safe"
 
 ---
 
+## [providers.opencode_go]（v0.5.2.0）
+
+OpenCode Go — DK 的 OpenCode Console 訂閱閘道：一個 OpenAI 相容 endpoint
+（`https://opencode.ai/inference/go/openai/v1`）轉發 DeepSeek / GLM / Qwen /
+Kimi / MiniMax / LongCat / MiMo 等開源模型，一把 personal API key 打全部。
+provider id 是 `opencode-go`，Loom 這邊的 model 名稱一律帶 `opencode/` 前綴
+（例如 `opencode/glm-5.3`），`/` 後面的 model id 直接透傳給 endpoint，程式不
+寫死模型清單；可用 id 清單見 `GET https://opencode.ai/inference/go/v1/models`
+（文件上的例子：`deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3`、
+`glm-5.3-flash`、`qwen3.8-flash`、`qwen3.8-max`、`kimi-k3`、
+`minimax-m3.1-flash`、`longcat-2.0`、`mimo-v2.6-flash`、`gpt-6-luna`）。
+
+```toml
+# [providers.opencode_go]
+# base_url      = "https://opencode.ai/inference/go/openai/v1"  # 通常不用改
+# default_model = "deepseek-v4.1-flash"   # 裸 model id — 不帶 "opencode/" 前綴
+```
+
+| 欄位 | 類型 | 預設值 | 說明 |
+|------|------|--------|------|
+| `base_url` | string | OpenCode Go endpoint | 不需覆寫；留給測試／代理用 |
+| `default_model` | string | `deepseek-v4.1-flash` | 只有在 `[cognition]default_model` 不是 `opencode/…` 時用到；只是建議值，可自由換成清單內任何 id |
+
+額度與注意事項：
+
+- **共用額度**：所有 Go 模型共用同一份 allowance（5 小時 = 月額度 20%／每週
+  50%（週一 00:00 UTC 重置）／每月），而且**與 OpenCode 本身共用**。額度用完
+  常見 429，Loom 會給出可讀訊息並指向用量查詢
+  `GET https://opencode.ai/inference/go/v1/usage`。
+- **錯誤碼**：401 = key 無效；403 = 訂閱不涵蓋該模型（EntitlementError）。
+- **隱私 retention**（寫進風險評估用）：DeepSeek／GLM／Kimi／Qwen／MiniMax
+  為 0 天；`gpt-6-luna` 30 天；Gemini 系 55 天。DeepSeek V4.1 Flash／V4 Pro
+  需先在 Console 的隱私設定選 **Global regions** 才可用。
+- **用戶端要求**：每個請求送 coding-agent 的 `User-Agent: loom-agent/<版本>`
+  與穩定的 `x-opencode-session`（Loom 的 session id）供路由與 prompt caching。
+
+用法（三種接法，皆 opt-in，不影響現有預設）：
+
+```toml
+# 1. 主模型：[cognition] default_model = "opencode/glm-5.3"
+# 2. 額度備援：[cognition] fallback_model = "opencode/deepseek-v4.1-flash"
+# 3. 指定用途（tier）：[cognition.tiers] 2 = "opencode/deepseek-v4-pro"
+```
+
+---
+
 ## .env 環境變數
 
 API key 一律放 `.env`，不放 `loom.toml`。
@@ -410,6 +457,7 @@ API key 一律放 `.env`，不放 `loom.toml`。
 # LLM Providers
 MINIMAX_API_KEY=your_key_here
 ANTHROPIC_API_KEY=your_key_here       # optional
+OPENCODE_API_KEY=your_key_here        # optional — OpenCode Go（opencode/<model>）
 
 # Discord bot (loom discord start)
 DISCORD_BOT_TOKEN=your_bot_token
