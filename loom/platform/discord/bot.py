@@ -94,7 +94,7 @@ from loom.platform.cli.ui import (
     ActionRolledBack, ActionStateChange,
     ReasoningContinuation, TextChunk, ThinkCollapsed,
     TierChanged, TierExpiryHint,
-    ToolBegin, ToolEnd, TurnDone, TurnDropped, TurnPaused,
+    ToolBegin, ToolEnd, TurnDone, TurnDropped,
 )
 from loom.autonomy.chime import ChimeRequest, format_chime_content
 from loom.platform.discord.tools import (
@@ -1612,7 +1612,6 @@ class LoomDiscordBot:
         _cache_read_tokens = 0
         _cache_creation_tokens = 0
         _cache_input_tokens = 0
-        _had_pause = False
         _had_rollback = False
 
         # ── Stalled-status watchdog (#422) ───────────────────────────────
@@ -1790,53 +1789,6 @@ class LoomDiscordBot:
                                 )
                                 tool_buf += f" ✗ {err}"
                             await _safe_edit(status_msg, tool_buf.lstrip())
-
-                    elif isinstance(event, TurnPaused):
-                        _had_pause = True
-                        pause_body = (
-                            (tool_buf.lstrip() + "\n\n" if tool_buf else "")
-                            + f"⏸ **Paused** after {event.tool_count_so_far} tool call(s).\n"
-                            "Reply `r` to resume · `c` to cancel · or send a redirect message"
-                        )
-                        await _safe_edit(status_msg, pause_body)
-
-                        def _pause_check(m: discord.Message) -> bool:
-                            return (
-                                m.channel.id == message.channel.id
-                                and (
-                                    not self._allowed_users
-                                    or m.author.id in self._allowed_users
-                                )
-                                and not m.author.bot
-                            )
-
-                        # Suppress the stalled watchdog while we wait on
-                        # the user (#422). Pause time is on the human;
-                        # tagging the status as ``still waiting`` would
-                        # mislead. ``resume()`` in the finally clears the
-                        # suppression AND resets the observation clock + latch
-                        # so the post-resume window doesn't inherit pre-pause
-                        # quiet time — a matched pair fully inside this
-                        # try/finally per Loom's shared-session
-                        # preemption-race convention (never fire-and-forget).
-                        try:
-                            sensor.suppress()
-                            reply = await self._client.wait_for(
-                                "message", check=_pause_check, timeout=120.0
-                            )
-                            raw = reply.content.strip()
-                            if raw.lower() in ("c", "cancel"):
-                                session.cancel()
-                            elif raw.lower() in ("r", "resume", ""):
-                                session.resume()
-                            else:
-                                session.resume_with(_attribute_speaker(raw, reply.author))
-                                tool_buf += f"\n*(redirected: {raw[:60]})*"
-                        except asyncio.TimeoutError:
-                            session.cancel()
-                            tool_buf += "\n*(pause timed out — cancelled)*"
-                        finally:
-                            sensor.resume()
 
                     elif isinstance(event, ReasoningContinuation):
                         # Issue #271: max_tokens recovery hint — small
@@ -2034,8 +1986,6 @@ class LoomDiscordBot:
                 embed.add_field(name="Actions", value=str(_total_actions), inline=True)
                 embed.add_field(name="Failures", value=str(_total_failures), inline=True)
                 embed.add_field(name="Elapsed", value=f"{_total_elapsed_ms / 1000:.1f}s", inline=True)
-                if _had_pause:
-                    embed.add_field(name="Paused", value="Yes", inline=True)
                 if _had_rollback:
                     embed.add_field(name="Rollbacks", value="Yes", inline=True)
                 embed.add_field(name="Grants", value=grants_str, inline=True)
@@ -2089,9 +2039,8 @@ class LoomDiscordBot:
             view = _ConfirmView()  # no auto-deny — waits for your decision
 
             just_text = f"**Justification:** *{justification}*\n" if justification else ""
-            # #690 S6c: why the approval classifier left this one to DK.
-            classifier = classifier_line(call)
-            classifier_text = f"-# {classifier}\n" if classifier else ""
+            # #704 S6: the mode and the one guard reason, as the CLI shows them.
+            classifier_text = f"-# {classifier_line(call)}\n"
             text = (
                 f"{color} **{trust}** — tool confirmation required\n"
                 f"**`{call.tool_name}`**\n"

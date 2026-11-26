@@ -77,7 +77,7 @@ def _assert_skipped(result: ToolResult, ran: list[str]) -> None:
     assert ran == []
     assert not result.success
     assert result.metadata.get("unattended_skip") is True
-    assert result.error.startswith("Skipped (not executed)")
+    assert result.error.startswith("守門・") and "\nSkipped (not executed)" in result.error
 
 
 class TestNameGrantNoLongerCoversShell:
@@ -254,7 +254,8 @@ class TestDenyAndCeilingsStillWin:
         )
         result = await blast.process(_bash(f"{PET} status"), executor)
         assert ran == []
-        assert result.error == "Permission denied by scope policy."
+        assert result.error.startswith("守門・授權範圍：")
+        assert result.error.endswith("Permission denied by scope policy.")
 
 
 class TestAbsolutePathAfterEquals:

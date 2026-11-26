@@ -489,47 +489,45 @@ class TraceMiddleware(Middleware):
         return result
 
 
+WRITE_EXPECT_KEY = "write_expect"
+"""What read before write established about a write's target: ``{"path":
+resolved path, "sha256": digest or None (absent)}``. write_file re-checks
+it where it writes (#704 S6)."""
+
+
 class LegitimacyGuardMiddleware(Middleware):
     """
-    Read-before-Write guard + Trajectory Anomaly detection
-    (Issue #47 Phase 3, refined Issue #118).
+    Read before write (Issue #47 Phase 3, #118, #288; restated in #704 S6).
 
-    **Layer 1 — Hard guard (strict_guard_tools, currently write_file only)**
+    The contract DK took from early Claude Code / opencode, for the tools in
+    ``strict_guard_tools`` (write_file):
 
-    Mirrors Claude Code's Read-before-Edit contract: the agent must call a
-    probe tool (``read_file``, ``list_dir``, etc.) before writing.  This
-    prevents hallucinated overwrites of files the agent has never seen.
+    - **Creating** a file needs no prior read: when nothing exists at the
+      path at call time, there is nothing to overwrite.
+    - **Overwriting** an existing file needs its current content read in
+      this session, and unchanged since. A read records the file's digest;
+      a write whose target's digest differs (never read, or changed by
+      someone else since) is stopped with a reason that says which.
+    - A successful write records the bytes it wrote, so the agent can keep
+      editing its own file. It waives nothing for any other file.
+    - The expectation rides on the call (``WRITE_EXPECT_KEY``) and the tool
+      re-checks it where it writes, so a file that appears or changes while
+      DK is being asked is not overwritten unseen.
 
-    ``run_bash`` and MCP tools are intentionally excluded from hard-guard:
-    exec authorization belongs to ``BlastRadiusMiddleware``.
+    Paths resolve in the workspace exactly as the file tools resolve them
+    (``loom.core.harness.paths``), so ``./a.md``, ``sub/../a.md`` and the
+    absolute path name one file.
 
-    (Layer 2, the trajectory-anomaly downgrade of ``/auto``, retired with
-    ``/auto`` in #704 S3.)
+    **What counts as a read of a file** (#167, #283, #288): a SAFE tool
+    with a ``path`` argument (read_file, probe_file, list_dir…), or a
+    read-only shell command (grep/head/cat/awk/sed -n/tail/wc) whose one
+    path the parser can pin down. A read that names no file (a web search,
+    a READ_PROBE tool, a shell pipeline) sets ``has_probed`` for the turn
+    but unlocks no overwrite; before #704 S6 it unlocked every file, and
+    one successful write waived the check for the rest of the session.
 
-    **What counts as a probe (Issue #167)**
-
-    A call is treated as a probe when *either* of the following holds:
-
-    1. ``call.capabilities & ToolCapability.READ_PROBE`` — explicit opt-in
-       on the ``ToolDefinition``.  Use this for GUARDED read tools (e.g.
-       ``web_search``) and for MCP tools that need to be recognized as
-       reads but cannot be classified by trust alone.
-    2. ``call.trust_level == TrustLevel.SAFE`` — by definition SAFE means
-       read-only, local, and fully reversible, which is exactly what the
-       probe-first heuristic wants to count.
-
-    The previous implementation hardcoded a tool-name allowlist, which
-    silently broke when tools were renamed and could not recognize MCP
-    or plugin-provided read tools at all.
-
-    **Session-trust (Issue #118)**
-
-    Once a strict-guard tool executes successfully, it is added to
-    ``_session_trusted``.  Future turns skip the probe requirement for
-    that tool — the human already reviewed and approved it.
-
-    ``reset_probe()`` resets per-turn state (``has_probed``) but
-    intentionally leaves ``_session_trusted`` intact.
+    ``run_bash`` and MCP tools are not guarded here: exec authorization
+    belongs to ``BlastRadiusMiddleware``.
     """
 
     # Read-only shell commands that count as file probes (Issue #283).
@@ -540,15 +538,12 @@ class LegitimacyGuardMiddleware(Middleware):
     # Shell metacharacters that defeat single-path bash extraction (#288).
     _BASH_AMBIGUOUS_CHARS: ClassVar[frozenset[str]] = frozenset("|<>;&")
 
-    def __init__(self) -> None:
-        # Issue #288: probe tracking is now per-file. _probed_files accumulates
-        # paths the agent has actually inspected this session; _unscoped_probed
-        # is the soft fallback for cases where the probe channel can't pin
-        # down a single path (READ_PROBE-flagged tools, bash pipelines, etc.)
-        # and is the moral successor of the old `has_probed` boolean for
-        # those non-file-scoped probes.
-        self._probed_files: set[str] = set()
-        self._unscoped_probed: bool = False
+    def __init__(self, workspace: Path | None = None) -> None:
+        # Where relative paths resolve; None = the process's cwd (tests).
+        self._workspace = workspace
+        # Resolved path → digest of the content last read or written in
+        # this session (None: seen absent).
+        self._known: dict[str, str | None] = {}
         # Per-turn flag: "did the agent do any probing this turn".
         self._probed_this_turn: bool = False
         # Only file-writing tools belong here.  exec tools (run_bash) and MCP
@@ -556,27 +551,25 @@ class LegitimacyGuardMiddleware(Middleware):
         self.strict_guard_tools: set[str] = {
             "write_file",
         }
-        # Tools that have successfully executed once this session; probe
-        # requirement is waived for these on subsequent turns (Issue #118).
-        self._session_trusted: set[str] = set()
 
     @property
     def has_probed(self) -> bool:
-        """Backward-compat: per-turn probe flag. Reads as True when any
-        probe (file-scoped or unscoped) fired this turn."""
+        """Per-turn probe flag: True when any probe (file-scoped or not)
+        fired this turn."""
         return self._probed_this_turn
 
-    @staticmethod
-    def _normalize_path(path: str) -> str:
-        if not path:
-            return ""
-        return os.path.normpath(os.path.expanduser(path.strip()))
+    def _resolve(self, raw: str) -> Path | None:
+        from .paths import resolve_workspace_path
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        return resolve_workspace_path(raw, self._workspace or Path.cwd())
 
     @classmethod
     def _extract_bash_path(cls, command: str) -> str | None:
         """Best-effort: pull a single file path from a known read-only bash
         invocation. Returns None when the parser can't pin one down — that
-        case falls back to ``_unscoped_probed`` and the agent must use
+        case is an unscoped read (it unlocks no overwrite) and the agent must use
         ``probe_file()`` if they need a per-file mark.
 
         Bails on shell metacharacters (pipe/redirect/chain) and on glob
@@ -608,9 +601,9 @@ class LegitimacyGuardMiddleware(Middleware):
     def _probe_signal(self, call: ToolCall) -> tuple[set[str], bool]:
         """Compute (file_paths, unscoped) for this call.
 
-        - file_paths: specific files this call probed (normalized)
-        - unscoped:   True when the call probed *something* but the
-                      file identity is unknown (READ_PROBE-flagged tools,
+        - file_paths: raw paths of the specific files this call reads
+        - unscoped:   True when the call reads *something* but the file
+                      identity is unknown (READ_PROBE-flagged tools,
                       unparseable bash, etc.)
 
         Returning ``(set(), False)`` means "not a probe".
@@ -620,7 +613,7 @@ class LegitimacyGuardMiddleware(Middleware):
             cmd = (call.args.get("command", "") or "")
             path = self._extract_bash_path(cmd)
             if path:
-                return ({self._normalize_path(path)}, False)
+                return ({path}, False)
             return (set(), True)
 
         # READ_PROBE capability flag: tool reads but identity not file-scoped
@@ -634,8 +627,8 @@ class LegitimacyGuardMiddleware(Middleware):
         # count as a probe — that was the #288 sledgehammer hole.
         if call.trust_level == TrustLevel.SAFE:
             path = call.args.get("path", "")
-            if path:
-                return ({self._normalize_path(path)}, False)
+            if isinstance(path, str) and path.strip():
+                return ({path}, False)
 
         return (set(), False)
 
@@ -652,66 +645,62 @@ class LegitimacyGuardMiddleware(Middleware):
         return True
 
     def reset_probe(self) -> None:
-        """Clear per-turn flag. Session-level _probed_files and
-        _unscoped_probed survive — once read, always read."""
+        """Clear the per-turn flag. What was read stays known while the
+        file is unchanged."""
         self._probed_this_turn = False
 
+    def _stop(self, call: ToolCall, reason: str, guidance: str) -> ToolResult:
+        from .guard_reason import guard_error
+        from .lifecycle import LIFECYCLE_CTX_KEY
+        ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
+        if ctx is not None:
+            ctx.authorization_result = False
+            ctx.authorization_reason = f"read before write: {reason}"
+        return ToolResult(
+            call_id=call.id, tool_name=call.tool_name, success=False,
+            error=guard_error("read_before_write", reason, guidance),
+            failure_type="permission_denied",
+        )
+
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
-        # Issue #288: per-file probe tracking
+        from .paths import file_digest
+
         paths, unscoped = self._probe_signal(call)
-        if paths:
-            self._probed_files |= paths
-            self._probed_this_turn = True
-        if unscoped:
-            self._unscoped_probed = True
+        if paths or unscoped:
             self._probed_this_turn = True
 
-        # TODO(#xx): Phase 4 - Goal Drift / Re-justification budget.
-        # Enforce re-justification for guarded actions after N steps without human interaction.
+        if call.tool_name not in self.strict_guard_tools:
+            result = await next(call)
+            # The content the read saw: the file as it is after the read.
+            for raw in paths:
+                target = self._resolve(raw)
+                if target is not None:
+                    self._known[str(target)] = file_digest(target)
+            return result
 
-        is_strict = call.tool_name in self.strict_guard_tools
-
-        # Session-trusted tools skip per-turn probe requirement (Issue #118).
-        if is_strict and call.tool_name in self._session_trusted:
-            return await next(call)
-
-        # --- Layer 1: Hard guard (write_file) — per-file check ---
-        if is_strict:
-            raw_target = call.args.get("path", "")
-            target = self._normalize_path(raw_target)
-            target_probed = target and target in self._probed_files
-            if not target_probed and not self._unscoped_probed:
-                error_msg = (
-                    f"LEGITIMACY GUARD: Blocked `{call.tool_name}`"
-                    + (f" → '{raw_target}'" if raw_target else "")
-                    + ". You must read this specific file before writing it. "
-                    "Call read_file (or grep/head/sed -n on this path, or "
-                    "probe_file if you read it via a complex pipeline) first. "
-                    "Writing to a path you have not inspected risks "
-                    "overwriting unknown content."
-                )
-
-                from .lifecycle import LIFECYCLE_CTX_KEY
-                ctx = call.metadata.get(LIFECYCLE_CTX_KEY)
-                if ctx is not None:
-                    ctx.authorization_result = False
-                    ctx.authorization_reason = "per-file probe-first failed"
-
-                return ToolResult(
-                    call_id=call.id,
-                    tool_name=call.tool_name,
-                    success=False,
-                    error=error_msg,
-                    failure_type="permission_denied"
-                )
+        raw_target = call.args.get("path", "")
+        target = self._resolve(raw_target if isinstance(raw_target, str) else "")
+        if target is None:
+            return await next(call)  # no path: the schema / the tool says so
+        current = file_digest(target)
+        if current is not None:
+            key = str(target)
+            if key not in self._known or self._known[key] is None:
+                return self._stop(
+                    call, f"{raw_target} exists and has not been read in this session",
+                    "Read it first (read_file, or grep/head/sed -n on this path, or "
+                    "probe_file after reading it through a pipeline), then write. "
+                    "Creating a file that does not exist needs no read.")
+            if self._known[key] != current:
+                return self._stop(
+                    call, f"{raw_target} changed since it was read",
+                    "Read it again, then write, so the write does not discard "
+                    "the change.")
+        call.metadata[WRITE_EXPECT_KEY] = {"path": str(target), "sha256": current}
 
         result = await next(call)
-
-        # On successful execution, promote to session-trusted so future turns
-        # don't require a new probe for the same tool (Issue #118).
-        if is_strict and result.success:
-            self._session_trusted.add(call.tool_name)
-
+        if result.success:
+            self._known[str(target)] = file_digest(target)
         return result
 
 
@@ -803,7 +792,14 @@ class BlastRadiusMiddleware(Middleware):
         # nobody was there to ask. The call was skipped, not refused, and
         # routing around it (another tool, a rewritten command) would
         # launder the very authorization the skip is holding back.
+        from .guard_reason import GUARD_REASON_KEY, GuardReason, ask_reason
+        reason = call.metadata.get(GUARD_REASON_KEY)
+        if not isinstance(reason, GuardReason):
+            reason = ask_reason(classifier_note, call.metadata.get("scope_verdict"),
+                                call.metadata.get("scope_diff"))
+            call.metadata[GUARD_REASON_KEY] = reason
         error = (
+            f"{reason.line()}\n"
             f"Skipped (not executed): {call.tool_name} needs authorization "
             f"beyond this '{call.origin}' turn's grants, and no human is "
             f"attending to approve it. This is not a denial. Do not retry it "
@@ -1011,10 +1007,12 @@ class BlastRadiusMiddleware(Middleware):
         if verdict == PV.DENY:
             self._notify_lifecycle(call, False, "scope-deny", source="policy", code="scope_deny")
             call.metadata["user_decision"] = False
+            from .guard_reason import guard_error
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=False,
-                error="Permission denied by scope policy.",
+                error=guard_error("scope", "the scope policy refuses this call",
+                                  "Permission denied by scope policy."),
                 failure_type="permission_denied",
             )
 
@@ -1030,6 +1028,9 @@ class BlastRadiusMiddleware(Middleware):
         if note is None:
             return None  # proceed
 
+        # #704 S6: one reason line for the confirm or the skip.
+        from .guard_reason import GUARD_REASON_KEY, ask_reason
+        call.metadata[GUARD_REASON_KEY] = ask_reason(note, verdict, diff)
         if self._is_unattended(call):
             return self._deny_unattended(call, verdict.value, classifier_note=note)
 
@@ -1227,6 +1228,8 @@ class BlastRadiusMiddleware(Middleware):
         note = await self._auto_decide(call, None, PV.CONFIRM)
         if note is None:
             return await next(call)
+        from .guard_reason import GUARD_REASON_KEY, ask_reason
+        call.metadata[GUARD_REASON_KEY] = ask_reason(note, None, None)
 
         # Unattended origins cannot request new permissions
         if self._is_unattended(call):

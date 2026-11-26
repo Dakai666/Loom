@@ -7,6 +7,7 @@ from typing import Any
 
 import jsonschema
 
+from .guard_reason import guard_error
 from .middleware import Middleware, ToolCall, ToolResult, ToolHandler
 from .registry import ToolRegistry
 
@@ -159,7 +160,7 @@ class SchemaValidationMiddleware(Middleware):
                 call_id=call.id,
                 tool_name=call.tool_name,
                 success=False,
-                error=self._format_error(e),
+                error=guard_error("schema", self._format_error(e)),
                 failure_type="validation_error",
             )
             

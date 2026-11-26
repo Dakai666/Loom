@@ -312,23 +312,3 @@ async def test_hard_limit_does_not_carry_into_the_next_turn(monkeypatch, tmp_pat
         await session.stop()
 
 
-async def test_pause_requested_in_the_final_batch_does_not_leak(monkeypatch, tmp_path):
-    """The hard stop skips the HITL block; a pause() that lands during the
-    final batch must not fire after the next turn's first batch."""
-    session, _ = await _session(monkeypatch, tmp_path, [[{"id": 0}]] * HARD_LIMIT)
-    try:
-        tracker = session._repeat_calls
-        orig = tracker.observe
-
-        def observe(name, args, result):
-            suffix = orig(name, args, result)
-            if tracker.limit_hit:
-                session._pause_requested = True  # pause() arrives mid-batch
-            return suffix
-
-        tracker.observe = observe
-        async for _ in session.stream_turn("post"):
-            pass
-        assert session._pause_requested is False
-    finally:
-        await session.stop()

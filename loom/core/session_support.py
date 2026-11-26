@@ -361,19 +361,12 @@ def _build_jobs_inject_message(jobstore: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def classifier_line(call: "ToolCall") -> str | None:
-    """Why the approval classifier left this call to DK (#690 S6c), or
-    None when it did not look at it."""
-    note = call.metadata.get("classifier_note")
-    if not note:
-        return None
-    from loom.core.harness.approval import describe_note
-    from loom.core.harness.mode import PermissionMode
-    try:
-        mode = f"（{PermissionMode(call.metadata.get('permission_mode')).label}）"
-    except ValueError:
-        mode = ""
-    return f"自動核准未放行{mode}：{describe_note(note)}"
+def classifier_line(call: "ToolCall") -> str:
+    """The one reason line a confirm shows, with the permission mode in
+    front (#704 S6), e.g. ``[自理] 守門・權限模式：Luna abstained``. The
+    same line on CLI and Discord."""
+    from loom.core.harness.guard_reason import confirm_line
+    return confirm_line(call)
 
 
 def _format_scope_panel(call: "ToolCall") -> str:

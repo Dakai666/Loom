@@ -99,7 +99,6 @@ from loom.core.events import (
     ToolEnd,
     TurnDone,
     TurnDropped,
-    TurnPaused,
 )
 from loom.core.harness.lifecycle import ActionRecord, LIFECYCLE_CTX_KEY
 from loom.core.harness.middleware import (
@@ -111,7 +110,6 @@ from loom.core.harness.middleware import (
     ToolCall,
     ToolResult,
     TraceMiddleware,
-    UNATTENDED_ORIGINS,
 )
 from loom.core.harness.mode import PermissionMode
 
@@ -759,12 +757,6 @@ class LoomSession:
         # configured server's tool names are pending, not unknown.
         self._mcp_loaded = False
 
-        # HITL pause/resume — stream_turn() checks _pause_requested at each
-        # tool-batch boundary.  The consumer calls pause() / resume() / cancel().
-        self._pause_requested: bool = False
-        self._cancel_requested: bool = False
-        self._resume_event: asyncio.Event = asyncio.Event()
-        # When True, stream_turn() auto-pauses after every tool batch.
         # Abort controller for cancellation of in-flight LLM streaming calls.
         self._abort = AbortController()
 
@@ -1343,7 +1335,7 @@ class LoomSession:
         # run_bash and MCP tools are NOT added here — exec authorization belongs
         # to BlastRadiusMiddleware (EXEC capability / scope grants).
         from loom.core.harness.middleware import LegitimacyGuardMiddleware
-        self._legitimacy_guard = LegitimacyGuardMiddleware()
+        self._legitimacy_guard = LegitimacyGuardMiddleware(workspace=self.workspace)
 
         # LogMiddleware is omitted here: stream_turn() yields ToolBegin/ToolEnd
         # events that the UI renders, providing richer display without duplication.
@@ -1424,37 +1416,11 @@ class LoomSession:
     # ------------------------------------------------------------------
 
     # =========================================================================
-    # SECTION 3 — LIFECYCLE (pause / resume / cancel / stop)
+    # SECTION 3 — LIFECYCLE (cancel / stop)
     # =========================================================================
-    def pause(self) -> None:
-        """Request a pause at the next tool-batch boundary in stream_turn()."""
-        self._pause_requested = True
-        self._cancel_requested = False
-
-    def resume(self) -> None:
-        """Resume a paused stream_turn() — continue the loop as-is."""
-        self._pause_requested = False
-        self._cancel_requested = False
-        self._resume_event.set()
-
-    def resume_with(self, message: str) -> None:
-        """
-        Resume and inject a human message into the conversation before continuing.
-
-        The message is appended to self.messages as a user turn so the next
-        LLM call will see it as context / a redirect.
-        """
-        now_str = user_timestamp()
-        self.messages.append({"role": "user", "content": f"[{now_str}]\n{message}"})
-        asyncio.ensure_future(self._log_message("user", message, turn_index=self._turn_index))
-        self.resume()
-
     def cancel(self) -> None:
-        """Abandon the rest of a paused stream_turn() — yields TurnDone and exits."""
+        """Abort the running turn's in-flight work (the abort controller)."""
         self._abort.abort()
-        self._cancel_requested = True
-        self._pause_requested = False
-        self._resume_event.set()
 
     async def stop(self) -> None:
         from loom.core.cognition.router import remove_failover_listener
@@ -1595,7 +1561,7 @@ class LoomSession:
         fired_at: datetime | None = None,
         program_intent: str | None = None,
     ) -> AsyncIterator[
-        TextChunk | ToolBegin | ToolEnd | TurnPaused | TurnDone | TurnDropped
+        TextChunk | ToolBegin | ToolEnd | TurnDone | TurnDropped
         | ModelThinkingStarted
         | ActionStateChange | ActionRolledBack
         | EnvelopeStarted | EnvelopeUpdated | EnvelopeCompleted
@@ -1703,7 +1669,6 @@ class LoomSession:
             # Issue #131: Reset abort signal from previous turn so the session
             # is not permanently stuck after a circuit-breaker trip.
             self._abort.reset()
-            self._cancel_requested = False
 
             # Issue #131: Reset per-turn deny counter so denials from a previous
             # turn don't carry over and immediately end this one (#704 S4).
@@ -2477,7 +2442,6 @@ class LoomSession:
                         yield TurnDropped(stop_reason="operator_denials", tool_count=tool_count,
                                           provider_error_detail=detail)
                         _stop_reason = "operator_denials"
-                        self._pause_requested = False
                         break
 
                     # #654: hard stop for an identical-call loop. Checked after
@@ -2493,9 +2457,6 @@ class LoomSession:
                             provider_error_detail=self._repeat_calls.limit_hit,
                         )
                         _stop_reason = "repeat_call_limit"
-                        # The HITL block below is skipped; a pause requested
-                        # during this batch must not fire in the next turn.
-                        self._pause_requested = False
                         break
 
                     # Check budget after tool results are appended — the next LLM
@@ -2507,40 +2468,6 @@ class LoomSession:
                     # block reading and miss a wire-cap overrun until the
                     # next turn boundary.
                     await self._fit_context_to(self.current_model(), where="mid-turn")
-
-                    # ── HITL check point ─────────────────────────────────────
-                    # Fires after every tool batch, before the next LLM call.
-                    # pause() sets _pause_requested (the per-batch /pause mode
-                    # that set it every batch was retired in #704 S4).
-                    # Unattended turns (chime / autonomy / subagent) never park
-                    # here: nobody would resume them, and the turn lock would
-                    # hold every later event (#668, PR #673 review). A pending
-                    # pause request is left for the next attended turn.
-                    _attended = origin not in UNATTENDED_ORIGINS
-                    if self._pause_requested and _attended:
-                        self._pause_requested = False
-                        self._resume_event.clear()
-                        yield TurnPaused(tool_count_so_far=tool_count)
-                        await self._resume_event.wait()
-                        self._resume_event.clear()
-                        if self._cancel_requested:
-                            self._cancel_requested = False
-                            self._last_think = "".join(_think_parts).strip()
-                            self._turn_index += 1
-                            # #675: release turn-local skill activations before TurnDone
-                            self._clear_turn_skill_activations()
-                            _tier_hint = self._tick_tier_counter()
-                            if _tier_hint is not None:
-                                yield _tier_hint
-                            yield TurnDone(
-                                tool_count=tool_count,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                elapsed_ms=(time.monotonic() - t0) * 1000,
-                                cache_read_input_tokens=cache_read_input_tokens,
-                                cache_creation_input_tokens=cache_creation_input_tokens,
-                            )
-                            return
                 else:
                     # Unexpected stop_reason (e.g. 'max_tokens', unknown provider value).
                     _raw_stop = getattr(response, "stop_reason", "unknown")

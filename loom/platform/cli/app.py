@@ -13,7 +13,7 @@ Design
   ``mode`` flag — INPUT / CONFIRM / PAUSE / REDIRECT
 - ``mode`` is a simple string held in a single-element list so closures
   see updates. Switching modes calls ``app.invalidate()`` to redraw
-- ``request_confirm`` / ``request_pause`` / ``request_redirect_text``
+- ``request_confirm`` / ``request_redirect_text``
   flip the mode, await a Future, and restore mode in a ``finally``.
   The transient widget rendering happens entirely inside the layout —
   it never reaches the terminal scrollback (the "用過即焚" property
@@ -77,7 +77,7 @@ _CLI_ERROR = _CLI_PALETTE["error"]
 _CLI_BORDER = _CLI_PALETTE["border"]
 
 
-Mode = Literal["input", "confirm", "pause", "redirect"]
+Mode = Literal["input", "confirm", "redirect"]
 
 
 # Minimum time a heartbeat label must stay visible before ``stop_heartbeat``
@@ -117,6 +117,9 @@ class FooterState:
 
     model: str = ""
     persona: str | None = None
+    # #704 S6: the session's permission mode, read on every redraw so a
+    # /mode switch shows at once. None = no session (tests, startup).
+    permission_mode: Callable[[], Any] | None = None
     # Context window utilisation — surfaces in footer when >60%
     token_pct: float = 0.0
     # Compaction in progress — when True, footer hides everything
@@ -199,14 +202,6 @@ class _ConfirmState:
 
 
 @dataclass
-class _PauseState:
-    title: str
-    options: list[tuple[str, Any, str | None]]
-    cursor: int = 0
-    future: asyncio.Future | None = None
-
-
-@dataclass
 class _TaskListState:
     """Snapshot of the agent's TaskList for the floating panel.
 
@@ -240,6 +235,7 @@ _APP_STYLE = Style.from_dict(
         "footer.envelope":       _CLI_ACCENT,
         "footer.compaction":     _CLI_WARNING,
         "footer.grant":          _CLI_MUTED,
+        "footer.mode":           _CLI_ACCENT,
         # Issue #284: transient hints (info / warn) — appear briefly
         # above the input separator then auto-vanish
         "hint.info":             _CLI_ACCENT,
@@ -305,7 +301,6 @@ class LoomApp:
 
         # Widget state
         self._confirm_state: _ConfirmState | None = None
-        self._pause_state: _PauseState | None = None
         self._redirect_future: asyncio.Future | None = None
         self._tasklist_state = _TaskListState()
 
@@ -570,31 +565,6 @@ class LoomApp:
             # next draw reclaims rows from scratch
             self._shrink_after_widget_close()
 
-    async def request_pause(
-        self,
-        *,
-        title: str,
-        options: list[tuple[str, Any, str | None]],
-        default_index: int = 0,
-        cancel_value: Any = None,
-    ) -> Any:
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pause_state = _PauseState(
-            title=title,
-            options=options,
-            cursor=max(0, min(default_index, len(options) - 1)),
-            future=future,
-        )
-        future._loom_cancel_value = cancel_value  # type: ignore[attr-defined]
-        self._mode[0] = "pause"
-        self._app.invalidate()
-        try:
-            return await future
-        finally:
-            self._pause_state = None
-            self._mode[0] = "input"
-            self._shrink_after_widget_close()
-
     def update_tasklist(self, todos: list[dict]) -> None:
         """Replace the floating task panel snapshot.
 
@@ -666,7 +636,6 @@ class LoomApp:
         # Mode-aware filters
         is_input = Condition(lambda: self._mode[0] == "input")
         is_confirm = Condition(lambda: self._mode[0] == "confirm")
-        is_pause = Condition(lambda: self._mode[0] == "pause")
         is_redirect = Condition(lambda: self._mode[0] == "redirect")
 
         # Input area — single Window, no separate prompt label.
@@ -694,16 +663,6 @@ class LoomApp:
                 wrap_lines=True,
             ),
             filter=is_confirm,
-        )
-
-        # Pause widget
-        pause_window = ConditionalContainer(
-            Window(
-                content=FormattedTextControl(self._render_pause, focusable=True),
-                height=Dimension(min=4, max=10),
-                wrap_lines=True,
-            ),
-            filter=is_pause,
         )
 
         # Redirect text input — same simplification: single Window
@@ -775,7 +734,6 @@ class LoomApp:
                 separator_top,
                 input_window,
                 confirm_window,
-                pause_window,
                 redirect_window,
                 separator_bottom,
                 footer_window,
@@ -808,6 +766,16 @@ class LoomApp:
             parts.append(("class:footer", f"  {self.footer.model} "))
 
         s = self.footer
+
+        if s.permission_mode is not None:
+            try:
+                mode = s.permission_mode()
+                label = getattr(mode, "label", "") or str(mode)
+            except Exception:
+                label = ""
+            if label:
+                parts.append(("class:footer", "  "))
+                parts.append(("class:footer.mode", f"模式 {label}"))
 
         # Issue #276: tier badge — only when sticky on non-default tier.
         # Bright when over reminder threshold so the hint is unmissable.
@@ -1073,29 +1041,6 @@ class LoomApp:
         )
         return FormattedText(parts)
 
-    def _render_pause(self) -> FormattedText:
-        if self._pause_state is None:
-            return FormattedText([])
-        state = self._pause_state
-        parts: list[tuple[str, str]] = []
-        parts.append(("class:widget.title", f"{state.title}\n"))
-        parts.append(("", "\n"))
-        for idx, (label, _value, shortcut) in enumerate(state.options):
-            arrow = " ▸ " if idx == state.cursor else "   "
-            style = (
-                "class:widget.option.cursor" if idx == state.cursor
-                else "class:widget.option"
-            )
-            parts.append((style, f"{arrow}{label}"))
-            if shortcut:
-                parts.append(("class:widget.shortcut", f"  ({shortcut})"))
-            parts.append(("", "\n"))
-        parts.append(("", "\n"))
-        parts.append(
-            ("class:widget.footer", "↑↓ 選擇  ⏎ 確認  esc 取消")
-        )
-        return FormattedText(parts)
-
     # ------------------------------------------------------------------
     # Key bindings
     # ------------------------------------------------------------------
@@ -1191,53 +1136,6 @@ class LoomApp:
         @kb.add("<any>", filter=is_confirm)
         def _confirm_shortcut(event):
             state = self._confirm_state
-            if not state or not state.future or state.future.done():
-                return
-            pressed = (event.data or "").lower()
-            if not pressed or len(pressed) != 1:
-                return
-            for _label, value, sc in state.options:
-                if sc and sc.lower() == pressed:
-                    state.future.set_result(value)
-                    return
-
-        # ── Pause mode (HITL) ─────────────────────────────────────────
-        is_pause = Condition(lambda: self._mode[0] == "pause")
-
-        @kb.add("up", filter=is_pause)
-        @kb.add("c-p", filter=is_pause)
-        def _pause_up(event):
-            if self._pause_state:
-                n = len(self._pause_state.options)
-                self._pause_state.cursor = (self._pause_state.cursor - 1) % n
-                event.app.invalidate()
-
-        @kb.add("down", filter=is_pause)
-        @kb.add("c-n", filter=is_pause)
-        def _pause_down(event):
-            if self._pause_state:
-                n = len(self._pause_state.options)
-                self._pause_state.cursor = (self._pause_state.cursor + 1) % n
-                event.app.invalidate()
-
-        @kb.add("enter", filter=is_pause)
-        def _pause_pick(event):
-            state = self._pause_state
-            if state and state.future and not state.future.done():
-                _label, value, _shortcut = state.options[state.cursor]
-                state.future.set_result(value)
-
-        @kb.add("escape", eager=True, filter=is_pause)
-        @kb.add("c-c", filter=is_pause)
-        def _pause_cancel(event):
-            state = self._pause_state
-            if state and state.future and not state.future.done():
-                cancel_value = getattr(state.future, "_loom_cancel_value", None)
-                state.future.set_result(cancel_value)
-
-        @kb.add("<any>", filter=is_pause)
-        def _pause_shortcut(event):
-            state = self._pause_state
             if not state or not state.future or state.future.done():
                 return
             pressed = (event.data or "").lower()

@@ -9,11 +9,11 @@ REDIRECT modes plus a FooterState that drives the live footer line — is
 These tests don't drive the real Application's event loop (that would
 need a TTY and a working renderer). Instead they exercise:
 
-- the mode flag transitions around ``request_confirm`` / ``request_pause``
+- the mode flag transitions around ``request_confirm``
   / ``request_redirect_text`` (launched as tasks, completed by directly
   resolving the future the helper awaits)
 - the render callbacks (``_render_footer`` / ``_render_tasklist`` /
-  ``_render_confirm`` / ``_render_pause``) under the various
+  ``_render_confirm``) under the various
   FooterState shapes documented in the issue
 - the TaskList state mutations (``update_tasklist`` collapse logic) and
   Markdown reblit infrastructure shared with #248
@@ -35,7 +35,6 @@ from loom.platform.cli.app import (
     FooterState,
     LoomApp,
     _ConfirmState,
-    _PauseState,
     _TaskListState,
     build_loom_app,
 )
@@ -87,7 +86,7 @@ class TestConstruction:
 
 
 # ---------------------------------------------------------------------------
-# Mode transitions — request_confirm / request_pause / request_redirect_text
+# Mode transitions — request_confirm / request_redirect_text
 # ---------------------------------------------------------------------------
 
 
@@ -129,22 +128,6 @@ class TestModeTransitions:
         assert app._confirm_state.cursor == 1
         app._confirm_state.future.set_result("b")
         await task
-
-    async def test_pause_flips_mode_then_restores(self, app: LoomApp) -> None:
-        task = asyncio.create_task(app.request_pause(
-            title="Paused",
-            options=[("Resume", "resume", "r"), ("Cancel", "cancel", "c")],
-            cancel_value="abort",
-        ))
-        await asyncio.sleep(0)
-        assert app.mode == "pause"
-        assert app._pause_state is not None
-
-        app._pause_state.future.set_result("resume")
-        result = await task
-        assert result == "resume"
-        assert app.mode == "input"
-        assert app._pause_state is None
 
     async def test_redirect_flips_mode_and_focuses_buffer(self, app: LoomApp) -> None:
         task = asyncio.create_task(app.request_redirect_text())
@@ -875,26 +858,7 @@ class TestWidgetRender:
         assert arrow_idx > a_idx
         assert arrow_idx < b_idx
 
-    def test_pause_render_contains_options(self, app: LoomApp) -> None:
-        app._pause_state = _PauseState(
-            title="Paused — tool batch finished",
-            options=[
-                ("Resume", "resume", "r"),
-                ("Cancel turn", "cancel", "c"),
-                ("Redirect", "redirect", "d"),
-            ],
-            cursor=0,
-            
-        )
-        text = _flat_text(app._render_pause())
-        assert "Resume" in text
-        assert "Cancel turn" in text
-        assert "Redirect" in text
-
     def test_confirm_render_returns_empty_when_state_none(self, app: LoomApp) -> None:
         app._confirm_state = None
         assert list(app._render_confirm()) == []
 
-    def test_pause_render_returns_empty_when_state_none(self, app: LoomApp) -> None:
-        app._pause_state = None
-        assert list(app._render_pause()) == []

@@ -43,7 +43,7 @@ class LoomSession:
 |------|------|
 | `start()` | 載入 config、prompt stack、memory、tools、plugins、ledger、session log |
 | `stream_turn(user_input)` | 執行一輪對話並串流事件 |
-| `pause()` / `resume()` / `resume_with()` / `cancel()` | pause boundary 控制（`/pause` 的每批自動暫停已在 #704 S4 退役）|
+| `cancel()` | 中止進行中 turn 的 in-flight 工作（abort controller）。`pause()`／`resume()`／`resume_with()` 與 `TurnPaused` 在 #704 S6 移除（`/pause` 已在 S4 退役，之後沒有呼叫者）|
 | `stop()` | flush memory health、compact、更新 session metadata、關閉資源 |
 
 ---
