@@ -86,7 +86,7 @@ max_tokens    = 8096
 |------|----------|----------------|
 | `MiniMax-*` | MiniMax | `MINIMAX_API_KEY` |
 | `claude-*` | Anthropic | `ANTHROPIC_API_KEY` |
-| `opencode/<model>` | OpenCode Go（OpenCode Console 訂閱閘道，model id 直接透傳） | `OPENCODE_API_KEY` |
+| `opencode-go/<model>`（canonical；短別名 `opencode/<model>` 亦可） | OpenCode Go（OpenCode Console 訂閱閘道，model id 直接透傳） | `OPENCODE_API_KEY` |
 
 ---
 
@@ -439,13 +439,36 @@ provider id 是 `opencode-go`，Loom 這邊的 model 名稱一律帶 `opencode/`
 - **用戶端要求**：每個請求送 coding-agent 的 `User-Agent: loom-agent/<版本>`
   與穩定的 `x-opencode-session`（Loom 的 session id）供路由與 prompt caching。
 
-用法（三種接法，皆 opt-in，不影響現有預設）：
+### 建議用法（DK 2026-11-26 決定）
+
+**一般對話 turn 走 OpenCode Go；Luna（自動核准分類器）不動**——Luna 的模型
+是 `approval.py` 內的常數 `REVIEW_MODEL = "codex/gpt-6-luna"`（ChatGPT plan），
+不受此設定影響，judge 等其他用途也維持原樣。
 
 ```toml
-# 1. 主模型：[cognition] default_model = "opencode/glm-5.3"
-# 2. 額度備援：[cognition] fallback_model = "opencode/deepseek-v4.1-flash"
-# 3. 指定用途（tier）：[cognition.tiers] 2 = "opencode/deepseek-v4-pro"
+[cognition]
+# 一般 turn 走 OpenCode Go（canonical 寫法：opencode-go/<model-id>）
+default_model  = "opencode-go/deepseek-v4.1-flash"
+# Go 額度用完（429）時自動回 ChatGPT plan；Go 的 429 會以 typed quota error
+# 觸發 Loom 既有 fallback 機制，冷卻（照 Retry-After，預設 30 分鐘）後自動恢復
+fallback_model = "chatgpt/gpt-6.1-terra"
+
+# fallback_model 指到 chatgpt/<slug> 時，chatgpt provider 必須能註冊
+# （default 不是 chatgpt/ 開頭就不會自動註冊，要明確 enabled）
+[providers.chatgpt]
+enabled = true
 ```
+
+為什麼用既有 fallback 機制而不是「手動切回」：Loom 的 quota fallback 會自動
+切換、冷卻後自動恢復，autonomy／Discord 會各通知一次（failover / restored），
+不需要人盯著；手動 `/model` 適合臨時換。**怎麼切回去**：
+
+- 自動：冷卻期過後 Loom 會 probe 主模型，成功即恢復並通知；
+- 手動：`/model chatgpt/gpt-6.1-terra`（切回 ChatGPT plan）或
+  `/model opencode-go/deepseek-v4.1-flash`（再切回 Go）。
+
+切換時記得把原本為 ChatGPT plan 設的 `fallback_model = "deepseek-flash"`
+改掉（主模型不是 ChatGPT plan 時它不再生效）。
 
 ---
 

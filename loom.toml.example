@@ -37,8 +37,9 @@ personality = ""
 #   codex/<model>           → Codex OAuth backend (e.g. codex/gpt-6.1-sol)     (`codex login`)
 #   deepseek-*              → DeepSeek official via Anthropic-compatible endpoint  (DEEPSEEK_API_KEY in .env)
 #   openrouter/<vendor>/<m> → OpenRouter aggregator (e.g. openrouter/deepseek/deepseek-v4-pro)  (OPENROUTER_API_KEY in .env)
-#   opencode/<model>        → OpenCode Go subscription gateway (e.g. opencode/glm-5.3;   (OPENCODE_API_KEY in .env)
-#                             model id passed through verbatim — see
+#   opencode-go/<model>     → OpenCode Go subscription gateway (e.g. opencode-go/deepseek-v4.1-flash;  (OPENCODE_API_KEY in .env)
+#                             short alias: opencode/<model>; model id passed
+#                             through verbatim — see
 #                             GET https://opencode.ai/inference/go/v1/models
 #   ollama/<name>           → local Ollama server  (enable [providers.ollama] below)
 #   lmstudio/<name>         → local LM Studio      (enable [providers.lmstudio] below)
@@ -55,10 +56,12 @@ default_model = "claude-sonnet-4-6"
 # fallback model's own limit. The fallback's provider must be registered
 # (e.g. DEEPSEEK_API_KEY in .env); it is usually pay-per-use. The autonomy
 # daemon notifies once per switch and once when the primary is restored.
-# Limitations: only Responses-API primaries (chatgpt/, codex/, xai/) report
-# quota failures in a form the router recognises; pick a fallback whose
-# context window is at least the primary's (the switching turn was sized
-# for the primary).
+# Limitations: only primaries whose 429 the router recognises as a quota
+# failure report it in a form the fallback acts on — the Responses-API
+# primaries (chatgpt/, codex/, xai/) and opencode-go/ (its 429 is typed
+# entitlement_or_quota, with the server's Retry-After as the cooldown);
+# pick a fallback whose context window is at least the primary's (the
+# switching turn was sized for the primary).
 # fallback_model = "deepseek-flash"
 
 # Context budget window. Each model's native window is declared by its
@@ -155,12 +158,17 @@ reminder_after_turns = 10
 # 30 天、Gemini 55 天）；DeepSeek V4.1 Flash / V4 Pro 需先在 Console 隱私設定
 # 選 Global regions 才可用。
 # base_url      = "https://opencode.ai/inference/go/openai/v1"
-# default_model = "deepseek-v4.1-flash"  # 裸 model id — 不帶 "opencode/" 前綴；
+# default_model = "deepseek-v4.1-flash"  # 裸 model id — 不帶 "opencode-go/" 前綴；
 #                                        # 建議值，可換清單內任何 id
-# 接法（皆 opt-in，不改現有預設）：
-#   主模型     [cognition] default_model = "opencode/glm-5.3"
-#   備援       [cognition] fallback_model = "opencode/deepseek-v4.1-flash"
-#   指定用途   [cognition.tiers] 2 = "opencode/deepseek-v4-pro"
+#
+# 建議用法（DK 2026-11-26 決定）— 一般 turn 走 Go，Luna 不動：
+#   [cognition]
+#   default_model  = "opencode-go/deepseek-v4.1-flash"  # canonical 寫法
+#   fallback_model = "chatgpt/gpt-6.1-terra"            # Go 額度用完自動回 ChatGPT plan
+#   [providers.chatgpt]
+#   enabled = true        # fallback 指到 chatgpt/<slug> 時要能註冊 chatgpt provider
+# Luna（自動核准分類器）維持 codex/gpt-6-luna（approval.py 內常數），不受影響。
+# 其他接法（皆 opt-in）：tier 指定用途 [cognition.tiers] 2 = "opencode-go/deepseek-v4-pro"
 
 # The official ChatGPT plan integration uses separate Loom credentials:
 #   loom auth chatgpt login
