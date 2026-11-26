@@ -163,7 +163,8 @@ async def _attempts(store: LedgerStore) -> int:
 def _skipped(result: ToolResult, env: Env) -> bool:
     return (not result.success and env.ran == []
             and result.metadata.get("unattended_skip") is True
-            and result.error.startswith("Skipped (not executed)"))
+            and "\nSkipped (not executed)" in result.error
+            and result.error.startswith("守門・"))
 
 
 def _write(path: str, content: str = "今天的新聞摘要。") -> dict:
@@ -304,7 +305,7 @@ class TestDenyWins:
         monkeypatch.setattr(env.perm, "evaluate", lambda *_a, **_k: PermissionVerdict.DENY)
         r = await env.run("web_search", {"query": "台北 天氣"})
         assert not r.success and env.ran == []
-        assert r.error == "Permission denied by scope policy."
+        assert r.error == "守門・授權範圍：the scope policy refuses this call\nPermission denied by scope policy."
         assert env.model.requests == []
 
     async def test_critical_tool_is_never_auto_approved(self, tmp_path, ledger):

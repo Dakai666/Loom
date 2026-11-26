@@ -23,7 +23,6 @@ add ``Producers:`` / ``Consumers:`` entries to the event's docstring.
 | ToolEnd             |  ✓  |  ✓  |    ✓    |   YES    |
 | TurnDone            |  ✓  |  ✓  |    ✓    |   YES    |
 | ThinkCollapsed      |  ✓  |  ✓  |    ✓    |   no     |
-| TurnPaused          |  ✓  |  ✓  |    ✓    |   no     |
 | TurnDropped         |  ✓  |  —  |    ✓    |   no     |
 | ModelThinkingStarted |  ✓  |  —  |    —    |   no     |
 | ReasoningContinuation |  ✓  |  ✓  |    ✓    |   no     |
@@ -132,31 +131,6 @@ class ToolEnd:
     skip_note: str = ""
     """Why the approval classifier did not approve a skipped call, e.g.
     ``model-abstain: reviewer_unavailable`` (#690 S6). Empty otherwise."""
-
-
-@dataclass
-class TurnPaused:
-    """The agent turn has been paused — all current tool calls are done but the
-    loop is suspended, waiting for human input before continuing.
-
-    The consumer should prompt the user and then call either::
-
-        session.resume()         — continue the turn as-is
-        session.resume_with(msg) — inject a message and continue
-        session.cancel()         — abandon the rest of this turn
-
-    Producers:
-        LoomSession.stream_turn() — emitted after a tool batch when
-        ``LoomSession.pause()`` was requested. The per-batch HITL mode that
-        requested it on every batch (/pause) was retired in #704 S4.
-
-    Consumers:
-        CLI     ✓  blocks on input(), calls session.resume() / cancel()
-        TUI     ✓  shows PauseModal widget, awaits user decision
-        Discord ✓  sends pause message, waits for reply with client.wait_for()
-    """
-
-    tool_count_so_far: int = 0
 
 
 @dataclass
@@ -600,7 +574,7 @@ class EventConsumer(Protocol):
     Consumers may ignore these safely (``else: pass`` is correct behaviour).
     See the Consumer Map in the module docstring for platform-specific coverage:
 
-    ``ThinkCollapsed``, ``TurnPaused``, ``TurnDropped``,
+    ``ThinkCollapsed``, ``TurnDropped``,
     ``ModelThinkingStarted``, ``ActionStateChange``,
     ``ActionRolledBack``,
     ``EnvelopeStarted``, ``EnvelopeUpdated``, ``EnvelopeCompleted``,
@@ -645,5 +619,4 @@ __all__ = [
     "ToolEnd",
     "TurnDone",
     "TurnDropped",
-    "TurnPaused",
 ]

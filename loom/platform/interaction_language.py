@@ -439,7 +439,7 @@ class LivenessSensor:
 
         Clears the suppressed flag AND resets the observation clock + latch so
         the post-resume window does not inherit pre-pause quiet time. Bind to
-        the TurnPaused try/finally as a matched pair with ``suppress`` per
+        a waiting-on-the-user try/finally as a matched pair with ``suppress`` per
         Loom's shared-session preemption-race convention.
         """
         self._suppressed = False

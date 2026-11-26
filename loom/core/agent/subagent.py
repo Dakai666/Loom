@@ -6,7 +6,9 @@ Design principles:
   - Has its own session_id in session_log so its trace is isolated.
   - Persists child task, assistant messages and tool previews in session_log.
   - Tool scope: SAFE tools by default; parent can extend via allowed_tools whitelist.
-  - GUARDED tools are auto-confirmed (no human in the loop for sub-agents).
+  - Permission mode 安全 whatever the parent's (#704 S6, ``subagent_mode``): a
+    GUARDED call runs only within the parent's grants and declarations; one
+    that would need a human is skipped (origin "subagent" is unattended).
   - CRITICAL tools are always blocked.
   - Bounded execution: stops at max_turns to prevent infinite loops.
   - Memory writes retain source="memorize" with child provenance in metadata.
@@ -68,6 +70,19 @@ def subagent_declarations(child_tools: list[str], parent_declared: Any) -> list[
     return [name for name in child_tools if name in parent]
 
 
+def subagent_mode(parent: Any = None) -> Any:
+    """A sub-agent's permission mode: 安全, whatever the parent's (#704 S6).
+
+    Never wider than the parent's, since 安全 is the narrowest. Inheriting
+    the parent's mode was weighed and not taken: a sub-agent is unattended
+    and has no classifier, so 自理 would decide exactly as 安全, and YOLO
+    would run the child's calls on a task text the parent model wrote,
+    with none of the parent turn's operator intent behind them. That is
+    not provably the parent's authority, so the child stays 安全."""
+    from loom.core.harness.mode import PermissionMode
+    return PermissionMode.SAFE
+
+
 def subagent_may_inherit(tool: Any, *, allowed_tools: list[str] | None) -> bool:
     """Whether a parent tool goes into a sub-agent's registry."""
     from loom.core.harness.permissions import TrustLevel
@@ -103,6 +118,7 @@ async def run_subagent(
     parent_session_id: str,
     workspace: Any,              # pathlib.Path
     parent_grants: "list[Any] | None" = None,
+    parent_mode: Any = None,
     parent_declared: "frozenset[str] | set[str] | None" = None,
     # parent session's LedgerEmitter (#334). The subagent inherits the
     # parent's ``turn_id`` via contextvar, so its ``model_event`` events
@@ -131,7 +147,6 @@ async def run_subagent(
     from loom.core.harness.validation import SchemaValidationMiddleware
     from loom.core.harness.failure import tool_result_text
     from loom.core.harness.permissions import PermissionContext, ToolCapability, TrustLevel
-    from loom.core.harness.mode import PermissionMode
 
     agent_id = config.agent_id
     session_id = f"{parent_session_id}:{agent_id}"
@@ -173,7 +188,7 @@ async def run_subagent(
     # classifier and no human, so 安全 is all it can be. #704 S3: a child
     # tool is declared only when a parent boundary declares it; the
     # model's whitelist picks among them, it never adds one.
-    perm = PermissionContext(session_id=session_id, mode=PermissionMode.SAFE)
+    perm = PermissionContext(session_id=session_id, mode=subagent_mode(parent_mode))
     declared = subagent_declarations(list(child_registry._tools), parent_declared or ())
     if declared:
         perm.declare("subagent", declared, unattended_only=True)

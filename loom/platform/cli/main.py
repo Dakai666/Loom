@@ -72,7 +72,6 @@ from loom.platform.cli.ui import (
     ToolEnd,
     TurnDone,
     TurnDropped,
-    TurnPaused,
     clear_line,
     status_bar,
     tool_begin_line,
@@ -406,7 +405,7 @@ async def _chat(
     #                          turns via _run_streaming_turn.
     #
     # Confirm / HITL pause / HITL redirect — all routed through the
-    # app's mode-flag mechanism (LoomApp.request_confirm / request_pause
+    # app's mode-flag mechanism (LoomApp.request_confirm
     # / request_redirect_text). No nested Applications; the widgets
     # render inside the same app's layout, so the "Application is not
     # running" race that PR-A worked around with three-event coordination
@@ -475,6 +474,7 @@ async def _chat(
     app = build_loom_app(on_submit=_on_submit)
     app.footer.model = model
     app.footer.persona = session.current_personality
+    app.footer.permission_mode = lambda: session.perm.mode
     # Issue #276: seed tier badge state from session config so the footer
     # has the right context immediately (saves the "old tier showing for
     # one turn before refresh" UX issue from #275).
@@ -1430,7 +1430,7 @@ async def _run_streaming_turn(
     # transition it OUT of THINKING when the agent actually produces
     # visible output (text or tool) — never on system-only boundary
     # events like TierExpiryHint, because the LLM
-    # round-trip is still pending across those. ToolBegin / TurnPaused
+    # round-trip is still pending across those. ToolBegin
     # / TurnDone branches drive their own heartbeat transitions, so
     # only TextChunk needs the explicit "first chunk wins" clear.
     _thinking_cleared = False
@@ -1593,99 +1593,6 @@ async def _run_streaming_turn(
                 if loom_app is not None:
                     loom_app.touch_heartbeat()
                     loom_app.stop_heartbeat()
-
-            elif isinstance(event, TurnPaused):
-                _bump_output_seq()
-                _cancel_pending_freeze()
-                # ── HITL pause (PR-A3: arrow-key widget) ──────────────────
-                _cancel_spinner()
-                clear_line()
-                if not at_line_start:
-                    console.print()
-                console.print(
-                    Rule(
-                        f"[loom.warning]⏸  Paused[/loom.warning]  "
-                        f"[loom.muted]({event.tool_count_so_far} tool(s) so far)[/loom.muted]",
-                        style="loom.warning",
-                    )
-                )
-
-                _PAUSE_RESUME = "resume"
-                _PAUSE_CANCEL = "cancel"
-                _PAUSE_REDIRECT = "redirect"
-
-                # PR-D1: route through LoomApp's mode-flag widgets so the
-                # pause + redirect overlays render inside the layout
-                # (用過即焚, no scrollback residue) rather than spinning
-                # nested Applications.
-                loom_app = getattr(session, "_loom_app", None)
-                # Heartbeat → PAUSED_BLOCKING while waiting on user; the
-                # stalled-prefix is suppressed for this state so a long
-                # think-time doesn't render as "still waiting".
-                if loom_app is not None:
-                    from loom.platform.interaction_language import HeartbeatState
-                    loom_app.start_heartbeat(
-                        state=HeartbeatState.PAUSED_BLOCKING.value,
-                        label="等待你的決定",
-                    )
-                if loom_app is not None:
-                    choice = await loom_app.request_pause(
-                        title="Loom 已暫停，下一步？",
-                        options=[
-                            ("繼續執行剩下的工具", _PAUSE_RESUME,   "r"),
-                            ("導向新指令並繼續",   _PAUSE_REDIRECT, "m"),
-                            ("取消這個 turn",     _PAUSE_CANCEL,   "c"),
-                        ],
-                        default_index=0,
-                        cancel_value=_PAUSE_CANCEL,
-                    )
-                else:
-                    # Fallback for tests / scripts without a running app.
-                    from loom.platform.cli.ui import SelectOption, select_prompt
-                    async def _pause_pick():
-                        return await select_prompt(
-                            title="Loom 已暫停，下一步？",
-                            options=[
-                                SelectOption(label="繼續執行剩下的工具", value=_PAUSE_RESUME,   shortcut="r"),
-                                SelectOption(label="導向新指令並繼續",   value=_PAUSE_REDIRECT, shortcut="m"),
-                                SelectOption(label="取消這個 turn",     value=_PAUSE_CANCEL,   shortcut="c"),
-                            ],
-                            default_index=0,
-                            cancel_value=_PAUSE_CANCEL,
-                        )
-                    runner = getattr(session, "_run_interactive", None)
-                    choice = await (runner(_pause_pick) if runner else _pause_pick())
-
-                # Decision made — release the PAUSED_BLOCKING heartbeat.
-                # The next event (TextChunk / ToolBegin) will repaint it.
-                if loom_app is not None:
-                    loom_app.stop_heartbeat(force=True)
-
-                if choice == _PAUSE_CANCEL:
-                    session.cancel()
-                elif choice == _PAUSE_REDIRECT:
-                    if loom_app is not None:
-                        raw = await loom_app.request_redirect_text()
-                    else:
-                        from prompt_toolkit import PromptSession as _PS
-                        async def _ask_redirect():
-                            ps = _PS()
-                            try:
-                                return await ps.prompt_async(
-                                    [("class:prompt", "redirect › ")],
-                                )
-                            except (EOFError, KeyboardInterrupt):
-                                return ""
-                        runner = getattr(session, "_run_interactive", None)
-                        raw = await (runner(_ask_redirect) if runner else _ask_redirect())
-                    raw = (raw or "").strip()
-                    if raw:
-                        session.resume_with(raw)
-                        console.print(f"[loom.muted]  Injected: {raw[:80]}[/loom.muted]")
-                    else:
-                        session.resume()
-                else:  # _PAUSE_RESUME
-                    session.resume()
 
             elif isinstance(event, TurnDropped):
                 _bump_output_seq()

@@ -146,9 +146,10 @@ class TestMode:
         await _bash(env, "python3 scripts/tool.py")
         assert (await _decisions(ledger))[-1]["mode"] == "safe"
 
-    def test_subagents_run_in_safe(self):
-        src = (ROOT / "loom/core/agent/subagent.py").read_text(encoding="utf-8")
-        assert "PermissionContext(session_id=session_id, mode=PermissionMode.SAFE)" in src
+    @pytest.mark.parametrize("parent", list(PermissionMode))
+    def test_subagents_run_in_safe(self, parent):
+        from loom.core.agent.subagent import subagent_mode
+        assert subagent_mode(parent) is PermissionMode.SAFE
 
 
 class TestDiscordOperatorGate:
@@ -256,7 +257,7 @@ class TestDelegation:
         assert env.confirm.await_count == 1
         call = env.confirm.await_args.args[0]
         from loom.core.session_support import classifier_line
-        assert classifier_line(call) == "自動核准未放行（自理）：Luna abstained"
+        assert classifier_line(call) == "[自理] 守門・權限模式：Luna abstained"
 
     async def test_not_a_session_pass(self, tmp_path, ledger):
         """The delegation lives in this turn's intent and writes no grant:

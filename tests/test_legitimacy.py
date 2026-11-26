@@ -46,14 +46,15 @@ def make_call(
 
 
 @pytest.mark.asyncio
-async def test_write_file_blocked_without_probe(handler):
-    """write_file is blocked when no read_file / list_dir has been called this turn."""
-    guard = LegitimacyGuardMiddleware()
+async def test_write_file_blocked_without_probe(handler, tmp_path):
+    """Overwriting an existing file that was not read is blocked (#704 S6)."""
+    (tmp_path / "foo.py").write_text("old")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
     call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": ""})
     res = await guard.process(call_write, handler)
     assert not res.success
     assert res.failure_type == "permission_denied"
-    assert "read this specific file" in res.error
+    assert "守門・先讀後寫" in res.error
     assert call_write.metadata[LIFECYCLE_CTX_KEY].authorization_result is False
 
 
@@ -71,17 +72,17 @@ async def test_write_file_allowed_after_read(handler):
 
 
 @pytest.mark.asyncio
-async def test_safe_tool_without_path_does_not_probe_files(handler):
+async def test_safe_tool_without_path_does_not_probe_files(handler, tmp_path):
     """Issue #288: SAFE tools that don't take a ``path`` arg (agent_health,
     introspect_self) MUST NOT count as a file probe. The previous
     sledgehammer behavior — any SAFE call clearing the gate for any
     write — is the bug this issue exists to fix.
     """
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "x").write_text("x")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
     call_safe = make_call("introspect_self", TrustLevel.SAFE, {})
     await guard.process(call_safe, handler)
     assert not guard.has_probed
-    assert not guard._probed_files
 
     call_write = make_call("write_file", TrustLevel.GUARDED, {"path": "x", "content": ""})
     res = await guard.process(call_write, handler)
@@ -104,11 +105,12 @@ async def test_explicit_read_probe_capability_counts_as_probe(handler):
 
 
 @pytest.mark.asyncio
-async def test_guarded_tool_without_read_probe_does_not_count(handler):
+async def test_guarded_tool_without_read_probe_does_not_count(handler, tmp_path):
     """Issue #167: a GUARDED tool with no READ_PROBE flag must NOT satisfy
     the heuristic, otherwise write_file could waltz through after any
     network/exec call."""
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "x").write_text("x")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
     call_unrelated = make_call(
         "some_mcp:do_thing", TrustLevel.GUARDED, {},
         capabilities=ToolCapability.NETWORK,
@@ -132,41 +134,9 @@ async def test_run_bash_not_guarded_by_probe(handler):
     assert res.success, "run_bash should bypass LegitimacyGuard entirely"
 
 
-@pytest.mark.asyncio
-async def test_reset_clears_probe_preserves_trust(handler):
-    """reset_probe() clears has_probed; session trust survives."""
-    guard = LegitimacyGuardMiddleware()
-    await guard.process(make_call("read_file", TrustLevel.SAFE, {"path": "a.py"}), handler)
-    # First write succeeds → session-trusted
-    await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "a.py", "content": ""}), handler)
-    assert "write_file" in guard._session_trusted
-
-    guard.reset_probe()
-    assert not guard.has_probed
-
-    # write_file session-trusted → still passes without re-probe
-    res = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "b.py", "content": ""}), handler)
-    assert res.success, "session-trusted write_file must not require re-probe"
-
-
-@pytest.mark.asyncio
-async def test_session_trust_skips_probe_on_subsequent_turns(handler):
-    """Issue #118: once write_file succeeds in a session, future turns skip the probe requirement."""
-    guard = LegitimacyGuardMiddleware()
-
-    # Turn 1: probe + write → session-trusted
-    await guard.process(make_call("read_file", TrustLevel.SAFE, {"path": "x.md"}), handler)
-    res = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "x.md", "content": ""}), handler)
-    assert res.success
-    assert "write_file" in guard._session_trusted
-
-    # New turn — per-turn state reset
-    guard.reset_probe()
-    assert not guard.has_probed
-
-    # Turn 2: no probe, but session-trusted → passes
-    res2 = await guard.process(make_call("write_file", TrustLevel.GUARDED, {"path": "y.md", "content": ""}), handler)
-    assert res2.success, "session-trusted write_file must not require re-probe on new turn"
+# Session trust (#118: one successful write waived the check for every
+# file for the rest of the session) is retired in #704 S6; see
+# tests/test_guards_704_s6.py.
 
 
 # Layer 2 (trajectory anomaly) only downgraded /auto, retired in #704 S3.
@@ -300,23 +270,21 @@ async def test_readonly_bash_permits_write(handler):
 
 
 @pytest.mark.asyncio
-async def test_per_file_probe_blocks_unrelated_write(handler):
+async def test_per_file_probe_blocks_unrelated_write(handler, tmp_path):
     """Issue #288: probing foo.py does NOT clear writes to bar.py."""
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "foo.py").write_text("f")
+    (tmp_path / "bar.py").write_text("b")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call("read_file", TrustLevel.SAFE, {"path": "foo.py"}), handler
     )
-    assert "foo.py" in guard._probed_files
 
     res_foo = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "foo.py", "content": "x"}),
         handler,
     )
     assert res_foo.success
-
-    # Reset session_trusted to isolate the per-file check (Layer 1, not Layer 3)
-    guard._session_trusted.clear()
 
     res_bar = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "bar.py", "content": "x"}),
@@ -327,14 +295,19 @@ async def test_per_file_probe_blocks_unrelated_write(handler):
 
 
 @pytest.mark.asyncio
-async def test_probe_file_tool_marks_specific_path(handler):
+async def test_probe_file_tool_marks_specific_path(handler, tmp_path):
     """probe_file('x.py') marks x.py specifically, not all files."""
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "x.py").write_text("x")
+    (tmp_path / "y.py").write_text("y")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call("probe_file", TrustLevel.SAFE, {"path": "x.py"}), handler
     )
-    assert "x.py" in guard._probed_files
+    res_y = await guard.process(
+        make_call("write_file", TrustLevel.GUARDED, {"path": "y.py", "content": "x"}), handler,
+    )
+    assert not res_y.success
 
     res = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "x.py", "content": "x"}),
@@ -344,9 +317,11 @@ async def test_probe_file_tool_marks_specific_path(handler):
 
 
 @pytest.mark.asyncio
-async def test_bash_path_extraction_per_file(handler):
+async def test_bash_path_extraction_per_file(handler, tmp_path):
     """grep PAT file.py marks file.py, not other.py."""
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "file.py").write_text("f")
+    (tmp_path / "other.py").write_text("o")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call(
@@ -356,15 +331,11 @@ async def test_bash_path_extraction_per_file(handler):
         ),
         handler,
     )
-    assert "file.py" in guard._probed_files
-    assert not guard._unscoped_probed
-
     res_match = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "file.py", "content": "x"}),
         handler,
     )
     assert res_match.success
-    guard._session_trusted.clear()
 
     res_other = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "other.py", "content": "x"}),
@@ -374,9 +345,11 @@ async def test_bash_path_extraction_per_file(handler):
 
 
 @pytest.mark.asyncio
-async def test_bash_pipeline_falls_back_to_unscoped(handler):
-    """Pipelines defeat the parser → unscoped fallback so writes still pass."""
-    guard = LegitimacyGuardMiddleware()
+async def test_bash_pipeline_unlocks_no_file(handler, tmp_path):
+    """Pipelines defeat the parser: the read names no file, so it unlocks
+    no overwrite (#704 S6; it used to unlock every file)."""
+    (tmp_path / "anything.py").write_text("a")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call(
@@ -386,20 +359,20 @@ async def test_bash_pipeline_falls_back_to_unscoped(handler):
         ),
         handler,
     )
-    assert guard._unscoped_probed
-    assert not guard._probed_files
+    assert guard.has_probed
 
     res = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "anything.py", "content": "x"}),
         handler,
     )
-    assert res.success
+    assert not res.success
 
 
 @pytest.mark.asyncio
-async def test_path_normalization_dot_prefix(handler):
+async def test_path_normalization_dot_prefix(handler, tmp_path):
     """./foo.py and foo.py refer to the same file under per-file tracking."""
-    guard = LegitimacyGuardMiddleware()
+    (tmp_path / "foo.py").write_text("f")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call("read_file", TrustLevel.SAFE, {"path": "./foo.py"}), handler
@@ -425,27 +398,22 @@ async def test_read_probe_capability_unscoped(handler):
         ),
         handler,
     )
-    assert guard._unscoped_probed
     assert guard.has_probed
 
 
 @pytest.mark.asyncio
-async def test_probed_files_persist_across_turn_reset(handler):
-    """reset_probe() clears per-turn flag but session-level _probed_files
-    survives — once read, always read."""
-    guard = LegitimacyGuardMiddleware()
+async def test_probed_files_persist_across_turn_reset(handler, tmp_path):
+    """reset_probe() clears the per-turn flag; a read survives the turn
+    while the file stays unchanged."""
+    (tmp_path / "kept.py").write_text("k")
+    guard = LegitimacyGuardMiddleware(workspace=tmp_path)
 
     await guard.process(
         make_call("read_file", TrustLevel.SAFE, {"path": "kept.py"}), handler
     )
-    assert "kept.py" in guard._probed_files
-
     guard.reset_probe()
     assert not guard.has_probed
-    assert "kept.py" in guard._probed_files  # session-level survives
 
-    # Across the turn boundary, session_trusted hasn't kicked in yet
-    # (no write succeeded), so the per-file check is what permits this:
     res = await guard.process(
         make_call("write_file", TrustLevel.GUARDED, {"path": "kept.py", "content": "x"}),
         handler,

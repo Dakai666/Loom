@@ -66,7 +66,6 @@ from loom.core.events import (  # noqa: E402, F401
     ToolEnd,
     TurnDone,
     TurnDropped,
-    TurnPaused,
 )
 from loom.platform.command_catalog import personality_command_entries
 

@@ -36,6 +36,7 @@ import httpx
 
 from loom.core.harness.middleware import ToolCall, ToolResult, VerifierResult
 from loom.core.harness.permissions import ToolCapability, TrustLevel
+from loom.core.harness.paths import file_digest, resolve_workspace_path
 from loom.core.harness.scope import ScopeRequirement, ScopeRequest, simple_argv
 from loom.core.timezone import user_zone
 from loom.core.security.self_termination_guard import SelfTerminationGuard
@@ -162,24 +163,8 @@ def _html_to_text(html: str) -> tuple[str, str]:
     return title, cleaned
 
 
-def _resolve_workspace_path(raw: str, workspace: Path) -> Path:
-    """Resolve a raw path string strictly relative to workspace.
-
-    - Escaping paths (e.g. ../../Windows) are rerouted back inside workspace
-      to safely contain prompt injection and path traversal attempts.
-    """
-    workspace = workspace.resolve()
-    p = Path(raw)
-    resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
-
-    try:
-        resolved.relative_to(workspace)
-        return resolved  # Check passed, securely inside workspace
-    except ValueError:
-        # Reroute: strip root/drive and forcibly place under workspace
-        # e.g. /etc/passwd → workspace/etc/passwd, C:\Windows → workspace\Windows
-        parts = resolved.parts[1:]
-        return (workspace / Path(*parts)).resolve()
+# Shared with the read-before-write guard (#704 S6): both must name the same file.
+_resolve_workspace_path = resolve_workspace_path
 
 
 def _make_openai_image_scope_resolver(workspace: Path):
@@ -487,6 +472,25 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
         raw = call.args.get("path", "")
         content = call.args.get("content", "")
         path = _resolve_workspace_path(raw, workspace)
+        # #704 S6: read before write checked the target when the call
+        # entered the pipeline; a confirm can take minutes, so check the
+        # same expectation again here, where the bytes are written.
+        # A different path means the guard checked another file: fail
+        # closed (#711 review), never skip the check.
+        expect = call.metadata.get("write_expect")
+        if isinstance(expect, dict):
+            now = file_digest(path)
+            if expect.get("path") != str(path) or now != expect.get("sha256"):
+                from loom.core.harness.guard_reason import guard_error
+                reason = (f"{raw} is not the file read before write checked"
+                          if expect.get("path") != str(path)
+                          else f"{raw} appeared since the check" if expect.get("sha256") is None
+                          else f"{raw} changed since it was read")
+                return ToolResult(
+                    call_id=call.id, tool_name=call.tool_name, success=False,
+                    error=guard_error("read_before_write", reason,
+                                      "Read it, then write, so the write does not discard it."),
+                    failure_type="permission_denied")
         try:
             # Capture original content for rollback (Issue #42)
             original_content: str | None = None
@@ -3403,6 +3407,7 @@ def make_spawn_agent_tool(parent_session: Any) -> "ToolDefinition":
                 parent_session_id=parent_session.session_id,
                 workspace=parent_session.workspace,
                 parent_grants=parent_session.perm.grants,
+                parent_mode=getattr(parent_session.perm, "mode", None),
                 parent_declared=parent_session.perm.declared_tools(),
                 ledger_emitter=getattr(parent_session, "_ledger_emitter", None),
             )

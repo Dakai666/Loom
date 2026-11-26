@@ -9,7 +9,7 @@ import pytest
 
 import loom
 from loom.core.cognition.providers import LLMResponse, ToolUse
-from loom.core.events import TurnDone, TurnDropped, TurnPaused
+from loom.core.events import TurnDone, TurnDropped
 from loom.core.memory.procedural import SkillGenome
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
@@ -103,8 +103,6 @@ async def _session(monkeypatch, tmp_path, mode):
             uses = [ToolUse(id="unload-1", name="unload_skill", args={"name": "deep"})]
         else:
             uses = []
-        if mode == "cancel" and uses:
-            session.pause()
         reason = "tool_use" if uses else ("unexpected_stop" if mode == "drop" else "end_turn")
         yield "", LLMResponse(
             text=None if uses else "done", tool_uses=uses, stop_reason=reason,
@@ -123,7 +121,7 @@ async def _session(monkeypatch, tmp_path, mode):
     return session, router, seen_models
 
 
-@pytest.mark.parametrize("mode", ["normal", "cancel", "drop"])
+@pytest.mark.parametrize("mode", ["normal", "drop"])
 async def test_turn_boundaries_keep_tier_and_ledger_without_diagnostics(monkeypatch, tmp_path, mode):
     session, router, seen_models = await _session(monkeypatch, tmp_path, mode)
     stopped = False
@@ -132,15 +130,10 @@ async def test_turn_boundaries_keep_tier_and_ledger_without_diagnostics(monkeypa
         events = []
         async for event in session.stream_turn("Use the deep skill"):
             events.append(event)
-            if isinstance(event, TurnPaused):
-                # Resume the paused turn into its cancellation TurnDone branch.
-                assert session._compute_skill_max_tier() == 2
-                session.cancel()
         assert any(isinstance(e, TurnDone) for e in events)
         if mode == "drop":
             assert any(isinstance(e, TurnDropped) for e in events)
-        if mode != "cancel":
-            assert seen_models[:2] == ["gpt-test", "gpt-deep"]
+        assert seen_models[:2] == ["gpt-test", "gpt-deep"]
         assert session._skill_outcome_tracker.activated_skills == []
         assert session._compute_skill_max_tier() == 0
         await asyncio.sleep(0)
