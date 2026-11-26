@@ -31,6 +31,7 @@ import openai
 import pytest
 
 from loom.core.cognition.providers import OpenCodeGoProvider
+from loom.core.cognition.responses_sse import QUOTA_FAILURE_TYPE, ResponsesProviderError
 from loom.core.cognition.router import LLMRouter
 
 OPENCGO_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
@@ -155,11 +156,12 @@ def _usage_chunk(prompt: int, completion: int) -> Any:
     )
 
 
-def _status_error(cls: type, status: int, message: str) -> Exception:
+def _status_error(cls: type, status: int, message: str, headers: dict | None = None) -> Exception:
     """Build an openai SDK status error without touching the network."""
     request = httpx.Request("POST", f"{OPENCGO_BASE_URL}/chat/completions")
     response = httpx.Response(
-        status, request=request, json={"error": {"message": message}}
+        status, request=request, headers=headers or {},
+        json={"error": {"message": message}},
     )
     return cls(message, response=response, body=None)
 
@@ -322,6 +324,41 @@ async def test_403_raises_readable_entitlement_error(fake_openai):
     assert FAKE_KEY not in msg
 
 
+async def test_429_raises_typed_quota_error_the_router_can_fail_over_on(fake_openai):
+    """DK's chosen failover path: the Go 429 must surface as the typed quota
+    failure (``entitlement_or_quota``) so the router's existing quota fallback
+    mechanism serves ``[cognition]fallback_model`` automatically."""
+    fake_openai.error = _status_error(
+        openai.RateLimitError, 429, "quota exhausted", headers={"retry-after": "120"}
+    )
+    provider = OpenCodeGoProvider(api_key=FAKE_KEY, session_id="s")
+
+    with pytest.raises(RuntimeError) as caught:
+        await _collect(provider)
+
+    exc = caught.value
+    assert isinstance(exc, ResponsesProviderError)
+    assert exc.failure_type == QUOTA_FAILURE_TYPE
+    assert exc.retry_after_seconds == 120.0
+    msg = str(exc)
+    assert "429" in msg
+    assert "allowance" in msg
+    assert "/v1/usage" in msg
+    assert FAKE_KEY not in msg
+
+
+async def test_429_without_retry_after_header_uses_no_cooldown_value(fake_openai):
+    fake_openai.error = _status_error(
+        openai.RateLimitError, 429, "quota exhausted"
+    )
+    provider = OpenCodeGoProvider(api_key=FAKE_KEY, session_id="s")
+
+    with pytest.raises(ResponsesProviderError) as caught:
+        await _collect(provider)
+
+    assert caught.value.retry_after_seconds is None
+
+
 async def test_429_raises_readable_quota_error_mentioning_allowance(fake_openai):
     fake_openai.error = _status_error(
         openai.RateLimitError, 429, "quota exhausted"
@@ -380,12 +417,30 @@ def test_router_maps_opencode_prefix_to_opencode_go():
 
 
 def test_bare_deepseek_id_still_routes_to_deepseek_provider():
-    """Guard: the OpenCode Go prefix must not shadow the deepseek- routing."""
+    """Guard: the OpenCode Go prefixes must not shadow the deepseek- routing."""
     assert LLMRouter()._provider_name_for_model("deepseek-v4.1-flash") == "deepseek"
     assert (
         LLMRouter()._provider_name_for_model("opencode/deepseek-v4.1-flash")
         == "opencode-go"
     )
+
+
+def test_router_maps_canonical_opencode_go_prefix():
+    """DK writes models as ``opencode-go/<id>`` (provider id + model id)."""
+    assert LLMRouter()._provider_name_for_model("opencode-go/deepseek-v4.1-flash") == "opencode-go"
+    assert LLMRouter()._provider_name_for_model("opencode-go/glm-5.3") == "opencode-go"
+
+
+async def test_canonical_prefix_model_id_passes_through(fake_openai):
+    fake_openai.chunks = [_text_chunk("ok")]
+    provider = OpenCodeGoProvider(
+        api_key=FAKE_KEY, model="opencode-go/deepseek-v4.1-flash"
+    )
+
+    await _collect(provider)
+
+    sent = fake_openai.instances[-1].requests[0]["model"]
+    assert sent == "deepseek-v4.1-flash"
 
 
 def test_build_router_registers_opencode_go_when_key_present(monkeypatch):
@@ -402,9 +457,12 @@ def test_build_router_registers_opencode_go_when_key_present(monkeypatch):
 
     router = session_module.build_router()
 
-    provider = router.get_provider("opencode/glm-5.3")
+    # Canonical Loom name (DK's form): opencode-go/<model-id>.
+    provider = router.get_provider("opencode-go/glm-5.3")
     assert provider.name == "opencode-go"
-    assert provider.model == "opencode/glm-5.3"
+    assert provider.model == "opencode-go/glm-5.3"
+    # The short "opencode/" spelling is still accepted as an alias.
+    assert router.get_provider("opencode/glm-5.3").name == "opencode-go"
     # The current default model must not have been changed.
     assert router.get_provider("MiniMax-M3.1-Flash").name == "minimax"
 
@@ -416,7 +474,7 @@ def test_build_router_serves_opencode_default_and_marks_it_default(monkeypatch):
         session_module, "_load_env", lambda: {"OPENCODE_API_KEY": FAKE_KEY}
     )
     monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
-        "cognition": {"default_model": "opencode/deepseek-v4.1-flash"},
+        "cognition": {"default_model": "opencode-go/deepseek-v4.1-flash"},
         "providers": {},
     })
 
@@ -424,7 +482,27 @@ def test_build_router_serves_opencode_default_and_marks_it_default(monkeypatch):
 
     provider = router.get_provider("unrecognized-model-name")
     assert provider.name == "opencode-go"
-    assert provider.model == "opencode/deepseek-v4.1-flash"
+    assert provider.model == "opencode-go/deepseek-v4.1-flash"
+
+
+def test_build_router_marks_default_for_alias_prefix_too(monkeypatch):
+    """The short ``opencode/`` spelling also selects the provider as default."""
+    from loom.core import session as session_module
+
+    monkeypatch.setattr(
+        session_module, "_load_env", lambda: {"OPENCODE_API_KEY": FAKE_KEY}
+    )
+    monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+        "cognition": {"default_model": "opencode/kimi-k3"},
+        "providers": {},
+    })
+
+    router = session_module.build_router()
+
+    provider = router.get_provider("opencode/kimi-k3")
+    assert provider.name == "opencode-go"
+    assert provider.model == "opencode/kimi-k3"
+    assert router.get_provider("some-other-model").name == "opencode-go"
 
 
 def test_build_router_passes_session_id_into_session_header(monkeypatch, fake_openai):
