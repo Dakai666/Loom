@@ -375,3 +375,88 @@ async def test_session_guard_resolves_in_the_workspace(monkeypatch, tmp_path):
         assert (await _write(g, "fresh.md")).success
     finally:
         await session.stop()
+
+
+# ---------------------------------------------------------------------------
+# #711 review: a failed read, a spaced path, a FIFO
+# ---------------------------------------------------------------------------
+
+
+async def _fail(call: ToolCall) -> ToolResult:
+    return ToolResult(call_id=call.id, tool_name=call.tool_name, success=False, error="nope")
+
+
+class TestReviewFindings:
+    async def test_a_failed_read_is_not_a_read(self, tmp_path):
+        (tmp_path / "bin.dat").write_bytes(b"\xff\xfe\x00")
+        g = _guard(tmp_path)
+        await g.process(_call("read_file", {"path": "bin.dat"}, trust=TrustLevel.SAFE), _fail)
+        assert not (await _write(g, "bin.dat")).success
+
+    async def test_real_read_file_on_a_binary_unlocks_nothing(self, tmp_path):
+        from loom.platform.cli.tools import make_filesystem_tools
+        (tmp_path / "bin.dat").write_bytes(b"\xff\xfe\x00")
+        tools = {t.name: t for t in make_filesystem_tools(tmp_path)}
+        g = _guard(tmp_path)
+        r = await g.process(_call("read_file", {"path": "bin.dat"}, trust=TrustLevel.SAFE),
+                            tools["read_file"].executor)
+        assert not r.success
+        w = await _write(g, "bin.dat", "x", tools["write_file"].executor)
+        assert not w.success and (tmp_path / "bin.dat").read_bytes() == b"\xff\xfe\x00"
+
+    async def test_probe_file_stays_a_self_declared_unlock(self, tmp_path):
+        from loom.platform.cli.tools import make_probe_file_tool
+        (tmp_path / "a.md").write_text("a")
+        g = _guard(tmp_path)
+        await g.process(_call("probe_file", {"path": "a.md"}, trust=TrustLevel.SAFE),
+                        make_probe_file_tool().executor)
+        assert (await _write(g, "a.md")).success
+
+    @pytest.mark.parametrize("raw", [" spaced.md", "spaced.md ", "\tspaced.md"])
+    async def test_a_spaced_path_names_the_same_file_in_guard_and_tool(self, tmp_path, raw):
+        from loom.platform.cli.tools import make_filesystem_tools
+        target = tmp_path / raw
+        target.write_text("unread")
+        write = next(t for t in make_filesystem_tools(tmp_path) if t.name == "write_file")
+        r = await _write(_guard(tmp_path), raw, "mine", write.executor)
+        assert not r.success and "守門・先讀後寫：" in r.error
+        assert target.read_text() == "unread"
+
+    async def test_tool_fails_closed_when_the_expectation_names_another_file(self, tmp_path):
+        from loom.platform.cli.tools import make_filesystem_tools
+        (tmp_path / "a.md").write_text("keep")
+        write = next(t for t in make_filesystem_tools(tmp_path) if t.name == "write_file")
+        call = _call("write_file", {"path": "a.md", "content": "x"})
+        call.metadata["write_expect"] = {"path": str(tmp_path / "other.md"), "sha256": None}
+        r = await write.executor(call)
+        assert not r.success and "守門・先讀後寫：" in r.error
+        assert (tmp_path / "a.md").read_text() == "keep"
+
+    def test_a_fifo_does_not_block(self, tmp_path):
+        import asyncio
+        import os
+        import threading
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        out: list = []
+        t = threading.Thread(target=lambda: out.append(asyncio.run(_write(_guard(tmp_path), "pipe"))),
+                             daemon=True)
+        t.start()
+        t.join(timeout=2)
+        if t.is_alive():  # unblock the reader so the thread can end
+            fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            os.close(fd)
+            t.join(timeout=2)
+            pytest.fail("the guard blocked on a FIFO")
+        assert not out[0].success and "守門・先讀後寫：" in out[0].error
+
+    def test_digest_is_chunked_and_regular_files_only(self, tmp_path):
+        import hashlib
+        import os
+        from loom.core.harness.paths import file_digest
+        big = tmp_path / "big.bin"
+        data = os.urandom(3 * 1024 * 1024 + 7)
+        big.write_bytes(data)
+        assert file_digest(big) == hashlib.sha256(data).hexdigest()
+        assert file_digest(tmp_path / "missing") is None
+        assert file_digest(tmp_path) not in (None, hashlib.sha256(b"").hexdigest())
