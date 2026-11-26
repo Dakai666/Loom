@@ -139,6 +139,7 @@ class LLMRouter:
         ("chatgpt/",   "chatgpt"),
         ("xai/",       "xai"),
         ("openrouter/", "openrouter"),
+        ("opencode-go/", "opencode-go"),
         ("opencode/",  "opencode-go"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),

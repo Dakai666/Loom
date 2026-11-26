@@ -46,6 +46,7 @@ from typing import Any
 
 from .forensics import get_forensics
 from . import vision as _vision
+from .responses_sse import QUOTA_FAILURE_TYPE, ResponsesProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -1103,10 +1104,14 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
     """
 
     name = "opencode-go"
-    ROUTING_PREFIX = "opencode/"
+    ROUTING_PREFIX = "opencode-go/"
     DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
     DEFAULT_MODEL = "deepseek-v4.1-flash"
     DEFAULT_TIMEOUT = 180.0
+
+    # Canonical Loom name: ``opencode-go/<model-id>`` (provider id + model id).
+    # The short ``opencode/<model-id>`` spelling keeps working as an alias.
+    _LOOM_PREFIXES = ("opencode-go/", "opencode/")
 
     def __init__(
         self,
@@ -1149,6 +1154,14 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
             },
         )
 
+    def _api_model(self) -> str:
+        """Strip Loom's routing prefix (either spelling) before the wire call."""
+        model = self.model
+        for prefix in self._LOOM_PREFIXES:
+            if model.startswith(prefix):
+                return model.removeprefix(prefix)
+        return model
+
     def _translate_status_error(self, exc: BaseException) -> BaseException:
         """Map OpenCode Go HTTP status errors to readable messages.
 
@@ -1177,11 +1190,29 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
                 "check the subscription in the OpenCode Console."
             )
         if status == 429:
-            return RuntimeError(
-                f"OpenCode Go allowance exhausted (HTTP 429): {detail}. "
-                "All Go models share one 5-hour / weekly / monthly allowance, "
-                "and it is shared with OpenCode itself. Remaining quota: "
-                "GET https://opencode.ai/inference/go/v1/usage."
+            # Typed quota failure: the router's quota fallback acts only on
+            # ``failure_type=entitlement_or_quota``, so a Go allowance
+            # exhaustion can automatically serve [cognition]fallback_model.
+            headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+            raw_retry_after = headers.get("retry-after")
+            retry_after: float | None = None
+            if raw_retry_after:
+                try:
+                    retry_after = float(raw_retry_after)
+                except (TypeError, ValueError):
+                    retry_after = None
+            return ResponsesProviderError(
+                provider=self.name,
+                model=self._api_model(),
+                failure_type=QUOTA_FAILURE_TYPE,
+                phase="headers_received",
+                detail=(
+                    f"OpenCode Go allowance exhausted (HTTP 429): {detail}. "
+                    "All Go models share one 5-hour / weekly / monthly "
+                    "allowance, and it is shared with OpenCode itself. "
+                    "Remaining quota: GET https://opencode.ai/inference/go/v1/usage."
+                ),
+                retry_after_seconds=retry_after,
             )
         return exc
 

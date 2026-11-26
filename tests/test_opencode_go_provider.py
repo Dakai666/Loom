@@ -30,7 +30,7 @@ import httpx
 import openai
 import pytest
 
-from loom.core.cognition.providers import OpenCodeGoProvider
+from loom.core.cognition.providers import OpenCodeGoProvider, LLMResponse
 from loom.core.cognition.responses_sse import QUOTA_FAILURE_TYPE, ResponsesProviderError
 from loom.core.cognition.router import LLMRouter
 
@@ -357,6 +357,69 @@ async def test_429_without_retry_after_header_uses_no_cooldown_value(fake_openai
         await _collect(provider)
 
     assert caught.value.retry_after_seconds is None
+
+
+async def test_router_fails_over_to_fallback_model_on_go_429(monkeypatch, fake_openai):
+    """End-to-end on the real router machinery: Go 429 (typed quota error) →
+    ``[cognition]fallback_model`` is served automatically."""
+    from loom.core.cognition import router as router_mod
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class _FallbackFake:
+        name = "chatgpt"
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def for_model(self, model: str) -> "_FallbackFake":
+            return self
+
+        def native_max_tokens(self, model: str) -> int | None:
+            return None
+
+        async def chat(self, messages, tools=None, max_tokens=8096):
+            self.calls.append(max_tokens)
+            return LLMResponse(
+                text="terra-reply", tool_uses=[], stop_reason="end_turn"
+            )
+
+    clock = _Clock()
+    monkeypatch.setattr(router_mod, "_clock", clock)
+    router_mod._reset_failover_state_for_tests()
+    try:
+        # The fake client is configured before the provider builds it.
+        fake_openai.error = _status_error(
+            openai.RateLimitError, 429, "quota exhausted",
+            headers={"retry-after": "120"},
+        )
+        primary = OpenCodeGoProvider(
+            api_key=FAKE_KEY, model="opencode-go/deepseek-v4.1-flash", session_id="s"
+        )
+        fallback = _FallbackFake()
+        r = (
+            LLMRouter()
+            .register(primary, default=True)
+            .register(fallback, default=False, fallback=False)
+        )
+        r.set_quota_fallback("chatgpt/gpt-6.1-terra")
+
+        response = await r.chat(
+            "opencode-go/deepseek-v4.1-flash", [{"role": "user", "content": "hi"}]
+        )
+
+        assert response.text == "terra-reply"
+        assert fallback.calls == [8096]
+        # Cooldown honoured from the Retry-After header (120s).
+        assert "opencode-go" in router_mod._cooldowns
+        assert router_mod._cooldowns["opencode-go"].until == 1120.0
+    finally:
+        router_mod._reset_failover_state_for_tests()
 
 
 async def test_429_raises_readable_quota_error_mentioning_allowance(fake_openai):

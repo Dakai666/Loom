@@ -433,9 +433,10 @@ def build_router(
     if opencode_key:
         opencode_cfg = cfg.get("providers", {}).get("opencode_go", {})
         raw_model = opencode_cfg.get("default_model", OpenCodeGoProvider.DEFAULT_MODEL)
+        # Canonical Loom name: opencode-go/<model-id>; opencode/ is an alias.
         opencode_model = (
-            default if default.startswith("opencode/")
-            else f"opencode/{raw_model}"
+            default if default.startswith(("opencode/", "opencode-go/"))
+            else f"opencode-go/{raw_model}"
         )
         router.register(
             OpenCodeGoProvider(
