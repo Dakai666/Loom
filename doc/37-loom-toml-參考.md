@@ -445,18 +445,28 @@ provider id 是 `opencode-go`，Loom 這邊的 model 名稱一律帶 `opencode/`
 是 `approval.py` 內的常數 `REVIEW_MODEL = "codex/gpt-6-luna"`（ChatGPT plan），
 不受此設定影響，judge 等其他用途也維持原樣。
 
-```toml
-[cognition]
-# 一般 turn 走 OpenCode Go（canonical 寫法：opencode-go/<model-id>）
-default_model  = "opencode-go/deepseek-v4.1-flash"
-# Go 額度用完（429）時自動回 ChatGPT plan；Go 的 429 會以 typed quota error
-# 觸發 Loom 既有 fallback 機制，冷卻（照 Retry-After，預設 30 分鐘）後自動恢復
-fallback_model = "chatgpt/gpt-6.1-terra"
+**live 設定有 `[cognition.tiers]`（`1 = "chatgpt/gpt-6.1-terra"`、
+`default_tier = 1`）——tier 有設定時 `default_model` 不會生效**，所以
+`tiers.1` 也要一起改。以下是「修改既有 key」的形式（live 已有
+`[cognition]`，不要整段新增一個 `[cognition]` 區塊，TOML 會 duplicate
+table）：
 
-# fallback_model 指到 chatgpt/<slug> 時，chatgpt provider 必須能註冊
-# （default 不是 chatgpt/ 開頭就不會自動註冊，要明確 enabled）
-[providers.chatgpt]
-enabled = true
+```toml
+# 修改 live 既有的行（不要新增 [cognition] 區塊）
+default_model = "opencode-go/deepseek-v4.1-flash"   # 原本 chatgpt/gpt-6.1-terra
+
+[cognition.tiers]
+1 = "opencode-go/deepseek-v4.1-flash"               # 原本 chatgpt/gpt-6.1-terra（會蓋過 default_model）
+
+# fallback_model 維持 live 現有的 "deepseek-flash"，不用改：
+# Go 的 429（typed entitlement_or_quota，含 Retry-After）會觸發 Loom 既有
+# quota fallback 機制，冷卻後自動恢復。deepseek-flash 是跨 provider 的
+# 額度備援，tier 2（chatgpt/gpt-6.1-sol）也因此維持跨 provider 備援不變。
+
+# 新增（live 沒有）
+[providers.opencode_go]
+base_url      = "https://opencode.ai/inference/go/openai/v1"
+default_model = "deepseek-v4.1-flash"               # 裸 model id，不帶 opencode-go/ 前綴
 ```
 
 為什麼用既有 fallback 機制而不是「手動切回」：Loom 的 quota fallback 會自動
@@ -467,8 +477,17 @@ enabled = true
 - 手動：`/model chatgpt/gpt-6.1-terra`（切回 ChatGPT plan）或
   `/model opencode-go/deepseek-v4.1-flash`（再切回 Go）。
 
-切換時記得把原本為 ChatGPT plan 設的 `fallback_model = "deepseek-flash"`
-改掉（主模型不是 ChatGPT plan 時它不再生效）。
+額度恢復後若想把 fallback 改回 ChatGPT plan：把
+`fallback_model = "deepseek-flash"` 改成 `"chatgpt/gpt-6.1-terra"`。但注意：
+那樣 fallback 與 tier 2（`chatgpt/gpt-6.1-sol`）就同屬 ChatGPT plan，
+**沒有跨 provider 的額度備援**（Go 與 ChatGPT plan 一起掛時沒有第三條路）。
+用 `deepseek-flash` 當 fallback 時，tier 2 的額度備援維持不變。
+
+提醒：`fallback_model` 指到 `chatgpt/<slug>` 時 chatgpt provider 必須能註冊
+（default 不是 `chatgpt/` 開頭就要 `[providers.chatgpt] enabled = true`；
+live 已符合）。Go 的 429 額度是 5 小時／每週／每月共用，並與 OpenCode 本身
+共用；DeepSeek V4.1 Flash／V4 Pro 需 Console 隱私設定選 Global regions
+（DK 端已符合）。
 
 ---
 

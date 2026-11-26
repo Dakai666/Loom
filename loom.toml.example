@@ -161,14 +161,22 @@ reminder_after_turns = 10
 # default_model = "deepseek-v4.1-flash"  # 裸 model id — 不帶 "opencode-go/" 前綴；
 #                                        # 建議值，可換清單內任何 id
 #
-# 建議用法（DK 2026-11-26 決定）— 一般 turn 走 Go，Luna 不動：
-#   [cognition]
-#   default_model  = "opencode-go/deepseek-v4.1-flash"  # canonical 寫法
-#   fallback_model = "chatgpt/gpt-6.1-terra"            # Go 額度用完自動回 ChatGPT plan
-#   [providers.chatgpt]
-#   enabled = true        # fallback 指到 chatgpt/<slug> 時要能註冊 chatgpt provider
+# 建議用法（DK 2026-11-26 決定）— 一般 turn 走 Go，Luna 不動。
+# 注意：live 有 [cognition.tiers]（tier 1）時 default_model 不生效，
+# tiers.1 要一起改；[cognition] 是修改既有行，不要整段新增（TOML
+# duplicate table）：
+#   default_model = "opencode-go/deepseek-v4.1-flash"   # 原本 chatgpt/gpt-6.1-terra
+#   [cognition.tiers]
+#   1 = "opencode-go/deepseek-v4.1-flash"               # 原本 chatgpt/gpt-6.1-terra
+# fallback_model 維持 deepseek-flash（跨 provider 備援；tier 2 備援不變）。
+# Go 的 429 是 typed quota error（含 Retry-After），會觸發既有 quota
+# fallback 並在冷卻後自動恢復。額度恢復後若想改回 ChatGPT plan 備援：
+# fallback_model 改成 "chatgpt/gpt-6.1-terra"，但那樣 tier 2
+# （chatgpt/gpt-6.1-sol）與 fallback 同屬 ChatGPT plan，就沒有跨 provider
+# 的額度備援了。
 # Luna（自動核准分類器）維持 codex/gpt-6-luna（approval.py 內常數），不受影響。
-# 其他接法（皆 opt-in）：tier 指定用途 [cognition.tiers] 2 = "opencode-go/deepseek-v4-pro"
+# fallback 指到 chatgpt/<slug> 時 chatgpt provider 要能註冊（default 不是
+# chatgpt/ 開頭就要 [providers.chatgpt] enabled = true；live 已符合）。
 
 # The official ChatGPT plan integration uses separate Loom credentials:
 #   loom auth chatgpt login
