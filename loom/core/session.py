@@ -4531,7 +4531,11 @@ class LoomSession:
             # actually succeeds — otherwise a failed switch would leave the
             # session with a new router but the old model, the exact
             # router/model drift this PR exists to prevent (#471 review).
-            rebuilt = build_router(active_model=model, session_id=self.session_id)
+            # getattr: bare ``LoomSession.__new__`` fakes in tests carry no
+            # session_id — the header just falls back to a generated one.
+            rebuilt = build_router(
+                active_model=model, session_id=getattr(self, "session_id", None)
+            )
             if rebuilt.switch_model(model):
                 self.router = rebuilt
                 ok = True
