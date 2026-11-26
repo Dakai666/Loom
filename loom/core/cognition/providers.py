@@ -828,6 +828,11 @@ class _OpenAICompatibleBase(LLMProvider):
             api_key=api_key,
             base_url=self._base_url,
             timeout=self._timeout,
+            # Explicit (equals the SDK default of 2, so every existing
+            # provider's retry behaviour is unchanged); OpenCodeGoProvider
+            # overrides with 0 — a 429 must reach the router's quota
+            # fallback immediately, not be retried in place for minutes.
+            max_retries=self._max_retries,
         )
 
     def _api_model(self) -> str:
@@ -1068,16 +1073,17 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
     personal API key. All text models (including tool-call models) ride the
     same chat-completions path — the Console translates per vendor — so the
     model id is passed through verbatim and no model list is hard-coded
-    here. Loom only strips its own ``opencode/`` routing prefix before the
-    wire call.
+    here. Loom only strips its own ``opencode-go/`` routing prefix before
+    the wire call.
 
-    Routing prefix: ``opencode/``
+    Routing prefix: ``opencode-go/`` (canonical; short alias ``opencode/``)
     Default base URL: ``https://opencode.ai/inference/go/openai/v1``
 
     Usage::
 
-        /model opencode/glm-5.3
-        /model opencode/deepseek-v4.1-flash
+        /model opencode-go/glm-5.3
+        /model opencode-go/deepseek-v4.1-flash
+        /model opencode/glm-5.3          # short alias, same provider
 
     Configure in ``.env``::
 
@@ -1087,7 +1093,7 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
 
         [providers.opencode_go]
         base_url      = "https://opencode.ai/inference/go/openai/v1"
-        default_model = "deepseek-v4.1-flash"   # bare id — no "opencode/" prefix here
+        default_model = "deepseek-v4.1-flash"   # bare id — no "opencode-go/" prefix here
 
     Client requirements from the OpenCode Go docs:
 
@@ -1098,9 +1104,12 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
       back to a per-provider-instance generated id when none is given.
 
     Quota note: every Go model draws from one shared allowance (5-hour /
-    weekly / monthly), which is also shared with OpenCode itself. A 429 is
-    translated into a readable message pointing at the usage endpoint;
-    401 / 403 likewise, without ever echoing the API key.
+    weekly / monthly), which is also shared with OpenCode itself. The SDK's
+    built-in retries are disabled for this provider (``max_retries=0``): a
+    429 is a typed quota error the router turns into an immediate failover,
+    not something to sleep out in place. 429 is translated into a readable
+    message pointing at the usage endpoint; 401 / 403 likewise, without
+    ever echoing the API key.
     """
 
     name = "opencode-go"
@@ -1119,8 +1128,9 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
         model: str = "",
         api_key: str = "",
         timeout: float = 0.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
         session_id: str | None = None,
+        http_client: Any = None,
     ) -> None:
         key = (api_key or "").strip()
         if not key:
@@ -1147,6 +1157,13 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
             api_key=key,
             base_url=self._base_url,
             timeout=self._timeout,
+            # Default 0 on purpose: a 429 (Retry-After ≤120s) must NOT be
+            # retried in place by the SDK — it is a typed quota error that
+            # the router turns into an immediate failover to
+            # [cognition]fallback_model. SDK retries would sleep out the
+            # Retry-After twice (~240s) before the router ever sees it.
+            max_retries=max_retries,
+            http_client=http_client,
             default_headers={
                 # Docs: a coding-agent User-Agent, never a generic SDK one.
                 "User-Agent": f"loom-agent/{getattr(_loom_pkg, '__version__', 'dev')}",
@@ -1236,7 +1253,9 @@ class OpenCodeGoProvider(_OpenAICompatibleBase):
         except BaseException as exc:
             translated = self._translate_status_error(exc)
             if translated is not exc:
-                raise translated from exc
+                # ``from None``: the original openai error (potentially an
+                # unredacted response body) must not ride along as __cause__.
+                raise translated from None
             raise
 
 

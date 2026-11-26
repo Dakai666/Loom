@@ -215,7 +215,7 @@ def build_router(
       xAI        — xAI OAuth from `loom auth xai` (explicit xai/<model> prefix)
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
       OpenCode Go — OPENCODE_API_KEY (OpenCode Console subscription gateway,
-                    provider id "opencode-go", models via opencode/<model>)
+                    provider id "opencode-go", models via opencode-go/<model>)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
     Local providers (no key needed; enable in loom.toml or via env):
@@ -424,8 +424,8 @@ def build_router(
     # share a single 5-hour / weekly / monthly allowance, which is also
     # shared with OpenCode itself. Auth comes only from OPENCODE_API_KEY:
     # without it the provider is simply not registered, so selecting an
-    # opencode/ model surfaces a clear "not registered" error instead of a
-    # request with an empty key or a silent fallback.
+    # opencode-go/<model> surfaces a clear "not registered" error instead of
+    # a request with an empty key or a silent fallback.
     opencode_key = (
         env.get("OPENCODE_API_KEY")
         or os.environ.get("OPENCODE_API_KEY", "")
@@ -448,7 +448,7 @@ def build_router(
                 api_key=opencode_key,
                 session_id=session_id,
             ),
-            default=default.startswith("opencode/"),
+            default=default.startswith(("opencode/", "opencode-go/")),
         )
 
     # DeepSeek — official api.deepseek.com via Anthropic-compatible endpoint.

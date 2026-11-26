@@ -15,7 +15,8 @@ Model routing rules
 "chatgpt/*"    → ChatGPTResponsesProvider (official ChatGPT plan usage)
 "xai/*"        → XAIResponsesProvider
 "openrouter/" → OpenRouterProvider
-"opencode/"   → OpenCodeGoProvider (OpenCode Console subscription gateway)
+"opencode-go/" → OpenCodeGoProvider (OpenCode Console subscription gateway;
+                canonical; short alias "opencode/")
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
