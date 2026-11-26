@@ -64,6 +64,20 @@ from .scope import PermissionVerdict, ScopeRequest
 _log = logging.getLogger(__name__)
 
 REVIEW_MODEL = "codex/gpt-6-luna"
+
+
+def review_model() -> str:
+    """The 自理 classifier's model: ``[cognition]review_model`` from
+    loom.toml when set, else the built-in default (behaviour unchanged for
+    deployments that don't configure it)."""
+    try:
+        from loom.core.config import load_loom_config
+
+        cfg = load_loom_config()
+    except Exception:
+        return REVIEW_MODEL
+    configured = str((cfg.get("cognition") or {}).get("review_model") or "").strip()
+    return configured or REVIEW_MODEL
 REVIEW_EFFORT = "low"
 REVIEW_TIMEOUT_SECONDS = 5.0
 DAILY_REVIEW_LIMIT = 40
@@ -1951,13 +1965,32 @@ ChatFn = Callable[[list[dict[str, Any]]], Awaitable[Any]]
 
 
 def plan_model_chat() -> ChatFn:
-    """One-attempt chat on the ChatGPT plan model through the existing Codex
-    OAuth provider. Built directly (not through LLMRouter), so no quota
-    failover can serve another model; the provider itself never retries."""
+    """One-attempt chat on the configured review model. Default stays on the
+    ChatGPT plan model through the existing Codex OAuth provider; an
+    ``opencode-go/<model-id>`` review model rides the OpenCode Go gateway
+    instead. Built directly (not through LLMRouter), so no quota failover
+    can serve another model; neither provider retries a 429 in place."""
+    model = review_model()
+    if model.startswith(("opencode-go/", "opencode/")):
+        from loom.core.cognition.providers import OpenCodeGoProvider
+        from loom.core.session_support import _load_env
+
+        key = (
+            _load_env().get("OPENCODE_API_KEY")
+            or os.environ.get("OPENCODE_API_KEY", "")
+        )
+        provider = OpenCodeGoProvider(
+            model=model, api_key=key, timeout=REVIEW_TIMEOUT_SECONDS,
+        )
+
+        async def chat(messages: list[dict[str, Any]]) -> Any:
+            return await provider.chat(messages=messages, tools=None, max_tokens=128)
+        return chat
+
     from loom.core.cognition.codex_responses_provider import CodexResponsesProvider
 
     provider = CodexResponsesProvider(
-        model=REVIEW_MODEL, reasoning_effort=REVIEW_EFFORT,
+        model=model, reasoning_effort=REVIEW_EFFORT,
         timeout=REVIEW_TIMEOUT_SECONDS, first_event_timeout=REVIEW_TIMEOUT_SECONDS,
         idle_event_timeout=REVIEW_TIMEOUT_SECONDS,
     )
@@ -2082,7 +2115,7 @@ class ApprovalClassifier:
         if self._emitter is None:
             return ApprovalDecision(False, "model-abstain: no_ledger")
         meta = {"tool_call_id": call.id, "tool_name": call.tool_name,
-                "model": REVIEW_MODEL, "origin": call.origin, "category": category}
+                "model": review_model(), "origin": call.origin, "category": category}
         if self._budget.unavailable():
             return ApprovalDecision(False, f"model-abstain: {REVIEWER_UNAVAILABLE}")
         if not await self._budget.take(self._emitter, meta):
