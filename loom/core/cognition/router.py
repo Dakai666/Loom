@@ -14,6 +14,8 @@ Model routing rules
 "codex/*"      → CodexResponsesProvider
 "chatgpt/*"    → ChatGPTResponsesProvider (official ChatGPT plan usage)
 "xai/*"        → XAIResponsesProvider
+"openrouter/" → OpenRouterProvider
+"opencode/"   → OpenCodeGoProvider (OpenCode Console subscription gateway)
 "ollama/*"     → OllamaProvider    (local Ollama server)
 "lmstudio/*"   → LMStudioProvider  (local LM Studio server)
 (default)      → first registered provider
@@ -137,6 +139,7 @@ class LLMRouter:
         ("chatgpt/",   "chatgpt"),
         ("xai/",       "xai"),
         ("openrouter/", "openrouter"),
+        ("opencode/",  "opencode-go"),
         ("deepseek-",  "deepseek"),
         ("ollama/",    "ollama"),
         ("lmstudio/",  "lmstudio"),

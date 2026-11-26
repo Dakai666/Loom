@@ -193,13 +193,19 @@ Output as flowing prose. Be dense and accurate. Do not include any preamble.
 # ---------------------------------------------------------------------------
 
 
-def build_router(active_model: str | None = None) -> LLMRouter:
+def build_router(
+    active_model: str | None = None,
+    session_id: str | None = None,
+) -> LLMRouter:
     """
     Build the LLM router with all available providers registered.
 
     Providers are registered if their credentials / config exist.
     The session's ``model`` attribute controls which provider is active at
-    runtime via ``switch_model()``.
+    runtime via ``switch_model()``. *session_id*, when given, is forwarded
+    to providers that need a stable per-conversation identifier (OpenCode
+    Go's ``x-opencode-session`` header); without it those providers
+    generate their own stable id.
 
     Cloud providers (require API keys in .env):
       MiniMax    — MINIMAX_API_KEY  (uses Anthropic-compatible endpoint, name="minimax")
@@ -208,6 +214,8 @@ def build_router(active_model: str | None = None) -> LLMRouter:
       Codex      — Codex OAuth from `codex login` (explicit codex/<model> prefix)
       xAI        — xAI OAuth from `loom auth xai` (explicit xai/<model> prefix)
       OpenRouter — OPENROUTER_API_KEY (OpenAI-compatible multi-vendor aggregator)
+      OpenCode Go — OPENCODE_API_KEY (OpenCode Console subscription gateway,
+                    provider id "opencode-go", models via opencode/<model>)
       DeepSeek   — DEEPSEEK_API_KEY   (official DeepSeek API, OpenAI-compatible)
 
     Local providers (no key needed; enable in loom.toml or via env):
@@ -222,6 +230,7 @@ def build_router(active_model: str | None = None) -> LLMRouter:
         XAIResponsesProvider,
         OpenAIProvider,
         OpenRouterProvider,
+        OpenCodeGoProvider,
     )
     from loom.core.cognition.xai_auth import validate_xai_base_url
 
@@ -409,6 +418,38 @@ def build_router(active_model: str | None = None) -> LLMRouter:
             default=default.startswith("openrouter/"),
         )
 
+    # OpenCode Go — OpenAI-compatible subscription gateway fronting DeepSeek /
+    # GLM / Qwen / Kimi / MiniMax / … models, billed against the OpenCode
+    # Console plan. One personal API key covers every model; all Go models
+    # share a single 5-hour / weekly / monthly allowance, which is also
+    # shared with OpenCode itself. Auth comes only from OPENCODE_API_KEY:
+    # without it the provider is simply not registered, so selecting an
+    # opencode/ model surfaces a clear "not registered" error instead of a
+    # request with an empty key or a silent fallback.
+    opencode_key = (
+        env.get("OPENCODE_API_KEY")
+        or os.environ.get("OPENCODE_API_KEY", "")
+    )
+    if opencode_key:
+        opencode_cfg = cfg.get("providers", {}).get("opencode_go", {})
+        raw_model = opencode_cfg.get("default_model", OpenCodeGoProvider.DEFAULT_MODEL)
+        opencode_model = (
+            default if default.startswith("opencode/")
+            else f"opencode/{raw_model}"
+        )
+        router.register(
+            OpenCodeGoProvider(
+                base_url=(
+                    opencode_cfg.get("base_url", "")
+                    or OpenCodeGoProvider.DEFAULT_BASE_URL
+                ),
+                model=opencode_model,
+                api_key=opencode_key,
+                session_id=session_id,
+            ),
+            default=default.startswith("opencode/"),
+        )
+
     # DeepSeek — official api.deepseek.com via Anthropic-compatible endpoint.
     # Reuses AnthropicProvider so thinking blocks (DeepSeek v4-pro reasoning)
     # are preserved across multi-turn tool use using the same code path that
@@ -540,7 +581,7 @@ class LoomSession:
         self._provisional_title = provisional_title
         # Workspace root — all relative file paths resolve here; defaults to CWD
         self.workspace: Path = (workspace or Path.cwd()).resolve()
-        self.router = build_router(self.model)
+        self.router = build_router(self.model, session_id=self.session_id)
 
         # AgentLedger handles — opened in start(), closed in stop().
         # Until start() runs, these are None and every subsystem's optional
@@ -4490,7 +4531,7 @@ class LoomSession:
             # actually succeeds — otherwise a failed switch would leave the
             # session with a new router but the old model, the exact
             # router/model drift this PR exists to prevent (#471 review).
-            rebuilt = build_router(active_model=model)
+            rebuilt = build_router(active_model=model, session_id=self.session_id)
             if rebuilt.switch_model(model):
                 self.router = rebuilt
                 ok = True

@@ -392,7 +392,8 @@ def test_build_router_registers_opencode_go_when_key_present(monkeypatch):
     from loom.core import session as session_module
 
     monkeypatch.setattr(
-        session_module, "_load_env", lambda: {"OPENCODE_API_KEY": FAKE_KEY}
+        session_module, "_load_env",
+        lambda: {"OPENCODE_API_KEY": FAKE_KEY, "MINIMAX_API_KEY": "sk-test-minimax"},
     )
     monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
         "cognition": {"default_model": "MiniMax-M3.1-Flash"},
@@ -405,7 +406,7 @@ def test_build_router_registers_opencode_go_when_key_present(monkeypatch):
     assert provider.name == "opencode-go"
     assert provider.model == "opencode/glm-5.3"
     # The current default model must not have been changed.
-    assert "opencode-go" not in router._default or router._default != "opencode-go"
+    assert router.get_provider("MiniMax-M3.1-Flash").name == "minimax"
 
 
 def test_build_router_serves_opencode_default_and_marks_it_default(monkeypatch):
@@ -443,7 +444,9 @@ def test_build_router_passes_session_id_into_session_header(monkeypatch, fake_op
 def test_build_router_without_key_does_not_register_opencode_go(monkeypatch):
     from loom.core import session as session_module
 
-    monkeypatch.setattr(session_module, "_load_env", lambda: {})
+    monkeypatch.setattr(
+        session_module, "_load_env", lambda: {"MINIMAX_API_KEY": "sk-test-minimax"}
+    )
     monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
         "cognition": {"default_model": "MiniMax-M3.1-Flash"},
         "providers": {},

@@ -12,6 +12,10 @@ CodexResponsesProvider — chatgpt.com/backend-api/codex/responses (Codex OAuth)
 XAIResponsesProvider — api.x.ai/v1/responses (xAI OAuth)
 AnthropicProvider  — api.anthropic.com  (also MiniMax via base_url="https://api.minimax.io/anthropic")
 OpenRouterProvider — openrouter.ai/api/v1 (OpenAI-compatible aggregator)
+OpenCodeGoProvider — opencode.ai/inference/go/openai/v1 (OpenCode Console
+                     subscription gateway, provider id "opencode-go"; fronts
+                     DeepSeek / GLM / Qwen / Kimi / MiniMax / … behind one
+                     personal API key, model ids passed through verbatim)
 DeepSeek           — official api.deepseek.com via Anthropic-compatible endpoint
                      (registered as AnthropicProvider with name="deepseek",
                       base_url="https://api.deepseek.com/anthropic")
@@ -1052,6 +1056,157 @@ class OpenAIProvider(_OpenAICompatibleBase):
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_TIMEOUT = 180.0
     MAX_TOKENS_PARAM = "max_completion_tokens"
+
+
+class OpenCodeGoProvider(_OpenAICompatibleBase):
+    """
+    OpenCode Go — the OpenCode Console coding-agent subscription gateway.
+
+    An OpenAI-compatible endpoint fronting many open-weight vendors
+    (DeepSeek, GLM, Qwen, Kimi, MiniMax, LongCat, MiMo, …) with a single
+    personal API key. All text models (including tool-call models) ride the
+    same chat-completions path — the Console translates per vendor — so the
+    model id is passed through verbatim and no model list is hard-coded
+    here. Loom only strips its own ``opencode/`` routing prefix before the
+    wire call.
+
+    Routing prefix: ``opencode/``
+    Default base URL: ``https://opencode.ai/inference/go/openai/v1``
+
+    Usage::
+
+        /model opencode/glm-5.3
+        /model opencode/deepseek-v4.1-flash
+
+    Configure in ``.env``::
+
+        OPENCODE_API_KEY=...    # OpenCode Console personal API key
+
+    Optionally in ``loom.toml``::
+
+        [providers.opencode_go]
+        base_url      = "https://opencode.ai/inference/go/openai/v1"
+        default_model = "deepseek-v4.1-flash"   # bare id — no "opencode/" prefix here
+
+    Client requirements from the OpenCode Go docs:
+
+    * a coding-agent ``User-Agent`` (never the generic SDK / HTTP-library
+      name) — Loom sends ``loom-agent/<version>``;
+    * a stable ``x-opencode-session`` header per conversation (used for
+      routing and prompt caching) — Loom sends its own session id, falling
+      back to a per-provider-instance generated id when none is given.
+
+    Quota note: every Go model draws from one shared allowance (5-hour /
+    weekly / monthly), which is also shared with OpenCode itself. A 429 is
+    translated into a readable message pointing at the usage endpoint;
+    401 / 403 likewise, without ever echoing the API key.
+    """
+
+    name = "opencode-go"
+    ROUTING_PREFIX = "opencode/"
+    DEFAULT_BASE_URL = "https://opencode.ai/inference/go/openai/v1"
+    DEFAULT_MODEL = "deepseek-v4.1-flash"
+    DEFAULT_TIMEOUT = 180.0
+
+    def __init__(
+        self,
+        base_url: str = "",
+        model: str = "",
+        api_key: str = "",
+        timeout: float = 0.0,
+        max_retries: int = 2,
+        session_id: str | None = None,
+    ) -> None:
+        key = (api_key or "").strip()
+        if not key:
+            # Never send an empty key or silently fall back to another
+            # provider — surface the missing configuration instead.
+            raise RuntimeError(
+                "OpenCode Go provider needs an OpenCode Console personal API "
+                "key. Set OPENCODE_API_KEY in .env (create one in the OpenCode "
+                "Console). Refusing to send requests without credentials."
+            )
+        self._api_key = key  # kept only to redact it from error details
+        self._base_url = base_url or self.DEFAULT_BASE_URL
+        self.model = model or (self.ROUTING_PREFIX + self.DEFAULT_MODEL)
+        self._timeout = timeout or self.DEFAULT_TIMEOUT
+        self._max_retries = max_retries
+        # Stable per-conversation session header (routing + prompt caching).
+        # Callers pass Loom's session id; without one, generate an id that is
+        # stable for this provider instance's lifetime.
+        self.session_header = session_id or f"loom-{uuid.uuid4().hex[:8]}"
+        import loom as _loom_pkg
+
+        from openai import AsyncOpenAI
+        self._async_client = AsyncOpenAI(
+            api_key=key,
+            base_url=self._base_url,
+            timeout=self._timeout,
+            default_headers={
+                # Docs: a coding-agent User-Agent, never a generic SDK one.
+                "User-Agent": f"loom-agent/{getattr(_loom_pkg, '__version__', 'dev')}",
+                "x-opencode-session": self.session_header,
+            },
+        )
+
+    def _translate_status_error(self, exc: BaseException) -> BaseException:
+        """Map OpenCode Go HTTP status errors to readable messages.
+
+        Never includes the API key — the key is redacted from any server
+        detail before the message is built. Non-status errors (connection
+        failures, timeouts) pass through unchanged, matching the behaviour
+        of the other OpenAI-compatible providers.
+        """
+        import openai
+
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            return exc
+        detail = str(exc).replace(self._api_key, "<redacted>")
+        if status == 401:
+            return RuntimeError(
+                f"OpenCode Go rejected the API key (HTTP 401): {detail}. "
+                "Check that OPENCODE_API_KEY holds a valid OpenCode Console "
+                "personal API key."
+            )
+        if status == 403:
+            return RuntimeError(
+                f"OpenCode Go refused this request (HTTP 403): {detail}. "
+                "Your OpenCode subscription does not cover this model "
+                "(EntitlementError) — choose a model your plan includes or "
+                "check the subscription in the OpenCode Console."
+            )
+        if status == 429:
+            return RuntimeError(
+                f"OpenCode Go allowance exhausted (HTTP 429): {detail}. "
+                "All Go models share one 5-hour / weekly / monthly allowance, "
+                "and it is shared with OpenCode itself. Remaining quota: "
+                "GET https://opencode.ai/inference/go/v1/usage."
+            )
+        return exc
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int = 8096,
+        *,
+        abort_signal: Any = None,
+    ) -> AsyncIterator[tuple[str, LLMResponse | None]]:
+        # Same streaming machinery as every OpenAI-compatible provider; only
+        # the status-error translation is provider-specific.
+        stream = super().stream_chat(
+            messages=messages, tools=tools, max_tokens=max_tokens,
+            abort_signal=abort_signal,
+        )
+        try:
+            async for item in stream:
+                yield item
+        except BaseException as exc:
+            translated = self._translate_status_error(exc)
+            if translated is not exc:
+                raise translated from exc
+            raise
 
 
 
