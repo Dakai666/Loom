@@ -79,6 +79,7 @@ max_tokens    = 8096
 | `default_model` | string | `"MiniMax-M2.7"` | `loom autonomy start` / `loom discord start` 使用的模型；CLI 優先用 `--model` flag |
 | `max_tokens` | integer | `8096` | LLM 每次呼叫的最大輸出 token |
 | `fallback_model` | string | （未設定） | 額度備援（opt-in）：主模型回報方案額度／用量上限耗盡時改由此模型服務，冷卻期照 `Retry-After`（上限 6h）或 30 分鐘；一般 rate limit、5xx、逾時、登入失效不觸發。詳見 `loom.toml.example` |
+| `review_model` | string | `"codex/gpt-6-luna"` | 自動核准分類器（Luna）的模型（#712）：未設定時行為不變；設 `opencode-go/<model-id>` 時走 OpenCode Go（`OPENCODE_API_KEY`）。每日上限、5 秒 timeout、abstain 處理不變 |
 
 **模型前綴路由：**
 
@@ -441,9 +442,13 @@ provider id 是 `opencode-go`，Loom 這邊的 model 名稱一律帶 `opencode/`
 
 ### 建議用法（DK 2026-11-26 決定）
 
-**一般對話 turn 走 OpenCode Go；Luna（自動核准分類器）不動**——Luna 的模型
-是 `approval.py` 內的常數 `REVIEW_MODEL = "codex/gpt-6-luna"`（ChatGPT plan），
-不受此設定影響，judge 等其他用途也維持原樣。
+**一般對話 turn 走 OpenCode Go。** Luna（自動核准分類器）的模型現在也可設定
+（`[cognition]review_model`，預設仍是 `codex/gpt-6-luna`、行為不變）——DK 的
+決策規則是「零誤放行才切」；三個題庫以 `opencode-go/deepseek-v4.1-flash`
+實測的模型層級 false accept 都是 0（題庫數字見 PR #712），所以片段包含
+Luna 的切換，但 deepseek 是 thinking 模型，128-token 回覆上限常被推理吃光
+（abstain 率約為 recorded Luna 的 1.1–1.4 倍，低於 2 倍門檻），多問不誤放行，
+介意可先不設 `review_model` 留在預設。
 
 **live 設定有 `[cognition.tiers]`（`1 = "chatgpt/gpt-6.1-terra"`、
 `default_tier = 1`）——tier 有設定時 `default_model` 不會生效**，所以
@@ -454,6 +459,7 @@ table）：
 ```toml
 # 修改 live 既有的行（不要新增 [cognition] 區塊）
 default_model = "opencode-go/deepseek-v4.1-flash"   # 原本 chatgpt/gpt-6.1-terra
+review_model  = "opencode-go/deepseek-v4.1-flash"   # Luna 分類器；預設 codex/gpt-6-luna
 
 [cognition.tiers]
 1 = "opencode-go/deepseek-v4.1-flash"               # 原本 chatgpt/gpt-6.1-terra（會蓋過 default_model）

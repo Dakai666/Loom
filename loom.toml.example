@@ -161,13 +161,18 @@ reminder_after_turns = 10
 # default_model = "deepseek-v4.1-flash"  # 裸 model id — 不帶 "opencode-go/" 前綴；
 #                                        # 建議值，可換清單內任何 id
 #
-# 建議用法（DK 2026-11-26 決定）— 一般 turn 走 Go，Luna 不動。
+# 建議用法（DK 2026-11-26 決定）— 一般 turn 走 Go，Luna 分類器亦可設。
 # 注意：live 有 [cognition.tiers]（tier 1）時 default_model 不生效，
 # tiers.1 要一起改；[cognition] 是修改既有行，不要整段新增（TOML
 # duplicate table）：
 #   default_model = "opencode-go/deepseek-v4.1-flash"   # 原本 chatgpt/gpt-6.1-terra
+#   review_model  = "opencode-go/deepseek-v4.1-flash"   # Luna 分類器；預設 codex/gpt-6-luna
 #   [cognition.tiers]
 #   1 = "opencode-go/deepseek-v4.1-flash"               # 原本 chatgpt/gpt-6.1-terra
+# review_model：三個核准題庫（S2 18 / S3 13 / #690 80）以 deepseek 實測
+# 模型層級 false accept 0（recorded Luna 反而有 2），但 deepseek 是
+# thinking 模型，128-token 回覆上限常被推理吃光 → abstain 約 1.1–1.4 倍
+# （多問不誤放行）。要留在預設就不要設 review_model。
 # fallback_model 維持 deepseek-flash（跨 provider 備援；tier 2 備援不變）。
 # Go 的 429 是 typed quota error（含 Retry-After），會觸發既有 quota
 # fallback 並在冷卻後自動恢復。額度恢復後若想改回 ChatGPT plan 備援：
