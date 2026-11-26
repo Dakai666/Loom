@@ -606,6 +606,107 @@ class TestWiring:
         assert seen == [("codex/gpt-6-luna", "low", None, [{"role": "user", "content": "x"}])]
 
 
+class TestReviewModelConfig:
+    """#712: the classifier model is configurable via ``[cognition]review_model``;
+    unset, behaviour is exactly what it was (codex/gpt-6-luna)."""
+
+    def test_default_is_unchanged_without_config(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {})
+        assert approval.review_model() == approval.REVIEW_MODEL
+
+    def test_reads_cognition_review_model(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        assert approval.review_model() == "opencode-go/deepseek-v4.1-flash"
+
+    def test_blank_or_missing_falls_back_to_default(self, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness import approval
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "   "},
+        })
+        assert approval.review_model() == approval.REVIEW_MODEL
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {})
+        assert approval.review_model() == approval.REVIEW_MODEL
+
+    async def test_plan_model_chat_builds_go_provider_for_opencode_model(
+        self, monkeypatch,
+    ):
+        import loom.core.config as config_mod
+        import loom.core.cognition.providers as providers_mod
+        import loom.core.session_support as session_support_mod
+        from loom.core.harness import approval
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        monkeypatch.setattr(
+            session_support_mod, "_load_env",
+            lambda project_root=None: {"OPENCODE_API_KEY": "sk-test-opencode-fake"},
+        )
+
+        stubs = []
+
+        class _GoStub:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                stubs.append(self)
+
+            async def chat(self, messages=None, tools=None, max_tokens=0):
+                self.seen = (messages, tools, max_tokens)
+
+                class _R:
+                    text = '{"verdict":"abstain"}'
+                return _R()
+
+        monkeypatch.setattr(providers_mod, "OpenCodeGoProvider", _GoStub)
+
+        chat = approval.plan_model_chat()
+        assert len(stubs) == 1
+        assert stubs[0].kwargs["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert stubs[0].kwargs["api_key"] == "sk-test-opencode-fake"
+        messages = [{"role": "user", "content": "x"}]
+        await chat(messages)
+        assert stubs[0].seen == (messages, None, 128)
+
+    def test_plan_model_chat_without_go_key_raises_clear_error(self, monkeypatch):
+        import loom.core.config as config_mod
+        import loom.core.session_support as session_support_mod
+        from loom.core.harness import approval
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        monkeypatch.setattr(session_support_mod, "_load_env", lambda project_root=None: {})
+        monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+
+        with pytest.raises(RuntimeError, match="OPENCODE_API_KEY"):
+            approval.plan_model_chat()
+
+    async def test_review_meta_records_the_configured_model(self, tmp_path, ledger, monkeypatch):
+        import loom.core.config as config_mod
+        from loom.core.harness.approval import REVIEW_MODEL
+
+        monkeypatch.setattr(config_mod, "load_loom_config", lambda: {
+            "cognition": {"review_model": "opencode-go/deepseek-v4.1-flash"},
+        })
+        env = Env(tmp_path, ledger)
+        await env.run("write_file", _write("outputs/brief.md"))
+        await asyncio.sleep(0.05)
+        rows = await ledger.execute_sql(
+            "SELECT payload FROM events WHERE event_type='approval_review' "
+            "AND json_extract(payload,'$.phase')='result'"
+        )
+        result = [json.loads(p) for (p,) in rows]
+        assert result and result[0]["model"] == "opencode-go/deepseek-v4.1-flash"
+        assert REVIEW_MODEL == "codex/gpt-6-luna"  # built-in default untouched
+
+
 # ---------------------------------------------------------------------------
 # #698 review: what leaves for the model, exact confirm grants, cooldown
 # ---------------------------------------------------------------------------
