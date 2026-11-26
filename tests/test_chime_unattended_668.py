@@ -19,8 +19,8 @@ Contract (PR #673 review added 5-7):
      was skipped, including real policy / guard denials.
   5. load_skill's precondition-check approval is a confirm too: an
      unattended turn never prompts for it; the checks just aren't mounted.
-  6. A pending pause request must not park an unattended turn on
-     TurnPaused — nobody would resume it. Interactive turns still pause.
+  6. (Retired with the pause path in #704 S6: there is no pause to park
+     an unattended turn on.)
   7. An unauthorized exec call is a skip, never a "probe, then re-issue"
      hint (/auto, the only thing probing could unlock, is retired: #704 S3).
 """

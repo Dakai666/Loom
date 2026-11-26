@@ -32,16 +32,42 @@ def resolve_workspace_path(raw: str, workspace: Path) -> Path:
 
 
 ABSENT = None
+NOT_REGULAR = "not-regular:"
+"""Prefix of the digest of something that exists but is not a regular file
+(a directory, a FIFO, a device). Read before write never overwrites it."""
+
+_CHUNK = 1 << 20
 
 
 def file_digest(path: Path) -> str | None:
-    """sha256 of the file's bytes, ``None`` when nothing is there. Anything
-    that exists but cannot be read gets a marker no read can match."""
+    """sha256 of the file's bytes, ``None`` when nothing is there.
+
+    Opened non-blocking and checked with ``fstat`` on the open descriptor
+    before any read, so a FIFO or device never blocks the event loop
+    (#711 review); only a regular file is hashed, in 1 MB chunks. Anything
+    else gets a ``NOT_REGULAR`` marker, and a file that exists but cannot
+    be read gets a marker no read can match."""
+    import os
+    import stat
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
         return ABSENT
+    except IsADirectoryError:
+        return f"{NOT_REGULAR}dir"
     except OSError as exc:
-        if not path.exists() and not path.is_symlink():
+        if not os.path.lexists(path):
             return ABSENT
         return f"unreadable:{type(exc).__name__}"
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            return f"{NOT_REGULAR}{stat.S_IFMT(mode):o}"
+        h = hashlib.sha256()
+        while chunk := os.read(fd, _CHUNK):
+            h.update(chunk)
+        return h.hexdigest()
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+    finally:
+        os.close(fd)

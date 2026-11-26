@@ -6,7 +6,9 @@ Design principles:
   - Has its own session_id in session_log so its trace is isolated.
   - Persists child task, assistant messages and tool previews in session_log.
   - Tool scope: SAFE tools by default; parent can extend via allowed_tools whitelist.
-  - GUARDED tools are auto-confirmed (no human in the loop for sub-agents).
+  - Permission mode 安全 whatever the parent's (#704 S6, ``subagent_mode``): a
+    GUARDED call runs only within the parent's grants and declarations; one
+    that would need a human is skipped (origin "subagent" is unattended).
   - CRITICAL tools are always blocked.
   - Bounded execution: stops at max_turns to prevent infinite loops.
   - Memory writes retain source="memorize" with child provenance in metadata.

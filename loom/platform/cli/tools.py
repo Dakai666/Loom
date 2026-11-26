@@ -475,12 +475,16 @@ def make_filesystem_tools(workspace: Path) -> list["ToolDefinition"]:
         # #704 S6: read before write checked the target when the call
         # entered the pipeline; a confirm can take minutes, so check the
         # same expectation again here, where the bytes are written.
+        # A different path means the guard checked another file: fail
+        # closed (#711 review), never skip the check.
         expect = call.metadata.get("write_expect")
-        if isinstance(expect, dict) and expect.get("path") == str(path):
+        if isinstance(expect, dict):
             now = file_digest(path)
-            if now != expect.get("sha256"):
+            if expect.get("path") != str(path) or now != expect.get("sha256"):
                 from loom.core.harness.guard_reason import guard_error
-                reason = (f"{raw} appeared since the check" if expect.get("sha256") is None
+                reason = (f"{raw} is not the file read before write checked"
+                          if expect.get("path") != str(path)
+                          else f"{raw} appeared since the check" if expect.get("sha256") is None
                           else f"{raw} changed since it was read")
                 return ToolResult(
                     call_id=call.id, tool_name=call.tool_name, success=False,

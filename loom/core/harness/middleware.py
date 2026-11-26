@@ -521,7 +521,11 @@ class LegitimacyGuardMiddleware(Middleware):
     **What counts as a read of a file** (#167, #283, #288): a SAFE tool
     with a ``path`` argument (read_file, probe_file, list_dir…), or a
     read-only shell command (grep/head/cat/awk/sed -n/tail/wc) whose one
-    path the parser can pin down. A read that names no file (a web search,
+    path the parser can pin down, and only when it succeeded (a read_file
+    that fails on a binary file saw nothing). ``probe_file`` is a
+    self-declared unlock: it reads no content, it records the agent's
+    claim that it read the file some other way. A target that is not a
+    regular file (directory, FIFO, device) is never overwritten. A read that names no file (a web search,
     a READ_PROBE tool, a shell pipeline) sets ``has_probed`` for the turn
     but unlocks no overwrite; before #704 S6 it unlocked every file, and
     one successful write waived the check for the rest of the session.
@@ -559,9 +563,10 @@ class LegitimacyGuardMiddleware(Middleware):
         return self._probed_this_turn
 
     def _resolve(self, raw: str) -> Path | None:
+        # The path exactly as the file tools resolve it: no strip, so
+        # " a.md" is the file the tool would write (#711 review).
         from .paths import resolve_workspace_path
-        raw = (raw or "").strip()
-        if not raw:
+        if not isinstance(raw, str) or not raw.strip():
             return None
         return resolve_workspace_path(raw, self._workspace or Path.cwd())
 
@@ -671,7 +676,12 @@ class LegitimacyGuardMiddleware(Middleware):
 
         if call.tool_name not in self.strict_guard_tools:
             result = await next(call)
-            # The content the read saw: the file as it is after the read.
+            # Only a read that succeeded saw the content (#711 review: a
+            # read_file that fails on a binary file, a denied or skipped
+            # read, unlocks nothing). The content it saw: the file as it
+            # is after the read.
+            if not result.success:
+                return result
             for raw in paths:
                 target = self._resolve(raw)
                 if target is not None:
@@ -682,7 +692,11 @@ class LegitimacyGuardMiddleware(Middleware):
         target = self._resolve(raw_target if isinstance(raw_target, str) else "")
         if target is None:
             return await next(call)  # no path: the schema / the tool says so
+        from .paths import NOT_REGULAR
         current = file_digest(target)
+        if current is not None and current.startswith(NOT_REGULAR):
+            return self._stop(call, f"{raw_target} is not a regular file",
+                              "write_file writes regular files only.")
         if current is not None:
             key = str(target)
             if key not in self._known or self._known[key] is None:
