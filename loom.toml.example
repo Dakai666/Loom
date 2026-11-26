@@ -179,7 +179,10 @@ reminder_after_turns = 10
 # fallback_model 改成 "chatgpt/gpt-6.1-terra"，但那樣 tier 2
 # （chatgpt/gpt-6.1-sol）與 fallback 同屬 ChatGPT plan，就沒有跨 provider
 # 的額度備援了。
-# Luna（自動核准分類器）維持 codex/gpt-6-luna（approval.py 內常數），不受影響。
+# Luna（自動核准分類器）預設 codex/gpt-6-luna；只有設了上面的
+# [cognition] review_model 才換。review_model 只接受 codex/、opencode-go/、
+# opencode/ 開頭；其他前綴、缺 OPENCODE_API_KEY 或 provider 建不起來時，
+# session 照常啟動，啟動時記一次 warning，Luna 每次都 abstain 改問 DK。
 # fallback 指到 chatgpt/<slug> 時 chatgpt provider 要能註冊（default 不是
 # chatgpt/ 開頭就要 [providers.chatgpt] enabled = true；live 已符合）。
 

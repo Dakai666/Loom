@@ -66,18 +66,30 @@ _log = logging.getLogger(__name__)
 REVIEW_MODEL = "codex/gpt-6-luna"
 
 
-def review_model() -> str:
-    """The 自理 classifier's model: ``[cognition]review_model`` from
-    loom.toml when set, else the built-in default (behaviour unchanged for
-    deployments that don't configure it)."""
+def _review_config() -> dict:
     try:
         from loom.core.config import load_loom_config
 
-        cfg = load_loom_config()
+        return load_loom_config() or {}
     except Exception:
-        return REVIEW_MODEL
+        return {}
+
+
+def review_model(cfg: dict | None = None) -> str:
+    """The 自理 classifier's model: ``[cognition]review_model`` from
+    loom.toml when set, else the built-in default (behaviour unchanged for
+    deployments that don't configure it)."""
+    if cfg is None:
+        cfg = _review_config()
     configured = str((cfg.get("cognition") or {}).get("review_model") or "").strip()
     return configured or REVIEW_MODEL
+
+
+# Review models the classifier knows how to build. Anything else is a
+# configuration mistake: warn once and abstain, never guess a provider.
+REVIEW_MODEL_PREFIXES = ("codex/", "opencode-go/", "opencode/")
+
+
 REVIEW_EFFORT = "low"
 REVIEW_TIMEOUT_SECONDS = 5.0
 DAILY_REVIEW_LIMIT = 40
@@ -1969,8 +1981,43 @@ def plan_model_chat() -> ChatFn:
     ChatGPT plan model through the existing Codex OAuth provider; an
     ``opencode-go/<model-id>`` review model rides the OpenCode Go gateway
     instead. Built directly (not through LLMRouter), so no quota failover
-    can serve another model; neither provider retries a 429 in place."""
-    model = review_model()
+    can serve another model; neither provider retries a 429 in place.
+
+    Never raises: a review model that cannot be built (missing key, unknown
+    prefix, provider error) logs one warning here and yields a chat whose
+    every call raises, so each review ends outcome=error → abstain and DK
+    is asked (fail closed, existing cooldown). Session start never depends
+    on the reviewer. The returned chat carries ``.model``, the model it was
+    built for, which the classifier records in the ledger."""
+    cfg = _review_config()
+    model = review_model(cfg)
+    try:
+        chat = _build_review_chat(model, cfg)
+    except Exception as exc:
+        # The key is never part of these messages: a missing key raises
+        # before one exists, and the prefix check runs before any lookup.
+        _log.warning(
+            "approval review model %r unavailable, Luna will abstain on every "
+            "review until fixed: %s: %s",
+            model, type(exc).__name__, exc,
+        )
+        chat = _unavailable_chat(model, type(exc).__name__)
+    chat.model = model  # type: ignore[attr-defined]
+    return chat
+
+
+def _unavailable_chat(model: str, reason: str) -> ChatFn:
+    async def chat(messages: list[dict[str, Any]]) -> Any:
+        raise RuntimeError(f"review model {model!r} unavailable ({reason})")
+    return chat
+
+
+def _build_review_chat(model: str, cfg: dict) -> ChatFn:
+    if not model.startswith(REVIEW_MODEL_PREFIXES):
+        raise ValueError(
+            "[cognition] review_model must start with one of "
+            + ", ".join(REVIEW_MODEL_PREFIXES)
+        )
     if model.startswith(("opencode-go/", "opencode/")):
         from loom.core.cognition.providers import OpenCodeGoProvider
         from loom.core.session_support import _load_env
@@ -1979,21 +2026,21 @@ def plan_model_chat() -> ChatFn:
             _load_env().get("OPENCODE_API_KEY")
             or os.environ.get("OPENCODE_API_KEY", "")
         )
-        provider = OpenCodeGoProvider(
+        # Same lookup as build_router: [providers.opencode_go] base_url;
+        # empty falls back to the provider's DEFAULT_BASE_URL.
+        go_cfg = (cfg.get("providers") or {}).get("opencode_go") or {}
+        provider: Any = OpenCodeGoProvider(
+            base_url=go_cfg.get("base_url", "") or "",
             model=model, api_key=key, timeout=REVIEW_TIMEOUT_SECONDS,
         )
+    else:
+        from loom.core.cognition.codex_responses_provider import CodexResponsesProvider
 
-        async def chat(messages: list[dict[str, Any]]) -> Any:
-            return await provider.chat(messages=messages, tools=None, max_tokens=128)
-        return chat
-
-    from loom.core.cognition.codex_responses_provider import CodexResponsesProvider
-
-    provider = CodexResponsesProvider(
-        model=model, reasoning_effort=REVIEW_EFFORT,
-        timeout=REVIEW_TIMEOUT_SECONDS, first_event_timeout=REVIEW_TIMEOUT_SECONDS,
-        idle_event_timeout=REVIEW_TIMEOUT_SECONDS,
-    )
+        provider = CodexResponsesProvider(
+            model=model, reasoning_effort=REVIEW_EFFORT,
+            timeout=REVIEW_TIMEOUT_SECONDS, first_event_timeout=REVIEW_TIMEOUT_SECONDS,
+            idle_event_timeout=REVIEW_TIMEOUT_SECONDS,
+        )
 
     async def chat(messages: list[dict[str, Any]]) -> Any:
         return await provider.chat(messages=messages, tools=None, max_tokens=128)
@@ -2034,6 +2081,9 @@ class ApprovalClassifier:
         self._perm = perm
         self._emitter = emitter
         self._chat = chat
+        # The model the chat was built for, captured once: a mid-session
+        # loom.toml edit must not relabel reviews the old provider served.
+        self._model = getattr(chat, "model", None) or review_model()
         self._context = context
         self._budget = budget
 
@@ -2115,7 +2165,7 @@ class ApprovalClassifier:
         if self._emitter is None:
             return ApprovalDecision(False, "model-abstain: no_ledger")
         meta = {"tool_call_id": call.id, "tool_name": call.tool_name,
-                "model": review_model(), "origin": call.origin, "category": category}
+                "model": self._model, "origin": call.origin, "category": category}
         if self._budget.unavailable():
             return ApprovalDecision(False, f"model-abstain: {REVIEWER_UNAVAILABLE}")
         if not await self._budget.take(self._emitter, meta):

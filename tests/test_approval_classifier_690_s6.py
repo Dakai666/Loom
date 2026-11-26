@@ -771,15 +771,22 @@ class TestReviewModelFailClosed:
                 await session.stop()
 
             env = Env(tmp_path, ledger, model=chat)
-            for i in range(2):
-                await env.run("write_file", _write(f"outputs/brief{i}.md"))
+            unattended = await env.run("write_file", _write("outputs/brief.md"))
+            attended = await env.run("write_file", _write("outputs/notes.md"),
+                                     origin="user")
         await asyncio.sleep(0.05)
         rows = await ledger.execute_sql(
             "SELECT json_extract(payload,'$.outcome') FROM events "
             "WHERE event_type='approval_review' "
             "AND json_extract(payload,'$.phase')='result'")
         assert [r[0] for r in rows][:1] == ["error"]
-        assert env.confirm.await_count == 2  # every call went to DK
+        # Fail closed: the unattended call is skipped, never auto-run; the
+        # attended one waits on DK's confirm.
+        assert not unattended.success
+        assert unattended.metadata.get("unattended_skip") is True
+        assert unattended.metadata.get("skip_note") == "model-abstain: error"
+        assert env.confirm.await_count == 1 and attended.success
+        assert [c.args["path"] for c in env.ran] == ["outputs/notes.md"]
         assert len(_unavailable_warnings(caplog)) == 1
 
     async def test_review_provider_uses_the_configured_base_url(self, monkeypatch):
