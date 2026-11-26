@@ -619,3 +619,181 @@ def test_loom_session_wires_its_session_id_into_the_header(monkeypatch, fake_ope
     assert provider._async_client.default_headers["x-opencode-session"] == (
         session.session_id
     )
+
+
+def test_build_router_marks_default_for_canonical_prefix(monkeypatch):
+    """Canonical ``opencode-go/`` must also select the provider as default
+    (the default-marking startswith() covers both spellings)."""
+    from loom.core import session as session_module
+
+    monkeypatch.setattr(
+        session_module, "_load_env",
+        lambda: {"OPENCODE_API_KEY": FAKE_KEY, "MINIMAX_API_KEY": "sk-test-minimax"},
+    )
+    monkeypatch.setattr(session_module, "_load_loom_config", lambda: {
+        "cognition": {"default_model": "opencode-go/deepseek-v4.1-flash"},
+        "providers": {},
+    })
+
+    router = session_module.build_router()
+
+    # The canonical default model is the router's default provider.
+    assert router.get_provider("anything-else").name == "opencode-go"
+    # …and MiniMax still registered (its key present) without stealing default.
+    assert router.get_provider("MiniMax-M3.1-Flash").name == "minimax"
+
+
+# ---------------------------------------------------------------------------
+# Must-fix #712r1: the SDK must not retry 429 itself — failover must be
+# immediate. Client uses max_retries=0; a 429 produces exactly one request
+# and the typed quota error right away, and the router fails over.
+# ---------------------------------------------------------------------------
+
+def test_go_client_disables_the_sdk_built_in_retries(fake_openai):
+    OpenCodeGoProvider(api_key=FAKE_KEY, session_id="s")
+    assert fake_openai.instances[-1].extra_kwargs["max_retries"] == 0
+
+
+def test_base_providers_keep_their_retry_behaviour(fake_openai):
+    """Base class now passes max_retries explicitly; the value is unchanged
+    (SDK default 2) so other providers' retry behaviour is identical."""
+    from loom.core.cognition.providers import OllamaProvider
+
+    OllamaProvider()
+    assert fake_openai.instances[-1].extra_kwargs["max_retries"] == 2
+
+    OllamaProvider(max_retries=5)
+    assert fake_openai.instances[-1].extra_kwargs["max_retries"] == 5
+
+
+def _real_transport_provider(handler) -> OpenCodeGoProvider:
+    """A provider wired to its own real client kwargs (max_retries included,
+    as production sets them) over httpx.MockTransport — offline, the
+    transport never touches the network."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return OpenCodeGoProvider(
+        api_key=FAKE_KEY,
+        model="opencode-go/deepseek-v4.1-flash",
+        session_id="s",
+        http_client=client,
+    )
+
+
+async def test_429_over_real_transport_sends_exactly_one_request_and_raises_typed_error(
+    monkeypatch,
+):
+    import asyncio
+
+    import openai as _openai
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            429,
+            headers={"retry-after": "120"},
+            request=request,
+            json={"error": {"message": "quota exhausted"}},
+        )
+
+    async def _no_sleep(*args, **kwargs):  # any sleep would mean a retry wait
+        raise AssertionError("must not sleep on a 429 — failover must be immediate")
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    import anyio
+
+    monkeypatch.setattr(anyio, "sleep", _no_sleep)
+    provider = _real_transport_provider(handler)
+
+    with pytest.raises(ResponsesProviderError) as caught:
+        await _collect(provider)
+
+    assert len(requests) == 1
+    assert caught.value.failure_type == QUOTA_FAILURE_TYPE
+    assert caught.value.retry_after_seconds == 120.0
+
+
+async def test_router_fails_over_immediately_on_real_transport_429(monkeypatch):
+    """Real httpx transport + real router machinery: one wire request, then
+    the fallback model is served without any retry delay."""
+    import asyncio
+
+    import openai as _openai
+    from loom.core.cognition import router as router_mod
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            429,
+            headers={"retry-after": "120"},
+            request=request,
+            json={"error": {"message": "quota exhausted"}},
+        )
+
+    class _FallbackFake:
+        name = "chatgpt"
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def for_model(self, model: str) -> "_FallbackFake":
+            return self
+
+        def native_max_tokens(self, model: str) -> int | None:
+            return None
+
+        async def chat(self, messages, tools=None, max_tokens=8096):
+            self.calls.append(max_tokens)
+            return LLMResponse(
+                text="terra-reply", tool_uses=[], stop_reason="end_turn"
+            )
+
+    async def _no_sleep(*args, **kwargs):
+        raise AssertionError("must not sleep on a 429 — failover must be immediate")
+
+    import anyio
+
+    monkeypatch.setattr(anyio, "sleep", _no_sleep)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = _real_transport_provider(handler)
+    fallback = _FallbackFake()
+    r = (
+        LLMRouter()
+        .register(provider, default=True)
+        .register(fallback, default=False, fallback=False)
+    )
+    r.set_quota_fallback("chatgpt/gpt-6.1-terra")
+
+    response = await r.chat(
+        "opencode-go/deepseek-v4.1-flash", [{"role": "user", "content": "hi"}]
+    )
+
+    assert response.text == "terra-reply"
+    assert fallback.calls == [8096]
+    assert len(requests) == 1  # the SDK did not retry the 429 itself
+
+
+async def test_typed_quota_error_carries_no_unredacted_cause(fake_openai):
+    """The original openai error (potentially an unredacted body) must not be
+    chained as __cause__ of the translated errors."""
+    fake_openai.error = _status_error(
+        openai.RateLimitError, 429, "quota exhausted"
+    )
+    provider = OpenCodeGoProvider(api_key=FAKE_KEY, session_id="s")
+
+    with pytest.raises(ResponsesProviderError) as caught:
+        await _collect(provider)
+
+    assert caught.value.__cause__ is None
+
+    fake_openai.error = _status_error(
+        openai.AuthenticationError, 401, "Invalid API key"
+    )
+    provider2 = OpenCodeGoProvider(api_key=FAKE_KEY, session_id="s")
+    with pytest.raises(RuntimeError) as caught2:
+        await _collect(provider2)
+    assert caught2.value.__cause__ is None
