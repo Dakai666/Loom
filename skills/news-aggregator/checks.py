@@ -25,17 +25,18 @@ import re
 # outside scripts/.  Each is matched narrowly — this is not a general
 # "allow mkdir" hole.
 _ALLOWED_OUTSIDE = (
-    # `mkdir -p news/YYYY-MM-DD` — create today's briefing output directory.
-    re.compile(r"^mkdir\s+-p\s+news/\d{4}-\d{2}-\d{2}\s*$"),
-    # `mkdir news/YYYY-MM-DD` (without -p) — same purpose.
-    re.compile(r"^mkdir\s+news/\d{4}-\d{2}-\d{2}\s*$"),
+    # `mkdir -p news/current/YYYY-MM-DD` (and legacy `news/YYYY-MM-DD`) — create
+    # today's briefing output directory.
+    re.compile(r"^mkdir\s+-p\s+news/(?:current/)?\d{4}-\d{2}-\d{2}\s*$"),
+    # `mkdir news/current/YYYY-MM-DD` (without -p) — same purpose.
+    re.compile(r"^mkdir\s+news/(?:current/)?\d{4}-\d{2}-\d{2}\s*$"),
     # 2026-10-26: step 4 — download today's cover image to its one fixed
     # path.  Only -s/-L/--max-time flags; the URL must be http(s) and
     # double-quoted with no `$`, backtick, backslash or `"` inside, so
     # nothing in it can expand or break out of the quotes.
     re.compile(
         r"^curl(?:\s+(?:-s|-L|-sL|-Ls|--max-time\s+\d+))*"
-        r"\s+-o\s+news/\d{4}-\d{2}-\d{2}/cover\.jpg"
+        r"\s+-o\s+news/(?:current/)?\d{4}-\d{2}-\d{2}/cover\.jpg"
         r'\s+"https?://[^"$`\\\s]+"\s*$'
     ),
 )

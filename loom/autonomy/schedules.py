@@ -27,8 +27,14 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 
+from loom.autonomy.permission_names import (
+    configured_mcp_servers,
+    warn_allowed_tool_drift,
+    workspace_skill_names,
+)
 from loom.autonomy.skill_allows import SkillAllowsError, activity_permission_fields, activity_workspace
 
 logger = logging.getLogger(__name__)
@@ -42,7 +48,12 @@ DEFAULT_SCHEDULES_PATH = Path("autonomy/schedules.toml")
 _ARRAY_KEYS = ("schedules", "triggers")
 
 
-def load_schedules(path: Path | None = None, *, workspace: Path | None = None) -> dict:
+def load_schedules(
+    path: Path | None = None,
+    *,
+    workspace: Path | None = None,
+    mcp_servers: Collection[str] | None = None,
+) -> dict:
     """Read the schedule registry, returning ``{"schedules": [...], "triggers": [...]}``.
 
     Every failure mode the daemon should survive yields *empty* arrays: file
@@ -69,19 +80,25 @@ def load_schedules(path: Path | None = None, *, workspace: Path | None = None) -
 
     resolved: dict[str, list[dict]] = {}
     ws = activity_workspace(p, DEFAULT_SCHEDULES_PATH, workspace)
+    servers = configured_mcp_servers(ws) if mcp_servers is None else frozenset(mcp_servers)
+    skills = workspace_skill_names(ws)
     for key in _ARRAY_KEYS:
         resolved[key] = []
         for entry in _coerce_array(raw, key):
             name = entry.get("name", "<unnamed>")
+            source = f"{key} {name!r}"
             try:
                 if isinstance(entry.get("target"), dict) and "skills" in entry["target"]:
                     raise SkillAllowsError(
                         "target.skills is misplaced; put skills on the schedule table, "
                         "before [schedules.target] if present")
-                perms = activity_permission_fields(entry, f"{key} {name!r}", ws)
+                perms = activity_permission_fields(entry, source, ws)
             except SkillAllowsError as exc:
                 logger.error("[autonomy] %s %r rejected: %s", key, name, exc)
                 continue
+            warn_allowed_tool_drift(
+                source, perms["allowed_tools"], mcp_servers=servers, skill_names=skills,
+            )
             # Leave absent legacy fields absent; a skill reference resolves
             # both fields even when its allows is explicitly empty.
             resolved[key].append({**entry, **perms} if "skills" in entry else entry)

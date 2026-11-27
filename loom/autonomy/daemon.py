@@ -630,7 +630,12 @@ class AutonomyDaemon:
         # Resolve the registry relative to loom.toml's directory so launching
         # from another cwd still finds the right per-workspace file.
         sched_path = path.resolve().parent / DEFAULT_SCHEDULES_PATH
-        sched_cfg = load_schedules(sched_path)
+        mcp_servers = {
+            s["name"].strip()
+            for s in config.get("mcp", {}).get("servers", [])
+            if isinstance(s, dict) and isinstance(s.get("name"), str) and s["name"].strip()
+        }
+        sched_cfg = load_schedules(sched_path, mcp_servers=mcp_servers)
 
         # Issue #91: tamper detection on the registry (fail-open — logs only).
         if not _check_config_integrity(sched_cfg):
@@ -754,16 +759,21 @@ class AutonomyDaemon:
                 mcp_servers = tomllib.load(f).get("mcp", {}).get("servers", [])
         except (OSError, tomllib.TOMLDecodeError):
             mcp_servers = []
+        mcp_configured = {
+            s["name"].strip()
+            for s in mcp_servers
+            if isinstance(s, dict) and isinstance(s.get("name"), str) and s["name"].strip()
+        }
         uses = collect_permission_uses(
-            load_schedules(base / DEFAULT_SCHEDULES_PATH),
-            load_rhythm(),
+            load_schedules(base / DEFAULT_SCHEDULES_PATH, mcp_servers=mcp_configured),
+            load_rhythm(mcp_servers=mcp_configured),
             load_room().furniture,
         )
         session = self._session
         checks = classify_permission_names(
             uses,
             registered={t.name for t in session.registry.list()},
-            mcp_configured={s.get("name") for s in mcp_servers if isinstance(s, dict)},
+            mcp_configured=mcp_configured,
             # A client whose connection has died stays in _mcp_clients; only
             # live ones count, so its tools read "not connected" (off).
             mcp_connected=(

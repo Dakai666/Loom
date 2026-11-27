@@ -369,15 +369,29 @@ def activity_permission_fields(
     S1 furniture keeps its own stricter subset contract, unchanged.
     """
     own = parse_permission_fields(entry, source_name)
+    legacy_reason: str | None = None
+    if "legacy_reason" in entry:
+        raw_reason = entry["legacy_reason"]
+        if not isinstance(raw_reason, str) or not raw_reason.strip():
+            raise SkillAllowsError("legacy_reason must be a non-empty string")
+        if "skills" in entry:
+            raise SkillAllowsError("legacy_reason cannot be combined with skills")
+        legacy_reason = raw_reason.strip()
     if "skills" not in entry:
         if "scope_grants" in entry:
-            # Staged compatibility: unrelated legacy activities cannot all
-            # migrate to S1 allows (e.g. arbitrary CLI / path:read). Keep
-            # their existing contract until explicitly migrated, loudly.
-            logger.warning(
-                "[autonomy] %s uses legacy scope_grants without skills; retained for "
-                "compatibility, migrate activity scopes to SKILL.md allows and skills",
-                source_name)
+            if legacy_reason is not None:
+                logger.info(
+                    "[autonomy] %s uses retained legacy scope_grants without skills "
+                    "(legacy_reason: %s)",
+                    source_name, legacy_reason)
+            else:
+                # Staged compatibility: unrelated legacy activities cannot all
+                # migrate to S1 allows (e.g. arbitrary CLI / path:read). Keep
+                # their existing contract until explicitly migrated, loudly.
+                logger.warning(
+                    "[autonomy] %s uses legacy scope_grants without skills; retained for "
+                    "compatibility, migrate activity scopes to SKILL.md allows and skills",
+                    source_name)
         return own
     names = entry["skills"]
     if (not isinstance(names, list) or not names

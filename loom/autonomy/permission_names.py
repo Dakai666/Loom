@@ -23,12 +23,17 @@ Each name gets one :class:`NameStatus`:
 
 from __future__ import annotations
 
+import logging
+import tomllib
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from loom.autonomy.permission_fields import parse_permission_fields
+
+logger = logging.getLogger(__name__)
 
 
 class NameStatus(Enum):
@@ -67,6 +72,151 @@ CONDITIONAL_TOOLS: dict[str, str] = {
 }
 
 _MCP_SEPARATOR = "__"  # mcp_client registers "<server>__<tool>"
+
+# Always-registered native tools across CLI / Memory / Skills / Circadian / Weather.
+# Combined with CONDITIONAL_TOOLS this forms the full native catalogue used for
+# load-time drift warnings (#708 S4b), kept in lockstep with ToolDefinition
+# factories by tests/test_allowed_tool_drift_708_s4b.py.
+CORE_NATIVE_TOOLS: frozenset[str] = frozenset({
+    # Filesystem / vision / shell
+    "read_file",
+    "write_file",
+    "list_dir",
+    "probe_file",
+    "see_image",
+    "run_bash",
+    # Memory / ledger
+    "recall",
+    "memorize",
+    "relate",
+    "memory_health",
+    "memory_prune",
+    "ledger_query",
+    # Skills
+    "load_skill",
+    "unload_skill",
+    "skill_review",
+    # Web / weather / subagent
+    "fetch_url",
+    "weather",
+    "spawn_agent",
+    # Tasks / pursuits / background jobs / scratchpad
+    "task_write",
+    "pursuit_list",
+    "pursuit_read",
+    "pursuit_write",
+    "jobs_list",
+    "jobs_status",
+    "jobs_await",
+    "jobs_cancel",
+    "scratchpad_read",
+    # Circadian
+    "weave_revise",
+    "journal_append",
+})
+
+KNOWN_NATIVE_TOOLS: frozenset[str] = CORE_NATIVE_TOOLS | frozenset(CONDITIONAL_TOOLS)
+
+
+def workspace_skill_names(workspace: Path) -> frozenset[str]:
+    """Return workspace skill names (``<workspace>/skills/<name>/SKILL.md``)."""
+    skills_dir = workspace / "skills"
+    if not skills_dir.is_dir():
+        return frozenset()
+    names: set[str] = set()
+    try:
+        for entry in skills_dir.iterdir():
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            if (entry / "SKILL.md").is_file():
+                names.add(entry.name)
+    except OSError:
+        return frozenset()
+    return frozenset(names)
+
+
+def configured_mcp_servers(workspace: Path) -> frozenset[str]:
+    """Read configured ``[[mcp.servers]]`` names from ``<workspace>/loom.toml`` (tolerant)."""
+    config_path = workspace / "loom.toml"
+    if not config_path.is_file():
+        return frozenset()
+    try:
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return frozenset()
+    mcp_cfg = raw.get("mcp")
+    if not isinstance(mcp_cfg, dict):
+        return frozenset()
+    servers = mcp_cfg.get("servers")
+    if not isinstance(servers, list):
+        return frozenset()
+    return frozenset(
+        s["name"].strip()
+        for s in servers
+        if isinstance(s, dict) and isinstance(s.get("name"), str) and s["name"].strip()
+    )
+
+
+def warn_allowed_tool_drift(
+    source_name: str,
+    allowed_tools: Iterable[str],
+    *,
+    workspace: Path | None = None,
+    known_tools: Collection[str] | None = None,
+    mcp_servers: Collection[str] | None = None,
+    skill_names: Collection[str] | None = None,
+) -> list[str]:
+    """Emit WARNINGs for ``allowed_tools`` entries that look like skill names
+    or drifted/retired/unknown tool names (#708 S4b).
+
+    Report-only: never mutates or rejects the entry. Returns the drifted names.
+    """
+    native = KNOWN_NATIVE_TOOLS if known_tools is None else known_tools
+    if mcp_servers is None:
+        servers: Collection[str] = (
+            configured_mcp_servers(workspace) if workspace is not None else frozenset()
+        )
+    else:
+        servers = mcp_servers
+    if skill_names is None:
+        skills: Collection[str] = (
+            workspace_skill_names(workspace) if workspace is not None else frozenset()
+        )
+    else:
+        skills = skill_names
+
+    drifted: list[str] = []
+    for raw in allowed_tools:
+        name = raw.strip()
+        if not name or name in native:
+            continue
+        if _MCP_SEPARATOR in name:
+            server = name.split(_MCP_SEPARATOR, 1)[0]
+            if server in servers:
+                continue
+            drifted.append(name)
+            logger.warning(
+                "[autonomy] %s allowed_tools includes %r, a drifted or retired MCP tool "
+                "(MCP server %r is not configured); remove or update this entry",
+                source_name, name, server,
+            )
+            continue
+        if name in skills:
+            drifted.append(name)
+            logger.warning(
+                "[autonomy] %s allowed_tools includes %r, which is a workspace skill name, "
+                "not a tool name; use skills = [%r] or load_skill instead of allowed_tools",
+                source_name, name, name,
+            )
+            continue
+        drifted.append(name)
+        logger.warning(
+            "[autonomy] %s allowed_tools includes unknown/drifted tool %r "
+            "(not a known native tool or configured MCP server prefix); check for typos "
+            "or retired tools",
+            source_name, name,
+        )
+    return drifted
 
 
 def collect_permission_uses(
