@@ -15,13 +15,15 @@ DATA = json.dumps({"hourly": {"time": ["2026-11-27T10:00"], "weather_code": [61]
                               "temperature_2m": [17], "precipitation_probability": [80]}}).encode()
 
 
-@pytest.mark.parametrize("case", ["drip", "oversize", "exact_limit"])
+@pytest.mark.parametrize("case", ["drip", "oversize", "exact_limit", "invalid_json"])
 def test_http_read_has_remaining_deadline_and_exact_size_boundary(monkeypatch, case):
     import http.client
     clock = [0.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(weather, "TIMEOUT", 2)
     data = DATA if case == "drip" else DATA + b" " * (weather.MAX_BYTES - len(DATA) + (case == "oversize"))
+    if case == "invalid_json":
+        data = b"<html>private error body</html>"
     class Response:
         status = 200
         offset = 0
