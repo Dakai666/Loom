@@ -4417,6 +4417,18 @@ def external_call_allowed(tool, call, workspace):
             or tool.capabilities & (ToolCapability.EXEC | ToolCapability.AGENT_SPAN)
             or getattr(tool.executor, "__code__", None) is not _nested_code(*spec)):
         return False
+    if tool.name in ("read_file", "list_dir"):
+        # Code identity alone does not prove which data root the closure
+        # reads. Compare only trusted roots canonically, never a target path.
+        try:
+            cells = dict(zip(tool.executor.__code__.co_freevars, tool.executor.__closure__ or ()))
+            bound = cells["workspace"].cell_contents
+            if not isinstance(bound, Path) or not isinstance(workspace, Path):
+                return False
+            if bound.resolve(strict=True) != workspace.resolve(strict=True):
+                return False
+        except (KeyError, ValueError, OSError, RuntimeError, TypeError):
+            return False
     if tool.name == "journal_append":
         # The existing append-only journal is the sole self-recording path.
         # No arbitrary filename, date, overwrite, semantic-memory or policy writes.
@@ -4424,7 +4436,6 @@ def external_call_allowed(tool, call, workspace):
             return False
         cells = dict(zip(tool.executor.__code__.co_freevars, tool.executor.__closure__ or ()))
         target = cells["target_dir"].cell_contents
-        from pathlib import Path
         # Reject even a safe-looking alternate journal destination.
         lexical = Path(target).absolute()
         if lexical != (workspace.absolute() / "autonomy/circadian/journal"):
