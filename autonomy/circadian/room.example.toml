@@ -36,15 +36,16 @@ name = "miji"
 label = "喵吉"
 command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]
 default_priority = "normal"
-allowed_tools = ["run_bash"]   # so a wake can be answered with pet.py
-# A declaration never covers shell (#704 S3): the exec grant below is what
-# lets the wake run pet.py — the shape allows exactly that script.
-scope_grants = [
-  { resource = "exec", action = "execute", selector = "python3 skills/pet-cat/pet.py" },
-]
+# What a wake goes on to do (#708). Its boundary is the skill's `allows` in
+# skills/pet-cat/SKILL.md, read at wake start — a furniture carries no grants
+# of its own. It may narrow them (allowed_tools / scope_grants that stay
+# inside the skill's allows), never widen them. A missing skill, a skill
+# without `allows`, or a script `allows` names that does not exist rejects
+# this furniture at load, loudly (ERROR + a room-log row).
+skill = "pet-cat"
 # ⚠️ signal text reaches the chime turn verbatim. Fine for local furniture
 # like 喵吉; for furniture that relays outside text (weather, calendar, web)
-# leave allowed_tools and scope_grants empty.
+# leave `skill` out until the external-text guard (#708 S3) lands.
 
 [furniture.priorities]
 feel_sick = "urgent"

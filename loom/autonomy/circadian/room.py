@@ -18,6 +18,13 @@ Contracts worth knowing before editing:
   ``{"signals": [{"id", "key", "text"}], "next_signal_at": iso | null}``.
   The command must be read-only with respect to its own state — 喵吉's
   ``peek`` replays a *copy*. The core never imports skill code.
+- **A furniture carries no grants; its skill does (#708 S1).** ``skill =
+  "<name>"`` points a wake at the activity it leads to; the wake's boundary
+  is that skill's SKILL.md ``allows`` (``loom/autonomy/skill_allows.py``),
+  read at load so it rides on the chime before the turn starts. The
+  furniture may narrow it, never widen it; a broken reference rejects the
+  furniture into ``RoomConfig.errors``, reported as an ERROR and a
+  ``furniture_rejected`` room-log row.
 - **The furniture decides what is a signal; the room decides whether it
   wakes.** Priority comes from ``room.toml`` (per-furniture mapping +
   default), so the agent can retune it without touching either side.
@@ -99,10 +106,11 @@ class Furniture:
     command: tuple[str, ...]
     priorities: dict[str, str] = field(default_factory=dict)
     default_priority: str = "normal"
+    # #708 S1: the skill a wake goes on to do. The wake's boundary below is
+    # derived from that skill's ``allows`` at load (the furniture may only
+    # narrow it); a furniture with no skill carries no grants at all.
+    skill: str | None = None
     allowed_tools: tuple[str, ...] = ()
-    # #704 S3: grants for this furniture's wake, the same shape as a
-    # schedule's (e.g. miji's exec shape for pet.py). A declaration never
-    # covers shell; an exec grant does.
     scope_grants: tuple[dict[str, Any], ...] = ()
 
     def priority_for(self, signal_id: str) -> str:
@@ -116,48 +124,104 @@ class RoomConfig:
     min_gap_minutes: int = 45
     queue_ttl_hours: int = 12
     furniture: tuple[Furniture, ...] = ()
+    # #708 S1: furniture rejected at load, one reason each. Never a quiet
+    # skip: ``register_room`` and ``room_tick`` report them as errors.
+    errors: tuple[str, ...] = ()
 
 
 def _is_str_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
-def _parse_furniture(entry: dict[str, Any], idx: int) -> Furniture | None:
+class FurnitureRejected(ValueError):
+    """A furniture that must not run, with the reason (#708 S1)."""
+
+
+def _skill_boundary(
+    name: str, skill: Any, entry: dict[str, Any], workspace: Path,
+) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...]]:
+    """The wake boundary of furniture *name*: its skill's ``allows``, or the
+    furniture's own ``allowed_tools`` / ``scope_grants`` when it narrows
+    them. Raises :class:`FurnitureRejected` on anything that would widen
+    the skill or hide a broken reference."""
+    from loom.autonomy.permission_fields import parse_permission_fields
+    from loom.autonomy.skill_allows import (
+        SkillAllowsError,
+        allows_permission_fields,
+        read_skill_allows,
+        harden,
+        widening,
+    )
+
+    has_own = "allowed_tools" in entry or "scope_grants" in entry
+    if skill is None:
+        if has_own:
+            raise FurnitureRejected(
+                f"furniture {name!r} carries allowed_tools / scope_grants but no skill; "
+                "a furniture carries no grants of its own: point it at a skill "
+                '(skill = "<name>") and declare the boundary in that SKILL.md allows')
+        return (), ()
+    if not isinstance(skill, str) or not skill:
+        raise FurnitureRejected(f"furniture {name!r}: skill must be a skill name")
+    try:
+        allows = read_skill_allows(skill, workspace)
+    except SkillAllowsError as exc:
+        raise FurnitureRejected(f"furniture {name!r}: {exc}") from None
+    derived = allows_permission_fields(allows, f"skill {skill}")
+    tools: list[str] = derived["allowed_tools"]
+    grants: list[dict[str, Any]] = derived["scope_grants"]
+    if has_own:
+        raw_tools = entry.get("allowed_tools", tools)
+        if not _is_str_list(raw_tools):
+            raise FurnitureRejected(f"furniture {name!r}: allowed_tools must be a list of names")
+        own = parse_permission_fields(entry, f"room:{name}")
+        if "allowed_tools" in entry:
+            tools = list(raw_tools)
+        if "scope_grants" in entry:
+            if not isinstance(entry["scope_grants"], list) or len(own["scope_grants"]) != len(
+                    entry["scope_grants"]):
+                raise FurnitureRejected(f"furniture {name!r} has a malformed scope_grant")
+            grants = own["scope_grants"]
+        if wider := widening(allows, tools, grants):
+            raise FurnitureRejected(
+                f"furniture {name!r} widens skill {skill!r} allows with {', '.join(wider)}; "
+                "a furniture may only narrow its skill")
+    # #714 N3: a narrowed exec shape denies absolute paths like the skill's.
+    grants = harden(list(grants))
+    # #707 re-review: a declared shell with no exec grant would skip
+    # silently at wake; say so at load.
+    from loom.autonomy.permission_fields import report_exec_without_grant
+    report_exec_without_grant(f"room furniture {name!r}", tools, grants,
+                              is_exec=lambda t: t == "run_bash")
+    return tuple(tools), tuple(grants)
+
+
+def _parse_furniture(entry: dict[str, Any], idx: int, workspace: Path | None = None) -> Furniture:
+    """One ``[[furniture]]``. Raises :class:`FurnitureRejected` with the
+    reason when it cannot run as written."""
     name = entry.get("name")
     command = entry.get("command")
     if not isinstance(name, str) or not name:
-        logger.warning("[room] furniture[%d] has no name; skipped", idx)
-        return None
+        raise FurnitureRejected(f"furniture[{idx}] has no name")
     if not (_is_str_list(command) and command):
-        logger.warning("[room] furniture %r has no valid command; skipped", name)
-        return None
+        raise FurnitureRejected(f"furniture {name!r} has no valid command")
     default = entry.get("default_priority", "normal")
     raw_prios = entry.get("priorities") or {}
     if default not in PRIORITIES or not isinstance(raw_prios, dict) or any(
         v not in PRIORITIES for v in raw_prios.values()
     ):
-        logger.warning("[room] furniture %r has an unknown priority; skipped", name)
-        return None
-    tools = entry.get("allowed_tools", [])
-    if not _is_str_list(tools):
-        logger.warning("[room] furniture %r allowed_tools must be a list; skipped", name)
-        return None
-    from loom.autonomy.permission_fields import parse_permission_fields
-    grants = parse_permission_fields(entry, f"room:{name}")["scope_grants"]
-    # #707 re-review: say so at load if the furniture declares shell with
-    # no exec grant; a declaration never covers shell, so its wake would
-    # skip silently.
-    from loom.autonomy.permission_fields import report_exec_without_grant
-    report_exec_without_grant(f"room furniture {name!r}", tools, grants,
-                              is_exec=lambda t: t == "run_bash")
+        raise FurnitureRejected(f"furniture {name!r} has an unknown priority")
+    skill = entry.get("skill")
+    tools, grants = _skill_boundary(name, skill, entry, workspace or Path("."))
     return Furniture(
         name=name,
         label=str(entry.get("label", name)),
         command=tuple(command),
         priorities={str(k): v for k, v in raw_prios.items()},
         default_priority=default,
-        allowed_tools=tuple(tools),
-        scope_grants=tuple(grants),
+        skill=skill,
+        allowed_tools=tools,
+        scope_grants=grants,
     )
 
 
@@ -173,11 +237,14 @@ def wake_permissions(
     return tools, tuple(grants)
 
 
-def load_room(path: Path | None = None) -> RoomConfig:
+def load_room(path: Path | None = None, *, workspace: Path | None = None) -> RoomConfig:
     """Read ``room.toml``. Tolerant by contract (same as the rhythm table): a
     missing or broken file means "no room", never an exception; one bad
-    furniture is dropped without silencing the rest. Duplicate furniture
-    names keep the first — they would share dedupe and schedule state."""
+    furniture is rejected without silencing the rest, and its reason lands in
+    ``RoomConfig.errors`` (#708 S1: loud, never a quiet skip). Duplicate
+    furniture names keep the first — they would share dedupe and schedule
+    state. Skills resolve under *workspace* (default: the working directory,
+    where furniture commands run)."""
     p = path or DEFAULT_ROOM_PATH
     if not p.exists():
         return RoomConfig()
@@ -197,9 +264,14 @@ def load_room(path: Path | None = None) -> RoomConfig:
         return RoomConfig()
 
     furniture: list[Furniture] = []
+    errors: list[str] = []
     for i, e in enumerate(entries):
-        f = _parse_furniture(e, i) if isinstance(e, dict) else None
-        if f is None:
+        try:
+            if not isinstance(e, dict):
+                raise FurnitureRejected(f"furniture[{i}] is not a table")
+            f = _parse_furniture(e, i, workspace)
+        except FurnitureRejected as exc:
+            errors.append(str(exc))
             continue
         if any(x.name == f.name for x in furniture):
             logger.warning("[room] duplicate furniture %r; keeping the first", f.name)
@@ -212,6 +284,7 @@ def load_room(path: Path | None = None) -> RoomConfig:
             min_gap_minutes=int(head.get("min_gap_minutes", 45)),
             queue_ttl_hours=int(head.get("queue_ttl_hours", 12)),
             furniture=tuple(furniture),
+            errors=tuple(errors),
         )
     except (TypeError, ValueError) as exc:
         logger.warning("[room] %s has a bad [room] value (%s); room disabled", p, exc)
@@ -495,6 +568,22 @@ def _get_lock() -> asyncio.Lock:
     return _tick_lock
 
 
+# Rejections already reported by this process. The config is re-read every
+# tick; a broken furniture is reported when it first appears (and again if
+# it comes back after being fixed), not every five minutes.
+_reported_errors: set[str] = set()
+
+
+def _report_rejected(errors: tuple[str, ...], now: datetime, tz: str) -> None:
+    current = set(errors)
+    for err in errors:
+        if err not in _reported_errors:
+            logger.error("[room] furniture rejected: %s", err)
+            _log("furniture_rejected", now, tz, error=err)
+    _reported_errors.intersection_update(current)
+    _reported_errors.update(current)
+
+
 def _touch_seen(state: RoomState, key: str) -> bool:
     """Record a sighting (LRU). Returns True when the key is new."""
     if key in state.seen:
@@ -516,9 +605,12 @@ async def room_tick(
     """One pass: re-decide the queue, peek due furniture, deliver at most
     one chime, then emit each new signal for subscribers."""
     cfg = config if config is not None else load_room()
+    tz = circadian.timezone
+    # A disabled (or removed) room forgets what it reported, so the same
+    # broken furniture is reported again when it comes back (#714 N4).
+    _report_rejected(cfg.errors if cfg.enabled else (), now, tz)
     if not cfg.enabled or not cfg.furniture:
         return
-    tz = circadian.timezone
     emits: list[dict[str, Any]] = []
     async with _get_lock():
         state = RoomState.load()
@@ -638,9 +730,13 @@ def register_room(daemon: Any, circadian: Any, path: Path | None = None) -> bool
     cfg = load_room(path)
     if not cfg.enabled:
         return False
+    # Reported once: the first tick sees these as already reported (#714 N4).
+    _report_rejected(cfg.errors, datetime.now(timezone.utc), circadian.timezone)
 
     async def _tick_handler(_trigger: Any, _context: dict[str, Any]) -> None:
-        await room_tick(daemon, circadian, datetime.now(timezone.utc))
+        # Tick the file that was registered (#714 N4); None reads the default.
+        await room_tick(daemon, circadian, datetime.now(timezone.utc),
+                        config=load_room(path) if path is not None else None)
 
     daemon.evaluator.register(CronTrigger(
         name=TICK_TRIGGER,

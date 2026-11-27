@@ -209,8 +209,10 @@ enabled = true
 [[furniture]]
 name = "cat"
 command = ["python", "pet.py"]
-allowed_tools = ["memorise"]
+skill = "cat"   # #708 S1: the boundary comes from the skill's allows
 """
+
+CAT_SKILL = "---\nname: cat\nallows:\n  tools: [memorise]\n---\n"
 
 
 def _tool(name: str) -> ToolDefinition:
@@ -268,6 +270,7 @@ def _write_all():
     _write("autonomy/schedules.toml", SCHEDULES)
     _write("autonomy/circadian/rhythm.toml", RHYTHM)
     _write("autonomy/circadian/room.toml", ROOM)
+    _write("skills/cat/SKILL.md", CAT_SKILL)
 
 
 class TestDaemonCheck:

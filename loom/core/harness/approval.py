@@ -1440,11 +1440,20 @@ def _hard_word(word: Word, cwd: Path, workspace: Path | None = None) -> str | No
     return None
 
 
-def _precondition_checks(text: str) -> Any:
-    """The ``precondition_checks`` a SKILL.md declares (None if none). A
-    frontmatter that does not parse is unique, so it always differs."""
+# The guarded part of a SKILL.md frontmatter: what the skill's checks are
+# and what its activity may do (#708 S1 ``allows``). Changing either is
+# DK's call; the rest of the skill is Loom Agent's own.
+_GUARDED_FRONT_KEYS = ("precondition_checks", "allows")
+_ABSENT = "\0absent"
+
+
+def _guarded_front(text: str, keys: tuple[str, ...] = _GUARDED_FRONT_KEYS) -> Any:
+    """The guarded frontmatter fields a SKILL.md declares, as a tuple in
+    *keys* order (``_ABSENT`` for an absent field, so ``allows:`` with no
+    value differs from no ``allows``, as the reader treats them; #714 N2).
+    A frontmatter that does not parse is unique, so it always differs."""
     if not text.startswith("---"):
-        return None
+        return tuple(_ABSENT for _ in keys)
     end = text.find("\n---", 3)
     if end < 0:
         return object()
@@ -1452,37 +1461,70 @@ def _precondition_checks(text: str) -> Any:
         front = _yaml.safe_load(text[3:end]) or {}
     except _yaml.YAMLError:
         return object()
-    return front.get("precondition_checks") if isinstance(front, dict) else object()
+    if not isinstance(front, dict):
+        return object()
+    return tuple(front.get(k, _ABSENT) for k in keys)
+
+
+def _precondition_checks(text: str) -> Any:
+    """The ``precondition_checks`` a SKILL.md declares (None if none)."""
+    front = _guarded_front(text, ("precondition_checks",))
+    if not isinstance(front, tuple):
+        return front
+    return None if front[0] == _ABSENT else front[0]
 
 
 def _skill_guard(rel: PurePosixPath, workspace: Path, content: str | None) -> bool:
     """Whether writing *content* to workspace path *rel* changes a skill's
     guard: its ``checks.py``, a module its ``precondition_checks`` names,
-    or the ``precondition_checks`` of its SKILL.md. ``content`` None (a
+    or the ``precondition_checks`` / ``allows`` of its SKILL.md (#708 S1).
+    ``content`` None (a
     shell edit) counts any SKILL.md. The rest of a skill, its body text and
-    scripts such as run.sh, is Loom Agent's own and follows the mode."""
-    parts = rel.parts
+    scripts such as run.sh, is Loom Agent's own and follows the mode.
+
+    Names compare case-blind (#714 B1): on a case-insensitive file system
+    (macOS APFS) ``skills/x/skill.md`` is ``skills/x/SKILL.md``. On a
+    case-sensitive one this only errs toward asking."""
+    parts = tuple(part.lower() for part in rel.parts)
     if len(parts) != 3 or parts[0] != "skills":
         return False
-    skill_md = workspace / "skills" / parts[1] / "SKILL.md"
+    skill_md = workspace / "skills" / rel.parts[1] / "SKILL.md"
     try:
         current = skill_md.read_text(encoding="utf-8") if skill_md.is_file() else ""
     except (OSError, UnicodeDecodeError):
         return True
-    if parts[2] == "SKILL.md":
+    if parts[2] == "skill.md":
         if content is None:
             return True
-        old, new = _precondition_checks(current), _precondition_checks(content)
+        old, new = _guarded_front(current), _guarded_front(content)
         return type(old) is object or type(new) is object or old != new
-    if rel.suffix != ".py":
+    name = PurePosixPath(parts[2])
+    if name.suffix != ".py":
         return False
-    if rel.stem == "checks":
+    if name.stem == "checks":
         return True
     checks = _precondition_checks(current)
     if type(checks) is object:
         return True
     refs = [c.get("ref", "") if isinstance(c, dict) else str(c) for c in checks or []]
-    return any(ref.rsplit(".", 1)[0] == rel.stem for ref in refs)
+    return any(ref.rsplit(".", 1)[0].lower() == name.stem for ref in refs)
+
+
+def protected_write_target(rel: PurePosixPath, workspace: Path) -> str | None:
+    """The hard guardrail a write to workspace path *rel* would cross by
+    its location or name alone, or None: outside the workspace, hidden or
+    credential-named, a policy file, a control document, or a skill's
+    guard. Used to keep a skill's ``allows.write`` prefixes off such files
+    at load (#714 B4); the write itself still meets ``hard_boundary``."""
+    if refusal := _location_refusal(str(rel), workspace):
+        return refusal
+    if rel.suffix.lower() in _POLICY_SUFFIXES:
+        return "policy_file"
+    if rel.name.lower() in _CONTROL_NAMES:
+        return "control_file"
+    if _skill_guard(rel, workspace, None):
+        return "skill_guard"
+    return None
 
 
 def _shell_hard(command: str, workspace: Path) -> str | None:

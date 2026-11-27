@@ -402,7 +402,7 @@ class TestLoadRoom:
             '[room]\nenabled = true\ndaily_budget = 4\n\n'
             '[[furniture]]\nname = "miji"\nlabel = "喵吉"\n'
             'command = ["python3", "skills/pet-cat/pet.py", "peek"]\n'
-            'default_priority = "normal"\nallowed_tools = ["run_bash"]\n'
+            'default_priority = "normal"\n'
             '[furniture.priorities]\nfeel_sick = "urgent"\n\n'
             '[[furniture]]\nname = "broken"\n'  # no command
             '\n[[furniture]]\nname = "bad_prio"\ncommand = ["x"]\n'
@@ -411,6 +411,8 @@ class TestLoadRoom:
         c = load_room(p)
         assert c.enabled and c.daily_budget == 4
         assert [f.name for f in c.furniture] == ["miji"]
+        # #708 S1: a dropped furniture is reported with its reason, not skipped quietly.
+        assert len(c.errors) == 2 and any("broken" in e for e in c.errors)
         assert c.furniture[0].priorities == {"feel_sick": "urgent"}
         assert c.furniture[0].command == ("python3", "skills/pet-cat/pet.py", "peek")
 
@@ -451,6 +453,11 @@ class TestSetupWiring:
 
     def test_example_room_toml_loads(self):
         repo = Path(__file__).resolve().parent.parent
+        skill = Path("skills/pet-cat")  # gitignored: a stand-in for Loom Agent's own
+        skill.mkdir(parents=True)
+        (skill / "pet.py").write_text("")
+        (skill / "SKILL.md").write_text(
+            "---\nname: pet-cat\nallows:\n  exec: [python3 skills/pet-cat/pet.py status]\n---\n")
         c = load_room(repo / "autonomy/circadian/room.example.toml")
         assert c.enabled
         assert c.furniture[0].priority_for("feel_sick") == "urgent"
