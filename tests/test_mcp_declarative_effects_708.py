@@ -430,3 +430,63 @@ class TestMutatingKeywordBlocksReadOnlyDeclaration:
         await _dispatch(env_safe, td, {"query": "hello", "justification": "test"}, origin="discord")
         assert env_safe.confirm.await_count == 1
         assert env_safe.model.requests == []
+
+
+# ---------------------------------------------------------------------------
+# 5. #718 review fix 2: mistyped tool_effects tool name logs WARNING
+# ---------------------------------------------------------------------------
+
+
+class TestMistypedToolEffectsWarning:
+    async def test_unmatched_declared_tool_name_logs_warning_and_stays_fail_closed(self, caplog) -> None:
+        cfg = MCPServerConfig(
+            name="minimax_coding",
+            command="true",
+            trust_level="guarded",
+            tool_effects={
+                "websearch": "public_search",  # typo: server exposes "web_search"
+                "understand_image": "media_read",
+            },
+        )
+        remote = [
+            SimpleNamespace(
+                name="web_search",
+                description="Search the public web",
+                inputSchema={"type": "object", "properties": {"query": {"type": "string"}}},
+            ),
+            SimpleNamespace(
+                name="understand_image",
+                description="Analyze an image",
+                inputSchema={"type": "object", "properties": {"image_source": {"type": "string"}}},
+            ),
+        ]
+        with caplog.at_level(logging.WARNING, logger=mcp_client_mod.__name__):
+            tools = {t.name: t for t in await _import_fake_mcp_tools(cfg, remote)}
+
+        assert tools["minimax_coding__web_search"].scope_resolver is None
+        assert tools["minimax_coding__understand_image"].scope_resolver is not None
+        assert any(
+            r.levelno == logging.WARNING
+            and "minimax_coding" in r.message
+            and "websearch" in r.message
+            for r in caplog.records
+        ), caplog.text
+
+    async def test_all_matched_tool_effects_emit_no_warning(self, caplog) -> None:
+        cfg = MCPServerConfig(
+            name="minimax_coding",
+            command="true",
+            trust_level="guarded",
+            tool_effects={"web_search": "public_search"},
+        )
+        remote = [
+            SimpleNamespace(
+                name="web_search",
+                description="Search the public web",
+                inputSchema={"type": "object", "properties": {"query": {"type": "string"}}},
+            ),
+        ]
+        with caplog.at_level(logging.WARNING, logger=mcp_client_mod.__name__):
+            await _import_fake_mcp_tools(cfg, remote)
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []

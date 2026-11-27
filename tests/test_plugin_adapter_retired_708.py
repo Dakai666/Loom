@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -112,3 +113,42 @@ async def test_session_start_ignores_plugin_files_and_loom_tools(tmp_path, monke
         assert not sentinel.exists()
     finally:
         await session.stop()
+
+
+@pytest.mark.parametrize("snippet,expected_key", [
+    ("[plugins]\nenabled = true\n", "plugins"),
+    ("[adapter]\nfoo = 1\n", "adapter"),
+    ("[adapters]\nfoo = 1\n", "adapters"),
+])
+def test_load_loom_config_warns_on_retired_plugin_adapter_sections(
+    tmp_path, monkeypatch, caplog, snippet: str, expected_key: str,
+) -> None:
+    from loom.core.config import load_loom_config
+
+    (tmp_path / "loom.toml").write_text(
+        f'[loom]\nname = "demo"\n\n{snippet}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="loom.core.config"):
+        cfg = load_loom_config()
+
+    assert cfg["loom"]["name"] == "demo"
+    assert any(
+        r.levelno == logging.WARNING
+        and expected_key in r.message
+        and "retired" in r.message.lower()
+        for r in caplog.records
+    ), caplog.text
+
+
+def test_load_loom_config_silent_without_retired_sections(tmp_path, monkeypatch, caplog) -> None:
+    from loom.core.config import load_loom_config
+
+    (tmp_path / "loom.toml").write_text('[loom]\nname = "demo"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="loom.core.config"):
+        cfg = load_loom_config()
+
+    assert cfg["loom"]["name"] == "demo"
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
