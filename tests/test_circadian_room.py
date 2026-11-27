@@ -539,7 +539,7 @@ class TestBounds:
     async def test_chime_lines_are_capped(self):
         RoomState(date="2026-09-23", queue=[
             {"source": "miji", "id": f"q{i}", "key": "k", "text": f"舊{i}",
-             "priority": "ambient", "at": at(11).isoformat()} for i in range(50)
+             "priority": "ambient", "input_trust": "local", "at": at(11).isoformat()} for i in range(50)
         ]).save()
         d = FakeDaemon()
         run = runner_returning({"signals": [sig("seeking", "2026-09-23:afternoon")]})

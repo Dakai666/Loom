@@ -150,11 +150,18 @@ async def test_mixed_room_queue_and_reconstruction_are_external(tmp_path, ledger
         daemon = FakeDaemon()
         await room_tick(daemon, CIRC, at(12), config=cfg, runner=runner)
         req = daemon.chimes[0]
-        assert req.input_trust == "external" and not req.scope_grants and "run_bash" not in req.allowed_tools
+        if ambient:
+            assert req.input_trust == "local" and req.scope_grants
+            assert "input_trust=" not in req.intent
+            assert [q["source"] for q in RoomState.load().queue] == ["window"]
+        else:
+            assert req.input_trust == "external" and not req.scope_grants and "run_bash" not in req.allowed_tools
         added, source = LoomDiscordBot._apply_chime_permissions(None, req,
             SimpleNamespace(perm=env.perm, registry=env.blast._registry))
         r = await _call(env, "run_bash", {"command": "python3 scripts/tool.py"}, caps=ToolCapability.EXEC)
-        assert not r.success and "external" in r.error
+        assert r.success is ambient
+        if not ambient:
+            assert "external" in r.error
         LoomDiscordBot._revoke_chime_permissions(None, SimpleNamespace(perm=env.perm), added, source)
     finally:
         st.set_dir_for_test(None)
