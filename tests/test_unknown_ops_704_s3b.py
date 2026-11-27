@@ -153,18 +153,6 @@ class TestUnknownOperations:
 # ---------------------------------------------------------------------------
 
 
-def test_furniture_scope_grants_are_parsed():
-    from loom.autonomy.circadian.room import _parse_furniture
-    f = _parse_furniture({
-        "name": "miji", "command": ["python3", "skills/pet-cat/pet.py", "peek", "--json"],
-        "allowed_tools": ["run_bash"],
-        "scope_grants": [{"resource": "exec", "action": "execute",
-                          "selector": "python3 skills/pet-cat/pet.py"}, {"bad": 1}],
-    }, 0)
-    assert f.scope_grants == ({"resource": "exec", "action": "execute",
-                               "selector": "python3 skills/pet-cat/pet.py"},)
-
-
 def test_room_wake_carries_furniture_grants():
     from loom.autonomy.circadian.room import Furniture, wake_permissions
     cfg = [
@@ -195,14 +183,17 @@ async def test_miji_wake_runs_pet_py_only_with_its_grant(tmp_path, ledger, with_
     """End to end over the harness: the room's furniture grants become the
     chime's scope grants (as the bot applies them), so a wake can run
     pet.py; the declaration alone cannot (#707 review)."""
-    import tomllib
-    from pathlib import Path as _P
+    # #708 S1: the furniture's boundary now comes from its skill's allows.
     from loom.autonomy.circadian.room import _parse_furniture, wake_permissions
-    entry = tomllib.loads((_P(__file__).parent.parent / "autonomy/circadian/room.example.toml")
-                          .read_text())["furniture"][0]
-    if not with_grant:
-        entry.pop("scope_grants")
-    tools, grants = wake_permissions([_parse_furniture(entry, 0)], {"miji"})
+    skill = tmp_path / "skills/pet-cat"
+    skill.mkdir(parents=True)
+    (skill / "pet.py").write_text("")
+    allows = ("  exec: [python3 skills/pet-cat/pet.py]\n" if with_grant else "")
+    (skill / "SKILL.md").write_text(
+        "---\nname: pet-cat\nallows:\n  tools: [run_bash]\n" + allows + "---\n")
+    entry = {"name": "miji", "command": ["python3", "skills/pet-cat/pet.py", "peek"],
+             "skill": "pet-cat"}
+    tools, grants = wake_permissions([_parse_furniture(entry, 0, tmp_path)], {"miji"})
     env = _env(tmp_path, ledger, mode=PermissionMode.SELF, grants=[
         ScopeGrant(resource=g["resource"], action=g["action"], selector=g["selector"],
                    source="autonomy:room@0900") for g in grants])
@@ -297,9 +288,12 @@ def test_room_load_reports_miji_without_grant(tmp_path, caplog):
     from loom.autonomy.circadian.room import load_room
     p = tmp_path / "room.toml"
     p.write_text('[room]\nenabled = true\n\n[[furniture]]\nname = "miji"\n'
-                 'command = ["python3", "skills/pet-cat/pet.py", "peek"]\nallowed_tools = ["run_bash"]\n')
+                 'command = ["python3", "skills/pet-cat/pet.py", "peek"]\nskill = "pet-cat"\n')
+    (tmp_path / "skills/pet-cat").mkdir(parents=True)
+    (tmp_path / "skills/pet-cat/SKILL.md").write_text(
+        "---\nname: pet-cat\nallows:\n  tools: [run_bash]\n---\n")
     with caplog.at_level(logging.WARNING):
-        load_room(p)
+        load_room(p, workspace=tmp_path)
     assert any("miji" in r.message and "exec" in r.message for r in caplog.records)
 
 

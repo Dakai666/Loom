@@ -1440,11 +1440,18 @@ def _hard_word(word: Word, cwd: Path, workspace: Path | None = None) -> str | No
     return None
 
 
-def _precondition_checks(text: str) -> Any:
-    """The ``precondition_checks`` a SKILL.md declares (None if none). A
-    frontmatter that does not parse is unique, so it always differs."""
+# The guarded part of a SKILL.md frontmatter: what the skill's checks are
+# and what its activity may do (#708 S1 ``allows``). Changing either is
+# DK's call; the rest of the skill is Loom Agent's own.
+_GUARDED_FRONT_KEYS = ("precondition_checks", "allows")
+
+
+def _guarded_front(text: str, keys: tuple[str, ...] = _GUARDED_FRONT_KEYS) -> Any:
+    """The guarded frontmatter fields a SKILL.md declares, as a tuple in
+    *keys* order (None for an absent field). A frontmatter that does not
+    parse is unique, so it always differs."""
     if not text.startswith("---"):
-        return None
+        return tuple(None for _ in keys)
     end = text.find("\n---", 3)
     if end < 0:
         return object()
@@ -1452,13 +1459,22 @@ def _precondition_checks(text: str) -> Any:
         front = _yaml.safe_load(text[3:end]) or {}
     except _yaml.YAMLError:
         return object()
-    return front.get("precondition_checks") if isinstance(front, dict) else object()
+    if not isinstance(front, dict):
+        return object()
+    return tuple(front.get(k) for k in keys)
+
+
+def _precondition_checks(text: str) -> Any:
+    """The ``precondition_checks`` a SKILL.md declares (None if none)."""
+    front = _guarded_front(text, ("precondition_checks",))
+    return front[0] if isinstance(front, tuple) else front
 
 
 def _skill_guard(rel: PurePosixPath, workspace: Path, content: str | None) -> bool:
     """Whether writing *content* to workspace path *rel* changes a skill's
     guard: its ``checks.py``, a module its ``precondition_checks`` names,
-    or the ``precondition_checks`` of its SKILL.md. ``content`` None (a
+    or the ``precondition_checks`` / ``allows`` of its SKILL.md (#708 S1).
+    ``content`` None (a
     shell edit) counts any SKILL.md. The rest of a skill, its body text and
     scripts such as run.sh, is Loom Agent's own and follows the mode."""
     parts = rel.parts
@@ -1472,7 +1488,7 @@ def _skill_guard(rel: PurePosixPath, workspace: Path, content: str | None) -> bo
     if parts[2] == "SKILL.md":
         if content is None:
             return True
-        old, new = _precondition_checks(current), _precondition_checks(content)
+        old, new = _guarded_front(current), _guarded_front(content)
         return type(old) is object or type(new) is object or old != new
     if rel.suffix != ".py":
         return False
