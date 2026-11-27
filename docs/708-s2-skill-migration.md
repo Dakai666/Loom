@@ -2,6 +2,8 @@
 
 本片只處理 rhythm anchors、schedules（含同一 registry 的 event triggers）引用技能。工具、技能、家具沿用 #708 定案；不抽天氣工具、不做窗戶或 Plugin/Adapter 清理。所有下列操作均由 DK 手動套用；本 PR 沒改 live/gitignored 設定、skills，也沒重啟 daemon 或執行生活工具。
 
+**S2b 後續**：[七項 legacy 活動遷移與保留](708-s2b-legacy-migration.md) 提供 Tarot exec-only、housekeeping 規程及 weekly/dream CLI 收窄；下文盤點保留 S2 當時狀態，不代表七項均已遷移或 live 已套用。S2b 的 template/片段與裁決以該指南為準。
+
 ## 載入契約
 
 ```toml

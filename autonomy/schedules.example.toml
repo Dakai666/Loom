@@ -35,13 +35,17 @@
 [[schedules]]
 name          = "memory_housekeeping"
 cron          = "0 19 * * 0"            # 19:00 UTC Sunday = 03:00 Asia/Taipei Monday
-intent        = """Run memory housekeeping. First call memory_prune with
-                   dry_run=true to preview decayed entries. If any qualify,
-                   call again with dry_run=false to delete them. Report:
-                   total examined, pruned, and retained."""
+intent        = """先 load_skill("memory-housekeeping")，依規程先量 corpus snapshot，
+                   再預覽／清理衰減記憶，最後寫 outputs/self_check/<today>-memory-corpus.md。
+                   只記工具實際回傳數字，不另外改記憶或 memorize。"""
 trust_level   = "safe"
 notify        = false
 notify_thread = 0
+# 先把 docs/examples/708-s2b/memory-housekeeping.SKILL.md 安裝至
+# skills/memory-housekeeping/SKILL.md，才加入此引用；不是空殼技能。
+skills        = ["memory-housekeeping"]
+allowed_tools = ["write_file"]
+attach_outputs = ["outputs/self_check/*-memory-corpus.md"]
 
 # （範例 2 的每日 free dream 已隨 dream_cycle 工具退役，#639：夢交給 daemon 的
 #  收斂夢／蒸餾夢排程，見 loom.toml 的 [memory.consolidation_dream] / [memory.distill_dream]。）
@@ -50,14 +54,15 @@ notify_thread = 0
 [[schedules]]
 name          = "skill_weekly_review"
 cron          = "0 2 * * 6"             # 02:00 UTC Saturday = 10:00 Asia/Taipei
-intent        = """Run `loom skill weekly` via run_bash, then read the
-                   generated report and surface items in the 該關注清單."""
+intent        = """Run plain `loom skill weekly` via run_bash, with no extra flags,
+                   redirect, pipe or chaining; then read the generated report
+                   with read_file and surface items in the 該關注清單."""
 trust_level   = "safe"
 notify        = true
 notify_thread = 0
 allowed_tools = ["run_bash", "read_file"]
 scope_grants  = [
-  { resource = "exec", action = "execute", selector = "workspace" },
+  { resource = "exec", action = "execute", selector = "loom skill weekly", constraints = { exact_argv = true, absolute_paths = "deny" } },
   { resource = "path", action = "read",    selector = "outputs"   },
 ]
 attach_outputs = ["outputs/self_check/*-skill-weekly.md"]

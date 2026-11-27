@@ -1,0 +1,66 @@
+# #708 S2b：既有四個 schedule table 的替換參考，非整份 live registry。
+# 先安裝兩份 SKILL.md；套用時保留原 cron/notify/target/attach_outputs 等 keys。
+# 將對應 table 的 intent/allowed_tools/scope_grants/skills 整欄取代，不能追加重複 keys。
+# skills 必須在 [schedules.target] 之前。其他 schedules 不動。
+
+[[schedules]]
+name = "daily_mood_tarot"
+cron = "0 8 * * *"
+intent = """先 load_skill("sisi_mood_tarot")，依技能直接執行 python3 skills/sisi_mood_tarot/draw_and_write.py。
+不要先跑 ls/test/cd/date、redirect、pipe、串接或額外備份 shell；內部備份與人格／log 更新交給原腳本。
+失敗照實回報已完成階段，不重試、不原生覆寫檔案。"""
+trust_level = "safe"
+notify = false
+skills = ["sisi_mood_tarot"]
+allowed_tools = []
+# 刪除這個 table 的舊 scope_grants 整段；不加空 scope_grants（會清掉 exec）。
+
+[[schedules]]
+name = "memory_housekeeping"
+cron = "0 19 * * 0"
+intent = """先 load_skill("memory-housekeeping")，依規程先 memory_health(view="corpus")，
+再 memory_prune(dry_run=true) 預覽，有符合條件的記憶才 memory_prune(dry_run=false)。
+用 write_file 寫 outputs/self_check/<today>-memory-corpus.md，記普查與上週差值、工具實際回傳的清理數字。
+工具沒有提供 archived/deleted 分拆時明說無法分拆；不編造、不另改記憶或 memorize。"""
+trust_level = "safe"
+notify = false
+notify_thread = 0
+skills = ["memory-housekeeping"]
+allowed_tools = ["write_file"]
+attach_outputs = ["outputs/self_check/*-memory-corpus.md"]
+# 刪除舊 scope_grants；path:write outputs/self_check 從技能取得。
+
+[[schedules]]
+name = "skill_weekly_review"
+cron = "0 2 * * 6"
+intent = """用 run_bash 從 workspace 執行 plain loom skill weekly，不加旗標、redirect、pipe 或串接。
+用 read_file 讀 outputs/self_check/<today>-skill-weekly.md，回報該關注清單；只觀察與回報，不編輯技能。"""
+trust_level = "safe"
+notify = false
+notify_thread = 0
+allowed_tools = ["run_bash", "read_file"]
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "loom skill weekly", constraints = { exact_argv = true, absolute_paths = "deny" } },
+  { resource = "path", action = "read", selector = "outputs" },
+]
+attach_outputs = ["outputs/self_check/*-skill-weekly.md"]
+# 仍 legacy：S1 不表達 CLI/path:read，沒有 skills 引用；載入 WARNING 是預期。
+
+[[schedules]]
+name = "monthly_big_dream"
+cron = "30 19 1 * *"
+intent = """每月一次全庫記憶大夢，沿用 DK 2026-11-19 直接寫入裁決與安全網。
+從 workspace 用 run_bash 執行 plain loom memory big-dream --execute --yes，timeout 設 10800 秒。
+不調參數、不加 --db、redirect、pipe 或串接；每個寫入階段先備份、自審可否決，loom.toml execute 開關仍有效。
+用 read_file 讀 autonomy/circadian/dreams/<today>.md，回報前後對照與否決／跳過數量。
+失敗／中止照實回報已完成階段，不重試；不另外 memorize、不改記憶。"""
+trust_level = "safe"
+notify = true
+notify_thread = 0
+allowed_tools = ["run_bash", "read_file"]
+scope_grants = [
+  { resource = "exec", action = "execute", selector = "loom memory big-dream --execute --yes", constraints = { exact_argv = true, absolute_paths = "deny" } },
+  { resource = "path", action = "read", selector = "autonomy/circadian/dreams" },
+]
+attach_outputs = ["autonomy/circadian/dreams/*.md"]
+# 仍 legacy；timeout 是 tool args，不是 allows／grant 條件，不宣稱其他 timeout 被 guard 拒絕。
