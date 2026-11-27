@@ -74,6 +74,10 @@ def load_schedules(path: Path | None = None, *, workspace: Path | None = None) -
         for entry in _coerce_array(raw, key):
             name = entry.get("name", "<unnamed>")
             try:
+                if isinstance(entry.get("target"), dict) and "skills" in entry["target"]:
+                    raise SkillAllowsError(
+                        "target.skills is misplaced; put skills on the schedule table, "
+                        "before [schedules.target] if present")
                 perms = activity_permission_fields(entry, f"{key} {name!r}", ws)
             except SkillAllowsError as exc:
                 logger.error("[autonomy] %s %r rejected: %s", key, name, exc)

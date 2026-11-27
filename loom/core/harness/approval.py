@@ -1039,26 +1039,27 @@ def classify_rules(
         return _refuse(f"verdict_{verdict.value}")
     if call.trust_level == TrustLevel.CRITICAL:
         return _refuse("critical")
+    missing = perm.diff(request).missing if request is not None else []
+    if any(_routine_ceiling(perm, req.resource, req.action) for req in missing):
+        return _refuse("scope_ceiling")
     entry = _tool_rule(call.tool_name)
     if entry is None:
         return _refuse("not_covered")
     resource, rule = entry
     if request is None:  # a tool without a scope resolver (MCP search)
         return rule(call, workspace)
-    missing = perm.diff(request).missing
     if any(req.resource != resource for req in missing):
         return _refuse("other_resource")
-    if verdict == PermissionVerdict.EXPAND_SCOPE and _routine_ceiling(perm, resource):
-        return _refuse("scope_ceiling")
     return rule(call, workspace)
 
 
-def _routine_ceiling(perm: Any, resource: str) -> bool:
+def _routine_ceiling(perm: Any, resource: str, action: str) -> bool:
     """Whether a live grant a routine or config declared (not a human's)
-    bounds *resource*: a call past it crosses a declared ceiling."""
+    bounds this *(resource, action)*: writes never fence unrelated reads."""
     now = time.time()
     return any(
         (g.valid_until == 0 or g.valid_until > now) and g.resource == resource
+        and g.action == action
         and g.source not in _HUMAN_GRANT_SOURCES
         for g in perm.grants)
 
@@ -1665,6 +1666,31 @@ def _exists_in(workspace: Path, text: str) -> bool:
         return False
 
 
+def _routine_skill_script(rel: PurePosixPath, perm: Any, workspace: Path) -> bool:
+    """An active routine's skill executable is not its writable output.
+
+    Protect only the actual script pinned by a live exec shape, including
+    nested scripts; do not forbid normal project/skill edits globally.
+    """
+    from .scope import simple_argv
+
+    now = time.time()
+    for grant in perm.grants:
+        if (grant.resource != "exec" or grant.action != "execute"
+                or grant.source in _HUMAN_GRANT_SOURCES
+                or (grant.valid_until and grant.valid_until < now)):
+            continue
+        argv = simple_argv(grant.selector)
+        if not argv:
+            continue
+        script = argv[1] if argv[0] in ("python", "python3") and len(argv) > 1 else argv[0]
+        target = _workspace_relative(script, workspace)
+        if (target is not None and target.parts and target.parts[0].lower() == "skills"
+                and str(target).lower() == str(rel).lower()):
+            return True
+    return False
+
+
 def hard_boundary(
     call: Any, request: ScopeRequest | None, verdict: PermissionVerdict, perm: Any,
     workspace: Path, *, declared: bool = False,
@@ -1684,7 +1710,7 @@ def hard_boundary(
         # EXPAND_SCOPE; it must not hide the existing ceiling from the
         # declaration fast-allow or YOLO path (#708 S2).
         if verdict in (PermissionVerdict.CONFIRM, PermissionVerdict.EXPAND_SCOPE) and any(
-                _routine_ceiling(perm, req.resource) for req in perm.diff(request).missing):
+                _routine_ceiling(perm, req.resource, req.action) for req in perm.diff(request).missing):
             return "scope_ceiling"
         for req in request.requirements:
             if req.resource == "path" and _workspace_relative(req.selector, workspace) is None:
@@ -1702,8 +1728,9 @@ def hard_boundary(
         if isinstance(content, str) and _redact_secrets(content) != content:
             return "credential_content"
         rel = _workspace_relative(raw, workspace)
-        if rel is not None and _skill_guard(rel, workspace,
-                                            content if isinstance(content, str) else None):
+        if rel is not None and (
+                _routine_skill_script(rel, perm, workspace)
+                or _skill_guard(rel, workspace, content if isinstance(content, str) else None)):
             return "skill_guard"
     elif name == "web_search" or name.endswith(_MCP_SEARCH_SUFFIX):
         query = call.args.get("query")
@@ -2202,7 +2229,8 @@ class ApprovalClassifier:
         crosses it."""
         if request is None:
             return False
-        return any(_routine_ceiling(self._perm, req.resource) for req in self._perm.diff(request).missing)
+        return any(_routine_ceiling(self._perm, req.resource, req.action)
+                   for req in self._perm.diff(request).missing)
 
     async def _review(self, call: Any, category: str, context: ReviewContext,
                       post: DelegatedPost | None = None) -> ApprovalDecision:

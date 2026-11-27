@@ -392,9 +392,9 @@ def activity_permission_fields(
     tools, grants = derived["allowed_tools"], derived["scope_grants"]
     if "allowed_tools" in entry:
         raw = entry["allowed_tools"]
-        if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
-            raise SkillAllowsError("allowed_tools must be a list of tool names")
-        tools = raw
+        if not isinstance(raw, list) or not all(isinstance(t, str) and t.strip() for t in raw):
+            raise SkillAllowsError("allowed_tools must be a list of non-empty tool names")
+        tools = [t.strip() for t in raw]
     if "scope_grants" in entry:
         raw = entry["scope_grants"]
         if not isinstance(raw, list) or len(raw) != len(own["scope_grants"]):
@@ -420,6 +420,9 @@ def activity_permission_fields(
     # Only scopes must be subsets here. Do not relax S1's widening helper.
     if outside := widening(union, [], grants):
         raise SkillAllowsError("widens skill allows: " + ", ".join(outside))
+    if "write_file" in tools and not any(
+            g.get("resource") == "path" and g.get("action") == "write" for g in grants):
+        raise SkillAllowsError("write_file declaration requires an effective path:write grant")
     return {"trust_level": own["trust_level"], "allowed_tools": list(tools),
             "scope_grants": harden(grants)}
 
