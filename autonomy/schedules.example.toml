@@ -16,8 +16,13 @@
 #   [[schedules]]  — cron-fired work items
 #   [[triggers]]   — event-fired work items (emitted via `loom autonomy emit`)
 #
-# Schedules must pre-declare the tools/scopes they need via ``allowed_tools`` /
-# ``scope_grants`` — otherwise a GUARDED run gets denied. ``cron`` strings are
+# Activity scopes now come from skills = [...] and SKILL.md allows (#708 S2).
+# With skills, scope_grants can only narrow that union. allowed_tools remains
+# a general-tool declaration through the existing permission-mode/hard guards.
+# Without skills, legacy scopes are retained with a migration WARNING so
+# unrelated activities keep running. See docs/708-s2-skill-migration.md.
+# Install/update skills before adding references. Missing skill/allows/script
+# rejects that entry with ERROR, preserving healthy siblings. ``cron`` strings are
 # UTC (hand-convert from local time); the per-schedule ``timezone`` field is
 # currently a no-op.
 #
@@ -64,6 +69,7 @@ cron          = "0 1 * * *"
 intent        = "撰寫晨報並發到討論串。"
 trust_level   = "safe"
 mode          = "chime"
+skills        = ["news-aggregator"]
 allowed_tools = ["write_file", "web_search"]
 
   [schedules.target]

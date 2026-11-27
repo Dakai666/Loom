@@ -17,9 +17,10 @@ per-schedule entries move here.
 The reader is tolerant by contract (mirrors ``rhythm.load_rhythm``): a missing
 or malformed file yields empty arrays so the daemon still starts; a single bad
 entry is dropped individually, never failing the whole file. Per-entry
-*semantic* validation (chime target shape, trust-level coercion) stays in the
-daemon's builder — this module only guarantees "you get well-typed arrays of
-tables, or empty".
+*semantic* validation of skill boundaries runs here; invalid references or
+widening reject only that entry with ERROR. Legacy entries without skills
+retain their contract with a migration WARNING. Chime target validation stays
+in the daemon builder.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from __future__ import annotations
 import logging
 import tomllib
 from pathlib import Path
+
+from loom.autonomy.skill_allows import SkillAllowsError, activity_permission_fields, activity_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ DEFAULT_SCHEDULES_PATH = Path("autonomy/schedules.toml")
 _ARRAY_KEYS = ("schedules", "triggers")
 
 
-def load_schedules(path: Path | None = None) -> dict:
+def load_schedules(path: Path | None = None, *, workspace: Path | None = None) -> dict:
     """Read the schedule registry, returning ``{"schedules": [...], "triggers": [...]}``.
 
     Every failure mode the daemon should survive yields *empty* arrays: file
@@ -64,7 +67,25 @@ def load_schedules(path: Path | None = None) -> dict:
         )
         return {"schedules": [], "triggers": []}
 
-    return {key: _coerce_array(raw, key) for key in _ARRAY_KEYS}
+    resolved: dict[str, list[dict]] = {}
+    ws = activity_workspace(p, DEFAULT_SCHEDULES_PATH, workspace)
+    for key in _ARRAY_KEYS:
+        resolved[key] = []
+        for entry in _coerce_array(raw, key):
+            name = entry.get("name", "<unnamed>")
+            try:
+                if isinstance(entry.get("target"), dict) and "skills" in entry["target"]:
+                    raise SkillAllowsError(
+                        "target.skills is misplaced; put skills on the schedule table, "
+                        "before [schedules.target] if present")
+                perms = activity_permission_fields(entry, f"{key} {name!r}", ws)
+            except SkillAllowsError as exc:
+                logger.error("[autonomy] %s %r rejected: %s", key, name, exc)
+                continue
+            # Leave absent legacy fields absent; a skill reference resolves
+            # both fields even when its allows is explicitly empty.
+            resolved[key].append({**entry, **perms} if "skills" in entry else entry)
+    return resolved
 
 
 def _coerce_array(raw: dict, key: str) -> list[dict]:
