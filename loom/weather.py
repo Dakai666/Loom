@@ -91,6 +91,8 @@ def _http_json(url):
             raise WeatherUnavailable("HTTP request unavailable")
         data = bytearray()
         while True:
+            if response.isclosed():
+                break  # read1 consumed the final known-length chunk
             sock.settimeout(_remaining(deadline))
             block = response.read1(min(4096, MAX_BYTES + 1 - len(data)))
             _remaining(deadline)

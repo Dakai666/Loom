@@ -30,6 +30,7 @@ def test_http_read_has_remaining_deadline_and_exact_size_boundary(monkeypatch, c
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def close(self): pass
+        def isclosed(self): return False
         def read(self, size):  # old transport: one read can exceed the total deadline
             if case == "drip": clock[0] += 3
             return data[:size]
