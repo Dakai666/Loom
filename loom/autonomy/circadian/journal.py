@@ -120,9 +120,20 @@ def _append_dated_entry(
     # with O_NOFOLLOW, so a symlink cannot redirect it to policy/other files.
     import os
     root = target_dir.absolute()
-    directory = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    # Both production writers use <workspace>/autonomy/circadian/{journal,
+    # dreams}. Only that configured workspace is trusted: resolving the
+    # complete target would silently follow a hostile link inside it.
+    # Standalone custom directories are caller-configured bases, never tool
+    # arguments; preserve the same boundary at their parent (or cwd).
+    if root.parts[-3:] in (("autonomy", "circadian", "journal"), ("autonomy", "circadian", "dreams")):
+        base = root.parents[2]
+    else:
+        cwd = Path.cwd().absolute()
+        base = cwd if root.is_relative_to(cwd) else root.parent
+    relative = root.relative_to(base)
+    directory = os.open(base.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in root.parts[1:]:
+        for part in relative.parts:
             try:
                 os.mkdir(part, dir_fd=directory)
             except FileExistsError:
@@ -227,10 +238,10 @@ def make_journal_append_tool(
 
         try:
             path = _append_dated_entry(target_dir, now, label, body)
-        except OSError as exc:
+        except OSError:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
-                error=f"could not write journal entry: {exc}",
+                error="journal directory or file is unavailable (links and special files are refused)",
             )
 
         return ToolResult(
