@@ -31,7 +31,9 @@
 #     derived grants, never adding to them. Use this only for
 #     narrowing (dawn subcommands, pet buy max_calls=2), not a second source
 #     of authority. Without skills, legacy scopes are retained with a
-#     migration WARNING; unrelated activities are not disabled by S2.
+#     migration WARNING; unrelated activities are not disabled by S2. Anchors
+#     that intentionally stay legacy may set a non-empty ``legacy_reason = "..."``
+#     to downgrade that WARNING to INFO (#708 S4b).
 #   - ``allowed_tools`` remains a general-tool declaration with or without
 #     skills; its calls follow the existing permission_mode decision path;
 #     declarations never bypass the hard guardrails or authorize EXEC.
@@ -122,7 +124,8 @@ public  = false
 # Research + jot a note: blanket the read-only web tools, but FENCE writing —
 # the scope_grant lets write_file touch only autonomy/circadian, nothing else.
 # write_file is deliberately NOT in allowed_tools (that would un-fence it).
-# Legacy non-target example retained during staged migration (WARNING).
+# Legacy non-target example retained with explicit legacy_reason (logs INFO).
+legacy_reason = "open-ended exploration phase without a dedicated skill script"
 allowed_tools = ["fetch_url", "web_search"]
 scope_grants  = [{ resource = "path", action = "write", selector = "autonomy/circadian" }]
 meaning = """

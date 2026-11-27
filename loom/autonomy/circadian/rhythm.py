@@ -88,6 +88,10 @@ class Anchor:
     # when ``None`` — so a deep phase's tier never leaks into the next one.
     model_tier: int | None = None
 
+    # #708 S4b: explicit reason why a non-skill anchor intentionally retains
+    # legacy scope_grants (downgrades the migration WARNING to INFO).
+    legacy_reason: str | None = None
+
     @property
     def trigger_name(self) -> str:
         # ``name`` is the activity identity (one weave section per name), so it
@@ -283,6 +287,7 @@ def load_rhythm(
                 "for phase anchors (the chime path has no planner gate); use "
                 "allowed_tools / scope_grants instead", name,
             )
+        legacy_reason = entry["legacy_reason"].strip() if "legacy_reason" in entry else None
         # Suffix the trigger only when the activity genuinely recurs: a single
         # surviving slot keeps the bare ``circadian:phase_<name>`` (backward
         # compatible), so the @HHMM form reflects reality, not declared intent.
@@ -295,6 +300,7 @@ def load_rhythm(
                 allowed_tools=allowed_tools, scope_grants=scope_grants,
                 program_menu=program_menu, model_tier=model_tier,
                 permission_report=permission_report,
+                legacy_reason=legacy_reason,
             ))
         seen.add(name)
 

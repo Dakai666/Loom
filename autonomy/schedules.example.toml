@@ -20,7 +20,10 @@
 # With skills, scope_grants can only narrow that union. allowed_tools remains
 # a general-tool declaration through the existing permission-mode/hard guards.
 # Without skills, legacy scopes are retained with a migration WARNING so
-# unrelated activities keep running. See docs/708-s2-skill-migration.md.
+# unrelated activities keep running. Entries that intentionally stay legacy
+# (e.g. CLI or path:read not expressible in SKILL.md allows) may set a non-empty
+# ``legacy_reason = "..."`` to downgrade that WARNING to INFO (#708 S4b).
+# See docs/708-s2-skill-migration.md.
 # Install/update skills before adding references. Missing skill/allows/script
 # rejects that entry with ERROR, preserving healthy siblings. ``cron`` strings are
 # UTC (hand-convert from local time); the per-schedule ``timezone`` field is
@@ -60,6 +63,7 @@ intent        = """Run plain `loom skill weekly` via run_bash, with no extra fla
 trust_level   = "safe"
 notify        = true
 notify_thread = 0
+legacy_reason = "S1 allows does not cover loom CLI exec or path:read"
 allowed_tools = ["run_bash", "read_file"]
 scope_grants  = [
   { resource = "exec", action = "execute", selector = "loom skill weekly", constraints = { exact_argv = true, absolute_paths = "deny" } },
