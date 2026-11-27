@@ -27,10 +27,16 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from loom.autonomy.permission_names import (
+    configured_mcp_servers,
+    warn_allowed_tool_drift,
+    workspace_skill_names,
+)
 from loom.autonomy.skill_allows import SkillAllowsError, activity_permission_fields, activity_workspace
 
 logger = logging.getLogger(__name__)
@@ -180,7 +186,12 @@ def _parse_model_tier(entry: dict[str, Any], name: str) -> int | None:
     return raw
 
 
-def load_rhythm(path: Path | None = None, *, workspace: Path | None = None) -> list[Anchor]:
+def load_rhythm(
+    path: Path | None = None,
+    *,
+    workspace: Path | None = None,
+    mcp_servers: Collection[str] | None = None,
+) -> list[Anchor]:
     """Read the rhythm table, returning anchors in declaration order.
 
     Returns ``[]`` for any failure mode the engine should survive: file
@@ -212,6 +223,10 @@ def load_rhythm(path: Path | None = None, *, workspace: Path | None = None) -> l
         if entries is not None:
             logger.warning("[circadian] rhythm: 'anchors' must be a TOML array, got %s", type(entries).__name__)
         return []
+
+    ws = activity_workspace(p, DEFAULT_RHYTHM_PATH, workspace)
+    servers = configured_mcp_servers(ws) if mcp_servers is None else frozenset(mcp_servers)
+    skills = workspace_skill_names(ws)
 
     for idx, entry in enumerate(entries):
         if not isinstance(entry, dict):
@@ -251,12 +266,15 @@ def load_rhythm(path: Path | None = None, *, workspace: Path | None = None) -> l
         # Permission fields parse through the shared autonomy helper (issue
         # #525) — same code path as schedules.toml — and belong to the activity
         # identity, so every expanded slot of a recurring activity shares them.
+        source = f"rhythm anchor {name!r}"
         try:
-            perms = activity_permission_fields(
-                entry, f"rhythm anchor {name!r}", activity_workspace(p, DEFAULT_RHYTHM_PATH, workspace))
+            perms = activity_permission_fields(entry, source, ws)
         except SkillAllowsError as exc:
             logger.error("[circadian] rhythm anchor %r rejected: %s", name, exc)
             continue
+        warn_allowed_tool_drift(
+            source, perms["allowed_tools"], mcp_servers=servers, skill_names=skills,
+        )
         allowed_tools = tuple(perms["allowed_tools"])
         scope_grants = tuple(perms["scope_grants"])
         if "trust_level" in entry:
