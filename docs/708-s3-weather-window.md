@@ -15,7 +15,7 @@ tracked `skills/weather/SKILL.md`，窗戶是既有 room tick 呼叫的唯讀命
 | 舊 journey/weather.py | Open-Meteo hourly、JsonCache.get | cache miss 會 JsonCache.set |
 | 舊 engine.now | 在家讀位置；旅途中呼叫 sync；呼叫 weather 與 provider.quota | sync 可推進 clock、抵達 position/status/leg |
 | 舊 journey.py now | load_config/load_state、provider/quota | CLI 結尾 save_state；SerpApi quota cache miss 也寫 account cache |
-| 新 query_weather／原生 weather | 固定 Open-Meteo GET、10 秒 timeout、最多 256 KiB、不跟 redirect | 無 cache／state／檔案寫入 |
+| 新 query_weather／原生 weather | 固定 Open-Meteo GET、最多 256 KiB、不跟 redirect；工具整體 10 秒 deadline | 無 cache／state／檔案寫入 |
 | 新 window 命令／parse | 同一 query + 有限 schema；不讀旅程或房間 state | 無 |
 | room_tick | 將新觀察與 RoomState.weather 前值比較 | 原本 room 單一 writer 保存基線、queue、seen、budget、log |
 | 人工 journey replacement | 既有 JsonCache.get；未命中呼叫共用 query | 明確 cache.set 只存驗證成功的 snapshot；原 CLI/state 行為保留 |
@@ -32,7 +32,7 @@ tracked `skills/weather/SKILL.md`，窗戶是既有 room tick 呼叫的唯讀命
 {"status":"ok","at":"2026-11-27T10:00:00+00:00","latitude":25.03,"longitude":121.56,"code":61,"temperature_c":17,"rain_probability":80}
 ```
 
-失敗是 `{"status":"unavailable"}`；未知 code、null、NaN、錯誤型別、缺欄位等是
+連線／deadline／超過 256 KiB／非 JSON 回應是 `{"status":"unavailable"}`；合法資料內未知 code、null、NaN、錯誤型別、缺欄位等是
 `{"status":"unknown"}`。`at` 必須是有 timezone 的可解析時間；經緯度在合法範圍，
 溫度限制 -100..70°C、降雨機率 0..100、code 是明確 WMO integer enum（bool 不算 int）。
 不傳 API description／place／HTML／error body；at 重新由 datetime 序列化。
@@ -43,6 +43,13 @@ tracked `skills/weather/SKILL.md`，窗戶是既有 room tick 呼叫的唯讀命
 temperature_2m、precipitation_probability、weather_code，攝氏預設、ISO 時間與 WMO 表。
 使用公開服務須符合[官方使用條件](https://open-meteo.com/en/terms)與 attribution，
 非商業公開 endpoint 不需要 key；此 PR 沒有新增或讀取任何 key。
+
+同步 client 每次以最多 4096 bytes 的 read1 讀取，按 remaining wall-clock time 設 socket
+timeout，讀取／parse 前後檢查截止時間。剛好 256 KiB 可解析，再多一 byte 則 unavailable。
+原生工具另以可終止的獨立程序呼叫同一個唯讀 weather module；總 deadline 包含程序啟動、
+DNS/connect、headers、read、parse。超時或取消會 kill 並 wait 回收，不留下 session 背景 IO
+thread。回傳前仍需 OS 回收／event-loop 排程時間，不承諾硬即時；直接使用同步 query 的
+journey 不具獨立程序總 deadline，仍有 socket/remaining 檢查，room command 另有既有 timeout。
 
 ## 窗戶的觸發與保存
 
@@ -80,13 +87,27 @@ write_file。目錄與 leaf 用 dirfd/O_NOFOLLOW；leaf 要求單一 hard link �
 O_NONBLOCK 防止 FIFO 阻塞。這不是通用 filesystem grant。journal 的系統報告 caller 也
 共用該檔案安全檢查，原本 symlink/hardlink journal 會拒寫，需 DK 人工決定保留方式。
 
+生活日誌與 system dream reports 共用 append helper：固定配置
+`<base>/autonomy/circadian/{journal,dreams}` 只 canonicalize 可信 base 一次，允許 base 祖先
+如 macOS `/var` alias；其下三段與 leaf 仍走 dirfd/O_NOFOLLOW，不 resolve 整個 target。
+明確配置的其他 standalone custom directory 以 cwd／其 parent 為可信 base，不接受工具
+參數改寫目錄；external journal policy 仍只接受 workspace 的固定 journal 路徑。
+read_file/list_dir 除 code object 外也核對 closure workspace 與 policy workspace 的 canonical
+root；異 root、缺 cell、無法解析一律 fail closed，可信 base alias 不誤拒。
+
 信任鏈是 room config → parse 的 Signal.input_trust → queue 保存 → normal/ambient 合併 →
 ChimeRequest.input_trust → daemon 原樣傳遞 → Discord PermissionContext.external_inputs →
 BlastRadiusMiddleware → turn finally 撤回。文字裡的 local／skill 等字串不參與這條鏈。
 舊 queue 缺 provenance 也按 external；config 改 local 不會把已排隊的 external 訊號升級。
-混合 local 喵吉與 external 窗戶（含 ambient）時，**整個 turn 採最嚴共同上限**，不帶
-喵吉的 exec/write grants；runtime 還會擋借來的既有 grants／platform declarations。
-代價是該混合 turn 不直接照顧喵吉；後續獨立 local wake 仍照原活動邊界運作。
+room 交付時改為 **單一 trust cohort**：各訊號先經既有 decide，雙方都有合格 waker 時先
+external，local 保留原 queue/key/time；成功後保存 prefer_local，下一個符合 budget/gap
+的 tick 優先交付延後 local，即使新 external 又到，也不把外部文字帶入 local turn。
+urgent 仍先於 normal，沒有為分離繞開睡眠／budget/gap/TTL；失敗所有未交付項目留 queue
+重試。seen 只對成功交付的項目記錄，pending key 自己去重；舊 state 的 pending seen 會移除。
+若 external 只有 ambient，不能自己叫醒，也不能阻止合格 local 交付；external ambient 留待
+同 trust 的 waker。沒有第二套排程。其他 programmatic 混合路徑仍受 runtime 最嚴共同上限，
+不能借既有 local grants／platform declarations。ChimeRequest 省略 provenance 預設 external，
+只有 operator schedule／circadian phase 建立點明確傳 local，room 根據結構決定。
 
 load_skill 本身可先讀，沒有「先有 grant 才能載技能」循環；讀其他技能不建立新 grants，
 也不解除 external 上限。原本 skill guard／checks 與 S1/S2 ceilings 保留。有人對話不套
@@ -99,12 +120,20 @@ registry setup 與 SDK 是可信程式碼。能直接改 Python function/code ob
 
 ## DK 完整人工套用順序
 
-所有以下指令／片段是 **DK／艾芮思操作**，worker 未執行。先完成 review、merge，再處理
+**必要的同步遷移：目前 live 喵吉家具省略 input_trust。DK 必須先備份、確認它是本地可信
+實作，在既有喵吉 table 加／替換唯一 `input_trust = "local"`，與 merge 同步、在新版 daemon
+載入前完成；否則新版預設 external 會移除其 exec。這不是可選的晚點設定。** worker 不先
+改 live；merge／live 時序由 DK／艾芮思安排，不能讓新版載入早於這一步。
+
+所有以下指令／片段是 **DK／艾芮思操作**，worker 未執行。完成上述同步安排及 review 後，處理
 下節主樹 news／housekeeping 與安全 fast-forward；如果該步驟停止，不要繼續套用 live。
 保留所有既有 guard/checks/metadata；不要重建或覆蓋整棵私人 skills。
 
 1. 在 **Loom repo 外**的獨立備份位置備份要變更的 journey/weather.py、pet SKILL.md、room.toml；備份不含
    .env／secrets。記下當前 revision，方便逐檔復原，不使用整棵 reset。
+   **同時核驗既有喵吉為本地可信實作，先在其原 table 加／替換唯一
+   `input_trust = "local"`，在新版 daemon 載入前完成。** 這是 merge 的同步必要步驟；
+   不是等新窗戶安裝完才補。worker 未操作，仍由 DK／艾芮思安排 live 套用。
 2. fast-forward 後確認 tracked `loom/weather.py` 與 `skills/weather/SKILL.md` 在位。
    這兩者直接來自 PR，不必 force-add gitignored 私人樹；執行環境須能 import 新版 loom
    （既有 editable install／DK 的正常安裝流程）。不要為了探測而呼叫真 API。
@@ -114,7 +143,8 @@ registry setup 與 SDK 是可信程式碼。能直接改 Python function/code ob
    `from journey.weather import make_weather` 不變；不用在 journey.py 再接第二條權限。
 4. weather 技能是 tracked 安裝來源，frontmatter 唯一一份 allows 已含
    `tools: [weather, journal_append]`；不再追加重複 YAML key，也不加 exec/write。
-5. 喵吉既有 `[[furniture]]` table 加上或替換唯一一個 key：
+5. 核對第 1 步的喵吉同步遷移已完成。以下是其既有 `[[furniture]]` table 的唯一 key，
+   **不要等到這一步才加，也不要追加第二個相同 key**：
 
    ```toml
    input_trust = "local"

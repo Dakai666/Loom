@@ -6,12 +6,14 @@ import pytest
 
 from loom.autonomy.circadian import state as st
 from loom.autonomy.circadian.room import Furniture, RoomConfig, RoomState, room_tick, parse_furniture_output
+from loom.core.harness.mode import PermissionMode
 from tests.test_circadian_room import FakeDaemon, CIRC, at, _circ_state
 
 
 @pytest.mark.parametrize("external_priority", ["normal", "ambient"])
 @pytest.mark.parametrize("fail_first", [False, True])
-async def test_local_queue_survives_separation_restart_new_external_and_retry(tmp_path, monkeypatch, external_priority, fail_first):
+@pytest.mark.parametrize("mode", list(PermissionMode))
+async def test_local_queue_survives_separation_restart_new_external_and_retry(tmp_path, monkeypatch, external_priority, fail_first, mode):
     monkeypatch.chdir(tmp_path)
     st.set_dir_for_test(tmp_path / "circadian")
     try:
@@ -29,7 +31,7 @@ async def test_local_queue_survives_separation_restart_new_external_and_retry(tm
         (tmp_path / "cat.py").write_text("# never executed")
         registry = ToolRegistry()
         registry.register(make_run_bash_tool(tmp_path))
-        perm = PermissionContext("two-cohorts")
+        perm = PermissionContext("two-cohorts", mode=mode)
         session = SimpleNamespace(perm=perm, registry=registry)
         async def prove_permission(req):
             tools, source = LoomDiscordBot._apply_chime_permissions(None, req, session)
