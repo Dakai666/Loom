@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from loom.autonomy.permission_fields import parse_permission_fields
+from loom.autonomy.skill_allows import SkillAllowsError, activity_permission_fields, activity_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def _parse_model_tier(entry: dict[str, Any], name: str) -> int | None:
     return raw
 
 
-def load_rhythm(path: Path | None = None) -> list[Anchor]:
+def load_rhythm(path: Path | None = None, *, workspace: Path | None = None) -> list[Anchor]:
     """Read the rhythm table, returning anchors in declaration order.
 
     Returns ``[]`` for any failure mode the engine should survive: file
@@ -251,7 +251,12 @@ def load_rhythm(path: Path | None = None) -> list[Anchor]:
         # Permission fields parse through the shared autonomy helper (issue
         # #525) — same code path as schedules.toml — and belong to the activity
         # identity, so every expanded slot of a recurring activity shares them.
-        perms = parse_permission_fields(entry, f"rhythm anchor {name!r}")
+        try:
+            perms = activity_permission_fields(
+                entry, f"rhythm anchor {name!r}", activity_workspace(p, DEFAULT_RHYTHM_PATH, workspace))
+        except SkillAllowsError as exc:
+            logger.error("[circadian] rhythm anchor %r rejected: %s", name, exc)
+            continue
         allowed_tools = tuple(perms["allowed_tools"])
         scope_grants = tuple(perms["scope_grants"])
         if "trust_level" in entry:

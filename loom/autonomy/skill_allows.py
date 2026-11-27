@@ -43,11 +43,11 @@ What a shape, a prefix or a tool may be (#714 review, 克萊兒 · Antigravity):
 frontmatter, so changing it is a ``skill_guard`` change that DK approves
 (#704 S3, ``approval._skill_guard``). No new approval mechanism.
 
-Who reads it: only a furniture wake in S1 (``circadian/room.py``), at wake
-start, so the boundary is on the chime before the turn reads the skill.
+Who reads it: furniture wakes (S1, ``circadian/room.py``), rhythm anchors
+and schedules (S2), at config load, before the turn reads the skill.
 Loading a skill never turns ``allows`` into grants: an attended turn stays
-under its permission_mode. S2 points rhythm anchors and schedules at the
-same reader. Only workspace skills (``<workspace>/skills/<name>``) are read:
+under its permission_mode. S2 resolves multiple references as a union.
+Only workspace skills (``<workspace>/skills/<name>``) are read:
 their SKILL.md is the one the skill guard covers.
 
 Unlike the tolerant autonomy loaders, this reader is strict: a missing skill,
@@ -62,6 +62,7 @@ still do anything once it runs; ``pet.py status`` writes state.
 
 from __future__ import annotations
 
+import logging
 import os
 import posixpath
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ _PROTECTED_FILES = (
 )
 _EXEC_CONSTRAINTS = {"absolute_paths": "deny"}
 _SCAN_LIMIT = 2000
+logger = logging.getLogger(__name__)
 
 
 class SkillAllowsError(ValueError):
@@ -352,3 +354,85 @@ def widening(allows: SkillAllows, tools: list[str] | tuple[str, ...],
                 continue
         out.append(f"{res}:{act} {sel}")
     return out
+
+
+def activity_permission_fields(
+    entry: dict[str, Any], source_name: str, workspace: Path,
+) -> dict[str, Any]:
+    """Resolve an anchor/schedule ceiling once, before its turn (#708 S2).
+
+    Multiple skills form a union. Explicit scope_grants REPLACE the derived
+    grants, and may only narrow them (including existing max_calls).
+    Never append an unlimited derived grant alongside its limited override.
+    allowed_tools remains an ordinary tool declaration, not a skill scope
+    grant: the existing resolver/mode/hard-guard path decides its calls.
+    S1 furniture keeps its own stricter subset contract, unchanged.
+    """
+    own = parse_permission_fields(entry, source_name)
+    if "skills" not in entry:
+        if "scope_grants" in entry:
+            # Staged compatibility: unrelated legacy activities cannot all
+            # migrate to S1 allows (e.g. arbitrary CLI / path:read). Keep
+            # their existing contract until explicitly migrated, loudly.
+            logger.warning(
+                "[autonomy] %s uses legacy scope_grants without skills; retained for "
+                "compatibility, migrate activity scopes to SKILL.md allows and skills",
+                source_name)
+        return own
+    names = entry["skills"]
+    if (not isinstance(names, list) or not names
+            or not all(isinstance(n, str) and n for n in names)):
+        raise SkillAllowsError("skills must be a non-empty list of skill names")
+    boundaries = [read_skill_allows(n, workspace) for n in dict.fromkeys(names)]
+    union = SkillAllows(**{
+        key: tuple(dict.fromkeys(v for a in boundaries for v in getattr(a, key)))
+        for key in ALLOWS_KEYS
+    })
+    derived = allows_permission_fields(union, source_name)
+    tools, grants = derived["allowed_tools"], derived["scope_grants"]
+    if "allowed_tools" in entry:
+        raw = entry["allowed_tools"]
+        if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+            raise SkillAllowsError("allowed_tools must be a list of tool names")
+        tools = raw
+    if "scope_grants" in entry:
+        raw = entry["scope_grants"]
+        if not isinstance(raw, list) or len(raw) != len(own["scope_grants"]):
+            raise SkillAllowsError("scope_grants must be a list of complete grants")
+        grants = own["scope_grants"]
+        for grant in grants:
+            constraints = grant.get("constraints", {})
+            if not isinstance(constraints, dict):
+                raise SkillAllowsError("grant constraints must be a table")
+            for key, value in constraints.items():
+                if key == "max_calls":
+                    valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                elif key == "exact_argv":
+                    valid = isinstance(value, bool)
+                elif key == "absolute_paths":
+                    valid = value == "deny"
+                else:
+                    valid = False
+                if not valid:
+                    raise SkillAllowsError(f"unsupported or invalid narrowing constraint {key}={value!r}")
+    # Tool names declare usage, not activity scopes. In particular EXEC
+    # names never authorize a command; middleware._declared enforces that.
+    # Only scopes must be subsets here. Do not relax S1's widening helper.
+    if outside := widening(union, [], grants):
+        raise SkillAllowsError("widens skill allows: " + ", ".join(outside))
+    return {"trust_level": own["trust_level"], "allowed_tools": list(tools),
+            "scope_grants": harden(grants)}
+
+
+def activity_workspace(path: Path, default_path: Path, workspace: Path | None) -> Path:
+    """Default-layout configs resolve skills from their workspace, not cwd.
+
+    An explicitly located standalone config uses its parent; callers with a
+    custom layout may pass workspace explicitly.
+    """
+    if workspace is not None:
+        return workspace
+    resolved = path.resolve()
+    if resolved.parts[-len(default_path.parts):] == default_path.parts:
+        return resolved.parents[len(default_path.parts) - 1]
+    return resolved.parent

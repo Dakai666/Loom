@@ -1678,7 +1678,12 @@ def hard_boundary(
     if call.trust_level == TrustLevel.CRITICAL:
         return "critical"
     if request is not None:
-        if verdict == PermissionVerdict.EXPAND_SCOPE and any(
+        # A mixed request may both expand an existing path/exec ceiling
+        # and introduce a new resource (e.g. image output + network).
+        # RESOURCE_TYPE_NEW makes the aggregate verdict CONFIRM, not
+        # EXPAND_SCOPE; it must not hide the existing ceiling from the
+        # declaration fast-allow or YOLO path (#708 S2).
+        if verdict in (PermissionVerdict.CONFIRM, PermissionVerdict.EXPAND_SCOPE) and any(
                 _routine_ceiling(perm, req.resource) for req in perm.diff(request).missing):
             return "scope_ceiling"
         for req in request.requirements:
