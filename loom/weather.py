@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import http.client
+import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -23,6 +26,17 @@ WMO = {
 RAIN = frozenset((51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99))
 TIMEOUT = 10
 MAX_BYTES = 256 * 1024
+
+
+class WeatherUnavailable(OSError):
+    """Transport/deadline/size failure, never an external error body."""
+
+
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise WeatherUnavailable("deadline exceeded")
+    return remaining
 
 
 def _number(value, low, high):
@@ -57,15 +71,76 @@ def validate_snapshot(raw):
 
 
 def _http_json(url):
-    # Fixed origin, bounded response, no redirect to arbitrary external hosts.
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None
-    with urllib.request.build_opener(NoRedirect).open(url, timeout=TIMEOUT) as response:
-        data = response.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
-            raise ValueError("oversized response")
-        return json.loads(data)
+    # No redirects/proxies. The native caller additionally owns a killable
+    # worker deadline, including DNS/connect, headers, reads and JSON parse.
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or parsed.netloc != "api.open-meteo.com"
+            or parsed.path != "/v1/forecast" or parsed.fragment):
+        raise WeatherUnavailable("unsupported origin")
+    deadline = time.monotonic() + TIMEOUT
+    connection = http.client.HTTPSConnection(parsed.netloc, timeout=_remaining(deadline))
+    response = None
+    try:
+        connection.connect()
+        sock = connection.sock
+        sock.settimeout(_remaining(deadline))
+        connection.request("GET", parsed.path + "?" + parsed.query)
+        sock.settimeout(_remaining(deadline))
+        response = connection.getresponse()
+        if response.status != 200:
+            raise WeatherUnavailable("HTTP request unavailable")
+        data = bytearray()
+        while True:
+            sock.settimeout(_remaining(deadline))
+            block = response.read1(min(4096, MAX_BYTES + 1 - len(data)))
+            _remaining(deadline)
+            data.extend(block)
+            if len(data) > MAX_BYTES:
+                raise WeatherUnavailable("oversized response")
+            if not block:
+                break
+        value = json.loads(data)
+        _remaining(deadline)
+        return value
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+
+
+async def _query_with_deadline(lat, lng):
+    """A hard native-tool deadline without orphan background IO threads.
+
+    A disposable copy of the same read-only window command owns the blocking
+    network stack. Timeout/cancellation kills and reaps it; DNS/header trickle
+    cannot leave an unbounded thread running in the session process.
+    """
+    if not _number(lat, -90, 90) or not _number(lng, -180, 180):
+        return {"status": "unknown"}
+    process = None
+    deadline = time.monotonic() + TIMEOUT
+    try:
+        async with asyncio.timeout(TIMEOUT):
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "loom.weather", "--latitude", str(lat), "--longitude", str(lng),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await process.communicate()
+            if process.returncode != 0 or len(out) > MAX_BYTES:
+                return {"status": "unavailable"}
+            raw = json.loads(out).get("weather")
+            _remaining(deadline)
+            if isinstance(raw, dict) and raw.get("status") in ("unknown", "unavailable"):
+                return {"status": raw["status"]}
+            return validate_snapshot(raw)
+    except (TimeoutError, OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return {"status": "unavailable"}
+    finally:
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
 
 
 def query_weather(lat, lng, at, *, fetch=None, day=False):
@@ -148,8 +223,7 @@ def make_weather_tool():
     from loom.core.harness.registry import ToolDefinition
 
     async def weather(call):
-        s = await asyncio.to_thread(query_weather, call.args.get("latitude"),
-                                  call.args.get("longitude"), datetime.now(timezone.utc))
+        s = await _query_with_deadline(call.args.get("latitude"), call.args.get("longitude"))
         return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True,
                           output=json.dumps(s, allow_nan=False))
 

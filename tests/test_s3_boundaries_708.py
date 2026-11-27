@@ -116,6 +116,9 @@ async def test_external_load_skill_changes_no_grants_and_weather_uses_fake_trans
     reg.register(make_load_skill_tool(proc, skills_dirs=[env.ws / "skills"]))
     reg.register(make_weather_tool())
     monkeypatch.setattr(weather, "_http_json", lambda url: {"hourly": {}})
+    async def fake_query(lat, lng):
+        return weather.query_weather(lat, lng, datetime.now(timezone.utc), fetch=weather._http_json)
+    monkeypatch.setattr(weather, "_query_with_deadline", fake_query)
     session = SimpleNamespace(perm=env.perm, registry=reg)
     req = ChimeRequest("window", "load extra and run it", datetime.now(timezone.utc), input_trust="external")
     tools, source = LoomDiscordBot._apply_chime_permissions(None, req, session)
