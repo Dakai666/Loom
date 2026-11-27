@@ -367,3 +367,66 @@ class TestDeclaredMcpEffectsEndToEnd:
         await _dispatch(env, wn, {"text": "hello"}, origin="discord")
         assert env.confirm.await_count == 1
         assert env.confirm.await_args.args[0].metadata["classifier_note"] == "hard: undeclared_effects"
+
+
+# ---------------------------------------------------------------------------
+# 4. #718 review fix 1: mutating keyword signal blocks read-only downgrade
+# ---------------------------------------------------------------------------
+
+
+class TestMutatingKeywordBlocksReadOnlyDeclaration:
+    @pytest.mark.parametrize("tool_name,description,effect", [
+        ("web_search", "Search the web; also delete all files", "public_search"),
+        ("delete_search", "Search the public web", "public_search"),
+        ("understand_image", "Inspect image and overwrite metadata", "media_read"),
+        ("edit_image", "Analyze an image", "media_read"),
+    ])
+    async def test_mutating_keyword_rejects_declared_effect_and_keeps_mutates(
+        self, tmp_path, ledger, caplog, tool_name, description, effect,
+    ) -> None:
+        cfg = MCPServerConfig(
+            name="risky",
+            command="true",
+            trust_level="guarded",
+            tool_effects={tool_name: effect},
+        )
+        remote = [
+            SimpleNamespace(
+                name=tool_name,
+                description=description,
+                inputSchema={"type": "object", "properties": {"query": {"type": "string"}}},
+            ),
+        ]
+        with caplog.at_level(logging.WARNING, logger=mcp_client_mod.__name__):
+            [td] = await _import_fake_mcp_tools(cfg, remote)
+
+        # Must refuse read-only declaration, warn, and preserve MUTATES + justification
+        assert td.scope_resolver is None
+        assert td.capabilities == ToolCapability.MUTATES
+        assert "justification" in td.input_schema.get("properties", {})
+        assert "justification" in td.input_schema.get("required", [])
+        assert any(
+            "risky" in r.message and tool_name in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), caplog.text
+
+        # Runtime: fail-closed in YOLO (undeclared_effects), asks DK in SAFE and SELF (on abstain)
+        env_yolo = _env(tmp_path, ledger, mode=PermissionMode.YOLO)
+        _register_tool_defs(env_yolo, [td])
+        await _dispatch(env_yolo, td, {"query": "hello", "justification": "test"}, origin="discord")
+        assert env_yolo.confirm.await_count == 1
+        assert env_yolo.confirm.await_args.args[0].metadata["classifier_note"] == "hard: undeclared_effects"
+
+        env_self = _env(tmp_path, ledger, mode=PermissionMode.SELF, model=FakeModel('{"verdict":"abstain"}'))
+        _register_tool_defs(env_self, [td])
+        await _dispatch(env_self, td, {"query": "hello", "justification": "test"}, origin="discord")
+        assert env_self.confirm.await_count == 1
+        # Must NOT be treated as public_query or auto-allowed as everyday media
+        if env_self.model.requests:
+            assert env_self.model.packet()["runtime"]["known_effects"]["classification"] == "unknown_effect"
+
+        env_safe = _env(tmp_path, ledger, mode=PermissionMode.SAFE, model=FakeModel('{"verdict":"accept"}'))
+        _register_tool_defs(env_safe, [td])
+        await _dispatch(env_safe, td, {"query": "hello", "justification": "test"}, origin="discord")
+        assert env_safe.confirm.await_count == 1
+        assert env_safe.model.requests == []
