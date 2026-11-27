@@ -474,6 +474,12 @@ class LoomMCPClient:
             from loom.core.harness.approval import DECLARED_MCP_EFFECTS
             from loom.core.harness.registry import ToolCapability
 
+            combined = f"{tool_name} {desc}".lower()
+            hits_mutating_keyword = any(kw in combined for kw in _MUTATING_KEYWORDS)
+            is_mutating = trust == TrustLevel.CRITICAL or (
+                trust == TrustLevel.GUARDED and hits_mutating_keyword
+            )
+
             raw_effect = self._cfg.tool_effects.get(tool_name)
             declared_effect = (
                 raw_effect
@@ -482,19 +488,21 @@ class LoomMCPClient:
                 and trust != TrustLevel.CRITICAL
                 else None
             )
+            if declared_effect is not None and hits_mutating_keyword:
+                logger.warning(
+                    "mcp_client: server %r tool %r matches mutating keyword(s) "
+                    "— refusing read-only tool_effect %r (fail-closed)",
+                    self._cfg.name, tool_name, declared_effect,
+                )
+                declared_effect = None
+
             scope_resolver = None
             scope_descriptions: list[str] = []
             if declared_effect is not None:
                 scope_resolver = make_mcp_effect_scope_resolver(self._cfg.name, declared_effect)
                 scope_descriptions = [f"MCP {declared_effect} via {self._cfg.name}"]
                 caps = ToolCapability.NETWORK | ToolCapability.READ_PROBE
-                is_mutating = False
             else:
-                combined = f"{tool_name} {desc}".lower()
-                is_mutating = trust == TrustLevel.CRITICAL or (
-                    trust == TrustLevel.GUARDED
-                    and any(kw in combined for kw in _MUTATING_KEYWORDS)
-                )
                 caps = ToolCapability.MUTATES if is_mutating else ToolCapability.NONE
             if is_mutating:
                 props = dict(schema_dict.get("properties") or {})
