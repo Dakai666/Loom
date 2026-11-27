@@ -134,18 +134,6 @@ async def test_spilled_outputs_compare_by_content_not_placeholder(tmp_path: Path
 # ── real stream_turn path ────────────────────────────────────────────────────
 
 
-@pytest.fixture(autouse=True)
-def _isolate_default_registry():
-    registry = loom_pkg._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
-    try:
-        yield
-    finally:
-        registry._tools.clear()
-        registry._tools.update(original)
-
-
 async def _session(monkeypatch, tmp_path: Path, script: list[list[dict]]):
     """A started session whose model plays ``script``: one response per
     entry, each a list of tool calls; an empty list ends the turn."""

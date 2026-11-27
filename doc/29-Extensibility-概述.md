@@ -1,3 +1,7 @@
+> **#708 S4a 退役註記（2026-11-27）**：`@loom.tool`（`AdapterRegistry`）、`LoomPlugin`（`PluginRegistry`）、
+> `loom.register_plugin` 與 `LoomSession._load_plugins`（`~/.loom/plugins/*.py`、`loom_tools.py` 自動掃描）
+> 已退役，下文相關章節僅供歷史參考；現行擴充通道為 MCP（`mcp_server.py` 與 `mcp_client.py`）。
+
 > **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
 > diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
 > `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。

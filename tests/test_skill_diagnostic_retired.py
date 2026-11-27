@@ -7,23 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import loom
 from loom.core.cognition.providers import LLMResponse, ToolUse
 from loom.core.events import TurnDone, TurnDropped
 from loom.core.memory.procedural import SkillGenome
 from loom.core.memory.semantic import SemanticEntry, SemanticMemory
 from loom.core.memory.store import SQLiteStore
 from loom.core.session import LoomSession
-
-
-@pytest.fixture(autouse=True)
-def isolated_registry():
-    registry = loom._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
-    yield
-    registry._tools.clear()
-    registry._tools.update(original)
 
 
 @pytest.mark.parametrize("module", [

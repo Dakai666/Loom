@@ -22,14 +22,9 @@ from loom.platform.cli.tools import make_agent_health_tool
 
 @pytest_asyncio.fixture
 async def session(tmp_path, monkeypatch, request):
-    import loom
     from loom.core import session as module
-    from rich.prompt import Confirm
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
-    registry = loom._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
     cfg = {"memory": {"compress_session": True, "episodic_compress_threshold": 1,
                       "episodic_retention_days": 1, "governance": {"episodic_ttl_days": 1}},
            "telemetry": {"dimensions": ["tool_call", "memory_compression"]}}
@@ -54,7 +49,6 @@ async def session(tmp_path, monkeypatch, request):
     monkeypatch.setattr(module, "_load_loom_config", lambda: cfg)
     monkeypatch.setattr(module, "_load_env", lambda *a, **k: {})
     monkeypatch.setattr(module, "build_embedding_provider", lambda *a, **k: None)
-    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: True)
     db_path = tmp_path / "memory.db"
     # Seed a legacy DB before startup (the False case is a truly empty DB).
     if getattr(request.node, "callspec", None) and request.node.callspec.params.get("legacy", False):
@@ -80,8 +74,6 @@ async def session(tmp_path, monkeypatch, request):
         yield s, router
     finally:
         await s.stop()
-        registry._tools.clear()
-        registry._tools.update(original)
 
 
 @pytest.mark.parametrize("legacy", [False, True])

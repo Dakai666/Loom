@@ -1349,11 +1349,6 @@ class LoomSession:
         self.registry.register(make_jobs_cancel_tool(self._jobstore))
         self.registry.register(make_scratchpad_read_tool(self._scratchpad))
 
-        # Plugin scan (4D): load ~/.loom/plugins/*.py + workspace loom_tools.py.
-        # New plugin files require one-time GUARDED approval stored in
-        # RelationalMemory; previously approved files load silently.
-        await self._load_plugins()
-
         # Issue #9: MCP client — import tools from external MCP servers
         try:
             from loom.extensibility.mcp_client import (
@@ -2875,121 +2870,6 @@ class LoomSession:
                 ))
 
         return catalog
-
-    # ------------------------------------------------------------------
-    # Plugin loader
-    # ------------------------------------------------------------------
-
-    async def _load_plugins(self) -> None:
-        """
-        Discover and load plugins from two locations (in order):
-
-        1. ``~/.loom/plugins/*.py``  — global plugin directory; Loom itself
-           can write new plugins here via write_file.
-        2. ``<workspace>/loom_tools.py`` — local convenience file (backward
-           compatible; treated as a plugin bundle).
-
-        Safety gate
-        -----------
-        The first time a plugin file is seen (not in RelationalMemory), the
-        user is prompted to approve it.  Approval is stored as:
-            (subject="plugin:<stem>", predicate="approved", object="true")
-        Subsequent sessions load approved plugins silently.
-        GUARDED trust — user must explicitly allow unknown code.
-
-        Note: the interactive prompt (Confirm.ask) is CLI-specific.  Non-CLI
-        platforms (Discord, TUI) override confirm_fn on BlastRadiusMiddleware
-        but this approval path is not yet injectable.  New plugins will block
-        on non-terminal platforms until this is addressed.
-        """
-        import importlib.util as _ilu
-        import loom as _loom_pkg
-        from rich.prompt import Confirm
-
-        plugin_dir = Path("~/.loom/plugins").expanduser()
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-
-        # Collect candidate files: global plugins first, then local loom_tools.py
-        candidates: list[tuple[Path, str]] = []
-        for p in sorted(plugin_dir.glob("*.py")):
-            candidates.append((p, f"plugin:{p.stem}"))
-        local = self.workspace / "loom_tools.py"
-        if local.exists():
-            candidates.append((local, f"plugin:loom_tools"))
-
-        if not candidates:
-            return
-
-        for plugin_path, rel_key in candidates:
-            approved = False
-            if self._memory is not None:
-                from loom.core.memory.relational_bridge import get_triple
-                entry = await get_triple(self._memory.semantic, rel_key, "approved")
-                approved = entry is not None and entry.object == "true"
-
-            if not approved:
-                # First-time: show file summary and ask for confirmation
-                console.print(
-                    f"\n[yellow]  New plugin:[/yellow] [bold]{plugin_path.name}[/bold]"
-                )
-                console.print(f"  [dim]{plugin_path}[/dim]")
-                try:
-                    lines = plugin_path.read_text(encoding="utf-8").splitlines()
-                    preview = "\n".join(f"    {l}" for l in lines[:12])
-                    if len(lines) > 12:
-                        preview += f"\n    … ({len(lines) - 12} more lines)"
-                    console.print(f"[dim]{preview}[/dim]")
-                except Exception:
-                    pass
-
-                allow = Confirm.ask(
-                    "  [yellow]Allow this plugin?[/yellow]", default=False
-                )
-                if not allow:
-                    console.print(f"  [dim]Skipped {plugin_path.name}[/dim]")
-                    continue
-
-                # Persist approval
-                if self._memory is not None:
-                    from loom.core.memory.relational_bridge import (
-                        RelationalEntry, upsert_triple,
-                    )
-                    await upsert_triple(self._memory.semantic, RelationalEntry(
-                        subject=rel_key,
-                        predicate="approved",
-                        object="true",
-                        source="user",
-                    ))
-
-            # Load the file — this executes @loom.tool / loom.register_plugin() calls
-            # No reset needed: ToolRegistry/PluginRegistry use name-keyed dicts, so
-            # re-registration is a safe upsert. Resetting would wipe tools registered
-            # by earlier plugin files in the same _load_plugins() loop.
-            try:
-                _spec = _ilu.spec_from_file_location(plugin_path.stem, plugin_path)
-                if _spec and _spec.loader:
-                    _mod = _ilu.module_from_spec(_spec)
-                    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-            except Exception as exc:
-                console.print(f"  [red]Error loading {plugin_path.name}: {exc}[/red]")
-                continue
-
-            # Install @loom.tool tools
-            tool_count = _loom_pkg._get_default_registry().install_into(self.registry)
-
-            # Install LoomPlugin instances
-            plugin_summary = _loom_pkg._get_default_plugin_registry().install_into(self)
-            plugin_count = sum(plugin_summary.values())
-            named_plugins = [n for n in plugin_summary if n != "(anonymous)"]
-
-            total = tool_count + plugin_count
-            if total:
-                detail = ""
-                if named_plugins:
-                    detail = f"  [dim]({', '.join(named_plugins)})[/dim]"
-                console.print(
-                    f"  [dim]✓ {plugin_path.name} — {total} tool(s) loaded{detail}[/dim]"
-                )
 
     # ------------------------------------------------------------------
     # Helpers

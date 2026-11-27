@@ -30,17 +30,11 @@ from loom.core.memory.store import SQLiteStore
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path, monkeypatch):
-    import loom
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(tmp_path)
-    registry = loom._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
     yield
-    registry._tools.clear()
-    registry._tools.update(original)
 
 
 def response(names=(), text="child answer"):

@@ -312,19 +312,11 @@ class TestSubAgentGrantInheritance:
 
 
 # =====================================================================
-# 5. Plugin middleware typo fix
+# 5. Middleware pipeline attribute
 # =====================================================================
 
 class TestPluginMiddlewareFix:
-    """Plugin install_into should use _middlewares, not _chain."""
-
-    def test_plugin_uses_middlewares_not_chain(self):
-        """install_into should reference _middlewares attribute."""
-        import inspect
-        from loom.extensibility.plugin import PluginRegistry
-        source = inspect.getsource(PluginRegistry.install_into)
-        assert "_middlewares" in source
-        assert "_chain" not in source
+    """MiddlewarePipeline uses _middlewares, not _chain."""
 
     def test_middleware_pipeline_has_middlewares_attr(self):
         """MiddlewarePipeline should have _middlewares (not _chain)."""
