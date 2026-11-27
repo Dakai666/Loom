@@ -99,7 +99,10 @@ def _http_json(url):
                 raise WeatherUnavailable("oversized response")
             if not block:
                 break
-        value = json.loads(data)
+        try:
+            value = json.loads(data)
+        except (ValueError, UnicodeError, RecursionError):
+            raise WeatherUnavailable("invalid response") from None
         _remaining(deadline)
         return value
     finally:
