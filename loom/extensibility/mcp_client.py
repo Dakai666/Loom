@@ -414,6 +414,18 @@ class LoomMCPClient:
         result = await self._session.list_tools()
         tool_defs: list[ToolDefinition] = []
 
+        if self._cfg.tool_effects:
+            exposed_names = {mcp_tool.name for mcp_tool in result.tools}
+            unmatched = sorted(set(self._cfg.tool_effects) - exposed_names)
+            if unmatched:
+                logger.warning(
+                    "mcp_client: server %r tool_effects declares tool(s) not exposed "
+                    "by server: %s (exposed: %s) — ignored (fail-closed)",
+                    self._cfg.name,
+                    ", ".join(unmatched),
+                    ", ".join(sorted(exposed_names)) or "(none)",
+                )
+
         # Keywords in a tool's name or description that signal mutation.
         # Used to assign MUTATES capability only to tools that actually write
         # state, rather than blanket-flagging all GUARDED tools in the server.
