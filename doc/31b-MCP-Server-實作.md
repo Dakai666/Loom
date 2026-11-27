@@ -110,6 +110,25 @@ github:get_repos
 | `safe` | `TrustLevel.SAFE` | 自動執行，不需要確認 |
 | `guarded` | `TrustLevel.GUARDED` | 需要確認 |
 
+### 宣告式唯讀效果（`tool_effects`，#708 S4a）
+
+對於 `trust_level = "guarded"` 的 server，可在 `[[mcp.servers]]` 透過 `tool_effects` 本地宣告已知唯讀工具效果（鍵為遠端裸工具名，per-server 隔離）：
+
+```toml
+[[mcp.servers]]
+name         = "minimax_coding"
+command      = "uvx"
+args         = ["minimax-coding-plan-mcp", "-y"]
+env          = { MINIMAX_API_KEY = "${MINIMAX_API_KEY}", MINIMAX_API_HOST = "${MINIMAX_API_HOST}" }
+trust_level  = "guarded"
+tool_effects = { web_search = "public_search", understand_image = "media_read" }
+```
+
+- 封閉詞彙僅限 `"public_search"` 與 `"media_read"`；其他值或非 table 格式會印 `WARNING` 並忽略（fail-closed）。
+- **絕不信任遠端 MCP `annotations`**（如 `readOnlyHint`）；宣告僅能來自本地 `loom.toml`。
+- 宣告生效時綁定 `scope_resolver`（`network / connect / mcp:<server>`）與 `ToolCapability.NETWORK | ToolCapability.READ_PROBE`，但若工具名稱或描述命中 `_MUTATING_KEYWORDS`（或 server 為 `CRITICAL`），會拒絕降級並印 `WARNING`，保留 `ToolCapability.MUTATES` 與必填 `justification`。
+- 連線取回遠端工具清單後，若 `tool_effects` 含該 server 未暴露的工具名（例如打錯字），會印 `WARNING` 提醒並維持 fail-closed。
+
 ### Mutating 工具檢測
 
 `LoomMCPClient` 會根據工具名稱和描述自動判斷是否需要 `MUTATES` capability：
