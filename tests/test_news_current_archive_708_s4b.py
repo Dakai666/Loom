@@ -347,3 +347,149 @@ async def test_news_checks_accepts_news_current_and_rejects_escapes():
         "rm -rf news/current",
     ]:
         assert not await checks.scripts_only_bash(_CallObj(cmd)), f"expected denied: {cmd}"
+
+
+def test_migration_guide_requires_shared_learning_news_current_paths():
+    """Docs must treat both shared_learning today-news paths as mandatory sync migration."""
+    guide = (REPO / "docs" / "708-s4b-cleanup.md").read_text(encoding="utf-8")
+    # Must NOT have the old contradiction ("不改 meaning" / optional "可一併").
+    assert "不改 `meaning`" not in guide
+    assert "可一併把範例路徑" not in guide
+    # Must explicitly list both today-news replacements for shared_learning as mandatory.
+    assert "必要" in guide
+    assert "news/YYYY-MM-DD/ + Discord forum" in guide
+    assert "news/current/YYYY-MM-DD/ + Discord forum" in guide
+    assert "news/YYYY-MM-DD/daily_briefing.md" in guide
+    assert "news/current/YYYY-MM-DD/daily_briefing.md" in guide
+    # Must clarify historical news stays readable in place without moving or widening permissions.
+    assert "歷史" in guide and "不需擴權" in guide
+
+
+@pytest.mark.parametrize("mode", list(PermissionMode))
+async def test_morning_briefing_producer_to_shared_learning_reader_flow(
+    tmp_path, ledger, monkeypatch, mode
+):
+    """08:00 producer writes news/current/YYYY-MM-DD/ -> 09:00 shared_learning reads today + history."""
+    from types import SimpleNamespace
+
+    from loom.autonomy.circadian.rhythm import load_rhythm
+    from loom.core.harness.middleware import ToolCall
+    from loom.core.ledger.correlation import turn_scope
+    from loom.platform.cli.tools import make_filesystem_tools
+    from loom.platform.discord.bot import LoomDiscordBot
+
+    env = _env(tmp_path, ledger, mode=mode)
+    monkeypatch.chdir(env.ws)
+    _install_tracked_news_skill(env.ws)
+    _populate_synthetic_live_news(env.ws, days=230, files_per_day=5)
+    # Seed a historical daily briefing in legacy news/<old-date>/ location.
+    hist_dir = env.ws / "news" / "2026-04-03"
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    (hist_dir / "daily_briefing.md").write_text(
+        "# 2026-04-03 historical briefing\nHistorical archive entry.\n", encoding="utf-8"
+    )
+
+    fs_tools = {t.name: t for t in make_filesystem_tools(env.ws)}
+    write_tool = fs_tools["write_file"]
+    read_tool = fs_tools["read_file"]
+    env.blast._registry.register(write_tool)
+    env.blast._registry.register(read_tool)
+
+    # 1) 08:00 morning_briefing producer writes today's briefing into news/current/2026-11-27/
+    sched_path = env.ws / "autonomy" / "schedules.toml"
+    sched_path.parent.mkdir(parents=True, exist_ok=True)
+    sched_path.write_text(
+        '[[schedules]]\nname = "morning_briefing"\ncron = "0 0 * * *"\n'
+        'intent = "write news/current/YYYY-MM-DD/daily_briefing.md"\n'
+        'skills = ["news-aggregator"]\nallowed_tools = ["write_file"]\n',
+        encoding="utf-8",
+    )
+    sched = load_schedules(sched_path)["schedules"][0]
+    producer_req = ChimeRequest(
+        input_trust="local",
+        schedule_name=sched["name"],
+        intent=sched["intent"],
+        fired_at=datetime.now(timezone.utc),
+        allowed_tools=tuple(sched["allowed_tools"]),
+        scope_grants=tuple(sched["scope_grants"]),
+    )
+    added, source = apply(env, producer_req)
+    with turn_scope("morning_briefing_producer"):
+        wres = await env.blast.process(
+            ToolCall(
+                tool_name="write_file",
+                args={
+                    "path": "news/current/2026-11-27/daily_briefing.md",
+                    "content": "## 絲絲想聊的\nSynthetic topic from today's briefing.\n",
+                },
+                origin="autonomy",
+                trust_level=write_tool.trust_level,
+                capabilities=write_tool.capabilities,
+                session_id="t-prod",
+            ),
+            write_tool.executor,
+        )
+    assert wres.success, wres.error
+    LoomDiscordBot._revoke_chime_permissions(None, SimpleNamespace(perm=env.perm), added, source)
+
+    # 2) 09:00 shared_learning reader loads via real load_rhythm with both migrated paths
+    rhythm_path = env.ws / "autonomy" / "circadian" / "rhythm.toml"
+    rhythm_path.parent.mkdir(parents=True, exist_ok=True)
+    rhythm_path.write_text(
+        '[[anchors]]\n'
+        'time = "09:00"\n'
+        'name = "shared_learning"\n'
+        'public = true\n'
+        'legacy_reason = "open conversation phase without a dedicated skill script"\n'
+        'allowed_tools = ["fetch_url", "web_search", "memorize"]\n'
+        'scope_grants = [{ resource = "path", action = "write", selector = "news" }]\n'
+        'meaning = """\n'
+        '晨報已由 08:00 的 morning_briefing 產出並投遞（news/current/YYYY-MM-DD/ + Discord forum）。\n'
+        '讀晨報用 `read_file`（例：`news/current/YYYY-MM-DD/daily_briefing.md`）或 `list_dir`，不用 run_bash。\n'
+        '"""\n',
+        encoding="utf-8",
+    )
+    anchors = load_rhythm(rhythm_path)
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    assert "news/current/YYYY-MM-DD/" in anchor.meaning
+    assert "news/current/YYYY-MM-DD/daily_briefing.md" in anchor.meaning
+    assert "news/YYYY-MM-DD/daily_briefing.md" not in anchor.meaning
+
+    reader_req = ChimeRequest(
+        input_trust="local",
+        schedule_name=anchor.trigger_name,
+        intent=anchor.meaning,
+        fired_at=datetime.now(timezone.utc),
+        allowed_tools=anchor.allowed_tools,
+        scope_grants=anchor.scope_grants,
+    )
+    apply(env, reader_req)
+
+    # Real read_file executor reads today's news/current/... AND historical news/... without permission widening.
+    with turn_scope("shared_learning_reader"):
+        today_read = await env.blast.process(
+            ToolCall(
+                tool_name="read_file",
+                args={"path": "news/current/2026-11-27/daily_briefing.md"},
+                origin="chime",
+                trust_level=read_tool.trust_level,
+                capabilities=read_tool.capabilities,
+                session_id="t-read",
+            ),
+            read_tool.executor,
+        )
+        hist_read = await env.blast.process(
+            ToolCall(
+                tool_name="read_file",
+                args={"path": "news/2026-04-03/daily_briefing.md"},
+                origin="chime",
+                trust_level=read_tool.trust_level,
+                capabilities=read_tool.capabilities,
+                session_id="t-read",
+            ),
+            read_tool.executor,
+        )
+    assert today_read.success and "Synthetic topic from today's briefing." in today_read.output
+    assert hist_read.success and "Historical archive entry." in hist_read.output
+    assert env.confirm.await_count == 0
