@@ -742,8 +742,12 @@ class BlastRadiusMiddleware(Middleware):
         ledger_emitter: Any = None,
         classifier: Any = None,
         workspace: Path | None = None,
+        external_policy: Any = None,
     ) -> None:
         self._perm = perm_ctx
+        # Platform composes audited implementations; no supplied policy means
+        # deny every tool during an external wake, never trust names/labels.
+        self._external_policy = external_policy
         # #700: where skills/<name>/ check modules live. None = a write
         # never offers trust (sub-agents, tests of the bare middleware).
         self._workspace = workspace
@@ -1223,6 +1227,17 @@ class BlastRadiusMiddleware(Middleware):
 
     async def process(self, call: ToolCall, next: ToolHandler) -> ToolResult:
         # --- Scope-aware path (Issue #45 Phase B) ---
+        # S3: before SAFE shortcuts, resolvers, declarations, grants and YOLO.
+        # Attended turns do not inherit the chime's provenance or authority.
+        if self._is_unattended(call) and getattr(self._perm, "external_inputs", ()):
+            tool = self._registry.get(call.tool_name) if self._registry is not None else None
+            try:
+                allowed = self._external_policy is not None and self._external_policy(tool, call, self._workspace)
+            except Exception:
+                _log.exception("external input effect check failed; refusing call")
+                allowed = False
+            if not allowed:
+                return self._deny_unattended(call, "external_input", classifier_note="hard: external_input")
         # If registry is available and tool has a scope_resolver, use it.
         scope_resolver = None
         if self._registry is not None:

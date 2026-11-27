@@ -209,6 +209,7 @@ enabled = true
 [[furniture]]
 name = "cat"
 command = ["python", "pet.py"]
+input_trust = "local"
 skill = "cat"   # #708 S1: the boundary comes from the skill's allows
 """
 

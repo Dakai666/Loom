@@ -150,6 +150,9 @@ class PermissionContext:
     # the permission-mode decision point, where the hard guardrails and the
     # declared scope ceilings hold.
     boundaries: dict[str, "Boundary"] = field(default_factory=dict)
+    # Sources of active external chimes. Orthogonal to declarations/grants:
+    # any one external source constrains the entire unattended turn.
+    external_inputs: set[str] = field(default_factory=set)
 
     # --- Scope-aware authorization (Issue #45 Phase A) ---
     grants: list[ScopeGrant] = field(default_factory=list)

@@ -156,7 +156,7 @@ class TestUnknownOperations:
 def test_room_wake_carries_furniture_grants():
     from loom.autonomy.circadian.room import Furniture, wake_permissions
     cfg = [
-        Furniture(name="miji", label="喵吉", command=("x",), allowed_tools=("run_bash",),
+        Furniture(name="miji", label="喵吉", command=("x",), allowed_tools=("run_bash",), input_trust="local",
                   scope_grants=({"resource": "exec", "action": "execute", "selector": "python3 a.py"},)),
         Furniture(name="weather", label="天氣", command=("y",)),
     ]
@@ -192,7 +192,7 @@ async def test_miji_wake_runs_pet_py_only_with_its_grant(tmp_path, ledger, with_
     allows = ("  exec: [python3 skills/pet-cat/pet.py]\n" if with_grant else "  tools: []\n")
     (skill / "SKILL.md").write_text("---\nname: pet-cat\nallows:\n" + allows + "---\n")
     entry = {"name": "miji", "command": ["python3", "skills/pet-cat/pet.py", "peek"],
-             "skill": "pet-cat"}
+             "skill": "pet-cat", "input_trust": "local"}
     tools, grants = wake_permissions([_parse_furniture(entry, 0, tmp_path)], {"miji"})
     env = _env(tmp_path, ledger, mode=PermissionMode.SELF, grants=[
         ScopeGrant(resource=g["resource"], action=g["action"], selector=g["selector"],

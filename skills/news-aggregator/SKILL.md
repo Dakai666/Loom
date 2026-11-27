@@ -11,6 +11,11 @@ precondition_checks:
     applies_to:
       - run_bash
     description: 限制 run_bash 只能在 skills/news-aggregator/scripts/ 目錄內執行，防止脫離新聞抓取範圍。
+allows:
+  exec:
+    - python3 skills/news-aggregator/scripts/fetch_news.py
+  write:
+    - news
 ---
 
 # 新聞聚合技能（News Aggregator Skill）

@@ -748,6 +748,8 @@ class LoomSession:
             sandbox=_sandbox_settings,
         )
         self.registry.register(_run_bash_tool)
+        from loom.weather import make_weather_tool
+        self.registry.register(make_weather_tool())
         _fs_tools = make_filesystem_tools(self.workspace)
         for tool in _fs_tools:
             self.registry.register(tool)
@@ -1080,6 +1082,7 @@ class LoomSession:
 
         # Register memory tools with injected stores
         from loom.platform.cli.tools import (
+            external_call_allowed,
             make_agent_health_tool,
             make_probe_file_tool,
             make_fetch_url_tool,
@@ -1406,6 +1409,7 @@ class LoomSession:
                     registry=self.registry,
                     ledger_emitter=self._ledger_emitter,
                     workspace=self.workspace,
+                    external_policy=external_call_allowed,
                     classifier=ApprovalClassifier(
                         workspace=self.workspace, perm=self.perm,
                         emitter=self._ledger_emitter, chat=plan_model_chat(),

@@ -4383,3 +4383,54 @@ def make_set_reasoning_effort_tool(session: Any) -> ToolDefinition:
         tags=["cognition", "effort"],
         impact_scope="agent",
     )
+
+
+# S3: audited external-furniture tool policy, injected by LoomSession.
+def _nested_code(factory, name):
+    from types import CodeType
+    return next(c for c in factory.__code__.co_consts if isinstance(c, CodeType) and c.co_name == name)
+
+
+def external_call_allowed(tool, call, workspace):
+    """Audited first-party executor identities, never MCP names/descriptions.
+
+    Native Python and registry setup remain trusted code. The harness calls
+    this injected check before grants, declarations, SAFE shortcuts or mode;
+    any unavailable/mismatched implementation fails closed.
+    """
+    if tool is None:
+        return False
+    from loom.platform.cli.tools import make_filesystem_tools
+    from loom.platform.cli.skill_tools import make_load_skill_tool
+    from loom.autonomy.circadian.journal import make_journal_append_tool
+    from loom.weather import make_weather_tool
+    from loom.core.harness.permissions import ToolCapability, TrustLevel
+    expected = {
+        "read_file": (make_filesystem_tools, "_read_file"),
+        "list_dir": (make_filesystem_tools, "_list_dir"),
+        "load_skill": (make_load_skill_tool, "_load_skill"),
+        "weather": (make_weather_tool, "weather"),
+        "journal_append": (make_journal_append_tool, "_journal_append"),
+    }
+    spec = expected.get(tool.name)
+    if (spec is None or tool.trust_level is not TrustLevel.SAFE
+            or tool.capabilities & (ToolCapability.EXEC | ToolCapability.AGENT_SPAN)
+            or getattr(tool.executor, "__code__", None) is not _nested_code(*spec)):
+        return False
+    if tool.name == "journal_append":
+        # The existing append-only journal is the sole self-recording path.
+        # No arbitrary filename, date, overwrite, semantic-memory or policy writes.
+        if workspace is None or not isinstance(call.args.get("body"), str) or len(call.args["body"]) > 4000:
+            return False
+        cells = dict(zip(tool.executor.__code__.co_freevars, tool.executor.__closure__ or ()))
+        target = cells["target_dir"].cell_contents
+        from pathlib import Path
+        # Reject even a safe-looking alternate journal destination.
+        lexical = Path(target).absolute()
+        if lexical != (workspace.absolute() / "autonomy/circadian/journal"):
+            return False
+    elif tool.capabilities & ToolCapability.MUTATES:
+        return False
+    # Registered effect resolver overrides are not trusted either. These
+    # implementations have no resolver; an attached one fails closed.
+    return tool.scope_resolver is None

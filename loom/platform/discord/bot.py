@@ -1037,17 +1037,24 @@ class LoomDiscordBot:
         from loom.core.harness.scope import ScopeGrant
 
         added: list[str] = list(req.allowed_tools)
+        grants = req.scope_grants
+        if req.input_trust != "local":
+            from loom.autonomy.input_trust import EXTERNAL_TOOLS
+            added = [t for t in added if t in EXTERNAL_TOOLS]
+            grants = ()
         source = (f"autonomy:{req.schedule_name}"
-                  if (added or req.scope_grants) else None)
+                  if (added or grants or req.input_trust != "local") else None)
+        # Anything except explicit local fails closed (including malformed
+        # programmatic requests); signal/intent text never supplies this field.
         if added:
             session.perm.declare(source, added, unattended_only=True)
             from loom.autonomy.permission_fields import report_exec_without_grant
             from loom.core.harness.permissions import ToolCapability
             report_exec_without_grant(
-                source, added, req.scope_grants,
+                source, added, grants,
                 is_exec=lambda n: bool(getattr(session.registry.get(n), "capabilities",
                                                ToolCapability.NONE) & ToolCapability.EXEC))
-        for g in req.scope_grants:
+        for g in grants:
             session.perm.grant(ScopeGrant(
                 resource=g["resource"],
                 action=g["action"],
@@ -1055,6 +1062,8 @@ class LoomDiscordBot:
                 constraints=g.get("constraints", {}),
                 source=source or f"autonomy:{req.schedule_name}",
             ))
+        if req.input_trust != "local":
+            session.perm.external_inputs.add(source)
         return added, source
 
     def _apply_chime_tier(
@@ -1101,6 +1110,7 @@ class LoomDiscordBot:
         if session is None:
             return
         if grant_source:
+            session.perm.external_inputs.discard(grant_source)
             try:
                 session.perm.withdraw(grant_source)
             except Exception:

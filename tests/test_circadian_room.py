@@ -93,6 +93,7 @@ MIJI = Furniture(
     priorities={"feel_sick": "urgent"},
     default_priority="normal",
     allowed_tools=("run_bash",),
+    input_trust="local",
 )
 
 
