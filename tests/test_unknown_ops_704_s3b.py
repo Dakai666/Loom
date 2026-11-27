@@ -36,10 +36,13 @@ from tests.test_single_decision_704_s3 import _call, _register, _skipped
 
 
 def _everyday(env):
+    from loom.extensibility.mcp_client import make_mcp_effect_scope_resolver
     _register(env, "memorize", caps=ToolCapability.MUTATES)
     _register(env, "image_generate", resolver=_make_openai_image_scope_resolver(env.ws),
               caps=ToolCapability.NETWORK | ToolCapability.MUTATES)
-    _register(env, "minimax_coding__understand_image")
+    _register(env, "minimax_coding__understand_image",
+              resolver=make_mcp_effect_scope_resolver("minimax_coding", "media_read"),
+              caps=ToolCapability.NETWORK | ToolCapability.READ_PROBE)
 
 
 EVERYDAY = [

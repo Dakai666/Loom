@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-import loom as loom_pkg
 from loom.core.tier_manager import TierManager
 
 
@@ -26,18 +25,6 @@ def _bare_tier(session, *, tier_models=None, default_tier=1):
         reminder_after_turns=10,
     )
     return session._tier
-
-
-@pytest.fixture(autouse=True)
-def _isolate_default_registry():
-    registry = loom_pkg._get_default_registry()
-    original_tools = dict(registry._tools)
-    registry._tools.clear()
-    try:
-        yield
-    finally:
-        registry._tools.clear()
-        registry._tools.update(original_tools)
 
 
 class TestCoreSessionImport:
@@ -396,27 +383,6 @@ class TestLoomSessionStartup:
         monkeypatch.setattr(session_module, "_load_loom_config", lambda: {})
         monkeypatch.setattr(session_module, "_load_env", lambda project_root=None: {})
         monkeypatch.setattr(session_module, "build_embedding_provider", lambda env, cfg: None)
-        from rich.prompt import Confirm
-        monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
-
-        (workspace / "loom_tools.py").write_text(
-            """
-import loom
-from loom.core.harness.middleware import ToolResult
-
-
-@loom.tool(description="Plugin-installed session tool", trust_level="safe")
-async def session_plugin_tool(call):
-    return ToolResult(
-        call_id=call.id,
-        tool_name=call.tool_name,
-        success=True,
-        output="ok",
-    )
-""".strip()
-            + "\n",
-            encoding="utf-8",
-        )
 
         from loom.core.session import LoomSession
 
@@ -431,7 +397,6 @@ async def session_plugin_tool(call):
         assert session._skill_outcome_tracker is not None
         assert session._pipeline is not None
         assert session._mcp_clients == []
-        assert session.registry.get("session_plugin_tool") is not None
         assert session.registry.get("image_generate") is None
         assert session.registry.get("openai__text_to_image") is None
 

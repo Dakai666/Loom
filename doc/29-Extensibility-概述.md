@@ -1,3 +1,7 @@
+> **#708 S4a 退役註記（2026-11-27）**：`@loom.tool`（`AdapterRegistry`）、`LoomPlugin`（`PluginRegistry`）、
+> `loom.register_plugin` 與 `LoomSession._load_plugins`（`~/.loom/plugins/*.py`、`loom_tools.py` 自動掃描）
+> 已退役，下文相關章節僅供歷史參考；現行擴充通道為 MCP（`mcp_server.py` 與 `mcp_client.py`）。
+
 > **#675 退役註記（2026-11-19）**：下文的 TaskReflector／TaskDiagnostic、
 > diagnostic post-hook 的 self_reflection、SkillEvolutionHook、confidence EMA、
 > `[reflection]` 與 `loom diagnostic` 描述僅供歷史參考，已非現行功能。
@@ -43,7 +47,7 @@ async def git_log(call: ToolCall) -> ToolResult:
     ...
 ```
 
-實作位置：`loom/extensibility/adapter.py` 的 `AdapterRegistry`。模組層 `_default_registry` 是 sink，session 啟動時 `install_into(self.registry)` 全量灌入。
+實作位置（已於 #708 S4a 退役）：`loom/extensibility/adapter.py` 的 `AdapterRegistry`。模組層 `_default_registry` 是 sink，session 啟動時 `install_into(self.registry)` 全量灌入。 <!-- doc-integrity:ignore — retired in #708 S4a -->
 
 ---
 
@@ -68,7 +72,7 @@ class MyPack(LoomPlugin):
 loom.register_plugin(MyPack())
 ```
 
-實作位置：`loom/extensibility/plugin.py` 的 `LoomPlugin` ABC + `PluginRegistry`。同樣 session 啟動時呼叫 `install_into(self)`，把 tools 進 registry、middleware prepend 到 pipeline、notifier 註冊到 NotificationRouter。
+實作位置（已於 #708 S4a 退役）：`loom/extensibility/plugin.py` 的 `LoomPlugin` ABC + `PluginRegistry`。同樣 session 啟動時呼叫 `install_into(self)`，把 tools 進 registry、middleware prepend 到 pipeline、notifier 註冊到 NotificationRouter。 <!-- doc-integrity:ignore — retired in #708 S4a -->
 
 詳見 [31-Plugin-系統.md](31-Plugin-系統.md)。
 
@@ -139,7 +143,7 @@ snapshot 存於 `_archive/extensibility-lens-retired-2026-05-23/`（gitignored�
 
 ## loom.toml 對應段落
 
-實際被讀取的擴充配置只有 MCP servers：
+實際被讀取的擴充配置只有 MCP servers（若 `loom.toml` 殘留已退役的 `[plugins]`／`[adapter]`／`[adapters]` 區段，載入時會印 `WARNING` 並忽略）：
 
 ```toml
 [[mcp.servers]]
@@ -149,7 +153,27 @@ args        = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 trust_level = "safe"
 ```
 
-Plugin 路徑、auto_discover、sandbox 等 keys 並沒有實作 —— Plugin 一律 hard-coded 走 `~/.loom/plugins/`。
+### `[[mcp.servers]]` 宣告式工具效果（`tool_effects`，#708 S4a）
+
+對於 `trust_level = "guarded"` 的外部 MCP server，Loom **不再**依工具名稱後綴（如 `*__web_search`、`*__understand_image`）硬編碼放行特例，也**絕不信任**遠端 MCP server 自行回報的 `annotations`（如 `readOnlyHint`）。操作者必須在本地 `loom.toml` 對應的 `[[mcp.servers]]` 條目中以 `tool_effects` 顯式宣告已知唯讀效果：
+
+```toml
+[[mcp.servers]]
+name         = "minimax_coding"
+command      = "uvx"
+args         = ["minimax-coding-plan-mcp", "-y"]
+env          = { MINIMAX_API_KEY = "${MINIMAX_API_KEY}", MINIMAX_API_HOST = "${MINIMAX_API_HOST}" }
+trust_level  = "guarded"
+tool_effects = { web_search = "public_search", understand_image = "media_read" }
+```
+
+契約重點：
+
+- **封閉詞彙**：僅接受 `public_search`（公開網頁搜尋：在 `SAFE`／`SELF` 走 Luna 審查、`YOLO` 通過硬護欄、皆套用敏感 query 與 routine network ceiling 檢查）與 `media_read`（唯讀看圖／媒體解析：在 `SELF` 有操作者時走日常規則放行，仍受路徑／憑證硬護欄與 routine network ceiling 約束；`SAFE` 與未宣告的無人值守呼叫照舊攔截）。
+- **Per-server 隔離**：`tool_effects` 的鍵是該 server 暴露的**裸工具名**（例如 `web_search`），只對該 `[[mcp.servers]]` 生效，其他 server 就算暴露同名工具也不會繼承宣告。
+- **Fail-closed**：未宣告、非 table 格式、未知效果值，或 `trust_level = "critical"` 皆會記錄警告並忽略（無唯讀 `scope_resolver`，在 `YOLO` 命中 `hard: undeclared_effects`）。
+- **Mutating 關鍵字不可降級**：若工具名稱或描述命中 `loom/extensibility/mcp_client.py` 的 `_MUTATING_KEYWORDS`（如 `delete`、`write`、`overwrite`、`edit` 等），會拒絕套用唯讀宣告並印 `WARNING`，保留 `ToolCapability.MUTATES` 與必填 `justification` 參數。
+- **未命中工具名警告**：連線取得遠端工具清單後，若 `tool_effects` 宣告了該 server 實際未暴露的工具名（例如打錯字寫成 `websearch`），會印一行 `WARNING` 點出 server 名與未命中名稱，並維持 fail-closed。
 
 ---
 
@@ -157,9 +181,7 @@ Plugin 路徑、auto_discover、sandbox 等 keys 並沒有實作 —— Plugin �
 
 | 通道 | 適用情境 |
 |------|----------|
-| `@loom.tool` | 單一 async 函式即可解決 |
-| `LoomPlugin` | 同時要貢獻 tools + middleware + notifier |
-| MCP Server | 把 Loom 工具開放給其他 agent 平台 |
-| MCP Client | 直接吃外部 MCP 生態的 tools |
+| MCP Server（`loom mcp serve`） | 把 Loom 工具開放給其他 agent 平台 |
+| MCP Client（`[[mcp.servers]]`） | 直接吃外部 MCP 生態的 tools，並可於本地宣告 `tool_effects` |
 
-> 全部走「對 session 一次 install」的模式，runtime 中不熱裝載 / 不熱卸載；要改 plugin 必須重啟 session。
+> 全部走「對 session 一次 install」的模式，runtime 中不熱裝載 / 不熱卸載；調整 MCP 設定後需重啟 session／daemon。

@@ -980,6 +980,15 @@ enabled = true
 # trust_level (Loom-only) controls what trust tier the imported tools get:
 #   safe    → auto-executed (SAFE tier)
 #   guarded → confirmation required (GUARDED tier)
+#
+# tool_effects (Loom-only, optional) locally declares known read-only effects
+# for GUARDED MCP tools (remote MCP annotations are never trusted):
+#   "public_search" → public web search (Luna review in SAFE/SELF, secret-query guardrail)
+#   "media_read"    → read-only image/media inspection (everyday rule in SELF attended,
+#                     hard path/secret guardrails and routine network ceilings still apply)
+# Undeclared GUARDED MCP tools stay fail-closed (undeclared_effects).
+# Example:
+#   tool_effects = { web_search = "public_search", understand_image = "media_read" }
 
 # ── Example: MCP filesystem server ───────────────────────────────────────────
 # [[mcp.servers]]

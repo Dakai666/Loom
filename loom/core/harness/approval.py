@@ -855,15 +855,28 @@ _TOOL_RULES: dict[str, tuple[str, Callable[[Any, Path], RuleDecision]]] = {
     "web_search": ("network", _search_rule),
     "run_bash": ("exec", _bash_rule),
 }
-# MCP public search (``minimax_coding__web_search``) is native search by
-# another name (#690 S6b).
-_MCP_SEARCH_SUFFIX = "__web_search"
+# Locally declared MCP tool effects (#708 S4a). Bound into ScopeRequest.metadata
+# by LoomMCPClient from loom.toml [[mcp.servers]].tool_effects; remote MCP
+# servers cannot self-declare these.
+DECLARED_EFFECT_KEY = "declared_effect"
+DECLARED_MCP_EFFECTS = frozenset({"public_search", "media_read"})
 
 
-def _tool_rule(tool_name: str) -> tuple[str, Callable[[Any, Path], RuleDecision]] | None:
-    if tool_name.endswith(_MCP_SEARCH_SUFFIX):
+def _declared_effect(request: ScopeRequest | None) -> str | None:
+    if request is None or not isinstance(getattr(request, "metadata", None), dict):
+        return None
+    effect = request.metadata.get(DECLARED_EFFECT_KEY)
+    return effect if isinstance(effect, str) and effect in DECLARED_MCP_EFFECTS else None
+
+
+def _tool_rule(
+    tool_name: str, request: ScopeRequest | None = None,
+) -> tuple[str, Callable[[Any, Path], RuleDecision]] | None:
+    if entry := _TOOL_RULES.get(tool_name):
+        return entry
+    if _declared_effect(request) == "public_search":
         return _TOOL_RULES["web_search"]
-    return _TOOL_RULES.get(tool_name)
+    return None
 
 
 # What the rules established about a REVIEW call, per category, in the
@@ -887,9 +900,9 @@ _CEILING = "僅已准/workspace內容與既准公開搜尋"
 
 # 自理 (#704 S3): Loom Agent's everyday tools, allowed by rule when DK is
 # present. Her own memory; media generation and understanding within the
-# routine spend ceilings (DK, #704 review of PR #707).
+# routine spend ceilings (DK, #704 review of PR #707). MCP media readers opt
+# in declaratively via ``tool_effects = { ... = "media_read" }`` (#708 S4a).
 _EVERYDAY_TOOLS = {"memorize": "own_memory", "image_generate": "media"}
-_EVERYDAY_SUFFIXES = {"__understand_image": "media"}
 # Rule refusals that mean "the rules do not know this", not "this is a
 # known risky effect" (writes, deletes, posts keep asking).
 _UNKNOWN_REASONS = frozenset({"not_covered", "unknown_program"})
@@ -1021,12 +1034,13 @@ def _resolves_executable(head: str, cwd: Path, workspace: Path) -> bool:
     return shutil.which(head) is not None
 
 
-def _everyday_tool(tool_name: str) -> str | None:
+def _everyday_tool(
+    tool_name: str, request: ScopeRequest | None = None,
+) -> str | None:
     if tool_name in _EVERYDAY_TOOLS:
         return _EVERYDAY_TOOLS[tool_name]
-    for suffix, code in _EVERYDAY_SUFFIXES.items():
-        if tool_name.endswith(suffix):
-            return code
+    if _declared_effect(request) == "media_read":
+        return "media"
     return None
 
 
@@ -1042,11 +1056,11 @@ def classify_rules(
     missing = perm.diff(request).missing if request is not None else []
     if any(_routine_ceiling(perm, req.resource, req.action) for req in missing):
         return _refuse("scope_ceiling")
-    entry = _tool_rule(call.tool_name)
+    entry = _tool_rule(call.tool_name, request)
     if entry is None:
         return _refuse("not_covered")
     resource, rule = entry
-    if request is None:  # a tool without a scope resolver (MCP search)
+    if request is None:
         return rule(call, workspace)
     if any(req.resource != resource for req in missing):
         return _refuse("other_resource")
@@ -1732,10 +1746,14 @@ def hard_boundary(
                 _routine_skill_script(rel, perm, workspace)
                 or _skill_guard(rel, workspace, content if isinstance(content, str) else None)):
             return "skill_guard"
-    elif name == "web_search" or name.endswith(_MCP_SEARCH_SUFFIX):
+    elif name == "web_search" or _declared_effect(request) == "public_search":
         query = call.args.get("query")
         if isinstance(query, str) and _SECRET_QUERY.search(query):
             return "sensitive_query"
+        if name != "web_search":
+            other_args = {k: v for k, v in call.args.items() if k != "query"}
+            if reason := _string_args_hard(other_args, workspace):
+                return reason
     elif name == "run_bash":
         command = call.args.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -2161,9 +2179,9 @@ class ApprovalClassifier:
         self._context = context
         self._budget = budget
 
-    def covers(self, call: Any) -> bool:
+    def covers(self, call: Any, request: ScopeRequest | None = None) -> bool:
         """Whether the rules know *call*'s tool at all."""
-        return _tool_rule(call.tool_name) is not None
+        return _tool_rule(call.tool_name, request) is not None
 
     async def decide(
         self, call: Any, request: ScopeRequest | None, verdict: PermissionVerdict,
@@ -2175,7 +2193,7 @@ class ApprovalClassifier:
         # present, after the hard guardrails and inside any routine ceiling.
         # Unattended, a tool its program does not declare is outside the
         # program's boundary: neither this rule nor Luna widens it.
-        if mode is PermissionMode.SELF and attended and (code := _everyday_tool(call.tool_name)):
+        if mode is PermissionMode.SELF and attended and (code := _everyday_tool(call.tool_name, request)):
             if self._past_routine_ceiling(request, verdict):
                 return ApprovalDecision(False, "rule-refuse: scope_ceiling")
             if hard := hard_boundary(call, request, verdict, self._perm, self._workspace,

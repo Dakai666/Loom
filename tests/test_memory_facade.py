@@ -139,14 +139,7 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
     facade holds.  Existing callers that reach into those private
     attributes must keep working in Phase A."""
     from unittest.mock import MagicMock
-    from rich.prompt import Confirm
-    import loom as loom_pkg
     from loom.core import session as core_session
-
-    # Isolate default registry so plugin probe doesn't pollute test state
-    registry = loom_pkg._get_default_registry()
-    original_tools = dict(registry._tools)
-    registry._tools.clear()
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -157,7 +150,6 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
     monkeypatch.setattr(core_session, "_load_loom_config", lambda: {})
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(core_session, "build_embedding_provider", lambda env, cfg: None)
-    monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
 
     from loom.core.session import LoomSession
     session = LoomSession(
@@ -180,8 +172,6 @@ async def test_session_holds_facade_aliased_to_subsystems(monkeypatch, tmp_path)
         assert session._memory.episodic is not None
     finally:
         await session.stop()
-        registry._tools.clear()
-        registry._tools.update(original_tools)
 
 
 # ── write API: memorize (no governor — fallback path) ──────────────────────
@@ -394,13 +384,7 @@ async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_pa
     references. #451 phase B retires ``query_relations`` (recall is the
     sole read verb)."""
     from unittest.mock import MagicMock
-    from rich.prompt import Confirm
-    import loom as loom_pkg
     from loom.core import session as core_session
-
-    registry = loom_pkg._get_default_registry()
-    original_tools = dict(registry._tools)
-    registry._tools.clear()
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -411,7 +395,6 @@ async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_pa
     monkeypatch.setattr(core_session, "_load_loom_config", lambda: {})
     monkeypatch.setattr(core_session, "_load_env", lambda project_root=None: {})
     monkeypatch.setattr(core_session, "build_embedding_provider", lambda env, cfg: None)
-    monkeypatch.setattr(Confirm, "ask", lambda *args, **kwargs: True)
 
     from loom.core.session import LoomSession
     session = LoomSession(
@@ -433,5 +416,3 @@ async def test_session_registers_memory_tools_through_facade(monkeypatch, tmp_pa
         assert session.registry.get("query_relations") is None
     finally:
         await session.stop()
-        registry._tools.clear()
-        registry._tools.update(original_tools)

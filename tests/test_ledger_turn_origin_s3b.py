@@ -82,14 +82,7 @@ async def _drain() -> None:
 
 @pytest.fixture
 def _isolate_default_registry():
-    registry = loom_pkg._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
-    try:
-        yield
-    finally:
-        registry._tools.clear()
-        registry._tools.update(original)
+    yield
 
 
 async def _start_session(monkeypatch, tmp_path: Path):

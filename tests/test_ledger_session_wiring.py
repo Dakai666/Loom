@@ -20,20 +20,6 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-import loom as loom_pkg
-
-
-@pytest.fixture(autouse=True)
-def _isolate_default_registry():
-    registry = loom_pkg._get_default_registry()
-    original = dict(registry._tools)
-    registry._tools.clear()
-    try:
-        yield
-    finally:
-        registry._tools.clear()
-        registry._tools.update(original)
-
 
 @pytest_asyncio.fixture
 async def session_module():

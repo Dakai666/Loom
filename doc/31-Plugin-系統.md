@@ -1,3 +1,7 @@
+> **#708 S4a 退役註記（2026-11-27）**：Python Plugin 系統（`LoomPlugin`、`PluginRegistry`、`AdapterRegistry`、
+> `@loom.tool`、`loom.register_plugin`、`LoomSession._load_plugins` 與 `loom_tools.py` 掃描）已退役，
+> 下文僅供歷史參考；外部工具請改由 MCP（`[[mcp.servers]]`）或 `loom mcp serve` 接線。
+
 # Plugin 系統（增量更新）
 
 > 對 [doc/31-Plugin-系統.md](doc/31-Plugin-系統.md) 的增量更新，補充首次確認機制細節。
