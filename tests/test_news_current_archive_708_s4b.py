@@ -493,3 +493,74 @@ async def test_morning_briefing_producer_to_shared_learning_reader_flow(
     assert today_read.success and "Synthetic topic from today's briefing." in today_read.output
     assert hist_read.success and "Historical archive entry." in hist_read.output
     assert env.confirm.await_count == 0
+
+
+def test_archive_news_atomic_no_replace_refuses_concurrent_empty_dir(tmp_path, monkeypatch):
+    """If an empty dir appears at destination right before rename, never overwrite it."""
+    import os
+
+    skill_dir = _install_tracked_news_skill(tmp_path)
+    mod = _load_archive_module(skill_dir / "scripts" / "archive_news.py")
+
+    current = tmp_path / "news" / "current"
+    archive = tmp_path / "news" / "archive"
+    (current / "2026-10-01").mkdir(parents=True)
+    (current / "2026-10-01" / "daily_briefing.md").write_text("vintage", encoding="utf-8")
+    archive.mkdir(parents=True)
+
+    # Wrap the atomic rename primitive so a concurrent empty dir appears at the
+    # destination strictly AFTER user-space checks and BEFORE the OS rename call.
+    assert hasattr(mod, "_rename_no_replace"), "archive_news must use atomic _rename_no_replace"
+    real_rename = mod._rename_no_replace
+    created_ino: list[int] = []
+
+    def racing_rename(src_fd: int, dst_fd: int, name: str) -> None:
+        raced = archive / name
+        raced.mkdir(parents=True, exist_ok=True)
+        created_ino.append(os.stat(raced).st_ino)
+        real_rename(src_fd, dst_fd, name)
+
+    monkeypatch.setattr(mod, "_rename_no_replace", racing_rename)
+
+    res = mod.archive_old_news(tmp_path, keep_days=30, today=date(2026, 11, 27))
+    assert created_ino, "race injection did not execute"
+    assert res.moved == []
+    assert any("2026-10-01" in s for s in res.skipped)
+    # Source is untouched; destination empty dir kept the exact same inode (not overwritten).
+    assert (current / "2026-10-01" / "daily_briefing.md").read_text(encoding="utf-8") == "vintage"
+    assert os.stat(archive / "2026-10-01").st_ino == created_ino[0]
+    assert list((archive / "2026-10-01").iterdir()) == []
+
+
+def test_archive_news_refuses_post_check_archive_root_symlink_swap(tmp_path, monkeypatch):
+    """If news/archive is swapped to an outside symlink after root checks, refuse the move."""
+    skill_dir = _install_tracked_news_skill(tmp_path)
+    mod = _load_archive_module(skill_dir / "scripts" / "archive_news.py")
+
+    current = tmp_path / "news" / "current"
+    archive = tmp_path / "news" / "archive"
+    outside = tmp_path / "outside"
+    (current / "2026-10-01").mkdir(parents=True)
+    (current / "2026-10-01" / "daily_briefing.md").write_text("precious", encoding="utf-8")
+    archive.mkdir(parents=True)
+    outside.mkdir()
+
+    real_contains = mod._contains_symlink
+    swapped = False
+
+    def swap_archive_after_initial_check(directory: Path) -> bool:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            archive.rmdir()
+            archive.symlink_to(outside)
+        return real_contains(directory)
+
+    monkeypatch.setattr(mod, "_contains_symlink", swap_archive_after_initial_check)
+
+    with pytest.raises((ValueError, OSError)):
+        mod.archive_old_news(tmp_path, keep_days=30, today=date(2026, 11, 27))
+
+    assert swapped
+    assert list(outside.iterdir()) == []
+    assert (current / "2026-10-01" / "daily_briefing.md").read_text(encoding="utf-8") == "precious"
