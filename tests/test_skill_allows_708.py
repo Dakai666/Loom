@@ -423,3 +423,290 @@ def test_allows_is_read_only_at_furniture_wake():
         and p.name != "skill_allows.py"
     )
     assert users == ["autonomy/circadian/room.py"]
+
+
+# ---------------------------------------------------------------------------
+# #714 cross-review (克萊兒 · Antigravity): B1–B4, N1–N4
+# ---------------------------------------------------------------------------
+
+
+def _allows(ws: Path, body: str) -> None:
+    _pet_skill(ws, f"---\nname: pet-cat\nallows:\n{body}---\n")
+
+
+class TestB1GuardIgnoresCase:
+    """APFS is case-insensitive: skill.md *is* SKILL.md there."""
+
+    @pytest.mark.parametrize("rel", [
+        "skills/pet-cat/skill.md", "skills/pet-cat/Skill.MD", "Skills/pet-cat/SKILL.md",
+        "SKILLS/pet-cat/skill.md",
+    ])
+    def test_case_variants_of_skill_md_are_guarded(self, tmp_path, rel):
+        from pathlib import PurePosixPath
+
+        from loom.core.harness.approval import _skill_guard
+        _pet_skill(tmp_path)
+        widened = PET_SKILL.replace("  tools: [memorize]\n", "  tools: [memorize, fetch_url]\n")
+        assert _skill_guard(PurePosixPath(rel), tmp_path, widened)
+        assert _skill_guard(PurePosixPath(rel), tmp_path, None)
+
+    @pytest.mark.parametrize("rel", ["skills/pet-cat/Checks.py", "skills/pet-cat/CHECKS.PY",
+                                     "Skills/pet-cat/checks.py"])
+    def test_case_variants_of_checks_are_guarded(self, tmp_path, rel):
+        from pathlib import PurePosixPath
+
+        from loom.core.harness.approval import _skill_guard
+        _pet_skill(tmp_path)
+        assert _skill_guard(PurePosixPath(rel), tmp_path, "x = 1\n")
+
+    def test_case_variant_of_a_ref_module_is_guarded(self, tmp_path):
+        from pathlib import PurePosixPath
+
+        from loom.core.harness.approval import _skill_guard
+        _pet_skill(tmp_path, PET_SKILL.replace("checks.restrict_to_pet_script",
+                                               "guards.restrict_to_pet_script"))
+        assert _skill_guard(PurePosixPath("skills/pet-cat/Guards.PY"), tmp_path, "x = 1\n")
+
+    def test_shell_redirect_to_a_case_variant_is_hard(self, tmp_path):
+        from loom.core.harness.approval import _shell_hard
+        _pet_skill(tmp_path)
+        assert _shell_hard("echo x > skills/pet-cat/skill.md", tmp_path) == "skill_guard"
+
+    @pytest.mark.parametrize("mode", [PermissionMode.YOLO, PermissionMode.SELF])
+    @pytest.mark.parametrize("origin", ["discord", "chime"])
+    async def test_write_to_a_case_variant_asks_dk(self, tmp_path, ledger, mode, origin):
+        env = _env(tmp_path, ledger, mode=mode)
+        _pet_skill(env.ws)
+        env.perm.declare("autonomy:room@0900", ["write_file"], unattended_only=True)
+        widened = PET_SKILL.replace("  tools: [memorize]\n", "  tools: [memorize, fetch_url]\n")
+        r = await env.run("write_file", {"path": "skills/pet-cat/skill.md", "content": widened},
+                          origin=origin)
+        assert not r.success or env.confirm.await_count == 1
+        assert (env.ws / "skills/pet-cat/SKILL.md").read_text() == PET_SKILL
+
+
+class TestB2ExecResolvesSymlinks:
+    def test_symlink_to_outside_the_workspace_is_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        _pet_skill(ws)
+        outside = tmp_path / "outside.py"
+        outside.write_text("print('x')\n")
+        (ws / "skills/pet-cat/sym.py").symlink_to(outside)
+        _allows(ws, "  exec: [python3 skills/pet-cat/sym.py]\n")
+        with pytest.raises(SkillAllowsError, match="sym.py"):
+            read_skill_allows("pet-cat", ws)
+
+    def test_symlink_to_another_skill_is_rejected(self, tmp_path):
+        _pet_skill(tmp_path)
+        other = tmp_path / "skills/other"
+        other.mkdir(parents=True)
+        (other / "secret.py").write_text("")
+        (tmp_path / "skills/pet-cat/sym.py").symlink_to("../other/secret.py")
+        _allows(tmp_path, "  exec: [python3 skills/pet-cat/sym.py]\n")
+        with pytest.raises(SkillAllowsError, match="sym.py"):
+            read_skill_allows("pet-cat", tmp_path)
+
+    def test_symlinked_directory_is_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        _pet_skill(ws)
+        out = tmp_path / "outdir"
+        out.mkdir()
+        (out / "run.py").write_text("")
+        (ws / "skills/pet-cat/lib").symlink_to(out)
+        _allows(ws, "  exec: [python3 skills/pet-cat/lib/run.py]\n")
+        with pytest.raises(SkillAllowsError, match="lib/run.py"):
+            read_skill_allows("pet-cat", ws)
+
+    def test_a_symlinked_skill_directory_is_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        elsewhere = tmp_path / "elsewhere"
+        _pet_skill(elsewhere)  # a real skill tree outside the workspace
+        (ws / "skills").mkdir(parents=True)
+        (ws / "skills/pet-cat").symlink_to(elsewhere / "skills/pet-cat")
+        with pytest.raises(SkillAllowsError, match="pet-cat"):
+            read_skill_allows("pet-cat", ws)
+
+
+class TestB3ExecPinsTheInterpreter:
+    @pytest.mark.parametrize("shape", [
+        'python3 -c "import os" skills/pet-cat/pet.py',
+        "python3 -m http.server skills/pet-cat/pet.py",
+        "bash -c evil skills/pet-cat/pet.py",
+        "rm -rf skills/pet-cat/pet.py",
+        "python3 -u skills/pet-cat/pet.py status",
+        "/usr/bin/python3 skills/pet-cat/pet.py",
+        "env python3 skills/pet-cat/pet.py",
+        "node skills/pet-cat/pet.py",
+        "python3",
+    ])
+    def test_dangerous_shapes_are_rejected(self, tmp_path, shape):
+        _allows(tmp_path, f"  exec: ['{shape}']\n" if '"' in shape else f'  exec: ["{shape}"]\n')
+        with pytest.raises(SkillAllowsError):
+            read_skill_allows("pet-cat", tmp_path)
+
+    @pytest.mark.parametrize("shape", [
+        "python3 skills/pet-cat/pet.py status",
+        "python skills/pet-cat/pet.py",
+        "skills/pet-cat/pet.py feed",
+    ])
+    def test_interpreter_then_script_is_accepted(self, tmp_path, shape):
+        _allows(tmp_path, f'  exec: ["{shape}"]\n')
+        assert read_skill_allows("pet-cat", tmp_path).exec == (shape,)
+
+
+class TestB4WriteStaysOffControlFiles:
+    @pytest.mark.parametrize("prefix", [
+        "skills", "skills/pet-cat", "skills/pet-cat/SKILL.md", "skills/pet-cat/checks.py",
+        "skills/other", "Skills/pet-cat", "autonomy", "autonomy/circadian", "loom.toml",
+        ".env", "notes/.private", "memory/care",
+    ])
+    def test_write_prefix_over_control_or_policy_is_rejected(self, tmp_path, prefix):
+        care = tmp_path / "memory/care"
+        care.mkdir(parents=True)
+        (care / "room.toml").write_text("")
+        (tmp_path / "skills/other").mkdir(parents=True)
+        _allows(tmp_path, f'  write: ["{prefix}"]\n')
+        with pytest.raises(SkillAllowsError, match="write"):
+            read_skill_allows("pet-cat", tmp_path)
+
+    def test_write_prefix_through_a_symlink_is_rejected(self, tmp_path):
+        ws = tmp_path / "ws"
+        _pet_skill(ws)
+        (tmp_path / "out").mkdir()
+        (ws / "notes").symlink_to(tmp_path / "out")
+        _allows(ws, '  write: ["notes"]\n')
+        with pytest.raises(SkillAllowsError, match="notes"):
+            read_skill_allows("pet-cat", ws)
+
+    @pytest.mark.parametrize("prefix", ["skills/pet-cat/notes", "news", "autonomy/circadian/journal"])
+    def test_plain_content_prefixes_are_accepted(self, tmp_path, prefix):
+        _allows(tmp_path, f'  write: ["{prefix}"]\n')
+        assert read_skill_allows("pet-cat", tmp_path).write == (prefix,)
+
+    @pytest.mark.parametrize("path,grant", [
+        ("skills/pet-cat/SKILL.md", "skills/pet-cat"),
+        ("autonomy/circadian/room.toml", "autonomy/circadian"),
+        ("memory/care/room.toml", "memory/care"),
+        ("memory/care/.env", "memory/care"),
+    ])
+    async def test_a_granted_write_still_meets_the_hard_boundary(self, tmp_path, ledger, path, grant):
+        """Runtime half: a PV.ALLOW from a routine grant is a rule-allow too,
+        so it passes the hard boundary (#704 S3)."""
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _pet_skill(env.ws)
+        (env.ws / "autonomy/circadian").mkdir(parents=True)
+        (env.ws / "memory/care").mkdir(parents=True)
+        env.perm.grant(ScopeGrant(resource="path", action="write", selector=grant,
+                                  source="autonomy:room@0900"))
+        r = await env.run("write_file", {"path": path, "content": "x = 1\n"}, origin="chime")
+        assert not r.success
+        assert env.confirm.await_count == 0  # unattended: skipped, not asked
+        assert not (env.ws / path).exists() or (env.ws / path).read_text() != "x = 1\n"
+
+    async def test_a_granted_plain_write_still_runs(self, tmp_path, ledger):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        (env.ws / "memory/care").mkdir(parents=True)
+        env.perm.grant(ScopeGrant(resource="path", action="write", selector="memory/care",
+                                  source="autonomy:room@0900"))
+        r = await env.run("write_file", {"path": "memory/care/today.md", "content": "她睡了。\n"},
+                          origin="chime")
+        assert r.success
+
+
+class TestN1ScopedToolsGoThroughTheirOwnKey:
+    @pytest.mark.parametrize("tool", ["write_file", "run_bash", "spawn_agent"])
+    def test_scoped_tool_in_allows_tools_is_rejected(self, tmp_path, tool):
+        _allows(tmp_path, f"  tools: [{tool}]\n")
+        with pytest.raises(SkillAllowsError, match=tool):
+            read_skill_allows("pet-cat", tmp_path)
+
+
+class TestN2NullAllows:
+    def test_null_allows_is_not_an_empty_boundary(self, tmp_path):
+        _pet_skill(tmp_path, "---\nname: pet-cat\nallows:\n---\n")
+        with pytest.raises(SkillAllowsError, match="allows"):
+            read_skill_allows("pet-cat", tmp_path)
+
+    def test_guard_tells_absent_from_null(self, tmp_path):
+        from pathlib import PurePosixPath
+
+        from loom.core.harness.approval import _skill_guard
+        bare = "---\nname: pet-cat\n---\n"
+        _pet_skill(tmp_path, bare)
+        assert _skill_guard(PurePosixPath("skills/pet-cat/SKILL.md"), tmp_path,
+                            "---\nname: pet-cat\nallows:\n---\n")
+
+
+class TestN3ExecDeniesAbsolutePaths:
+    def test_exec_grants_deny_absolute_paths(self, tmp_path):
+        _pet_skill(tmp_path)
+        fields = allows_permission_fields(read_skill_allows("pet-cat", tmp_path), "s")
+        assert all(g["constraints"] == {"absolute_paths": "deny"}
+                   for g in fields["scope_grants"] if g["resource"] == "exec")
+
+    def test_a_narrowing_furniture_keeps_the_constraint(self, tmp_path):
+        _pet_skill(tmp_path)
+        narrow = MIJI + (f'scope_grants = [{{ resource = "exec", action = "execute",'
+                         f' selector = "{PET} status" }}]\n')
+        (miji,) = load_room(_room(tmp_path, narrow), workspace=tmp_path).furniture
+        assert miji.scope_grants[0]["constraints"]["absolute_paths"] == "deny"
+
+    async def test_absolute_path_argument_is_not_covered(self, tmp_path, ledger, monkeypatch, circ_dir):
+        env = _env(tmp_path, ledger, mode=PermissionMode.SELF)
+        _pet_skill(env.ws)
+        req = await _wake(env.ws, monkeypatch)
+        for g in req.scope_grants:
+            env.perm.grant(ScopeGrant(resource=g["resource"], action=g["action"],
+                                      selector=g["selector"], constraints=g.get("constraints", {}),
+                                      source="autonomy:x"))
+        r = await _call(env, "run_bash", {"command": f"{PET} status /etc/passwd"},
+                        origin="chime", caps=ToolCapability.EXEC)
+        assert not r.success
+
+
+class TestN4RoomReporting:
+    async def test_disabled_room_forgets_reported_errors(self, tmp_path, monkeypatch, circ_dir):
+        monkeypatch.chdir(tmp_path)
+        room._reported_errors.clear()
+        p = _room(tmp_path, MIJI)
+        now = datetime(2026, 11, 27, 2, 0, tzinfo=timezone.utc)
+
+        async def runner(f, n):
+            return [], None
+
+        await room_tick(_Daemon(), CIRC, now, config=load_room(p, workspace=tmp_path), runner=runner)
+        await room_tick(_Daemon(), CIRC, now, config=room.RoomConfig(), runner=runner)
+        await room_tick(_Daemon(), CIRC, now, config=load_room(p, workspace=tmp_path), runner=runner)
+        rows = [json.loads(line) for f in (circ_dir / "log").glob("room-*.jsonl")
+                for line in f.read_text().splitlines()]
+        assert len([r for r in rows if r["event"] == "furniture_rejected"]) == 2
+
+    async def test_register_room_ticks_the_file_it_registered(self, tmp_path, monkeypatch, circ_dir):
+        monkeypatch.chdir(tmp_path)
+        p = tmp_path / "elsewhere.toml"
+        p.write_text('[room]\nenabled = true\n[[furniture]]\nname = "c"\ncommand = ["true"]\n')
+        seen = []
+
+        async def fake_tick(daemon, circadian, now, *, config=None, runner=None):
+            seen.append(config)
+
+        monkeypatch.setattr(room, "room_tick", fake_tick)
+        d = _Daemon()
+        assert room.register_room(d, CIRC, p)
+        await d.handlers[room.TICK_TRIGGER](None, {})
+        assert seen and seen[0] is not None and [f.name for f in seen[0].furniture] == ["c"]
+
+    def test_startup_and_first_tick_report_once(self, tmp_path, caplog, monkeypatch, circ_dir):
+        import asyncio
+        monkeypatch.chdir(tmp_path)
+        room._reported_errors.clear()
+        p = _room(tmp_path, MIJI + '\n[[furniture]]\nname = "c"\ncommand = ["true"]\n')
+
+        async def runner(f, n):
+            return [], None
+
+        with caplog.at_level(logging.ERROR):
+            room.register_room(_Daemon(), CIRC, p)
+            asyncio.run(room_tick(_Daemon(), CIRC, datetime.now(timezone.utc),
+                                  config=load_room(p, workspace=tmp_path), runner=runner))
+        assert len([r for r in caplog.records if "miji" in r.getMessage()]) == 1
