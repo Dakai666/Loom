@@ -83,6 +83,17 @@ def _room(ws: Path, furniture: str) -> Path:
     return p
 
 
+@pytest.fixture(autouse=True)
+def _fresh_room_reports(tmp_path):
+    """Rejections are reported once per process; each test starts clean.
+    The room log goes to tmp, never the live ~/.loom/circadian/log."""
+    room._reported_errors.clear()
+    st.set_dir_for_test(tmp_path / "circadian")
+    yield
+    st.set_dir_for_test(None)
+    room._reported_errors.clear()
+
+
 MIJI = (
     '[[furniture]]\nname = "miji"\nlabel = "喵吉"\nskill = "pet-cat"\n'
     f'command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]\n'
@@ -110,7 +121,8 @@ class TestAllowsParsing:
         fields = allows_permission_fields(read_skill_allows("pet-cat", tmp_path), "skill pet-cat")
         assert fields["allowed_tools"] == ["memorize"]
         assert fields["scope_grants"] == [
-            {"resource": "exec", "action": "execute", "selector": f"{PET} {s}"} for s in CARE
+            {"resource": "exec", "action": "execute", "selector": f"{PET} {s}",
+             "constraints": {"absolute_paths": "deny"}} for s in CARE
         ]
 
     def test_write_paths_become_path_write_grants(self, tmp_path):
@@ -219,7 +231,8 @@ class TestFurnitureSkill:
         assert miji.skill == "pet-cat"
         assert miji.allowed_tools == ("memorize",)
         assert miji.scope_grants == tuple(
-            {"resource": "exec", "action": "execute", "selector": f"{PET} {s}"} for s in CARE)
+            {"resource": "exec", "action": "execute", "selector": f"{PET} {s}",
+             "constraints": {"absolute_paths": "deny"}} for s in CARE)
         assert cfg.errors == ()
 
     def test_furniture_may_narrow(self, tmp_path):

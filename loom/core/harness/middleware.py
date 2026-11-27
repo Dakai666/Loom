@@ -1011,12 +1011,19 @@ class BlastRadiusMiddleware(Middleware):
         verdict = self._perm.evaluate(scope_request, call.trust_level, attended=attended)
         self._write_scope_metadata(call, scope_request, diff, verdict)
 
+        hard: str | None = None
         if verdict == PV.ALLOW:
             # Only routine / system grants exist since #704 S4: a human's
-            # "allow once" leaves none behind.
-            self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}",
-                                   source="grant", code=diff.reason.value)
-            return None  # proceed
+            # "allow once" leaves none behind. A grant is a rule-allow too,
+            # so it meets the hard guardrails like every other (#704 S3,
+            # #714 B4): a routine's write grant over a directory never
+            # reaches a SKILL.md, a policy file or a credential in it.
+            hard = (self._hard_boundary(call, scope_request, verdict, declared=True)
+                    if self._workspace is not None else None)
+            if hard is None:
+                self._notify_lifecycle(call, True, f"scope-allow: {diff.reason.value}",
+                                       source="grant", code=diff.reason.value)
+                return None  # proceed
 
         if verdict == PV.DENY:
             self._notify_lifecycle(call, False, "scope-deny", source="policy", code="scope_deny")
@@ -1038,9 +1045,12 @@ class BlastRadiusMiddleware(Middleware):
         # skipping, the approval classifier may approve this one call. It
         # grants nothing, so a refusal or an abstain leaves exactly the
         # path below.
-        note = await self._auto_decide(call, scope_request, verdict)
-        if note is None:
-            return None  # proceed
+        if hard is not None:
+            note: str | None = f"hard: {hard}"
+        else:
+            note = await self._auto_decide(call, scope_request, verdict)
+            if note is None:
+                return None  # proceed
 
         # #704 S6: one reason line for the confirm or the skip.
         from .guard_reason import GUARD_REASON_KEY, ask_reason

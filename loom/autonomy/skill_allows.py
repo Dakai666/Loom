@@ -7,7 +7,7 @@ listing only that skill's own things::
       exec:                     # exact command prefixes (argv shapes)
         - python3 skills/pet-cat/pet.py status
         - python3 skills/pet-cat/pet.py feed
-      write:                    # workspace path prefixes
+      write:                    # workspace directory prefixes
         - skills/pet-cat/notes
       tools: [memorize]         # extra tools the activity declares
 
@@ -17,9 +17,27 @@ The format is deliberately minimal: exact prefixes and names, no wildcards,
 no conditions. Each entry translates one to one into the forms the harness
 already enforces, through :func:`parse_permission_fields`:
 
-- ``exec``  → ``{resource="exec", action="execute", selector=<shape>}``
+- ``exec``  → ``{resource="exec", action="execute", selector=<shape>,
+  constraints={absolute_paths="deny"}}``
 - ``write`` → ``{resource="path", action="write", selector=<prefix>}``
 - ``tools`` → ``allowed_tools``
+
+What a shape, a prefix or a tool may be (#714 review, 克萊兒 · Antigravity):
+
+- **exec** runs one of this skill's own scripts and nothing else: either
+  ``python3`` / ``python`` followed directly by the script (no interpreter
+  flags such as ``-c`` / ``-m`` before it), or the script itself. Every
+  script path resolves (symlinks followed) to an existing file inside the
+  skill's own directory, which itself must not be a symlink.
+- **write** is a directory prefix (``write_file`` grants match the file's
+  parent directory). It may not cover a control or policy file: a skill's
+  directory or its SKILL.md / ``*.py`` guard files, ``autonomy/`` config,
+  ``loom.toml``, hidden or credential paths, or any existing file under it
+  that the hard guardrail protects. It may not pass through a symlink.
+  At run time every granted write still meets ``hard_boundary``.
+- **tools** never names a scoped tool (``write_file``, ``run_bash``,
+  ``spawn_agent``): those go through ``write`` / ``exec``, where they are
+  bounded.
 
 ``allows`` sits beside ``precondition_checks`` in the guarded part of the
 frontmatter, so changing it is a ``skill_guard`` change that DK approves
@@ -29,16 +47,22 @@ Who reads it: only a furniture wake in S1 (``circadian/room.py``), at wake
 start, so the boundary is on the chime before the turn reads the skill.
 Loading a skill never turns ``allows`` into grants: an attended turn stays
 under its permission_mode. S2 points rhythm anchors and schedules at the
-same reader.
+same reader. Only workspace skills (``<workspace>/skills/<name>``) are read:
+their SKILL.md is the one the skill guard covers.
 
 Unlike the tolerant autonomy loaders, this reader is strict: a missing skill,
 a malformed ``allows`` or a script that does not exist raises
 :class:`SkillAllowsError`, so the caller can reject the furniture loudly
 instead of a wake quietly skipping its work (喵吉 since 11-22).
+
+Known limit: exec grants match argv prefixes, not OS isolation. The checks
+run every time the room reloads (each tick), but a script the skill owns can
+still do anything once it runs; ``pet.py status`` writes state.
 """
 
 from __future__ import annotations
 
+import os
 import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -49,6 +73,17 @@ from loom.core.harness.scope import simple_argv
 
 ALLOWS_KEYS = ("exec", "write", "tools")
 _WILDCARD_CHARS = frozenset("*?[]{}~$")
+INTERPRETERS = frozenset({"python3", "python"})
+# Tools whose reach a scope bounds: declaring one by name would hand the
+# activity an unscoped version of what exec / write bound.
+SCOPED_TOOLS = frozenset({"write_file", "run_bash", "spawn_agent"})
+# Policy files a write prefix may never cover, whether or not they exist yet.
+_PROTECTED_FILES = (
+    "loom.toml", ".env", "autonomy/schedules.toml",
+    "autonomy/circadian/rhythm.toml", "autonomy/circadian/room.toml",
+)
+_EXEC_CONSTRAINTS = {"absolute_paths": "deny"}
+_SCAN_LIMIT = 2000
 
 
 class SkillAllowsError(ValueError):
@@ -99,24 +134,121 @@ def _plain_prefix(path: str) -> PurePosixPath | None:
     return PurePosixPath(norm)
 
 
-def _check_exec(shape: str, skill_dir: PurePosixPath, workspace: Path, where: str) -> None:
+def _real_skill_dir(skill_dir: PurePosixPath, workspace: Path, where: str) -> Path:
+    """The skill's directory, which must be a real directory (not a
+    symlink) inside the workspace."""
+    ws_real = workspace.resolve()
+    lexical = ws_real / skill_dir
+    try:
+        real = lexical.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        raise SkillAllowsError(f"{where} not found ({skill_dir}/SKILL.md)") from None
+    except (OSError, RuntimeError) as exc:
+        raise SkillAllowsError(f"{where} unreadable ({skill_dir}): {exc}") from None
+    if real != lexical or not real.is_dir():
+        raise SkillAllowsError(
+            f"{where}: {skill_dir} must be a real directory inside the workspace, not a symlink")
+    return real
+
+
+def _own_file(token: str, skill_dir: PurePosixPath, skill_real: Path, workspace: Path,
+              shape: str, where: str) -> None:
+    """*token* names an existing file of this skill, after symlinks."""
+    rel = _plain_prefix(token)
+    if rel is None or not rel.is_relative_to(skill_dir):
+        raise SkillAllowsError(
+            f"{where} allows.exec {shape!r}: {token} is not this skill's own script "
+            f"(must live under {skill_dir}/)")
+    try:
+        real = (workspace.resolve() / rel).resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        raise SkillAllowsError(f"{where} allows.exec {shape!r}: {token} does not exist") from None
+    except (OSError, RuntimeError) as exc:
+        raise SkillAllowsError(f"{where} allows.exec {shape!r}: {token} unreadable: {exc}") from None
+    if not real.is_relative_to(skill_real) or not real.is_file():
+        raise SkillAllowsError(
+            f"{where} allows.exec {shape!r}: {token} resolves outside {skill_dir}/ "
+            "(a symlink may not lead out of the skill)")
+
+
+def _check_exec(shape: str, skill_dir: PurePosixPath, skill_real: Path, workspace: Path,
+                where: str) -> None:
     if any(c in _WILDCARD_CHARS for c in shape):
         raise SkillAllowsError(f"{where} allows.exec {shape!r}: exact prefixes only, no wildcards")
     argv = simple_argv(shape)
     if argv is None:
         raise SkillAllowsError(f"{where} allows.exec {shape!r} is not one plain command")
-    scripts = [a for a in argv if "/" in a]
-    if not scripts:
-        raise SkillAllowsError(
-            f"{where} allows.exec {shape!r} names no script of this skill ({skill_dir}/…)")
-    for token in scripts:
-        rel = _plain_prefix(token)
-        if rel is None or not rel.is_relative_to(skill_dir):
+    # The program is the skill's script, or a Python interpreter whose very
+    # next word is the script: no -c / -m / -u before it (#714 B3).
+    if argv[0] in INTERPRETERS:
+        if len(argv) < 2 or argv[1].startswith("-") or "/" not in argv[1]:
             raise SkillAllowsError(
-                f"{where} allows.exec {shape!r}: {token} is not this skill's own script "
-                f"(must live under {skill_dir}/)")
-        if not (workspace / rel).is_file():
-            raise SkillAllowsError(f"{where} allows.exec {shape!r}: {token} does not exist")
+                f"{where} allows.exec {shape!r}: {argv[0]} must be followed directly by "
+                f"this skill's script ({skill_dir}/…), with no interpreter options")
+        script_at = 1
+    elif "/" in argv[0]:
+        script_at = 0
+    else:
+        raise SkillAllowsError(
+            f"{where} allows.exec {shape!r}: the program must be this skill's script or "
+            f"{' / '.join(sorted(INTERPRETERS))} running it")
+    for token in argv[script_at:]:
+        if token == argv[script_at] or "/" in token:
+            _own_file(token, skill_dir, skill_real, workspace, shape, where)
+
+
+def _check_write(path: str, workspace: Path, where: str) -> None:
+    """A write prefix stays off control and policy files (#714 B4)."""
+    from loom.core.harness.approval import protected_write_target
+
+    rel = _plain_prefix(path)
+    if rel is None:
+        raise SkillAllowsError(
+            f"{where} allows.write {path!r} must be a plain path inside the workspace")
+    low = PurePosixPath(*(part.lower() for part in rel.parts))
+
+    def refuse(why: str) -> SkillAllowsError:
+        return SkillAllowsError(f"{where} allows.write {path!r} {why}")
+
+    if any(part.startswith(".") for part in low.parts):
+        raise refuse("is a hidden path")
+    if low.parts[0] == "skills" and (
+            len(low.parts) < 3
+            or (len(low.parts) == 3 and (low.name == "skill.md" or low.suffix == ".py"))):
+        raise refuse("covers a skill's directory or guard files (SKILL.md, *.py); "
+                     "name a subdirectory such as skills/<name>/notes")
+    for protected in _PROTECTED_FILES:
+        if PurePosixPath(protected).is_relative_to(low):
+            raise refuse(f"covers {protected}")
+    if reason := protected_write_target(rel / "_", workspace):
+        if reason not in ("policy_file", "control_file", "skill_guard"):
+            raise refuse(f"is protected ({reason})")
+    # No part of it may be a symlink: the grant would reach where it leads.
+    ws_real = workspace.resolve()
+    here = ws_real
+    for part in rel.parts:
+        here = here / part
+        if here.is_symlink():
+            raise refuse(f"passes through a symlink ({here.relative_to(ws_real)})")
+        if not here.exists():
+            break
+    target = ws_real / rel
+    if target.is_file():
+        raise refuse("is a file; write prefixes are directories")
+    if not target.is_dir():
+        return
+    seen = 0
+    for root, dirs, files in os.walk(target, followlinks=False):
+        for name in dirs + files:
+            seen += 1
+            if seen > _SCAN_LIMIT:
+                raise refuse(f"covers more than {_SCAN_LIMIT} entries; name a narrower directory")
+            full = Path(root) / name
+            sub = PurePosixPath(full.relative_to(ws_real).as_posix())
+            if full.is_symlink():
+                raise refuse(f"holds a symlink ({sub})")
+            if name in files and (reason := protected_write_target(sub, workspace)):
+                raise refuse(f"covers {sub} ({reason})")
 
 
 def read_skill_allows(name: str, workspace: Path) -> SkillAllows:
@@ -124,13 +256,16 @@ def read_skill_allows(name: str, workspace: Path) -> SkillAllows:
 
     Raises :class:`SkillAllowsError` when the skill is missing, declares no
     ``allows`` (write ``allows: {}`` to say "nothing"), or declares one that
-    is malformed or names a script that does not exist.
+    is malformed or crosses the rules in the module docstring.
     """
     if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
         raise SkillAllowsError(f"skill name {name!r} must be one directory under skills/")
     skill_dir = PurePosixPath("skills") / name
-    skill_md = workspace / skill_dir / "SKILL.md"
     where = f"skill {name!r}"
+    skill_real = _real_skill_dir(skill_dir, workspace, where)
+    skill_md = skill_real / "SKILL.md"
+    if skill_md.is_symlink():
+        raise SkillAllowsError(f"{where}: {skill_dir}/SKILL.md must not be a symlink")
     try:
         text = skill_md.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -143,7 +278,9 @@ def read_skill_allows(name: str, workspace: Path) -> SkillAllows:
             f"{where} declares no allows (write `allows: {{}}` if the activity needs nothing)")
     raw = front["allows"]
     if raw is None:
-        raw = {}
+        # `allows:` with no value is a half-written table, not "nothing" (#714 N2).
+        raise SkillAllowsError(
+            f"{where} allows has no value (write `allows: {{}}` if the activity needs nothing)")
     if not isinstance(raw, dict):
         raise SkillAllowsError(f"{where} allows must be a table of {', '.join(ALLOWS_KEYS)}")
     unknown = sorted(str(k) for k in raw if k not in ALLOWS_KEYS)
@@ -153,25 +290,40 @@ def read_skill_allows(name: str, workspace: Path) -> SkillAllows:
 
     exec_ = _str_list(raw.get("exec"), "exec", where)
     for shape in exec_:
-        _check_exec(shape, skill_dir, workspace, where)
+        _check_exec(shape, skill_dir, skill_real, workspace, where)
     write = _str_list(raw.get("write"), "write", where)
     for path in write:
-        if _plain_prefix(path) is None:
-            raise SkillAllowsError(
-                f"{where} allows.write {path!r} must be a plain path inside the workspace")
+        _check_write(path, workspace, where)
     tools = _str_list(raw.get("tools"), "tools", where)
     for tool in tools:
         if any(c in _WILDCARD_CHARS for c in tool) or any(c.isspace() for c in tool):
             raise SkillAllowsError(f"{where} allows.tools {tool!r} must be an exact tool name")
+        if tool in SCOPED_TOOLS:
+            raise SkillAllowsError(
+                f"{where} allows.tools {tool!r} is a scoped tool; list its scripts in "
+                "allows.exec or its directories in allows.write instead")
     return SkillAllows(exec=tuple(exec_), write=tuple(write), tools=tuple(tools))
+
+
+def harden(grants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """*grants* with every exec grant denying absolute paths (#714 N3), so a
+    shape never covers ``pet.py status /etc/passwd``."""
+    out = []
+    for g in grants:
+        if g.get("resource") == "exec":
+            g = {**g, "constraints": {**(g.get("constraints") or {}), **_EXEC_CONSTRAINTS}}
+        out.append(g)
+    return out
 
 
 def allows_permission_fields(allows: SkillAllows, source_name: str) -> dict[str, Any]:
     """*allows* in the existing allowed_tools / scope_grants forms."""
     grants = [{"resource": "exec", "action": "execute", "selector": s} for s in allows.exec]
     grants += [{"resource": "path", "action": "write", "selector": p} for p in allows.write]
-    return parse_permission_fields(
+    fields = parse_permission_fields(
         {"allowed_tools": list(allows.tools), "scope_grants": grants}, source_name)
+    fields["scope_grants"] = harden(fields["scope_grants"])
+    return fields
 
 
 def widening(allows: SkillAllows, tools: list[str] | tuple[str, ...],
@@ -181,7 +333,8 @@ def widening(allows: SkillAllows, tools: list[str] | tuple[str, ...],
     A tool must be one ``allows.tools`` names; an exec grant's shape must
     start with an ``allows.exec`` shape; a path write grant must sit under an
     ``allows.write`` prefix. Constraints only ever narrow a grant, so they
-    are kept as written. Anything else widens.
+    are kept as written (and exec grants are hardened by the caller).
+    Anything else widens.
     """
     out = [f"tool {t}" for t in tools if t not in allows.tools]
     shapes = [simple_argv(s) for s in allows.exec]

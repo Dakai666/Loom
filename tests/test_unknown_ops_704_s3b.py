@@ -188,9 +188,9 @@ async def test_miji_wake_runs_pet_py_only_with_its_grant(tmp_path, ledger, with_
     skill = tmp_path / "skills/pet-cat"
     skill.mkdir(parents=True)
     (skill / "pet.py").write_text("")
-    allows = ("  exec: [python3 skills/pet-cat/pet.py]\n" if with_grant else "")
-    (skill / "SKILL.md").write_text(
-        "---\nname: pet-cat\nallows:\n  tools: [run_bash]\n" + allows + "---\n")
+    # #714 N1: run_bash is never an allows tool; the exec shape is the grant.
+    allows = ("  exec: [python3 skills/pet-cat/pet.py]\n" if with_grant else "  tools: []\n")
+    (skill / "SKILL.md").write_text("---\nname: pet-cat\nallows:\n" + allows + "---\n")
     entry = {"name": "miji", "command": ["python3", "skills/pet-cat/pet.py", "peek"],
              "skill": "pet-cat"}
     tools, grants = wake_permissions([_parse_furniture(entry, 0, tmp_path)], {"miji"})
@@ -284,7 +284,10 @@ class TestEverydayArgsMeetHardGuardrails:
         assert r.success and env.confirm.await_count == 0
 
 
-def test_room_load_reports_miji_without_grant(tmp_path, caplog):
+def test_room_load_rejects_run_bash_declared_without_exec(tmp_path):
+    """#707 warned on run_bash declared with no exec grant; since #708 a
+    skill cannot declare run_bash at all (#714 N1), and the furniture is
+    rejected loudly instead."""
     from loom.autonomy.circadian.room import load_room
     p = tmp_path / "room.toml"
     p.write_text('[room]\nenabled = true\n\n[[furniture]]\nname = "miji"\n'
@@ -292,9 +295,9 @@ def test_room_load_reports_miji_without_grant(tmp_path, caplog):
     (tmp_path / "skills/pet-cat").mkdir(parents=True)
     (tmp_path / "skills/pet-cat/SKILL.md").write_text(
         "---\nname: pet-cat\nallows:\n  tools: [run_bash]\n---\n")
-    with caplog.at_level(logging.WARNING):
-        load_room(p, workspace=tmp_path)
-    assert any("miji" in r.message and "exec" in r.message for r in caplog.records)
+    cfg = load_room(p, workspace=tmp_path)
+    assert cfg.furniture == ()
+    assert any("miji" in e and "run_bash" in e for e in cfg.errors)
 
 
 # ---------------------------------------------------------------------------

@@ -149,6 +149,7 @@ def _skill_boundary(
         SkillAllowsError,
         allows_permission_fields,
         read_skill_allows,
+        harden,
         widening,
     )
 
@@ -185,6 +186,8 @@ def _skill_boundary(
             raise FurnitureRejected(
                 f"furniture {name!r} widens skill {skill!r} allows with {', '.join(wider)}; "
                 "a furniture may only narrow its skill")
+    # #714 N3: a narrowed exec shape denies absolute paths like the skill's.
+    grants = harden(list(grants))
     # #707 re-review: a declared shell with no exec grant would skip
     # silently at wake; say so at load.
     from loom.autonomy.permission_fields import report_exec_without_grant
@@ -603,8 +606,9 @@ async def room_tick(
     one chime, then emit each new signal for subscribers."""
     cfg = config if config is not None else load_room()
     tz = circadian.timezone
-    if cfg.enabled:
-        _report_rejected(cfg.errors, now, tz)
+    # A disabled (or removed) room forgets what it reported, so the same
+    # broken furniture is reported again when it comes back (#714 N4).
+    _report_rejected(cfg.errors if cfg.enabled else (), now, tz)
     if not cfg.enabled or not cfg.furniture:
         return
     emits: list[dict[str, Any]] = []
@@ -726,11 +730,13 @@ def register_room(daemon: Any, circadian: Any, path: Path | None = None) -> bool
     cfg = load_room(path)
     if not cfg.enabled:
         return False
-    for err in cfg.errors:
-        logger.error("[room] furniture rejected: %s", err)
+    # Reported once: the first tick sees these as already reported (#714 N4).
+    _report_rejected(cfg.errors, datetime.now(timezone.utc), circadian.timezone)
 
     async def _tick_handler(_trigger: Any, _context: dict[str, Any]) -> None:
-        await room_tick(daemon, circadian, datetime.now(timezone.utc))
+        # Tick the file that was registered (#714 N4); None reads the default.
+        await room_tick(daemon, circadian, datetime.now(timezone.utc),
+                        config=load_room(path) if path is not None else None)
 
     daemon.evaluator.register(CronTrigger(
         name=TICK_TRIGGER,

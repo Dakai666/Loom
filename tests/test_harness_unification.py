@@ -71,14 +71,14 @@ def _make_registry(*tool_defs):
     return reg
 
 
-async def _run_middleware(perm, call, confirm_result=True, registry=None):
+async def _run_middleware(perm, call, confirm_result=True, registry=None, workspace=None):
     confirm_fn = AsyncMock(return_value=confirm_result)
     handler = AsyncMock(return_value=_ok_result(call))
     import tempfile
     from pathlib import Path
     mw = BlastRadiusMiddleware(
         perm_ctx=perm, confirm_fn=confirm_fn, registry=registry,
-        workspace=Path(tempfile.mkdtemp()),
+        workspace=workspace or Path(tempfile.mkdtemp()),
     )
     result = await mw.process(call, handler)
     return result, confirm_fn, handler
@@ -205,8 +205,10 @@ class TestOriginAwareScopeAwarePath:
             "write_file", {"path": "src/x.py"},
             caps=ToolCapability.MUTATES, origin="autonomy",
         )
+        # A granted write meets the hard boundary (#714 B4): the grant must
+        # sit inside the middleware's workspace, as a real session's does.
         result, confirm_fn, handler = await _run_middleware(
-            perm, call, registry=reg,
+            perm, call, registry=reg, workspace=_WORKSPACE,
         )
 
         assert result.success
