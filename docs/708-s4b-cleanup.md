@@ -64,9 +64,9 @@ legacy_reason = "S1 allows 不表達 loom CLI exec 與 path:read（outputs）"
 legacy_reason = "S1 allows 不表達 loom CLI exec 與 path:read（autonomy/circadian/dreams）"
 ```
 
-### 3. Live `autonomy/circadian/rhythm.toml` — 項目 5（3 筆刻意保留 legacy 標記）
+### 3. Live `autonomy/circadian/rhythm.toml` — 項目 5（3 筆刻意保留 legacy 標記）＋項目 6（`shared_learning` 當日晨報讀取路徑**必要同步遷移**）
 
-在既有 `shared_learning`、`curiosity`、`deep_weave` 三個 `[[anchors]]` table 各自補上一行 `legacy_reason`（不改 `meaning`、`time`、`public`、`allowed_tools`、`scope_grants`）：
+1. **項目 5（legacy 標記）**：在既有 `shared_learning`、`curiosity`、`deep_weave` 三個 `[[anchors]]` table 各自補上一行 `legacy_reason`（不改 `time`、`public`、`allowed_tools`、`scope_grants`；`curiosity` 與 `deep_weave` 的 `meaning` 原樣不動）：
 
 ```toml
 # 加在 [[anchors]] name = "shared_learning" 內：
@@ -79,7 +79,18 @@ legacy_reason = "開放式好奇心探索時段，無固定技能腳本；保留
 legacy_reason = "深度研究時段，無固定技能腳本；保留 outputs 寫入邊界"
 ```
 
-> 註：`shared_learning` 的 `meaning` 若要讀今日晨報，可一併把範例路徑從 `news/YYYY-MM-DD/daily_briefing.md` 更新為 `news/current/YYYY-MM-DD/daily_briefing.md`（它既有的 `path:write` selector `news` 仍涵蓋 `news/current`，既有行為不受影響）。
+2. **項目 6（必要同步遷移，非可選）**：因 08:00 `morning_briefing` 改寫入 `news/current/YYYY-MM-DD/`，09:00 `shared_learning` 的 `meaning` 中**兩處**當日晨報讀取路徑**必須同步更新**（否則 09:00 會找不到 08:00 剛產出的晨報）。請僅替換以下兩處當日路徑，**完整保留 `shared_learning` 其餘所有敘事與 `legacy_reason`**：
+
+```diff
+# [[anchors]] name = "shared_learning" 的 meaning 內精確替換兩處當日路徑：
+- ⚠️ 晨報已由 08:00 的 morning_briefing 產出並投遞（news/YYYY-MM-DD/ + Discord forum）。
++ ⚠️ 晨報已由 08:00 的 morning_briefing 產出並投遞（news/current/YYYY-MM-DD/ + Discord forum）。
+
+- 讀晨報用 `read_file`（例：`news/YYYY-MM-DD/daily_briefing.md`）或 `list_dir`，不用 run_bash——
++ 讀晨報用 `read_file`（例：`news/current/YYYY-MM-DD/daily_briefing.md`）或 `list_dir`，不用 run_bash——
+```
+
+> **邊界與相容說明**：此步驟**不需搬歷史、不需擴權**——既有 `shared_learning` 的 `read_file`（SAFE）無需新增任何權限，原 `path:write` selector `news` 亦已涵蓋 `news/current/`；歷史舊日期新聞照舊留在原地，依然可直接從 `news/YYYY-MM-DD/...`（及後續歸檔的 `news/archive/YYYY-MM-DD/...`）讀得到。
 
 ### 4. Live `skills/news-aggregator/` — 項目 6（同步 tracked 更新）
 
