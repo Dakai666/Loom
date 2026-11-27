@@ -45,11 +45,7 @@ Contracts worth knowing before editing:
 Awake means: inside active hours, today's daily session not closed, and —
 when the rhythm table has a ``dawn`` anchor — dawn already delivered today.
 The thread opens at ``start`` but she wakes at dawn; the room doesn't speak
-first. ``RoomState.activity`` is the override slot a later ``room`` tool
-will write (``focused`` / ``tending``); until then an awake agent is ``free``.
-
-Known gaps (spec §5.5): the chime doesn't carry the current activity or
-today's Program yet — Program has no structured source until §6 lands.
+first.
 """
 
 from __future__ import annotations
@@ -92,7 +88,6 @@ NEXT_CHECK_MAX = timedelta(hours=12)  # a furniture is re-peeked at least this o
 SEEN_CAP = 500
 
 PRIORITIES = ("urgent", "normal", "ambient")
-ACTIVITIES = ("sleeping", "free", "focused", "tending")
 
 
 # ---------------------------------------------------------------------------
@@ -426,8 +421,6 @@ def room_state_path() -> Path:
 @dataclass
 class RoomState:
     date: str = ""
-    activity: str | None = None
-    """Declared activity override; ``None`` ⇒ ``free`` while awake."""
     wakes_today: int = 0
     last_wake_at: str | None = None
     queue: list[dict[str, Any]] = field(default_factory=list)
@@ -441,8 +434,8 @@ class RoomState:
     @classmethod
     def load(cls) -> "RoomState":
         """Read ``room.json``. Each field is type-checked and falls back to
-        its default on its own, so one bad field (hand edit, a future writer)
-        never kills every tick."""
+        its default on its own (unknown legacy keys such as ``activity`` are
+        ignored), so one bad or retired field never kills every tick."""
         p = room_state_path()
         if not p.exists():
             return cls()
@@ -461,7 +454,6 @@ class RoomState:
         queue, seen, nxt = raw.get("queue"), raw.get("seen"), raw.get("next_check")
         return cls(
             date=raw.get("date") if isinstance(raw.get("date"), str) else "",
-            activity=opt_str(raw.get("activity")),
             wakes_today=wakes if isinstance(wakes, int) and not isinstance(wakes, bool) else 0,
             last_wake_at=opt_str(raw.get("last_wake_at")),
             queue=[q for q in queue if isinstance(q, dict)] if isinstance(queue, list) else [],
@@ -511,29 +503,19 @@ def _awake(now: datetime, circadian: Any) -> bool:
     return True
 
 
-def current_activity(state: RoomState, now: datetime, circadian: Any) -> str:
-    if not _awake(now, circadian):
-        return "sleeping"
-    if state.activity in ACTIVITIES and state.activity != "sleeping":
-        return state.activity
-    return "free"
-
-
 def decide(
-    priority: str, activity: str, state: RoomState, config: RoomConfig, now: datetime
+    priority: str, awake: bool, state: RoomState, config: RoomConfig, now: datetime
 ) -> str:
-    """The wake matrix (spec §5.1). Returns ``"wake"`` or ``"queue"``.
+    """The wake rule. Returns ``"wake"`` or ``"queue"``.
 
-    urgent  → wakes in every waking activity; bypasses budget and gap
-    normal  → wakes only in ``free``, within budget and min gap
+    urgent  → wakes whenever awake; bypasses budget and gap
+    normal  → wakes when awake, within budget and min gap
     ambient → never wakes on its own
     """
-    if activity == "sleeping" or priority not in ("urgent", "normal"):
+    if not awake or priority not in ("urgent", "normal"):
         return "queue"
     if priority == "urgent":
         return "wake"
-    if activity != "free":
-        return "queue"
     if state.wakes_today >= config.daily_budget:
         return "queue"
     last = _parse_dt(state.last_wake_at)
@@ -589,8 +571,7 @@ def _log(event: str, now: datetime, tz: str, **fields: Any) -> None:
 # Tick
 # ---------------------------------------------------------------------------
 
-# In-process only: the daemon is room.json's single writer today. A second
-# writer (the planned ``room`` tool, a CLI) must also take ``state_lock()``.
+# In-process only: the daemon is room.json's single writer.
 _tick_lock: asyncio.Lock | None = None
 
 
@@ -662,13 +643,13 @@ async def room_tick(
             else:
                 kept.append(q)
 
-        activity = current_activity(state, now, circadian)
+        awake = _awake(now, circadian)
 
         # Everything still queued is decided again under today's conditions.
         woken: list[dict[str, Any]] = []
         state.queue = []
         for q in kept:
-            if decide(q.get("priority", "ambient"), activity, state, cfg, now) == "wake":
+            if decide(q.get("priority", "ambient"), awake, state, cfg, now) == "wake":
                 woken.append(q)
             else:
                 state.queue.append(q)
@@ -677,7 +658,7 @@ async def room_tick(
         # own their key; only successful delivery belongs in delivered dedupe.
         state.seen = [key for key in state.seen if key not in pending_keys]
         if woken:
-            _log("redecide", now, tz, activity=activity, woken=[q.get("id") for q in woken])
+            _log("redecide", now, tz, awake=awake, woken=[q.get("id") for q in woken])
 
         for f in cfg.furniture:
             due = _parse_dt(state.next_check.get(f.name))
@@ -725,11 +706,11 @@ async def room_tick(
                 if s.dedupe_key in pending_keys:
                     continue
                 pending_keys.add(s.dedupe_key)
-                decision = decide(s.priority, activity, state, cfg, now)
+                decision = decide(s.priority, awake, state, cfg, now)
                 _log("signal", now, tz, source=s.source, id=s.id, key=s.key,
-                     priority=s.priority, activity=activity, decision=decision)
+                     priority=s.priority, awake=awake, decision=decision)
                 emits.append({"source": s.source, "id": s.id, "key": s.key,
-                              "priority": s.priority, "activity": activity,
+                              "priority": s.priority, "awake": awake,
                               "decision": decision})
                 entry = {**asdict(s), "at": now.isoformat()}
                 (woken if decision == "wake" else state.queue).append(entry)

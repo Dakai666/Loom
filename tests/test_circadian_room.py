@@ -6,8 +6,8 @@ Spec: outputs/doc/circadian_room/spec_v0.1.md (+ miji_signal_inventory.md §7).
 The invariants that matter most — written first:
 - furniture is the only source of signals; a signal is woken on at most once
   (dedupe by source + id + key), across ticks and restarts
-- the wake matrix: urgent wakes unless sleeping; normal wakes only in
-  ``free``; ambient never wakes on its own
+- the wake rule: urgent wakes unless sleeping; normal wakes when awake
+  within budget and min gap; ambient never wakes on its own
 - budget + min gap keep normal signals from flooding the thread; urgent
   bypasses both
 - nothing is dropped silently: a signal that doesn't wake is queued, and
@@ -130,35 +130,32 @@ class TestDecide:
     def _state(self, **kw) -> RoomState:
         return RoomState(date="2026-09-23", **kw)
 
-    def test_urgent_wakes_when_awake_in_any_activity(self):
-        for act in ("free", "focused", "tending"):
-            assert decide("urgent", act, self._state(), cfg(), at(14)) == "wake"
+    def test_urgent_wakes_when_awake(self):
+        assert decide("urgent", True, self._state(), cfg(), at(14)) == "wake"
 
     def test_urgent_queues_while_sleeping(self):
-        assert decide("urgent", "sleeping", self._state(), cfg(), at(3)) == "queue"
+        assert decide("urgent", False, self._state(), cfg(), at(3)) == "queue"
 
-    def test_normal_wakes_only_when_free(self):
-        assert decide("normal", "free", self._state(), cfg(), at(14)) == "wake"
-        assert decide("normal", "focused", self._state(), cfg(), at(14)) == "queue"
-        assert decide("normal", "tending", self._state(), cfg(), at(14)) == "queue"
-        assert decide("normal", "sleeping", self._state(), cfg(), at(3)) == "queue"
+    def test_normal_wakes_only_when_awake(self):
+        assert decide("normal", True, self._state(), cfg(), at(14)) == "wake"
+        assert decide("normal", False, self._state(), cfg(), at(3)) == "queue"
 
     def test_ambient_never_wakes(self):
-        for act in ("free", "focused", "sleeping"):
-            assert decide("ambient", act, self._state(), cfg(), at(14)) == "queue"
+        for awake in (True, False):
+            assert decide("ambient", awake, self._state(), cfg(), at(14)) == "queue"
 
     def test_normal_respects_daily_budget(self):
         s = self._state(wakes_today=6)
-        assert decide("normal", "free", s, cfg(daily_budget=6), at(14)) == "queue"
+        assert decide("normal", True, s, cfg(daily_budget=6), at(14)) == "queue"
 
     def test_normal_respects_min_gap(self):
         s = self._state(last_wake_at=at(13, 30).isoformat())
-        assert decide("normal", "free", s, cfg(min_gap_minutes=45), at(14)) == "queue"
-        assert decide("normal", "free", s, cfg(min_gap_minutes=45), at(14, 16)) == "wake"
+        assert decide("normal", True, s, cfg(min_gap_minutes=45), at(14)) == "queue"
+        assert decide("normal", True, s, cfg(min_gap_minutes=45), at(14, 16)) == "wake"
 
     def test_urgent_bypasses_budget_and_gap(self):
         s = self._state(wakes_today=99, last_wake_at=at(13, 59).isoformat())
-        assert decide("urgent", "free", s, cfg(), at(14)) == "wake"
+        assert decide("urgent", True, s, cfg(), at(14)) == "wake"
 
 
 # ---------------------------------------------------------------------------
