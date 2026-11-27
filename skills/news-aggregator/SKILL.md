@@ -14,8 +14,9 @@ precondition_checks:
 allows:
   exec:
     - python3 skills/news-aggregator/scripts/fetch_news.py
+    - python3 skills/news-aggregator/scripts/archive_news.py
   write:
-    - news
+    - news/current
 ---
 
 # 新聞聚合技能（News Aggregator Skill）
@@ -28,17 +29,20 @@ allows:
 
 ```
 Loom/
-├── news/                         ← 新聞報告存放目錄
-│   └── YYYY-MM-DD/              ← 依日期分組
-│       ├── tech_briefing.md        → 科技晨報（Hacker News + GitHub）
-│       ├── international_briefing.md → 國際晨報
-│       ├── medical_briefing.md     → 醫學晨報
-│       ├── astronomy_briefing.md    → 天文晨報
-│       └── daily_briefing.md       → 四合一總摘要（含跨域關聯分析）
+├── news/                         ← 新聞報告根目錄（歷史日期資料夾原樣保留，不刪資料）
+│   ├── current/                  ← 當期晨報工作區（allows.write 邊界，維持近 30 天）
+│   │   └── YYYY-MM-DD/           ← 依日期分組
+│   │       ├── tech_briefing.md          → 科技晨報（Hacker News + GitHub）
+│   │       ├── international_briefing.md → 國際晨報
+│   │       ├── medical_briefing.md       → 醫學晨報
+│   │       ├── astronomy_briefing.md     → 天文晨報
+│   │       └── daily_briefing.md         → 四合一總摘要（含跨域關聯分析）
+│   └── archive/                  ← 超過 30 天之自動歸檔區（由 archive_news.py 搬移，絕不刪除）
 └── skills/news-aggregator/
     ├── SKILL.md                  ← 本技能定義
     └── scripts/
         ├── fetch_news.py         ← 新聞抓取主腳本
+        ├── archive_news.py       ← 舊當期晨報歸檔腳本（news/current → news/archive，只搬不刪）
         ├── rss_parser.py         ← RSS 解析（依賴）+ 來源健康狀態記錄
         ├── opencli_fetch.py      ← CLI 備援抓取
         └── archive-2026-06/      ← 2026-06 的暫存 JSON 殘留（已歸檔，歷史 briefing 仍引用）
@@ -54,8 +58,8 @@ Loom/
 
 ### 步驟 1：建立寫入上下文（先後次序重要）
 
-先 `list_dir("news/")` 建立父目錄上下文；今日目錄若已存在，再列出並讀取既有檔案，避免覆寫。
-今日目錄尚不存在時，使用 `write_file` 寫第一份正式報告（工具會建立父目錄），再列出今日目錄確認。
+先 `list_dir("news/current/")` 建立父目錄上下文；今日目錄 `news/current/YYYY-MM-DD/` 若已存在，再列出並讀取既有檔案，避免覆寫。
+今日目錄尚不存在時，使用 `write_file` 寫第一份正式報告至 `news/current/YYYY-MM-DD/`（工具會建立父目錄），再列出今日目錄確認。
 第一次寫新檔前，先對該路徑 `probe_file`，或先 `read_file` 一次（失敗也會標記）；`list_dir` 日期目錄不算對檔案的探測，guard 仍會擋。
 不要另下 shell 建目錄；guard 若拒絕就回報，不繞過。
 
@@ -126,7 +130,7 @@ python3 skills/news-aggregator/scripts/fetch_news.py --source hackernews --no-sa
 ```
 minimax__text_to_image(
   prompt="<為今日四軌晨報寫的一段封面描述>",
-  output_directory="<workspace 絕對路徑>/news/YYYY-MM-DD",
+  output_directory="<workspace 絕對路徑>/news/current/YYYY-MM-DD",
   aspect_ratio="16:9",
 )
 ```
@@ -140,12 +144,12 @@ minimax__text_to_image(
 > （2026-10-25 實測：指定 `news/2026-10-25/` 後，該目錄裡沒有任何圖檔，Desktop 也沒有）。
 > **所以必須自己抓回來**：
 > ```bash
-> curl -sL --max-time 30 -o news/YYYY-MM-DD/cover.jpg "<回傳的 URL>"
+> curl -sL --max-time 30 -o news/current/YYYY-MM-DD/cover.jpg "<回傳的 URL>"
 > ```
-> 抓回來之後，`create_discord_forum_post(..., files=["news/YYYY-MM-DD/cover.jpg"])` 才真的會有配圖。
+> 抓回來之後，`create_discord_forum_post(..., files=["news/current/YYYY-MM-DD/cover.jpg"])` 才真的會有配圖。
 > **只貼 briefing 檔而不抓圖，等於沒配圖。**
 
-> ⚠️ **落點只有一個：`news/YYYY-MM-DD/cover.jpg`**（跟五份 briefing 同目錄，檔名固定 `cover.jpg`）。
+> ⚠️ **落點只有一個：`news/current/YYYY-MM-DD/cover.jpg`**（跟五份 briefing 同目錄，檔名固定 `cover.jpg`）。
 > **不要另開 `outputs/news/`，也不要自取檔名（`quote.jpg` 之類）。**
 > 2026-10-26 08:00 實測：圖被抓到 `outputs/news/2026-10-26/quote.jpg`，dawn 只好事後搬回正確位置。
 > 下載回來的資料其實是 JPEG，就算 URL 結尾是 `.jpeg`／`.png`，也直接存成 `cover.jpg`，不要事後再改名。
@@ -156,21 +160,21 @@ autonomy 跑的時候沒有人類在旁邊看，**所以投遞前自己驗一次
 
 > ⚠️ **用 `list_dir` 驗，不要用 `ls`／`wc`／`stat`。**
 > 這個技能的 `run_bash` 守門（`checks.scripts_only_bash`）只放行兩件事：
-> `mkdir news/YYYY-MM-DD` 與 `curl ... -o news/YYYY-MM-DD/cover.jpg "<url>"`。
+> `mkdir news/current/YYYY-MM-DD` 與 `curl ... -o news/current/YYYY-MM-DD/cover.jpg "<url>"`（亦向後相容舊路徑 `news/YYYY-MM-DD`）。
 > **2026-10-26 實測：`ls -l`、`wc -c` 都被 deny。** 而 `list_dir`／`see_image` 不受這個守門限制
 > （守門只掛在 `run_bash` 上）。
 
 **驗檔兩段式：**
 
-1. **存在性** — `list_dir` 看 `news/YYYY-MM-DD/`，`cover.jpg` 在名單裡才算過。
+1. **存在性** — `list_dir` 看 `news/current/YYYY-MM-DD/`，`cover.jpg` 在名單裡才算過。
    `list_dir` **不顯示檔案大小**，所以它看不出空檔。
-2. **可讀性（可選）** — 對 `news/YYYY-MM-DD/cover.jpg` 呼叫 `see_image`：
+2. **可讀性（可選）** — 對 `news/current/YYYY-MM-DD/cover.jpg` 呼叫 `see_image`：
    **讀得到＝檔案非空且可解碼**（正常是 100 KB 級的 JPEG）；讀不到＝空檔或壞檔，**重抓一次**。
 
 > ⚠️ 用 `see_image` 驗完之後**不要再移動或刪除那個檔案**——框架的檔案型圖片 ref 會在後續 turn 重送檔案本體，
 > 檔案不見會讓 session 整個壞掉（2026-10-26 實例，框架同日已改為降級，但仍以不動為妙）。
 
-驗過再呼叫 `create_discord_forum_post(..., files=["news/YYYY-MM-DD/cover.jpg"])`。
+驗過再呼叫 `create_discord_forum_post(..., files=["news/current/YYYY-MM-DD/cover.jpg"])`。
 
 > ⚠️ **驗不過就不要卡住整份晨報**：圖抓失敗時**照常投遞五份 briefing，只是不帶 `files`**。
 > 配圖是加分項，主體優先——這跟上面「產圖失敗不影響晨報主體」是同一條規律。
@@ -180,8 +184,12 @@ autonomy 跑的時候沒有人類在旁邊看，**所以投遞前自己驗一次
 - **產圖失敗不影響晨報主體**：五份 briefing 照常寫、照常投遞，配圖只是加分。
 - prompt 裡要明寫 `no text, no letters, no numbers, no logos`——產圖模型很容易生出亂碼文字。
 
-### 最後一步：收尾
-整合完成後，呼叫 `unload_skill("news-aggregator")` 釋放技能。
+### 最後一步：歸檔與收尾
+投遞完成後，執行歸檔腳本將 `news/current/` 中超過 30 天的舊日期資料夾搬移至 `news/archive/`（只搬不刪，避免當期目錄累積觸頂 `_SCAN_LIMIT`）：
+```bash
+python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
+```
+接著呼叫 `unload_skill("news-aggregator")` 釋放技能。
 
 ---
 
