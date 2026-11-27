@@ -47,7 +47,7 @@ async def git_log(call: ToolCall) -> ToolResult:
     ...
 ```
 
-實作位置：`loom/extensibility/adapter.py` 的 `AdapterRegistry`。模組層 `_default_registry` 是 sink，session 啟動時 `install_into(self.registry)` 全量灌入。
+實作位置（已於 #708 S4a 退役）：`loom/extensibility/adapter.py` 的 `AdapterRegistry`。模組層 `_default_registry` 是 sink，session 啟動時 `install_into(self.registry)` 全量灌入。 <!-- doc-integrity:ignore — retired in #708 S4a -->
 
 ---
 
@@ -72,7 +72,7 @@ class MyPack(LoomPlugin):
 loom.register_plugin(MyPack())
 ```
 
-實作位置：`loom/extensibility/plugin.py` 的 `LoomPlugin` ABC + `PluginRegistry`。同樣 session 啟動時呼叫 `install_into(self)`，把 tools 進 registry、middleware prepend 到 pipeline、notifier 註冊到 NotificationRouter。
+實作位置（已於 #708 S4a 退役）：`loom/extensibility/plugin.py` 的 `LoomPlugin` ABC + `PluginRegistry`。同樣 session 啟動時呼叫 `install_into(self)`，把 tools 進 registry、middleware prepend 到 pipeline、notifier 註冊到 NotificationRouter。 <!-- doc-integrity:ignore — retired in #708 S4a -->
 
 詳見 [31-Plugin-系統.md](31-Plugin-系統.md)。
 
