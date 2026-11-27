@@ -115,9 +115,45 @@ def _append_dated_entry(
         chunk += f"# {date_str} {header_title}\n\n"
     chunk += f"## {time_str} · {label}\n{body}\n\n"
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(chunk)
+    # S3: this is the sole bounded self-recording operation permitted during
+    # external wakes. Walk/open each directory and the generated date leaf
+    # with O_NOFOLLOW, so a symlink cannot redirect it to policy/other files.
+    import os
+    root = target_dir.absolute()
+    # Both production writers use <workspace>/autonomy/circadian/{journal,
+    # dreams}. Only that configured workspace is trusted: resolving the
+    # complete target would silently follow a hostile link inside it.
+    # Standalone custom directories are caller-configured bases, never tool
+    # arguments; preserve the same boundary at their parent (or cwd).
+    if root.parts[-3:] in (("autonomy", "circadian", "journal"), ("autonomy", "circadian", "dreams")):
+        base = root.parents[2]
+    else:
+        cwd = Path.cwd().absolute()
+        base = cwd if root.is_relative_to(cwd) else root.parent
+    relative = root.relative_to(base)
+    directory = os.open(base.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in relative.parts:
+            try:
+                os.mkdir(part, dir_fd=directory)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o600, dir_fd=directory)
+        try:
+            import stat
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError("journal target must be a single-link regular file")
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as fh:
+                fh.write(chunk)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
     return path
 
 
@@ -202,10 +238,10 @@ def make_journal_append_tool(
 
         try:
             path = _append_dated_entry(target_dir, now, label, body)
-        except OSError as exc:
+        except OSError:
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name, success=False,
-                error=f"could not write journal entry: {exc}",
+                error="journal directory or file is unavailable (links and special files are refused)",
             )
 
         return ToolResult(

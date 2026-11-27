@@ -645,6 +645,7 @@ class TestChimePermissions:
             intent="hi",
             fired_at=datetime.now(timezone.utc),
             target={"type": "discord_thread", "id": "111"},
+            input_trust="local",  # explicit operator schedule boundary
             allowed_tools=("write_file", "memorize"),
             scope_grants=(
                 {"resource": "path", "action": "write", "selector": "news/*"},
@@ -706,6 +707,7 @@ class TestChimePermissions:
             intent="hi",
             fired_at=datetime.now(timezone.utc),
             target={"type": "discord_thread", "id": "111"},
+            input_trust="local",  # explicit operator schedule boundary
             allowed_tools=("write_file",),
             scope_grants=(
                 {"resource": "path", "action": "write", "selector": "news/*"},

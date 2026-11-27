@@ -95,7 +95,7 @@ def _fresh_room_reports(tmp_path):
 
 
 MIJI = (
-    '[[furniture]]\nname = "miji"\nlabel = "喵吉"\nskill = "pet-cat"\n'
+    '[[furniture]]\ninput_trust = "local"\nname = "miji"\nlabel = "喵吉"\nskill = "pet-cat"\n'
     f'command = ["python3", "skills/pet-cat/pet.py", "peek", "--json"]\n'
 )
 
@@ -309,8 +309,12 @@ class TestFurnitureSkill:
         repo = Path(__file__).resolve().parent.parent
         example = repo / "autonomy/circadian/room.example.toml"
         _pet_skill(tmp_path)
+        weather = tmp_path / "skills/weather"
+        weather.mkdir()
+        (weather / "SKILL.md").write_text((repo / "skills/weather/SKILL.md").read_text())
         cfg = load_room(example, workspace=tmp_path)
-        (miji,) = cfg.furniture
+        miji, window = cfg.furniture
+        assert window.input_trust == "external"
         assert miji.skill == "pet-cat" and cfg.errors == ()
         import tomllib
         entry = tomllib.loads(example.read_text(encoding="utf-8"))["furniture"][0]

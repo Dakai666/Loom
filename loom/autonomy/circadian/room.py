@@ -112,6 +112,7 @@ class Furniture:
     skill: str | None = None
     allowed_tools: tuple[str, ...] = ()
     scope_grants: tuple[dict[str, Any], ...] = ()
+    input_trust: str = "external"
 
     def priority_for(self, signal_id: str) -> str:
         return self.priorities.get(signal_id, self.default_priority)
@@ -212,7 +213,20 @@ def _parse_furniture(entry: dict[str, Any], idx: int, workspace: Path | None = N
     ):
         raise FurnitureRejected(f"furniture {name!r} has an unknown priority")
     skill = entry.get("skill")
+    trust = entry.get("input_trust", "external")
+    if not isinstance(trust, str) or trust not in ("local", "external"):
+        raise FurnitureRejected(f"furniture {name!r}: input_trust must be local or external")
     tools, grants = _skill_boundary(name, skill, entry, workspace or Path("."))
+    if trust == "external":
+        # Load-time filtering, not rejection: existing omitted fields now
+        # default external and lose privileged activity scopes. Unknown tool
+        # effects cannot be verified at config load, so retain only the
+        # known first-party implementations; runtime checks identity again.
+        from loom.autonomy.input_trust import EXTERNAL_TOOLS
+        filtered = tuple(t for t in tools if t in EXTERNAL_TOOLS)
+        if filtered != tools or grants:
+            logger.warning("[room] external furniture %r: filtered exec/write/unverified tools", name)
+        tools, grants = filtered, ()
     return Furniture(
         name=name,
         label=str(entry.get("label", name)),
@@ -222,6 +236,7 @@ def _parse_furniture(entry: dict[str, Any], idx: int, workspace: Path | None = N
         skill=skill,
         allowed_tools=tools,
         scope_grants=grants,
+        input_trust=trust,
     )
 
 
@@ -234,6 +249,9 @@ def wake_permissions(
     grants: list[dict[str, Any]] = []
     for f in woke:
         grants.extend(g for g in f.scope_grants if g not in grants)
+    if any(f.input_trust != "local" for f in woke) or sources - {f.name for f in woke}:
+        from loom.autonomy.input_trust import EXTERNAL_TOOLS
+        return tuple(t for t in tools if t in EXTERNAL_TOOLS), ()
     return tools, tuple(grants)
 
 
@@ -302,6 +320,8 @@ class Signal:
     key: str
     text: str
     priority: str
+    input_trust: str = "external"
+    weather: dict[str, Any] | None = None
 
     @property
     def dedupe_key(self) -> str:
@@ -330,6 +350,11 @@ def parse_furniture_output(
         return [], None
     if not isinstance(data, dict):
         return [], None
+    if "weather" in data:
+        from loom.weather import validate_snapshot
+        snapshot = validate_snapshot(data["weather"])
+        return [Signal(furniture.name, "_weather", "observation", "", furniture.default_priority,
+                       furniture.input_trust, snapshot)], None
     signals: list[Signal] = []
     items = data.get("signals")
     for item in items if isinstance(items, list) else []:
@@ -345,6 +370,7 @@ def parse_furniture_output(
             key=key,
             text=str(item.get("text", "")).strip(),
             priority=furniture.priority_for(sid),
+            input_trust=furniture.input_trust,
         ))
     return signals, _parse_dt(data.get("next_signal_at"))
 
@@ -407,6 +433,10 @@ class RoomState:
     queue: list[dict[str, Any]] = field(default_factory=list)
     seen: list[str] = field(default_factory=list)
     next_check: dict[str, str] = field(default_factory=dict)
+    # The room daemon is the single writer. Window peek never reads/writes
+    # this file; restart retains baseline, first observation is quiet.
+    weather: dict[str, dict[str, Any]] = field(default_factory=dict)
+    prefer_local: bool = False
 
     @classmethod
     def load(cls) -> "RoomState":
@@ -436,6 +466,9 @@ class RoomState:
             last_wake_at=opt_str(raw.get("last_wake_at")),
             queue=[q for q in queue if isinstance(q, dict)] if isinstance(queue, list) else [],
             seen=[s for s in seen if isinstance(s, str)] if isinstance(seen, list) else [],
+            prefer_local=raw.get("prefer_local") is True,
+            weather={k: v for k, v in raw.get("weather", {}).items() if isinstance(k, str) and isinstance(v, dict)}
+                    if isinstance(raw.get("weather"), dict) else {},
             next_check=(
                 {k: v for k, v in nxt.items() if isinstance(v, str)}
                 if isinstance(nxt, dict) else {}
@@ -639,6 +672,10 @@ async def room_tick(
                 woken.append(q)
             else:
                 state.queue.append(q)
+        pending_keys = {f"{q.get('source')}:{q.get('id')}:{q.get('key')}" for q in kept}
+        # Older room state marked an enqueue as seen. Pending entries still
+        # own their key; only successful delivery belongs in delivered dedupe.
+        state.seen = [key for key in state.seen if key not in pending_keys]
         if woken:
             _log("redecide", now, tz, activity=activity, woken=[q.get("id") for q in woken])
 
@@ -659,11 +696,35 @@ async def room_tick(
                 state.next_check.pop(f.name, None)
             dropped = len(signals) - MAX_SIGNALS_PER_PEEK
             signals = signals[:MAX_SIGNALS_PER_PEEK]
+            observed = []
+            for s in signals:
+                if s.weather is None:
+                    observed.append(s)
+                    continue
+                from loom.weather import validate_snapshot, window_changes
+                snapshot = validate_snapshot(s.weather)
+                previous = state.weather.get(f.name)
+                # Old/replayed/future data never becomes a live signal.
+                at = _parse_dt(snapshot.get("at"))
+                if at is None or not timedelta(0) <= now - at <= timedelta(hours=2):
+                    state.weather.pop(f.name, None)
+                    continue
+                for change in window_changes(snapshot, previous):
+                    observed.append(Signal(f.name, change["id"], change["key"], change["text"],
+                                           f.priority_for(change["id"]), f.input_trust))
+                old_at = _parse_dt((previous or {}).get("at"))
+                if old_at is None or at >= old_at:
+                    state.weather[f.name] = snapshot
+            signals = observed
             _log("peek", now, tz, source=f.name, count=len(signals),
                  dropped=max(0, dropped), next_check=state.next_check.get(f.name))
             for s in signals:
-                if not _touch_seen(state, s.dedupe_key):
+                if s.dedupe_key in state.seen:
+                    _touch_seen(state, s.dedupe_key)
                     continue
+                if s.dedupe_key in pending_keys:
+                    continue
+                pending_keys.add(s.dedupe_key)
                 decision = decide(s.priority, activity, state, cfg, now)
                 _log("signal", now, tz, source=s.source, id=s.id, key=s.key,
                      priority=s.priority, activity=activity, decision=decision)
@@ -676,9 +737,29 @@ async def room_tick(
 
         if woken:
             labels = {f.name: f.label for f in cfg.furniture}
-            merged = list(state.queue)
+            by_name = {f.name: f for f in cfg.furniture}
+            def is_external(entry):
+                f = by_name.get(entry.get("source"))
+                return (entry.get("input_trust", "external") != "local"
+                        or f is None or f.input_trust != "local")
+            # Select only among cohorts with an actually eligible waker.
+            # Ambient never wakes alone. Preserve urgent priority, otherwise
+            # external first, then a persisted turn for deferred local work.
+            eligible = {is_external(s) for s in woken}
+            urgent = {is_external(s) for s in woken if s.get("priority") == "urgent"}
+            candidates = urgent or eligible
+            external = (not (state.prefer_local and False in candidates)
+                        if len(candidates) == 2 else next(iter(candidates)))
+            deferred = [s for s in woken + state.queue if is_external(s) != external]
+            deferred_local = any(not is_external(s) for s in woken) and external
+            woken = [s for s in woken if is_external(s) == external]
+            merged = [s for s in state.queue if is_external(s) == external]
+            state.queue = deferred
             sources = {s.get("source") for s in woken} | {s.get("source") for s in merged}
             tools, grants = wake_permissions(cfg.furniture, sources)
+            if external:
+                from loom.autonomy.input_trust import EXTERNAL_TOOLS
+                tools, grants = tuple(t for t in tools if t in EXTERNAL_TOOLS), ()
             # Unique per wake: the bot dedupes pending chimes by name
             # (latest wins), which would silently swallow an earlier room
             # wake still waiting behind a user turn.
@@ -690,6 +771,7 @@ async def room_tick(
                 target={"type": "circadian_today", "fallback": "skip"},
                 allowed_tools=tools,
                 scope_grants=grants,
+                input_trust="external" if external else "local",
             )
             try:
                 delivered = bool(await daemon.deliver_chime(req))
@@ -704,9 +786,12 @@ async def room_tick(
                 if any(s.get("priority") != "urgent" for s in woken):
                     state.wakes_today += 1
                 state.last_wake_at = now.isoformat()
-                state.queue = []
+                for s in woken + merged:
+                    _touch_seen(state, f"{s.get('source')}:{s.get('id')}:{s.get('key')}")
+                state.seen = state.seen[-SEEN_CAP:]
+                state.prefer_local = deferred_local
             else:
-                state.queue = woken + state.queue
+                state.queue = woken + merged + state.queue
 
         state.save()
 

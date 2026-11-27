@@ -157,6 +157,7 @@ async def test_general_declarations_survive_migration_without_becoming_skill_gra
         '{resource="path",action="write",selector="news"}]\n')
     item = load(config(env.ws, kind, boundary + 'allowed_tools=' + declarations + '\n'), kind)[0]
     req = ChimeRequest(schedule_name="activity", intent="Synthetic", fired_at=datetime.now(timezone.utc),
+        input_trust="local",  # synthetic operator anchor/schedule above
         allowed_tools=tuple(fields(item, "allowed_tools")), scope_grants=tuple(fields(item, "scope_grants")))
     apply(env, req)
     for name, args, caps in [
@@ -285,6 +286,7 @@ async def test_general_media_cannot_hide_a_path_expansion_behind_new_network_eff
     caps = ToolCapability.NETWORK | ToolCapability.MUTATES
     _register(env, "image_generate", resolver=_make_openai_image_scope_resolver(env.ws), caps=caps)
     apply(env, ChimeRequest(schedule_name="news", intent="Synthetic", fired_at=datetime.now(timezone.utc),
+        input_trust="local",  # synthetic operator news schedule
                            allowed_tools=tuple(item["allowed_tools"]), scope_grants=tuple(item["scope_grants"])))
     assert (await _call(env, "image_generate", {"prompt": "cat", "output_path": "news/cat.png"}, caps=caps)).success
     out = await _call(env, "image_generate", {"prompt": "cat", "output_path": "outputs/cat.png"}, caps=caps)
