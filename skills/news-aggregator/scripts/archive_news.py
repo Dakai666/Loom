@@ -4,23 +4,32 @@ Design invariants (#708 S4b):
 - Move only, NEVER delete any briefing or overwrite an existing archive folder.
 - Workspace root is derived from this script's location (no --workspace/--src/--dst
   CLI flags) so an unattended exec prefix grant cannot redirect moves elsewhere.
-- Never follow symlinks: symlinked news/current/archive roots abort with error;
-  symlinked date entries or date entries containing any symlink are skipped.
+- Never follow symlinks: parent directories are pinned via O_DIRECTORY | O_NOFOLLOW
+  fds verified with samestat; symlinked roots abort with ValueError and symlinked
+  date entries (or entries containing symlinks) are skipped.
+- Atomic no-replace rename (macOS renameatx_np with RENAME_EXCL; Linux renameat2
+  with RENAME_NOREPLACE) prevents overwriting concurrent files or empty dirs.
 - Keeps the active ``news/current/`` prefix well below ``skill_allows._SCAN_LIMIT``
   (2,000 entries) and isolated from Finder ``.DS_Store`` files in ``news/`` or
   ``news/archive/`` without relaxing any security check.
 """
 
 import argparse
+import ctypes
+import errno
 import json
 import os
 import re
+import stat
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
 _DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DIR_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_RENAME_EXCL = 0x00000004  # macOS <stdio.h> RENAME_EXCL
+_RENAME_NOREPLACE = 1      # Linux <linux/fs.h> RENAME_NOREPLACE
 
 
 @dataclass
@@ -42,6 +51,68 @@ def _check_workspace_dir(path: Path, ws_real: Path, label: str) -> None:
         raise ValueError(f"{label} escapes workspace: {path}")
     if path.exists() and not path.is_dir():
         raise ValueError(f"{label} must be a directory: {path}")
+
+
+def _open_dir_nofollow(parent_fd: int, name: str, expected_path: Path, label: str) -> int:
+    """Open child directory *name* relative to *parent_fd* without following symlinks,
+    verifying its inode matches *expected_path* via samestat."""
+    try:
+        fd = os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"{label} must not be a symlink: {expected_path}") from exc
+        raise
+    try:
+        fd_st = os.fstat(fd)
+        path_st = os.stat(expected_path, follow_symlinks=False)
+        if not stat.S_ISDIR(fd_st.st_mode) or not os.path.samestat(fd_st, path_st):
+            raise ValueError(f"{label} changed or resolved outside expected path: {expected_path}")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _rename_no_replace(src_fd: int, dst_fd: int, name: str) -> None:
+    """Atomically rename *name* from *src_fd* to *dst_fd* without replacing any target
+    (including an empty directory)."""
+    if "/" in name or name in ("", ".", ".."):
+        raise ValueError(f"invalid entry name: {name!r}")
+    name_b = os.fsencode(name)
+
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renameatx_np
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        rc = fn(src_fd, name_b, dst_fd, name_b, _RENAME_EXCL)
+        if rc != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err), name)
+        return
+
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = getattr(libc, "renameat2", None)
+        if fn is not None:
+            fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            fn.restype = ctypes.c_int
+            ctypes.set_errno(0)
+            rc = fn(src_fd, name_b, dst_fd, name_b, _RENAME_NOREPLACE)
+            if rc == 0:
+                return
+            err = ctypes.get_errno()
+            if err not in (errno.ENOSYS, errno.EINVAL):
+                raise OSError(err, os.strerror(err), name)
+
+    # Portable fallback when kernel no-replace rename is unavailable.
+    try:
+        os.stat(name, dir_fd=dst_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        os.rename(name, name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+    else:
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), name)
 
 
 def _contains_symlink(directory: Path) -> bool:
@@ -92,32 +163,87 @@ def archive_old_news(
     if not current_dir.exists():
         return result
 
-    for entry in sorted(current_dir.iterdir(), key=lambda p: p.name):
-        name = entry.name
-        if entry.is_symlink():
-            result.skipped.append(f"{name} (symlink)")
-            continue
-        if not entry.is_dir():
-            result.skipped.append(f"{name} (not a directory)")
-            continue
-        entry_date = _parse_date_dir(name)
-        if entry_date is None:
-            result.skipped.append(f"{name} (not YYYY-MM-DD)")
-            continue
-        if entry_date >= cutoff:
-            result.kept.append(name)
-            continue
-        if _contains_symlink(entry):
-            result.skipped.append(f"{name} (contains symlink)")
-            continue
-        dst = archive_dir / name
-        if dst.exists() or dst.is_symlink():
-            result.skipped.append(f"{name} (archive target already exists)")
-            continue
-        if not dry_run:
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            entry.rename(dst)
-        result.moved.append(name)
+    ws_fd = os.open(ws_real, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    news_fd: int | None = None
+    current_fd: int | None = None
+    try:
+        news_fd = _open_dir_nofollow(ws_fd, "news", news_root, "news/")
+        current_fd = _open_dir_nofollow(news_fd, "current", current_dir, "news/current/")
+
+        for name in sorted(os.listdir(current_fd)):
+            try:
+                entry_st = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(entry_st.st_mode):
+                result.skipped.append(f"{name} (symlink)")
+                continue
+            if not stat.S_ISDIR(entry_st.st_mode):
+                result.skipped.append(f"{name} (not a directory)")
+                continue
+            entry_date = _parse_date_dir(name)
+            if entry_date is None:
+                result.skipped.append(f"{name} (not YYYY-MM-DD)")
+                continue
+            if entry_date >= cutoff:
+                result.kept.append(name)
+                continue
+            if _contains_symlink(current_dir / name):
+                result.skipped.append(f"{name} (contains symlink)")
+                continue
+
+            if dry_run:
+                if archive_dir.exists() or archive_dir.is_symlink():
+                    archive_fd = _open_dir_nofollow(news_fd, "archive", archive_dir, "news/archive/")
+                    try:
+                        os.stat(name, dir_fd=archive_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        result.moved.append(name)
+                    else:
+                        result.skipped.append(f"{name} (archive target already exists)")
+                    finally:
+                        os.close(archive_fd)
+                else:
+                    result.moved.append(name)
+                continue
+
+            # Ensure news/ and news/current/ have not been swapped and open
+            # news/archive/ fresh with O_NOFOLLOW right before atomic rename.
+            if not os.path.samestat(
+                os.fstat(news_fd), os.stat("news", dir_fd=ws_fd, follow_symlinks=False)
+            ):
+                raise ValueError(f"news/ changed during archive: {news_root}")
+            if not os.path.samestat(
+                os.fstat(current_fd), os.stat("current", dir_fd=news_fd, follow_symlinks=False)
+            ):
+                raise ValueError(f"news/current/ changed during archive: {current_dir}")
+
+            try:
+                os.mkdir("archive", dir_fd=news_fd)
+            except FileExistsError:
+                pass
+            archive_fd = _open_dir_nofollow(news_fd, "archive", archive_dir, "news/archive/")
+            try:
+                _rename_no_replace(current_fd, archive_fd, name)
+            except FileExistsError:
+                result.skipped.append(f"{name} (archive target already exists)")
+            except OSError as exc:
+                if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                    result.skipped.append(f"{name} (archive target already exists)")
+                elif exc.errno == errno.ELOOP:
+                    result.skipped.append(f"{name} (symlink race refused)")
+                else:
+                    result.skipped.append(f"{name} (rename refused: {exc.strerror or exc})")
+            else:
+                result.moved.append(name)
+            finally:
+                os.close(archive_fd)
+    finally:
+        if current_fd is not None:
+            os.close(current_fd)
+        if news_fd is not None:
+            os.close(news_fd)
+        os.close(ws_fd)
 
     return result
 
