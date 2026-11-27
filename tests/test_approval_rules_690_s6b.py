@@ -233,9 +233,13 @@ class TestMcpSearch:
             ran.append(call.tool_name)
             return ToolResult(call_id=call.id, tool_name=call.tool_name, success=True, output="ok")
 
+        from loom.extensibility.mcp_client import make_mcp_effect_scope_resolver
+
         env.blast._registry.register(ToolDefinition(
             name=MCP_SEARCH, description="", input_schema={}, executor=executor,
-            trust_level=TrustLevel.GUARDED, capabilities=ToolCapability.NETWORK,
+            trust_level=TrustLevel.GUARDED,
+            capabilities=ToolCapability.NETWORK | ToolCapability.READ_PROBE,
+            scope_resolver=make_mcp_effect_scope_resolver("minimax_coding", "public_search"),
         ))
 
         async def run(query: str, origin: str = "discord") -> ToolResult:

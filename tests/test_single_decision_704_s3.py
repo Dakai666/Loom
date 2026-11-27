@@ -186,8 +186,11 @@ class TestDeclarations:
         assert (await _call(env, "spawn_agent", {"task": "x"}, caps=ToolCapability.AGENT_SPAN)).success
 
     async def test_declared_search_with_a_secret_query_skips(self, tmp_path, ledger):
+        from loom.extensibility.mcp_client import make_mcp_effect_scope_resolver
         env = _env(tmp_path, ledger)
-        _register(env, "minimax_coding__web_search")
+        _register(env, "minimax_coding__web_search",
+                  resolver=make_mcp_effect_scope_resolver("minimax_coding", "public_search"),
+                  caps=ToolCapability.NETWORK | ToolCapability.READ_PROBE)
         env.perm.declare("autonomy:x", ["minimax_coding__web_search"], unattended_only=True)
         r = await _call(env, "minimax_coding__web_search", {"query": "api_key sk-proj-abcdefghij"})
         assert _skipped(r)

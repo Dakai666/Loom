@@ -171,6 +171,76 @@ class MCPServerConfig:
     type: str = "stdio"         # stdio | http | sse
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    # Local declarative effect mapping (#708 S4a): remote tool name → closed
+    # effect vocabulary ("public_search" | "media_read"). Never inferred from
+    # remote MCP tool annotations or names; undeclared tools fail closed.
+    tool_effects: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_tool_effects(server_name: str, raw: Any) -> dict[str, str]:
+    """Validate local ``tool_effects`` from loom.toml; invalid entries fail closed."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "mcp_client: server %r has non-table tool_effects %r — ignoring (fail-closed)",
+            server_name, type(raw).__name__,
+        )
+        return {}
+    from loom.core.harness.approval import DECLARED_MCP_EFFECTS
+
+    parsed: dict[str, str] = {}
+    for tool_name, effect in raw.items():
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            logger.warning(
+                "mcp_client: server %r has invalid tool_effects key %r — ignoring",
+                server_name, tool_name,
+            )
+            continue
+        if not isinstance(effect, str) or effect not in DECLARED_MCP_EFFECTS:
+            logger.warning(
+                "mcp_client: server %r tool %r has unknown tool_effect %r "
+                "(allowed: %s) — ignoring (fail-closed)",
+                server_name, tool_name, effect, ", ".join(sorted(DECLARED_MCP_EFFECTS)),
+            )
+            continue
+        parsed[tool_name] = effect
+    return parsed
+
+
+def make_mcp_effect_scope_resolver(server_name: str, effect: str):
+    """Build a scope_resolver for a locally declared MCP tool effect (#708 S4a).
+
+    Raises ``ValueError`` if *effect* is not in ``DECLARED_MCP_EFFECTS``.
+    """
+    from loom.core.harness.approval import DECLARED_EFFECT_KEY, DECLARED_MCP_EFFECTS
+    from loom.core.harness.scope import ScopeRequest, ScopeRequirement
+
+    if effect not in DECLARED_MCP_EFFECTS:
+        raise ValueError(
+            f"Unknown MCP declared effect {effect!r}; "
+            f"expected one of {sorted(DECLARED_MCP_EFFECTS)}"
+        )
+
+    selector = f"mcp:{server_name}"
+
+    def _resolve(call: Any) -> ScopeRequest:
+        return ScopeRequest(
+            tool_name=call.tool_name,
+            capabilities=call.capabilities,
+            requirements=[
+                ScopeRequirement(
+                    resource="network",
+                    action="connect",
+                    selector=selector,
+                    tool_name=call.tool_name,
+                    capabilities=call.capabilities,
+                ),
+            ],
+            metadata={DECLARED_EFFECT_KEY: effect},
+        )
+
+    return _resolve
 
 
 # ${VAR} or ${VAR:-default}
@@ -249,6 +319,7 @@ def load_mcp_server_configs(
                 url=_x(item.get("url", "")),
                 headers={k: _x(v) for k, v in dict(item.get("headers", {})).items()},
                 trust_level=item.get("trust_level", "safe"),
+                tool_effects=_parse_tool_effects(name, item.get("tool_effects")),
             )
         except Exception as exc:
             logger.warning("mcp_client: invalid server config %r — %s", item, exc)
@@ -400,13 +471,31 @@ class LoomMCPClient:
             # Shallow-copy to avoid mutating the MCP-provided schema object.
             schema_dict = dict(schema if isinstance(schema, dict) else schema.model_dump())
 
+            from loom.core.harness.approval import DECLARED_MCP_EFFECTS
             from loom.core.harness.registry import ToolCapability
-            combined = f"{tool_name} {desc}".lower()
-            is_mutating = trust == TrustLevel.CRITICAL or (
-                trust == TrustLevel.GUARDED
-                and any(kw in combined for kw in _MUTATING_KEYWORDS)
+
+            raw_effect = self._cfg.tool_effects.get(tool_name)
+            declared_effect = (
+                raw_effect
+                if isinstance(raw_effect, str)
+                and raw_effect in DECLARED_MCP_EFFECTS
+                and trust != TrustLevel.CRITICAL
+                else None
             )
-            caps = ToolCapability.MUTATES if is_mutating else ToolCapability.NONE
+            scope_resolver = None
+            scope_descriptions: list[str] = []
+            if declared_effect is not None:
+                scope_resolver = make_mcp_effect_scope_resolver(self._cfg.name, declared_effect)
+                scope_descriptions = [f"MCP {declared_effect} via {self._cfg.name}"]
+                caps = ToolCapability.NETWORK | ToolCapability.READ_PROBE
+                is_mutating = False
+            else:
+                combined = f"{tool_name} {desc}".lower()
+                is_mutating = trust == TrustLevel.CRITICAL or (
+                    trust == TrustLevel.GUARDED
+                    and any(kw in combined for kw in _MUTATING_KEYWORDS)
+                )
+                caps = ToolCapability.MUTATES if is_mutating else ToolCapability.NONE
             if is_mutating:
                 props = dict(schema_dict.get("properties") or {})
                 props["justification"] = {
@@ -428,6 +517,8 @@ class LoomMCPClient:
                     input_schema=schema_dict,
                     executor=_executor,
                     tags=["mcp", self._cfg.name],
+                    scope_descriptions=scope_descriptions,
+                    scope_resolver=scope_resolver,
                 )
             )
 
