@@ -41,7 +41,7 @@ class ChimeRequest:
     """The static part of ``intent`` (a phase's rhythm meaning) when the rest
     is agent-written (today's weave). The approval classifier trusts only
     this part (#690 S6). None: the whole intent is the program's."""
-    input_trust: str = "local"
+    input_trust: str = "external"
     """Config-derived furniture provenance, not parsed from intent text.
     Appended to preserve existing positional arguments for program chimes."""
 

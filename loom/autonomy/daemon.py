@@ -454,6 +454,7 @@ class AutonomyDaemon:
             trust_level=plan.context.get("trust_level"),
             allowed_tools=tuple(plan.context.get("allowed_tools", [])),
             scope_grants=tuple(plan.context.get("scope_grants", [])),
+            input_trust="local",  # operator schedule, never inferred from its text
         )
         return await self.deliver_chime(req)
 

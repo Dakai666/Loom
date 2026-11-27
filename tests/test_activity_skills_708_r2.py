@@ -60,6 +60,7 @@ async def test_b2_incomplete_activity_never_delivers_write_then_exec(tmp_path, l
     bad = next((i for i in items if i.name == "dawn"), None)
     if bad is not None:  # reproduce the pre-fix exploit through the middleware
         apply(env, ChimeRequest(schedule_name="dawn", intent="Synthetic", fired_at=datetime.now(timezone.utc),
+            input_trust="local",  # operator phase fixture
                                allowed_tools=bad.allowed_tools, scope_grants=bad.scope_grants))
         write = await env.run("write_file", {"path": "skills/pet-cat/pet.py", "content": "# replaced"})
         assert not write.success
@@ -77,6 +78,7 @@ async def test_b2_active_nested_skill_script_cannot_be_replaced_before_exec(tmp_
     skill(env.ws, "demo", [command], ["skills/demo/scripts", "news"])
     item = load(config(env.ws, "anchor", 'skills=["demo"]\nallowed_tools=["write_file"]\n'), "anchor")[0]
     added, source = apply(env, ChimeRequest(schedule_name="demo", intent="Synthetic", fired_at=datetime.now(timezone.utc),
+                            input_trust="local",  # operator activity fixture
                             allowed_tools=item.allowed_tools, scope_grants=item.scope_grants))
     script = env.ws / "skills/demo/scripts/run.py"
     original = script.read_text()

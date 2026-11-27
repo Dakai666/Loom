@@ -52,6 +52,7 @@ def install(ws):
 
 def request(item):
     return ChimeRequest(
+        input_trust="local",  # item comes only from the reviewed operator registry template
         schedule_name=item["name"], intent=item["intent"],
         fired_at=datetime.now(timezone.utc),
         allowed_tools=tuple(item["allowed_tools"]), scope_grants=tuple(item["scope_grants"]),
