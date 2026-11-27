@@ -83,8 +83,16 @@ def test_local_day_summary_and_explicit_cache_write(tmp_path):
     assert cache.writes == 1 and len(urls) == 1
 
 
-def test_room_saves_window_baseline_but_peek_never_does(tmp_path, monkeypatch):
-    # Covered asynchronously below; this assertion exposes missing ownership
-    # before the runner/room integration exists.
-    from loom.autonomy.circadian.room import RoomState
-    assert hasattr(RoomState(), "weather")
+@pytest.mark.parametrize("field,value", [
+    ("at", "2026-11-27T10:00"), ("at", "<script>"), ("at", 123),
+    ("latitude", 91), ("longitude", float("inf")),
+    ("rain_probability", float("nan")), ("rain_probability", 101),
+    ("rain_probability", "80<script>"), ("temperature_c", None),
+    ("code", "61"), ("code", 61.0),
+])
+def test_invalid_snapshot_fields_cannot_create_weather_or_signals(field, value):
+    from loom.weather import query_weather, validate_snapshot, window_changes
+    snapshot = query_weather(25, 121, NOW, fetch=lambda url: payload())
+    snapshot[field] = value
+    assert validate_snapshot(snapshot) == {"status": "unknown"}
+    assert not window_changes(snapshot, snapshot)

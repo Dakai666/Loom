@@ -30,7 +30,7 @@ async def test_self_record_cannot_target_aliases_or_special_files(tmp_path, kind
     from loom.autonomy.circadian.journal import make_journal_append_tool
     base = tmp_path / "journal"
     base.mkdir()
-    target = base / (datetime.now().date().isoformat() + ".md")
+    target = base / (datetime.now(timezone.utc).date().isoformat() + ".md")
     protected = tmp_path / "policy.toml"
     protected.write_text("original policy")
     if kind == "hardlink":
