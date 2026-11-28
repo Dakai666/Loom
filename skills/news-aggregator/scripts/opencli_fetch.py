@@ -3,7 +3,7 @@
 opencli_fetch.py — OpenCLI adapter 統一封裝
 
 職責：將 opencli 各 news adapter 的輸出標準化為與 fetch_news.py 相容的 JSON 格式。
-所有 adapter 都是直接 subprocess 呼叫 opencli CLI，零額外依賴。
+HN 使用官方 Firebase API 取得 ID／時間；其他 adapter 以 subprocess 呼叫 opencli CLI。
 
 注意：opencli 的 exit code 有 bug（成功時可能非零），一律用 pipe 擷取 stdout 判斷。
 """
@@ -13,7 +13,9 @@ import json
 import sys
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+import requests
+from rss_parser import record_source_health
 from typing import Any
 
 
@@ -52,13 +54,16 @@ def norm_hackernews(items: list[dict]) -> list[dict]:
     """標準化 HackerNews 輸出"""
     out = []
     for it in items:
+        if not it.get("id") or not it.get("time"):
+            continue
+        hn_url = f"https://news.ycombinator.com/item?id={it['id']}"
         out.append({
             "source": "Hacker News",
             "title": it.get("title", ""),
-            "url": it.get("url") or it.get("hn_url", ""),
-            "hn_url": f"https://news.ycombinator.com/item?id={it.get('id', '')}",
+            "url": it.get("url") or hn_url,
+            "hn_url": hn_url,
             "heat": f"{it.get('score', 0)} points",
-            "time": it.get("time", "") or it.get("published", ""),
+            "time": datetime.fromtimestamp(it['time'], timezone.utc).isoformat(),
             "_raw_rank": it.get("rank"),
             "_raw_author": it.get("author"),
         })
@@ -152,12 +157,37 @@ def norm_v2ex(items: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────
 
 def fetch_hackernews(limit: int = 10, keyword: str = None) -> list[dict]:
-    cmd = ["opencli", "hackernews", "top", "--limit", str(limit), "--format", "json"]
-    items = parse_json_output(run(cmd))
+    """Use the official API: OpenCLI top omits the story ID and timestamp."""
+    base = "https://hacker-news.firebaseio.com/v0"
+    items, errors = [], []
+    try:
+        response = requests.get(f"{base}/topstories.json", timeout=15)
+        response.raise_for_status()
+        ids = response.json()
+        if not isinstance(ids, list):
+            raise ValueError("topstories response is not a list")
+        for story_id in ids[:limit]:
+            try:
+                if type(story_id) is not int or story_id <= 0:
+                    raise ValueError("invalid story ID")
+                response = requests.get(f"{base}/item/{story_id}.json", timeout=15)
+                response.raise_for_status()
+                story = response.json()
+                if story is None or story.get("deleted") or story.get("dead"):
+                    continue
+                if story.get("id") != story_id or not story.get("time") or not story.get("title"):
+                    raise ValueError(f"story {story_id} missing id/time/title")
+                items.extend(norm_hackernews([story]))
+            except Exception as exc:
+                errors.append(f"story {story_id}: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+    record_source_health("Hacker News", "failed" if errors else ("ok" if items else "empty"),
+                         "; ".join(errors), len(items))
     if keyword:
         kw = keyword.lower()
         items = [i for i in items if kw in i.get("title", "").lower()]
-    return norm_hackernews(items[:limit])
+    return items
 
 
 def fetch_producthunt(limit: int = 10, keyword: str = None) -> list[dict]:

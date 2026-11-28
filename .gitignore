@@ -149,3 +149,4 @@ uv.lock
 # global scripts/ rule, but not the raw fetch archives
 !skills/news-aggregator/scripts/
 skills/news-aggregator/scripts/archive-*/
+skills/news-aggregator/scripts/tmp_*.json

@@ -2,7 +2,7 @@ import sys
 import requests
 from bs4 import BeautifulSoup
 import urllib3
-import re
+from xml.etree import ElementTree as ET
 from datetime import datetime
 
 # Suppress insecure request warnings
@@ -89,63 +89,77 @@ def _parse_pub_datetime(time_str):
         return None
 
 
+class _FeedTreeBuilder(ET.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        # No DTDs, local/external entities or network/file resolution in feeds.
+        raise ValueError("DTD declarations are not allowed in feeds")
+
+
+def _local_name(element):
+    return element.tag.rsplit('}', 1)[-1].lower()
+
+
+def _child(entry, *names):
+    return next((child for child in entry if _local_name(child) in names), None)
+
+
+def _text(element):
+    return ''.join(element.itertext()).strip() if element is not None else ""
+
+
 def parse_rss_content(content, source_name, limit=5):
     """
-    Parses RSS/Atom content string (XML or HTML) and returns items.
+    Parse RSS/Atom/RDF XML; malformed documents are failures, not empty feeds.
     """
     try:
-        # Use html.parser which is built-in and lenient
-        soup = BeautifulSoup(content, 'html.parser')
+        root = ET.fromstring(content, parser=ET.XMLParser(target=_FeedTreeBuilder()))
+        if _local_name(root) not in ('rss', 'feed', 'rdf'):
+            raise ValueError("response is not an RSS/Atom/RDF feed")
 
         items = []
-        entries = soup.find_all(['item', 'entry'])
+        entries = [entry for entry in root.iter() if _local_name(entry) in ('item', 'entry')]
 
         for entry in entries:
             # --- Title ---
-            title_tag = entry.find('title')
-            if not title_tag: continue
-            title = clean_text(title_tag.get_text())
+            title = _text(_child(entry, 'title'))
+            if not title: continue
 
             # --- Link ---
             link = ""
-            link_tag = entry.find('link')
-            if link_tag:
-                if link_tag.has_attr('href'):
-                    link = link_tag['href']
-                elif link_tag.get_text(strip=True):
-                    link = link_tag.get_text(strip=True)
-                if not link:
-                    link = str(link_tag.next_sibling).strip()
+            for link_tag in entry:
+                if _local_name(link_tag) == 'link' and link_tag.get('rel', 'alternate') == 'alternate':
+                    link = link_tag.get('href') or _text(link_tag)
+                    if link:
+                        break
 
             if not link:
-                guid = entry.find('guid')
-                if guid and guid.get_text(strip=True).startswith('http'):
-                    link = guid.get_text(strip=True)
+                guid = _text(_child(entry, 'guid'))
+                if guid.startswith('http'):
+                    link = guid
 
             # --- Time ---
-            pub = entry.find(['pubdate', 'published', 'updated', 'dc:date'])
-            time_str = clean_text(pub.get_text()) if pub else ""
+            time_str = _text(_child(entry, 'pubdate', 'published', 'updated', 'date'))
 
             # --- Summary / Content ---
-            content_encoded = entry.find('content:encoded')
-            description = entry.find('description')
-            summary = entry.find('summary')
-            content = entry.find('content')
-
             raw_summary = ""
-            if content_encoded: raw_summary = content_encoded.get_text()
-            elif description: raw_summary = description.get_text()
-            elif summary: raw_summary = summary.get_text()
-            elif content: raw_summary = content.get_text()
+            for name in ('encoded', 'description', 'summary', 'content'):
+                element = _child(entry, name)
+                if element is not None:
+                    # Preserve inline XHTML boundaries before stripping markup.
+                    raw_summary = (element.text or '') + ''.join(
+                        ET.tostring(child, encoding='unicode') for child in element
+                    )
+                    break
 
             soup_desc = BeautifulSoup(raw_summary, 'html.parser')
-            clean_summary = soup_desc.get_text(separator=' ', strip=True)[:300] + "..." if len(raw_summary) > 300 else ""
+            plain_summary = soup_desc.get_text(separator=' ', strip=True)
+            clean_summary = plain_summary[:300] + ("..." if len(plain_summary) > 300 else "")
 
             # --- Heat ---
             heat = ""
-            comments = entry.find('slash:comments')
+            comments = _text(_child(entry, 'comments'))
             if comments:
-                heat = f"{comments.get_text(strip=True)} comments"
+                heat = f"{comments} comments"
 
             items.append({
                 "source": source_name,
@@ -170,7 +184,8 @@ def parse_rss_content(content, source_name, limit=5):
                 newest = max(d for _, d in dated)
                 now = datetime.now(newest.tzinfo) if newest.tzinfo else datetime.now()
                 age_days = (now - newest).days
-                if age_days >= 7:
+                stale_days = 14 if source_name == "NEJM Alerts" else 7
+                if age_days >= stale_days:
                     record_source_health(
                         source_name,
                         "stale",
@@ -208,18 +223,22 @@ def parse_rss_content(content, source_name, limit=5):
 
 def fetch_rss_feed(url, source_name, limit=5):
     """
-    Robust RSS/Atom fetcher using BeautifulSoup.
+    RSS/Atom fetcher with HTTP and media-type validation before XML parsing.
     Handles various feed formats (RSS 2.0, Atom, etc.)
     """
     try:
         # User-Agent is critical
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            "Accept": "application/rss+xml,application/atom+xml,application/rdf+xml,application/xml,text/xml;q=0.9"
         }
 
         response = requests.get(url, headers=headers, timeout=15, verify=False)
-        response.encoding = response.apparent_encoding or 'utf-8'
+        response.raise_for_status()
+        media_type = response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+        if media_type not in ('application/rss+xml', 'application/atom+xml',
+                              'application/rdf+xml', 'application/xml', 'text/xml'):
+            raise ValueError(f"unexpected Content-Type: {media_type or '(missing)'}")
 
         return parse_rss_content(response.content, source_name, limit)
 

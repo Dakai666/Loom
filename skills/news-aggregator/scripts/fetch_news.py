@@ -66,7 +66,7 @@ def enrich_items_with_content(items, max_workers=10):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 重疊來源：從 opencli_fetch.py 接管
-# 2026-04-19 更新：hackernews / producthunt / v2ex 由 OpenCLI adapter 提供，
+# hackernews / producthunt / v2ex 由 adapter 提供（HN 使用官方 API），
 # 統一維護口徑，消除重複邏輯。
 # ─────────────────────────────────────────────────────────────────────────────
 from opencli_fetch import fetch_hackernews, fetch_producthunt, fetch_v2ex
@@ -103,57 +103,44 @@ def fetch_weibo(limit=5, keyword=None):
         return []
 
 def fetch_github(limit=5, keyword=None):
+    urls = []
     if keyword:
-         topic_url = f"https://github.com/topics/{keyword.split(',')[0].strip()}?o=desc&s=updated"
-         try:
-             response = requests.get(topic_url, headers=HEADERS, timeout=10)
-             if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                items = []
-                for article in soup.select('article.border'):
-                     h3 = article.select_one('h3 a')
-                     if not h3: continue
-                     repo_link = h3['href']
-                     title = repo_link.strip('/')
-                     link = "https://github.com" + repo_link
-                     desc = ""
-                     desc_div = article.select_one('.color-fg-muted')
-                     if desc_div: desc = desc_div.get_text(strip=True)
-                     items.append({
-                        "source": "GitHub Trending",
-                        "title": f"{title} - {desc}",
-                        "url": link,
-                        "heat": "Topic Match",
-                        "time": "Updated recently"
-                     })
-                if items: return items[:limit]
-         except: pass
-
-    try:
-        response = requests.get("https://github.com/trending", headers=HEADERS, timeout=10)
-    except: return []
-
-    soup = BeautifulSoup(response.text, 'html.parser')
-    items = []
-    for article in soup.select('article.Box-row'):
+        topic = requests.utils.quote(keyword.split(",")[0].strip(), safe="")
+        urls.append((f"https://github.com/topics/{topic}?o=desc&s=updated", "article.border", "h3 a"))
+    urls.append(("https://github.com/trending", "article.Box-row", "h2 a"))
+    errors = []
+    for url, article_selector, title_selector in urls:
         try:
-            h2 = article.select_one('h2 a')
-            if not h2: continue
-            title = h2.get_text(strip=True).replace('\n', '').replace(' ', '')
-            link = "https://github.com" + h2['href']
-            desc = article.select_one('p')
-            desc_text = desc.get_text(strip=True) if desc else ""
-            stars_tag = article.select_one('a[href$="/stargazers"]')
-            stars = stars_tag.get_text(strip=True) if stars_tag else ""
-            items.append({
-                "source": "GitHub Trending",
-                "title": f"{title} - {desc_text}",
-                "url": link,
-                "heat": f"{stars} stars",
-                "time": "Today"
-            })
-        except: continue
-    return filter_items(items, keyword)[:limit]
+            response = requests.get(url, headers=HEADERS, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "html.parser")
+            if soup.find("html") is None and soup.select_one(article_selector) is None:
+                raise ValueError("response is not a GitHub HTML page")
+            items = []
+            for article in soup.select(article_selector):
+                title = article.select_one(title_selector)
+                if title is None or not title.get("href"):
+                    continue
+                repo = title["href"].strip("/")
+                desc = article.select_one("p" if article_selector == "article.Box-row" else ".color-fg-muted")
+                desc_text = desc.get_text(strip=True) if desc else ""
+                stars = article.select_one("a[href$=\"/stargazers\"]")
+                items.append({
+                    "source": "GitHub Trending",
+                    "title": f"{repo} - {desc_text}",
+                    "url": "https://github.com/" + repo,
+                    "heat": (f"{stars.get_text(strip=True)} stars" if stars else "") if article_selector == "article.Box-row" else "Topic Match",
+                    "time": "Today" if article_selector == "article.Box-row" else "Updated recently",
+                })
+            if not items and len(urls) > 1 and url != urls[-1][0]:
+                continue
+            record_source_health("GitHub Trending", "ok" if items else "empty",
+                                 "; ".join(errors), len(items))
+            return (filter_items(items, keyword) if article_selector == "article.Box-row" else items)[:limit]
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {exc}")
+    record_source_health("GitHub Trending", "failed", "; ".join(errors), 0)
+    return []
 
 def fetch_36kr(limit=5, keyword=None):
     try:
@@ -211,7 +198,7 @@ def fetch_wallstreetcn(limit=5, keyword=None):
 
 # --- RSS-based Fetchers ---
 
-from rss_parser import fetch_rss_feed, source_health_report, health_summary_line, clear_source_health
+from rss_parser import fetch_rss_feed, source_health_report, health_summary_line, clear_source_health, record_source_health
 
 def fetch_huggingface_papers(limit=5, keyword=None):
     items = []
@@ -286,26 +273,25 @@ def fetch_latentspace_ainews(limit=5, keyword=None):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SOURCE GROUPS (四軌分類)
-# 2026-04-18: Reuters RSS 移除（DNS 持續失敗超過5天）
-# 替代方案：以 Al Jazeera World 新聞填補國際軌覆蓋缺口
+# Each core track keeps an independent quota for every source.
 # ─────────────────────────────────────────────────────────────────────────────
 
 INTL_SOURCES = [
     ("Al Jazeera",     "https://www.aljazeera.com/xml/rss/all.xml"),
     ("BBC World",     "https://feeds.bbci.co.uk/news/world/rss.xml"),
-    ("NHK World",     "https://www3.nhk.or.jp/rss/news/cat0.xml"),
+    ("CNA International", "https://feeds.feedburner.com/rsscna/intworld"),
 ]
 
 MEDICAL_SOURCES = [
     ("NEJM Alerts",      "https://www.nejm.org/action/showFeed?jc=nejm&type=etoc&feed=rss"),
-    ("WHO News",        "https://www.who.int/feeds/entity/csr/don/en/rss.xml"),
-    ("Medscape Medical","https://www.medscape.com/xml publishers/smyte/rss?channelId=3445"),
+    ("Nature Medicine", "https://www.nature.com/nm.rss"),
+    ("STAT News",       "https://www.statnews.com/feed/"),
 ]
 
 ASTRONOMY_SOURCES = [
     ("NASA News",      "https://www.nasa.gov/news-release/feed/"),
-    ("ESA News",       "https://www.esa.int/rssfeed/Our_Activities/Space_Science"),
-    ("Astronomy.com",  "https://astronomy.com/rss/news"),
+    ("ESA News",       "https://www.esa.int/rssfeed/TopNews"),
+    ("Astronomy.com",  "https://www.astronomy.com/feed/"),
 ]
 
 AI_NEWSLETTER_SOURCES = [
@@ -337,29 +323,23 @@ ESSAY_SOURCES = [
 # 聚合 Fetchers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_international(limit=5, keyword=None):
-    all_items = []
+def _fetch_track_sources(sources, limit, keyword):
+    # Each source gets its own quota; preserve declared order for stable output.
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, limit): name for name, url in INTL_SOURCES}
-        for future in concurrent.futures.as_completed(futures):
-            all_items.extend(future.result())
-    return filter_items(all_items, keyword)[:limit]
+        futures = [executor.submit(fetch_rss_feed, url, name, limit) for name, url in sources]
+        return [item for future in futures for item in filter_items(future.result(), keyword)[:limit]]
+
+
+def fetch_international(limit=5, keyword=None):
+    return _fetch_track_sources(INTL_SOURCES, limit, keyword)
+
 
 def fetch_medical(limit=5, keyword=None):
-    all_items = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, limit): name for name, url in MEDICAL_SOURCES}
-        for future in concurrent.futures.as_completed(futures):
-            all_items.extend(future.result())
-    return filter_items(all_items, keyword)[:limit]
+    return _fetch_track_sources(MEDICAL_SOURCES, limit, keyword)
+
 
 def fetch_astronomy(limit=5, keyword=None):
-    all_items = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_rss_feed, url, name, limit): name for name, url in ASTRONOMY_SOURCES}
-        for future in concurrent.futures.as_completed(futures):
-            all_items.extend(future.result())
-    return filter_items(all_items, keyword)[:limit]
+    return _fetch_track_sources(ASTRONOMY_SOURCES, limit, keyword)
 
 def fetch_ai_newsletters(limit=5, keyword=None):
     all_items = []
@@ -499,6 +479,7 @@ for name, url in ASTRONOMY_SOURCES:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_all_four_tracks(limit_per_track=8, keyword=None):
+    """Fetch all core sources; the historical argument is a per-source quota."""
     tracks = {}
     track_configs = [
         ("tech",          ["hackernews", "github"]),

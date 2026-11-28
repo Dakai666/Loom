@@ -69,38 +69,29 @@ Loom/
 python3 skills/news-aggregator/scripts/fetch_news.py --all-tracks --limit 8
 
 # 單一軌
-python3 skills/news-aggregator/scripts/fetch_news.py --source tech --limit 8 --no-save
+python3 skills/news-aggregator/scripts/fetch_news.py --source international --limit 8 --no-save
 
 # 單一來源
 python3 skills/news-aggregator/scripts/fetch_news.py --source hackernews --no-save
 ```
 
-> ⚠️ **`--limit` 是「整軌」的上限，不是「每個來源」的上限**（2026-10-27 實測）。
-> `--all-tracks --limit 8` 時，`international` 陣列回傳 8 則**全部來自 Al Jazeera**，
-> BBC 的 8 則被截掉；`astronomy` 陣列 8 則**全部來自 ESA**，NASA 的 8 則被截掉。
-> 這會讓「多來源聚合軌」實際變成單一來源軌，卻不會報錯。
->
-> **因此聚合後必須補抓每個 ok 來源的獨立清單**，否則 briefing 會漏掉整個媒體的視角：
-> ```bash
-> python3 skills/news-aggregator/scripts/fetch_news.py --source bbc_world --limit 8 --no-save
-> python3 skills/news-aggregator/scripts/fetch_news.py --source nasa_news --limit 8 --no-save
-> ```
-> 判斷方式：看 JSON 陣列裡出現了幾個不同的 `source` 值，與 `_source_health` 裡 `status=ok` 的來源數比對。
-> 少了哪個來源就補抓哪個。
+> **`--limit` 是每個來源的配額**：國際、醫學、天文各有三個來源，
+> `--all-tracks --limit 8` 每軌最多 24 則；科技為 HN + GitHub，每軌最多 16 則。
+> 來源各自取限額，不在合併後截斷；一次抓齊，不需手動補抓。
 
 > **workspace 指令與 guard**：使用 `python3 skills/news-aggregator/scripts/fetch_news.py ...`。
 > guard 已接受完整 scripts 路徑，不需切換目錄；guard 不是授權機制。
 > 每次 fetch 分別呼叫，不串接、重導向、shell 展開或額外 Python 後處理。
-> `--all-tracks` 自行保存 JSON；預設輸出從腳本位置解析。
+> `--all-tracks` 將 JSON 輸出至 stdout，不自行保存；單源保存目錄從腳本位置解析。
 > 驗檔使用 `list_dir`／`read_file`；所需呼叫不在 scope 時回報，不繞過。
 
-### 步驟 2.5：讀取來源健康狀態（不要靠猜）
+### 步驟 3：讀取來源健康狀態（不要靠猜）
 
 `--all-tracks` 的 JSON 裡有一個 `_source_health` 鍵，是**腳本產生的證據**：
 
 ```json
 "_source_health": [
-  {"source": "NHK World", "status": "stale", "detail": "newest item is 76 days old (2026-08-08)", "item_count": 3},
+  {"source": "CNA International", "status": "ok", "detail": "", "item_count": 8},
   {"source": "NASA News", "status": "ok", "detail": "", "item_count": 8},
   {"source": "Astronomy.com", "status": "empty", "detail": "feed parsed but contained zero items", "item_count": 0}
 ]
@@ -112,79 +103,25 @@ python3 skills/news-aggregator/scripts/fetch_news.py --source hackernews --no-sa
 |---|---|---|
 | `ok` | 抓到且有內容 | ✅ 正常 |
 | `empty` | feed 能抓，但沒有條目 | ⚠️ 來源空 — 不是壞掉，是沒東西 |
-| `stale` | feed 能抓，但最新內容已經舊了（≥7 天） | ⚠️ **feed 已停更** — 這不是新聞延遲，是來源停擺 |
+| `stale` | feed 能抓，但最新內容已經舊了（一般 ≥7 天，NEJM ≥14 天） | ⚠️ **feed 已停更** — 這不是新聞延遲，是來源停擺 |
 | `failed` | 抓取本身失敗 | ❌ 抓取失敗 — 附上 detail 裡的原因 |
 
-> ⚠️ **不要自己從內容推斷來源健康狀態。** 2026-10-24 之前這張表是手寫的，結果是「stale」與「empty」被混為一談（例如把 NHK 的 8 月舊聞寫成「feed 無更新」）。**現在腳本分得清楚了，就引用腳本的。**
+> ⚠️ **不要自己從內容推斷來源健康狀態。** 2026-10-24 之前這張表是手寫的，結果是「stale」與「empty」被混為一談（例如把停更舊聞寫成「feed 無更新」）。**現在腳本分得清楚了，就引用腳本的。**
 
-### 步驟 3：深度整合（integrate）
+### 步驟 4：深度整合（integrate）
 讀取 JSON 資料後，以下的格式要求是強制性的——
 **絲絲的整合想法比原始新聞更有價值**，因此每則新聞都必須包含絲絲自己的深度分析，而非只是轉述。
 
 **寫「來源健康狀態」表時，必須逐列對照 JSON 裡的 `_source_health`，不得憑印象寫。**
 
-### 步驟 4：配圖 + 投遞（2026-10-25 新增 — DK 指定）
+### 步驟 5：驗檔與投遞
 
-**配圖用 minimax MCP 的 `text_to_image`，不要用 `image_generate`。**
+使用 `list_dir`／`read_file` 確認今日五份 Markdown briefing 已寫入且可讀，
+再以 `create_discord_forum_post` 投遞晨報導讀與五份文件。
+每日晨報不產生或下載封面圖，附件只包含 briefing 文件。
+投遞後用 `read_discord_forum`（list 模式）確認貼文出現在清單。
 
-```
-minimax__text_to_image(
-  prompt="<為今日四軌晨報寫的一段封面描述>",
-  output_directory="<workspace 絕對路徑>/news/current/YYYY-MM-DD",
-  aspect_ratio="16:9",
-)
-```
-
-> ⚠️ **為什麼不能用 `image_generate`**：它是 Loom 內建的計費工具，在 autonomy（無人值守）排程下
-> 不在既有 scope 內，權限判定會是 `skip: unattended-skip (autonomy, confirm)`（2026-11 之前記成 `deny: unattended-deny`），配圖這一步不會執行。
-> **2026-10-25 08:00 實測**：五份 briefing 都產出成功，**唯一被擋的就是 `image_generate`**，
-> 結果晨報投遞時沒有配圖。minimax MCP 走 MCP server，不受 Loom scope 攔截。
-
-> ⚠️ **`text_to_image` 只回傳圖片 URL，不會把檔案寫進 `output_directory`**
-> （2026-10-25 實測：指定 `news/2026-10-25/` 後，該目錄裡沒有任何圖檔，Desktop 也沒有）。
-> **所以必須自己抓回來**：
-> ```bash
-> curl -sL --max-time 30 -o news/current/YYYY-MM-DD/cover.jpg "<回傳的 URL>"
-> ```
-> 抓回來之後，`create_discord_forum_post(..., files=["news/current/YYYY-MM-DD/cover.jpg"])` 才真的會有配圖。
-> **只貼 briefing 檔而不抓圖，等於沒配圖。**
-
-> ⚠️ **落點只有一個：`news/current/YYYY-MM-DD/cover.jpg`**（跟五份 briefing 同目錄，檔名固定 `cover.jpg`）。
-> **不要另開 `outputs/news/`，也不要自取檔名（`quote.jpg` 之類）。**
-> 2026-10-26 08:00 實測：圖被抓到 `outputs/news/2026-10-26/quote.jpg`，dawn 只好事後搬回正確位置。
-> 下載回來的資料其實是 JPEG，就算 URL 結尾是 `.jpeg`／`.png`，也直接存成 `cover.jpg`，不要事後再改名。
-
-### 步驟 4.5：投遞前驗檔（2026-10-26 新增 — DK 認可）
-
-autonomy 跑的時候沒有人類在旁邊看，**所以投遞前自己驗一次**，不要靠「應該抓回來了」。
-
-> ⚠️ **用 `list_dir` 驗，不要用 `ls`／`wc`／`stat`。**
-> 這個技能的 `run_bash` 守門（`checks.scripts_only_bash`）只放行兩件事：
-> `mkdir news/current/YYYY-MM-DD` 與 `curl ... -o news/current/YYYY-MM-DD/cover.jpg "<url>"`（亦向後相容舊路徑 `news/YYYY-MM-DD`）。
-> **2026-10-26 實測：`ls -l`、`wc -c` 都被 deny。** 而 `list_dir`／`see_image` 不受這個守門限制
-> （守門只掛在 `run_bash` 上）。
-
-**驗檔兩段式：**
-
-1. **存在性** — `list_dir` 看 `news/current/YYYY-MM-DD/`，`cover.jpg` 在名單裡才算過。
-   `list_dir` **不顯示檔案大小**，所以它看不出空檔。
-2. **可讀性（可選）** — 對 `news/current/YYYY-MM-DD/cover.jpg` 呼叫 `see_image`：
-   **讀得到＝檔案非空且可解碼**（正常是 100 KB 級的 JPEG）；讀不到＝空檔或壞檔，**重抓一次**。
-
-> ⚠️ 用 `see_image` 驗完之後**不要再移動或刪除那個檔案**——框架的檔案型圖片 ref 會在後續 turn 重送檔案本體，
-> 檔案不見會讓 session 整個壞掉（2026-10-26 實例，框架同日已改為降級，但仍以不動為妙）。
-
-驗過再呼叫 `create_discord_forum_post(..., files=["news/current/YYYY-MM-DD/cover.jpg"])`。
-
-> ⚠️ **驗不過就不要卡住整份晨報**：圖抓失敗時**照常投遞五份 briefing，只是不帶 `files`**。
-> 配圖是加分項，主體優先——這跟上面「產圖失敗不影響晨報主體」是同一條規律。
-
-**規則**
-- **一天最多一張**，不要為了「多一張比較好」重複呼叫（付費工具）。
-- **產圖失敗不影響晨報主體**：五份 briefing 照常寫、照常投遞，配圖只是加分。
-- prompt 裡要明寫 `no text, no letters, no numbers, no logos`——產圖模型很容易生出亂碼文字。
-
-### 最後一步：歸檔與收尾
+### 步驟 6：歸檔與收尾
 投遞完成後，執行歸檔腳本將 `news/current/` 中超過 30 天的舊日期資料夾搬移至 `news/archive/`（只搬不刪，避免當期目錄累積觸頂 `_SCAN_LIMIT`）：
 ```bash
 python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
@@ -260,19 +197,17 @@ python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
 
 | 狀態 | 意義 | 判斷依據 |
 |---|---|---|
-| `ok` | 正常 | feed 抓到且有條目，最新內容在 7 天內 |
+| `ok` | 正常 | feed 抓到且有條目，最新內容未達 stale 門檻（一般 7 天；NEJM 14 天） |
 | `empty` | 來源空 | feed 能抓但零條目 — 源沒壞，是沒東西 |
-| `stale` | **feed 已停更** | feed 能抓但最新內容 ≥7 天 — 這不是新聞延遲，是來源停擺 |
-| `failed` | 抓取失敗 | 連線／DNS／解析錯誤，detail 裡有原因 |
+| `stale` | **feed 已停更** | feed 能抓但最新內容達門檻（一般 ≥7 天；NEJM ≥14 天） — 這不是新聞延遲，是來源停擺 |
+| `failed` | 抓取失敗 | HTTP／Content-Type／連線／DNS／解析錯誤，detail 裡有原因 |
 
 **已知長期問題（狀態需每次現場確認）**：
 
 | 來源 | 長期狀況 |
 |------|---------|
-| Reuters World | 在部分網路環境 DNS 解析失敗，以 BBC／NHK 為主（2026-10-27 實測：Reuters **完全沒有出現在 `_source_health`**，連狀態列都沒有，無法從腳本輸出判定是「抓取前被跳過」還是「靜默失敗」） |
 | NASA APOD | URL 格式為 `apod.nasa.gov/apod/apYYMMDD.html`，需主動拼接當天日期 |
 | NEJM Alerts | feed 偶有數日不更新 |
-| NHK World | 某些時段回傳舊聞（2026-10-24 實測：最新一則為 76 天前） |
 | Ben's Bites | 受 Cloudflare 保護，需 Playwright |
 
 > **重要**：`stale` 與 `empty` 是不同的故障。過去這兩者都被寫成「⚠️ 部分網路環境問題」，掩蓋了真正的原因。**2026-10-24 起腳本會分辨並直接標出。**
@@ -283,7 +218,7 @@ python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
 
 | 金鑰 | 名稱 |
 |------|------|
-| `hackernews` | 🦄 矽谷熱點 |
+| `hackernews` | 🦄 矽谷熱點（官方 HN API，含討論連結及 UTC 時間） |
 | `github` | 🐙 開源趨勢 |
 | `36kr` | 🚀 創投快訊 |
 | `producthunt` | 🐱 產品獵人 |
@@ -298,19 +233,19 @@ python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
 
 | 金鑰 | 名稱 |
 |------|------|
-| `international` | 🌍 國際聚合（Reuters + BBC + NHK 三合一） |
-| `reuters_world` | Reuters World RSS |
+| `international` | 🌍 國際聚合（Al Jazeera + BBC + CNA 三合一） |
 | `bbc_world` | BBC World RSS |
-| `nhk_world` | NHK World RSS |
+| `cna_international` | CNA 中央社國際 RSS |
+| `al_jazeera` | Al Jazeera RSS |
 
 ### 🏥 醫學新聞
 
 | 金鑰 | 名稱 |
 |------|------|
-| `medical` | 🏥 醫學聚合（NEJM + WHO + Medscape 三合一） |
+| `medical` | 🏥 醫學聚合（NEJM + Nature Medicine + STAT News 三合一） |
 | `nejm_alerts` | NEJM Alerts RSS |
-| `who_news` | WHO News RSS |
-| `medscape_medical` | Medscape Medical RSS |
+| `nature_medicine` | Nature Medicine RSS（https://www.nature.com/nm.rss） |
+| `stat_news` | STAT News RSS |
 
 ### 🔭 天文新聞
 
@@ -350,9 +285,8 @@ python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30
 
 1. **HuggingFace Papers** 需要 Playwright
 2. **Ben's Bites** 受 Cloudflare 保護，需要 Playwright
-3. Reuters RSS 在部分網路環境可能 DNS 解析失敗，標記 ⚠️ 並以 BBC/NHK 為主
-4. `--deep` 模式會增加抓取時間
-5. **NASA APOD**：URL 格式已從 `apod.nasa.gov/apod/` 變更為 `apod.nasa.gov/apod/apYYMMDD.html`，
+3. `--deep` 模式會增加抓取時間
+4. **NASA APOD**：URL 格式已從 `apod.nasa.gov/apod/` 變更為 `apod.nasa.gov/apod/apYYMMDD.html`，
    需要主動拼接當天日期才能抓取；Astronomy.com 可作為穩定的備援來源
 
 ---
