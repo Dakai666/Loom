@@ -13,7 +13,9 @@ DK 2026-11-28 定案：沒有綁技能的 rhythm anchor 是正式的「開放時
 
 不能連宣告一起拿掉：phase chime 是 `origin="chime"`，屬於 unattended；`_everyday_tool` 與未知工具進 Luna 的路徑都要求 attended。沒有宣告的 memorize／pursuit_write／spawn_agent／image_generate 會被 not_covered 拒絕，造成日常功能迴退。保留既有宣告讓這些工具繼續能用；未列名工具仍依 permission_mode、resolver、classifier 與 hard guard 判定，不保證每個未宣告工具都能在無人值守時執行。
 
-在本機 local 開放 chime 中，成功 `load_skill` 的實際目錄必須正好是 workspace `skills/<name>`；不以 `-`／`_` 變體猜另一個技能的 allows。hook 帶 origin、目錄與 checks 掛載結果，attended 回合不安裝授權，即使旗標殘留也一樣。宣告了 precondition checks 卻未核准、解析失敗、缺 manager 或只部分掛載時，不安裝 allows，activation telemetry 仍記錄；無 checks 的技能照常。後續載入卸掉舊技能的 checks，也一併撤回那個技能的 grants。
+在本機 local 開放 chime 中，成功 `load_skill` 的實際目錄必須正好是 workspace `skills/<name>`；不以 `-`／`_` 變體猜另一個技能的 allows。hook 帶 origin、目錄與 checks 掛載結果，attended 回合不安裝授權，即使旗標殘留也一樣。宣告了 precondition checks 卻未核准、解析失敗、缺 manager、任何 ref 的 applies_to 為空，或只部分掛載時，不安裝 allows，activation telemetry 仍記錄；無 checks 的技能照常。後續載入卸掉舊技能的 checks，也一併撤回那個技能的 grants。
+
+具名 `unload_skill(name)` 表示不再使用該技能：即使它沒有 checks、removed 為 0，仍撤回當前 open source 下該技能的 grants 與 declaration。重複卸載冪等；不帶 name 只列清單，不撤權。共用撤權 helper 不動 anchor 宣告、其他技能或其他來源。session stop 的 unmount_all 後也清理當前所有 open-slot 技能授權（包含無 checks 的技能）；同技能重掛在同步 mount 中完成，若任何 check 未成功掛回，load hook 會撤權。
 
 本地技能沿用 `read_skill_allows` → `allows_permission_fields`（內含 harden），將 exec shapes、write 前綴與 tools 套用為當回合的**正向授權**。來源為 `<open_slot_source>:skill:<name>` 的 grants 在這個開放回合不算 `_routine_ceiling`：載入 pet 後依然能 ls／git status，載入 news 的 write 後依然可由一般判定寫 outputs 或 journal。綁定時段、schedule、furniture、external 與 subagent 不享有這個例外，其 ceiling／max_calls 等收窄完全保留；所有 hard guards 不變。
 

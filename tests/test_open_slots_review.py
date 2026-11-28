@@ -13,6 +13,7 @@ from loom.core.harness.middleware import ToolCall
 from loom.core.harness.scope import ScopeGrant
 from loom.core.harness.skill_checks import SkillCheckManager
 from loom.core.infra.log_once import log_once
+from loom.core.session import LoomSession
 from loom.platform.cli.skill_tools import make_load_skill_tool
 from tests.test_open_slots import _apply, _session, _skill
 from tests.test_permission_mode_704 import _env, _decisions
@@ -232,3 +233,91 @@ async def test_unmounted_checks_revoke_prior_skill_allows(tmp_path):
     assert not any(g.source.endswith(":local-skill") for g in session.perm.grants)
     assert (await tool.executor(_load_call())).success
     assert not any(g.source.endswith(":local-skill") for g in session.perm.grants)
+
+
+@pytest.mark.parametrize("kind", ["checks", "no-checks", "list"])
+async def test_explicit_unload_revokes_only_named_open_skill(tmp_path, kind):
+    from loom.core.harness.registry import ToolRegistry, ToolDefinition
+    from loom.platform.cli.skill_tools import make_unload_skill_tool
+    genome = _skill(tmp_path)
+    if kind != "no-checks":
+        genome.precondition_check_refs = [{"ref": "checks.guard", "applies_to": ["run_bash"]}]
+        (tmp_path / "skills/local-skill/checks.py").write_text("async def guard(call):\n    return True\n")
+    reg = ToolRegistry()
+    reg.register(ToolDefinition(name="run_bash", description="", input_schema={},
+                 trust_level=TrustLevel.GUARDED, executor=AsyncMock()))
+    manager = SkillCheckManager(reg)
+    session = _session(tmp_path)
+    _apply(session, tools=("web_search",))
+    source = session.perm.open_slot_source
+    session.perm.declare(source + ":skill:other", ["pursuit_write"], unattended_only=True)
+    session.perm.grant(ScopeGrant(resource="path", action="write", selector="other", source=source + ":skill:other"))
+    session.perm.grant(ScopeGrant(resource="path", action="write", selector="foreign", source="autonomy:another:skill:local-skill"))
+    before = list(session.perm.grants)
+    load = make_load_skill_tool(SimpleNamespace(get=AsyncMock(return_value=genome)), [tmp_path / "skills"],
+        skill_check_manager=manager, confirm_fn=AsyncMock(return_value=True), on_loaded=session._on_skill_loaded)
+    assert (await load.executor(_load_call(origin="interactive"))).success
+    assert (await load.executor(_load_call())).success
+    skill_source = source + ":skill:local-skill"
+    assert any(g.source == skill_source for g in session.perm.grants)
+    assert skill_source in session.perm.boundaries
+    unload = make_unload_skill_tool(manager,
+        on_unloaded=lambda n: LoomSession._revoke_open_slot_skill(session, n))
+    if kind == "list":
+        permissions = list(session.perm.grants), dict(session.perm.boundaries)
+        result = await unload.executor(ToolCall(tool_name="unload_skill", args={}, origin="chime",
+            session_id="t", trust_level=TrustLevel.SAFE))
+        assert result.success
+        assert (session.perm.grants, session.perm.boundaries) == permissions
+        return
+    for _ in range(2):  # explicit intent, including removed == 0, is idempotent
+        result = await unload.executor(ToolCall(tool_name="unload_skill", args={"name": "local-skill"},
+            origin="chime", session_id="t", trust_level=TrustLevel.SAFE))
+        assert result.success
+        assert session.perm.grants == before
+        assert skill_source not in session.perm.boundaries
+        assert session.perm.declared_by("web_search", attended=False) == source
+        assert session.perm.declared_by("pursuit_write", attended=False) == source + ":skill:other"
+        assert session.perm.open_slot_source == source
+
+
+async def test_empty_target_ref_among_valid_refs_cannot_authorize(tmp_path):
+    from loom.core.harness.registry import ToolRegistry, ToolDefinition
+    genome = _skill(tmp_path)
+    genome.precondition_check_refs = [
+        {"ref": "checks.guard", "applies_to": []},
+        {"ref": "checks.guard", "applies_to": ["run_bash"]},
+    ]
+    (tmp_path / "skills/local-skill/checks.py").write_text("async def guard(call):\n    return True\n")
+    reg = ToolRegistry()
+    reg.register(ToolDefinition(name="run_bash", description="", input_schema={},
+                 trust_level=TrustLevel.GUARDED, executor=AsyncMock()))
+    session = _session(tmp_path)
+    _apply(session)
+    tool = make_load_skill_tool(SimpleNamespace(get=AsyncMock(return_value=genome)), [tmp_path / "skills"],
+        skill_check_manager=SkillCheckManager(reg), confirm_fn=AsyncMock(return_value=True),
+        on_loaded=session._on_skill_loaded)
+    result = await tool.executor(_load_call(origin="interactive"))
+    assert result.success
+    assert result.metadata["skill_checks_ready"] is False
+    assert (await tool.executor(_load_call())).success
+    assert session.perm.grants == []
+
+
+async def test_session_stop_clears_open_skill_authorization(tmp_path):
+    genome = _skill(tmp_path)
+    session = _session(tmp_path)
+    _apply(session, tools=("web_search",))
+    load = make_load_skill_tool(SimpleNamespace(get=AsyncMock(return_value=genome)), [tmp_path / "skills"],
+                               on_loaded=session._on_skill_loaded)
+    assert (await load.executor(_load_call())).success
+    assert session.perm.grants
+    other = ScopeGrant(resource="path", action="write", selector="other", source="autonomy:other")
+    session.perm.grant(other)
+    session._skill_check_manager = SkillCheckManager(session.registry)
+    session._db, session._db_ctx = AsyncMock(), None
+    session._governor = session._session_log = session._ledger_store = None
+    session._mcp_clients = []
+    await session.stop()
+    assert session.perm.grants == [other]
+    assert session.perm.declared_tools() == frozenset({"web_search"})

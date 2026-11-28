@@ -396,7 +396,7 @@ def make_load_skill_tool(
         # Mount
         summary = manager.mount(name, refs, callables, keep_existing=keep_existing)
         expected = sum(len(ref.applies_to) for ref in refs)
-        return summary, expected > 0 and len(summary) == expected
+        return summary, all(ref.applies_to for ref in refs) and len(summary) == expected
 
     return ToolDefinition(
         name="load_skill",
@@ -439,6 +439,7 @@ def make_load_skill_tool(
 
 def make_unload_skill_tool(
     skill_check_manager: "SkillCheckManager",
+    *, on_unloaded: "Callable[[str], None] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``unload_skill`` tool for explicit skill check removal.
@@ -464,6 +465,10 @@ def make_unload_skill_tool(
             )
 
         removed = skill_check_manager.unmount(name)
+        # A named unload closes the skill even when it declared no checks.
+        # Listing above is observational and never sends this notification.
+        if on_unloaded is not None:
+            on_unloaded(name)
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True,

@@ -1212,6 +1212,7 @@ class LoomSession:
         from loom.platform.cli.skill_tools import make_unload_skill_tool
         self.registry.register(make_unload_skill_tool(
             self._skill_check_manager,
+            on_unloaded=self._revoke_open_slot_skill,
         ))
 
         # doc/54 §4.3 / §5 P0-5: Register skill_review tool — agent's
@@ -1482,6 +1483,13 @@ class LoomSession:
         # Issue #64: unmount all skill-declared checks before closing
         if hasattr(self, "_skill_check_manager"):
             self._skill_check_manager.unmount_all()
+        # Shutdown closes all current open-slot skills, including those
+        # without checks (which unmount_all cannot enumerate).
+        if source := self.perm.open_slot_source:
+            prefix = f"{source}:skill:"
+            for boundary in list(self.perm.boundaries):
+                if boundary.startswith(prefix):
+                    self._revoke_open_slot_skill(boundary[len(prefix):])
         # Grab the connection reference and immediately clear self._db so any
         # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
         db, self._db = self._db, None
@@ -2763,6 +2771,13 @@ class LoomSession:
     # =========================================================================
     # SECTION 6 — PLUGIN / SKILL LOADING
     # =========================================================================
+    def _revoke_open_slot_skill(self, skill_name: str) -> None:
+        """Close this skill's current-turn authorization, idempotently."""
+        if source := self.perm.open_slot_source:
+            skill_source = f"{source}:skill:{skill_name}"
+            self.perm.withdraw(skill_source)
+            self.perm.revoke_matching(lambda g: g.source == skill_source)
+
     def _on_skill_loaded(self, skill_name: str, *, origin: str,
                          skill_dir: str | None, checks_ready: bool,
                          unmounted_skills: tuple[str, ...] = ()) -> None:
@@ -2783,9 +2798,7 @@ class LoomSession:
         # A later load can unmount an earlier skill's checks. Its additive
         # authorization must leave with those checks, even within this turn.
         for name in unmounted_skills:
-            old_source = f"{source}:skill:{name}"
-            self.perm.withdraw(old_source)
-            self.perm.revoke_matching(lambda g, s=old_source: g.source == s)
+            self._revoke_open_slot_skill(name)
         if origin not in UNATTENDED_ORIGINS:
             return
         if not skill_name or "/" in skill_name or skill_name in (".", ".."):
@@ -2800,8 +2813,7 @@ class LoomSession:
             return
         skill_source = f"{source}:skill:{skill_name}"
         if not checks_ready:
-            self.perm.withdraw(skill_source)
-            self.perm.revoke_matching(lambda g: g.source == skill_source)
+            self._revoke_open_slot_skill(skill_name)
             logger.info("Open slot skill %s gets no allows: declared checks are not fully mounted", skill_name)
             return
         if skill_source in self.perm.boundaries:
