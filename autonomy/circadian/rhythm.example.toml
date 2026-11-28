@@ -32,13 +32,16 @@
 #     narrowing (dawn subcommands, pet buy max_calls=2), not a second source
 #     of authority. Without skills, an anchor is an OPEN SLOT: the agent's
 #     own life, with the same permission path as an ordinary session.
-#     allowed_tools / scope_grants are ignored for open slots; no list to
-#     maintain. Old legacy_reason is ignored (one INFO per anchor/process);
+#     allowed_tools remains a declaration for unattended calls, never a
+#     whitelist lock. scope_grants is ignored: no configured scope ceiling.
+#     Old legacy_reason is ignored (one INFO per anchor/process);
 #     remove it. legacy_reason together with skills is still an error.
 #   - With skills, ``allowed_tools`` remains a general-tool declaration;
 #     non-EXEC declarations can bypass the classifier, but never hard guards.
 #     During an open slot, load_skill on a workspace skill supplies its
-#     allows for that turn. External skills gain no permissions. Loading a
+#     allows as positive grants for that turn, without fencing other calls.
+#     Declared precondition checks must be fully mounted before granting.
+#     External skills gain no permissions. Loading a
 #     skill in a skill-bound slot never expands its narrowed ceiling.
 #   - See docs/open-slots.md for the open-slot contract and migration.
 #   - See docs/708-s2-skill-migration.md for guarded skill snippets, exact
@@ -124,8 +127,9 @@ meaning = """
 time    = "11:00"
 name    = "curiosity"
 public  = false
-# Open slot: no skills, declarations or grants. Use existing tools/skills
-# through the ordinary session decision path; no extra permission list.
+# Open slot: keep declarations so unattended everyday tools still work.
+# Declarations never authorize EXEC or bypass hard guards; no scope ceiling.
+allowed_tools = ["fetch_url", "web_search"]
 meaning = """
 絲絲自己的好奇心散步。
 挑你自己感興趣的，不是為了產出。

@@ -287,18 +287,18 @@ class TestDaemonCheck:
 
         assert checks["run_bash"].status is NameStatus.REGISTERED
         assert set(checks["run_bash"].sources) == {
-            "schedule morning_briefing",
+            "schedule morning_briefing", "rhythm dawn",
         }
-        assert "fetch_url" not in checks  # old open-slot declarations ignored
+        assert checks["fetch_url"].status is NameStatus.REGISTERED
         assert checks["minimax_coding__web_search"].status is NameStatus.REGISTERED
         assert checks["async_jobs"].status is NameStatus.UNKNOWN
-        assert "web_search" not in checks
+        assert checks["web_search"].status is NameStatus.CONDITIONAL
         assert checks["memorise"].status is NameStatus.UNKNOWN
         assert checks["memorise"].sources == ("room cat",)
 
         line = daemon.permission_names_line
         assert "async_jobs" in line and "memorise" in line
-        assert "conditional: web_search " not in line
+        assert "web_search" in line
         assert "run_bash" not in line
         assert any(
             "async_jobs" in r.getMessage() and r.levelno == logging.WARNING

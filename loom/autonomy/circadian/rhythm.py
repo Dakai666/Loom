@@ -63,8 +63,8 @@ class Anchor:
     public: bool = True
     trigger_suffix: str = ""  # "@HHMM" disambiguator for multi-time activities
 
-    # Skill-bound permissions (issue #525 / #708). Open slots carry neither
-    # declarations nor grants and use the ordinary session decision path.
+    # Skill-bound permissions (issue #525 / #708). Open slots retain tool
+    # declarations, discard configured grants, and have no scope ceiling.
     # A skill-bound phase can do tool work
     # (research, write a draft, run the pet script) without re-asking DK every
     # day. _deliver_phase_chime forwards these onto the ChimeRequest;
@@ -206,8 +206,8 @@ def load_rhythm(
     Per-anchor errors (missing fields, bad time, duplicate name) are logged
     and the bad anchor skipped — the rest of the table still loads.
 
-    Without skills an anchor is an open slot: old permission fields and
-    legacy_reason are ignored. Skill-bound anchors keep their union/subset
+    Without skills an anchor is an open slot: tool declarations remain,
+    scope_grants and legacy_reason are ignored. Skill-bound anchors keep their union/subset
     contract; schedules retain their separate non-skill compatibility path.
 
     ``time`` may be a scalar ``"HH:MM"`` or a list of them (issue #526). A

@@ -364,8 +364,8 @@ def activity_permission_fields(
 ) -> dict[str, Any]:
     """Resolve an anchor/schedule ceiling once, before its turn (#708 S2).
 
-    Only rhythm callers opt into open slots: without skills they have no
-    declarations or grants; legacy_reason is ignored. Schedules default to
+    Only rhythm callers opt into open slots: without skills they retain
+    tool declarations but have no grants; legacy_reason is ignored. Schedules default to
     their existing non-skill permission contract.
     Multiple skills form a union. Explicit scope_grants REPLACE the derived
     grants, and may only narrow them (including existing max_calls).
@@ -381,20 +381,21 @@ def activity_permission_fields(
             log_once(logger, logging.INFO, ("open_slot_legacy_reason", source_name),
                      "[autonomy] %s: legacy_reason is ignored for an open slot; "
                      "remove this retired field", source_name)
-        return {"trust_level": None, "allowed_tools": [], "scope_grants": []}
+        # Preserve tolerant declaration parsing without parsing discarded
+        # legacy grants (or emitting diagnostics about fields we ignore).
+        own = parse_permission_fields({"allowed_tools": entry.get("allowed_tools")}, source_name)
+        return {"trust_level": None, "allowed_tools": own["allowed_tools"], "scope_grants": []}
     own = parse_permission_fields(entry, source_name)
     legacy_reason: str | None = None
     if "legacy_reason" in entry:
         raw_reason = entry["legacy_reason"]
         if not isinstance(raw_reason, str) or not raw_reason.strip():
             raise SkillAllowsError("legacy_reason must be a non-empty string")
-        if "skills" in entry:
-            raise SkillAllowsError("legacy_reason cannot be combined with skills")
         legacy_reason = raw_reason.strip()
     if "skills" not in entry:
         if "scope_grants" in entry:
             if legacy_reason is not None:
-                log_once(logger, logging.INFO, ("legacy_scope", source_name),
+                log_once(logger, logging.INFO, ("legacy_scope", source_name, logging.INFO),
                     "[autonomy] %s uses retained legacy scope_grants without skills "
                     "(legacy_reason: %s)",
                     source_name, legacy_reason)
@@ -402,7 +403,7 @@ def activity_permission_fields(
                 # Staged compatibility: unrelated legacy activities cannot all
                 # migrate to S1 allows (e.g. arbitrary CLI / path:read). Keep
                 # their existing contract until explicitly migrated, loudly.
-                log_once(logger, logging.WARNING, ("legacy_scope", source_name),
+                log_once(logger, logging.WARNING, ("legacy_scope", source_name, logging.WARNING),
                     "[autonomy] %s uses legacy scope_grants without skills; retained for "
                     "compatibility, migrate activity scopes to SKILL.md allows and skills",
                     source_name)

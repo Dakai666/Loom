@@ -249,7 +249,7 @@ class TestLoadRhythm:
 
     def test_anchor_carries_permission_fields(self, tmp_path):
         # Old non-skill permission fields remain readable, but open slots
-        # have the ordinary session contract without declarations or grants.
+        # retain declarations while discarding their old scope ceiling.
         p = tmp_path / "perm.toml"
         _write(p, '''
             [[anchors]]
@@ -261,7 +261,7 @@ class TestLoadRhythm:
             ]
         ''')
         a = load_rhythm(p)[0]
-        assert a.allowed_tools == ()
+        assert a.allowed_tools == ("fetch_url", "web_search")
         assert a.scope_grants == ()
         assert a.open_slot
 
@@ -277,7 +277,7 @@ class TestLoadRhythm:
         assert a.scope_grants == ()
 
     def test_multi_time_anchor_shares_permission_fields(self, tmp_path):
-        # Every expanded open slot ignores the old declaration alike.
+        # Every expanded open slot retains the same declaration.
         p = tmp_path / "petperm.toml"
         _write(p, '''
             [[anchors]]
@@ -288,7 +288,7 @@ class TestLoadRhythm:
         anchors = load_rhythm(p)
         assert len(anchors) == 2
         for a in anchors:
-            assert a.allowed_tools == ()
+            assert a.allowed_tools == ("run_bash",)
             assert a.open_slot
 
     def test_anchor_trust_level_is_ignored(self, tmp_path):

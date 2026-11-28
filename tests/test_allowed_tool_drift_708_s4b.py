@@ -91,10 +91,6 @@ def test_workspace_skill_name_in_allowed_tools_emits_skill_warning(tmp_path, kin
     # Non-blocking: entry still loads with its declared tools preserved.
     assert len(items) == 1
     tools = items[0]["allowed_tools"] if isinstance(items[0], dict) else list(items[0].allowed_tools)
-    if kind == "anchor":
-        assert tools == []
-        assert not caplog.records
-        return
     assert tools == ["write_file", "async_jobs"]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -115,10 +111,6 @@ def test_retired_mcp_and_unknown_tool_emit_drift_warning(tmp_path, kind, caplog)
     with caplog.at_level(logging.WARNING, logger="loom.autonomy"):
         items = _load(path, kind)
     assert len(items) == 1
-    if kind == "anchor":
-        assert items[0].allowed_tools == ()
-        assert not caplog.records
-        return
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
     assert any("openai__text_to_image" in w and "openai" in w for w in warnings)

@@ -1029,8 +1029,8 @@ class LoomDiscordBot:
         a declaration that covers only the chime's own unattended calls
         (#704 S3), and its scope grants as ceilings.
 
-        Local rhythm open slots start without either. Their source marks
-        the turn for workspace skill allows, all revoked together below.
+        Local rhythm open slots retain declarations, without scope ceilings.
+        Their source marks additive workspace skill allows for this turn.
 
         Returns ``(declared_tools, grant_source)`` to be passed to
         ``_revoke_chime_permissions`` after the chime turn.
@@ -1039,19 +1039,17 @@ class LoomDiscordBot:
             return [], None
         from loom.core.harness.scope import ScopeGrant
 
-        if req.open_slot and req.input_trust == "local":
-            source = f"autonomy:{req.schedule_name}"
-            session.perm.open_slot_source = source
-            return [], source
-
         added: list[str] = list(req.allowed_tools)
-        grants = req.scope_grants
+        is_open = req.open_slot and req.input_trust == "local"
+        grants = () if is_open else req.scope_grants
         if req.input_trust != "local":
             from loom.autonomy.input_trust import EXTERNAL_TOOLS
             added = [t for t in added if t in EXTERNAL_TOOLS]
             grants = ()
         source = (f"autonomy:{req.schedule_name}"
-                  if (added or grants or req.input_trust != "local") else None)
+                  if (added or grants or is_open or req.input_trust != "local") else None)
+        if is_open:
+            session.perm.open_slot_source = source
         # Anything except explicit local fails closed (including malformed
         # programmatic requests); signal/intent text never supplies this field.
         if added:

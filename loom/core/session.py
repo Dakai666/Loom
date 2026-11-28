@@ -2763,10 +2763,12 @@ class LoomSession:
     # =========================================================================
     # SECTION 6 — PLUGIN / SKILL LOADING
     # =========================================================================
-    def _on_skill_loaded(self, skill_name: str) -> None:
+    def _on_skill_loaded(self, skill_name: str, *, origin: str,
+                         skill_dir: str | None, checks_ready: bool,
+                         unmounted_skills: tuple[str, ...] = ()) -> None:
         """Track activation; local skills supply allows only in open chimes.
 
-        Resolve using the loader's workspace-first directory convention.
+        Use the loader's actual directory and check-mount result.
         External skills never gain grants; read_skill_allows also rejects
         symlinks and invalid boundaries before any permission is installed.
         """
@@ -2775,30 +2777,42 @@ class LoomSession:
             if loaded is not None:
                 loaded.add(skill_name)
         source = self.perm.open_slot_source
+        from loom.core.harness.middleware import UNATTENDED_ORIGINS
         if source is None or self.perm.external_inputs:
+            return
+        # A later load can unmount an earlier skill's checks. Its additive
+        # authorization must leave with those checks, even within this turn.
+        for name in unmounted_skills:
+            old_source = f"{source}:skill:{name}"
+            self.perm.withdraw(old_source)
+            self.perm.revoke_matching(lambda g, s=old_source: g.source == s)
+        if origin not in UNATTENDED_ORIGINS:
             return
         if not skill_name or "/" in skill_name or skill_name in (".", ".."):
             return
         from loom.autonomy.skill_allows import (
-            SkillAllowsError, allows_permission_fields, harden, read_skill_allows,
+            SkillAllowsError, allows_permission_fields, read_skill_allows,
         )
-        from loom.platform.cli.skill_tools import _find_skill_resources
         from loom.core.harness.scope import ScopeGrant
 
-        directory, _ = _find_skill_resources(skill_name, [self.workspace / "skills"])
-        if directory is None:
+        expected = self.workspace / "skills" / skill_name
+        if skill_dir is None or Path(skill_dir).absolute() != expected.absolute():
             return
-        name = Path(directory).name
-        skill_source = f"{source}:skill:{name}"
+        skill_source = f"{source}:skill:{skill_name}"
+        if not checks_ready:
+            self.perm.withdraw(skill_source)
+            self.perm.revoke_matching(lambda g: g.source == skill_source)
+            logger.info("Open slot skill %s gets no allows: declared checks are not fully mounted", skill_name)
+            return
         if skill_source in self.perm.boundaries:
             return
         try:
-            fields = allows_permission_fields(read_skill_allows(name, self.workspace), skill_source)
+            fields = allows_permission_fields(read_skill_allows(skill_name, self.workspace), skill_source)
         except SkillAllowsError as exc:
             logger.warning("Open slot skill %s gets no allows: %s", skill_name, exc)
             return
         self.perm.declare(skill_source, fields["allowed_tools"], unattended_only=True)
-        for grant in harden(fields["scope_grants"]):
+        for grant in fields["scope_grants"]:
             self.perm.grant(ScopeGrant(**grant, source=skill_source))
 
     async def _auto_import_skills(self) -> list["SkillCatalogEntry"]:

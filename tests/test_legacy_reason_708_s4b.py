@@ -191,7 +191,8 @@ def test_tracked_examples_demonstrate_legacy_reason(caplog):
         (repo / "autonomy/circadian/rhythm.example.toml").read_text(encoding="utf-8")
     )
     curiosity = next(a for a in rhythm_raw["anchors"] if a["name"] == "curiosity")
-    assert not {"legacy_reason", "allowed_tools", "scope_grants", "skills"} & curiosity.keys()
+    assert not {"legacy_reason", "scope_grants", "skills"} & curiosity.keys()
+    assert curiosity["allowed_tools"] == ["fetch_url", "web_search"]
 
     with caplog.at_level(logging.INFO, logger="loom.autonomy"):
         load_schedules(repo / "autonomy/schedules.example.toml", workspace=repo)

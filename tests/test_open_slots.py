@@ -34,7 +34,7 @@ def test_open_anchor_ignores_old_permissions(tmp_path, caplog, reason):
         anchors = load_rhythm(p, workspace=tmp_path)
     assert len(anchors) == 1
     a = anchors[0]
-    assert a.allowed_tools == ()
+    assert a.allowed_tools == ("memorize",)
     assert a.scope_grants == ()
     assert a.open_slot is True
     assert "legacy scope_grants" not in caplog.text
@@ -70,10 +70,12 @@ def test_retired_config_warning_once_per_key_list(caplog):
 
 
 def _session(tmp_path):
+    from loom.core.harness.registry import ToolRegistry
     session = LoomSession.__new__(LoomSession)
     session.workspace = tmp_path
     session.perm = PermissionContext("open-slot-test")
     session._telemetry = None
+    session.registry = ToolRegistry()
     return session
 
 
@@ -100,9 +102,10 @@ def test_open_turn_has_no_declaration_or_ceiling_and_revoke_clears_flag(tmp_path
     session = _session(tmp_path)
     added, source = _apply(session, tools=("memorize",), grants=(
         {"resource": "path", "action": "write", "selector": "notes"},))
-    assert added == []
+    assert added == ["memorize"]
     assert session.perm.open_slot_source == source
-    assert session.perm.boundaries == {}
+    assert session.perm.declared_by("memorize", attended=False) == source
+    assert session.perm.declared_by("memorize", attended=True) is None
     assert session.perm.grants == []
     assert not _routine_ceiling(session.perm, "path", "write")
     LoomDiscordBot._revoke_chime_permissions(None, session, added, source)
@@ -197,7 +200,8 @@ async def test_loaded_allows_reaches_real_harness(tmp_path, ledger, monkeypatch)
     assert not (await _call(env, "run_bash", {"command": "python3 skills/local-skill/helper.py other"},
                             caps=ToolCapability.EXEC)).success
     assert (await env.run("write_file", {"path": "notes/synthetic.md", "content": "x"}, origin="chime")).success
-    assert not (await env.run("write_file", {"path": "elsewhere/synthetic.md", "content": "x"}, origin="chime")).success
+    # Additive grants do not fence the ordinary classifier path.
+    assert (await env.run("write_file", {"path": "elsewhere/synthetic.md", "content": "x"}, origin="chime")).success
     _register(env, "memorize", caps=ToolCapability.MUTATES)
     assert (await _call(env, "memorize", {"key": "synthetic", "value": "x"},
                         caps=ToolCapability.MUTATES)).success
