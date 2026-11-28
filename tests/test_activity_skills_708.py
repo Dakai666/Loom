@@ -128,14 +128,18 @@ def test_invalid_skill_is_rejected_during_load(tmp_path, kind, broken, caplog):
 def test_legacy_non_skill_scope_is_preserved_with_explicit_migration_warning(tmp_path, kind, caplog):
     item = load(config(tmp_path, kind,
         'scope_grants=[{resource="exec",action="execute",selector="workspace"}]\n'), kind)[0]
+    if kind == "anchor":
+        assert fields(item, "scope_grants") == ()
+        assert item.open_slot
+        assert not caplog.records
+        return
     assert fields(item, "scope_grants")[0]["selector"] == "workspace"
     assert any(r.levelname == "WARNING" and "legacy" in r.message and "skills" in r.message
                for r in caplog.records)
 
 
-@pytest.mark.parametrize("kind", ["anchor", "schedule"])
+@pytest.mark.parametrize("kind,migrated", [("anchor", False), ("anchor", True), ("schedule", False), ("schedule", True)])
 @pytest.mark.parametrize("mode", list(PermissionMode))
-@pytest.mark.parametrize("migrated", [False, True])
 async def test_general_declarations_survive_migration_without_becoming_skill_grants(
         tmp_path, ledger, monkeypatch, kind, mode, migrated):
     from loom.autonomy.chime import ChimeRequest
@@ -158,7 +162,8 @@ async def test_general_declarations_survive_migration_without_becoming_skill_gra
     item = load(config(env.ws, kind, boundary + 'allowed_tools=' + declarations + '\n'), kind)[0]
     req = ChimeRequest(schedule_name="activity", intent="Synthetic", fired_at=datetime.now(timezone.utc),
         input_trust="local",  # synthetic operator anchor/schedule above
-        allowed_tools=tuple(fields(item, "allowed_tools")), scope_grants=tuple(fields(item, "scope_grants")))
+        allowed_tools=tuple(fields(item, "allowed_tools")), scope_grants=tuple(fields(item, "scope_grants")),
+        open_slot=kind == "anchor" and not migrated)
     apply(env, req)
     for name, args, caps in [
         ("memorize", {"key": "note", "value": "Synthetic"}, ToolCapability.MUTATES),
@@ -169,8 +174,15 @@ async def test_general_declarations_survive_migration_without_becoming_skill_gra
         assert env.confirm.await_count == 0
         assert (await _decisions(ledger))[-1]["decision_source"] == "program"
     # Declaration fast-allow never grants EXEC or crosses a write ceiling.
-    assert not (await _call(env, "run_bash", {"command": PET + " buy bowl"}, caps=ToolCapability.EXEC)).success
-    assert not (await env.run("write_file", {"path": "outputs/out.md", "content": "x"})).success
+    if kind == "anchor" and not migrated:
+        result = await _call(env, "run_bash", {"command": PET + " buy bowl"}, caps=ToolCapability.EXEC)
+        assert "scope_ceiling" not in result.metadata.get("skip_note", "")
+        assert (await _decisions(ledger))[-1]["decision_source"] != "grant"
+        assert (await env.run("write_file", {"path": "outputs/out.md", "content": "x"})).success
+        assert env.perm.grants == []
+    else:
+        assert not (await _call(env, "run_bash", {"command": PET + " buy bowl"}, caps=ToolCapability.EXEC)).success
+        assert not (await env.run("write_file", {"path": "outputs/out.md", "content": "x"})).success
     assert not (await env.run("write_file", {"path": "news/room.toml", "content": "x"})).success
     assert not (await _call(env, "memorize", {"key": "../outside", "value": "x"}, caps=ToolCapability.MUTATES)).success
     assert not (await _call(env, "memorize", {"key": "k", "value": "x"}, caps=ToolCapability.MUTATES,

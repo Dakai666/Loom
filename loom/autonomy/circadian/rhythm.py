@@ -63,7 +63,9 @@ class Anchor:
     public: bool = True
     trigger_suffix: str = ""  # "@HHMM" disambiguator for multi-time activities
 
-    # Routine-safe permissions (issue #525) — a phase can do tool work
+    # Skill-bound permissions (issue #525 / #708). Open slots retain tool
+    # declarations, discard configured grants, and have no scope ceiling.
+    # A skill-bound phase can do tool work
     # (research, write a draft, run the pet script) without re-asking DK every
     # day. _deliver_phase_chime forwards these onto the ChimeRequest;
     # bot._apply_chime_permissions pre-authorises them for the phase turn (and
@@ -88,9 +90,10 @@ class Anchor:
     # when ``None`` — so a deep phase's tier never leaks into the next one.
     model_tier: int | None = None
 
-    # #708 S4b: explicit reason why a non-skill anchor intentionally retains
-    # legacy scope_grants (downgrades the migration WARNING to INFO).
+    # Compatibility only: legacy_reason is ignored for open slots.
     legacy_reason: str | None = None
+    open_slot: bool = False
+    """No skills in the rhythm entry: an ordinary turn for the agent's life."""
 
     @property
     def trigger_name(self) -> str:
@@ -203,6 +206,10 @@ def load_rhythm(
     Per-anchor errors (missing fields, bad time, duplicate name) are logged
     and the bad anchor skipped — the rest of the table still loads.
 
+    Without skills an anchor is an open slot: tool declarations remain,
+    scope_grants and legacy_reason are ignored. Skill-bound anchors keep their union/subset
+    contract; schedules retain their separate non-skill compatibility path.
+
     ``time`` may be a scalar ``"HH:MM"`` or a list of them (issue #526). A
     list expands to one anchor per *valid, distinct* slot, all sharing name +
     meaning; invalid slots inside the list are dropped individually. When a
@@ -272,7 +279,7 @@ def load_rhythm(
         # identity, so every expanded slot of a recurring activity shares them.
         source = f"rhythm anchor {name!r}"
         try:
-            perms = activity_permission_fields(entry, source, ws)
+            perms = activity_permission_fields(entry, source, ws, open_slot=True)
         except SkillAllowsError as exc:
             logger.error("[circadian] rhythm anchor %r rejected: %s", name, exc)
             continue
@@ -287,7 +294,7 @@ def load_rhythm(
                 "for phase anchors (the chime path has no planner gate); use "
                 "allowed_tools / scope_grants instead", name,
             )
-        legacy_reason = entry["legacy_reason"].strip() if "legacy_reason" in entry else None
+        legacy_reason = None  # compatibility input is deliberately ignored
         # Suffix the trigger only when the activity genuinely recurs: a single
         # surviving slot keeps the bare ``circadian:phase_<name>`` (backward
         # compatible), so the @HHMM form reflects reality, not declared intent.
@@ -301,6 +308,7 @@ def load_rhythm(
                 program_menu=program_menu, model_tier=model_tier,
                 permission_report=permission_report,
                 legacy_reason=legacy_reason,
+                open_slot="skills" not in entry,
             ))
         seen.add(name)
 

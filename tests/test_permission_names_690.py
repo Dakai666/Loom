@@ -297,7 +297,8 @@ class TestDaemonCheck:
         assert checks["memorise"].sources == ("room cat",)
 
         line = daemon.permission_names_line
-        assert "async_jobs" in line and "memorise" in line and "web_search" in line
+        assert "async_jobs" in line and "memorise" in line
+        assert "web_search" in line
         assert "run_bash" not in line
         assert any(
             "async_jobs" in r.getMessage() and r.levelno == logging.WARNING
@@ -393,12 +394,14 @@ class TestDawnChime:
 
         _write("loom.toml", LOOM_TOML)
         _write("autonomy/schedules.toml", "")
+        _write("skills/synthetic/SKILL.md", "---\nname: synthetic\nallows: {}\n---\n")
         _write("autonomy/circadian/rhythm.toml", """
 [[anchors]]
 time = "08:00"
 name = "dawn"
 meaning = "wake"
 allowed_tools = ["run_bash"]
+skills = ["synthetic"]
 """)
         daemon = _daemon(_session("run_bash"))
         daemon.load_config("loom.toml")
@@ -412,6 +415,7 @@ time = "08:00"
 name = "dawn"
 meaning = "wake"
 allowed_tools = ["run_bash", "memorise"]
+skills = ["synthetic"]
 """)
         await _fire(daemon, "circadian:dawn_spawn")
         assert "memorise" in daemon.permission_names_line

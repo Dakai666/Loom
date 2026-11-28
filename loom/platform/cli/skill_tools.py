@@ -53,10 +53,12 @@ def _find_skill_resources(
     # Try both hyphenated and underscored variants
     variants = [skill_name, skill_name.replace("-", "_"), skill_name.replace("_", "-")]
 
-    for base_dir in skills_dirs:
-        if not base_dir.is_dir():
-            continue
-        for variant in variants:
+    # Prefer an exact name in any configured root before trying aliases.
+    # An external my-skill must never borrow workspace my_skill's resources.
+    for variant in dict.fromkeys(variants):
+        for base_dir in skills_dirs:
+            if not base_dir.is_dir():
+                continue
             skill_dir = base_dir / variant
             if not skill_dir.is_dir():
                 continue
@@ -133,7 +135,7 @@ def make_load_skill_tool(
     turn_index_fn: "Callable[[], int] | None" = None,
     skill_check_manager: "SkillCheckManager | None" = None,
     confirm_fn: "Callable | None" = None,
-    on_loaded: "Callable[[str], None] | None" = None,
+    on_loaded: "Callable[..., None] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``load_skill`` tool that loads full skill instructions.
@@ -148,6 +150,9 @@ def make_load_skill_tool(
 
     # Per-session dedup tracking (set of already-loaded skill names)
     _loaded_this_session: set[str] = set()
+    # Keep provenance/check readiness alongside body dedup, never re-resolve
+    # a cached external skill against a different workspace alias.
+    _loaded_context: dict[str, tuple[str | None, bool, bool]] = {}
     # Skills whose precondition-check approval was skipped on an unattended
     # turn (#668). Kept apart from body dedup so the next attended load_skill
     # can still ask and mount them (#673 review).
@@ -171,11 +176,20 @@ def make_load_skill_tool(
             and call.origin not in UNATTENDED_ORIGINS
         )
         if name in _loaded_this_session and not _retry_checks:
+            # Activation is session-deduplicated, but the hook also owns
+            # turn-scoped allows. A later open chime must reapply them.
+            directory, has_checks, ready = _loaded_context[name]
+            ready = ready and (not has_checks or (
+                skill_check_manager is not None
+                and name in skill_check_manager.mounted_skills()))
+            if on_loaded is not None:
+                on_loaded(name, origin=call.origin, skill_dir=directory, checks_ready=ready)
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,
                 output=f"Skill '{name}' is already loaded in this session. "
                        f"Refer to the previously loaded instructions.",
+                metadata={"skill_checks_ready": ready},
             )
 
         # Try ProceduralMemory first
@@ -233,7 +247,8 @@ def make_load_skill_tool(
 
         # Issue #64 Phase B: mount skill-declared precondition checks.
         # Approval reads/writes go through the semantic store (#451 phase B).
-        checks_summary = await _mount_skill_checks(
+        mounted_before = set(skill_check_manager.mounted_skills()) if skill_check_manager else set()
+        checks_summary, checks_ready = await _mount_skill_checks(
             name, skill, skill_dir, skill_check_manager, semantic,
             keep_existing=keep_existing, origin=call.origin,
         )
@@ -258,13 +273,17 @@ def make_load_skill_tool(
 
         # Record activation
         _loaded_this_session.add(name)
+        _loaded_context[name] = (skill_dir, bool(skill.precondition_check_refs), checks_ready)
+        unmounted = mounted_before - set(skill_check_manager.mounted_skills()) if skill_check_manager else set()
         if on_loaded is not None:
-            on_loaded(name)
+            on_loaded(name, origin=call.origin, skill_dir=skill_dir, checks_ready=checks_ready,
+                      unmounted_skills=tuple(unmounted))
         if outcome_tracker is not None:
             _turn = turn_index_fn() if turn_index_fn else 0
             outcome_tracker.record_activation(name, _turn)
 
-        metadata: dict = {"skill_name": name, "skill_confidence": skill.confidence}
+        metadata: dict = {"skill_name": name, "skill_confidence": skill.confidence,
+                          "skill_checks_ready": checks_ready}
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True, output=output,
@@ -279,10 +298,10 @@ def make_load_skill_tool(
         sem: "SemanticMemory | None",
         keep_existing: bool = False,
         origin: str = "interactive",
-    ) -> list[str]:
-        """Resolve and mount precondition checks for a skill. Returns descriptions."""
+    ) -> tuple[list[str], bool]:
+        """Return descriptions and whether every declared check was mounted."""
         if manager is None:
-            return []
+            return [], not bool(skill.precondition_check_refs)
 
         # Harness invariant: every load_skill is a lifecycle event for the
         # manager, even when the new skill declares no checks.  Without this,
@@ -290,12 +309,16 @@ def make_load_skill_tool(
         # stranded on tool definitions (Issue #184).
         if not skill.precondition_check_refs:
             manager.activate(name, keep_existing=keep_existing)
-            return []
+            return [], True
 
         from loom.core.harness.skill_checks import SkillPreconditionRef, SkillCheckManager
         from loom.core.memory.relational_bridge import get_triple, upsert_triple
 
-        refs = [SkillPreconditionRef.from_dict(d) for d in skill.precondition_check_refs]
+        try:
+            refs = [SkillPreconditionRef.from_dict(d) for d in skill.precondition_check_refs]
+        except (AttributeError, TypeError, ValueError) as exc:
+            _log.warning("Failed to parse checks for skill %r: %s", name, exc)
+            return [], False
 
         # Approval gate: first-time approval (stored as a relational triple
         # in the semantic store via the bridge since #451 phase B).
@@ -347,7 +370,7 @@ def make_load_skill_tool(
                 user_ok = False
 
             if not user_ok:
-                return []
+                return [], False
 
             # Persist approval
             if sem is not None:
@@ -361,17 +384,19 @@ def make_load_skill_tool(
 
         # Resolve callables from skill directory
         if not skill_dir_str:
-            return []
+            return [], False
 
         skill_dir_path = Path(skill_dir_str)
         try:
             callables = SkillCheckManager.resolve_all(skill_dir_path, refs)
         except (FileNotFoundError, AttributeError, ImportError, ValueError) as exc:
             _log.warning("Failed to resolve checks for skill %r: %s", name, exc)
-            return []
+            return [], False
 
         # Mount
-        return manager.mount(name, refs, callables, keep_existing=keep_existing)
+        summary = manager.mount(name, refs, callables, keep_existing=keep_existing)
+        expected = sum(len(ref.applies_to) for ref in refs)
+        return summary, all(ref.applies_to for ref in refs) and len(summary) == expected
 
     return ToolDefinition(
         name="load_skill",
@@ -414,6 +439,7 @@ def make_load_skill_tool(
 
 def make_unload_skill_tool(
     skill_check_manager: "SkillCheckManager",
+    *, on_unloaded: "Callable[[str], None] | None" = None,
 ) -> ToolDefinition:
     """
     Create a SAFE ``unload_skill`` tool for explicit skill check removal.
@@ -439,6 +465,10 @@ def make_unload_skill_tool(
             )
 
         removed = skill_check_manager.unmount(name)
+        # A named unload closes the skill even when it declared no checks.
+        # Listing above is observational and never sends this notification.
+        if on_unloaded is not None:
+            on_unloaded(name)
         return ToolResult(
             call_id=call.id, tool_name=call.tool_name,
             success=True,

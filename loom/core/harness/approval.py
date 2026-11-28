@@ -1071,10 +1071,13 @@ def _routine_ceiling(perm: Any, resource: str, action: str) -> bool:
     """Whether a live grant a routine or config declared (not a human's)
     bounds this *(resource, action)*: writes never fence unrelated reads."""
     now = time.time()
+    open_source = getattr(perm, "open_slot_source", None)
+    additive_prefix = f"{open_source}:skill:" if open_source else None
     return any(
         (g.valid_until == 0 or g.valid_until > now) and g.resource == resource
         and g.action == action
         and g.source not in _HUMAN_GRANT_SOURCES
+        and not (additive_prefix and g.source.startswith(additive_prefix))
         for g in perm.grants)
 
 

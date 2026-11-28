@@ -30,14 +30,20 @@
 #   - ``scope_grants`` with skills is an optional SUBSET, replacing the
 #     derived grants, never adding to them. Use this only for
 #     narrowing (dawn subcommands, pet buy max_calls=2), not a second source
-#     of authority. Without skills, legacy scopes are retained with a
-#     migration WARNING; unrelated activities are not disabled by S2. Anchors
-#     that intentionally stay legacy may set a non-empty ``legacy_reason = "..."``
-#     to downgrade that WARNING to INFO (#708 S4b).
-#   - ``allowed_tools`` remains a general-tool declaration with or without
-#     skills; its calls follow the existing permission_mode decision path;
-#     declarations never bypass the hard guardrails or authorize EXEC.
-#     Loading a skill never grants permission or expands the current ceiling.
+#     of authority. Without skills, an anchor is an OPEN SLOT: the agent's
+#     own life, with the same permission path as an ordinary session.
+#     allowed_tools remains a declaration for unattended calls, never a
+#     whitelist lock. scope_grants is ignored: no configured scope ceiling.
+#     Old legacy_reason is ignored (one INFO per anchor/process);
+#     remove it. legacy_reason together with skills is still an error.
+#   - With skills, ``allowed_tools`` remains a general-tool declaration;
+#     non-EXEC declarations can bypass the classifier, but never hard guards.
+#     During an open slot, load_skill on a workspace skill supplies its
+#     allows as positive grants for that turn, without fencing other calls.
+#     Declared precondition checks must be fully mounted before granting.
+#     External skills gain no permissions. Loading a
+#     skill in a skill-bound slot never expands its narrowed ceiling.
+#   - See docs/open-slots.md for the open-slot contract and migration.
 #   - See docs/708-s2-skill-migration.md for guarded skill snippets, exact
 #     replacement steps, buy limits and retained checks.py.
 #   - ``model_tier`` picks the LLM tier this phase runs on (an int key of
@@ -121,13 +127,9 @@ meaning = """
 time    = "11:00"
 name    = "curiosity"
 public  = false
-# Research + jot a note: blanket the read-only web tools, but FENCE writing —
-# the scope_grant lets write_file touch only autonomy/circadian, nothing else.
-# write_file is deliberately NOT in allowed_tools (that would un-fence it).
-# Legacy non-target example retained with explicit legacy_reason (logs INFO).
-legacy_reason = "open-ended exploration phase without a dedicated skill script"
+# Open slot: keep declarations so unattended everyday tools still work.
+# Declarations never authorize EXEC or bypass hard guards; no scope ceiling.
 allowed_tools = ["fetch_url", "web_search"]
-scope_grants  = [{ resource = "path", action = "write", selector = "autonomy/circadian" }]
 meaning = """
 絲絲自己的好奇心散步。
 挑你自己感興趣的，不是為了產出。

@@ -498,6 +498,7 @@ async def _deliver_phase_chime(
         # forwarded — the chime path has no planner gate to honour it (#525).
         allowed_tools=anchor.allowed_tools,
         scope_grants=anchor.scope_grants,
+        open_slot=anchor.open_slot,
         input_trust="local",  # operator-defined rhythm, not today's weave text
         # Each phase sets its own tier (the anchor's, or the default) so a
         # deep phase's tier doesn't carry into the phases after it.

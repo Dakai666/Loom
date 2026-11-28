@@ -11,6 +11,8 @@ import logging
 import tomllib
 from pathlib import Path
 
+from loom.core.infra.log_once import log_once
+
 logger = logging.getLogger(__name__)
 
 _RETIRED_PLUGIN_KEYS = ("plugins", "adapter", "adapters")
@@ -19,7 +21,8 @@ _RETIRED_PLUGIN_KEYS = ("plugins", "adapter", "adapters")
 def _warn_retired_config_keys(cfg: dict) -> None:
     present = [k for k in _RETIRED_PLUGIN_KEYS if k in cfg]
     if present:
-        logger.warning(
+        log_once(
+            logger, logging.WARNING, ("retired_config_keys", tuple(present)),
             "loom.toml contains retired plugin/adapter section(s) %s "
             "(retired in #708 S4a); plugins and adapters are no longer loaded "
             "— remove these keys or migrate to [[mcp.servers]].",

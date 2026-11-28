@@ -90,14 +90,18 @@ async def test_retained_research_anchor_keeps_general_tools_and_existing_write_c
     from tests.test_circadian_phase_chime import _make_daemon, CFG
     from tests.test_single_decision_704_s3 import _register
     from loom.platform.cli.tools import _fetch_url_resolver
+    from tests.test_approval_classifier_690_s6 import FakeModel
 
-    env = _env(tmp_path, ledger, mode=mode)
+    env = _env(tmp_path, ledger, mode=mode, model=FakeModel('{"verdict":"reject"}'))
     monkeypatch.chdir(env.ws)
     path = env.ws / "autonomy/circadian/rhythm.toml"
     path.parent.mkdir(parents=True)
     snippet = PACKAGE / "rhythm.toml"
     assert snippet.is_file(), "S2b retained anchor tables are missing"
     shutil.copyfile(snippet, path)
+    # A synthetic old grant must no longer automatically authorize writes.
+    path.write_text(path.read_text().replace(f'name = "{name}"', f'name = "{name}"\n'
+        f'scope_grants=[{{resource="path",action="write",selector="{prefix}"}}]'))
     anchors = load_rhythm(path)
     assert len(anchors) == 3
     anchor = next(a for a in anchors if a.name == name)
@@ -108,12 +112,19 @@ async def test_retained_research_anchor_keeps_general_tools_and_existing_write_c
     finally:
         st.set_dir_for_test(None)
     apply(env, requests[0])
+    assert anchor.open_slot and requests[0].open_slot
+    assert env.perm.grants == []
+    assert env.perm.declared_tools() == frozenset(anchor.allowed_tools)
+    from loom.core.harness.approval import _routine_ceiling
+    assert not _routine_ceiling(env.perm, "path", "write")
     _register(env, "fetch_url", resolver=_fetch_url_resolver, caps=ToolCapability.NETWORK)
     assert (await _call(env, "fetch_url", {"url": "https://example.com"})).success
-    assert (await env.run("write_file", {"path": prefix + "/synthetic.md", "content": "x"})).success
-    assert not (await env.run("write_file", {"path": "elsewhere/synthetic.md", "content": "x"})).success
-    assert any(name in r.message and "legacy scope_grants without skills" in r.message
-               for r in caplog.records)
+    for target in (prefix + "/synthetic.md", "elsewhere/synthetic.md"):
+        result = await env.run("write_file", {"path": target, "content": "x"})
+        assert result.success is (mode is PermissionMode.YOLO)
+        assert "scope_ceiling" not in result.metadata.get("skip_note", "")
+        assert (await _decisions(ledger))[-1]["decision_source"] != "grant"
+    assert not any("legacy scope_grants without skills" in r.message for r in caplog.records)
 
 
 @pytest.mark.parametrize("name", ["daily_mood_tarot", "memory_housekeeping",

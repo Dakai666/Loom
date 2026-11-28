@@ -153,6 +153,8 @@ class PermissionContext:
     # Sources of active external chimes. Orthogonal to declarations/grants:
     # any one external source constrains the entire unattended turn.
     external_inputs: set[str] = field(default_factory=set)
+    open_slot_source: str | None = None
+    """Local open chime turn; cleared with all of its loaded-skill grants."""
 
     # --- Scope-aware authorization (Issue #45 Phase A) ---
     grants: list[ScopeGrant] = field(default_factory=list)

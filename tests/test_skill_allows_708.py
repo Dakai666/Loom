@@ -430,16 +430,15 @@ async def test_judgement_based_care_runs_inside_one_allows(
 
 
 def test_allows_is_read_only_at_furniture_wake():
-    """Loading a skill (attended or not) never turns its allows into grants:
-    only the room's wake path reads them in S1. S2 adds anchors and
-    schedules through the same reader."""
+    """S1 room and open-slot session activation use the shared reader.
+    Skill-bound S2 configs resolve through activity_permission_fields."""
     root = Path(__file__).resolve().parent.parent / "loom"
     users = sorted(
         str(p.relative_to(root)) for p in root.rglob("*.py")
         if "read_skill_allows" in p.read_text(encoding="utf-8")
         and p.name != "skill_allows.py"
     )
-    assert users == ["autonomy/circadian/room.py"]
+    assert users == ["autonomy/circadian/room.py", "core/session.py"]
 
 
 # ---------------------------------------------------------------------------

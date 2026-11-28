@@ -1029,6 +1029,9 @@ class LoomDiscordBot:
         a declaration that covers only the chime's own unattended calls
         (#704 S3), and its scope grants as ceilings.
 
+        Local rhythm open slots retain declarations, without scope ceilings.
+        Their source marks additive workspace skill allows for this turn.
+
         Returns ``(declared_tools, grant_source)`` to be passed to
         ``_revoke_chime_permissions`` after the chime turn.
         """
@@ -1037,13 +1040,16 @@ class LoomDiscordBot:
         from loom.core.harness.scope import ScopeGrant
 
         added: list[str] = list(req.allowed_tools)
-        grants = req.scope_grants
+        is_open = req.open_slot and req.input_trust == "local"
+        grants = () if is_open else req.scope_grants
         if req.input_trust != "local":
             from loom.autonomy.input_trust import EXTERNAL_TOOLS
             added = [t for t in added if t in EXTERNAL_TOOLS]
             grants = ()
         source = (f"autonomy:{req.schedule_name}"
-                  if (added or grants or req.input_trust != "local") else None)
+                  if (added or grants or is_open or req.input_trust != "local") else None)
+        if is_open:
+            session.perm.open_slot_source = source
         # Anything except explicit local fails closed (including malformed
         # programmatic requests); signal/intent text never supplies this field.
         if added:
@@ -1109,6 +1115,13 @@ class LoomDiscordBot:
     ) -> None:
         if session is None:
             return
+        if grant_source and session.perm.open_slot_source == grant_source:
+            session.perm.open_slot_source = None
+            skill_prefix = f"{grant_source}:skill:"
+            for source in list(session.perm.boundaries):
+                if source.startswith(skill_prefix):
+                    session.perm.withdraw(source)
+            session.perm.revoke_matching(lambda g: g.source.startswith(skill_prefix))
         if grant_source:
             session.perm.external_inputs.discard(grant_source)
             try:

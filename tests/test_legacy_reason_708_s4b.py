@@ -1,4 +1,4 @@
-"""#708 S4b Item 5: explicit legacy_reason downgrades retained legacy WARNING to INFO.
+"""#708 S4b: schedule legacy_reason and open-anchor compatibility.
 
 Contracts pinned here:
 - Legacy ``scope_grants`` without ``skills`` and with a valid non-empty
@@ -10,8 +10,8 @@ Contracts pinned here:
   only that entry with ``ERROR``, preserving healthy siblings.
 - Combining ``skills`` and ``legacy_reason`` (semantic contradiction) rejects
   only that entry with ``ERROR``, preserving healthy siblings.
-- Tracked ``schedules.example.toml`` and ``rhythm.example.toml`` demonstrate
-  ``legacy_reason`` on intentionally retained legacy entries.
+- Rhythm open slots ignore legacy_reason, including malformed values;
+  their example carries no permission fields. Schedules retain this field.
 """
 
 from __future__ import annotations
@@ -91,9 +91,12 @@ def test_valid_legacy_reason_downgrades_warning_to_info(tmp_path, kind, caplog):
     with caplog.at_level(logging.INFO, logger="loom.autonomy"):
         items = _load(path, kind)
     assert len(items) == 2
-    assert _grants(items[0])[0]["selector"] == "outputs"
     if kind == "anchor":
-        assert items[0].legacy_reason == reason
+        assert _grants(items[0]) == []
+        assert items[0].legacy_reason is None
+        assert "legacy_reason is ignored" in caplog.text
+        return
+    assert _grants(items[0])[0]["selector"] == "outputs"
 
     legacy_warnings = [
         r for r in caplog.records
@@ -117,6 +120,10 @@ def test_missing_legacy_reason_keeps_warning(tmp_path, kind, caplog):
     with caplog.at_level(logging.INFO, logger="loom.autonomy"):
         items = _load(path, kind)
     assert len(items) == 2
+    if kind == "anchor":
+        assert _grants(items[0]) == []
+        assert not caplog.records
+        return
     assert any(
         r.levelno == logging.WARNING
         and "legacy scope_grants without skills" in r.getMessage()
@@ -145,6 +152,11 @@ def test_invalid_legacy_reason_rejects_entry_with_error(tmp_path, kind, bad_line
     path = _write_entry(tmp_path, kind, extra)
     with caplog.at_level(logging.ERROR, logger="loom.autonomy"):
         items = _load(path, kind)
+    if kind == "anchor":
+        assert [_name(i) for i in items] == ["curiosity", "healthy"]
+        assert _grants(items[0]) == []
+        assert not caplog.records
+        return
     assert [_name(i) for i in items] == ["healthy"]
     assert any(
         r.levelno == logging.ERROR and "legacy_reason" in r.getMessage()
@@ -179,7 +191,8 @@ def test_tracked_examples_demonstrate_legacy_reason(caplog):
         (repo / "autonomy/circadian/rhythm.example.toml").read_text(encoding="utf-8")
     )
     curiosity = next(a for a in rhythm_raw["anchors"] if a["name"] == "curiosity")
-    assert isinstance(curiosity.get("legacy_reason"), str) and curiosity["legacy_reason"].strip()
+    assert not {"legacy_reason", "scope_grants", "skills"} & curiosity.keys()
+    assert curiosity["allowed_tools"] == ["fetch_url", "web_search"]
 
     with caplog.at_level(logging.INFO, logger="loom.autonomy"):
         load_schedules(repo / "autonomy/schedules.example.toml", workspace=repo)

@@ -1175,13 +1175,6 @@ class LoomSession:
         # skill check approval uses _confirm_fn so both paths stay in sync.
         self._confirm_fn = self._confirm_tool_cli
 
-        # Issue #279: track loaded skills in telemetry
-        def _on_skill_loaded(skill_name: str) -> None:
-            if self._telemetry is not None:
-                _ls = self._telemetry.get("loaded_skills")
-                if _ls is not None:
-                    _ls.add(skill_name)
-
         self.registry.register(make_load_skill_tool(
             self._memory.procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
@@ -1189,6 +1182,7 @@ class LoomSession:
             turn_index_fn=lambda: self._turn_index,
             skill_check_manager=self._skill_check_manager,
             confirm_fn=lambda call: self._confirm_fn(call),
+            on_loaded=self._on_skill_loaded,
         ))
 
         # Issue #276: agent-side tier control. Only register when at least
@@ -1218,6 +1212,7 @@ class LoomSession:
         from loom.platform.cli.skill_tools import make_unload_skill_tool
         self.registry.register(make_unload_skill_tool(
             self._skill_check_manager,
+            on_unloaded=self._revoke_open_slot_skill,
         ))
 
         # doc/54 §4.3 / §5 P0-5: Register skill_review tool — agent's
@@ -1488,6 +1483,13 @@ class LoomSession:
         # Issue #64: unmount all skill-declared checks before closing
         if hasattr(self, "_skill_check_manager"):
             self._skill_check_manager.unmount_all()
+        # Shutdown closes all current open-slot skills, including those
+        # without checks (which unmount_all cannot enumerate).
+        if source := self.perm.open_slot_source:
+            prefix = f"{source}:skill:"
+            for boundary in list(self.perm.boundaries):
+                if boundary.startswith(prefix):
+                    self._revoke_open_slot_skill(boundary[len(prefix):])
         # Grab the connection reference and immediately clear self._db so any
         # concurrent or re-entrant call (e.g. /new → on_unmount) hits the guard above.
         db, self._db = self._db, None
@@ -2769,6 +2771,62 @@ class LoomSession:
     # =========================================================================
     # SECTION 6 — PLUGIN / SKILL LOADING
     # =========================================================================
+    def _revoke_open_slot_skill(self, skill_name: str) -> None:
+        """Close this skill's current-turn authorization, idempotently."""
+        if source := self.perm.open_slot_source:
+            skill_source = f"{source}:skill:{skill_name}"
+            self.perm.withdraw(skill_source)
+            self.perm.revoke_matching(lambda g: g.source == skill_source)
+
+    def _on_skill_loaded(self, skill_name: str, *, origin: str,
+                         skill_dir: str | None, checks_ready: bool,
+                         unmounted_skills: tuple[str, ...] = ()) -> None:
+        """Track activation; local skills supply allows only in open chimes.
+
+        Use the loader's actual directory and check-mount result.
+        External skills never gain grants; read_skill_allows also rejects
+        symlinks and invalid boundaries before any permission is installed.
+        """
+        if self._telemetry is not None:
+            loaded = self._telemetry.get("loaded_skills")
+            if loaded is not None:
+                loaded.add(skill_name)
+        source = self.perm.open_slot_source
+        from loom.core.harness.middleware import UNATTENDED_ORIGINS
+        if source is None or self.perm.external_inputs:
+            return
+        # A later load can unmount an earlier skill's checks. Its additive
+        # authorization must leave with those checks, even within this turn.
+        for name in unmounted_skills:
+            self._revoke_open_slot_skill(name)
+        if origin not in UNATTENDED_ORIGINS:
+            return
+        if not skill_name or "/" in skill_name or skill_name in (".", ".."):
+            return
+        from loom.autonomy.skill_allows import (
+            SkillAllowsError, allows_permission_fields, read_skill_allows,
+        )
+        from loom.core.harness.scope import ScopeGrant
+
+        expected = self.workspace / "skills" / skill_name
+        if skill_dir is None or Path(skill_dir).absolute() != expected.absolute():
+            return
+        skill_source = f"{source}:skill:{skill_name}"
+        if not checks_ready:
+            self._revoke_open_slot_skill(skill_name)
+            logger.info("Open slot skill %s gets no allows: declared checks are not fully mounted", skill_name)
+            return
+        if skill_source in self.perm.boundaries:
+            return
+        try:
+            fields = allows_permission_fields(read_skill_allows(skill_name, self.workspace), skill_source)
+        except SkillAllowsError as exc:
+            logger.warning("Open slot skill %s gets no allows: %s", skill_name, exc)
+            return
+        self.perm.declare(skill_source, fields["allowed_tools"], unattended_only=True)
+        for grant in fields["scope_grants"]:
+            self.perm.grant(ScopeGrant(**grant, source=skill_source))
+
     async def _auto_import_skills(self) -> list["SkillCatalogEntry"]:
         """
         Scan skills/ directories for SKILL.md files and auto-import them

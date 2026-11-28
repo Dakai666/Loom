@@ -248,12 +248,8 @@ class TestLoadRhythm:
         assert anchors[0].meaning == "first"
 
     def test_anchor_carries_permission_fields(self, tmp_path):
-        # Issue #525: an anchor declares allowed_tools / scope_grants (the same
-        # fields a schedules.toml entry uses) so a circadian phase can do
-        # routine tool work — research, write a draft, run the pet script —
-        # without re-asking DK every day. The fields ride through to the chime.
-        # Blanket tools go in allowed_tools; a fenced tool (write_file) is
-        # authorised by the scope_grant alone, not co-listed in allowed_tools.
+        # Old non-skill permission fields remain readable, but open slots
+        # retain declarations while discarding their old scope ceiling.
         p = tmp_path / "perm.toml"
         _write(p, '''
             [[anchors]]
@@ -266,9 +262,8 @@ class TestLoadRhythm:
         ''')
         a = load_rhythm(p)[0]
         assert a.allowed_tools == ("fetch_url", "web_search")
-        assert a.scope_grants == (
-            {"resource": "path", "action": "write", "selector": "autonomy/circadian"},
-        )
+        assert a.scope_grants == ()
+        assert a.open_slot
 
     def test_anchor_without_permission_fields_defaults_empty(self, tmp_path):
         p = tmp_path / "plain.toml"
@@ -282,8 +277,7 @@ class TestLoadRhythm:
         assert a.scope_grants == ()
 
     def test_multi_time_anchor_shares_permission_fields(self, tmp_path):
-        # The permission fields are an attribute of the activity identity, so
-        # every expanded slot of a recurring activity carries the same grants.
+        # Every expanded open slot retains the same declaration.
         p = tmp_path / "petperm.toml"
         _write(p, '''
             [[anchors]]
@@ -295,6 +289,7 @@ class TestLoadRhythm:
         assert len(anchors) == 2
         for a in anchors:
             assert a.allowed_tools == ("run_bash",)
+            assert a.open_slot
 
     def test_anchor_trust_level_is_ignored(self, tmp_path):
         # trust_level is NOT a phase field (issue #525 / Codex review): the
