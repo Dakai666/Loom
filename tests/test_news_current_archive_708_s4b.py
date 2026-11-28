@@ -11,8 +11,8 @@ Contracts pinned here:
   dated folders older than ``--keep-days`` from ``news/current/`` to
   ``news/archive/``, enforces workspace boundaries, refuses symlinks, never
   overwrites archive collisions, and exposes no arbitrary path flags on CLI.
-- ``skills/news-aggregator/checks.py`` accepts ``news/current/YYYY-MM-DD``
-  (mkdir + cover.jpg curl) while keeping legacy patterns and rejecting escapes.
+- ``skills/news-aggregator/checks.py`` permits the archive script and rejects
+  retired mkdir + cover.jpg curl commands for both current and legacy paths.
 """
 
 from __future__ import annotations
@@ -323,7 +323,7 @@ def test_archive_news_refuses_symlinked_roots_and_cli_boundary_flags(tmp_path):
     ) == "vintage\n"
 
 
-async def test_news_checks_accepts_news_current_and_rejects_escapes():
+async def test_news_checks_accepts_scripts_and_rejects_retired_commands():
     checks = _load_checks_module()
 
     class _CallObj:
@@ -332,16 +332,17 @@ async def test_news_checks_accepts_news_current_and_rejects_escapes():
 
     url = "https://example.com/cover.jpg"
     for cmd in [
-        "mkdir -p news/current/2026-11-27",
-        "mkdir news/current/2026-11-27",
-        f'curl -sL --max-time 30 -o news/current/2026-11-27/cover.jpg "{url}"',
         "python3 skills/news-aggregator/scripts/archive_news.py --keep-days 30",
-        "mkdir -p news/2026-10-26",
-        f'curl -sL -o news/2026-10-26/cover.jpg "{url}"',
+        "python3 skills/news-aggregator/scripts/fetch_news.py --all-tracks --limit 8",
     ]:
         assert await checks.scripts_only_bash(_CallObj(cmd)), f"expected allowed: {cmd}"
 
     for cmd in [
+        "mkdir -p news/current/2026-11-27",
+        "mkdir news/current/2026-11-27",
+        f'curl -sL --max-time 30 -o news/current/2026-11-27/cover.jpg "{url}"',
+        "mkdir -p news/2026-10-26",
+        f'curl -sL -o news/2026-10-26/cover.jpg "{url}"',
         f'curl -sL -o news/current/2026-11-27/../../evil.sh "{url}"',
         f'curl -sL -o news/archive/2026-11-27/cover.jpg "{url}"',
         "rm -rf news/current",

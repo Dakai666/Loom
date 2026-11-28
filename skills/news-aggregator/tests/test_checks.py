@@ -1,13 +1,8 @@
 """
 Tests for news-aggregator's run_bash guard (checks.scripts_only_bash).
 
-Why these exist
----------------
-Step 4 of the briefing downloads the cover image with
-`curl ... -o news/YYYY-MM-DD/cover.jpg "<url>"`.  On 2026-10-26 the guard was
-found to deny exactly that command, so once the guard is live the morning
-briefing loses its cover image every day.  The allowance must stay narrow:
-the point of the guard is that a replaced SKILL.md can't run arbitrary bash.
+The workflow runs scripts and delivers Markdown files; retired cover-image
+downloads and shell directory creation must stay denied.
 
 Run:
     python -m pytest skills/news-aggregator/tests/test_checks.py -q
@@ -41,10 +36,6 @@ async def _allowed(command: str) -> bool:
 
 
 @pytest.mark.parametrize("command", [
-    f'curl -sL --max-time 30 -o news/2026-10-26/cover.jpg "{URL}"',
-    f'curl -sL -o news/2026-10-26/cover.jpg "{URL}"',
-    f'curl -L -s --max-time 60 -o news/2026-10-26/cover.jpg "{URL}"',
-    "mkdir -p news/2026-10-26",
     "cd skills/news-aggregator/scripts && python fetch_news.py --all-tracks",
 ])
 async def test_briefing_workflow_allowed(command: str) -> None:
@@ -70,4 +61,14 @@ async def test_briefing_workflow_allowed(command: str) -> None:
     "rm -rf news",
 ])
 async def test_everything_else_denied(command: str) -> None:
+    assert not await _allowed(command)
+
+
+@pytest.mark.parametrize("command", [
+    f'curl -sL --max-time 30 -o news/current/2026-10-26/cover.jpg "{URL}"',
+    f'curl -L -s -o news/2026-10-26/cover.jpg "{URL}"',
+    "mkdir -p news/current/2026-10-26",
+    "mkdir news/2026-10-26",
+])
+async def test_retired_image_and_directory_commands_denied(command):
     assert not await _allowed(command)
