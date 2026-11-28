@@ -45,8 +45,9 @@ frontmatter, so changing it is a ``skill_guard`` change that DK approves
 
 Who reads it: furniture wakes (S1, ``circadian/room.py``), rhythm anchors
 and schedules (S2), at config load, before the turn reads the skill.
-Loading a skill never turns ``allows`` into grants: an attended turn stays
-under its permission_mode. S2 resolves multiple references as a union.
+Loading a workspace skill during an open rhythm slot supplies its allows
+for that turn. Attended and skill-bound turns keep their existing contract.
+S2 resolves multiple references as a union.
 Only workspace skills (``<workspace>/skills/<name>``) are read:
 their SKILL.md is the one the skill guard covers.
 
@@ -71,6 +72,7 @@ from typing import Any
 
 from loom.autonomy.permission_fields import parse_permission_fields
 from loom.core.harness.scope import simple_argv
+from loom.core.infra.log_once import log_once
 
 ALLOWS_KEYS = ("exec", "write", "tools")
 _WILDCARD_CHARS = frozenset("*?[]{}~$")
@@ -358,9 +360,13 @@ def widening(allows: SkillAllows, tools: list[str] | tuple[str, ...],
 
 def activity_permission_fields(
     entry: dict[str, Any], source_name: str, workspace: Path,
+    *, open_slot: bool = False,
 ) -> dict[str, Any]:
     """Resolve an anchor/schedule ceiling once, before its turn (#708 S2).
 
+    Only rhythm callers opt into open slots: without skills they have no
+    declarations or grants; legacy_reason is ignored. Schedules default to
+    their existing non-skill permission contract.
     Multiple skills form a union. Explicit scope_grants REPLACE the derived
     grants, and may only narrow them (including existing max_calls).
     Never append an unlimited derived grant alongside its limited override.
@@ -368,6 +374,14 @@ def activity_permission_fields(
     grant: the existing resolver/mode/hard-guard path decides its calls.
     S1 furniture keeps its own stricter subset contract, unchanged.
     """
+    if "legacy_reason" in entry and "skills" in entry:
+        raise SkillAllowsError("legacy_reason cannot be combined with skills")
+    if open_slot and "skills" not in entry:
+        if "legacy_reason" in entry:
+            log_once(logger, logging.INFO, ("open_slot_legacy_reason", source_name),
+                     "[autonomy] %s: legacy_reason is ignored for an open slot; "
+                     "remove this retired field", source_name)
+        return {"trust_level": None, "allowed_tools": [], "scope_grants": []}
     own = parse_permission_fields(entry, source_name)
     legacy_reason: str | None = None
     if "legacy_reason" in entry:
@@ -380,7 +394,7 @@ def activity_permission_fields(
     if "skills" not in entry:
         if "scope_grants" in entry:
             if legacy_reason is not None:
-                logger.info(
+                log_once(logger, logging.INFO, ("legacy_scope", source_name),
                     "[autonomy] %s uses retained legacy scope_grants without skills "
                     "(legacy_reason: %s)",
                     source_name, legacy_reason)
@@ -388,7 +402,7 @@ def activity_permission_fields(
                 # Staged compatibility: unrelated legacy activities cannot all
                 # migrate to S1 allows (e.g. arbitrary CLI / path:read). Keep
                 # their existing contract until explicitly migrated, loudly.
-                logger.warning(
+                log_once(logger, logging.WARNING, ("legacy_scope", source_name),
                     "[autonomy] %s uses legacy scope_grants without skills; retained for "
                     "compatibility, migrate activity scopes to SKILL.md allows and skills",
                     source_name)

@@ -22,6 +22,14 @@ from pathlib import Path
 import loom.autonomy.circadian.journal as _journal_module
 
 
+@pytest.fixture(autouse=True)
+def _isolate_log_once(monkeypatch):
+    """Each test represents a fresh process; repeat loads within it dedup."""
+    import importlib
+    module = importlib.import_module("loom.core.infra.log_once")
+    monkeypatch.setattr(module, "_seen", set())
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

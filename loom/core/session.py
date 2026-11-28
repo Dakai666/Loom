@@ -1175,13 +1175,6 @@ class LoomSession:
         # skill check approval uses _confirm_fn so both paths stay in sync.
         self._confirm_fn = self._confirm_tool_cli
 
-        # Issue #279: track loaded skills in telemetry
-        def _on_skill_loaded(skill_name: str) -> None:
-            if self._telemetry is not None:
-                _ls = self._telemetry.get("loaded_skills")
-                if _ls is not None:
-                    _ls.add(skill_name)
-
         self.registry.register(make_load_skill_tool(
             self._memory.procedural, skills_dirs,
             outcome_tracker=self._skill_outcome_tracker,
@@ -1189,6 +1182,7 @@ class LoomSession:
             turn_index_fn=lambda: self._turn_index,
             skill_check_manager=self._skill_check_manager,
             confirm_fn=lambda call: self._confirm_fn(call),
+            on_loaded=self._on_skill_loaded,
         ))
 
         # Issue #276: agent-side tier control. Only register when at least
@@ -2769,6 +2763,44 @@ class LoomSession:
     # =========================================================================
     # SECTION 6 — PLUGIN / SKILL LOADING
     # =========================================================================
+    def _on_skill_loaded(self, skill_name: str) -> None:
+        """Track activation; local skills supply allows only in open chimes.
+
+        Resolve using the loader's workspace-first directory convention.
+        External skills never gain grants; read_skill_allows also rejects
+        symlinks and invalid boundaries before any permission is installed.
+        """
+        if self._telemetry is not None:
+            loaded = self._telemetry.get("loaded_skills")
+            if loaded is not None:
+                loaded.add(skill_name)
+        source = self.perm.open_slot_source
+        if source is None or self.perm.external_inputs:
+            return
+        if not skill_name or "/" in skill_name or skill_name in (".", ".."):
+            return
+        from loom.autonomy.skill_allows import (
+            SkillAllowsError, allows_permission_fields, harden, read_skill_allows,
+        )
+        from loom.platform.cli.skill_tools import _find_skill_resources
+        from loom.core.harness.scope import ScopeGrant
+
+        directory, _ = _find_skill_resources(skill_name, [self.workspace / "skills"])
+        if directory is None:
+            return
+        name = Path(directory).name
+        skill_source = f"{source}:skill:{name}"
+        if skill_source in self.perm.boundaries:
+            return
+        try:
+            fields = allows_permission_fields(read_skill_allows(name, self.workspace), skill_source)
+        except SkillAllowsError as exc:
+            logger.warning("Open slot skill %s gets no allows: %s", skill_name, exc)
+            return
+        self.perm.declare(skill_source, fields["allowed_tools"], unattended_only=True)
+        for grant in harden(fields["scope_grants"]):
+            self.perm.grant(ScopeGrant(**grant, source=skill_source))
+
     async def _auto_import_skills(self) -> list["SkillCatalogEntry"]:
         """
         Scan skills/ directories for SKILL.md files and auto-import them

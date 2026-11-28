@@ -128,14 +128,18 @@ def test_invalid_skill_is_rejected_during_load(tmp_path, kind, broken, caplog):
 def test_legacy_non_skill_scope_is_preserved_with_explicit_migration_warning(tmp_path, kind, caplog):
     item = load(config(tmp_path, kind,
         'scope_grants=[{resource="exec",action="execute",selector="workspace"}]\n'), kind)[0]
+    if kind == "anchor":
+        assert fields(item, "scope_grants") == ()
+        assert item.open_slot
+        assert not caplog.records
+        return
     assert fields(item, "scope_grants")[0]["selector"] == "workspace"
     assert any(r.levelname == "WARNING" and "legacy" in r.message and "skills" in r.message
                for r in caplog.records)
 
 
-@pytest.mark.parametrize("kind", ["anchor", "schedule"])
+@pytest.mark.parametrize("kind,migrated", [("anchor", True), ("schedule", False), ("schedule", True)])
 @pytest.mark.parametrize("mode", list(PermissionMode))
-@pytest.mark.parametrize("migrated", [False, True])
 async def test_general_declarations_survive_migration_without_becoming_skill_grants(
         tmp_path, ledger, monkeypatch, kind, mode, migrated):
     from loom.autonomy.chime import ChimeRequest

@@ -1,27 +1,22 @@
-# 保留參考：三項都仍是 legacy path:write scopes，沒有技能遷移。
-# 不需要用本檔覆蓋 live rhythm。若核對 keys，保留既有 meaning/time/public 與其他欄位。
+# 開放時段參考：DK 2026-11-28 定案，無 skills 是正式開放時段，不是 legacy。
+# 不用本檔覆蓋 live rhythm；merge 後由艾芮思刪除舊 allowed_tools/scope_grants/legacy_reason，
+# 保留既有 meaning/time/public 與其他節律 metadata。詳見 docs/open-slots.md。
 # 特別不要把 shared_learning 指到 news-aggregator：它接續聊天，不重跑晨報。
 
 [[anchors]]
 name = "shared_learning"
 time = "09:00"
 public = true
-allowed_tools = ["fetch_url", "web_search", "minimax_coding__web_search", "memorize"]
-scope_grants = [{ resource = "path", action = "write", selector = "news" }]
 meaning = "從既有晨報的分享段接續對話；有興趣才讀原文，不重跑晨報、沒有產出義務。"
 
 [[anchors]]
 name = "curiosity"
 time = "11:00"
 public = false
-allowed_tools = ["fetch_url", "web_search", "minimax_coding__web_search", "spawn_agent", "memorize"]
-scope_grants = [{ resource = "path", action = "write", selector = "outputs" }]
 meaning = "依既有 program 決定好奇心散步；無產出壓力，有成果可記 outputs。"
 
 [[anchors]]
 name = "deep_weave"
 time = "14:00"
 public = false
-allowed_tools = ["fetch_url", "web_search", "minimax_coding__web_search", "spawn_agent", "memorize"]
-scope_grants = [{ resource = "path", action = "write", selector = "outputs" }]
 meaning = "依既有 program 保護深度研究；產出可為 note、draft 或仍不懂的問題。"

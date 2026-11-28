@@ -108,12 +108,12 @@ async def test_retained_research_anchor_keeps_general_tools_and_existing_write_c
     finally:
         st.set_dir_for_test(None)
     apply(env, requests[0])
-    _register(env, "fetch_url", resolver=_fetch_url_resolver, caps=ToolCapability.NETWORK)
-    assert (await _call(env, "fetch_url", {"url": "https://example.com"})).success
-    assert (await env.run("write_file", {"path": prefix + "/synthetic.md", "content": "x"})).success
-    assert not (await env.run("write_file", {"path": "elsewhere/synthetic.md", "content": "x"})).success
-    assert any(name in r.message and "legacy scope_grants without skills" in r.message
-               for r in caplog.records)
+    assert anchor.open_slot and requests[0].open_slot
+    assert env.perm.grants == []
+    assert env.perm.declared_tools() == frozenset()
+    from loom.core.harness.approval import _routine_ceiling
+    assert not _routine_ceiling(env.perm, "path", "write")
+    assert not any("legacy scope_grants without skills" in r.message for r in caplog.records)
 
 
 @pytest.mark.parametrize("name", ["daily_mood_tarot", "memory_housekeeping",

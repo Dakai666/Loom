@@ -171,6 +171,10 @@ def make_load_skill_tool(
             and call.origin not in UNATTENDED_ORIGINS
         )
         if name in _loaded_this_session and not _retry_checks:
+            # Activation is session-deduplicated, but the hook also owns
+            # turn-scoped allows. A later open chime must reapply them.
+            if on_loaded is not None:
+                on_loaded(name)
             return ToolResult(
                 call_id=call.id, tool_name=call.tool_name,
                 success=True,

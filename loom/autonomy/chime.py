@@ -44,6 +44,8 @@ class ChimeRequest:
     input_trust: str = "external"
     """Config-derived furniture provenance, not parsed from intent text.
     Appended to preserve existing positional arguments for program chimes."""
+    open_slot: bool = False
+    """Rhythm entry without skills; local skill allows may apply this turn."""
 
 
 def format_chime_content(req: ChimeRequest) -> str:

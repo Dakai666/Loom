@@ -1,5 +1,7 @@
 # #708 S2b：剩餘七項活動的遷移與保留
 
+**2026-11-28 後續契約**：本頁保留 S2b 歷史脈絡。無 skills 的 rhythm anchor 已定案為正式[開放時段](open-slots.md)，不再保留自己的 allowed_tools／scope_grants，也不需 legacy_reason；以下關於 rhythm 的 legacy 保留／待遷移敘述由新契約取代。`docs/examples/708-s2b/rhythm.toml` 已同步移除這些欄位。Schedule／trigger 的授權語義不變，legacy 訊息改為同 process、同來源一次；merge 後的 live rhythm 遷移由艾芮思執行。
+
 本片由蘇菲亞 · Codex 實作，對象是 Loom Agent 的七項既有活動。基準為 master 的 #715 merge `57902d5`。交付是 tracked 安全技能模板、可解析的 TOML 替換參考與合成測試；**沒有套用 live**、改私人技能、搬人格、重啟 daemon 或執行生活 CLI/API。不包含 weather、window、input_trust 的 S3。
 
 ## 七項 outcome

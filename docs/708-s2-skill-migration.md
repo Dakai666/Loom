@@ -1,6 +1,8 @@
 # #708 S2：節律與排程引用技能
 
-本片只處理 rhythm anchors、schedules（含同一 registry 的 event triggers）引用技能。工具、技能、家具沿用 #708 定案；不抽天氣工具、不做窗戶或 Plugin/Adapter 清理。所有下列操作均由 DK 手動套用；本 PR 沒改 live/gitignored 設定、skills，也沒重啟 daemon 或執行生活工具。
+本片只處理 rhythm anchors、schedules（含同一 registry 的 event triggers）引用技能。工具、技能、家具沿用 #708 定案；不抽天氣工具、不做窗戶或 Plugin/Adapter 清理。本頁保留 S2 當時的遷移紀錄；目前 live 遷移由艾芮思在 merge 後執行，實作 PR 不改 live/gitignored 設定或技能、不重啟 daemon、不執行生活工具。
+
+**2026-11-28 契約更新**：DK 定案「沒有綁技能的 rhythm anchor 是正式開放時段，不是 legacy」。[開放時段契約](open-slots.md) 取代本頁與 S2b 關於 rhythm 無 skills 項目「未退役、需遷移、保留舊 grant」的敘述；下方歷史盤點不是現行授權指示。Schedule／trigger 無 skills 的既有授權語義保留，只將相容 log 收斂為每個 process、每個項目一次。
 
 **S2b 後續**：[七項 legacy 活動遷移與保留](708-s2b-legacy-migration.md) 提供 Tarot exec-only、housekeeping 規程及 weekly/dream CLI 收窄；下文盤點保留 S2 當時狀態，不代表七項均已遷移或 live 已套用。S2b 的 template/片段與裁決以該指南為準。
 
@@ -18,7 +20,7 @@ skills = ["pet-cat", "world-journey"]
 
 引用 skills 的入口若宣告 `write_file`，**收窄後**的 grants 必須仍有 `path:write`；否則以 `write_file declaration requires an effective path:write grant` ERROR 拒載。工具名稱會 strip 空白，空項拒收；不會藉空白拼法避過檢查。活動中的 exec grant 實際指向的技能腳本也受既有 hard-boundary/skill_guard 路徑保護（包括巢狀腳本），即使 write prefix 涵蓋該檔也不能先覆寫再執行；這只保護該活動的執行檔，不全域禁止一般專案編輯。撤回 grant 後恢復原本 permission_mode；不是 OS 隔離，可信腳本本身的副作用仍不由此隔離。
 
-**分階段相容**：未設定 skills 的舊項目保留既有 scopes/一般工具宣告，並輸出包含項目名稱的 `legacy scope_grants without skills` WARNING。明確引用 skills 後就沒有 fallback：錯誤必須 ERROR 拒收。如此不會因只遷移 dawn/pet/morning 而突然停掉其餘活動；未引用技能的舊項目仍未完成退役，不能宣稱全域手寫 grant 已移除。下面逐項列出。
+**分流契約**：未設定 skills 的 rhythm anchor 是開放時段，忽略 `allowed_tools`／`scope_grants`／`legacy_reason`，沒有節律自己的常駐宣告或 grant。開放時段成功載入 workspace 技能後，該技能的 allows 在當回合生效，回合結束撤回；外來技能不取得 grants，綁定時段不經此路徑。未設定 skills 的 schedule／trigger 保留既有 scopes／一般工具宣告；`legacy scope_grants without skills` 每個 process、每個項目只印一次，非空 `legacy_reason` 仍將 WARNING 降為 INFO。明確引用 skills 後沒有 fallback：錯誤仍以 ERROR 拒收。
 
 ### 真實權限路徑與一般工具快速放行
 

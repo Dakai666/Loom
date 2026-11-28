@@ -23,6 +23,9 @@
 # unrelated activities keep running. Entries that intentionally stay legacy
 # (e.g. CLI or path:read not expressible in SKILL.md allows) may set a non-empty
 # ``legacy_reason = "..."`` to downgrade that WARNING to INFO (#708 S4b).
+# Both diagnostics emit once per activity/process. This schedule contract
+# is unchanged: unlike rhythm open slots, non-skill schedules KEEP their
+# allowed_tools / scope_grants, and legacy_reason remains meaningful.
 # See docs/708-s2-skill-migration.md.
 # Install/update skills before adding references. Missing skill/allows/script
 # rejects that entry with ERROR, preserving healthy siblings. ``cron`` strings are
