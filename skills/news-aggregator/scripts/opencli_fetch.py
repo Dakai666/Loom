@@ -65,7 +65,7 @@ def norm_hackernews(items: list[dict]) -> list[dict]:
             "heat": f"{it.get('score', 0)} points",
             "time": datetime.fromtimestamp(it['time'], timezone.utc).isoformat(),
             "_raw_rank": it.get("rank"),
-            "_raw_author": it.get("author"),
+            "_raw_author": it.get("author") or it.get("by"),
         })
     return out
 
@@ -157,7 +157,11 @@ def norm_v2ex(items: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────
 
 def fetch_hackernews(limit: int = 10, keyword: str = None) -> list[dict]:
-    """Use the official API: OpenCLI top omits the story ID and timestamp."""
+    """Official API, capped at 100 stories; nonpositive quotas skip fetching."""
+    limit = max(0, min(int(limit), 100))
+    if limit == 0:
+        record_source_health("Hacker News", "empty", "fetch skipped: nonpositive quota", 0)
+        return []
     base = "https://hacker-news.firebaseio.com/v0"
     items, errors = [], []
     try:

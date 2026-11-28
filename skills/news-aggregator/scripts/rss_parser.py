@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import urllib3
 from xml.etree import ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Suppress insecure request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -69,7 +69,7 @@ def clean_text(text):
 
 
 def _parse_pub_datetime(time_str):
-    """Best-effort parse of a feed timestamp into a datetime.
+    """Parse ISO/RFC feed timestamps into UTC, assuming UTC for naive dates.
 
     Returns None when the timestamp is missing or unparseable — which is
     itself a signal, because a feed with no timestamps at all is one we
@@ -78,15 +78,16 @@ def _parse_pub_datetime(time_str):
     if not time_str:
         return None
     from email.utils import parsedate_to_datetime
-    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
-            return datetime.strptime(time_str, fmt)
-        except (ValueError, TypeError):
-            continue
     try:
-        return parsedate_to_datetime(time_str)
-    except Exception:
-        return None
+        parsed = datetime.fromisoformat(time_str)
+    except (ValueError, TypeError):
+        try:
+            parsed = parsedate_to_datetime(time_str)
+        except (ValueError, TypeError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class _FeedTreeBuilder(ET.TreeBuilder):
@@ -141,7 +142,7 @@ def parse_rss_content(content, source_name, limit=5):
             time_str = _text(_child(entry, 'pubdate', 'published', 'updated', 'date'))
 
             # --- Summary / Content ---
-            raw_summary = ""
+            plain_summary = ""
             for name in ('encoded', 'description', 'summary', 'content'):
                 element = _child(entry, name)
                 if element is not None:
@@ -149,16 +150,15 @@ def parse_rss_content(content, source_name, limit=5):
                     raw_summary = (element.text or '') + ''.join(
                         ET.tostring(child, encoding='unicode') for child in element
                     )
-                    break
-
-            soup_desc = BeautifulSoup(raw_summary, 'html.parser')
-            plain_summary = soup_desc.get_text(separator=' ', strip=True)
+                    plain_summary = BeautifulSoup(raw_summary, 'html.parser').get_text(separator=' ', strip=True)
+                    if plain_summary:
+                        break
             clean_summary = plain_summary[:300] + ("..." if len(plain_summary) > 300 else "")
 
             # --- Heat ---
             heat = ""
-            comments = _text(_child(entry, 'comments'))
-            if comments:
+            comments = _text(entry.find('{http://purl.org/rss/1.0/modules/slash/}comments'))
+            if comments.isascii() and comments.isdecimal():
                 heat = f"{comments} comments"
 
             items.append({
@@ -182,7 +182,7 @@ def parse_rss_content(content, source_name, limit=5):
             dated = [(i, d) for i, d in dated if d is not None]
             if dated:
                 newest = max(d for _, d in dated)
-                now = datetime.now(newest.tzinfo) if newest.tzinfo else datetime.now()
+                now = datetime.now(timezone.utc)
                 age_days = (now - newest).days
                 stale_days = 14 if source_name == "NEJM Alerts" else 7
                 if age_days >= stale_days:

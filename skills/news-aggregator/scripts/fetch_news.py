@@ -134,9 +134,10 @@ def fetch_github(limit=5, keyword=None):
                 })
             if not items and len(urls) > 1 and url != urls[-1][0]:
                 continue
+            selected = (filter_items(items, keyword) if article_selector == "article.Box-row" else items)[:limit]
             record_source_health("GitHub Trending", "ok" if items else "empty",
-                                 "; ".join(errors), len(items))
-            return (filter_items(items, keyword) if article_selector == "article.Box-row" else items)[:limit]
+                                 "; ".join(errors), len(selected))
+            return selected
         except Exception as exc:
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
     record_source_health("GitHub Trending", "failed", "; ".join(errors), 0)

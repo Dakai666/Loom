@@ -190,6 +190,106 @@ def test_filtered_out_tech_news_is_still_healthy(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("tags,want", [
+    ('<comments>https://example.test/#respond</comments><slash:comments>5</slash:comments>', '5 comments'),
+    ('<comments>https://example.test/#respond</comments>', ''),
+    ('<comments>7</comments>', ''),
+    ('<slash:comments>https://example.test/#respond</slash:comments>', ''),
+])
+def test_wordpress_heat_only_uses_numeric_slash_comments(tags, want):
+    xml = f'<rss xmlns:slash="http://purl.org/rss/1.0/modules/slash/"><channel><item><title>WordPress</title><link>https://example.test/post</link>{tags}</item></channel></rss>'
+    assert rss_parser.parse_rss_content(xml.encode(), "STAT News")[0]["heat"] == want
+
+
+@pytest.mark.parametrize("stamp,want", [
+    ('2026-11-27', datetime(2026, 11, 27, tzinfo=timezone.utc)),
+    ('2026-11-28T01:00:00.500Z', datetime(2026, 11, 28, 1, 0, 0, 500000, tzinfo=timezone.utc)),
+    ('2026-11-28T09:00:00+08:00', datetime(2026, 11, 28, 1, tzinfo=timezone.utc)),
+    ('Fri, 27 Nov 2026 00:00:00', datetime(2026, 11, 27, tzinfo=timezone.utc)),
+    ('Fri, 27 Nov 2026 08:00:00 +0800', datetime(2026, 11, 27, tzinfo=timezone.utc)),
+])
+def test_feed_dates_normalized_to_utc(stamp, want):
+    parsed = rss_parser._parse_pub_datetime(stamp)
+    assert parsed == want
+    assert parsed.tzinfo == timezone.utc
+
+
+@pytest.mark.parametrize("days,want", [(6, 'ok'), (7, 'stale')])
+def test_nature_rdf_date_only_staleness(days, want):
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d')
+    xml = f'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item><title>Nature</title><link>https://example.test/nature</link><dc:date>{stamp}</dc:date></item></rdf:RDF>'
+    assert len(rss_parser.parse_rss_content(xml.encode(), "Nature Medicine")) == 1
+    rec = rss_parser.source_health_report()[0]
+    assert rec["status"] == want
+    assert rec["detail"] != 'no parseable timestamps'
+
+
+@pytest.mark.parametrize("days,want", [(13, 'ok'), (14, 'stale')])
+def test_mixed_naive_aware_and_fractional_dates_keep_feed_items(days, want):
+    newest = datetime.now(timezone.utc) - timedelta(days=days, minutes=1)
+    older = newest - timedelta(days=1)
+    stamps = [older.strftime('%a, %d %b %Y %H:%M:%S'),
+              newest.isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+              (older - timedelta(days=1)).isoformat(timespec='seconds')]
+    entries = ''.join(f'<item><title>Item {i}</title><link>https://example.test/{i}</link><pubDate>{stamp}</pubDate></item>' for i, stamp in enumerate(stamps))
+    items = rss_parser.parse_rss_content(f'<rss><channel>{entries}</channel></rss>'.encode(), 'NEJM Alerts')
+    assert len(items) == 3
+    assert rss_parser.source_health_report()[0]['status'] == want
+
+
+@pytest.mark.parametrize('encoded', ['', '   ', '<![CDATA[<p> </p>]]>'])
+def test_empty_content_encoded_falls_back_to_description(encoded):
+    xml = f'<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Fallback</title><link>https://example.test/fallback</link><content:encoded>{encoded}</content:encoded><description>Real summary</description></item></channel></rss>'
+    assert rss_parser.parse_rss_content(xml.encode(), 'NASA News')[0]['summary'] == 'Real summary'
+
+
+@pytest.mark.parametrize('limit', [-1, 0])
+def test_hn_nonpositive_quota_does_not_request(monkeypatch, limit):
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        return response(data=[41, 42, 43])
+    monkeypatch.setattr(requests, 'get', get)
+    assert opencli_fetch.fetch_hackernews(limit) == []
+    assert calls == []
+
+
+def test_hn_quota_is_bounded_at_100(monkeypatch):
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        if url.endswith('topstories.json'):
+            return response(data=list(range(1, 106)))
+        story_id = int(url.rsplit('/', 1)[-1].split('.')[0])
+        return response(data={'id': story_id, 'time': 1795824000, 'title': 'Story'})
+    monkeypatch.setattr(requests, 'get', get)
+    items = opencli_fetch.fetch_hackernews(10000)
+    assert len(items) == 100
+    assert len(calls) == 101  # topstories plus at most 100 story requests
+    assert rss_parser.source_health_report()[0]['item_count'] == 100
+
+
+@pytest.mark.parametrize('author,by,want', [(None, 'firebase-user', 'firebase-user'), ('adapter-user', 'firebase-user', 'adapter-user')])
+def test_hn_author_supports_firebase_by(author, by, want):
+    item = opencli_fetch.norm_hackernews([{'id': 42, 'time': 1795824000, 'title': 'Story', 'author': author, 'by': by}])[0]
+    assert item['_raw_author'] == want
+
+
+@pytest.mark.parametrize('keyword,count', [(None, 8), ('missing', 0)])
+def test_github_health_count_matches_quota_output_without_false_failure(monkeypatch, keyword, count):
+    articles = ''.join(f'<article class="Box-row"><h2><a href="/org/repo{i}">org/repo{i}</a></h2></article>' for i in range(25))
+    def get(url, **kwargs):
+        if '/topics/' in url:
+            return response(b'<html></html>', content_type='text/html')
+        return response(articles.encode(), content_type='text/html')
+    monkeypatch.setattr(requests, 'get', get)
+    items = fetch_news.fetch_github(8, keyword)
+    assert len(items) == count
+    rec = rss_parser.source_health_report()[0]
+    assert rec['status'] == 'ok'
+    assert rec['item_count'] == count
+
+
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
